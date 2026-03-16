@@ -1,6 +1,6 @@
 {
 	"name": "@opencode-swarm/claude-code",
-	"version": "8.0.0-beta.0",
+	"version": "8.0.1-beta.0",
 	"description": "Claude Code adapter for opencode-swarm — hooks, agents, and state bridge for Claude Code integration",
 	"type": "module",
 	"main": "dist/index.js",

@@ -2,6 +2,6 @@
   ".": "7.0.0-beta.0",
   "packages/telemetry": "8.0.0-beta.0",
   "packages/core": "8.0.0-beta.0",
-  "packages/claude-code": "8.0.0-beta.0",
-  "packages/opencode": "8.0.0-beta.0"
+  "packages/claude-code": "8.0.1-beta.0",
+  "packages/opencode": "8.0.1-beta.0"
 }

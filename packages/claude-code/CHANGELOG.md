@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.0.1-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v8.0.0-beta.0...v8.0.1-beta.0) (2026-03-16)
+
+
+### Bug Fixes
+
+* remove bundledDependencies from claude-code and fix publish workflow ([7211e9a](https://github.com/zaxbysauce/opencode-swarm/commit/7211e9aad2678248b3ac7a10ef7053757d2c8ce0))
+
 ## [8.0.0-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.0-beta.0...v8.0.0-beta.0) (2026-03-16)
 
 

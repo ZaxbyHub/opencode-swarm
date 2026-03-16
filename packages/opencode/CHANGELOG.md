@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.0.1-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v8.0.0-beta.0...v8.0.1-beta.0) (2026-03-16)
+
+
+### Bug Fixes
+
+* add diagnostic startup logging to plugin for beta regression debugging ([906b50d](https://github.com/zaxbysauce/opencode-swarm/commit/906b50d8df9d94fa9bcc360b4e4e04afcb9a1bb4))
+
 ## [8.0.0-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.0-beta.0...v8.0.0-beta.0) (2026-03-16)
 
 
