@@ -16,6 +16,7 @@
  * updates after the initial scan completes.
  */
 
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../config/constants';
 import {
@@ -70,8 +71,26 @@ const SUPPORTED_EXTENSIONS = [
 function extractFilePath(args: unknown): string | null {
 	if (!args || typeof args !== 'object') return null;
 	const a = args as Record<string, unknown>;
-	const filePath = (a.file_path ?? a.path ?? a.filePath) as string | undefined;
+	let filePath = (a.file_path ?? a.path ?? a.filePath) as string | undefined;
 	if (!filePath || typeof filePath !== 'string') return null;
+
+	// Decode URL-encoded paths (up to 3 iterations for double-encoded paths)
+	for (let i = 0; i < 3; i++) {
+		try {
+			const decoded = decodeURIComponent(filePath);
+			if (decoded === filePath) break;
+			filePath = decoded;
+		} catch {
+			break;
+		}
+	}
+
+	// Normalize Unicode lookalike characters to ASCII equivalents
+	filePath = filePath
+		.replace(/．/g, '.')
+		.replace(/／/g, '/')
+		.replace(/․/g, '.');
+
 	return filePath;
 }
 
@@ -91,6 +110,8 @@ export function createRepoGraphBuilderHook(
 
 	let initStarted = false;
 	let initPromise: Promise<void> = Promise.resolve();
+	let consecutiveFailures = 0;
+	const FAILURE_ADVISORY_THRESHOLD = 3;
 
 	async function doInit(): Promise<void> {
 		// Yield once before any scan work so the caller's promise chain has
@@ -145,24 +166,9 @@ export function createRepoGraphBuilderHook(
 			if (!(WRITE_TOOL_NAMES as readonly string[]).includes(input.tool)) {
 				return;
 			}
-			const rawFilePath = extractFilePath(input.args);
-			if (!rawFilePath) return;
-			if (rawFilePath.includes('\0')) return;
-
-			let filePath = rawFilePath;
-			for (let i = 0; i < 3; i++) {
-				try {
-					const decoded = decodeURIComponent(filePath);
-					if (decoded === filePath) break;
-					filePath = decoded;
-				} catch {
-					break;
-				}
-			}
-			filePath = filePath
-				.replace(/．/g, '.')
-				.replace(/／/g, '/')
-				.replace(/․/g, '.');
+			const filePath = extractFilePath(input.args);
+			if (!filePath) return;
+			if (filePath.includes('\0')) return;
 
 			if (!isSupportedSourceFile(filePath)) return;
 
@@ -170,8 +176,44 @@ export function createRepoGraphBuilderHook(
 				? filePath
 				: path.resolve(workspaceRoot, filePath);
 
-			const normalizedAbsolute = absoluteFilePath.replace(/\\/g, '/');
-			const normalizedWorkspace = workspaceRoot.replace(/\\/g, '/');
+			// SECURITY: Resolve symlinks to get the real path, then verify the
+			// real path is still within the workspace boundary. This prevents
+			// symlink-based workspace escape attacks (mirrors the approach used
+			// in resolveModuleSpecifier in repo-graph.ts).
+			let realFilePath: string;
+			try {
+				realFilePath = realpathSync(absoluteFilePath);
+			} catch (error) {
+				// Only fall back to unresolved path for ENOENT (file doesn't exist yet).
+				// Reject all other errors (EACCES, ELOOP, etc.) to prevent symlink-based
+				// workspace escape attacks.
+				if (
+					!(error instanceof Error) ||
+					(error as NodeJS.ErrnoException).code !== 'ENOENT'
+				) {
+					return; // Reject path - security boundary check failed
+				}
+				realFilePath = absoluteFilePath;
+			}
+
+			let realWorkspace: string;
+			try {
+				realWorkspace = realpathSync(workspaceRoot);
+			} catch (error) {
+				// Only fall back to unresolved path for ENOENT.
+				// Reject all other errors (EACCES, ELOOP, etc.) to prevent symlink-based
+				// workspace escape attacks.
+				if (
+					!(error instanceof Error) ||
+					(error as NodeJS.ErrnoException).code !== 'ENOENT'
+				) {
+					return; // Reject path - security boundary check failed
+				}
+				realWorkspace = workspaceRoot;
+			}
+
+			const normalizedAbsolute = realFilePath.replace(/\\/g, '/');
+			const normalizedWorkspace = realWorkspace.replace(/\\/g, '/');
 			if (
 				!normalizedAbsolute.startsWith(`${normalizedWorkspace}/`) &&
 				normalizedAbsolute !== normalizedWorkspace
@@ -181,12 +223,20 @@ export function createRepoGraphBuilderHook(
 
 			try {
 				await _updateGraphForFiles(workspaceRoot, [absoluteFilePath]);
+				consecutiveFailures = 0;
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				consecutiveFailures++;
 				logger.error(`[repo-graph] Incremental update failed: ${message}`);
+				if (consecutiveFailures >= FAILURE_ADVISORY_THRESHOLD) {
+					logger.warn(
+						`[repo-graph] ${consecutiveFailures} consecutive incremental update failures. ` +
+							`The dependency graph may be stale. Consider reloading the workspace.`,
+					);
+				}
 			}
 		},
 	};

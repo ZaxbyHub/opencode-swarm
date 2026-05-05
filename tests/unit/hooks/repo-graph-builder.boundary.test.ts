@@ -1,6 +1,9 @@
 /**
  * Verification tests for repo-graph-builder.ts workspace boundary validation
  * Tests: files inside/outside workspace, path traversal, edge cases
+ *
+ * Uses the DI pattern (deps parameter of createRepoGraphBuilderHook) instead
+ * of mock.module for consistent mock isolation per project testing standards.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -10,19 +13,14 @@ import * as path from 'node:path';
 
 import { createRepoGraphBuilderHook } from '../../../src/hooks/repo-graph-builder';
 
-// Create mock functions at top level
-const mockUpdateGraphForFiles = mock(() => Promise.resolve({}));
-const mockBuildWorkspaceGraph = mock(() => ({
-	metadata: { nodeCount: 0, edgeCount: 0 },
-}));
+// Create DI mock functions at top level
+const mockUpdateGraphForFiles = mock(() => Promise.resolve({} as any));
+const mockBuildWorkspaceGraph = mock(() =>
+	Promise.resolve({
+		metadata: { nodeCount: 0, edgeCount: 0 },
+	} as any),
+);
 const mockSaveGraph = mock(() => Promise.resolve());
-
-// Mock the repo-graph module BEFORE importing the hook
-mock.module('../../../src/tools/repo-graph', () => ({
-	updateGraphForFiles: mockUpdateGraphForFiles,
-	buildWorkspaceGraph: mockBuildWorkspaceGraph,
-	saveGraph: mockSaveGraph,
-}));
 
 describe('repo-graph-builder workspace boundary validation', () => {
 	let tempDir: string;
@@ -30,6 +28,8 @@ describe('repo-graph-builder workspace boundary validation', () => {
 
 	beforeEach(() => {
 		mockUpdateGraphForFiles.mockClear();
+		mockBuildWorkspaceGraph.mockClear();
+		mockSaveGraph.mockClear();
 		// Create a real temp workspace directory
 		tempDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), 'repo-graph-boundary-test-'),
@@ -46,6 +46,14 @@ describe('repo-graph-builder workspace boundary validation', () => {
 		}
 	});
 
+	function makeHook() {
+		return createRepoGraphBuilderHook(workspaceRoot, {
+			updateGraphForFiles: mockUpdateGraphForFiles,
+			buildWorkspaceGraph: mockBuildWorkspaceGraph,
+			saveGraph: mockSaveGraph,
+		});
+	}
+
 	function makeToolInput(filePath: string) {
 		return {
 			tool: 'write',
@@ -59,7 +67,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('file inside workspace triggers updateGraphForFiles', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a file inside workspace
 		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
@@ -75,7 +83,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	});
 
 	test('relative file path inside workspace triggers updateGraphForFiles', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a file inside workspace
 		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
@@ -96,7 +104,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('absolute file outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a file OUTSIDE workspace
 		const outsideFile = path.join(os.tmpdir(), 'outside-workspace.txt');
@@ -108,7 +116,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	});
 
 	test('relative path resolving outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a sibling directory
 		const siblingDir = path.join(workspaceRoot, '..', 'sibling-workspace');
@@ -127,7 +135,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('path traversal attempt ../../../etc/passwd is rejected after resolution', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Attempt path traversal to escape workspace
 		await hook.toolAfter(makeToolInput('../../../etc/passwd'), {
@@ -138,7 +146,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	});
 
 	test('absolute path traversal attempt is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a sibling directory for the traversal target
 		const siblingDir = path.join(workspaceRoot, '..', 'target');
@@ -163,7 +171,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('file at workspace root level is allowed', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// The boundary check allows: startsWith(workspaceRoot + path.sep) OR equals workspaceRoot
 		// A file at workspace root level (not inside a subdirectory) should be allowed
@@ -176,7 +184,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	});
 
 	test('similar-name directory outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a "similar" directory name that shares prefix but is NOT the workspace
 		const similarRoot = path.join(
@@ -193,7 +201,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	});
 
 	test('file in parent directory of workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Create a file in the parent of workspace
 		const parentFile = path.join(workspaceRoot, '..', 'parent-file.ts');
@@ -209,7 +217,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('unsupported extension is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		// Even a file inside workspace with unsupported extension should not trigger update
 		const filePath = path.join(workspaceRoot, 'data.json');
@@ -226,7 +234,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('non-write tool is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		const filePath = path.join(workspaceRoot, 'file.ts');
 		fs.writeFileSync(filePath, 'content');
@@ -245,7 +253,7 @@ describe('repo-graph-builder workspace boundary validation', () => {
 	// ─────────────────────────────────────────────────────────────────
 
 	test('missing file_path arg is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot);
+		const hook = makeHook();
 
 		await hook.toolAfter(
 			{ tool: 'Write', sessionID: 'test', args: {} },

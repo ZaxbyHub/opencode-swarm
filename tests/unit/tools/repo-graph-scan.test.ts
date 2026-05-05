@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -420,7 +420,7 @@ export const file2 = 'f2';`,
 			);
 		}
 
-		const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+		const warnSpy = spyOn(logger, 'warn').mockImplementation(() => {});
 
 		// Build graph with maxFiles: 2
 		buildWorkspaceGraph(workspacePath, { maxFiles: 2 });
