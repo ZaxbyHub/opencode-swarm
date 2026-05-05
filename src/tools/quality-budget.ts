@@ -196,7 +196,7 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 			.describe('Quality budget thresholds'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
-		const result = await qualityBudget(
+		const result = await _internals.qualityBudget(
 			args as {
 				changed_files: string[];
 				config?: {
@@ -212,3 +212,13 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(result);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	qualityBudget: typeof qualityBudget;
+} = {
+	qualityBudget,
+} as const;

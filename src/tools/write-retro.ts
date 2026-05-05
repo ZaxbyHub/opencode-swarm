@@ -723,7 +723,7 @@ export const write_retro: ToolDefinition = createSwarmTool({
 					| Record<string, unknown>
 					| undefined,
 			};
-			return await executeWriteRetro(writeRetroArgs, directory);
+			return await _internals.executeWriteRetro(writeRetroArgs, directory);
 		} catch {
 			return JSON.stringify(
 				{ success: false, phase: rawPhase, message: 'Invalid arguments' },
@@ -733,3 +733,16 @@ export const write_retro: ToolDefinition = createSwarmTool({
 		}
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ * Uses getter for write_retro to avoid circular reference at module load time.
+ */
+export const _internals: {
+	executeWriteRetro: typeof executeWriteRetro;
+	write_retro: typeof write_retro;
+} = {
+	executeWriteRetro: executeWriteRetro,
+	write_retro: write_retro,
+} as const;

@@ -149,7 +149,7 @@ function extractCurrentPhaseFromPlan(
 	}
 
 	// Validate plan.phases is an array before iteration (security fix)
-	if (!validatePlanPhases(plan)) {
+	if (!_internals.validatePlanPhases(plan)) {
 		return { currentPhase: null, currentTask: null, incompleteTasks: [] };
 	}
 
@@ -377,11 +377,11 @@ export async function getHandoffData(directory: string): Promise<HandoffData> {
 		directory,
 		'session/state.json',
 	);
-	const sessionState = parseSessionState(sessionContent);
+	const sessionState = _internals.parseSessionState(sessionContent);
 
 	// Read plan
 	const plan = await loadPlanJsonOnly(directory);
-	const planInfo = extractCurrentPhaseFromPlan(plan);
+	const planInfo = _internals.extractCurrentPhaseFromPlan(plan);
 
 	// Fallback to plan.md if no structured plan
 	if (!plan) {
@@ -412,8 +412,8 @@ export async function getHandoffData(directory: string): Promise<HandoffData> {
 
 	// Read context.md
 	const contextContent = await readSwarmFileAsync(directory, 'context.md');
-	const recentDecisions = extractDecisions(contextContent);
-	const rawPhaseMetrics = extractPhaseMetrics(contextContent);
+	const recentDecisions = _internals.extractDecisions(contextContent);
+	const rawPhaseMetrics = _internals.extractPhaseMetrics(contextContent);
 	// Sanitize phase metrics (limit to 1000 chars for safety)
 	const phaseMetrics = sanitizeString(rawPhaseMetrics, 1000);
 
@@ -659,3 +659,31 @@ export function formatContinuationPrompt(data: HandoffData): string {
 
 	return `\`\`\`markdown\n${lines.join('\n')}\n\`\`\``;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	getHandoffData: typeof getHandoffData;
+	formatHandoffMarkdown: typeof formatHandoffMarkdown;
+	formatContinuationPrompt: typeof formatContinuationPrompt;
+	escapeHtml: typeof escapeHtml;
+	sanitizeString: typeof sanitizeString;
+	validatePlanPhases: typeof validatePlanPhases;
+	extractCurrentPhaseFromPlan: typeof extractCurrentPhaseFromPlan;
+	parseSessionState: typeof parseSessionState;
+	extractDecisions: typeof extractDecisions;
+	extractPhaseMetrics: typeof extractPhaseMetrics;
+} = {
+	getHandoffData,
+	formatHandoffMarkdown,
+	formatContinuationPrompt,
+	escapeHtml,
+	sanitizeString,
+	validatePlanPhases,
+	extractCurrentPhaseFromPlan,
+	parseSessionState,
+	extractDecisions,
+	extractPhaseMetrics,
+} as const;

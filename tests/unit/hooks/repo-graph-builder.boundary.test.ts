@@ -44,6 +44,8 @@ describe('repo-graph-builder workspace boundary validation', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		// CROSS-MODULE mock cleanup — no _internals seam in repo-graph-builder.ts
+		mock.restore();
 	});
 
 	function makeHook() {

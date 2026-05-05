@@ -552,3 +552,15 @@ export async function updateRetrievalOutcome(
 		warn('[swarm] Knowledge: failed to update retrieval outcomes');
 	}
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	readMergedKnowledge: typeof readMergedKnowledge;
+	updateRetrievalOutcome: typeof updateRetrievalOutcome;
+} = {
+	readMergedKnowledge,
+	updateRetrievalOutcome,
+};

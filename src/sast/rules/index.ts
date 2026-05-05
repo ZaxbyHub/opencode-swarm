@@ -70,6 +70,24 @@ const allRules: SastRule[] = [
 	...csharpRules,
 ];
 
+export const _internals: {
+	getAllRules: typeof getAllRules;
+	getRulesForLanguage: typeof getRulesForLanguage;
+	getRuleById: typeof getRuleById;
+	findPatternMatches: typeof findPatternMatches;
+	executeRulesSync: typeof executeRulesSync;
+	executeRules: typeof executeRules;
+	getRuleStats: typeof getRuleStats;
+} = {
+	getAllRules,
+	getRulesForLanguage,
+	getRuleById,
+	findPatternMatches,
+	executeRulesSync,
+	executeRules,
+	getRuleStats,
+} as const;
+
 /**
  * Get all registered rules
  */
@@ -195,7 +213,7 @@ export async function executeRules(
 ): Promise<SastFinding[]> {
 	// For now, just use the sync version
 	// Tree-sitter integration can be added later
-	return executeRulesSync(filePath, content, language);
+	return _internals.executeRulesSync(filePath, content, language);
 }
 
 /**

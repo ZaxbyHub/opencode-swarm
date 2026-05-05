@@ -1,5 +1,15 @@
 import { z } from 'zod';
 /**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    stripKnownSwarmPrefix: typeof stripKnownSwarmPrefix;
+    resolveGuardrailsConfig: typeof resolveGuardrailsConfig;
+};
+/**
  * Strips known Swarm prefixes from agent names to get the canonical agent name.
  *
  * Strategy:

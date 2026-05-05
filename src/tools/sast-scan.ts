@@ -758,7 +758,19 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			phase: safeArgs.phase,
 		};
 
-		const result = await sastScan(input, directory);
+		const result = await _internals.sastScan(input, directory);
 		return JSON.stringify(result, null, 2);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	sastScan: typeof sastScan;
+	sast_scan: typeof sast_scan;
+} = {
+	sastScan,
+	sast_scan,
+} as const;

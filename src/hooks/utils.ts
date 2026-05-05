@@ -10,6 +10,21 @@ import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
 import { bunFile } from '../utils/bun-compat';
 
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.<fn>(...)` so tests can replace the function on this object
+ * without touching the real module — `mock.module` from `bun:test` leaks
+ * across files in Bun's shared test-runner process, which would corrupt
+ * unrelated suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	safeHook: typeof safeHook;
+	composeHandlers: typeof composeHandlers;
+	validateSwarmPath: typeof validateSwarmPath;
+	readSwarmFileAsync: typeof readSwarmFileAsync;
+} = { safeHook, composeHandlers, validateSwarmPath, readSwarmFileAsync };
+
 export function safeHook<I, O>(
 	fn: (input: I, output: O) => Promise<void>,
 ): (input: I, output: O) => Promise<void> {
@@ -38,7 +53,7 @@ export function composeHandlers<I, O>(
 
 	return async (input: I, output: O) => {
 		for (const fn of fns) {
-			const safeFn = safeHook(fn);
+			const safeFn = _internals.safeHook(fn);
 			await safeFn(input, output);
 		}
 	};
@@ -102,7 +117,7 @@ export async function readSwarmFileAsync(
 	filename: string,
 ): Promise<string | null> {
 	try {
-		const resolvedPath = validateSwarmPath(directory, filename);
+		const resolvedPath = _internals.validateSwarmPath(directory, filename);
 		const file = bunFile(resolvedPath);
 		const content = await file.text();
 		return content;

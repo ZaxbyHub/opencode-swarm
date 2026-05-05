@@ -19,7 +19,7 @@
  * 15. Prefixed agent names
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
 	KnowledgeConfig,
@@ -27,7 +27,27 @@ import type {
 } from '../../../src/hooks/knowledge-types.js';
 
 // ============================================================================
-// Mocks Setup
+// MOCK CONVERSION NOTES
+// ============================================================================
+// These tests use mock.module() for cross-module mocks because the source
+// modules (knowledge-reader, knowledge-store, plan/manager, extractors,
+// schema, run-memory) use direct imports rather than _internals DI seams.
+//
+// Cross-module mocks CANNOT be converted to _internals because:
+// - The source uses direct named imports (e.g., import { readMergedKnowledge })
+// - _internals seams only exist where they were explicitly designed
+//
+// MOCK MODULES (remain as mock.module):
+// - src/hooks/knowledge-reader.js: readMergedKnowledge
+// - src/hooks/knowledge-store.js: readRejectedLessons
+// - src/plan/manager.js: loadPlan
+// - src/hooks/extractors.js: extractCurrentPhaseFromPlan
+// - src/config/schema.js: stripKnownSwarmPrefix
+// - src/services/run-memory.js: getRunMemorySummary
+//
+// These tests use mock.module for cross-module mocks. In CI, per-file isolation
+// prevents leakage. For local batch runs, use `bun test --isolate` (Bun >=1.3.13).
+// beforeEach resets mock call state via mockClear() for deterministic test isolation.
 // ============================================================================
 
 // Declare mock functions before mock.module() calls
@@ -172,6 +192,14 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('Adversarial: Oversized lesson injection', () => {
 	beforeEach(() => {
+		// Clear all mock call history before each test
+		mockReadMergedKnowledge.mockClear();
+		mockReadRejectedLessons.mockClear();
+		mockLoadPlan.mockClear();
+		mockExtractCurrentPhaseFromPlan.mockClear();
+		mockStripKnownSwarmPrefix.mockClear();
+		mockGetRunMemorySummary.mockClear();
+
 		mockReadMergedKnowledge.mockReset();
 		mockReadRejectedLessons.mockReset();
 		mockLoadPlan.mockReset();

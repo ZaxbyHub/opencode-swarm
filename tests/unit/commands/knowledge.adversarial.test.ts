@@ -52,6 +52,10 @@ const {
 	handleKnowledgeMigrateCommand,
 } = await import('../../../src/commands/knowledge.js');
 
+afterEach(() => {
+	mock.restore();
+});
+
 describe('Adversarial Security Tests for knowledge.ts', () => {
 	const testDirectory = '/test/directory';
 

@@ -424,3 +424,49 @@ export function inferTags(lesson: string): string[] {
 
 	return Array.from(new Set(tags)); // deduplicate
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	getPlatformConfigDir: typeof getPlatformConfigDir;
+	resolveSwarmKnowledgePath: typeof resolveSwarmKnowledgePath;
+	resolveSwarmRejectedPath: typeof resolveSwarmRejectedPath;
+	resolveHiveKnowledgePath: typeof resolveHiveKnowledgePath;
+	resolveHiveRejectedPath: typeof resolveHiveRejectedPath;
+	readKnowledge: typeof readKnowledge;
+	readRejectedLessons: typeof readRejectedLessons;
+	appendKnowledge: typeof appendKnowledge;
+	rewriteKnowledge: typeof rewriteKnowledge;
+	enforceKnowledgeCap: typeof enforceKnowledgeCap;
+	sweepAgedEntries: typeof sweepAgedEntries;
+	sweepStaleTodos: typeof sweepStaleTodos;
+	appendRejectedLesson: typeof appendRejectedLesson;
+	normalize: typeof normalize;
+	wordBigrams: typeof wordBigrams;
+	jaccardBigram: typeof jaccardBigram;
+	findNearDuplicate: typeof findNearDuplicate;
+	computeConfidence: typeof computeConfidence;
+	inferTags: typeof inferTags;
+} = {
+	getPlatformConfigDir,
+	resolveSwarmKnowledgePath,
+	resolveSwarmRejectedPath,
+	resolveHiveKnowledgePath,
+	resolveHiveRejectedPath,
+	readKnowledge,
+	readRejectedLessons,
+	appendKnowledge,
+	rewriteKnowledge,
+	enforceKnowledgeCap,
+	sweepAgedEntries,
+	sweepStaleTodos,
+	appendRejectedLesson,
+	normalize,
+	wordBigrams,
+	jaccardBigram,
+	findNearDuplicate,
+	computeConfidence,
+	inferTags,
+};

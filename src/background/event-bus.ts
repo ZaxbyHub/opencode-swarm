@@ -177,3 +177,15 @@ export function getGlobalEventBus(): AutomationEventBus {
 export function resetGlobalEventBus(): void {
 	globalEventBus = null;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	getGlobalEventBus: typeof getGlobalEventBus;
+	resetGlobalEventBus: typeof resetGlobalEventBus;
+} = {
+	getGlobalEventBus,
+	resetGlobalEventBus,
+} as const;

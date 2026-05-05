@@ -9,7 +9,7 @@
  * 2. [MODE: ...] stripping works; other [BRACKET: patterns] are NOT stripped
  * 3. trim() only removes JS-defined whitespace, not zero-width chars or tabs/newlines in middle
  */
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { execSync } from 'node:child_process';
 
 // Mock execSync before importing the module under test
@@ -642,5 +642,9 @@ describe('Adversarial Security Tests for issue.ts', () => {
 			]);
 			expect(result).toContain('Error:');
 		});
+	});
+
+	afterEach(() => {
+		mock.restore();
 	});
 });

@@ -1,4 +1,8 @@
 /**
+ * Execute git command safely
+ */
+declare function gitExec(args: string[], cwd: string): string;
+/**
  * Check if we're in a git repository
  */
 export declare function isGitRepo(cwd: string): boolean;
@@ -58,6 +62,10 @@ export interface ResetToRemoteBranchResult {
     warnings: string[];
 }
 /**
+ * Detect the default remote branch using multiple fallback methods
+ */
+declare function detectDefaultRemoteBranch(cwd: string): string | null;
+/**
  * Reset local branch to align with its remote counterpart.
  * Safely handles uncommitted changes, unpushed commits, and detached HEAD states.
  *
@@ -68,3 +76,14 @@ export interface ResetToRemoteBranchResult {
 export declare function resetToRemoteBranch(cwd: string, options?: {
     pruneBranches?: boolean;
 }): ResetToRemoteBranchResult;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    gitExec: typeof gitExec;
+    detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
+    getDefaultBaseBranch: typeof getDefaultBaseBranch;
+    resetToRemoteBranch: typeof resetToRemoteBranch;
+};
+export {};

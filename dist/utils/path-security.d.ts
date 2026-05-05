@@ -34,3 +34,13 @@ export declare function validateDirectory(directory: string): void;
  * @throws Error if the resolved target escapes the root boundary
  */
 export declare function validateSymlinkBoundary(targetPath: string, rootPath: string): void;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    containsPathTraversal: typeof containsPathTraversal;
+    containsControlChars: typeof containsControlChars;
+    validateDirectory: typeof validateDirectory;
+    validateSymlinkBoundary: typeof validateSymlinkBoundary;
+};

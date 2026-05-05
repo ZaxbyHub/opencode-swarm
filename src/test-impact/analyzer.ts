@@ -181,11 +181,35 @@ async function buildImpactMapInternal(
 	return impactMap;
 }
 
+export const _internals: {
+	normalizePath: typeof normalizePath;
+	isCacheStale: typeof isCacheStale;
+	resolveRelativeImport: typeof resolveRelativeImport;
+	findTestFilesSync: typeof findTestFilesSync;
+	extractImports: typeof extractImports;
+	buildImpactMapInternal: typeof buildImpactMapInternal;
+	buildImpactMap: typeof buildImpactMap;
+	loadImpactMap: typeof loadImpactMap;
+	saveImpactMap: typeof saveImpactMap;
+	analyzeImpact: typeof analyzeImpact;
+} = {
+	normalizePath,
+	isCacheStale,
+	resolveRelativeImport,
+	findTestFilesSync,
+	extractImports,
+	buildImpactMapInternal,
+	buildImpactMap,
+	loadImpactMap,
+	saveImpactMap,
+	analyzeImpact,
+} as const;
+
 export async function buildImpactMap(
 	cwd: string,
 ): Promise<Record<string, string[]>> {
-	const impactMap = await buildImpactMapInternal(cwd);
-	await saveImpactMap(cwd, impactMap);
+	const impactMap = await _internals.buildImpactMapInternal(cwd);
+	await _internals.saveImpactMap(cwd, impactMap);
 	return impactMap;
 }
 
@@ -202,7 +226,7 @@ export async function loadImpactMap(
 			const generatedAt = new Date(data.generatedAt).getTime();
 
 			// Check if any source file is newer than cache
-			if (!isCacheStale(map, generatedAt)) {
+			if (!_internals.isCacheStale(map, generatedAt)) {
 				return map;
 			}
 			// Cache is stale, fall through to rebuild
@@ -211,7 +235,7 @@ export async function loadImpactMap(
 		}
 	}
 
-	return buildImpactMap(cwd);
+	return _internals.buildImpactMap(cwd);
 }
 
 async function saveImpactMap(
@@ -256,7 +280,7 @@ export async function analyzeImpact(
 			typeof f === 'string' && f.length > 0 && !f.includes('\0'),
 	);
 
-	const impactMap = await loadImpactMap(cwd);
+	const impactMap = await _internals.loadImpactMap(cwd);
 
 	const impactedTestsSet = new Set<string>();
 	const untestedFiles: string[] = [];

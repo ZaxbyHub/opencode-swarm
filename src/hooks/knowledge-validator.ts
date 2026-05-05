@@ -603,3 +603,19 @@ export async function restoreEntry(
 		}
 	}
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	validateLesson: typeof validateLesson;
+	auditEntryHealth: typeof auditEntryHealth;
+	quarantineEntry: typeof quarantineEntry;
+	restoreEntry: typeof restoreEntry;
+} = {
+	validateLesson,
+	auditEntryHealth,
+	quarantineEntry,
+	restoreEntry,
+};

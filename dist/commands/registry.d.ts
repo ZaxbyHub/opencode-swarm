@@ -1,4 +1,7 @@
 import type { AgentDefinition } from '../agents/index.js';
+declare function levenshteinDistance(a: string, b: string): number;
+declare function findSimilarCommands(query: string): string[];
+declare function buildDetailedHelp(commandName: string, entry: CommandEntry): string;
 export declare function handleHelpCommand(ctx: CommandContext): Promise<string>;
 export type CommandContext = {
     directory: string;
@@ -404,6 +407,18 @@ export declare function validateAliases(): {
     warnings: string[];
 };
 /**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    handleHelpCommand: typeof handleHelpCommand;
+    validateAliases: typeof validateAliases;
+    resolveCommand: typeof resolveCommand;
+    levenshteinDistance: typeof levenshteinDistance;
+    findSimilarCommands: typeof findSimilarCommands;
+    buildDetailedHelp: typeof buildDetailedHelp;
+};
+/**
  * Resolves compound commands like "evidence summary" and "config doctor".
  * Tries a two-token compound key first, then falls back to a single-token key.
  * Returns a warning if the resolved command is a deprecated alias.
@@ -414,3 +429,4 @@ export declare function resolveCommand(tokens: string[]): {
     key: string;
     warning?: string;
 } | null;
+export {};

@@ -89,6 +89,28 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand } = await import('../../../src/commands/close.js');
 
+// ── DI Conversion Summary ────────────────────────────────────────────
+//
+// WITHIN-MODULE MOCKS: NONE POSSIBLE
+// close.ts imports all functions directly (flushPendingSnapshot, swarmState,
+// resetSwarmState, archiveEvidence, executeWriteRetro, curateAndStoreSwarm) and
+// does NOT route any through _internals. The _internals DI seam only works when
+// the consuming module uses _internals (e.g., full-auto-intercept.ts imports
+// state._internals directly). Since close.ts has no _internals usage, none of
+// its imports can be intercepted via _internals.
+//
+// CROSS-MODULE MOCKS: All mocks remain as mock.module
+// - executeWriteRetro (tools/write-retro.ts)
+// - curateAndStoreSwarm (hooks/knowledge-curator.ts)
+// - archiveEvidence (evidence/manager.ts) — not in manager._internals
+// - flushPendingSnapshot (session/snapshot-writer.ts) — close.ts imports directly
+// - swarmState + resetSwarmState (state.ts) — close.ts imports directly
+// - isGitRepo + resetToRemoteBranch (git/branch.ts)
+// - writeCheckpoint (plan/checkpoint.ts)
+//
+// All mock.module calls require afterEach(mock.restore()) cleanup.
+// ─────────────────────────────────────────────────────────────────────
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 let testDir: string;
@@ -136,6 +158,8 @@ describe('handleCloseCommand — finalizer stages', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		// Restore all mock.module mocks to prevent cross-test pollution
+		mock.restore();
 	});
 
 	// ── STAGE 2: ARCHIVE ─────────────────────────────────────────────

@@ -1115,3 +1115,27 @@ export async function loadLastApprovedPlan(
 
 	return null;
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals = {
+	computePlanHash,
+	computeCurrentPlanHash,
+	ledgerExists,
+	getLatestLedgerSeq,
+	readLedgerEvents,
+	initLedger,
+	appendLedgerEvent,
+	appendLedgerEventWithRetry,
+	takeSnapshotEvent,
+	replayFromLedger,
+	applyEventToPlan,
+	readLedgerEventsWithIntegrity,
+	quarantineLedgerSuffix,
+	replayWithIntegrity,
+	loadLastApprovedPlan,
+	getLedgerPath,
+	getPlanJsonPath,
+};

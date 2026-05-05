@@ -10,6 +10,14 @@ import { access, readdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { LANGUAGE_REGISTRY, type LanguageProfile } from './profiles.js';
 
+export const _internals: {
+	getProfileForFile: typeof getProfileForFile;
+	detectProjectLanguages: typeof detectProjectLanguages;
+} = {
+	getProfileForFile,
+	detectProjectLanguages,
+} as const;
+
 /**
  * Resolve a language profile from a file path based on its extension.
  * Returns undefined for files with no extension or unknown extensions.

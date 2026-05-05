@@ -57,3 +57,15 @@ export declare const telemetry: {
     prmEscalationTriggered(sessionId: string, pattern: string, level: number, occurrenceCount: number): void;
     prmHardStop(sessionId: string, pattern: string, level: number, occurrenceCount: number): void;
 };
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.telemetry` and `_internals.emit` so tests can replace the
+ * underlying implementations without using `mock.module` — `mock.module` from
+ * `bun:test` leaks across files in Bun's shared test-runner process, which
+ * would corrupt unrelated test suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    telemetry: typeof telemetry;
+    emit: typeof emit;
+};

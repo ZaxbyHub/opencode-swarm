@@ -8,6 +8,24 @@
  * 4. Duplicate lessons → skipped increments
  * 5. Invalid lessons → rejected increments
  * 6. Advisory message in phase-complete.ts includes "Knowledge: N applied, M skipped" text
+ *
+ * MOCK CONVERSION NOTES:
+ * These tests use mock.module() for cross-module mocks because the source
+ * modules (knowledge-store, knowledge-validator, knowledge-reader) use direct
+ * imports rather than _internals DI seams.
+ *
+ * Cross-module mocks CANNOT be converted to _internals because:
+ * - The source uses direct named imports
+ * - _internals seams only exist where they were explicitly designed
+ *
+ * MOCK MODULES (remain as mock.module):
+ * - src/hooks/knowledge-store.js: all functions
+ * - src/hooks/knowledge-validator.js: validateLesson, quarantineEntry
+ * - src/hooks/knowledge-reader.js: updateRetrievalOutcome
+ *
+ * These tests use mock.module for cross-module mocks. In CI, per-file isolation
+ * prevents leakage. For local batch runs, use `bun test --isolate` (Bun >=1.3.13).
+ * beforeEach resets mock call state via mockClear() for deterministic test isolation.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';

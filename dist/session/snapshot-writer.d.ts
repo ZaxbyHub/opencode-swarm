@@ -113,3 +113,12 @@ export declare function createSnapshotWriterHook(directory: string): (input: unk
  * are persisted before returning.
  */
 export declare function flushPendingSnapshot(directory: string): Promise<void>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    writeSnapshot: typeof writeSnapshot;
+    createSnapshotWriterHook: typeof createSnapshotWriterHook;
+    flushPendingSnapshot: typeof flushPendingSnapshot;
+};

@@ -23,3 +23,7 @@ export interface ImportCheckpointResult {
  * @returns ImportCheckpointResult indicating success or failure with error message
  */
 export declare function importCheckpoint(directory: string, source?: string): Promise<ImportCheckpointResult>;
+export declare const _internals: {
+    writeCheckpoint: typeof writeCheckpoint;
+    importCheckpoint: typeof importCheckpoint;
+};

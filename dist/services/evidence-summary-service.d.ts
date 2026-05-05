@@ -4,7 +4,14 @@
  * Provides deterministic evidence aggregation per task and phase.
  * Produces machine-readable and human-readable summary artifacts.
  */
-import type { PhaseStatus, TaskStatus } from '../config/plan-schema';
+import type { Evidence, EvidenceBundle } from '../config/evidence-schema';
+import type { Phase, PhaseStatus, Task, TaskStatus } from '../config/plan-schema';
+/**
+ * Safely normalize evidence bundle entries to a valid array.
+ * Handles null, undefined, non-array, and invalid entry objects.
+ * Returns only valid entries with required fields.
+ */
+declare function normalizeBundleEntries(bundle: EvidenceBundle | null | undefined): Evidence[];
 /** Evidence types required for task completion */
 export declare const REQUIRED_EVIDENCE_TYPES: readonly ["review", "test"];
 export type RequiredEvidenceType = (typeof REQUIRED_EVIDENCE_TYPES)[number];
@@ -57,6 +64,33 @@ export interface EvidenceSummaryArtifact {
     summaryText: string;
 }
 /**
+ * Get task status from plan or infer from evidence
+ */
+declare function getTaskStatus(task: Task | undefined, bundle: EvidenceBundle | null): TaskStatus;
+/**
+ * Check if evidence meets completion criteria for a task
+ */
+declare function isEvidenceComplete(bundle: EvidenceBundle | null): {
+    isComplete: boolean;
+    missingEvidence: string[];
+};
+/**
+ * Generate blockers for a task based on evidence and status
+ */
+declare function getTaskBlockers(task: Task | undefined, summary: ReturnType<typeof isEvidenceComplete>, status: TaskStatus): string[];
+/**
+ * Build evidence summary for a single task
+ */
+declare function buildTaskSummary(directory: string, task: Task | undefined, taskId: string): Promise<TaskEvidenceSummary>;
+/**
+ * Build evidence summary for a single phase
+ */
+declare function buildPhaseSummary(directory: string, phase: Phase): Promise<PhaseEvidenceSummary>;
+/**
+ * Generate human-readable summary text
+ */
+declare function generateSummaryText(artifact: EvidenceSummaryArtifact): string;
+/**
  * Build complete evidence summary artifact
  *
  * Aggregates evidence per task and phase, producing deterministic
@@ -73,3 +107,19 @@ export declare function isAutoSummaryEnabled(automationConfig?: {
     };
     mode?: string;
 }): boolean;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    buildEvidenceSummary: typeof buildEvidenceSummary;
+    isAutoSummaryEnabled: typeof isAutoSummaryEnabled;
+    normalizeBundleEntries: typeof normalizeBundleEntries;
+    getTaskStatus: typeof getTaskStatus;
+    isEvidenceComplete: typeof isEvidenceComplete;
+    getTaskBlockers: typeof getTaskBlockers;
+    buildTaskSummary: typeof buildTaskSummary;
+    buildPhaseSummary: typeof buildPhaseSummary;
+    generateSummaryText: typeof generateSummaryText;
+};
+export {};

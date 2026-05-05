@@ -533,3 +533,29 @@ No plan content available. Start by creating a .swarm/plan.md file.
 
 	return output;
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	extractCurrentPhase: typeof extractCurrentPhase;
+	extractCurrentTask: typeof extractCurrentTask;
+	extractDecisions: typeof extractDecisions;
+	extractIncompleteTasks: typeof extractIncompleteTasks;
+	extractPatterns: typeof extractPatterns;
+	extractCurrentPhaseFromPlan: typeof extractCurrentPhaseFromPlan;
+	extractCurrentTaskFromPlan: typeof extractCurrentTaskFromPlan;
+	extractIncompleteTasksFromPlan: typeof extractIncompleteTasksFromPlan;
+	extractPlanCursor: typeof extractPlanCursor;
+} = {
+	extractCurrentPhase,
+	extractCurrentTask,
+	extractDecisions,
+	extractIncompleteTasks,
+	extractPatterns,
+	extractCurrentPhaseFromPlan,
+	extractCurrentTaskFromPlan,
+	extractIncompleteTasksFromPlan,
+	extractPlanCursor,
+};

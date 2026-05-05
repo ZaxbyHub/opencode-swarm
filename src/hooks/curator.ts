@@ -73,6 +73,19 @@ export type CuratorLLMDelegate = (
  * Used as fallback when config.llm_timeout_ms is not set. */
 const DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300_000;
 
+// ============================================================================
+// DI Seam — _internals (declared before functions that use it to avoid TDZ)
+// ============================================================================
+
+export const _internals = {
+	parseKnowledgeRecommendations,
+	readCuratorSummary,
+	writeCuratorSummary,
+	filterPhaseEvents,
+	checkPhaseCompliance,
+	normalizeAgentName,
+};
+
 /**
  * Parse OBSERVATIONS section from curator LLM output.
  * Expected format per line: "- entry <uuid> (<observable>): [text]"
@@ -301,9 +314,9 @@ export function checkPhaseCompliance(
 
 	// Check 1: Missing required agents
 	for (const agent of requiredAgents) {
-		const normalizedAgent = normalizeAgentName(agent);
+		const normalizedAgent = _internals.normalizeAgentName(agent);
 		const isDispatched = agentsDispatched.some(
-			(a) => normalizeAgentName(a) === normalizedAgent,
+			(a) => _internals.normalizeAgentName(a) === normalizedAgent,
 		);
 
 		if (!isDispatched) {
@@ -328,7 +341,7 @@ export function checkPhaseCompliance(
 			if ((e as Record<string, unknown>).type === 'agent.delegation') {
 				const agent = (e as Record<string, unknown>).agent;
 				if (agent && typeof agent === 'string') {
-					const normalized = normalizeAgentName(agent);
+					const normalized = _internals.normalizeAgentName(agent);
 					if (normalized === 'coder') {
 						coderDelegations.push({ event: e, index: i });
 					} else if (normalized === 'reviewer') {
@@ -411,7 +424,7 @@ export function checkPhaseCompliance(
 			) {
 				const agent = (e as Record<string, unknown>).agent;
 				if (agent && typeof agent === 'string') {
-					const normalized = normalizeAgentName(agent);
+					const normalized = _internals.normalizeAgentName(agent);
 					if (normalized === 'sme') {
 						smeDelegations.push({ event: e, index: i });
 					}
@@ -457,7 +470,7 @@ export async function runCuratorInit(
 ): Promise<CuratorInitResult> {
 	try {
 		// 1. Read prior curator summary
-		const priorSummary = await readCuratorSummary(directory);
+		const priorSummary = await _internals.readCuratorSummary(directory);
 
 		// 2. Read high-confidence knowledge entries
 		const knowledgePath = resolveSwarmKnowledgePath(directory);
@@ -652,7 +665,7 @@ export async function runCuratorPhase(
 ): Promise<CuratorPhaseResult> {
 	try {
 		// 1. Read prior curator summary
-		const priorSummary = await readCuratorSummary(directory);
+		const priorSummary = await _internals.readCuratorSummary(directory);
 
 		// 1b. Deduplication guard: skip if this phase was already digested.
 		// Without this, repeated phase_complete or curator_analyze calls for
@@ -679,7 +692,7 @@ export async function runCuratorPhase(
 			'events.jsonl',
 		);
 		const phaseEvents = eventsJsonlContent
-			? filterPhaseEvents(eventsJsonlContent, phase)
+			? _internals.filterPhaseEvents(eventsJsonlContent, phase)
 			: [];
 
 		// 3. Read context.md decisions
@@ -688,7 +701,7 @@ export async function runCuratorPhase(
 		// 4. Run compliance check
 		// Required agents for a standard phase: reviewer, test_engineer
 		const requiredAgents = ['reviewer', 'test_engineer'];
-		const complianceObservations = checkPhaseCompliance(
+		const complianceObservations = _internals.checkPhaseCompliance(
 			phaseEvents,
 			agentsDispatched,
 			requiredAgents,
@@ -726,7 +739,11 @@ export async function runCuratorPhase(
 			phase,
 			timestamp: new Date().toISOString(),
 			summary: `Phase ${phase} completed. ${tasksCompleted}/${tasksTotal} tasks completed. ${complianceObservations.length} compliance observations.`,
-			agents_used: [...new Set(agentsDispatched.map(normalizeAgentName))],
+			agents_used: [
+				...new Set(
+					agentsDispatched.map((a) => _internals.normalizeAgentName(a)),
+				),
+			],
 			tasks_completed: tasksCompleted,
 			tasks_total: tasksTotal,
 			key_decisions: keyDecisions.slice(0, 5),
@@ -787,7 +804,8 @@ export async function runCuratorPhase(
 				}
 
 				if (llmOutput?.trim()) {
-					knowledgeRecommendations = parseKnowledgeRecommendations(llmOutput);
+					knowledgeRecommendations =
+						_internals.parseKnowledgeRecommendations(llmOutput);
 				}
 
 				getGlobalEventBus().publish('curator.phase.llm_completed', {
@@ -840,7 +858,7 @@ export async function runCuratorPhase(
 			};
 		}
 
-		await writeCuratorSummary(directory, updatedSummary);
+		await _internals.writeCuratorSummary(directory, updatedSummary);
 
 		// 8. Write compliance observations to events.jsonl as curator_compliance events
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');

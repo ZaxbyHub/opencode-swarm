@@ -11,6 +11,26 @@ import { createHash } from 'node:crypto';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	getProfile: typeof getProfile;
+	getOrCreateProfile: typeof getOrCreateProfile;
+	setGates: typeof setGates;
+	getEffectiveGates: typeof getEffectiveGates;
+	computeProfileHash: typeof computeProfileHash;
+} = {
+	getProfile,
+	getOrCreateProfile,
+	setGates,
+	getEffectiveGates,
+	computeProfileHash,
+};
+
+/**
  * QA gate flags. All ten gates are tracked explicitly.
  */
 export interface QaGates {
@@ -117,7 +137,7 @@ export function getOrCreateProfile(
 	planId: string,
 	projectType?: string,
 ): QaGateProfile {
-	const existing = getProfile(directory, planId);
+	const existing = _internals.getProfile(directory, planId);
 	if (existing) return existing;
 
 	const db = getProjectDb(directory);
@@ -138,7 +158,7 @@ export function getOrCreateProfile(
 		}
 	}
 
-	const after = getProfile(directory, planId);
+	const after = _internals.getProfile(directory, planId);
 	if (!after) {
 		throw new Error(
 			`Failed to create or load QA gate profile for plan_id=${planId}`,
@@ -157,7 +177,7 @@ export function setGates(
 	planId: string,
 	gates: Partial<QaGates>,
 ): QaGateProfile {
-	const current = getProfile(directory, planId);
+	const current = _internals.getProfile(directory, planId);
 	if (!current) {
 		throw new Error(
 			`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
@@ -189,7 +209,7 @@ export function setGates(
 		planId,
 	]);
 
-	const updated = getProfile(directory, planId);
+	const updated = _internals.getProfile(directory, planId);
 	if (!updated) {
 		throw new Error(
 			`Failed to re-read QA gate profile after update for plan_id=${planId}`,
@@ -207,7 +227,7 @@ export function lockProfile(
 	planId: string,
 	snapshotSeq: number,
 ): QaGateProfile {
-	const current = getProfile(directory, planId);
+	const current = _internals.getProfile(directory, planId);
 	if (!current) {
 		throw new Error(
 			`No QA gate profile found for plan_id=${planId} — cannot lock`,
@@ -221,7 +241,7 @@ export function lockProfile(
 		"UPDATE qa_gate_profile SET locked_at = datetime('now'), locked_by_snapshot_seq = ? WHERE plan_id = ?",
 		[snapshotSeq, planId],
 	);
-	const locked = getProfile(directory, planId);
+	const locked = _internals.getProfile(directory, planId);
 	if (!locked) {
 		throw new Error(
 			`Failed to re-read locked QA gate profile for plan_id=${planId}`,

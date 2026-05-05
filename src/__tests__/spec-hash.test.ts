@@ -21,6 +21,7 @@ describe('computeSpecHash', () => {
 	});
 
 	afterEach(async () => {
+		await mock.restore();
 		// Clean up temp directory
 		try {
 			await rm(tempDir, { force: true, recursive: true });

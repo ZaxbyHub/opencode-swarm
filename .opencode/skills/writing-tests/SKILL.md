@@ -34,6 +34,8 @@ Bun provides a vitest compatibility layer (`vi.mock`, `vi.fn`, `vi.spyOn`) that 
 
 Bun's `--smol` mode shares the module cache between test files in the same worker process. A `mock.module()` call in file A replaces the module globally — file B gets the mock instead of the real module. This caused ~959 failures before per-file isolation was added (#330).
 
+**Additional critical limitation (Bun v1.3.11):** `mock.restore()` does NOT reliably restore `mock.module` mocks. Cross-module mocks can persist across test boundaries even after `afterEach(mock.restore())` is called. Three layers of defense are required.
+
 ### Rules
 
 1. **Spread the real module when mocking.** Only override the specific export you need:
@@ -45,7 +47,7 @@ mock.module('node:child_process', () => ({
   execFileSync: mockExecFileSync, // override only what you test
 }));
 ```
-This prevents tests from accidentally nullifying exports that other code depends on.
+This prevents tests from accidentally nullifying exports that other code depends on. **This is mandatory for Node built-ins** (`node:fs`, `node:fs/promises`, `node:child_process`, etc.) because other code imports the full module — returning a partial mock without spreading real exports breaks unrelated imports.
 
 2. **Use lazy binding in source code.** Import the namespace, call methods at invocation time:
 ```typescript
@@ -57,7 +59,26 @@ function run() { return child_process.execFileSync('git', ['status']); }
 import { execFileSync } from 'node:child_process';
 ```
 
-3. **Never create circular mock imports.** This pattern deadlocks Bun:
+3. **Always add `afterEach(mock.restore())` for cross-module mocks.** Even though it is unreliable in Bun v1.3.11, it provides best-effort cleanup and reduces the window of cross-file contamination. Without it, the mock persists until the process exits:
+```typescript
+import { afterEach, mock } from 'bun:test';
+
+afterEach(() => {
+  mock.restore();
+});
+```
+**Exception — Windows EBUSY:** Test files that spawn async child processes (e.g. `pre-check-batch` tests) must **NOT** call `mock.restore()` on Windows. Child process handles can hold directory locks, and `mock.restore()` triggers cleanup that causes `EBUSY` errors. These files must use `describe.skipIf(process.platform === 'win32')` or `test.skipIf(process.platform === 'win32')` for affected tests.
+
+Intentionally skipped on Windows (async child process handles cause EBUSY):
+- `tests/unit/tools/pre-check-batch-sast-preexisting.test.ts`
+- `tests/unit/tools/pre-check-batch.adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-cwd.test.ts`
+- `tests/unit/tools/pre-check-batch-cwd.adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-contextdir-adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-secretscan-evidence.test.ts`
+- `tests/unit/tools/pre-check-batch.test.ts`
+
+4. **Never create circular mock imports.** This pattern deadlocks Bun:
 ```typescript
 // BROKEN — imports from the module it's about to mock
 import { realFn } from '../../src/module.js';
@@ -68,15 +89,88 @@ vi.mock('../../src/module.js', () => ({
 ```
 Instead, inline the function logic or extract the real functions into a separate utility module.
 
-4. **Prefer constructor/parameter injection over module mocking.** The swarm's hook factories (`createScopeGuardHook`, `createDelegationLedgerHook`, etc.) accept injected dependencies — test them by passing mock callbacks, not by replacing modules.
+5. **Prefer constructor/parameter injection over module mocking.** The swarm's hook factories (`createScopeGuardHook`, `createDelegationLedgerHook`, etc.) accept injected dependencies — test them by passing mock callbacks, not by replacing modules.
 
-5. **Mock `validateDirectory` when testing with Windows temp paths.** The `path-security.ts` validator rejects Windows absolute paths (`C:\...`). If your test uses `os.tmpdir()` and passes that path to a function that calls `validateDirectory`, mock it:
+6. **Mock `validateDirectory` when testing with Windows temp paths.** The `path-security.ts` validator rejects Windows absolute paths (`C:\...`). If your test uses `os.tmpdir()` and passes that path to a function that calls `validateDirectory`, mock it:
 ```typescript
 mock.module('../../../src/utils/path-security', () => ({
   validateDirectory: () => {},
   validateSwarmPath: (p: string) => p,
 }));
 ```
+
+## Two-Tier Mock Convention
+
+The codebase uses a two-tier strategy for mock isolation:
+
+### Tier 1: _internals DI Seams (Within-Module)
+
+For mocking functions within the same module, source files export an `_internals` object that wraps key functions. Tests can replace individual functions without using `mock.module`:
+
+```typescript
+// In source file (src/services/my-service.ts)
+export const _internals = {
+  helperFn: () => { /* real implementation */ }
+};
+
+export function mainFn() {
+  return _internals.helperFn();
+}
+```
+
+```typescript
+// In test file
+import { _internals, mainFn } from '../../../src/services/my-service';
+
+test('mainFn uses mocked helper', () => {
+  const original = _internals.helperFn;
+  _internals.helperFn = mock(() => 'mocked');
+  // ... test ...
+  _internals.helperFn = original; // restore
+});
+```
+
+**Benefits:**
+- No process-global mock pollution
+- Type-safe
+- Fast (no module re-parsing)
+- Works in batch test runs without isolation
+
+### Tier 2: mock.module (Cross-Module)
+
+When mocking dependencies from other modules (especially Node built-ins), use `mock.module` with proper cleanup:
+
+```typescript
+import * as realFs from 'node:fs/promises';
+
+mock.module('node:fs/promises', () => ({
+  ...realFs,  // MUST spread real exports
+  readFile: mock(() => Promise.resolve('mocked')),
+}));
+
+afterEach(() => mock.restore());
+```
+
+**Critical rules for cross-module mocks:**
+1. **Always spread real exports** for Node built-ins — other code depends on exports you don't mock
+2. **Always add `afterEach(mock.restore())`** — provides best-effort cleanup
+3. **Run in per-file isolation** — CI runs each file in its own process (`for f in *.test.ts; do bun --smol test "$f"; done`)
+
+### Choosing Between Tiers
+
+| Scenario | Pattern | Example |
+|----------|---------|---------|
+| Mocking a function in the same module you're testing | `_internals` seam | `src/state.ts` `_internals.loadSnapshot` |
+| Mocking a Node built-in (fs, child_process, etc.) | `mock.module` + spread real | `mock.module('node:fs/promises', () => ({ ...realFs, readFile: mockFn }))` |
+| Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
+| File-scoped mock (applies to all tests in file) | `mock.module` at top level + `mockReset()` in `beforeEach` | Preflight tests with `mockLoadPlan.mockReset()` |
+
+### Files Intentionally Using File-Scoped Mocks
+
+Some test files use top-level `mock.module` that must persist across all tests in the file. These files use `mockReset()`/`mockClear()` in `beforeEach` instead of `mock.restore()` in `afterEach`:
+
+- `tests/unit/tools/pkg-audit-cwd.test.ts` — mocks `discovery.js`
+- `src/__tests__/preflight-phase.test.ts` — mocks `plan/manager` and `preflight-service`
 
 ## CI Pipeline Structure
 
@@ -236,3 +330,58 @@ The `--timeout 120000` flag sets per-test timeout to 120 seconds. Individual tes
 3. Verify no `process.cwd()` usage — use the `directory` parameter from `createSwarmTool` or hook constructor
 4. Verify no hardcoded paths (`/tmp/...`, `C:\...`) — use `os.tmpdir()` + `path.join()`
 5. Verify mocks are restored in `afterEach` if using `spyOn` or `mock.module`
+
+## Known Pre-existing Test Failures
+
+The following test failures are pre-existing and unrelated to mock isolation:
+
+| Test file | Failures | Cause | Status |
+|-----------|----------|-------|--------|
+| `tests/unit/hooks/full-auto-intercept.test.ts` | 21/37 | `logger.log` returns early without `OPENCODE_SWARM_DEBUG=1` | Pre-existing |
+| `tests/unit/hooks/full-auto-intercept.dispatch.test.ts` | 2/46 | Same logger issue | Pre-existing |
+| `tests/unit/commands/help-compound-commands.test.ts` | Multiple | Command routing issues | Pre-existing |
+| `tests/unit/commands/index.test.ts` | Multiple | Command routing issues | Pre-existing |
+| `tests/unit/commands/issue-command.test.ts` | Multiple | Command routing issues | Pre-existing |
+| `src/__tests__/preflight-phase.test.ts` | 3/3 | `loadPlan` called twice per invocation (lines 930 + 545) | Bug exposed by cleanup |
+
+## Known Cross-module mock.module Locations
+
+The following directories contain test files that use cross-module `mock.module` (permitted under two-tier convention):
+
+- `tests/unit/commands/` — mocks tools, hooks, services, state
+- `tests/unit/hooks/` — mocks knowledge-store, knowledge-validator, knowledge-reader, telemetry, utils
+- `tests/unit/tools/` — mocks Node built-ins (fs, child_process), sast-baseline, build/discovery
+- `tests/unit/services/` — mocks path-security
+- `tests/unit/config/` — mocks node:fs/promises
+- `tests/unit/background/` — mocks utils, event-bus, evidence-summary-service
+- `tests/unit/council/` — mocks node:fs
+- `tests/unit/plan/` — mocks spec-hash
+- `tests/unit/mutation/` — mocks node:child_process
+- `tests/unit/git/` — mocks node:child_process
+- `tests/integration/` — mocks co-change-analyzer, knowledge-store
+- `src/__tests__/` — mocks plan/manager, preflight-service, telemetry
+- `src/hooks/` — mocks logger, event-bus
+- `src/tools/__tests__/` — mocks test-impact/analyzer, build/discovery, path-security
+- `src/mutation/__tests__/` — mocks state
+- `src/agents/` — mocks node:fs/promises
+- `src/background/` — mocks vulnerability trigger
+
+## Dead-code _internals Seams
+
+The following source modules export `_internals` but have no test consumers (as of this writing). They are harmless but may be removed in future cleanup:
+
+- `src/tools/secretscan.ts`
+- `src/tools/knowledge-recall.ts`
+- `src/tools/lint.ts`
+- `src/tools/sast-scan.ts`
+- `src/tools/sast-baseline.ts`
+- `src/mutation/gate.ts`
+- `src/mutation/equivalence.ts`
+- `src/mutation/engine.ts`
+- `src/db/qa-gate-profile.ts`
+- `src/config/schema.ts`
+- `src/config/index.ts`
+- `src/commands/registry.ts`
+- `src/background/manager.ts`
+- `src/background/event-bus.ts`
+- `src/agents/critic.ts`

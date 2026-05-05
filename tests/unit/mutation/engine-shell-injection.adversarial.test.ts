@@ -44,6 +44,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		mockSpawnSync.mockClear();
 		// Clean up temp directory
 		try {

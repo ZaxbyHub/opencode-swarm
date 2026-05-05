@@ -236,6 +236,8 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 			// Ignore cleanup errors
 		}
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	/**

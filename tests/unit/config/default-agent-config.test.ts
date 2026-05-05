@@ -6,9 +6,13 @@ import {
 import { PluginConfigSchema } from '../../../src/config/schema';
 
 // Mock node:fs/promises to avoid the agent-tool snapshot writer touching disk.
+const realFsPromises = await import('node:fs/promises');
+const mockMkdir = mock(() => Promise.resolve());
+const mockWriteFile = mock(() => Promise.resolve());
 mock.module('node:fs/promises', () => ({
-	mkdir: mock(() => Promise.resolve()),
-	writeFile: mock(() => Promise.resolve()),
+	...realFsPromises,
+	mkdir: mockMkdir,
+	writeFile: mockWriteFile,
 }));
 
 // ─── Helper: build a multi-swarm PluginConfig ──────────────────────────────
@@ -259,9 +263,9 @@ describe('resolvePrimaryAgentNames', () => {
 
 describe('getAgentConfigs — primary mode resolution', () => {
 	beforeEach(() => {
-		// no-op, kept for symmetry with prior file
+		mockMkdir.mockClear();
+		mockWriteFile.mockClear();
 	});
-	afterEach(() => {});
 
 	describe('legacy single-swarm', () => {
 		test('undefined config ⇒ unprefixed architect primary', () => {

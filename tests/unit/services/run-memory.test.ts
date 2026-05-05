@@ -15,6 +15,8 @@ mock.module('../../../src/utils/path-security', () => ({
 	validateDirectory: () => {},
 }));
 
+afterEach(() => mock.restore());
+
 import {
 	generateTaskFingerprint,
 	getFailures,

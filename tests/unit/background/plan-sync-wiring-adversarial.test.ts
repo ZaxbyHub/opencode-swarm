@@ -20,18 +20,20 @@ import {
 	AutomationConfigSchema,
 	AutomationModeSchema,
 } from '../../../src/config/schema';
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
 
-// Mock loadPlan to prevent in-flight async operations from holding event loop open
-// across test boundaries (which causes downstream tests to time out).
+// Within-module DI seam: mock functions assigned to _internals
 const mockLoadPlan = mock(async () => null);
-mock.module('../../../src/plan/manager', () => ({
-	loadPlan: mockLoadPlan,
-}));
 
 // Static import (mock is hoisted by Bun, so this receives the mocked module).
 // Using static import avoids `await import(...)` inside tests, which hangs in
 // Bun v1.3.9 when the event loop is saturated after many fs.watch create/destroy cycles.
 import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
+
+// Helper to install mocks onto _internals seam
+function installMocks(): void {
+	planManagerInternals.loadPlan = mockLoadPlan;
+}
 
 // Helper to reset mock state
 function resetMockState(): void {
@@ -428,12 +430,15 @@ describe('ADVERSARIAL: Initialization Failure Injection', () => {
 	let swarmDir: string;
 
 	beforeEach(() => {
+		installMocks();
 		resetMockState();
 		tempDir = path.join(tmpdir(), `.test-plan-sync-adversarial-${Date.now()}`);
 		swarmDir = path.join(tempDir, '.swarm');
 	});
 
 	afterEach(async () => {
+		// Restore mocks to _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -573,6 +578,7 @@ describe('ADVERSARIAL: Lifecycle Abuse Scenarios', () => {
 	let swarmDir: string;
 
 	beforeEach(() => {
+		installMocks();
 		resetMockState();
 		tempDir = path.join(tmpdir(), `.test-plan-sync-lifecycle-${Date.now()}`);
 		swarmDir = path.join(tempDir, '.swarm');
@@ -582,6 +588,8 @@ describe('ADVERSARIAL: Lifecycle Abuse Scenarios', () => {
 	});
 
 	afterEach(async () => {
+		// Restore mocks to _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -902,6 +910,16 @@ describe('ADVERSARIAL: Plugin Wiring Security Gates', () => {
 });
 
 describe('ADVERSARIAL: Edge Case Attack Vectors', () => {
+	beforeEach(() => {
+		installMocks();
+		resetMockState();
+	});
+
+	afterEach(() => {
+		// Restore mocks to _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
+	});
+
 	describe('Extreme value attacks', () => {
 		test('extremely long directory path', async () => {
 			// Create a very long path (but still valid on most systems)

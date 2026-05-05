@@ -152,7 +152,7 @@ function getTaskStatus(
 		return task.status;
 	}
 	// Infer from evidence presence - use normalized entries for safety
-	const entries = normalizeBundleEntries(bundle);
+	const entries = _internals.normalizeBundleEntries(bundle);
 	if (entries.length > 0) {
 		return 'completed';
 	}
@@ -167,7 +167,7 @@ function isEvidenceComplete(bundle: EvidenceBundle | null): {
 	missingEvidence: string[];
 } {
 	// Use normalized entries for safety
-	const entries = normalizeBundleEntries(bundle);
+	const entries = _internals.normalizeBundleEntries(bundle);
 	if (entries.length === 0) {
 		return {
 			isComplete: false,
@@ -226,12 +226,12 @@ async function buildTaskSummary(
 	const result = await loadEvidence(directory, taskId);
 	const bundle = result.status === 'found' ? result.bundle : null;
 	const phase = task?.phase ?? 0;
-	const status = getTaskStatus(task, bundle);
-	const evidenceCheck = isEvidenceComplete(bundle);
-	const blockers = getTaskBlockers(task, evidenceCheck, status);
+	const status = _internals.getTaskStatus(task, bundle);
+	const evidenceCheck = _internals.isEvidenceComplete(bundle);
+	const blockers = _internals.getTaskBlockers(task, evidenceCheck, status);
 
 	// Use normalized entries for safety
-	const entries = normalizeBundleEntries(bundle);
+	const entries = _internals.normalizeBundleEntries(bundle);
 
 	// Determine evidence presence
 	const hasReview = entries.some((e) => e.type === 'review');
@@ -278,14 +278,18 @@ async function buildPhaseSummary(
 	const _taskMap = new Map(phase.tasks.map((t) => [t.id, t]));
 
 	for (const task of phase.tasks) {
-		const summary = await buildTaskSummary(directory, task, task.id);
+		const summary = await _internals.buildTaskSummary(directory, task, task.id);
 		taskSummaries.push(summary);
 	}
 
 	// Also include tasks that have evidence but aren't in the plan
 	const extraTaskIds = taskIds.filter((id) => !phaseTaskIds.has(id));
 	for (const taskId of extraTaskIds) {
-		const summary = await buildTaskSummary(directory, undefined, taskId);
+		const summary = await _internals.buildTaskSummary(
+			directory,
+			undefined,
+			taskId,
+		);
 		if (summary.phase === phase.id) {
 			taskSummaries.push(summary);
 		}
@@ -447,7 +451,7 @@ export async function buildEvidenceSummary(
 
 	for (const phase of phasesToProcess) {
 		// Create a mock directory context for buildPhaseSummary
-		const summary = await buildPhaseSummary(directory, phase);
+		const summary = await _internals.buildPhaseSummary(directory, phase);
 		phaseSummaries.push(summary);
 		totalTasks += summary.totalTasks;
 		completedTasks += summary.completedTasks;
@@ -477,7 +481,7 @@ export async function buildEvidenceSummary(
 	};
 
 	// Generate human-readable summary
-	artifact.summaryText = generateSummaryText(artifact);
+	artifact.summaryText = _internals.generateSummaryText(artifact);
 
 	log('[EvidenceSummary] Summary built', {
 		phases: phaseSummaries.length,
@@ -510,3 +514,29 @@ export function isAutoSummaryEnabled(automationConfig?: {
 	// Check the explicit capability flag
 	return automationConfig.capabilities?.evidence_auto_summaries === true;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	buildEvidenceSummary: typeof buildEvidenceSummary;
+	isAutoSummaryEnabled: typeof isAutoSummaryEnabled;
+	normalizeBundleEntries: typeof normalizeBundleEntries;
+	getTaskStatus: typeof getTaskStatus;
+	isEvidenceComplete: typeof isEvidenceComplete;
+	getTaskBlockers: typeof getTaskBlockers;
+	buildTaskSummary: typeof buildTaskSummary;
+	buildPhaseSummary: typeof buildPhaseSummary;
+	generateSummaryText: typeof generateSummaryText;
+} = {
+	buildEvidenceSummary,
+	isAutoSummaryEnabled,
+	normalizeBundleEntries,
+	getTaskStatus,
+	isEvidenceComplete,
+	getTaskBlockers,
+	buildTaskSummary,
+	buildPhaseSummary,
+	generateSummaryText,
+} as const;

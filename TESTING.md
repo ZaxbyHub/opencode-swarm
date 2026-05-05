@@ -30,20 +30,35 @@ bun --smol test tests/unit/cli --timeout 120000
 
 **Do not run `bun --smol test tests/unit/tools` as a single batch.** Mock modules leak across files in Bun's `--smol` mode, causing false failures. The CI uses per-file isolation loops for steps 4-6 (tools, services, state/agents).
 
+**Bun v1.3.13+:** The `--isolate` flag is available for local development to run each test file in a fresh global environment. However, CI currently uses `--smol` with per-file isolation loops, which achieves the same mock isolation goal. You may use `--isolate` locally, but the CI pipeline will continue using `--smol` with per-file loops for consistency.
+
 ### Mock Isolation
 
 Bun's `--smol` mode shares module cache between test files. A `mock.module()` call replaces the module globally for all files in the same process.
 
-**Always spread the real module when mocking:**
+**`mock.restore()` does NOT reliably restore `mock.module` mocks in Bun v1.3.11.** Three layers of defense are required.
+
+**Always spread the real module when mocking Node built-ins:**
 
 ```typescript
 import * as realChildProcess from 'node:child_process';
 const mockExecFileSync = mock(() => '');
 mock.module('node:child_process', () => ({
-  ...realChildProcess,           // preserve all exports
+  ...realChildProcess,           // preserve ALL exports — mandatory
   execFileSync: mockExecFileSync, // override only what you need
 }));
 ```
+
+**Always add `afterEach(mock.restore())` for cross-module mocks.** Even though unreliable in Bun v1.3.11, it provides best-effort cleanup. **Exception — Windows EBUSY:** Test files that spawn async child processes (pre-check-batch suite) must NOT call `mock.restore()` on Windows. Child process handles hold directory locks and trigger `EBUSY` errors. Skip affected tests with `test.skipIf(process.platform === 'win32')`.
+
+Intentionally skipped on Windows (async child process handles cause EBUSY):
+- `tests/unit/tools/pre-check-batch.test.ts`
+- `tests/unit/tools/pre-check-batch.adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-cwd.test.ts`
+- `tests/unit/tools/pre-check-batch-cwd.adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-contextdir-adversarial.test.ts`
+- `tests/unit/tools/pre-check-batch-sast-preexisting.test.ts`
+- `tests/unit/tools/pre-check-batch-secretscan-evidence.test.ts`
 
 **Use lazy binding in source code** so mocks can intercept:
 

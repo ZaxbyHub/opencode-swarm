@@ -1048,7 +1048,7 @@ export async function runSecretscan(
 	try {
 		// Call the tool's execute function with proper args format
 		// Use type assertion to bypass strict context requirements for programmatic calls
-		const result = (await secretscan.execute(
+		const result = (await _internals.secretscan.execute(
 			{ directory },
 			{} as Parameters<typeof secretscan.execute>[1],
 		)) as unknown as ToolResult;
@@ -1069,3 +1069,15 @@ export async function runSecretscan(
 		return errorResult;
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	secretscan: typeof secretscan;
+	runSecretscan: typeof runSecretscan;
+} = {
+	secretscan,
+	runSecretscan,
+} as const;

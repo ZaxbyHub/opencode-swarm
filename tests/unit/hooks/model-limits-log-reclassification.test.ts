@@ -4,7 +4,7 @@
  * Mocks only src/utils/logger to avoid leaking a partial mock.
  */
 
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLog = mock(() => {});
 const mockWarn = mock(() => {});
@@ -17,6 +17,11 @@ mock.module('../../../src/utils/logger', () => ({
 }));
 
 describe('model-limits: log reclassification', () => {
+	afterEach(() => {
+		// CROSS-MODULE mock cleanup — no _internals seam in model-limits.ts for logger
+		mock.restore();
+	});
+
 	it('should call log() and NOT warn() for the "Resolved limit for" message on first call', () => {
 		mockLog.mockClear();
 		mockWarn.mockClear();

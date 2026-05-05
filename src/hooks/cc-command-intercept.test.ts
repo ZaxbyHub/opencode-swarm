@@ -12,6 +12,8 @@ mock.module('../../src/utils/logger', () => ({
 	error: mock(() => {}),
 }));
 
+afterEach(() => mock.restore());
+
 import { createCcCommandInterceptHook } from '../../src/hooks/cc-command-intercept';
 
 type MessageWithParts = {

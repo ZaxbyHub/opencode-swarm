@@ -4,7 +4,7 @@
  * Mocks only src/utils/logger to avoid leaking a partial mock.
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLog = mock(() => {});
 
@@ -19,6 +19,11 @@ import { resolveModelLimit } from '../../../src/hooks/model-limits';
 describe('model-limits: adversarial/attack-vector tests', () => {
 	beforeEach(() => {
 		mockLog.mockClear();
+	});
+
+	afterEach(() => {
+		// CROSS-MODULE mock cleanup — no _internals seam in model-limits.ts for logger
+		mock.restore();
 	});
 
 	describe('Scenario 1: undefined inputs', () => {

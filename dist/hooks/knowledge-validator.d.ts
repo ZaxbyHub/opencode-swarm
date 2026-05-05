@@ -27,3 +27,9 @@ export interface EntryHealthResult {
 export declare function auditEntryHealth(entry: KnowledgeEntryBase): EntryHealthResult;
 export declare function quarantineEntry(directory: string, entryId: string, reason: string, reportedBy: 'architect' | 'user' | 'auto'): Promise<void>;
 export declare function restoreEntry(directory: string, entryId: string): Promise<void>;
+export declare const _internals: {
+    validateLesson: typeof validateLesson;
+    auditEntryHealth: typeof auditEntryHealth;
+    quarantineEntry: typeof quarantineEntry;
+    restoreEntry: typeof restoreEntry;
+};

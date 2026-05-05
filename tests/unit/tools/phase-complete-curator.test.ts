@@ -235,6 +235,8 @@ describe('phase_complete - curator pipeline', () => {
 		}
 		// Reset state after each test
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	describe('curator pipeline skipped when enabled=false (default)', () => {
@@ -596,6 +598,8 @@ describe('Task 5.3: curator compliance warnings surfacing', () => {
 			// Ignore
 		}
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	describe('compliance warnings are surfaced when suppress_warnings: false', () => {

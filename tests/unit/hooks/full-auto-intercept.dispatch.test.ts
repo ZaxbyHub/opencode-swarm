@@ -9,16 +9,36 @@
  * NOTE: dispatchCriticAndWriteEvent requires swarmState.opencodeClient to be mocked
  * because it makes actual LLM calls when the client is present. These tests mock
  * the client to test the fallback behavior when client is null.
+ *
+ * MOCK CONVERSION NOTES:
+ * - src/state.ts: Converted to _internals DI seam (mutate properties, not reassign)
+ * - src/telemetry.js, src/hooks/utils.js, src/parallel/file-locks.js, src/agents/critic.js:
+ *   Cannot convert - source uses direct imports (not _internals routing)
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Track console.warn calls for verification
-const consoleWarnCalls: string[] = [];
-const consoleLogCalls: string[] = [];
-const consoleErrorCalls: string[] = [];
+// =============================================================================
+// STATE MODULE - Converted to _internals DI seam
+// =============================================================================
+// Import _internals directly - we mutate its properties, not reassign the object
+import { _internals } from '../../../src/state.js';
+
+// Save original _internals properties for restoration in afterEach
+let origHasActiveFullAuto: typeof _internals.hasActiveFullAuto;
+let origSwarmState: typeof _internals.swarmState;
+let origEnsureAgentSession: typeof _internals.ensureAgentSession;
+let origResetSwarmState: typeof _internals.resetSwarmState;
+
+// Mock hasActiveFullAuto function - starts returning true
+const mockHasActiveFullAutoFn = mock(() => true);
+
+// Mock state object - allows tests to control hasActiveFullAutoResult
+const mockState = {
+	hasActiveFullAutoResult: false,
+};
 
 // Persistent session state storage
 interface SessionState {
@@ -39,30 +59,44 @@ const stateRef: { sessionStorage: Map<string, SessionState> } = {
 	sessionStorage: globalState._sessionStorage,
 };
 
-// Mock dependencies
-const mockHasActiveFullAuto = mock(() => true);
+// Mock ensureAgentSession
+function mockEnsureAgentSession(sessionId: string) {
+	if (!stateRef.sessionStorage.has(sessionId)) {
+		stateRef.sessionStorage.set(sessionId, {
+			fullAutoInteractionCount: 0,
+			fullAutoDeadlockCount: 0,
+			fullAutoLastQuestionHash: undefined,
+		});
+	}
+	return stateRef.sessionStorage.get(sessionId)!;
+}
 
-mock.module('../../../src/state.js', () => ({
-	hasActiveFullAuto: mockHasActiveFullAuto,
-	swarmState: {
-		agentSessions: stateRef.sessionStorage,
-		opencodeClient: null, // Default to null for fallback tests
-	},
-	ensureAgentSession: (sessionId: string) => {
-		if (!stateRef.sessionStorage.has(sessionId)) {
-			stateRef.sessionStorage.set(sessionId, {
-				fullAutoInteractionCount: 0,
-				fullAutoDeadlockCount: 0,
-				fullAutoLastQuestionHash: undefined,
-			});
-		}
-		return stateRef.sessionStorage.get(sessionId)!;
-	},
-	resetSwarmState: () => {
-		stateRef.sessionStorage.clear();
-	},
-}));
+// Mock resetSwarmState
+function mockResetSwarmState() {
+	stateRef.sessionStorage.clear();
+}
 
+// Mock swarmState object - opencodeClient: null for fallback tests
+const mockSwarmState = {
+	agentSessions: stateRef.sessionStorage,
+	opencodeClient: null,
+};
+
+// =============================================================================
+// REMAINING MOCKS - Cannot convert (source uses direct imports, not _internals)
+// These remain as mock.module per the plan:
+// - src/telemetry.js: source imports { telemetry } directly, not via _internals
+// - src/hooks/utils.js: source imports { validateSwarmPath } directly
+// - src/parallel/file-locks.js: source imports { tryAcquireLock } directly
+// - src/agents/critic.js: source imports { createCriticAutonomousOversightAgent } directly
+// =============================================================================
+
+// Track console.warn calls for verification
+const consoleWarnCalls: string[] = [];
+const consoleLogCalls: string[] = [];
+const consoleErrorCalls: string[] = [];
+
+// Mock telemetry - remains as mock.module (no _internals seam for direct import)
 mock.module('../../../src/telemetry.js', () => ({
 	telemetry: {
 		autoOversightEscalation: mock(() => {}),
@@ -119,6 +153,23 @@ let originalConsoleError: typeof console.error;
 
 describe('parseCriticResponse', () => {
 	beforeEach(() => {
+		// Save original _internals properties
+		origHasActiveFullAuto = _internals.hasActiveFullAuto;
+		origSwarmState = _internals.swarmState;
+		origEnsureAgentSession = _internals.ensureAgentSession;
+		origResetSwarmState = _internals.resetSwarmState;
+
+		// Replace _internals properties with mocks
+		_internals.hasActiveFullAuto = mockHasActiveFullAutoFn;
+		_internals.swarmState = mockSwarmState;
+		_internals.ensureAgentSession = mockEnsureAgentSession;
+		_internals.resetSwarmState = mockResetSwarmState;
+
+		// Set mock implementation to use mockState.hasActiveFullAutoResult
+		mockHasActiveFullAutoFn.mockImplementation(
+			() => mockState.hasActiveFullAutoResult,
+		);
+
 		originalConsoleLog = console.log;
 		originalConsoleWarn = console.warn;
 		originalConsoleError = console.error;
@@ -140,9 +191,18 @@ describe('parseCriticResponse', () => {
 	});
 
 	afterEach(() => {
+		// Restore original _internals properties
+		_internals.hasActiveFullAuto = origHasActiveFullAuto;
+		_internals.swarmState = origSwarmState;
+		_internals.ensureAgentSession = origEnsureAgentSession;
+		_internals.resetSwarmState = origResetSwarmState;
+
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
 		console.error = originalConsoleError;
+
+		// Restore cross-module mocks
+		mock.restore();
 	});
 
 	describe('single-line values', () => {
@@ -543,6 +603,23 @@ REASONING: Final reasoning line`;
 
 describe('dispatchCriticAndWriteEvent fallback', () => {
 	beforeEach(() => {
+		// Save original _internals properties
+		origHasActiveFullAuto = _internals.hasActiveFullAuto;
+		origSwarmState = _internals.swarmState;
+		origEnsureAgentSession = _internals.ensureAgentSession;
+		origResetSwarmState = _internals.resetSwarmState;
+
+		// Replace _internals properties with mocks
+		_internals.hasActiveFullAuto = mockHasActiveFullAutoFn;
+		_internals.swarmState = mockSwarmState;
+		_internals.ensureAgentSession = mockEnsureAgentSession;
+		_internals.resetSwarmState = mockResetSwarmState;
+
+		// Set mock implementation to use mockState.hasActiveFullAutoResult
+		mockHasActiveFullAutoFn.mockImplementation(
+			() => mockState.hasActiveFullAutoResult,
+		);
+
 		testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-test-'));
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
 
@@ -567,6 +644,12 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 	});
 
 	afterEach(() => {
+		// Restore original _internals properties
+		_internals.hasActiveFullAuto = origHasActiveFullAuto;
+		_internals.swarmState = origSwarmState;
+		_internals.ensureAgentSession = origEnsureAgentSession;
+		_internals.resetSwarmState = origResetSwarmState;
+
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
 		console.error = originalConsoleError;
@@ -575,6 +658,9 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+
+		// Restore cross-module mocks
+		mock.restore();
 	});
 
 	it('returns PENDING verdict when swarmState.opencodeClient is null', async () => {

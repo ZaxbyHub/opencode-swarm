@@ -265,8 +265,8 @@ export function createSnapshotWriterHook(
 		// Chain writes so concurrent calls don't race on the temp-rename sequence.
 		// Each write sees the latest swarmState snapshot at the moment it runs.
 		_writeInFlight = _writeInFlight.then(
-			() => writeSnapshot(directory, swarmState),
-			() => writeSnapshot(directory, swarmState),
+			() => _internals.writeSnapshot(directory, swarmState),
+			() => _internals.writeSnapshot(directory, swarmState),
 		);
 		return _writeInFlight;
 	};
@@ -280,8 +280,22 @@ export function createSnapshotWriterHook(
 export async function flushPendingSnapshot(directory: string): Promise<void> {
 	// Trigger a fresh write and wait for it (and any already-in-flight write) to finish.
 	_writeInFlight = _writeInFlight.then(
-		() => writeSnapshot(directory, swarmState),
-		() => writeSnapshot(directory, swarmState),
+		() => _internals.writeSnapshot(directory, swarmState),
+		() => _internals.writeSnapshot(directory, swarmState),
 	);
 	await _writeInFlight;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	writeSnapshot: typeof writeSnapshot;
+	createSnapshotWriterHook: typeof createSnapshotWriterHook;
+	flushPendingSnapshot: typeof flushPendingSnapshot;
+} = {
+	writeSnapshot,
+	createSnapshotWriterHook,
+	flushPendingSnapshot,
+} as const;

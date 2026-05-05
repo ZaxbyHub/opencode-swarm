@@ -119,6 +119,7 @@ describe('pkg-audit tool - cwd fix tests', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		BunSpawnSpy.mockRestore();
 		fsExistsSyncSpy.mockRestore();
 		process.chdir(originalCwd);

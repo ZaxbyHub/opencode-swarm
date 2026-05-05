@@ -87,6 +87,7 @@ describe('handleHandoffCommand — continuation prompt', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		try {
 			rmSync(testDir, { recursive: true, force: true });
 		} catch {

@@ -31,3 +31,19 @@ export function error(message: string, data?: unknown): void {
 		console.error(`[opencode-swarm ${timestamp}] ERROR: ${message}`);
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	isDebug: typeof isDebug;
+	log: typeof log;
+	warn: typeof warn;
+	error: typeof error;
+} = {
+	isDebug,
+	log,
+	warn,
+	error,
+} as const;

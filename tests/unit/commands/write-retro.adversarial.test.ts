@@ -3,7 +3,7 @@
  * Tests various attack vectors including JSON injection, oversized payloads,
  * malformed JSON, and error handling edge cases.
  */
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock the write-retro tool module
 const mockExecuteWriteRetro = mock(
@@ -14,6 +14,8 @@ mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
 	write_retro: {},
 }));
+
+afterEach(() => mock.restore());
 
 // Import AFTER mock setup
 const { handleWriteRetroCommand } = await import(

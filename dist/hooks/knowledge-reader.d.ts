@@ -20,3 +20,7 @@ export interface RankedEntry extends KnowledgeEntryBase {
 }
 export declare function readMergedKnowledge(directory: string, config: KnowledgeConfig, context?: ProjectContext): Promise<RankedEntry[]>;
 export declare function updateRetrievalOutcome(directory: string, phaseInfo: string, phaseSucceeded: boolean): Promise<void>;
+export declare const _internals: {
+    readMergedKnowledge: typeof readMergedKnowledge;
+    updateRetrievalOutcome: typeof updateRetrievalOutcome;
+};

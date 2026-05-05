@@ -154,3 +154,13 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 			return JSON.stringify(result);
 		},
 	});
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	knowledge_recall: typeof knowledge_recall;
+} = {
+	knowledge_recall,
+} as const;

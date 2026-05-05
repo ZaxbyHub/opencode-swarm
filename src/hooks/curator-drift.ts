@@ -99,6 +99,17 @@ export async function writeDriftReport(
 	return filePath;
 }
 
+// ============================================================================
+// DI Seam — _internals (declared before functions that use it to avoid TDZ)
+// ============================================================================
+
+export const _internals = {
+	readPriorDriftReports,
+	writeDriftReport,
+	runDeterministicDriftCheck,
+	buildDriftInjectionText,
+};
+
 /**
  * Deterministic drift check for the given phase.
  * Builds a structured DriftReport from curator data, plan, spec, and prior reports.
@@ -122,7 +133,7 @@ export async function runDeterministicDriftCheck(
 		const specMd = await readSwarmFileAsync(directory, 'spec.md');
 
 		// 3. Read prior drift reports
-		const priorReports = await readPriorDriftReports(directory);
+		const priorReports = await _internals.readPriorDriftReports(directory);
 
 		// 4. Build drift analysis from curator data
 		// Compliance observations drive alignment severity
@@ -205,7 +216,7 @@ export async function runDeterministicDriftCheck(
 		};
 
 		// 9. Write drift report
-		const reportPath = await writeDriftReport(directory, report);
+		const reportPath = await _internals.writeDriftReport(directory, report);
 
 		// 10. Emit curator.drift.completed event
 		getGlobalEventBus().publish('curator.drift.completed', {

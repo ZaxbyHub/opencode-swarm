@@ -55,6 +55,22 @@ const DEFAULT_RULES_DIR = '.swarm/semgrep-rules';
  */
 const DEFAULT_TIMEOUT_MS = 30000;
 
+export const _internals: {
+	isSemgrepAvailable: typeof isSemgrepAvailable;
+	checkSemgrepAvailable: typeof checkSemgrepAvailable;
+	resetSemgrepCache: typeof resetSemgrepCache;
+	runSemgrep: typeof runSemgrep;
+	getRulesDirectory: typeof getRulesDirectory;
+	hasBundledRules: typeof hasBundledRules;
+} = {
+	isSemgrepAvailable,
+	checkSemgrepAvailable,
+	resetSemgrepCache,
+	runSemgrep,
+	getRulesDirectory,
+	hasBundledRules,
+} as const;
+
 /**
  * Check if Semgrep CLI is available on the system
  * Uses caching to avoid shelling out on every check
@@ -85,7 +101,7 @@ export function isSemgrepAvailable(): boolean {
  * @returns Promise resolving to availability status
  */
 export async function checkSemgrepAvailable(): Promise<boolean> {
-	return isSemgrepAvailable();
+	return _internals.isSemgrepAvailable();
 }
 
 /**
@@ -242,14 +258,14 @@ export async function runSemgrep(
 	// If no files to scan, return empty results
 	if (files.length === 0) {
 		return {
-			available: isSemgrepAvailable(),
+			available: _internals.isSemgrepAvailable(),
 			findings: [],
 			engine: 'tier_a',
 		};
 	}
 
 	// Check Semgrep availability
-	if (!isSemgrepAvailable()) {
+	if (!_internals.isSemgrepAvailable()) {
 		return {
 			available: false,
 			findings: [],

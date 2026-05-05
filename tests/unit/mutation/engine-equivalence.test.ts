@@ -94,6 +94,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		try {
 			const entries = fs.readdirSync(tempDir);
 			for (const entry of entries) {

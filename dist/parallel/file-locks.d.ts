@@ -1,3 +1,18 @@
+/**
+ * Test-only dependency-injection seam. Tests replace the function on this
+ * object so they can inject mock behaviour without touching the real
+ * `proper-lockfile` module — `mock.module` from `bun:test` leaks across
+ * files in Bun's shared test-runner process, which would corrupt
+ * unrelated suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ *
+ * NOTE: Production code does NOT call through this seam internally.
+ * `_internals` exists solely to allow test code to intercept lock
+ * acquisition without patching the real implementation.
+ */
+export declare const _internals: {
+    tryAcquireLock: typeof tryAcquireLock;
+};
 export interface FileLock {
     filePath: string;
     agent: string;

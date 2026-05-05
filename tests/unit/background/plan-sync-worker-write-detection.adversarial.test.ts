@@ -1,20 +1,20 @@
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	mock,
-	mockModule,
-	test,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
 
 // Track log calls for testing
 const logCalls: { message: string; data?: unknown }[] = [];
 
-// Mock the log function in utils module
+// Import _internals seam for plan/manager (within-module)
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
+
+// Within-module DI seam: mock functions assigned to _internals
+const mockLoadPlan = mock(async () => null);
+
+// Cross-module mock: Mock the utils module's re-exports since warn is called directly
+// from ../utils (not via _internals in logger.ts)
 mock.module('../../../src/utils', () => ({
 	log: (message: string, data?: unknown) => {
 		logCalls.push({ message, data });
@@ -25,15 +25,6 @@ mock.module('../../../src/utils', () => ({
 	},
 	error: () => {}, // Don't track errors
 }));
-
-// Mock the plan/manager module to avoid actual loadPlan calls
-const mockLoadPlan = mock(async () => null);
-mock.module('../../../src/plan/manager', () => ({
-	loadPlan: mockLoadPlan,
-}));
-
-// Import after mocks are set up
-import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
 
 // Helper to create temp directory structure
 function setupTempDir(): {
@@ -93,6 +84,9 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	let markerPath: string;
 
 	beforeEach(() => {
+		// Install mock functions onto _internals seam for plan/manager
+		planManagerInternals.loadPlan = mockLoadPlan;
+
 		const dirs = setupTempDir();
 		tempDir = dirs.tempDir;
 		swarmDir = dirs.swarmDir;
@@ -104,6 +98,9 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	});
 
 	afterEach(() => {
+		// Restore original function to _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
+		mock.restore(); // Clean up cross-module mocks
 		cleanupTempDir(tempDir);
 	});
 

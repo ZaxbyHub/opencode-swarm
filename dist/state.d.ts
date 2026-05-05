@@ -506,3 +506,29 @@ export declare function hasActiveFullAuto(sessionID?: string): boolean;
 export declare function setSessionEnvironment(sessionId: string, profile: EnvironmentProfile): void;
 export declare function getSessionEnvironment(sessionId: string): EnvironmentProfile | undefined;
 export declare function ensureSessionEnvironment(sessionId: string): EnvironmentProfile;
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.*` for key exported functions and objects so tests can replace
+ * them without using `mock.module` — `mock.module` from `bun:test` leaks
+ * across files in Bun's shared test-runner process, which would corrupt
+ * unrelated test suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    swarmState: typeof swarmState;
+    resetSwarmState: typeof resetSwarmState;
+    ensureAgentSession: typeof ensureAgentSession;
+    startAgentSession: typeof startAgentSession;
+    getAgentSession: typeof getAgentSession;
+    beginInvocation: typeof beginInvocation;
+    getActiveWindow: typeof getActiveWindow;
+    advanceTaskState: typeof advanceTaskState;
+    getTaskState: typeof getTaskState;
+    hasActiveFullAuto: typeof hasActiveFullAuto;
+    hasActiveTurboMode: typeof hasActiveTurboMode;
+    buildRehydrationCache: typeof buildRehydrationCache;
+    applyRehydrationCache: typeof applyRehydrationCache;
+    rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
+    isCouncilGateActive: typeof isCouncilGateActive;
+    defaultRunContext: typeof defaultRunContext;
+};

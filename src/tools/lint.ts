@@ -713,17 +713,21 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
 		const cwd = directory;
 
 		// Primary: detect Biome or ESLint (JS/TS projects)
-		const linter = await detectAvailableLinter(directory);
+		const linter = await _internals.detectAvailableLinter(directory);
 		if (linter) {
-			const result = await runLint(linter, mode, directory);
+			const result = await _internals.runLint(linter, mode, directory);
 			return JSON.stringify(result, null, 2);
 		}
 
 		// Fallback: detect additional language linters (Python, Rust, Go, Java, Kotlin, C#, C/C++, Swift, Dart, Ruby)
-		const additionalLinter = detectAdditionalLinter(cwd);
+		const additionalLinter = _internals.detectAdditionalLinter(cwd);
 		if (additionalLinter) {
 			warn(`[lint] Using ${additionalLinter} linter for this project`);
-			const result = await runAdditionalLint(additionalLinter, mode, cwd);
+			const result = await _internals.runAdditionalLint(
+				additionalLinter,
+				mode,
+				cwd,
+			);
 			return JSON.stringify(result, null, 2);
 		}
 
@@ -739,3 +743,19 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(errorResult, null, 2);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	detectAvailableLinter: typeof detectAvailableLinter;
+	runLint: typeof runLint;
+	detectAdditionalLinter: typeof detectAdditionalLinter;
+	runAdditionalLint: typeof runAdditionalLint;
+} = {
+	detectAvailableLinter,
+	runLint,
+	detectAdditionalLinter,
+	runAdditionalLint,
+} as const;

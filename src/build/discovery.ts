@@ -345,6 +345,20 @@ function findFilesRecursive(
 /**
  * Discover build commands using language profiles (primary detection path)
  */
+export const _internals: {
+	isCommandAvailable: typeof isCommandAvailable;
+	discoverBuildCommandsFromProfiles: typeof discoverBuildCommandsFromProfiles;
+	discoverBuildCommands: typeof discoverBuildCommands;
+	clearToolchainCache: typeof clearToolchainCache;
+	getEcosystems: typeof getEcosystems;
+} = {
+	isCommandAvailable,
+	discoverBuildCommandsFromProfiles,
+	discoverBuildCommands,
+	clearToolchainCache,
+	getEcosystems,
+} as const;
+
 export async function discoverBuildCommandsFromProfiles(
 	workingDir: string,
 ): Promise<BuildDiscoveryResult> {
@@ -428,7 +442,8 @@ export async function discoverBuildCommands(
 	const _filesToCheck = filterByScope(workingDir, scope, changedFiles);
 
 	// ============ Profile-driven detection (primary path) ============
-	const profileResult = await discoverBuildCommandsFromProfiles(workingDir);
+	const profileResult =
+		await _internals.discoverBuildCommandsFromProfiles(workingDir);
 	const profileCommands = profileResult.commands;
 	const profileSkipped = profileResult.skipped;
 

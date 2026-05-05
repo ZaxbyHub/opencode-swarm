@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import type { ToolResult } from './create-tool';
-import { curator_analyze } from './curator-analyze';
 
 // Test utilities
 function createTempDir(): string {
@@ -40,46 +39,74 @@ async function executeTool(
 	return resultToString(result);
 }
 
-// Mock modules before importing curator_analyze
-mock.module('../hooks/curator.js', () => ({
-	runCuratorPhase: mock(async () => ({
+// Extract mock functions before mock.module() calls so they can be cleared
+const mockRunCuratorPhase = mock(async () => ({
+	phase: 1,
+	digest: {
 		phase: 1,
-		digest: {
+		timestamp: '2026-01-01',
+		summary: 'Test digest',
+		agents_used: ['coder'],
+		tasks_completed: 2,
+		tasks_total: 3,
+		key_decisions: [],
+		blockers_resolved: [],
+	},
+	compliance: [
+		{
 			phase: 1,
 			timestamp: '2026-01-01',
-			summary: 'Test digest',
-			agents_used: ['coder'],
-			tasks_completed: 2,
-			tasks_total: 3,
-			key_decisions: [],
-			blockers_resolved: [],
+			type: 'missing_reviewer',
+			description: 'No reviewer dispatched',
+			severity: 'warning',
 		},
-		compliance: [
-			{
-				phase: 1,
-				timestamp: '2026-01-01',
-				type: 'missing_reviewer',
-				description: 'No reviewer dispatched',
-				severity: 'warning',
-			},
-		],
-		knowledge_recommendations: [],
-		summary_updated: true,
-	})),
-	applyCuratorKnowledgeUpdates: mock(async () => ({ applied: 2, skipped: 0 })),
+	],
+	knowledge_recommendations: [],
+	summary_updated: true,
 }));
 
-mock.module('../config/index.js', () => ({
-	loadPluginConfigWithMeta: mock(() => ({
-		config: { curator: { enabled: true, phase_enabled: true } },
-		meta: { path: '/tmp/test' },
-	})),
+const mockApplyCuratorKnowledgeUpdates = mock(async () => ({
+	applied: 2,
+	skipped: 0,
 }));
+
+const mockLoadPluginConfigWithMeta = mock(() => ({
+	config: { curator: { enabled: true, phase_enabled: true } },
+	meta: { path: '/tmp/test' },
+}));
+
+// Mock modules before importing curator_analyze
+const realCurator = await import('../hooks/curator.js');
+mock.module('../hooks/curator.js', () => ({
+	...realCurator,
+	runCuratorPhase: mockRunCuratorPhase,
+	applyCuratorKnowledgeUpdates: mockApplyCuratorKnowledgeUpdates,
+}));
+
+const realConfig = await import('../config/index.js');
+mock.module('../config/index.js', () => ({
+	...realConfig,
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+const mockBuildRejectedReceipt = mock(() => ({}));
+const mockBuildApprovedReceipt = mock(() => ({}));
+mock.module('../hooks/review-receipt.js', () => ({
+	buildRejectedReceipt: mockBuildRejectedReceipt,
+	buildApprovedReceipt: mockBuildApprovedReceipt,
+	persistReviewReceipt: mock(() => Promise.resolve()),
+}));
+
+// Dynamically import SUT after mocks are established
+const { curator_analyze } = await import('./curator-analyze');
 
 describe('curator_analyze tool', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
+		mockRunCuratorPhase.mockClear();
+		mockApplyCuratorKnowledgeUpdates.mockClear();
+		mockLoadPluginConfigWithMeta.mockClear();
 		tempDir = createTempDir();
 		createSwarmDir(tempDir);
 	});
@@ -109,6 +136,14 @@ describe('curator_analyze tool', () => {
 
 			expect(parsed.applied).toBe(0);
 			expect(parsed.skipped).toBe(0);
+		});
+
+		it('calls buildRejectedReceipt when compliance warnings exist', async () => {
+			mockBuildRejectedReceipt.mockClear();
+			mockBuildApprovedReceipt.mockClear();
+			await executeTool({ phase: 1 }, tempDir);
+			expect(mockBuildRejectedReceipt).toHaveBeenCalled();
+			expect(mockBuildApprovedReceipt).not.toHaveBeenCalled();
 		});
 	});
 

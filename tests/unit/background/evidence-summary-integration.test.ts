@@ -77,8 +77,12 @@ beforeEach(() => {
 	jest.clearAllMocks();
 });
 
+// Cross-module mocks via mock.module must be restored after each test to prevent
+// cross-test contamination. Per the two-tier DI convention, cross-module mocks
+// (source imports directly, not via _internals) require explicit cleanup.
 afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
+	mock.restore();
 });
 
 function createMockAutomationConfig(

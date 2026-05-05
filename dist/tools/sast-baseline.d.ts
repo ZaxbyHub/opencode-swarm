@@ -124,3 +124,13 @@ export declare function captureOrMergeBaseline(directory: string, phase: number,
  * Returns 'invalid_schema' when the file is present but unparseable.
  */
 export declare function loadBaseline(directory: string, phase: number): LoadBaselineResult;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    fingerprintFinding: typeof fingerprintFinding;
+    assignOccurrenceIndices: typeof assignOccurrenceIndices;
+    captureOrMergeBaseline: typeof captureOrMergeBaseline;
+    loadBaseline: typeof loadBaseline;
+};

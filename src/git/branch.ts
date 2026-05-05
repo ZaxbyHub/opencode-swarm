@@ -75,7 +75,7 @@ export function createBranch(
  * @returns Array of changed file paths, or empty array if error occurs
  */
 export function getChangedFiles(cwd: string, branch?: string): string[] {
-	const baseBranch = branch || getDefaultBaseBranch(cwd);
+	const baseBranch = branch || _internals.getDefaultBaseBranch(cwd);
 
 	try {
 		const output = gitExec(['diff', '--name-only', baseBranch, 'HEAD'], cwd);
@@ -226,7 +226,7 @@ export function resetToRemoteBranch(
 		const currentBranch = getCurrentBranch(cwd);
 
 		// Detect default remote branch
-		const defaultRemoteBranch = detectDefaultRemoteBranch(cwd);
+		const defaultRemoteBranch = _internals.detectDefaultRemoteBranch(cwd);
 		if (!defaultRemoteBranch) {
 			return {
 				success: false,
@@ -441,3 +441,19 @@ export function resetToRemoteBranch(
 		};
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	gitExec: typeof gitExec;
+	detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
+	getDefaultBaseBranch: typeof getDefaultBaseBranch;
+	resetToRemoteBranch: typeof resetToRemoteBranch;
+} = {
+	gitExec,
+	detectDefaultRemoteBranch,
+	getDefaultBaseBranch,
+	resetToRemoteBranch,
+} as const;

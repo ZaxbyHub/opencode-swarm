@@ -49,6 +49,52 @@ export interface PreflightConfig {
     linter?: 'biome' | 'eslint';
 }
 /**
+ * Validate directory path to prevent path traversal attacks.
+ * Returns the normalized absolute path if valid, or throws an error.
+ */
+declare function validateDirectoryPath(dir: string): string;
+/**
+ * Validate and sanitize timeout value.
+ * Returns a valid timeout within bounds, or throws an error for invalid values.
+ */
+declare function validateTimeout(timeoutMs: number | undefined, defaultValue: number): number;
+/**
+ * Get package.json version from directory
+ */
+declare function getPackageVersion(dir: string): string | null;
+/**
+ * Get version from CHANGELOG.md (latest version header)
+ */
+declare function getChangelogVersion(dir: string): string | null;
+/**
+ * Get version from version file (e.g., VERSION.txt, version.txt)
+ */
+declare function getVersionFileVersion(dir: string): string | null;
+/**
+ * Run version consistency check
+ */
+declare function runVersionCheck(dir: string, _timeoutMs: number): Promise<PreflightCheckResult>;
+/**
+ * Run lint check
+ */
+declare function runLintCheck(dir: string, linter: 'biome' | 'eslint', timeoutMs: number): Promise<PreflightCheckResult>;
+/**
+ * Run tests check
+ */
+declare function runTestsCheck(_dir: string, scope: 'all' | 'convention' | 'graph', timeoutMs: number): Promise<PreflightCheckResult>;
+/**
+ * Run secrets check
+ */
+declare function runSecretsCheck(dir: string, timeoutMs: number): Promise<PreflightCheckResult>;
+/**
+ * Run evidence completeness check
+ */
+declare function runEvidenceCheck(dir: string): Promise<PreflightCheckResult>;
+/**
+ * Run requirement coverage check
+ */
+declare function runRequirementCoverageCheck(dir: string, currentPhase: number): Promise<PreflightCheckResult>;
+/**
  * Run all preflight checks
  */
 export declare function runPreflight(dir: string, phase: number, config?: PreflightConfig): Promise<PreflightReport>;
@@ -60,3 +106,24 @@ export declare function formatPreflightMarkdown(report: PreflightReport): string
  * Handle preflight command - thin adapter for CLI
  */
 export declare function handlePreflightCommand(directory: string, _args: string[]): Promise<string>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    runPreflight: typeof runPreflight;
+    formatPreflightMarkdown: typeof formatPreflightMarkdown;
+    handlePreflightCommand: typeof handlePreflightCommand;
+    validateDirectoryPath: typeof validateDirectoryPath;
+    validateTimeout: typeof validateTimeout;
+    getPackageVersion: typeof getPackageVersion;
+    getChangelogVersion: typeof getChangelogVersion;
+    getVersionFileVersion: typeof getVersionFileVersion;
+    runVersionCheck: typeof runVersionCheck;
+    runLintCheck: typeof runLintCheck;
+    runTestsCheck: typeof runTestsCheck;
+    runSecretsCheck: typeof runSecretsCheck;
+    runEvidenceCheck: typeof runEvidenceCheck;
+    runRequirementCoverageCheck: typeof runRequirementCoverageCheck;
+};
+export {};

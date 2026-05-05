@@ -14,7 +14,7 @@ import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { hasActiveFullAuto, swarmState } from '../state.js';
+import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import * as logger from '../utils/logger';
 import { validateSwarmPath } from './utils';
@@ -546,7 +546,7 @@ export async function dispatchCriticAndWriteEvent(
 	deadlockCount: number,
 	oversightAgentName: string,
 ): Promise<CriticDispatchResult> {
-	const client = swarmState.opencodeClient;
+	const client = stateInternals.swarmState.opencodeClient;
 
 	// If no client (e.g., in tests), fall back to PENDING
 	if (!client) {
@@ -769,16 +769,14 @@ export function createFullAutoInterceptHook(
 		const sessionID = architectMessage.info?.sessionID;
 
 		// Check if full-auto is active for this session
-		if (!hasActiveFullAuto(sessionID)) return;
+		if (!stateInternals.hasActiveFullAuto(sessionID)) return;
 
 		// Get or create session state for tracking
-		let session: ReturnType<
-			typeof import('../state').ensureAgentSession
-		> | null = null;
+		let session: ReturnType<typeof stateInternals.ensureAgentSession> | null =
+			null;
 		if (sessionID) {
 			// Only import and use ensureAgentSession if we have a sessionID
-			const { ensureAgentSession } = await import('../state');
-			session = ensureAgentSession(sessionID);
+			session = stateInternals.ensureAgentSession(sessionID);
 		}
 
 		// Check interaction limit — escalate if threshold reached

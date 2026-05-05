@@ -242,12 +242,12 @@ export async function getRunMemorySummary(
 	}
 
 	// Group by taskId
-	const groups = groupByTaskId(entries);
+	const groups = _internals.groupByTaskId(entries);
 
 	// Build summaries for tasks with failures
 	const summaries: string[] = [];
 	for (const [taskId, taskEntries] of groups) {
-		const summary = summarizeTask(taskId, taskEntries);
+		const summary = _internals.summarizeTask(taskId, taskEntries);
 		if (summary) {
 			summaries.push(summary);
 		}
@@ -294,3 +294,25 @@ export async function getRunMemorySummary(
 
 	return prefix + summaryText + suffix;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	generateTaskFingerprint: typeof generateTaskFingerprint;
+	recordOutcome: typeof recordOutcome;
+	getTaskHistory: typeof getTaskHistory;
+	getFailures: typeof getFailures;
+	getRunMemorySummary: typeof getRunMemorySummary;
+	groupByTaskId: typeof groupByTaskId;
+	summarizeTask: typeof summarizeTask;
+} = {
+	generateTaskFingerprint,
+	recordOutcome,
+	getTaskHistory,
+	getFailures,
+	getRunMemorySummary,
+	groupByTaskId,
+	summarizeTask,
+} as const;

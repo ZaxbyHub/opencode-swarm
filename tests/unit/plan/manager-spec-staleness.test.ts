@@ -59,6 +59,7 @@ describe('loadPlan spec staleness early-return removal (PR #440 QA)', () => {
 	});
 
 	afterEach(async () => {
+		mock.restore();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
 		}

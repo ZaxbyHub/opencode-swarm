@@ -40,6 +40,15 @@ export interface SastFinding {
     remediation?: string;
     excerpt?: string;
 }
+export declare const _internals: {
+    getAllRules: typeof getAllRules;
+    getRulesForLanguage: typeof getRulesForLanguage;
+    getRuleById: typeof getRuleById;
+    findPatternMatches: typeof findPatternMatches;
+    executeRulesSync: typeof executeRulesSync;
+    executeRules: typeof executeRules;
+    getRuleStats: typeof getRuleStats;
+};
 /**
  * Get all registered rules
  */
@@ -52,6 +61,10 @@ export declare function getRulesForLanguage(language: string): SastRule[];
  * Get rule by ID
  */
 export declare function getRuleById(id: string): SastRule | undefined;
+/**
+ * Parse source code and extract matches for a given pattern
+ */
+declare function findPatternMatches(content: string, pattern: RegExp): SastMatch[];
 /**
  * Execute rules synchronously (pattern matching only)
  * This is the primary execution method for offline SAST
@@ -70,3 +83,4 @@ export declare function getRuleStats(): {
     bySeverity: Record<string, number>;
     byLanguage: Record<string, number>;
 };
+export {};

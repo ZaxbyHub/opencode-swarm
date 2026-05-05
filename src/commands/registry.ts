@@ -82,7 +82,7 @@ function findSimilarCommands(query: string): string[] {
 		score:
 			cmd.length < q.length
 				? q.length - cmd.length
-				: levenshteinDistance(q, cmd),
+				: _internals.levenshteinDistance(q, cmd),
 	}));
 	scored.sort((a, b) => a.score - b.score);
 	return scored.slice(0, 3).map((s) => s.cmd);
@@ -119,14 +119,14 @@ export async function handleHelpCommand(ctx: CommandContext): Promise<string> {
 
 	// Split targetCommand to tokens for resolveCommand
 	const tokens = targetCommand.split(/\s+/);
-	const resolved = resolveCommand(tokens);
+	const resolved = _internals.resolveCommand(tokens);
 
 	if (resolved) {
-		return buildDetailedHelp(resolved.key, resolved.entry);
+		return _internals.buildDetailedHelp(resolved.key, resolved.entry);
 	}
 
 	// Command not found - suggest similar commands
-	const similar = findSimilarCommands(targetCommand);
+	const similar = _internals.findSimilarCommands(targetCommand);
 	const { buildHelpText: fullHelp } = await import('./index.js');
 	if (similar.length > 0) {
 		return (
@@ -227,7 +227,7 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/agents',
 	},
 	help: {
-		handler: (ctx) => handleHelpCommand(ctx),
+		handler: (ctx) => _internals.handleHelpCommand(ctx),
 		description: 'Show help for swarm commands',
 		category: 'core',
 		args: '[command]',
@@ -693,8 +693,28 @@ export function validateAliases(): {
 	return { valid: errors.length === 0, errors, warnings };
 }
 
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	handleHelpCommand: typeof handleHelpCommand;
+	validateAliases: typeof validateAliases;
+	resolveCommand: typeof resolveCommand;
+	levenshteinDistance: typeof levenshteinDistance;
+	findSimilarCommands: typeof findSimilarCommands;
+	buildDetailedHelp: typeof buildDetailedHelp;
+} = {
+	handleHelpCommand,
+	validateAliases,
+	resolveCommand,
+	levenshteinDistance,
+	findSimilarCommands,
+	buildDetailedHelp,
+} as const;
+
 // Validate at module load time — throw if invalid, log warnings
-const validation = validateAliases();
+const validation = _internals.validateAliases();
 if (!validation.valid) {
 	throw new Error(
 		`COMMAND_REGISTRY alias validation failed:\n${validation.errors.join('\n')}`,

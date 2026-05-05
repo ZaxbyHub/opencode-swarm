@@ -223,6 +223,8 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			// Ignore cleanup errors
 		}
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	describe('1. Missing spec.md + missing drift evidence + plan.json with incomplete tasks', () => {

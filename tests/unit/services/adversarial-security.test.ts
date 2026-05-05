@@ -19,6 +19,8 @@ mock.module('../../../src/utils/path-security', () => ({
 	validateDirectory: () => {},
 }));
 
+afterEach(() => mock.restore());
+
 // Import validateSwarmPath to test path traversal directly
 import { validateSwarmPath } from '../../../src/hooks/utils';
 

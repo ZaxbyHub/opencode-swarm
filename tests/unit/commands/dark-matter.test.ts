@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { CoChangeEntry } from '../../../src/tools/co-change-analyzer.js';
 
 // Mock the co-change-analyzer module
@@ -62,6 +62,10 @@ const {
 	handleDarkMatterCommand: handleDarkMatterFromIndex,
 	createSwarmCommandHandler,
 } = await import('../../../src/commands/index.js');
+
+afterEach(() => {
+	mock.restore();
+});
 
 describe('handleDarkMatterCommand', () => {
 	beforeEach(() => {

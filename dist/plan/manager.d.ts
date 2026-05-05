@@ -11,6 +11,19 @@ import { type LedgerEvent, type LedgerEventInput } from './ledger';
 /** Reset the startup ledger check flag. For testing only. */
 export declare function resetStartupLedgerCheck(): void;
 /**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.loadPlan(...)`, `_internals.loadPlanJsonOnly(...)`, etc. so tests
+ * can replace the functions on this object without touching the real module —
+ * `mock.module` from `bun:test` leaks across files in Bun's shared test-runner
+ * process, which would corrupt unrelated suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    loadPlan: typeof loadPlan;
+    loadPlanJsonOnly: typeof loadPlanJsonOnly;
+    regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
+};
+/**
  * Append a ledger event with exponential-backoff retry on stale-writer conflicts.
  *
  * Replaces the raw `appendLedgerEventWithRetry` call in savePlan with a helper

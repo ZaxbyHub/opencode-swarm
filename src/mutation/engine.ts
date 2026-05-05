@@ -68,6 +68,16 @@ const MUTATION_TIMEOUT_MS = 30_000;
 const TOTAL_BUDGET_MS = 300_000;
 const GIT_APPLY_TIMEOUT_MS = 5_000;
 
+export const _internals: {
+	executeMutation: typeof executeMutation;
+	computeReport: typeof computeReport;
+	executeMutationSuite: typeof executeMutationSuite;
+} = {
+	executeMutation,
+	computeReport,
+	executeMutationSuite,
+} as const;
+
 export async function executeMutation(
 	patch: MutationPatch,
 	testCommand: string[],

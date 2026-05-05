@@ -255,6 +255,8 @@ describe('phase-complete drift_check adversarial tests', () => {
 			// Ignore cleanup errors
 		}
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	// ========== GROUP 1: Path Traversal in Phase Number ==========

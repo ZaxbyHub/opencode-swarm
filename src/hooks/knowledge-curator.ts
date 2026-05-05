@@ -370,7 +370,7 @@ export async function curateAndStoreSwarm(
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
 
 	// Run auto-promotion after processing all lessons
-	await runAutoPromotion(directory, config);
+	await _internals.runAutoPromotion(directory, config);
 
 	return { stored, skipped, rejected };
 }
@@ -518,7 +518,7 @@ export function createKnowledgeCuratorHook(
 					? evidenceData.phase_number
 					: 1;
 
-			await curateAndStoreSwarm(
+			await _internals.curateAndStoreSwarm(
 				lessons,
 				projectName,
 				{ phase_number: phaseNumber },
@@ -562,7 +562,7 @@ export function createKnowledgeCuratorHook(
 		const phaseMatch = /^Phase:\s*(\d+)/m.exec(planContent);
 		const phaseNumber = phaseMatch ? parseInt(phaseMatch[1], 10) : 1;
 
-		await curateAndStoreSwarm(
+		await _internals.curateAndStoreSwarm(
 			normalLessons,
 			projectName,
 			{ phase_number: phaseNumber },
@@ -575,3 +575,19 @@ export function createKnowledgeCuratorHook(
 
 	return safeHook(handler);
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	isWriteToEvidenceFile: typeof isWriteToEvidenceFile;
+	curateAndStoreSwarm: typeof curateAndStoreSwarm;
+	runAutoPromotion: typeof runAutoPromotion;
+	createKnowledgeCuratorHook: typeof createKnowledgeCuratorHook;
+} = {
+	isWriteToEvidenceFile,
+	curateAndStoreSwarm,
+	runAutoPromotion,
+	createKnowledgeCuratorHook,
+};

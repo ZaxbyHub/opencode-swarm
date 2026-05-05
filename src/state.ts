@@ -507,7 +507,7 @@ export function startAgentSession(
 
 	// Apply cached plan+evidence data so new sessions start with correct workflow
 	// state even when no snapshot existed at init time.
-	applyRehydrationCache(sessionState);
+	_internals.applyRehydrationCache(sessionState);
 
 	// Rehydrate workflow state from disk if directory provided (non-fatal).
 	// Register the promise in pendingRehydrations so rehydrateState can await it
@@ -515,7 +515,8 @@ export function startAgentSession(
 	// in-flight workflow state.
 	if (directory) {
 		let rehydrationPromise: Promise<void>;
-		rehydrationPromise = rehydrateSessionFromDisk(directory, sessionState)
+		rehydrationPromise = _internals
+			.rehydrateSessionFromDisk(directory, sessionState)
 			.catch((err) => {
 				console.warn(
 					'[state] Rehydration failed:',
@@ -729,7 +730,12 @@ export function ensureAgentSession(
 	}
 
 	// Create new session
-	startAgentSession(sessionId, agentName ?? 'unknown', 7200000, directory);
+	_internals.startAgentSession(
+		sessionId,
+		agentName ?? 'unknown',
+		7200000,
+		directory,
+	);
 	session = swarmState.agentSessions.get(sessionId);
 	if (!session) {
 		// This should never happen, but TypeScript needs it
@@ -1482,8 +1488,8 @@ export async function rehydrateSessionFromDisk(
 	directory: string,
 	session: AgentSessionState,
 ): Promise<void> {
-	await buildRehydrationCache(directory);
-	applyRehydrationCache(session);
+	await _internals.buildRehydrationCache(directory);
+	_internals.applyRehydrationCache(session);
 }
 
 /**
@@ -1564,3 +1570,47 @@ export function ensureSessionEnvironment(
 		});
 	return profile;
 }
+
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.*` for key exported functions and objects so tests can replace
+ * them without using `mock.module` — `mock.module` from `bun:test` leaks
+ * across files in Bun's shared test-runner process, which would corrupt
+ * unrelated test suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	swarmState: typeof swarmState;
+	resetSwarmState: typeof resetSwarmState;
+	ensureAgentSession: typeof ensureAgentSession;
+	startAgentSession: typeof startAgentSession;
+	getAgentSession: typeof getAgentSession;
+	beginInvocation: typeof beginInvocation;
+	getActiveWindow: typeof getActiveWindow;
+	advanceTaskState: typeof advanceTaskState;
+	getTaskState: typeof getTaskState;
+	hasActiveFullAuto: typeof hasActiveFullAuto;
+	hasActiveTurboMode: typeof hasActiveTurboMode;
+	buildRehydrationCache: typeof buildRehydrationCache;
+	applyRehydrationCache: typeof applyRehydrationCache;
+	rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
+	isCouncilGateActive: typeof isCouncilGateActive;
+	defaultRunContext: typeof defaultRunContext;
+} = {
+	swarmState,
+	resetSwarmState,
+	ensureAgentSession,
+	startAgentSession,
+	getAgentSession,
+	beginInvocation,
+	getActiveWindow,
+	advanceTaskState,
+	getTaskState,
+	hasActiveFullAuto,
+	hasActiveTurboMode,
+	buildRehydrationCache,
+	applyRehydrationCache,
+	rehydrateSessionFromDisk,
+	isCouncilGateActive,
+	defaultRunContext,
+};

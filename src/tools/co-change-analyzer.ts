@@ -386,11 +386,14 @@ export async function detectDarkMatter(
 	}
 
 	// Parse git log and build matrix
-	const commitMap = await parseGitLog(directory, maxCommitsToAnalyze);
-	const matrix = buildCoChangeMatrix(commitMap);
+	const commitMap = await _internals.parseGitLog(
+		directory,
+		maxCommitsToAnalyze,
+	);
+	const matrix = _internals.buildCoChangeMatrix(commitMap);
 
 	// Get static edges
-	const staticEdges = await getStaticEdges(directory);
+	const staticEdges = await _internals.getStaticEdges(directory);
 
 	// Filter and annotate entries
 	const results: CoChangeEntry[] = [];
@@ -558,7 +561,27 @@ export const co_change_analyzer: ReturnType<typeof tool> = createSwarmTool({
 			maxCommitsToAnalyze,
 		};
 
-		const pairs = await detectDarkMatter(directory, options);
-		return formatDarkMatterOutput(pairs);
+		const pairs = await _internals.detectDarkMatter(directory, options);
+		return _internals.formatDarkMatterOutput(pairs);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	parseGitLog: typeof parseGitLog;
+	buildCoChangeMatrix: typeof buildCoChangeMatrix;
+	getStaticEdges: typeof getStaticEdges;
+	detectDarkMatter: typeof detectDarkMatter;
+	darkMatterToKnowledgeEntries: typeof darkMatterToKnowledgeEntries;
+	formatDarkMatterOutput: typeof formatDarkMatterOutput;
+} = {
+	parseGitLog,
+	buildCoChangeMatrix,
+	getStaticEdges,
+	detectDarkMatter,
+	darkMatterToKnowledgeEntries,
+	formatDarkMatterOutput,
+} as const;

@@ -1,6 +1,17 @@
 import { z } from 'zod';
 import { ALL_AGENT_NAMES } from './constants';
 
+/**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	stripKnownSwarmPrefix: typeof stripKnownSwarmPrefix;
+	resolveGuardrailsConfig: typeof resolveGuardrailsConfig;
+} = { stripKnownSwarmPrefix, resolveGuardrailsConfig };
+
 // Known Swarm prefixes for multi-tenant/variant agent names
 // These are stripped to get the canonical agent name
 const KNOWN_SWARM_PREFIXES = [
@@ -690,7 +701,7 @@ export function resolveGuardrailsConfig(
 	}
 
 	// Strip prefixes to get canonical agent name
-	const canonicalName = stripKnownSwarmPrefix(agentName);
+	const canonicalName = _internals.stripKnownSwarmPrefix(agentName);
 
 	// Check if this is a known agent (has built-in profile)
 	const hasBuiltInProfile = canonicalName in DEFAULT_AGENT_PROFILES;

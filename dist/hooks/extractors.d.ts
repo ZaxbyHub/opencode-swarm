@@ -51,3 +51,14 @@ export declare function extractPlanCursor(planContent: string, options?: {
     maxTokens?: number;
     lookaheadTasks?: number;
 }): string;
+export declare const _internals: {
+    extractCurrentPhase: typeof extractCurrentPhase;
+    extractCurrentTask: typeof extractCurrentTask;
+    extractDecisions: typeof extractDecisions;
+    extractIncompleteTasks: typeof extractIncompleteTasks;
+    extractPatterns: typeof extractPatterns;
+    extractCurrentPhaseFromPlan: typeof extractCurrentPhaseFromPlan;
+    extractCurrentTaskFromPlan: typeof extractCurrentTaskFromPlan;
+    extractIncompleteTasksFromPlan: typeof extractIncompleteTasksFromPlan;
+    extractPlanCursor: typeof extractPlanCursor;
+};

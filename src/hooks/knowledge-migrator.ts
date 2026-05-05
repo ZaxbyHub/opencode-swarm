@@ -67,6 +67,22 @@ interface Section {
 }
 
 // ============================================================================
+// DI Seam — _internals (declared before functions that use it to avoid TDZ)
+// ============================================================================
+
+export const _internals = {
+	migrateContextToKnowledge,
+	migrateKnowledgeToExternal,
+	parseContextMd,
+	splitIntoSections,
+	extractBullets,
+	inferCategoryFromText,
+	truncateLesson,
+	inferProjectName,
+	writeSentinel,
+};
+
+// ============================================================================
 // Main Export
 // ============================================================================
 
@@ -114,11 +130,11 @@ export async function migrateContextToKnowledge(
 	}
 
 	// Parse context.md into raw entries
-	const rawEntries = parseContextMd(contextContent);
+	const rawEntries = _internals.parseContextMd(contextContent);
 
 	// If no entries, write sentinel and return
 	if (rawEntries.length === 0) {
-		await writeSentinel(sentinelPath, 0, 0);
+		await _internals.writeSentinel(sentinelPath, 0, 0);
 		return {
 			migrated: true,
 			entriesMigrated: 0,
@@ -133,13 +149,14 @@ export async function migrateContextToKnowledge(
 	let migrated = 0;
 	let dropped = 0;
 
-	const projectName = inferProjectName(directory);
+	const projectName = _internals.inferProjectName(directory);
 
 	// Process each raw entry
 	for (const raw of rawEntries) {
 		// Validate if enabled
 		if (config.validation_enabled !== false) {
-			const category = raw.categoryHint ?? inferCategoryFromText(raw.text);
+			const category =
+				raw.categoryHint ?? _internals.inferCategoryFromText(raw.text);
 			const result = validateLesson(
 				raw.text,
 				existing.map((e) => e.lesson),
@@ -171,8 +188,8 @@ export async function migrateContextToKnowledge(
 		const entry: SwarmKnowledgeEntry = {
 			id: randomUUID(),
 			tier: 'swarm',
-			lesson: truncateLesson(raw.text),
-			category: raw.categoryHint ?? inferCategoryFromText(raw.text),
+			lesson: _internals.truncateLesson(raw.text),
+			category: raw.categoryHint ?? _internals.inferCategoryFromText(raw.text),
 			tags: [...inferredTags, `migration:${raw.sourceSection}`],
 			scope: 'global',
 			confidence: 0.3,
@@ -200,7 +217,7 @@ export async function migrateContextToKnowledge(
 	}
 
 	// Write sentinel file
-	await writeSentinel(sentinelPath, migrated, dropped);
+	await _internals.writeSentinel(sentinelPath, migrated, dropped);
 
 	// Log migration result
 	logger.log(
@@ -224,7 +241,7 @@ export async function migrateContextToKnowledge(
  * Extracts bullets from sections matching: lessons-learned, patterns, sme-cache, decisions.
  */
 function parseContextMd(content: string): RawMigrationEntry[] {
-	const sections = splitIntoSections(content);
+	const sections = _internals.splitIntoSections(content);
 	const entries: RawMigrationEntry[] = [];
 	const seen = new Set<string>();
 
@@ -250,7 +267,7 @@ function parseContextMd(content: string): RawMigrationEntry[] {
 		if (!match) continue;
 
 		// Extract bullets from section body
-		const bullets = extractBullets(section.body);
+		const bullets = _internals.extractBullets(section.body);
 
 		for (const bullet of bullets) {
 			// Filter by length
@@ -262,9 +279,9 @@ function parseContextMd(content: string): RawMigrationEntry[] {
 			seen.add(normalized);
 
 			entries.push({
-				text: truncateLesson(bullet),
+				text: _internals.truncateLesson(bullet),
 				sourceSection: match.sourceSection,
-				categoryHint: inferCategoryFromText(bullet),
+				categoryHint: _internals.inferCategoryFromText(bullet),
 			});
 		}
 	}

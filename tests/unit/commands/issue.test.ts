@@ -343,4 +343,8 @@ describe('handleIssueCommand', () => {
 			);
 		});
 	});
+
+	afterEach(() => {
+		mock.restore();
+	});
 });

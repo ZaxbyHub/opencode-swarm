@@ -31,7 +31,7 @@ export async function isSpecStale(
 	directory: string,
 	plan: Plan,
 ): Promise<{ stale: boolean; reason?: string; currentHash?: string | null }> {
-	const currentHash = await computeSpecHash(directory);
+	const currentHash = await _internals.computeSpecHash(directory);
 
 	// Pre-feature plan: no specHash means plan predates this feature
 	if (!plan.specHash) {
@@ -58,3 +58,15 @@ export async function isSpecStale(
 
 	return { stale: false };
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	computeSpecHash: typeof computeSpecHash;
+	isSpecStale: typeof isSpecStale;
+} = {
+	computeSpecHash,
+	isSpecStale,
+} as const;

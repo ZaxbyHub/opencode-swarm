@@ -1,5 +1,23 @@
 import type { AgentDefinition } from './architect';
 
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.createCriticAgent(...)` etc. so tests can replace the functions
+ * on this object without touching the real module — `mock.module` from
+ * `bun:test` leaks across files in Bun's shared test-runner process, which
+ * would corrupt unrelated suites. Mutating this local object is file-scoped
+ * and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	createCriticAgent: typeof createCriticAgent;
+	createCriticDriftVerifierAgent: typeof createCriticDriftVerifierAgent;
+	createCriticAutonomousOversightAgent: typeof createCriticAutonomousOversightAgent;
+} = {
+	createCriticAgent,
+	createCriticDriftVerifierAgent,
+	createCriticAutonomousOversightAgent,
+};
+
 export type CriticRole =
 	| 'plan_critic'
 	| 'sounding_board'

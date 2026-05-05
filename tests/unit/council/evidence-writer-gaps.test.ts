@@ -47,6 +47,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	mock.restore();
 	rmSync(tempDir, { recursive: true, force: true });
 });
 

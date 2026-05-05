@@ -8,7 +8,15 @@
  * - Edge cases
  */
 
-import { beforeEach, describe, expect, it, mock, vi } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	vi,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -69,6 +77,10 @@ describe('sastScan', () => {
 		// Create a temporary directory for each test
 		tempDir = fs.mkdtempSync(path.join(tmpdir(), 'sast-test-'));
 		mockSemgrepAvailable = false;
+		// File-scoped mock.module pattern: clear mock call data in beforeEach
+		// (mock.restore() would remove the module mock permanently)
+		mockCaptureOrMergeBaseline.mockClear();
+		mockLoadBaseline.mockClear();
 		vi.clearAllMocks();
 	});
 

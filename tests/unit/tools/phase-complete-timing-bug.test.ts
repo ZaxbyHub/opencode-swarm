@@ -260,6 +260,8 @@ describe('Task 2.3: phase_complete timing bug fix — drift gate architecture', 
 			// Ignore cleanup errors
 		}
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	describe('1. runDeterministicDriftCheck is NOT called by phase_complete (core fix)', () => {

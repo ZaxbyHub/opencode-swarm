@@ -208,19 +208,19 @@ export function rotateTelemetryIfNeeded(
 
 export const telemetry = {
 	sessionStarted(sessionId: string, agentName: string): void {
-		emit('session_started', { sessionId, agentName });
+		_internals.emit('session_started', { sessionId, agentName });
 	},
 
 	sessionEnded(sessionId: string, reason: string): void {
-		emit('session_ended', { sessionId, reason });
+		_internals.emit('session_ended', { sessionId, reason });
 	},
 
 	agentActivated(sessionId: string, agentName: string, oldName?: string): void {
-		emit('agent_activated', { sessionId, agentName, oldName });
+		_internals.emit('agent_activated', { sessionId, agentName, oldName });
 	},
 
 	delegationBegin(sessionId: string, agentName: string, taskId: string): void {
-		emit('delegation_begin', { sessionId, agentName, taskId });
+		_internals.emit('delegation_begin', { sessionId, agentName, taskId });
 	},
 
 	delegationEnd(
@@ -229,7 +229,7 @@ export const telemetry = {
 		taskId: string,
 		result: string,
 	): void {
-		emit('delegation_end', { sessionId, agentName, taskId, result });
+		_internals.emit('delegation_end', { sessionId, agentName, taskId, result });
 	},
 
 	taskStateChanged(
@@ -238,11 +238,16 @@ export const telemetry = {
 		newState: string,
 		oldState?: string,
 	): void {
-		emit('task_state_changed', { sessionId, taskId, newState, oldState });
+		_internals.emit('task_state_changed', {
+			sessionId,
+			taskId,
+			newState,
+			oldState,
+		});
 	},
 
 	gatePassed(sessionId: string, gate: string, taskId: string): void {
-		emit('gate_passed', { sessionId, gate, taskId });
+		_internals.emit('gate_passed', { sessionId, gate, taskId });
 	},
 
 	gateFailed(
@@ -251,15 +256,15 @@ export const telemetry = {
 		taskId: string,
 		reason: string,
 	): void {
-		emit('gate_failed', { sessionId, gate, taskId, reason });
+		_internals.emit('gate_failed', { sessionId, gate, taskId, reason });
 	},
 
 	phaseChanged(sessionId: string, oldPhase: number, newPhase: number): void {
-		emit('phase_changed', { sessionId, oldPhase, newPhase });
+		_internals.emit('phase_changed', { sessionId, oldPhase, newPhase });
 	},
 
 	budgetUpdated(sessionId: string, budgetPct: number, agentName: string): void {
-		emit('budget_updated', { sessionId, budgetPct, agentName });
+		_internals.emit('budget_updated', { sessionId, budgetPct, agentName });
 	},
 
 	modelFallback(
@@ -269,7 +274,7 @@ export const telemetry = {
 		toModel: string,
 		reason: string,
 	): void {
-		emit('model_fallback', {
+		_internals.emit('model_fallback', {
 			sessionId,
 			agentName,
 			fromModel,
@@ -284,15 +289,20 @@ export const telemetry = {
 		limitType: string,
 		value: number,
 	): void {
-		emit('hard_limit_hit', { sessionId, agentName, limitType, value });
+		_internals.emit('hard_limit_hit', {
+			sessionId,
+			agentName,
+			limitType,
+			value,
+		});
 	},
 
 	revisionLimitHit(sessionId: string, agentName: string): void {
-		emit('revision_limit_hit', { sessionId, agentName });
+		_internals.emit('revision_limit_hit', { sessionId, agentName });
 	},
 
 	loopDetected(sessionId: string, agentName: string, loopType: string): void {
-		emit('loop_detected', { sessionId, agentName, loopType });
+		_internals.emit('loop_detected', { sessionId, agentName, loopType });
 	},
 
 	scopeViolation(
@@ -301,7 +311,7 @@ export const telemetry = {
 		file: string,
 		reason: string,
 	): void {
-		emit('scope_violation', { sessionId, agentName, file, reason });
+		_internals.emit('scope_violation', { sessionId, agentName, file, reason });
 	},
 
 	qaSkipViolation(
@@ -309,11 +319,11 @@ export const telemetry = {
 		agentName: string,
 		skipCount: number,
 	): void {
-		emit('qa_skip_violation', { sessionId, agentName, skipCount });
+		_internals.emit('qa_skip_violation', { sessionId, agentName, skipCount });
 	},
 
 	heartbeat(sessionId: string): void {
-		emit('heartbeat', { sessionId });
+		_internals.emit('heartbeat', { sessionId });
 	},
 
 	turboModeChanged(
@@ -321,7 +331,7 @@ export const telemetry = {
 		enabled: boolean,
 		agentName: string,
 	): void {
-		emit('turbo_mode_changed', { sessionId, enabled, agentName });
+		_internals.emit('turbo_mode_changed', { sessionId, enabled, agentName });
 	},
 
 	autoOversightEscalation(
@@ -331,7 +341,7 @@ export const telemetry = {
 		deadlockCount: number,
 		phase?: number,
 	): void {
-		emit('auto_oversight_escalation', {
+		_internals.emit('auto_oversight_escalation', {
 			sessionId,
 			reason,
 			interactionCount,
@@ -346,7 +356,7 @@ export const telemetry = {
 		shellFamily: string,
 		executionMode: string,
 	): void {
-		emit('environment_detected', {
+		_internals.emit('environment_detected', {
 			sessionId,
 			hostOS,
 			shellFamily,
@@ -361,7 +371,7 @@ export const telemetry = {
 		category: string,
 		stepRange: [number, number],
 	): void {
-		emit('prm_pattern_detected', {
+		_internals.emit('prm_pattern_detected', {
 			sessionId,
 			pattern,
 			severity,
@@ -375,7 +385,11 @@ export const telemetry = {
 		pattern: string,
 		level: number,
 	): void {
-		emit('prm_course_correction_injected', { sessionId, pattern, level });
+		_internals.emit('prm_course_correction_injected', {
+			sessionId,
+			pattern,
+			level,
+		});
 	},
 
 	prmEscalationTriggered(
@@ -384,7 +398,7 @@ export const telemetry = {
 		level: number,
 		occurrenceCount: number,
 	): void {
-		emit('prm_escalation_triggered', {
+		_internals.emit('prm_escalation_triggered', {
 			sessionId,
 			pattern,
 			level,
@@ -398,6 +412,24 @@ export const telemetry = {
 		level: number,
 		occurrenceCount: number,
 	): void {
-		emit('prm_hard_stop', { sessionId, pattern, level, occurrenceCount });
+		_internals.emit('prm_hard_stop', {
+			sessionId,
+			pattern,
+			level,
+			occurrenceCount,
+		});
 	},
 };
+
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.telemetry` and `_internals.emit` so tests can replace the
+ * underlying implementations without using `mock.module` — `mock.module` from
+ * `bun:test` leaks across files in Bun's shared test-runner process, which
+ * would corrupt unrelated test suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	telemetry: typeof telemetry;
+	emit: typeof emit;
+} = { telemetry, emit };

@@ -57,23 +57,12 @@ describe('test-runner impact scope ADVERSARIAL security tests', () => {
 		}));
 
 		// Mock the path-security module to avoid Windows path issues in tests
-		// But preserve the actual validation logic - we only mock to allow relative paths
+		// Import real module and override only validateDirectory to allow test paths
+		const realPathSecurity = await import(
+			'../../../src/utils/path-security.js'
+		);
 		mock.module('../../../src/utils/path-security.js', () => ({
-			containsControlChars: (str: string) => /[\0\t\r\n]/.test(str),
-			containsPathTraversal: (str: string) => {
-				// Check for basic path traversal patterns
-				if (/\.\.[/\\]/.test(str)) return true;
-				if (/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(str)) return true;
-				if (/%2e%2e/i.test(str)) return true;
-				if (/%2e\./i.test(str)) return true;
-				if (/%252e%252e/i.test(str)) return true;
-				if (/\uff0e/.test(str)) return true;
-				if (/\u3002/.test(str)) return true;
-				if (/\uff65/.test(str)) return true;
-				if (/%2f/i.test(str)) return true;
-				if (/%5c/i.test(str)) return true;
-				return false;
-			},
+			...realPathSecurity,
 			validateDirectory: () => {},
 			validateSymlinkBoundary: () => {},
 		}));

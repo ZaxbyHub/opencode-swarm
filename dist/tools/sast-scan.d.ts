@@ -85,3 +85,11 @@ export declare function sastScan(input: SastScanInput, directory: string, config
  * - Tier B: Semgrep (optional, if available on PATH)
  */
 export declare const sast_scan: ToolDefinition;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    sastScan: typeof sastScan;
+    sast_scan: typeof sast_scan;
+};

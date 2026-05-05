@@ -46,6 +46,10 @@ export declare const sanitizeTaskId: typeof _sanitizeTaskId;
  */
 export declare function saveEvidence(directory: string, taskId: string, evidence: Evidence): Promise<EvidenceBundle>;
 /**
+ * Transform a flat retrospective object into a valid EvidenceBundle.
+ */
+declare function wrapFlatRetrospective(flatEntry: Record<string, unknown>, taskId: string): EvidenceBundle;
+/**
  * Load evidence bundle for a task.
  * Returns a LoadEvidenceResult discriminated union.
  */
@@ -76,3 +80,13 @@ export declare function checkRequirementCoverage(phase: number, directory: strin
  * Returns array of archived (deleted) task IDs.
  */
 export declare function archiveEvidence(directory: string, maxAgeDays: number, maxBundles?: number): Promise<string[]>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    wrapFlatRetrospective: typeof wrapFlatRetrospective;
+    loadEvidence: typeof loadEvidence;
+    listEvidenceTaskIds: typeof listEvidenceTaskIds;
+};
+export {};

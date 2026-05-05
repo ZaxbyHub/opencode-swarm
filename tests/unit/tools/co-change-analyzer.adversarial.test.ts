@@ -1,8 +1,21 @@
-import { beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from 'bun:test';
 import { promisify } from 'node:util';
 
 // mock.module() must be called before importing the module under test.
 // Declare mock functions first, then register the module overrides.
+
+// Cross-module mocks must be restored after each test to prevent contamination.
+afterEach(() => {
+	mock.restore();
+});
 
 const mockReaddir = mock(() => Promise.resolve([]));
 const mockReadFile = mock(() => Promise.resolve(''));
@@ -37,7 +50,9 @@ const mockExecFile = mock(
 		);
 	});
 
+const realFsPromises = await import('node:fs/promises');
 mock.module('node:fs/promises', () => ({
+	...realFsPromises,
 	readdir: mockReaddir,
 	readFile: mockReadFile,
 	stat: mockStat,

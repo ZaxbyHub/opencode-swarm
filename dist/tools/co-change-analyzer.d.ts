@@ -43,3 +43,15 @@ export declare function darkMatterToKnowledgeEntries(pairs: CoChangeEntry[], pro
  */
 export declare function formatDarkMatterOutput(pairs: CoChangeEntry[]): string;
 export declare const co_change_analyzer: ReturnType<typeof tool>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    parseGitLog: typeof parseGitLog;
+    buildCoChangeMatrix: typeof buildCoChangeMatrix;
+    getStaticEdges: typeof getStaticEdges;
+    detectDarkMatter: typeof detectDarkMatter;
+    darkMatterToKnowledgeEntries: typeof darkMatterToKnowledgeEntries;
+    formatDarkMatterOutput: typeof formatDarkMatterOutput;
+};

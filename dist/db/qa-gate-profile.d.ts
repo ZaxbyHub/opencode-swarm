@@ -7,6 +7,19 @@
  * Sessions can only ratchet gates tighter (enable more), never disable them.
  */
 /**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    getProfile: typeof getProfile;
+    getOrCreateProfile: typeof getOrCreateProfile;
+    setGates: typeof setGates;
+    getEffectiveGates: typeof getEffectiveGates;
+    computeProfileHash: typeof computeProfileHash;
+};
+/**
  * QA gate flags. All ten gates are tracked explicitly.
  */
 export interface QaGates {

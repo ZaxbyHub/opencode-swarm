@@ -66,6 +66,24 @@ export function resetStartupLedgerCheck(): void {
 	recoveryMutexes.clear();
 }
 
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.loadPlan(...)`, `_internals.loadPlanJsonOnly(...)`, etc. so tests
+ * can replace the functions on this object without touching the real module —
+ * `mock.module` from `bun:test` leaks across files in Bun's shared test-runner
+ * process, which would corrupt unrelated suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	loadPlan: typeof loadPlan;
+	loadPlanJsonOnly: typeof loadPlanJsonOnly;
+	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
+} = {
+	loadPlan,
+	loadPlanJsonOnly,
+	regeneratePlanMarkdown,
+};
+
 // ── CAS backoff constants ─────────────────────────────────────────────────────
 const CAS_BACKOFF_START_MS = 5;
 const CAS_BACKOFF_CAP_MS = 250;
@@ -347,7 +365,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 				const inSync = await isPlanMdInSync(directory, validated);
 				if (!inSync) {
 					try {
-						await regeneratePlanMarkdown(directory, validated);
+						await _internals.regeneratePlanMarkdown(directory, validated);
 					} catch (regenError) {
 						// Log warning but don't fail - plan.json is valid
 						warn(
@@ -600,7 +618,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 		if (existingMutex) {
 			// Another call is already recovering — wait for it, then re-check plan.json
 			await existingMutex;
-			const postRecoveryPlan = await loadPlanJsonOnly(directory);
+			const postRecoveryPlan = await _internals.loadPlanJsonOnly(directory);
 			if (postRecoveryPlan) return postRecoveryPlan;
 		}
 
@@ -713,7 +731,7 @@ export async function savePlan(
 	// even if the incoming plan has it as 'pending'/'in_progress'/'blocked'.
 	if (options?.preserveCompletedStatuses !== false) {
 		try {
-			const currentPlan = await loadPlanJsonOnly(directory);
+			const currentPlan = await _internals.loadPlanJsonOnly(directory);
 			if (currentPlan) {
 				const completedTaskIds = new Set<string>();
 				for (const phase of currentPlan.phases) {
@@ -761,7 +779,7 @@ export async function savePlan(
 	// detector rebuilds plan.json from ledger. The plan_created event embeds
 	// the full plan so replayFromLedger can bootstrap without plan.json (#444).
 	// Load current plan for comparison and ledger initialization
-	const currentPlan = await loadPlanJsonOnly(directory);
+	const currentPlan = await _internals.loadPlanJsonOnly(directory);
 
 	// Initialize or re-initialize the ledger as needed.
 	// Re-initialization is required when the swarm identity changes (e.g., after session
@@ -988,7 +1006,7 @@ export async function savePlan(
 							planHashAfter: hashAfter,
 							verifyValid: async () => {
 								// If another writer already persisted the transition, skip.
-								const onDisk = await loadPlanJsonOnly(directory);
+								const onDisk = await _internals.loadPlanJsonOnly(directory);
 								if (!onDisk) return true; // no on-disk plan — just retry
 								for (const p of onDisk.phases) {
 									const t = p.tasks.find((x) => x.id === capturedTaskId);
@@ -1206,7 +1224,7 @@ export async function updateTaskStatus(
 	// refresh the plan and retry with the latest state.
 	const MAX_OUTER_RETRIES = 1;
 	for (let attempt = 0; attempt <= MAX_OUTER_RETRIES; attempt++) {
-		const plan = await loadPlan(directory);
+		const plan = await _internals.loadPlan(directory);
 		if (plan === null) {
 			throw new Error(`Plan not found in directory: ${directory}`);
 		}

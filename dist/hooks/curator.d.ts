@@ -32,6 +32,14 @@ import type { KnowledgeConfig } from './knowledge-types.js';
  * Used to delegate analysis to the explorer agent in CURATOR mode.
  */
 export type CuratorLLMDelegate = (systemPrompt: string, userInput: string, signal?: AbortSignal) => Promise<string>;
+export declare const _internals: {
+    parseKnowledgeRecommendations: typeof parseKnowledgeRecommendations;
+    readCuratorSummary: typeof readCuratorSummary;
+    writeCuratorSummary: typeof writeCuratorSummary;
+    filterPhaseEvents: typeof filterPhaseEvents;
+    checkPhaseCompliance: typeof checkPhaseCompliance;
+    normalizeAgentName: typeof normalizeAgentName;
+};
 /**
  * Parse OBSERVATIONS section from curator LLM output.
  * Expected format per line: "- entry <uuid> (<observable>): [text]"
@@ -52,6 +60,10 @@ export declare function readCuratorSummary(directory: string): Promise<CuratorSu
  * @param summary - The curator summary to write
  */
 export declare function writeCuratorSummary(directory: string, summary: CuratorSummary): Promise<void>;
+/**
+ * Normalize agent name by stripping common swarm prefixes.
+ */
+declare function normalizeAgentName(name: string): string;
 /**
  * Filter events from JSONL by phase or timestamp.
  * @param eventsJsonl - Raw JSONL string of events
@@ -106,3 +118,4 @@ export declare function applyCuratorKnowledgeUpdates(directory: string, recommen
     applied: number;
     skipped: number;
 }>;
+export {};

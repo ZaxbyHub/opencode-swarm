@@ -101,3 +101,12 @@ export async function importCheckpoint(
 		};
 	}
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals = {
+	writeCheckpoint,
+	importCheckpoint,
+};
