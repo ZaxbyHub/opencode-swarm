@@ -3354,7 +3354,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	test_engineer: {
 		blockedExact: ['.swarm/plan.md', '.swarm/plan.json'],
 		blockedPrefix: ['src/'],
-		allowedPrefix: ['tests/', '.swarm/evidence/'],
+		allowedPrefix: ['tests/', 'test/', '.swarm/evidence/'],
+		// v7.x (#bug-test-engineer-write-access): allow writes to any tests/test
+		// directory at any depth (e.g. src-tauri/tests/, packages/foo/test/) and
+		// to any .test.* / .spec.* file so that projects with non-root test
+		// layouts are not blocked. allowedGlobs is evaluated at Step 5, before
+		// blockedPrefix at Step 6, so test files inside src/ sub-directories
+		// (e.g. src/__tests__/) are also covered — writing there is intentional.
+		allowedGlobs: [
+			'**/tests/**',
+			'**/test/**',
+			'**/__tests__/**',
+			'**/*.test.*',
+			'**/*.spec.*',
+		],
 		blockedZones: ['generated'],
 	},
 	docs: {

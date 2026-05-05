@@ -259,6 +259,84 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			);
 			expect(result.allowed).toBe(false);
 		});
+
+		// Regression tests for #bug-test-engineer-write-access:
+		// test_engineer must be able to write to tests/ at any depth in the tree,
+		// not only at the project root.
+		it('allows test_engineer to write to a subdirectory tests/ (e.g. src-tauri/tests/)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src-tauri/tests/scoring_adversarial_test.rs',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write to a nested package tests/ dir', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'packages/core/tests/unit/foo.test.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write to a test/ directory (singular)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'backend/test/test_api.py',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write to __tests__ directory inside src/', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/__tests__/auth.test.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write .test.ts files at arbitrary paths', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/auth/login.test.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write .spec.ts files at arbitrary paths', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/auth/login.spec.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('blocks test_engineer from writing to src/ production files (no test marker)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/auth/login.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('Path blocked');
+			}
+		});
+
+		it('allows prefixed test_engineer (e.g. local_test_engineer) to write to subdirectory tests/', () => {
+			const result = checkFileAuthority(
+				'local_test_engineer',
+				'src-tauri/tests/scoring_adversarial_test.rs',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
 	});
 
 	describe('Docs and Designer write scope', () => {
