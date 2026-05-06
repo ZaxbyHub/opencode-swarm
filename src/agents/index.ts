@@ -197,7 +197,14 @@ function getTemperatureOverride(
  * "lmstudio/qwen/qwen3.6-35b-a3b") is part of the model path and must NOT
  * be stripped.
  */
-const KNOWN_VARIANT_VALUES = new Set(['low', 'medium', 'high', 'thinking']);
+const KNOWN_VARIANT_VALUES = new Set([
+	'low',
+	'medium',
+	'high',
+	'max',
+	'xhigh',
+	'thinking',
+]);
 
 /**
  * Get variant (reasoning-effort) override for an agent.

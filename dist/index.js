@@ -60655,7 +60655,14 @@ var init_agents2 = __esm(() => {
   init_curator_agent();
   init_reviewer();
   warnedAgents = new Set;
-  KNOWN_VARIANT_VALUES = new Set(["low", "medium", "high", "thinking"]);
+  KNOWN_VARIANT_VALUES = new Set([
+    "low",
+    "medium",
+    "high",
+    "max",
+    "xhigh",
+    "thinking"
+  ]);
 });
 
 // src/background/evidence-summary-integration.ts

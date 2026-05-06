@@ -40,7 +40,7 @@ Each entry under `agents` accepts the following optional fields:
 | Field | Type | Description |
 |---|---|---|
 | `model` | `"<provider>/<model>"` | Model id. **Do not** include a third `/<variant>` segment — see `variant` below. |
-| `variant` | `string` | Reasoning-effort variant for models that support it (e.g. `"low"`, `"medium"`, `"high"`, `"xhigh"` for `gpt-5.x` / `gpt-5.x-codex`). |
+| `variant` | `string` | Reasoning-effort variant for models that support it (e.g. `"low"`, `"medium"`, `"high"`, `"max"`, `"xhigh"`, `"thinking"` for `gpt-5.x` / `gpt-5.x-codex`). |
 | `temperature` | `0–2` | Sampling temperature override. |
 | `disabled` | `boolean` | Skip this agent entirely (it will not be registered). |
 | `fallback_models` | `string[]` (max 3) | Models to retry on transient errors (429/503/timeout). |

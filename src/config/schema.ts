@@ -103,7 +103,7 @@ export const AgentOverrideConfigSchema = z.object({
 	//
 	// Note: swarm will auto-split the last segment of a 3-part model string
 	// ONLY when that last segment is one of the known variant tokens
-	// ("low", "medium", "high", "thinking").  Model IDs that genuinely have
+	// ("low", "medium", "high", "max", "xhigh", "thinking").  Model IDs that genuinely have
 	// three path components (e.g. "lmstudio/qwen/qwen3.6-35b-a3b") are
 	// preserved unchanged.
 	variant: z.string().min(1).optional(),

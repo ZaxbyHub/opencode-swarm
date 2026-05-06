@@ -260,14 +260,29 @@ describe('createAgents', () => {
 			warnSpy.mockRestore();
 		});
 
-		it('still auto-splits known variant tokens: low, medium, high, thinking', () => {
+		it('still auto-splits known variant tokens: low, medium, high, max, xhigh, thinking', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const variantCases: Array<[string, string, string]> = [
 				['grove-openai/gpt-5.3-codex/low', 'grove-openai/gpt-5.3-codex', 'low'],
 				[
+					'grove-openai/gpt-5.3-codex/medium',
+					'grove-openai/gpt-5.3-codex',
+					'medium',
+				],
+				[
 					'grove-openai/gpt-5.3-codex/high',
 					'grove-openai/gpt-5.3-codex',
 					'high',
+				],
+				[
+					'grove-openai/gpt-5.3-codex/max',
+					'grove-openai/gpt-5.3-codex',
+					'max',
+				],
+				[
+					'grove-openai/gpt-5.3-codex/xhigh',
+					'grove-openai/gpt-5.3-codex',
+					'xhigh',
 				],
 				[
 					'grove-openai/gpt-5.3-codex/thinking',
