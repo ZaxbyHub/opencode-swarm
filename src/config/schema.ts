@@ -95,13 +95,17 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
 	// Reasoning-effort / model variant (e.g. "low" | "medium" | "high" for
-	// gpt-5.x-codex or gpt-5.x). OpenCode treats variants as a separate field
-	// from the model id at the registry level — it is NOT a third
-	// "provider/model/variant" segment in the model string. We surface it as
-	// its own override field so users can pin reasoning effort per agent
-	// without encoding it into `model` (which OpenCode's basic 2-segment
-	// parser would mis-resolve as a missing model id and raise
-	// ProviderModelNotFoundError).
+	// gpt-5.x-codex or gpt-5.x, or "thinking" for extended-thinking models).
+	// OpenCode treats variants as a separate field from the model id at the
+	// registry level — it is NOT a third "provider/model/variant" segment in
+	// the model string.  We surface it as its own override field so users can
+	// pin reasoning effort per agent without encoding it into `model`.
+	//
+	// Note: swarm will auto-split the last segment of a 3-part model string
+	// ONLY when that last segment is one of the known variant tokens
+	// ("low", "medium", "high", "thinking").  Model IDs that genuinely have
+	// three path components (e.g. "lmstudio/qwen/qwen3.6-35b-a3b") are
+	// preserved unchanged.
 	variant: z.string().min(1).optional(),
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),

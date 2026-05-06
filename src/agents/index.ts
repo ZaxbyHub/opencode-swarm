@@ -189,6 +189,17 @@ function getTemperatureOverride(
 }
 
 /**
+ * Known reasoning-effort variant identifiers that OpenCode supports as a
+ * third path segment in `provider/model/variant` notation.
+ *
+ * ONLY these short tokens are treated as embedded variants during auto-split.
+ * Any other third segment (e.g. "qwen3.6-35b-a3b" in
+ * "lmstudio/qwen/qwen3.6-35b-a3b") is part of the model path and must NOT
+ * be stripped.
+ */
+const KNOWN_VARIANT_VALUES = new Set(['low', 'medium', 'high', 'thinking']);
+
+/**
  * Get variant (reasoning-effort) override for an agent.
  *
  * OpenCode reads the agent's reasoning effort from a top-level `variant` field
@@ -231,11 +242,17 @@ function applyOverrides(
 		swarmPrefix,
 	);
 	// Auto-split variant from model string for backward compatibility.
-	// If the model has 3+ segments (provider/model/variant), always clean it
-	// and use either the auto-split variant or the explicit variant override.
+	// Only applies when the last segment is a known reasoning-effort variant
+	// (see KNOWN_VARIANT_VALUES above).  Multi-part model IDs such as
+	// "lmstudio/qwen/qwen3.6-35b-a3b" are left intact because "qwen3.6-35b-a3b"
+	// is not a known variant token — stripping it would produce a wrong model
+	// path and raise ProviderModelNotFoundError.
 	const modelSegments = agent.config.model?.split('/') ?? [];
-	if (modelSegments.length >= 3) {
-		const autoVariant = modelSegments[modelSegments.length - 1];
+	const lastSegment = modelSegments[modelSegments.length - 1] ?? '';
+	const hasEmbeddedVariant =
+		modelSegments.length >= 3 && KNOWN_VARIANT_VALUES.has(lastSegment);
+	if (hasEmbeddedVariant) {
+		const autoVariant = lastSegment;
 		const cleanedModel = modelSegments.slice(0, -1).join('/');
 		const effectiveVariant = variantOverride ?? autoVariant;
 		if (!quiet) {

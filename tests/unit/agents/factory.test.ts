@@ -205,6 +205,93 @@ describe('createAgents', () => {
 			warnSpy.mockRestore();
 		});
 
+		it('preserves 3-segment lmstudio model ID intact (regression: bug where last segment was stripped as variant)', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				agents: {
+					reviewer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			// The full 3-segment path must be preserved — the last segment is a
+			// model name component, not a reasoning-effort variant token.
+			expect(reviewer?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(reviewer?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+			expect(warnSpy).not.toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('preserves 3-segment lmstudio model ID intact for multiple agents', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				agents: {
+					coder: { model: 'lmstudio/qwen/qwen3-coder-next' },
+					reviewer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+					test_engineer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+					docs: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(coder?.config.model).toBe('lmstudio/qwen/qwen3-coder-next');
+			expect(
+				(coder?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			expect(reviewer?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(reviewer?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			const te = agents.find((a) => a.name === 'test_engineer');
+			expect(te?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(te?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			expect(warnSpy).not.toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('still auto-splits known variant tokens: low, medium, high, thinking', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const variantCases: Array<[string, string, string]> = [
+				['grove-openai/gpt-5.3-codex/low', 'grove-openai/gpt-5.3-codex', 'low'],
+				[
+					'grove-openai/gpt-5.3-codex/high',
+					'grove-openai/gpt-5.3-codex',
+					'high',
+				],
+				[
+					'grove-openai/gpt-5.3-codex/thinking',
+					'grove-openai/gpt-5.3-codex',
+					'thinking',
+				],
+			];
+
+			for (const [fullModel, expectedModel, expectedVariant] of variantCases) {
+				const config = {
+					quiet: false,
+					agents: { coder: { model: fullModel } },
+				};
+				const agents = createAgents(config as unknown as PluginConfig);
+				const coder = agents.find((a) => a.name === 'coder');
+				expect(coder?.config.model).toBe(expectedModel);
+				expect(
+					(coder?.config as { variant?: string } | undefined)?.variant,
+				).toBe(expectedVariant);
+			}
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
 		it('disabled agent is filtered out', () => {
 			const config = {
 				agents: {
