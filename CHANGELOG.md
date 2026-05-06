@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.3...v7.5.4) (2026-05-06)
+
+
+### Bug Fixes
+
+* **delegation-gate:** stop internal warn messages leaking into chat stream ([#776](https://github.com/zaxbysauce/opencode-swarm/issues/776)) ([d40015c](https://github.com/zaxbysauce/opencode-swarm/commit/d40015cfb625e0b68bddd8cae99fc7f8aa11f9ee))
+
 ## [7.5.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.2...v7.5.3) (2026-05-06)
 
 
