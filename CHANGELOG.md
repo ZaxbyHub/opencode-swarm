@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.1...v7.5.2) (2026-05-06)
+
+
+### Bug Fixes
+
+* **testing:** eliminate mock.module cross-test contamination and register submit_phase_council_verdicts tool ([#769](https://github.com/zaxbysauce/opencode-swarm/issues/769)) ([2106c19](https://github.com/zaxbysauce/opencode-swarm/commit/2106c19f1458da4ffc30dff261010941238b3cea))
+
 ## [7.5.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.0...v7.5.1) (2026-05-06)
 
 
