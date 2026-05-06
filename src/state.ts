@@ -25,6 +25,7 @@ import type { EscalationTracker } from './prm/escalation.js';
 import type { PatternMatch } from './prm/types.js';
 import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
+import * as logger from './utils/logger';
 
 export { AgentRunContext } from './state/agent-run-context.js';
 
@@ -518,7 +519,7 @@ export function startAgentSession(
 		rehydrationPromise = _internals
 			.rehydrateSessionFromDisk(directory, sessionState)
 			.catch((err) => {
-				console.warn(
+				logger.warn(
 					'[state] Rehydration failed:',
 					err instanceof Error ? err.message : String(err),
 				);
@@ -1043,7 +1044,7 @@ export async function advanceTaskStateAndPersist(
 	try {
 		await updateTaskStatus(directory, taskId, planStatus);
 	} catch (err) {
-		console.warn(
+		logger.warn(
 			`[advanceTaskStateAndPersist] persist ${taskId} → ${planStatus} failed (in-memory state still advanced): ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
@@ -1166,7 +1167,7 @@ export async function isCouncilGateActive(
 		const msg = err instanceof Error ? err.message : String(err);
 		const isBenign = msg.includes('SQLITE_CANTOPEN') || msg.includes('ENOENT');
 		if (!isBenign) {
-			console.warn(
+			logger.warn(
 				`[isCouncilGateActive] getProfile threw unexpectedly for plan ${planId}: ${msg}. Treating council as inactive.`,
 			);
 		}
@@ -1185,7 +1186,7 @@ export async function isCouncilGateActive(
 	// Disagreement case: warn once per plan_id, then fall back.
 	if (enabled !== councilMode && !_councilDisagreementWarned.has(planId)) {
 		_councilDisagreementWarned.add(planId);
-		console.warn(
+		logger.warn(
 			`[delegation-gate] Council mode mismatch for plan ${planId}: ` +
 				`pluginConfig.council.enabled=${enabled}, QaGates.council_mode=${councilMode}. ` +
 				'Falling back to Stage B (non-council) advancement.',

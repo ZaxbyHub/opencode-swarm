@@ -15,7 +15,7 @@
  *     Stage B path runs.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,6 +29,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import * as logger from '../../../src/utils/logger';
 
 // Match the planId derivation used by set-qa-gates.ts / get-qa-gate-profile.ts
 function derivePlanId(plan: { swarm: string; title: string }): string {
@@ -614,10 +615,11 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			sessionB.taskWorkflowStates.set('1.2', 'coder_delegated');
 
 			const warnings: string[] = [];
-			const origWarn = console.warn;
-			console.warn = (...args: unknown[]) => {
-				warnings.push(args.map(String).join(' '));
-			};
+			const warnSpy = spyOn(logger, 'warn').mockImplementation(
+				(msg: string) => {
+					warnings.push(msg);
+				},
+			);
 
 			try {
 				// Session A reviewer: triggers disagreement check.
@@ -641,7 +643,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					{},
 				);
 			} finally {
-				console.warn = origWarn;
+				warnSpy.mockRestore();
 			}
 
 			// Disagreement: both sessions fell back to Stage B (council disabled).
