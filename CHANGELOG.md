@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.0...v7.5.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **guardrails:** allow test_engineer, docs, and designer to write to nested directories at any depth ([#768](https://github.com/zaxbysauce/opencode-swarm/issues/768)) ([1fdeaed](https://github.com/zaxbysauce/opencode-swarm/commit/1fdeaedb2b33e9dbb75f51a2a9a62048483ad352))
+
 ## [7.5.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.4.3...v7.5.0) (2026-05-05)
 
 
