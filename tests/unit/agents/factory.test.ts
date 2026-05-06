@@ -274,11 +274,7 @@ describe('createAgents', () => {
 					'grove-openai/gpt-5.3-codex',
 					'high',
 				],
-				[
-					'grove-openai/gpt-5.3-codex/max',
-					'grove-openai/gpt-5.3-codex',
-					'max',
-				],
+				['grove-openai/gpt-5.3-codex/max', 'grove-openai/gpt-5.3-codex', 'max'],
 				[
 					'grove-openai/gpt-5.3-codex/xhigh',
 					'grove-openai/gpt-5.3-codex',
