@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.2...v7.5.3) (2026-05-06)
+
+
+### Bug Fixes
+
+* **agents:** preserve 3-segment model IDs (lmstudio/qwen/model-name) ([#772](https://github.com/zaxbysauce/opencode-swarm/issues/772)) ([8664008](https://github.com/zaxbysauce/opencode-swarm/commit/86640080d0e2572ee140831707e0d9e1cbb14358))
+
 ## [7.5.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.1...v7.5.2) (2026-05-06)
 
 
