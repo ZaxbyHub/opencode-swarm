@@ -209,6 +209,21 @@ When you rename a field in a Zod schema, TypeScript interface, or serialized for
 
 Failing to do this causes test fixtures to write stale-format JSON that passes Zod validation for the write but fails on the read path — a silent correctness hazard.
 
+**Agent prompt changes: extra step required.**
+When you edit any agent prompt (`src/agents/*.ts`), tests that assert on prompt content will silently break even if your change appears unrelated. Before pushing:
+1. Identify the text you changed or removed from the prompt.
+2. Grep for that text across all test files:
+   ```bash
+   # bash
+   grep -rn "the exact phrase you removed" tests/ --include="*.ts"
+   # PowerShell
+   Get-ChildItem -Recurse tests/ -Filter "*.test.ts" | Select-String "the exact phrase you removed"
+   ```
+3. Run every test file that matches: `bun --smol test <matching-file> --timeout 30000`.
+4. If any fail, update the assertion to match the new prompt text (or remove it if the concept no longer exists).
+
+Prompt-text tests are especially fragile because they test content, not behaviour — a refactor that seems unrelated (e.g. changing a delegation format example) can silently break assertions checking for specific template strings.
+
 ### Troubleshooting — CI fails on tests that seem unrelated to your changes
 
 If a test fails and you suspect it is pre-existing (unrelated to your changes):

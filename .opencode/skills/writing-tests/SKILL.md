@@ -11,6 +11,30 @@ description: >
 
 > **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`) guard fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. `allow_full_suite` should be used only when intentional and justified in the PR description. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
 
+## ⛔ STOP — Read Before Running Any Tests
+
+**`test_runner` scope safety — one rule, no exceptions:**
+
+| Scope | Files param | Safe? |
+|-------|------------|-------|
+| `'convention'` | any | ✅ Safe |
+| `'graph'` | single file | ✅ Safe |
+| `'graph'` | **multiple files** | ❌ **SESSION KILL** — each file fans out to its own import tree; union blows past MAX_SAFE_TEST_FILES=50 |
+| `'impact'` | multiple files | ❌ **SESSION KILL** — same reason |
+| `'all'` | any | ❌ **Never in agent context** |
+
+**If you need to run tests across multiple source files: use a per-file shell loop, not `test_runner`.**
+
+**Truncated output recovery:** When `bun test` output exceeds the bash tool buffer it is saved to a file whose ID (`tool_abc123...`) cannot be retrieved via `retrieve_summary` (which only accepts `S1`, `S2` format). Workaround — pipe to a temp file instead:
+```powershell
+# PowerShell (Windows)
+bun --smol test tests/unit/agents --timeout 60000 | Out-File "$env:TEMP\test_out.txt"; Get-Content "$env:TEMP\test_out.txt" | Select-Object -Last 30
+```
+```bash
+# bash (Linux/macOS)
+bun --smol test tests/unit/agents --timeout 60000 2>&1 | tee /tmp/test_out.txt | tail -30
+```
+
 ## Framework: bun:test Only
 
 All test files MUST import from `bun:test`:
@@ -301,6 +325,8 @@ if (isWindows) test.skip('reason', () => {});
 
 ## Running Tests
 
+### bash (Linux / macOS)
+
 ```bash
 # Single file
 bun test tests/unit/hooks/scope-guard.test.ts
@@ -315,6 +341,28 @@ for f in tests/unit/tools/*.test.ts; do bun --smol test "$f" --timeout 30000; do
 bun --smol test tests/unit/cli --timeout 120000
 bun --smol test tests/unit/commands tests/unit/config --timeout 120000
 ```
+
+### PowerShell (Windows)
+
+```powershell
+# Single file
+bun test tests/unit/hooks/scope-guard.test.ts
+
+# Batch directory (safe for dirs without mock conflicts)
+bun --smol test tests/unit/hooks --timeout 30000
+
+# Per-file loop (required for tools/services/agents — prevents mock poisoning)
+Get-ChildItem tests/unit/tools/*.test.ts | ForEach-Object { bun --smol test $_.FullName --timeout 30000 }
+
+# CI-equivalent run for batch steps
+bun --smol test tests/unit/cli --timeout 120000
+bun --smol test tests/unit/commands tests/unit/config --timeout 120000
+
+# Capture output to file (avoids truncation when output is large)
+bun --smol test tests/unit/agents --timeout 60000 | Out-File "$env:TEMP\test_out.txt"; Get-Content "$env:TEMP\test_out.txt" | Select-Object -Last 50
+```
+
+**Note:** `for f in ...; do` bash syntax is invalid in PowerShell. Use `Get-ChildItem | ForEach-Object` instead. `Select-String -Last N` is also invalid — use `Select-Object -Last N`.
 
 **Warning:** Running `bun --smol test tests/unit/tools` as a single batch will cause mock poisoning failures. Always use the per-file loop for directories in CI steps 4-6 (tools, services, agents, etc.).
 
@@ -342,6 +390,7 @@ The following test failures are pre-existing and unrelated to mock isolation:
 | `tests/unit/commands/index.test.ts` | Multiple | Command routing issues | Pre-existing |
 | `tests/unit/commands/issue-command.test.ts` | Multiple | Command routing issues | Pre-existing |
 | `src/__tests__/preflight-phase.test.ts` | 3/3 | `loadPlan` called twice per invocation (lines 930 + 545) | Bug exposed by cleanup |
+| `tests/unit/agents/architect-sounding-board-protocol.adversarial.test.ts` | 1 | Token budget threshold `35000` exceeded by prompt growth; soft regression indicator that prompt size needs attention | Pre-existing |
 
 ## Known Cross-module mock.module Locations
 
