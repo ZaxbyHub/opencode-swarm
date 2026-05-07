@@ -196,6 +196,8 @@ git worktree remove "$env:TEMP\repro-check"
 - Fails on `main` too → pre-existing. Document under `## Pre-existing failures` in PR body. Continue.
 - Fails only on your branch → you introduced it. Fix before pushing.
 
+**⚠️ Check your own session history first.** Before documenting anything as pre-existing, confirm you did not fix or update this test earlier in the current session. A test you fixed 20 messages ago is not pre-existing — listing it as such in the table or PR body is incorrect and will be caught in review.
+
 ---
 
 ## Failure Classification

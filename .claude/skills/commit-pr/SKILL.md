@@ -74,7 +74,16 @@ rm -f .swarm/evidence/*.json
 git status --short
 ```
 
-If `git status` shows uncommitted changes, either commit them (if they're part of this PR) or stash them (if they're from a prior session).
+If `git status` shows uncommitted changes, either commit them (if they're part of this PR) or move them aside. **On Windows, `git stash` is unreliable** — it can silently drop untracked files and fail with `EBUSY` errors when file handles are held by running processes. Prefer one of these safer alternatives:
+
+```bash
+# Option A — commit work-in-progress to a temporary branch, then switch back
+git switch -c save/prior-session
+git add -A && git commit -m "chore: save prior session state"
+git switch -c my-feature-branch origin/main
+```
+
+If you must use stash, always pass `--include-untracked` (`git stash push --include-untracked`) to avoid silently losing untracked files, and verify with `git stash show -p` that all expected files were captured before proceeding.
 
 ### Step 1 — Format every commit message correctly
 
@@ -296,7 +305,36 @@ git push --force-with-lease -u origin <branch-name>
 
 **Why:** Interim commits (`fix attempt 1`, `wip`, `address review`) are noise in the project history. A single well-named commit makes `git log`, `git bisect`, and release notes meaningful. The PR title doubles as the squash commit message — both must be correct conventional-commit format.
 
+#### Pushing to a PR branch owned by another agent or bot
+
+When a PR was created by Copilot, another agent, or an automated tool, its head branch (e.g. `copilot/fix-skills-passing-to-subagents`) will not exist in your local repo. Pushing your local branch to a different remote name will create a second branch and leave the PR pointing at the wrong one. Correct pattern:
+
+```bash
+# 1. Identify the PR's actual head branch
+gh pr view <number> --json headRefName --jq '.headRefName'
+# e.g. → copilot/fix-skills-passing-to-subagents
+
+# 2. Fetch it so git knows the remote ref
+git fetch origin copilot/fix-skills-passing-to-subagents
+
+# 3. Push your local branch to the PR's remote branch
+git push origin <your-local-branch>:copilot/fix-skills-passing-to-subagents --force-with-lease
+```
+
+```powershell
+# PowerShell equivalent
+$prBranch = gh pr view <number> --json headRefName --jq '.headRefName'
+git fetch origin $prBranch
+git push origin "<your-local-branch>:$prBranch" --force-with-lease
+```
+
+Verify the PR is now tracking your commit: `gh pr view <number> --json headRefOid` should match `git rev-parse HEAD`.
+
 ### Step 8 — Open the PR with the correct body format
+
+`## Summary` must have 1–3 bullets explaining what and why. `## Test plan` must be a markdown checklist. Do not replace the body of an existing release-please PR — prepend only.
+
+#### bash (Linux / macOS)
 
 ```bash
 gh pr create --title "<type>(<scope>): <description>" --body "$(cat <<'EOF'
@@ -313,7 +351,26 @@ EOF
 )" --base main
 ```
 
-`## Summary` must have 1–3 bullets explaining what and why. `## Test plan` must be a markdown checklist. Do not replace the body of an existing release-please PR — prepend only.
+#### PowerShell (Windows)
+
+`<<'EOF'` heredoc syntax is **invalid in PowerShell** and will produce a parse error. Use a here-string written to a temp file instead:
+
+```powershell
+$body = @"
+## Summary
+- <bullet 1>
+- <bullet 2 if needed>
+- <bullet 3 if needed>
+
+## Test plan
+- [ ] <what you tested>
+- [ ] <additional test step>
+"@
+$body | Out-File "$env:TEMP\pr_body.txt" -Encoding UTF8
+gh pr create --title "<type>(<scope>): <description>" --body-file "$env:TEMP\pr_body.txt" --base main
+```
+
+Note: Inside a PowerShell here-string (`@"..."@`), backticks are literal — no escaping needed. Double-quotes inside the here-string do not need escaping either.
 
 ### Step 9 — Pre-merge checklist
 
