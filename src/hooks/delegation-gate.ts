@@ -876,12 +876,9 @@ export function createDelegationGateHook(
 											targetAgent === 'test_engineer' &&
 											seedEligibleState === 'reviewer_run'
 										) {
-											advanceTaskState(
-												otherSession,
-												seedTaskId,
-												'tests_run',
-												{ emitTelemetry: false },
-											);
+											advanceTaskState(otherSession, seedTaskId, 'tests_run', {
+												emitTelemetry: false,
+											});
 										}
 									} catch (err) {
 										logger.warn(

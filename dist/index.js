@@ -25916,7 +25916,9 @@ function createDelegationGateHook(config2, directory) {
                     if (targetAgent === "reviewer" && (seedEligibleState === "coder_delegated" || seedEligibleState === "pre_check_passed")) {
                       advanceTaskState(otherSession, seedTaskId, "reviewer_run", { emitTelemetry: false });
                     } else if (targetAgent === "test_engineer" && seedEligibleState === "reviewer_run") {
-                      advanceTaskState(otherSession, seedTaskId, "tests_run", { emitTelemetry: false });
+                      advanceTaskState(otherSession, seedTaskId, "tests_run", {
+                        emitTelemetry: false
+                      });
                     }
                   } catch (err2) {
                     warn(`[delegation-gate] toolAfter cross-session stage-b-parallel intermediate: could not advance ${seedTaskId} (${seedEligibleState}) after ${targetAgent}: ${err2 instanceof Error ? err2.message : String(err2)}`);
