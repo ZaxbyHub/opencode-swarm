@@ -953,7 +953,7 @@ describe('write_final_council_evidence adversarial security tests', () => {
 
 			// Should be valid date
 			expect(date.toISOString()).toBe(timestamp);
-			expect(isNaN(date.getTime())).toBe(false);
+			expect(Number.isNaN(date.getTime())).toBe(false);
 		});
 
 		test('entry type is always "final-council"', async () => {
