@@ -25868,6 +25868,20 @@ function createDelegationGateHook(config2, directory) {
                 } catch (err2) {
                   warn(`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err2 instanceof Error ? err2.message : String(err2)}`);
                 }
+              } else {
+                try {
+                  if (targetAgent === "reviewer" && (eligibleState === "coder_delegated" || eligibleState === "pre_check_passed")) {
+                    advanceTaskState(session, taskId, "reviewer_run", {
+                      telemetrySessionId: input.sessionID
+                    });
+                  } else if (targetAgent === "test_engineer" && eligibleState === "reviewer_run") {
+                    advanceTaskState(session, taskId, "tests_run", {
+                      telemetrySessionId: input.sessionID
+                    });
+                  }
+                } catch (err2) {
+                  warn(`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err2 instanceof Error ? err2.message : String(err2)}`);
+                }
               }
             }
             const seedTaskId = getSeedTaskId(session);
@@ -25896,6 +25910,16 @@ function createDelegationGateHook(config2, directory) {
                     });
                   } catch (err2) {
                     warn(`[delegation-gate] toolAfter cross-session stage-b-parallel: could not advance ${seedTaskId} (${seedEligibleState}) → tests_run: ${err2 instanceof Error ? err2.message : String(err2)}`);
+                  }
+                } else {
+                  try {
+                    if (targetAgent === "reviewer" && (seedEligibleState === "coder_delegated" || seedEligibleState === "pre_check_passed")) {
+                      advanceTaskState(otherSession, seedTaskId, "reviewer_run", { emitTelemetry: false });
+                    } else if (targetAgent === "test_engineer" && seedEligibleState === "reviewer_run") {
+                      advanceTaskState(otherSession, seedTaskId, "tests_run", { emitTelemetry: false });
+                    }
+                  } catch (err2) {
+                    warn(`[delegation-gate] toolAfter cross-session stage-b-parallel intermediate: could not advance ${seedTaskId} (${seedEligibleState}) after ${targetAgent}: ${err2 instanceof Error ? err2.message : String(err2)}`);
                   }
                 }
               }

@@ -750,7 +750,9 @@ export function createDelegationGateHook(
 								taskId,
 								targetAgent as 'reviewer' | 'test_engineer',
 							);
+
 							if (hasBothStageBCompletions(session, taskId)) {
+								// Barrier reached: both reviewer and test_engineer have completed.
 								// Advance through reviewer_run → tests_run in a single compound
 								// step so the state machine stays consistent.
 								try {
@@ -768,6 +770,36 @@ export function createDelegationGateHook(
 								} catch (err) {
 									logger.warn(
 										`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
+									);
+								}
+							} else {
+								// Intermediate advancement: advance state immediately when a
+								// single Stage B agent completes, without waiting for the barrier.
+								// This preserves the sequential-equivalent state machine contract:
+								//   coder_delegated → reviewer_run  (when reviewer completes)
+								//   reviewer_run → tests_run        (when test_engineer completes)
+								// The barrier path above handles the case where both complete
+								// while state is still coder_delegated (compound step).
+								try {
+									if (
+										targetAgent === 'reviewer' &&
+										(eligibleState === 'coder_delegated' ||
+											eligibleState === 'pre_check_passed')
+									) {
+										advanceTaskState(session, taskId, 'reviewer_run', {
+											telemetrySessionId: input.sessionID,
+										});
+									} else if (
+										targetAgent === 'test_engineer' &&
+										eligibleState === 'reviewer_run'
+									) {
+										advanceTaskState(session, taskId, 'tests_run', {
+											telemetrySessionId: input.sessionID,
+										});
+									}
+								} catch (err) {
+									logger.warn(
+										`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
 									);
 								}
 							}
@@ -824,6 +856,36 @@ export function createDelegationGateHook(
 									} catch (err) {
 										logger.warn(
 											`[delegation-gate] toolAfter cross-session stage-b-parallel: could not advance ${seedTaskId} (${seedEligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
+										);
+									}
+								} else {
+									// Intermediate cross-session advancement (mirrors same-session logic)
+									try {
+										if (
+											targetAgent === 'reviewer' &&
+											(seedEligibleState === 'coder_delegated' ||
+												seedEligibleState === 'pre_check_passed')
+										) {
+											advanceTaskState(
+												otherSession,
+												seedTaskId,
+												'reviewer_run',
+												{ emitTelemetry: false },
+											);
+										} else if (
+											targetAgent === 'test_engineer' &&
+											seedEligibleState === 'reviewer_run'
+										) {
+											advanceTaskState(
+												otherSession,
+												seedTaskId,
+												'tests_run',
+												{ emitTelemetry: false },
+											);
+										}
+									} catch (err) {
+										logger.warn(
+											`[delegation-gate] toolAfter cross-session stage-b-parallel intermediate: could not advance ${seedTaskId} (${seedEligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
 										);
 									}
 								}
