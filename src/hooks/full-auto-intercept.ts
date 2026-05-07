@@ -1086,7 +1086,14 @@ async function handleEscalation(
 		logger.error(
 			`[full-auto-intercept] ESCALATION (terminate mode) — reason: ${reason}, session: ${sessionID}`,
 		);
-		process.exit(1);
+		// State-based termination (v2 pattern): mark the run as terminated in
+		// durable state so subsequent tool calls are blocked by the permission
+		// hook.  Do NOT use process.exit(1) — that kills the entire OpenCode
+		// host process, violating Invariant #1 (fast, bounded, fail-open).
+		if (sessionID) {
+			terminateFullAutoRun(directory, sessionID, reason);
+		}
+		return true;
 	}
 
 	// In pause mode, return true to signal that escalation was triggered

@@ -68660,7 +68660,10 @@ async function handleEscalation(directory, reason, sessionID, architectOutput, i
   await writeEscalationReport(directory, reason, architectOutput, interactionCount, deadlockCount, phase);
   if (escalationMode === "terminate") {
     error48(`[full-auto-intercept] ESCALATION (terminate mode) — reason: ${reason}, session: ${sessionID}`);
-    process.exit(1);
+    if (sessionID) {
+      terminateFullAutoRun(directory, sessionID, reason);
+    }
+    return true;
   }
   warn(`[full-auto-intercept] ESCALATION (pause mode) — reason: ${reason}, session: ${sessionID}`);
   return true;
