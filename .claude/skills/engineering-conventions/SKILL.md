@@ -51,6 +51,39 @@ The OpenCode `test_runner` tool is for **targeted agent validation** with explic
 - For repo validation, run the shell commands in `contributing.md` / `TESTING.md` directly (per-file isolation loops + tier orchestration).
 - `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Default to `files: [...]` instead.
 
+## Agent prompt strings — escaping pitfalls
+
+Agent prompts in `src/agents/*.ts` are large TypeScript template literals. They frequently contain characters that have special meaning inside template literals and cause silent parse errors if unescaped:
+
+| Character | Inside template literal | Correct escape |
+|-----------|------------------------|----------------|
+| Backtick `` ` `` | Terminates the literal | `` \` `` (single backslash — renders as `` ` `` in output) |
+| `${` | Starts an interpolation | `\${` (single backslash) |
+| Literal backslash `\` | Consumed by escape processing | `\\` (double backslash renders as `\` in output) |
+
+**The most common failure pattern:** A coder adds an inline code example containing backticks to an agent prompt string. The unescaped backtick silently terminates the template literal, producing a `SyntaxError: Unexpected identifier` or `Unexpected token` at the character *after* the backtick — which appears unrelated to the actual cause.
+
+```typescript
+// WRONG — unescaped backtick terminates the template literal
+const PROMPT = `
+Use `bun:test` for all tests.   // ← bare backtick before "bun" closes the literal
+`;
+
+// CORRECT — single backslash before each backtick; renders as Use `bun:test` in output
+const PROMPT = `
+Use \`bun:test\` for all tests.
+`;
+
+// OVER-ESCAPED (also wrong) — triple backslash produces literal \` in the rendered prompt
+const PROMPT = `
+Use \\\`bun:test\\\` for all tests.  // renders as: Use \`bun:test\` (backslashes visible)
+`;
+```
+
+**Detection:** If `bun run build` or `bun --smol test` reports a parse error at a line number that seems far from any recent change, search the surrounding lines for an unescaped backtick inside a template literal.
+
+**Prevention:** After adding any inline code example to an agent prompt, run `bun run build` immediately — the TypeScript compiler catches unescaped backticks as a syntax error before any tests run.
+
 ## The invariant-audit gate (PR-time)
 
 Every PR that touches a relevant area must include an `## Invariant audit` section in its description. The format is in `AGENTS.md` ("Invariant audit required in PRs"). The `commit-pr` skill enforces this gate before push/PR — load it before committing.
