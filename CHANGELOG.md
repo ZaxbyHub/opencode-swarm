@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.6.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.4...v7.6.0) (2026-05-07)
+
+
+### Features
+
+* **agents:** propagate project skills from architect to subagents ([#778](https://github.com/zaxbysauce/opencode-swarm/issues/778)) ([05b6984](https://github.com/zaxbysauce/opencode-swarm/commit/05b6984e740a9cc1f0f557c0c250fabd40ef9625))
+
 ## [7.5.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.3...v7.5.4) (2026-05-06)
 
 
