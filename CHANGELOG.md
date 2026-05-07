@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.7.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.6.1...v7.7.0) (2026-05-07)
+
+
+### Features
+
+* **qa-gate:** add final_council gate + derivePlanId utility + dead code removal ([#786](https://github.com/zaxbysauce/opencode-swarm/issues/786)) ([669fcbd](https://github.com/zaxbysauce/opencode-swarm/commit/669fcbdeecd4164e103eb97b7e0beac6535cd6db))
+
+
+### Bug Fixes
+
+* **gate:** evidence-incomplete no longer hard-blocks task completion when session state confirms gates passed ([#780](https://github.com/zaxbysauce/opencode-swarm/issues/780)) ([7d7d3e1](https://github.com/zaxbysauce/opencode-swarm/commit/7d7d3e19190866d391dcaebcd5b10ca52c530261))
+
 ## [7.6.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.6.0...v7.6.1) (2026-05-07)
 
 
