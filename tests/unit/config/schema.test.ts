@@ -302,22 +302,26 @@ describe('PluginConfigSchema', () => {
 			// default_agent is intentionally optional with NO schema default — see
 			// src/config/schema.ts for the full rationale (issue: multi-swarm
 			// prefixed architects disappearing from OpenCode after v7.3.x).
-			expect(result.data).toEqual({
-				max_iterations: 5,
-				qa_retry_limit: 3,
-				inject_phase_reminders: true,
-				execution_mode: 'balanced',
-				turbo_mode: false,
-				quiet: true,
-				version_check: true,
-				adversarial_testing: { enabled: true, scope: 'all' },
-				full_auto: {
-					enabled: false,
-					max_interactions_per_phase: 50,
-					deadlock_threshold: 3,
-					escalation_mode: 'pause',
-				},
+			// Top-level non-full_auto fields stay strict; full_auto is asserted by
+			// shape (legacy v1 fields exact, v2 fields presence-checked) so future
+			// v2 additions don't break this test.
+			expect(result.data.max_iterations).toBe(5);
+			expect(result.data.qa_retry_limit).toBe(3);
+			expect(result.data.inject_phase_reminders).toBe(true);
+			expect(result.data.execution_mode).toBe('balanced');
+			expect(result.data.turbo_mode).toBe(false);
+			expect(result.data.quiet).toBe(true);
+			expect(result.data.version_check).toBe(true);
+			expect(result.data.adversarial_testing).toEqual({
+				enabled: true,
+				scope: 'all',
 			});
+			expect(result.data.full_auto?.enabled).toBe(false);
+			expect(result.data.full_auto?.max_interactions_per_phase).toBe(50);
+			expect(result.data.full_auto?.deadlock_threshold).toBe(3);
+			expect(result.data.full_auto?.escalation_mode).toBe('pause');
+			expect(result.data.full_auto?.mode).toBe('supervised');
+			expect(result.data.full_auto?.fail_closed).toBe(true);
 			// default_agent is omitted from the output because no schema default
 			// applies — distinguishing omitted from explicit "architect" is a
 			// load-bearing semantic.
@@ -425,12 +429,18 @@ describe('PluginConfigSchema', () => {
 		const result = PluginConfigSchema.safeParse({});
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.data.full_auto).toEqual({
-				enabled: false,
-				max_interactions_per_phase: 50,
-				deadlock_threshold: 3,
-				escalation_mode: 'pause',
-			});
+			// Legacy v1 fields preserved exactly.
+			expect(result.data.full_auto?.enabled).toBe(false);
+			expect(result.data.full_auto?.max_interactions_per_phase).toBe(50);
+			expect(result.data.full_auto?.deadlock_threshold).toBe(3);
+			expect(result.data.full_auto?.escalation_mode).toBe('pause');
+			// v2 fields added: shape exists with safe defaults; do not lock the
+			// full nested object so future v2 additions don't break this test.
+			expect(result.data.full_auto?.mode).toBe('supervised');
+			expect(result.data.full_auto?.fail_closed).toBe(true);
+			expect(result.data.full_auto?.permission_policy?.enabled).toBe(true);
+			expect(result.data.full_auto?.denials?.max_consecutive).toBe(3);
+			expect(result.data.full_auto?.denials?.max_total).toBe(20);
 		}
 	});
 

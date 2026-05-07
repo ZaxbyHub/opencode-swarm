@@ -63,6 +63,7 @@ export {
 	resetSummaryIdCounter,
 } from './tool-summarizer';
 export {
+	composeBlockingHandlers,
 	composeHandlers,
 	estimateTokens,
 	readSwarmFileAsync,

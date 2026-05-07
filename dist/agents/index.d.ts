@@ -3,9 +3,17 @@ import { type PluginConfig } from '../config';
 import { type AgentDefinition } from './architect';
 export type { AgentDefinition } from './architect';
 /**
- * Strip the swarm prefix from an agent name to get the base name.
- * e.g., "local_coder" with prefix "local" → "coder"
- * Returns the name unchanged if no prefix matches.
+ * Strip the user-defined swarm prefix from an agent name to get the base
+ * canonical role.
+ *
+ * The `swarmPrefix` argument is the swarm ID that the USER configured in
+ * their `swarms` map — it is an arbitrary string, NOT one of a known list.
+ * Examples of valid prefixes: "banana", "acme-prod", "customer123",
+ * "mySwarm". The plugin must not assume any fixed set of swarm names.
+ *
+ * Example: agentName="banana_coder" with swarmPrefix="banana" -> "coder".
+ *
+ * Returns the name unchanged if `swarmPrefix` is empty or does not match.
  */
 export declare function stripSwarmPrefix(agentName: string, swarmPrefix?: string): string;
 /**
