@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.7.0",
+    version: "7.8.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -65368,22 +65368,26 @@ __export(exports_runtime, {
 import * as path67 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 async function initTreeSitter() {
-  if (treeSitterInitialized) {
-    return;
-  }
-  const thisDir = path67.dirname(fileURLToPath2(import.meta.url));
-  const isSource = thisDir.replace(/\\/g, "/").endsWith("/src/lang");
-  if (isSource) {
-    await Parser.init();
-  } else {
-    const grammarsDir = getGrammarsDirAbsolute();
-    await Parser.init({
-      locateFile(scriptName) {
-        return path67.join(grammarsDir, scriptName);
+  if (!treeSitterInitPromise) {
+    treeSitterInitPromise = (async () => {
+      const thisDir = path67.dirname(fileURLToPath2(import.meta.url));
+      const isSource = thisDir.replace(/\\/g, "/").endsWith("/src/lang");
+      if (isSource) {
+        await Parser.init();
+      } else {
+        const grammarsDir = getGrammarsDirAbsolute();
+        await Parser.init({
+          locateFile(scriptName) {
+            return path67.join(grammarsDir, scriptName);
+          }
+        });
       }
+    })().catch((err2) => {
+      treeSitterInitPromise = null;
+      throw err2;
     });
   }
-  treeSitterInitialized = true;
+  return treeSitterInitPromise;
 }
 function sanitizeLanguageId(languageId) {
   const normalized = languageId.toLowerCase();
@@ -65466,7 +65470,7 @@ async function isGrammarAvailable(languageId) {
 function clearParserCache() {
   parserCache.clear();
   initializedLanguages.clear();
-  treeSitterInitialized = false;
+  treeSitterInitPromise = null;
 }
 function getInitializedLanguages() {
   return Array.from(initializedLanguages);
@@ -65474,7 +65478,7 @@ function getInitializedLanguages() {
 function getSupportedLanguages() {
   return Object.keys(LANGUAGE_WASM_MAP);
 }
-var parserCache, initializedLanguages, treeSitterInitialized = false, LANGUAGE_WASM_MAP;
+var parserCache, initializedLanguages, treeSitterInitPromise = null, LANGUAGE_WASM_MAP;
 var init_runtime = __esm(() => {
   init_tree_sitter();
   parserCache = new Map;

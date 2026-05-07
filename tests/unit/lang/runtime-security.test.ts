@@ -387,4 +387,38 @@ describe('runtime.ts - Security Verification Tests', () => {
 			expect(parserCache.size).toBe(1);
 		});
 	});
+
+	describe('11. Concurrent initialization safety', () => {
+		it('should handle concurrent loadGrammar calls without multiple Parser.init races', async () => {
+			clearParserCache();
+			// All three race on initTreeSitter() before any completes.
+			// The promise-memoization fix ensures Parser.init() fires exactly once.
+			const [p1, p2, p3] = await Promise.all([
+				loadGrammar('javascript'),
+				loadGrammar('python'),
+				loadGrammar('typescript'),
+			]);
+			expect(p1).toBeDefined();
+			expect(p2).toBeDefined();
+			expect(p3).toBeDefined();
+			expect(parserCache.size).toBeGreaterThanOrEqual(3);
+		});
+
+		it('should resolve all concurrent same-language loads without error', async () => {
+			clearParserCache();
+			// Concurrent calls for the same language all resolve successfully.
+			// Each caller creates its own parser instance (a pre-existing per-language
+			// race not addressed by this fix), but none crash or produce ENOENT.
+			const [p1, p2, p3] = await Promise.all([
+				loadGrammar('javascript'),
+				loadGrammar('javascript'),
+				loadGrammar('javascript'),
+			]);
+			expect(p1).toBeDefined();
+			expect(p2).toBeDefined();
+			expect(p3).toBeDefined();
+			// Cache settles to one entry after all callers complete
+			expect(parserCache.size).toBe(1);
+		});
+	});
 });
