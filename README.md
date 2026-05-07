@@ -98,7 +98,9 @@ Swarm has two independent mode systems:
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
 | **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
-| **Full-Auto** | Depends on critic | Fast | Unattended multi-interaction runs |
+| **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
+
+Full-Auto reduces approval friction by deterministically allowing safe operations (read-only tools, in-scope writes, safe shell) and routing every ambiguous or high-risk action (writes to plugin/build/guardrail paths, network, dependency changes, plan/phase mutations, subagent delegation) through the read-only `critic_oversight` agent before it executes. Denials are returned to the agent as structured signals so it can choose a safer path; repeated denials pause the run; phase completion requires an APPROVED oversight record. See [docs/modes.md](docs/modes.md#full-auto) for `mode`, `permission_policy`, `denials`, and `oversight` config keys, fail-closed semantics, and recovery from a paused run.
 
 **Project mode** — persistent via `execution_mode` config key:
 

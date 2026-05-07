@@ -40,7 +40,7 @@ Session-scoped. Resets when you start a new session.
 
 ### Full-Auto
 
-Designed for autonomous multi-agent orchestration with critic oversight. Turns Swarm into a supervised autopilot — it keeps running across multiple interactions without pausing for confirmation, with the critic agent acting as the safety net.
+Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which bypasses Stage B for non-Tier-3 files), Full-Auto adds a *new* decision layer on top of every existing guardrail.
 
 **Config-gated.** You cannot enable Full-Auto via `/swarm full-auto on` alone. It requires:
 
@@ -48,14 +48,140 @@ Designed for autonomous multi-agent orchestration with critic oversight. Turns S
 {
   "full_auto": {
     "enabled": true,
-    "max_interactions_per_phase": 50
+    "mode": "supervised",
+    "fail_closed": true,
+    "max_interactions_per_phase": 50,
+    "deadlock_threshold": 3,
+    "escalation_mode": "pause",
+    "permission_policy": {
+      "enabled": true,
+      "trusted_roots": ["."],
+      "trusted_domains": [],
+      "protected_paths": [".git", "package.json"],
+      "allow_defaults": true
+    },
+    "denials": {
+      "max_consecutive": 3,
+      "max_total": 20,
+      "on_limit": "pause"
+    },
+    "oversight": {
+      "on_plan_change": true,
+      "on_task_completion": false,
+      "on_phase_boundary": true,
+      "on_high_risk_action": true,
+      "on_subagent_return_warning": true,
+      "every_tool_calls": 25,
+      "every_architect_turns": 5,
+      "every_minutes": 20
+    }
   }
 }
 ```
 
-**Safety counters:** Full-Auto tracks `fullAutoInteractionCount` and `fullAutoDeadlockCount` per phase. When `max_interactions_per_phase` (default 50) is exceeded, the escalation_mode kicks in (pause or terminate based on config).
+#### Modes
 
-**When to use:** long-running phases you want to run unattended. Pair with Balanced or Strict `execution_mode` for safety.
+- `assisted` — least invasive. The deterministic policy still runs, but
+  task completion does not require critic verification.
+- `supervised` (default) — the deterministic policy + critic escalation for
+  ambiguous/high-risk actions. Phase boundaries always require critic approval.
+- `strict` — like supervised, but every task completion also requires critic
+  verification.
+
+#### Permission policy
+
+The deterministic classifier handles obvious cases without an LLM call:
+
+- **Allow** — read-only swarm and search tools, evidence/status reads,
+  in-scope writes by coder, plan/evidence pathless tools.
+- **Deny** — writes outside the project root, writes outside declared coder
+  scope, direct writes to `.git`, exfiltration-like network actions,
+  destructive shell, production deploys/migrations/force-push, permission
+  grants, secret access, attempts to disable Full-Auto.
+- **Escalate to critic** — package.json / lockfile changes, plugin/build
+  config touches, guardrail/delegation/plan-ledger/evidence/tool-registry
+  changes, shell commands not in the deterministic safe set, web/network
+  fetches to non-trusted domains, dependency mutations, Task delegations,
+  `phase_complete`, `update_task_status(completed)` (strict mode), tool
+  output injection followed by a risky action, repeated denials, plan
+  mutation after approval.
+- **Escalate to human** — irreversible external operations, production
+  infrastructure changes, or critic verdicts of `ESCALATE_TO_HUMAN`.
+
+#### Deny-and-continue behavior
+
+A denial is returned to the agent as a structured error so it can choose a
+safer path (declare scope, switch to a read-only verification, ask for
+approval). Denials accumulate against two thresholds:
+
+- `denials.max_consecutive` (default 3) — pause when N consecutive denials
+  occur without an allowed action in between.
+- `denials.max_total` (default 20) — pause when the cumulative session
+  denial count is reached.
+
+`denials.on_limit` controls whether the run is paused or terminated.
+
+#### Prompt-injection scanner
+
+Tool output from `web_search`, `webfetch`, `fetch`, `doc_extract`, `doc_scan`,
+`gitingest`, `extract_code_blocks`, `retrieve_summary`, `search`, `read`, and
+`view` is inspected for instruction-override, system-role-override,
+credential-request, exfiltration, guardrail-disable, and curl-pipe-shell
+patterns. Detections write a `full_auto_input_warning` event and stash a
+warning on the session. The next risky action (shell, network, secret-read)
+escalates to the critic instead of using the deterministic policy.
+
+#### Subagent outbound and return checks
+
+- **Outbound** — Task delegation requires a registered subagent, declared
+  scope (for coder), and triggers an advisory if the prompt mentions a
+  protected path.
+- **Return** — The result text is scanned for skipped tests, tool timeouts,
+  scope changes, "instructions from external content", missing evidence,
+  and out-of-scope file generation. Severe categories pause the run.
+
+#### Critic escalation triggers
+
+A critic dispatch happens for: tool actions classified as escalate, plan
+mutation after approval, `phase_complete`, task completion (strict),
+subagent-return warnings, periodic cadence (every N tool calls / architect
+turns / minutes), and on near-limit consecutive denials.
+
+#### Phase approval gate
+
+When Full-Auto v2 is active, `phase_complete` requires an APPROVED
+`full_auto_oversight` evidence record at
+`.swarm/evidence/{phase}/full-auto-*.json`. Stale (>24h), missing, or
+non-APPROVED records block. Turbo does NOT bypass this gate.
+
+#### Fail-closed behavior
+
+When `fail_closed: true` (default), the permission/oversight layer pauses
+the run on any of: missing `opencodeClient`, critic dispatch failure,
+unparseable critic response, severe subagent return warning, denial
+threshold reached.
+
+#### Recovery
+
+Paused or terminated runs are durable in `.swarm/full-auto-state.json`. To
+resume:
+
+```bash
+/swarm full-auto on    # creates a fresh running record for the session
+```
+
+Inspect the file to see `pauseReason` / `terminateReason` and the denial
+history. Address the underlying cause before re-enabling.
+
+#### Legacy v1 fields
+
+`max_interactions_per_phase`, `deadlock_threshold`, `escalation_mode`, and
+`critic_model` continue to control the reactive intercept that fires on
+architect text patterns. v1 and v2 layers run together — v2 verdicts are
+also mirrored from v1 dispatches when a durable run exists.
+
+**When to use:** long-running phases you want to run unattended. Pair with
+Balanced or Strict `execution_mode` for safety.
 
 ### Combining Turbo + Full-Auto
 
@@ -119,7 +245,7 @@ The README table names three safety tiers for readability. In the code, the `exe
 No. Tier 3 patterns (`auth*`, `crypto*`, `security*.ts`, etc.) always run full review regardless of Turbo. See `src/tools/update-task-status.ts:98-109` for the authoritative list.
 
 **Does Full-Auto bypass the critic?**  
-No. Full-Auto keeps the critic agent active. It's the critic's job to pause the architect if it detects drift or scope expansion. See `src/state.ts:216-217` for the interaction/deadlock counters.
+No. Full-Auto v2 *increases* critic involvement: every escalate-class action gets a dedicated read-only critic verification before it executes, and phase boundaries require an APPROVED `full_auto_oversight` evidence record before `phase_complete` will succeed. Reactive intercept verdicts are also mirrored into the v2 evidence pipeline when a durable run is active. See `src/full-auto/oversight.ts` and `src/full-auto/phase-approval.ts` for the dispatch and gate.
 
 **How do I tell what mode is active?**  
 `/swarm status` shows session modes. `/swarm config` shows the resolved `execution_mode`.

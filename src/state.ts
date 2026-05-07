@@ -362,6 +362,15 @@ export const swarmState = {
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
 
+	/**
+	 * All generated agent names registered with OpenCode at plugin init.
+	 * Used by Full-Auto v2 delegation guard to apply strict registry-aware
+	 * canonical-role extraction (so user-supplied prose like
+	 * `not_an_architect` cannot collapse to `architect` via suffix-only
+	 * matching). Populated by `src/index.ts` after `createAgents`.
+	 */
+	generatedAgentNames: [] as string[],
+
 	/** Last known context budget percentage (0-100), updated by system-enhancer */
 	lastBudgetPct: 0,
 
@@ -394,6 +403,7 @@ export function resetSwarmState(): void {
 	swarmState.opencodeClient = null;
 	swarmState.curatorInitAgentNames = [];
 	swarmState.curatorPhaseAgentNames = [];
+	swarmState.generatedAgentNames = [];
 	_rehydrationCache = null;
 	// Full Auto Mode (Phase 4)
 	swarmState.fullAutoEnabledInConfig = false;

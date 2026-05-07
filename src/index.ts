@@ -28,6 +28,7 @@ import {
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
 } from './config/schema';
+import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
 	consolidateSystemMessages,
@@ -57,6 +58,9 @@ import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
+import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
+import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
+import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
 import { deleteStoredInputArgs } from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
@@ -365,6 +369,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	swarmState.curatorPhaseAgentNames = Object.keys(agents).filter(
 		(k) => k === 'curator_phase' || k.endsWith('_curator_phase'),
 	);
+	// Populate the generated-agent registry used by Full-Auto v2's strict
+	// canonical-role extraction (resolveGeneratedAgentRole). Without this,
+	// user-supplied prose like `not_an_architect` could collapse to
+	// `architect` via suffix-only matching and slip past the delegation
+	// guard (adversarial review C1 fix).
+	swarmState.generatedAgentNames = Object.keys(agents);
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
@@ -449,6 +459,30 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		config,
 		ctx.directory,
 	);
+
+	// Full-Auto v2 hooks: permission, input-probe, delegation. Each is a no-op
+	// when full_auto.enabled is false. Hook ordering (tool.execute.before):
+	//   1. guardrails (existing)
+	//   2. scope-guard (existing)
+	//   3. delegation-gate (existing)
+	//   4. full-auto-permission (NEW — adds an additional decision layer)
+	//   5. full-auto-delegation outbound (NEW — Task tool only)
+	// Hook ordering (tool.execute.after):
+	//   - full-auto-input-probe runs after guardrails/delegation-gate so it can
+	//     observe tool output AFTER existing safety has cleaned it up.
+	//   - full-auto-delegation return check runs alongside.
+	const fullAutoPermissionHook = createFullAutoPermissionHook({
+		config,
+		directory: ctx.directory,
+	});
+	const fullAutoInputProbeHook = createFullAutoInputProbeHook({
+		config,
+		directory: ctx.directory,
+	});
+	const fullAutoDelegationHook = createFullAutoDelegationHook({
+		config,
+		directory: ctx.directory,
+	});
 
 	// CC command intercept: handle Claude Code command interception
 	const ccCommandInterceptHook = createCcCommandInterceptHook({});
@@ -1164,14 +1198,46 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				}
 			}
 
-			// Guardrails runs first WITHOUT safeHook — throws must propagate to block tools
+			// ---------------------------------------------------------------
+			// FAIL-CLOSED CHAIN — DO NOT wrap any of the calls below in
+			// safeHook() or composeHandlers(). Both helpers swallow throws,
+			// which would silently disable the policy and let the tool run
+			// anyway. The OpenCode host treats a propagated throw from
+			// `tool.execute.before` as a tool rejection.
+			//
+			// The semantically equivalent `composeBlockingHandlers` helper in
+			// src/hooks/utils.ts exists for new fail-closed compositions. The
+			// raw-await pattern below is preserved so each hook's role is
+			// individually documented for future maintainers.
+			//
+			// Regression test: tests/unit/hooks/hook-composition.test.ts
+			// asserts every callsite below uses raw `await` (not safeHook).
+			// ---------------------------------------------------------------
+
+			// 1. Guardrails authority enforcement (FAIL-CLOSED).
+			//    Throws must propagate to block tools.
 			await guardrailsHooks.toolBefore(input, output);
 
-			// Watchdog: scope-guard runs after guardrails WITHOUT safeHook — throws must propagate to block tools
+			// 2. Scope-guard watchdog (FAIL-CLOSED).
+			//    Blocks out-of-scope writes by non-architect agents.
 			await scopeGuardHook.toolBefore(input, output);
 
-			// Reviewer gate enforcement — throws must propagate to block coder re-delegation
+			// 3. Reviewer gate (FAIL-CLOSED).
+			//    Blocks coder re-delegation when the prior reviewer round
+			//    has not produced an explicit pass/decision.
 			await delegationGateHooks.toolBefore(input, output);
+
+			// 4. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
+			//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
+			//    delegations (unknown canonical role, missing coder scope).
+			await fullAutoDelegationHook.toolBefore(input, output);
+
+			// 5. Full-Auto v2 permission policy (FAIL-CLOSED).
+			//    Throws FULL_AUTO_DENY / FULL_AUTO_BLOCKED / FULL_AUTO_PAUSED /
+			//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
+			//    critic when escalate_critic is needed.
+			await fullAutoPermissionHook.toolBefore(input, output);
+			// ---------------------------------------------------------------
 
 			// v6.29: One-time 50% context pressure warning
 			if (swarmState.lastBudgetPct >= 50) {
@@ -1188,7 +1254,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				}
 			}
 
-			// Activity tracking runs second WITH safeHook — errors should not propagate
+			// ADVISORY — activity tracking is observer-only.
+			// Wrapped in safeHook intentionally: errors here must NOT block
+			// the tool call that the fail-closed chain above has already
+			// approved.
 			await safeHook(activityHooks.toolBefore)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
@@ -1230,6 +1299,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					console.error(
 						`[DIAG] toolAfter delegationGate done tool=${_toolName}`,
 					);
+
+				// Full-Auto v2: prompt-injection probe + subagent return check.
+				// Both are non-throwing observers (errors swallowed by safeHook).
+				await safeHook(fullAutoInputProbeHook.toolAfter)(input, output);
+				await safeHook(fullAutoDelegationHook.toolAfter)(input, output);
 
 				// Adversarial semantic pattern detection on agent output
 				if (isTaskTool && typeof output.output === 'string') {
@@ -1455,6 +1529,34 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
 					);
 				await delegationHandler(input, output);
+
+				// Full-Auto v2 cadence: increment architect-turn counter and, when a
+				// cadence trigger fires (every N turns / minutes / near-limit
+				// denials), dispatch a critic oversight call in the background.
+				// Critic-internal tool calls run on ephemeral sessions that have
+				// no durable run state, so they short-circuit inside
+				// tickAndMaybeDispatchCadence and do NOT recurse.
+				try {
+					if (
+						config.full_auto?.enabled === true &&
+						input?.sessionID &&
+						input?.agent
+					) {
+						const stripped = stripKnownSwarmPrefix(String(input.agent));
+						if (stripped === 'architect') {
+							tickAndMaybeDispatchCadence(
+								ctx.directory,
+								input.sessionID,
+								'architectTurns',
+								config,
+								{ activeAgent: String(input.agent) },
+							);
+						}
+					}
+				} catch {
+					// Best-effort — never block chat.message.
+				}
+
 				if (process.env.DEBUG_SWARM)
 					console.error(
 						`[DIAG] chat.message DONE agent=${input.agent ?? 'none'}`,

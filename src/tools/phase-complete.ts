@@ -18,6 +18,7 @@ import {
 } from '../config/schema';
 import { getEffectiveGates, getProfile } from '../db/qa-gate-profile.js';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
+import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import {
 	applyCuratorKnowledgeUpdates,
 	runCuratorPhase,
@@ -1485,6 +1486,35 @@ export async function executePhaseComplete(
 					fcError,
 				);
 			}
+		}
+	}
+
+	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
+	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
+	// the autonomous-oversight approval — fail-closed by default. The gate is
+	// a no-op when full_auto.enabled is false or when no durable Full-Auto run
+	// is active for this session. Runs after Gate 6 (Final Council) so that
+	// last-phase completions are gated by both council approval (when
+	// final_council is enabled) AND Full-Auto v2 approval (when active).
+	{
+		const approval = verifyFullAutoPhaseApproval(dir, sessionID, phase, config);
+		if (!approval.ok) {
+			return JSON.stringify(
+				{
+					success: false,
+					phase,
+					status: 'blocked' as const,
+					reason: 'FULL_AUTO_APPROVAL_REQUIRED',
+					message: `Phase ${phase} cannot be completed: ${approval.reason ?? 'Full-Auto v2 approval missing'}`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [
+						`Full-Auto v2 active. Re-run critic_oversight with trigger_source=phase_boundary so an APPROVED record is written to .swarm/evidence/${phase}/full-auto-*.json before calling phase_complete again.`,
+					],
+				},
+				null,
+				2,
+			);
 		}
 	}
 

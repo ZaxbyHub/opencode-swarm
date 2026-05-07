@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ALL_AGENT_NAMES } from './constants';
+import { type AgentName, ALL_AGENT_NAMES } from './constants';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
@@ -9,86 +9,136 @@ import { ALL_AGENT_NAMES } from './constants';
  */
 export const _internals: {
 	stripKnownSwarmPrefix: typeof stripKnownSwarmPrefix;
+	getCanonicalAgentRole: typeof getCanonicalAgentRole;
 	resolveGuardrailsConfig: typeof resolveGuardrailsConfig;
-} = { stripKnownSwarmPrefix, resolveGuardrailsConfig };
+} = {
+	stripKnownSwarmPrefix,
+	getCanonicalAgentRole,
+	resolveGuardrailsConfig,
+};
 
-// Known Swarm prefixes for multi-tenant/variant agent names
-// These are stripped to get the canonical agent name
-const KNOWN_SWARM_PREFIXES = [
-	'paid',
-	'local',
-	'cloud',
-	'enterprise',
-	'mega',
-	'default',
-	'custom',
-	'team',
-	'project',
-	'swarm',
-	'synthetic',
-];
-
-// Supported separators between prefix and agent name
-const SEPARATORS = ['_', '-', ' '];
+// Supported separators between an arbitrary, user-defined swarm ID prefix
+// and the canonical role suffix that the plugin understands. Generated
+// agent names are produced by the swarm registry; the plugin must not make
+// assumptions about which prefix strings users choose.
+const SEPARATORS = ['_', '-', ' '] as const;
 
 /**
- * Strips known Swarm prefixes from agent names to get the canonical agent name.
- *
- * Strategy:
- * 1. First try stripping known prefixes from the front (e.g., 'paid_architect' -> 'architect')
- * 2. If that doesn't yield a known agent, check if the name ENDS with a known agent name
- *    (e.g., 'not-an-architect' -> 'architect', 'team-alpha-reviewer' -> 'reviewer')
- *
- * Supports underscore, hyphen, and space separators.
- * Case-insensitive matching, but returns the canonical lowercase agent name.
- *
- * @param agentName - The potentially prefixed agent name
- * @returns The canonical agent name, or the original if no known agent found
+ * Pre-sorted canonical roles, longest first. This is mandatory so compound
+ * roles like `critic_oversight` win over `critic`, and `test_engineer` wins
+ * over `engineer`/etc. when matched as a suffix. Computed once at module
+ * load — `ALL_AGENT_NAMES` is `as const`-readonly so this is safe.
  */
-export function stripKnownSwarmPrefix(agentName: string): string {
-	if (!agentName) return agentName;
+const CANONICAL_ROLES_LONGEST_FIRST: readonly string[] = [
+	...(ALL_AGENT_NAMES as readonly string[]),
+].sort((a, b) => b.length - a.length);
 
+const CANONICAL_ROLES_SET: ReadonlySet<string> = new Set(
+	ALL_AGENT_NAMES as readonly string[],
+);
+
+/**
+ * Type guard: returns true when `role` is a canonical agent role recognized
+ * by the plugin (e.g. "architect", "coder", "critic_oversight"). User-defined
+ * swarm IDs must NOT be treated as canonical roles.
+ */
+export function isKnownCanonicalRole(role: string): role is AgentName {
+	if (!role) return false;
+	return CANONICAL_ROLES_SET.has(role);
+}
+
+/**
+ * Extract the canonical agent role from a generated agent name, using
+ * suffix-based matching with longest-suffix-wins.
+ *
+ * Generated agent names have the shape `<arbitrary user-defined swarm ID>
+ * <separator> <canonical role>`. The swarm ID is opaque to the plugin —
+ * it can be anything the user configures (e.g. `banana`, `acme-prod`,
+ * `customer123`). Only the canonical role suffix is plugin-defined.
+ *
+ * Behavior:
+ *   - If `agentName` is itself a canonical role, return it unchanged.
+ *   - Else, find the longest canonical role `R` such that `agentName`
+ *     ends with `<sep><R>` for some separator in {"_", "-", " "}; return `R`.
+ *   - Else, return `agentName` unchanged (caller can detect "no role found"
+ *     by comparing the result to `agentName`, or by passing the result
+ *     through `isKnownCanonicalRole`).
+ *
+ * Optional `generatedAgentNames` argument: when supplied (e.g. from
+ * `getAgentConfigs` output at plugin init), the function ONLY infers a role
+ * for names actually present in that registry. Bare user-supplied strings
+ * like `not_an_architect` are NOT treated as roles unless they appear in
+ * the generated-name set. Callers that need this strict behavior should
+ * use `resolveGeneratedAgentRole` instead.
+ *
+ * Case-insensitive on the input; the returned role is the canonical
+ * lowercase form from `ALL_AGENT_NAMES`.
+ */
+export function getCanonicalAgentRole(
+	agentName: string,
+	generatedAgentNames?: Iterable<string>,
+): AgentName | string {
+	if (!agentName) return agentName;
 	const normalized = agentName.toLowerCase();
 
-	// Strategy 1: Strip known prefixes from the front
-	let stripped = normalized;
-	let previous = '';
+	// 1. Exact canonical match always wins, regardless of registry.
+	if (CANONICAL_ROLES_SET.has(normalized)) {
+		return normalized as AgentName;
+	}
 
-	while (stripped !== previous) {
-		previous = stripped;
-		for (const prefix of KNOWN_SWARM_PREFIXES) {
-			for (const sep of SEPARATORS) {
-				const prefixWithSep = prefix + sep;
-				if (stripped.startsWith(prefixWithSep)) {
-					stripped = stripped.slice(prefixWithSep.length);
-					break;
-				}
-			}
-			if (stripped !== previous) break;
+	// 2. If a registry was supplied, the strict path: only infer role for
+	//    names actually generated by the swarm registry.
+	if (generatedAgentNames) {
+		const registry = new Set<string>();
+		for (const n of generatedAgentNames) registry.add(n.toLowerCase());
+		if (!registry.has(normalized)) {
+			return agentName;
 		}
 	}
 
-	// Check if stripped result is a known agent name
-	if ((ALL_AGENT_NAMES as readonly string[]).includes(stripped)) {
-		return stripped;
-	}
-
-	// Strategy 2: Check if the name ENDS with a known agent name (with separator)
-	for (const agent of ALL_AGENT_NAMES) {
+	// 3. Suffix scan: longest canonical role wins. We require a separator
+	//    BEFORE the role so unrelated prose like `oversight` (the word) does
+	//    not collapse arbitrary names to canonical roles.
+	for (const role of CANONICAL_ROLES_LONGEST_FIRST) {
 		for (const sep of SEPARATORS) {
-			const suffix = sep + agent;
+			const suffix = sep + role;
 			if (normalized.endsWith(suffix)) {
-				return agent;
+				return role as AgentName;
 			}
-		}
-		// Also check if it exactly equals an agent name (already handled but for completeness)
-		if (normalized === agent) {
-			return agent;
 		}
 	}
 
-	// Return original if no known agent found
 	return agentName;
+}
+
+/**
+ * Strict variant of {@link getCanonicalAgentRole}: only infers a canonical
+ * role when the agent name is actually present in the supplied generated-
+ * name registry, OR is itself a canonical role. Use this from callers that
+ * must avoid treating arbitrary user-supplied strings as roles.
+ */
+export function resolveGeneratedAgentRole(
+	agentName: string,
+	generatedAgentNames: Iterable<string>,
+): AgentName | string {
+	return _internals.getCanonicalAgentRole(agentName, generatedAgentNames);
+}
+
+/**
+ * Backward-compatible alias for {@link getCanonicalAgentRole}. The previous
+ * implementation stripped a hardcoded list of "known swarm prefixes" from
+ * the front of the agent name. That approach was wrong by design: swarm
+ * IDs are arbitrary user-defined strings — the plugin cannot enumerate
+ * them. The new implementation does suffix-based canonical role extraction
+ * (see `getCanonicalAgentRole`) which works for ANY user-defined swarm ID.
+ *
+ * Existing tests that pass `synthetic_reviewer` / `mega_architect` /
+ * `cloud_critic_oversight` / etc. continue to pass because those names
+ * end with `<sep><canonical role>`, which is exactly what the suffix
+ * extractor matches.
+ */
+export function stripKnownSwarmPrefix(agentName: string): string {
+	return getCanonicalAgentRole(agentName);
 }
 
 // Agent override configuration
@@ -1330,6 +1380,9 @@ export const PluginConfigSchema = z.object({
 	version_check: z.boolean().default(true).optional(),
 
 	// Full-auto mode — autonomous multi-agent orchestration with critic oversight
+	// v2: adds permission policy, denial accounting, and oversight cadence triggers
+	// while preserving the legacy v1 fields (max_interactions_per_phase, deadlock_threshold,
+	// escalation_mode, critic_model) so existing configs continue to load unchanged.
 	full_auto: z
 		.object({
 			enabled: z.boolean().default(false),
@@ -1337,14 +1390,155 @@ export const PluginConfigSchema = z.object({
 			max_interactions_per_phase: z.number().int().min(5).max(200).default(50),
 			deadlock_threshold: z.number().int().min(2).max(10).default(3),
 			escalation_mode: z.enum(['pause', 'terminate']).default('pause'),
+			// v2 additions — all optional with safe defaults so legacy configs are unaffected.
+			mode: z.enum(['assisted', 'supervised', 'strict']).default('supervised'),
+			fail_closed: z.boolean().default(true),
+			permission_policy: z
+				.object({
+					enabled: z.boolean().default(true),
+					trusted_roots: z.array(z.string()).default(['.']),
+					trusted_domains: z.array(z.string()).default([]),
+					protected_paths: z
+						.array(z.string())
+						.default([
+							'.git',
+							'.github/workflows',
+							'.swarm',
+							'package.json',
+							'package-lock.json',
+							'bun.lock',
+							'CHANGELOG.md',
+							'.release-please-manifest.json',
+							'release-please-config.json',
+							'src/index.ts',
+							'src/hooks/guardrails.ts',
+							'src/hooks/delegation-gate.ts',
+							'src/hooks/scope-guard.ts',
+							'src/hooks/full-auto-permission.ts',
+							'src/hooks/full-auto-intercept.ts',
+							'src/full-auto',
+							'src/config/schema.ts',
+							'src/config/constants.ts',
+							'src/tools/phase-complete.ts',
+							'dist',
+						]),
+					allow_defaults: z.boolean().default(true),
+				})
+				.default(() => ({
+					enabled: true,
+					trusted_roots: ['.'],
+					trusted_domains: [],
+					protected_paths: [
+						'.git',
+						'.github/workflows',
+						'.swarm',
+						'package.json',
+						'package-lock.json',
+						'bun.lock',
+						'CHANGELOG.md',
+						'.release-please-manifest.json',
+						'release-please-config.json',
+						'src/index.ts',
+						'src/hooks/guardrails.ts',
+						'src/hooks/delegation-gate.ts',
+						'src/hooks/scope-guard.ts',
+						'src/hooks/full-auto-permission.ts',
+						'src/hooks/full-auto-intercept.ts',
+						'src/full-auto',
+						'src/config/schema.ts',
+						'src/config/constants.ts',
+						'src/tools/phase-complete.ts',
+						'dist',
+					],
+					allow_defaults: true,
+				})),
+			denials: z
+				.object({
+					max_consecutive: z.number().int().min(1).max(50).default(3),
+					max_total: z.number().int().min(1).max(500).default(20),
+					on_limit: z.enum(['pause', 'terminate']).default('pause'),
+				})
+				.default(() => ({
+					max_consecutive: 3,
+					max_total: 20,
+					on_limit: 'pause' as const,
+				})),
+			oversight: z
+				.object({
+					on_plan_change: z.boolean().default(true),
+					// strict mode flips this to true automatically at runtime; default
+					// supervised stays false unless the action is high-risk.
+					on_task_completion: z.boolean().default(false),
+					on_phase_boundary: z.boolean().default(true),
+					on_high_risk_action: z.boolean().default(true),
+					on_subagent_return_warning: z.boolean().default(true),
+					every_tool_calls: z.number().int().min(0).max(10000).default(25),
+					every_architect_turns: z.number().int().min(0).max(1000).default(5),
+					every_minutes: z.number().int().min(0).max(1440).default(20),
+				})
+				.default(() => ({
+					on_plan_change: true,
+					on_task_completion: false,
+					on_phase_boundary: true,
+					on_high_risk_action: true,
+					on_subagent_return_warning: true,
+					every_tool_calls: 25,
+					every_architect_turns: 5,
+					every_minutes: 20,
+				})),
 		})
 		.optional()
-		.default({
+		.default(() => ({
 			enabled: false,
 			max_interactions_per_phase: 50,
 			deadlock_threshold: 3,
-			escalation_mode: 'pause',
-		}),
+			escalation_mode: 'pause' as const,
+			mode: 'supervised' as const,
+			fail_closed: true,
+			permission_policy: {
+				enabled: true,
+				trusted_roots: ['.'],
+				trusted_domains: [],
+				protected_paths: [
+					'.git',
+					'.github/workflows',
+					'.swarm',
+					'package.json',
+					'package-lock.json',
+					'bun.lock',
+					'CHANGELOG.md',
+					'.release-please-manifest.json',
+					'release-please-config.json',
+					'src/index.ts',
+					'src/hooks/guardrails.ts',
+					'src/hooks/delegation-gate.ts',
+					'src/hooks/scope-guard.ts',
+					'src/hooks/full-auto-permission.ts',
+					'src/hooks/full-auto-intercept.ts',
+					'src/full-auto',
+					'src/config/schema.ts',
+					'src/config/constants.ts',
+					'src/tools/phase-complete.ts',
+					'dist',
+				],
+				allow_defaults: true,
+			},
+			denials: {
+				max_consecutive: 3,
+				max_total: 20,
+				on_limit: 'pause' as const,
+			},
+			oversight: {
+				on_plan_change: true,
+				on_task_completion: false,
+				on_phase_boundary: true,
+				on_high_risk_action: true,
+				on_subagent_return_warning: true,
+				every_tool_calls: 25,
+				every_architect_turns: 5,
+				every_minutes: 20,
+			},
+		})),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

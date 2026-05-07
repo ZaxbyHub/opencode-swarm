@@ -13,9 +13,10 @@ export function handleAgentsCommand(
 		return 'No agents registered.';
 	}
 
-	// Compute registered subagent base names (stripped of known swarm prefixes)
-	// so prefixed names (e.g. "mega_coder", "local_reviewer") correctly match
-	// ALL_SUBAGENT_NAMES base names without appearing as unregistered.
+	// Compute registered subagent base names by extracting the canonical
+	// role suffix from each generated agent name. Generated names have an
+	// arbitrary user-defined swarm prefix (e.g. "bananaSwarm_coder",
+	// "acme-prod_reviewer"); the plugin extracts just the canonical role.
 	const allAgentKeys = entries.map(([key]) => key);
 	const registeredBaseNames = allAgentKeys
 		.map((key) => stripKnownSwarmPrefix(key))

@@ -18,4 +18,4 @@ export { createRepoGraphBuilderHook, type RepoGraphBuilderHook, } from './repo-g
 export { buildApprovedReceipt, buildReceiptContextForDrift, buildRejectedReceipt, persistReviewReceipt, readAllReceipts, readReceiptsByScopeHash, } from './review-receipt';
 export { createSystemEnhancerHook } from './system-enhancer';
 export { createToolSummarizerHook, resetSummaryIdCounter, } from './tool-summarizer';
-export { composeHandlers, estimateTokens, readSwarmFileAsync, safeHook, validateSwarmPath, } from './utils';
+export { composeBlockingHandlers, composeHandlers, estimateTokens, readSwarmFileAsync, safeHook, validateSwarmPath, } from './utils';

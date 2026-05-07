@@ -269,6 +269,14 @@ export declare const swarmState: {
      * name at call time by matching the active session's agent prefix. */
     curatorInitAgentNames: string[];
     curatorPhaseAgentNames: string[];
+    /**
+     * All generated agent names registered with OpenCode at plugin init.
+     * Used by Full-Auto v2 delegation guard to apply strict registry-aware
+     * canonical-role extraction (so user-supplied prose like
+     * `not_an_architect` cannot collapse to `architect` via suffix-only
+     * matching). Populated by `src/index.ts` after `createAgents`.
+     */
+    generatedAgentNames: string[];
     /** Last known context budget percentage (0-100), updated by system-enhancer */
     lastBudgetPct: number;
     /** Per-session guardrail state — keyed by sessionID */

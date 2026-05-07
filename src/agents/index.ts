@@ -47,9 +47,17 @@ let _swarmAgents:
 	| undefined;
 
 /**
- * Strip the swarm prefix from an agent name to get the base name.
- * e.g., "local_coder" with prefix "local" → "coder"
- * Returns the name unchanged if no prefix matches.
+ * Strip the user-defined swarm prefix from an agent name to get the base
+ * canonical role.
+ *
+ * The `swarmPrefix` argument is the swarm ID that the USER configured in
+ * their `swarms` map — it is an arbitrary string, NOT one of a known list.
+ * Examples of valid prefixes: "banana", "acme-prod", "customer123",
+ * "mySwarm". The plugin must not assume any fixed set of swarm names.
+ *
+ * Example: agentName="banana_coder" with swarmPrefix="banana" -> "coder".
+ *
+ * Returns the name unchanged if `swarmPrefix` is empty or does not match.
  */
 export function stripSwarmPrefix(
 	agentName: string,
@@ -80,8 +88,8 @@ function getModelForAgent(
 	swarmPrefix?: string,
 	quiet?: boolean,
 ): string {
-	// Strip swarm prefix if present (e.g., "local_coder" -> "coder")
-	// Only strip if we have a known swarm prefix, not just any underscore
+	// Strip the user-configured swarm prefix to get the canonical role
+	// (e.g., "banana_coder" with swarmPrefix="banana" -> "coder").
 	const baseAgentName = stripSwarmPrefix(agentName, swarmPrefix);
 
 	// 1. Check explicit override
