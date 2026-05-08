@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.9.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.8.1...v7.9.0) (2026-05-08)
+
+
+### Features
+
+* **commands:** audit remediation — registration, UX, error handling, and observability ([#796](https://github.com/zaxbysauce/opencode-swarm/issues/796)) ([9d2d194](https://github.com/zaxbysauce/opencode-swarm/commit/9d2d194eb425966e35c2d35dce9b8f8f9191246a))
+
 ## [7.8.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.8.0...v7.8.1) (2026-05-08)
 
 
