@@ -30,7 +30,9 @@ import { createDesignerAgent } from './designer';
 import { createDocsAgent } from './docs';
 import { createExplorerAgent } from './explorer';
 import { createReviewerAgent } from './reviewer';
+import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
+import { createSpecWriterAgent } from './spec-writer';
 import { createTestEngineerAgent } from './test-engineer';
 
 export type { AgentDefinition } from './architect';
@@ -505,6 +507,32 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		curatorPhase.name = prefixName('curator_phase');
 		agents.push(applyOverrides(curatorPhase, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5f. v2: skill_improver — issue #629. Registered when enabled in config.
+	// Always present in agent map (so SDK can dispatch by name) — runtime gating
+	// happens in the skill_improve tool which checks skill_improver.enabled.
+	if (!isAgentDisabled('skill_improver', swarmAgents, swarmPrefix)) {
+		const sip = getPrompts('skill_improver');
+		const skillImprover = createSkillImproverAgent(
+			swarmAgents?.skill_improver?.model ?? getModel('skill_improver'),
+			sip.prompt,
+			sip.appendPrompt,
+		);
+		skillImprover.name = prefixName('skill_improver');
+		agents.push(applyOverrides(skillImprover, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5g. v2: spec_writer — independent model for .swarm/spec.md authorship.
+	if (!isAgentDisabled('spec_writer', swarmAgents, swarmPrefix)) {
+		const sw = getPrompts('spec_writer');
+		const specWriter = createSpecWriterAgent(
+			swarmAgents?.spec_writer?.model ?? getModel('spec_writer'),
+			sw.prompt,
+			sw.appendPrompt,
+		);
+		specWriter.name = prefixName('spec_writer');
+		agents.push(applyOverrides(specWriter, swarmAgents, swarmPrefix, quiet));
 	}
 
 	if (!isAgentDisabled('test_engineer', swarmAgents, swarmPrefix)) {

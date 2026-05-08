@@ -64,7 +64,14 @@ export type ToolName =
 	| 'set_qa_gates'
 	| 'web_search'
 	| 'convene_general_council'
-	| 'write_final_council_evidence';
+	| 'write_final_council_evidence'
+	| 'skill_generate'
+	| 'skill_list'
+	| 'skill_apply'
+	| 'skill_inspect'
+	| 'skill_improve'
+	| 'spec_write'
+	| 'knowledge_ack';
 
 /** Readonly array of all tool names */
 export const TOOL_NAMES: readonly ToolName[] = [
@@ -128,6 +135,13 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'web_search',
 	'convene_general_council',
 	'write_final_council_evidence',
+	'skill_generate',
+	'skill_list',
+	'skill_apply',
+	'skill_inspect',
+	'skill_improve',
+	'spec_write',
+	'knowledge_ack',
 ] as const;
 
 /** Set for O(1) tool name validation */

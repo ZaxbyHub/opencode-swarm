@@ -1,5 +1,5 @@
 /** Three-layer validation gate for the opencode-swarm v6.17 knowledge system. */
-import type { KnowledgeCategory, KnowledgeEntryBase } from './knowledge-types.js';
+import type { ActionableDirectiveFields, DirectivePriority, KnowledgeCategory, KnowledgeEntryBase } from './knowledge-types.js';
 export interface ValidationResult {
     valid: boolean;
     layer: 1 | 2 | 3 | null;
@@ -15,6 +15,21 @@ export declare function validateLesson(candidate: string, existingLessons: strin
     scope: string;
     confidence: number;
 }): ValidationResult;
+/** Maximum chars allowed per trigger / required-action / forbidden-action string. */
+export declare const ACTIONABLE_STRING_MAX = 200;
+/** Maximum number of items in any actionable list (triggers, required_actions, etc.). */
+export declare const ACTIONABLE_LIST_MAX = 20;
+/** Generated skill paths must be repo-local under one of these prefixes. */
+export declare const ALLOWED_SKILL_PATH_PREFIXES: string[];
+export interface ActionableValidationResult {
+    valid: boolean;
+    errors: string[];
+}
+/** Validate a generated_skill_path: must be repo-local and under an allowed prefix. */
+export declare function validateSkillPath(p: unknown): boolean;
+/** Validate the optional ActionableDirectiveFields block on a knowledge entry. */
+export declare function validateActionableFields(fields: ActionableDirectiveFields | undefined): ActionableValidationResult;
+export type { ActionableDirectiveFields, DirectivePriority };
 export interface QuarantinedEntry extends KnowledgeEntryBase {
     quarantine_reason: string;
     quarantined_at: string;

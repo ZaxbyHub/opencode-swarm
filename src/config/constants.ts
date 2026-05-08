@@ -18,6 +18,8 @@ export const ALL_SUBAGENT_NAMES = [
 	'council_generalist',
 	'council_skeptic',
 	'council_domain_expert',
+	'skill_improver',
+	'spec_writer',
 	...QA_AGENTS,
 	...PIPELINE_AGENTS,
 ] as const;
@@ -271,6 +273,12 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'convene_general_council',
 		'web_search',
 		'write_final_council_evidence',
+		'skill_generate',
+		'skill_list',
+		'skill_apply',
+		'skill_inspect',
+		'skill_improve',
+		'knowledge_ack',
 	],
 	explorer: [
 		'complexity_hotspots',
@@ -448,6 +456,36 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 	council_generalist: [],
 	council_skeptic: [],
 	council_domain_expert: [],
+	// v2: skill_improver — reviews knowledge/skills/spec/architect-prompt under
+	// daily quota. Default mode is proposal-only (no source mutation). May draft
+	// SKILL.md proposals when explicitly invoked with mode='draft_skills'.
+	skill_improver: [
+		'knowledge_recall',
+		'knowledge_query',
+		'skill_list',
+		'skill_inspect',
+		'skill_generate',
+		'skill_improve',
+		'search',
+		'doc_scan',
+		'doc_extract',
+		'web_search',
+	],
+	// v2: spec_writer — independent agent for authoring .swarm/spec.md. Has
+	// read tools and the safe spec_write tool only.
+	spec_writer: [
+		'search',
+		'knowledge_recall',
+		'knowledge_query',
+		'doc_scan',
+		'doc_extract',
+		'req_coverage',
+		'lint_spec',
+		'retrieve_summary',
+		'symbols',
+		'extract_code_blocks',
+		'spec_write',
+	],
 };
 
 /**
@@ -561,6 +599,14 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 		'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council.',
 	req_coverage:
 		'query requirement coverage status for tracked functional requirements',
+	skill_generate: 'compile knowledge entries into a structured SKILL.md draft',
+	skill_list: 'list generated skill files and their status',
+	skill_apply: 'activate a draft skill proposal',
+	skill_inspect: 'inspect the content and source entries of a skill file',
+	skill_improve: 'run the skill_improver agent to review and refine skills',
+	spec_write: 'author or update .swarm/spec.md for the current project',
+	knowledge_ack:
+		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
 };
 
 // Runtime validation: ensure all tool names in AGENT_TOOL_MAP are registered
@@ -601,6 +647,14 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// Curator agents — lightweight read-only analysis (same model family as explorer)
 	curator_init: 'opencode/gpt-5-nano',
 	curator_phase: 'opencode/gpt-5-nano',
+
+	// v2: Skill improver — defaults to a strong reasoning model, but is gated
+	// behind skill_improver.enabled and a daily quota (issue #629).
+	skill_improver: 'opencode/big-pickle',
+
+	// v2: Spec writer — independent from architect so users can run a
+	// high-capability model on spec while keeping architect cheaper.
+	spec_writer: 'opencode/big-pickle',
 
 	// Fallback
 	default: 'opencode/big-pickle',
@@ -669,6 +723,14 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 	curator_phase: {
 		model: 'opencode/gpt-5-nano',
 		fallback_models: ['opencode/big-pickle'],
+	},
+	skill_improver: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
+	},
+	spec_writer: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
 	},
 };
 

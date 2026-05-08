@@ -921,6 +921,8 @@ export const KnowledgeConfigSchema = z.object({
 	min_retrievals_for_utility: z.number().min(1).max(100).default(3),
 	/** Schema version for the knowledge store format */
 	schema_version: z.number().int().min(1).default(1),
+	/** v2: Confidence threshold above which a tool/agent match strongly boosts ranking. Default: 0.75 */
+	directive_min_confidence: z.number().min(0).max(1).default(0.75),
 	/** Weighted scoring: multiplier for encounters from the source project */
 	same_project_weight: z.number().min(0).max(5).default(1.0),
 	/** Weighted scoring: multiplier for encounters from other projects */
@@ -965,9 +967,89 @@ export const CuratorConfigSchema = z.object({
 	 *  Must cover ephemeral session creation overhead plus full model response time.
 	 *  Default: 300000 (5 minutes). Increase for slower models; decrease for fast local models. */
 	llm_timeout_ms: z.number().int().min(5000).max(600000).default(300_000),
+	/** v2: Allow curator to propose generated skill candidates from mature knowledge. Default: true */
+	skill_generation_enabled: z.boolean().default(true),
+	/** v2: Skill generation mode: 'draft' writes only proposals; 'active' compiles directly into .opencode/skills/generated. Default: 'draft' */
+	skill_generation_mode: z.enum(['draft', 'active']).default('draft'),
+	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.85 */
+	min_skill_confidence: z.number().min(0).max(1).default(0.85),
+	/** v2: Minimum number of phase confirmations for a skill candidate cluster. Default: 2 */
+	min_skill_confirmations: z.number().int().min(1).max(50).default(2),
 });
 
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
+
+// Knowledge-application enforcement configuration (v2)
+export const KnowledgeApplicationConfigSchema = z.object({
+	/** Enable application tracking + acknowledgment contract. Default: true */
+	enabled: z.boolean().default(true),
+	/** 'warn' = advisory; 'enforce' = block critical-directive violations on high-risk actions. Default: warn */
+	mode: z.enum(['warn', 'enforce']).default('warn'),
+	/** Confidence floor for which directives are subject to enforcement. */
+	min_confidence: z.number().min(0).max(1).default(0.85),
+	/** Critical-priority directives must receive an explicit ack. */
+	critical_requires_ack: z.boolean().default(true),
+	/** Critical directives that reference a generated skill must include the skill via SKILLS:. */
+	require_skill_refs: z.boolean().default(true),
+});
+
+export type KnowledgeApplicationConfig = z.infer<
+	typeof KnowledgeApplicationConfigSchema
+>;
+
+// Skill-improver agent configuration (issue #629)
+export const SkillImproverConfigSchema = z.object({
+	/** Default: false. Must be explicitly enabled. */
+	enabled: z.boolean().default(false),
+	/** @deprecated Setting `skill_improver.model` at the top level no longer
+	 *  drives the actual agent model. Use `agents.skill_improver.model`
+	 *  (or `swarms.<id>.agents.skill_improver.model`) instead. This field is
+	 *  preserved purely for proposal-frontmatter tagging. config-doctor will
+	 *  warn when only the top-level value is set. */
+	model: z.string().nullable().default(null),
+	/** @deprecated Same precedence rule as `model` — set
+	 *  `agents.skill_improver.fallback_models` instead. */
+	fallback_models: z.array(z.string()).default([]),
+	/** Hard daily quota. Default: 10. */
+	max_calls_per_day: z.number().int().min(1).max(1000).default(10),
+	/** 'manual' is the only supported trigger today; 'scheduled' is reserved. */
+	trigger: z.enum(['manual', 'scheduled']).default('manual'),
+	/** Targets the skill_improver may inspect/improve. */
+	targets: z
+		.array(z.enum(['skills', 'spec', 'architect_prompt', 'knowledge']))
+		.default(['skills', 'spec', 'architect_prompt', 'knowledge']),
+	/** 'proposal' = write only to .swarm/skill-improver/proposals; 'draft_skills' = also draft into .swarm/skills/proposals. */
+	write_mode: z.enum(['proposal', 'draft_skills']).default('proposal'),
+	/** When true, Architect must ask user before invoking skill_improve (matches full-auto user-approval pattern). */
+	require_user_approval: z.boolean().default(true),
+	/** Quota window. 'utc' resets at 00:00 UTC; 'local' resets at local midnight. Default: 'utc'. */
+	quota_window: z.enum(['utc', 'local']).default('utc'),
+	/** Allow falling back to the offline deterministic proposal when no
+	 *  OpenCode client is wired. Default true for one minor (deprecation
+	 *  window); will flip to false in the next minor. The proposal frontmatter
+	 *  is tagged `source: deterministic_fallback` so reviewers can tell.
+	 *  Set to false to make `skill_improve` refuse with `no_llm_client` when
+	 *  no delegate is available. */
+	allow_deterministic_fallback: z.boolean().default(true),
+});
+
+export type SkillImproverConfig = z.infer<typeof SkillImproverConfigSchema>;
+
+// Spec-writer agent configuration
+export const SpecWriterConfigSchema = z.object({
+	/** Default: true (cheap on demand from architect). */
+	enabled: z.boolean().default(true),
+	/** @deprecated Setting `spec_writer.model` at the top level does NOT
+	 *  drive the spec_writer agent model — use `agents.spec_writer.model`
+	 *  instead. This field is retained only so config-doctor can warn. */
+	model: z.string().nullable().default(null),
+	/** @deprecated Use `agents.spec_writer.fallback_models`. */
+	fallback_models: z.array(z.string()).default([]),
+	/** Allow writing .swarm/spec.md directly via the safe spec_write tool. */
+	allow_spec_write: z.boolean().default(true),
+});
+
+export type SpecWriterConfig = z.infer<typeof SpecWriterConfigSchema>;
 
 // Slop detector configuration (v6.29)
 export const SlopDetectorConfigSchema = z.object({
@@ -1308,6 +1390,15 @@ export const PluginConfigSchema = z.object({
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),
+
+	// v2: Knowledge-application contract (warn|enforce, ack tracking)
+	knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+
+	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
+	skill_improver: SkillImproverConfigSchema.optional(),
+
+	// v2: Spec writer agent — independent model for .swarm/spec.md authorship
+	spec_writer: SpecWriterConfigSchema.optional(),
 
 	// Tool output truncation configuration
 	tool_output: z

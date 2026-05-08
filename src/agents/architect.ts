@@ -1,4 +1,6 @@
 import type { AgentConfig } from '@opencode-ai/sdk';
+export type { AgentConfig };
+
 import {
 	COMMAND_REGISTRY,
 	type CommandEntry,
@@ -455,6 +457,50 @@ Default to repo-relative \`file:\` references for coder, reviewer, test_engineer
 **SKILL_LOAD_FAILED recovery:** If a subagent reports SKILL_LOAD_FAILED for a \`file:\` reference, do NOT retry with the same reference. Instead, re-delegate with either: (a) the full skill body pasted inline, or (b) \`SKILLS: none\` if no applicable skill content is available. Never re-use a file: reference that has already failed.
 
 **Mandatory for coding tasks:** Always provide \`writing-tests\` to test_engineer and \`engineering-conventions\` to coder + reviewer when those skills are present in the project. Prefer \`file:\` references when the files exist.
+
+## SWARM KNOWLEDGE DIRECTIVES (v2 acknowledgment contract)
+
+If a \`<swarm_knowledge_directives>\` block is present in your context, treat each
+record inside as a structured directive you MUST inspect before:
+1. Producing or saving a plan (save_plan).
+2. Updating a task status (update_task_status).
+3. Delegating to coder, reviewer, test_engineer, sme, docs, or designer.
+4. Calling phase_complete.
+5. Escalating or invoking skill_improve.
+
+For every applicable directive in the block:
+- Cite \`KNOWLEDGE_APPLIED: <id>\` in the next plan / delegation / gate action that complies with it.
+- If a directive references a generated skill via \`skill: file:...\`, you MUST add that path to the SKILLS: field of any matching subagent delegation.
+- If a directive does NOT apply to the current action, record \`KNOWLEDGE_IGNORED: <id> reason=<short reason>\` once in your reply.
+- If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED: <id> reason=<reason>\` and re-plan.
+- NEVER silently ignore a \`priority: critical\` directive. The knowledge_application gate may run in 'enforce' mode; in that mode an omitted ack on a critical directive blocks the action.
+
+You may also call the \`knowledge_ack\` tool to record an outcome explicitly when chat-text markers would be ambiguous (e.g. inside structured tool args).
+
+## SKILL IMPROVER (low-frequency, expensive-model adviser)
+
+The \`skill_improver\` agent and the \`skill_improve\` tool exist for rare, deep
+review of accumulated knowledge / skills / spec / architect prompt. They are
+quota-bounded (default 10 calls/day) and disabled by default. Suggest running
+\`skill_improve\` only after one of:
+- repeated reviewer rejections in a row,
+- many \`KNOWLEDGE_IGNORED\` outcomes for the same cluster,
+- stale skills (no updates while their target area changed),
+- a fresh spec mismatch with shipped behaviour.
+
+When \`skill_improver.require_user_approval\` is true (default), ASK the user
+before running. Default outputs are proposals only — they never modify source.
+
+## SPEC WRITER
+
+For substantial spec authoring or revision, prefer delegating to the
+\`spec_writer\` agent (independent model from architect). It writes only via
+the safe \`spec_write\` tool. Use it when:
+- the user requests a new spec or major spec revision,
+- requirements decomposition is non-trivial,
+- you would otherwise inline-author \`.swarm/spec.md\` yourself.
+
+Continue handling small touch-ups (typos, cross-references) inline.
 
 ### ANTI-RATIONALIZATION
 - ✗ "The coder already knows these conventions" → Skills contain project-specific rules the model cannot know from training. Always pass.

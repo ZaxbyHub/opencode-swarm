@@ -31,6 +31,7 @@ import type {
 // ============================================================================
 
 vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
+	readContextualKnowledge: vi.fn(async () => []),
 	readMergedKnowledge: vi.fn(async () => []),
 }));
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
@@ -42,6 +43,7 @@ vi.mock('../../../src/hooks/curator-drift.js', () => ({
 }));
 vi.mock('../../../src/plan/manager.js', () => ({
 	loadPlan: vi.fn(async () => null),
+	getCurrentTaskId: vi.fn(() => undefined),
 }));
 vi.mock('../../../src/hooks/extractors.js', () => ({
 	extractCurrentPhaseFromPlan: vi.fn(() => 'Phase 1: Setup'),
@@ -69,7 +71,7 @@ import {
 } from '../../../src/hooks/curator-drift.js';
 import { extractCurrentPhaseFromPlan } from '../../../src/hooks/extractors.js';
 // Import mocked modules
-import { readMergedKnowledge } from '../../../src/hooks/knowledge-reader.js';
+import { readContextualKnowledge } from '../../../src/hooks/knowledge-reader.js';
 import { readRejectedLessons } from '../../../src/hooks/knowledge-store.js';
 import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 import { loadPlan } from '../../../src/plan/manager.js';
@@ -181,7 +183,7 @@ describe('First-call injection', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -192,7 +194,7 @@ describe('First-call injection', () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
@@ -202,7 +204,7 @@ describe('First-call injection', () => {
 
 		// Should inject knowledge on first call (no initialization skip)
 		expect(loadPlan).toHaveBeenCalled();
-		expect(readMergedKnowledge).toHaveBeenCalled();
+		expect(readContextualKnowledge).toHaveBeenCalled();
 		expect(output.messages.length).toBe(3); // system + knowledge injection + user
 		const hasKnowledgeInjection = output.messages.some((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
@@ -222,7 +224,7 @@ describe('Cache re-inject', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -233,7 +235,7 @@ describe('Cache re-inject', () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
@@ -245,8 +247,8 @@ describe('Cache re-inject', () => {
 		// Second call - should reuse cached text (not re-read)
 		await hook({}, output);
 
-		// readMergedKnowledge was called on first call; second call should use cache
-		expect(readMergedKnowledge).toHaveBeenCalledTimes(1);
+		// readContextualKnowledge was called on first call; second call should use cache
+		expect(readContextualKnowledge).toHaveBeenCalledTimes(1);
 		const hasKnowledgeInjection = output.messages.some((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
 		);
@@ -265,7 +267,7 @@ describe('Second-call fetch and injection', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -283,14 +285,14 @@ describe('Second-call fetch and injection', () => {
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
 		// Second call - should inject
 		await hook({}, output);
 
-		expect(readMergedKnowledge).toHaveBeenCalled();
+		expect(readContextualKnowledge).toHaveBeenCalled();
 		const hasKnowledgeInjection = output.messages.some((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
 		);
@@ -315,14 +317,14 @@ describe('Cache re-inject', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
 		);
 	});
 
-	it('Test 3: third call same phase reuses cachedInjectionText, does not call readMergedKnowledge again', async () => {
+	it('Test 3: third call same phase reuses cachedInjectionText, does not call readContextualKnowledge again', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 
@@ -331,7 +333,7 @@ describe('Cache re-inject', () => {
 
 		// Set up knowledge entries for second call
 		const entries = [makeSwarmEntry('Cached lesson for re-inject', 0.85)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -339,12 +341,12 @@ describe('Cache re-inject', () => {
 		await hook({}, output);
 
 		// Reset mock to verify it's NOT called on third call
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockClear();
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockClear();
 
 		// Third call - should use cache
 		await hook({}, output);
 
-		expect(readMergedKnowledge).not.toHaveBeenCalled();
+		expect(readContextualKnowledge).not.toHaveBeenCalled();
 		const knowledgeMsg = output.messages.find((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
 		);
@@ -365,7 +367,7 @@ describe('Phase change', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -382,7 +384,7 @@ describe('Phase change', () => {
 
 		// Second call - fetches and caches (phase 1)
 		const entries1 = [makeSwarmEntry('Phase 1 lesson', 0.85)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries1,
 		);
 		await hook({}, output);
@@ -406,14 +408,14 @@ describe('Phase change', () => {
 			'Phase 2: Implementation',
 		);
 		const entries2 = [makeSwarmEntry('Phase 2 lesson', 0.9)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries2,
 		);
 
 		// The cached state is in the hook closure - we need to reset it
 		// We can't directly reset the hook's internal state, but we can create a new hook
 		// However, for this test, let's verify the cache invalidation works by checking
-		// that readMergedKnowledge gets called with the new phase info
+		// that readContextualKnowledge gets called with the new phase info
 
 		// Create a fresh hook to simulate new architect call after phase change
 		const hook2 = createKnowledgeInjectorHook('/proj', makeConfig());
@@ -426,7 +428,7 @@ describe('Phase change', () => {
 		await hook2({}, output2);
 
 		// Should have fetched knowledge for phase 2
-		expect(readMergedKnowledge).toHaveBeenCalled();
+		expect(readContextualKnowledge).toHaveBeenCalled();
 
 		// Check content
 		const knowledgeMessages = output2.messages.filter((m) =>
@@ -448,7 +450,7 @@ describe('Non-orchestrator agents skipped', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -536,7 +538,7 @@ describe('Context budget exhaustion', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -597,14 +599,14 @@ describe('Empty knowledge', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
 		);
 	});
 
-	it('Test 8: when readMergedKnowledge returns [], no injection block added', async () => {
+	it('Test 8: when readContextualKnowledge returns [], no injection block added', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 
@@ -650,7 +652,7 @@ describe('Tier labels', () => {
 			makeSwarmEntry('Swarm lesson', 0.8),
 			makeHiveEntry('Hive lesson', 0.8),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -680,7 +682,7 @@ describe('Explicit [tier:status] prefixes', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -693,7 +695,7 @@ describe('Explicit [tier:status] prefixes', () => {
 
 		// Set up entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Always validate function inputs', 0.85)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -718,7 +720,7 @@ describe('Explicit [tier:status] prefixes', () => {
 		const entries = [
 			makeHiveEntry('Use dependency injection for testability', 0.9),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -746,7 +748,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'experimental',
 			},
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries as RankedEntry[],
 		);
 
@@ -786,7 +788,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'experimental',
 			},
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries as RankedEntry[],
 		);
 
@@ -813,7 +815,7 @@ describe('Explicit [tier:status] prefixes', () => {
 
 		// Set up entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Test lesson content', 0.8)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -850,7 +852,7 @@ describe('Compact format and confirmation indicators', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -862,7 +864,7 @@ describe('Compact format and confirmation indicators', () => {
 		const output = makeOutput('architect');
 
 		const entries = [makeSwarmEntry('High confidence lesson', 0.95)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -898,7 +900,7 @@ describe('Compact format and confirmation indicators', () => {
 				phase_number: 3,
 			},
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			entry,
 		]);
 
@@ -923,7 +925,7 @@ describe('Compact format and confirmation indicators', () => {
 				phase_number: 1,
 			},
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			entry,
 		]);
 
@@ -947,7 +949,7 @@ describe('Compact format and confirmation indicators', () => {
 
 		const entry = makeSwarmEntry('Unconfirmed lesson', 0.85);
 		entry.confirmed_by = [];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			entry,
 		]);
 
@@ -972,7 +974,7 @@ describe('Compact format and confirmation indicators', () => {
 
 		const longLesson = 'A'.repeat(280);
 		const entry = makeSwarmEntry(longLesson, 0.85);
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			entry,
 		]);
 
@@ -1002,7 +1004,7 @@ describe('Rejected pattern warnings', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
@@ -1122,7 +1124,7 @@ describe('Idempotency', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -1164,7 +1166,7 @@ describe('No plan', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -1197,7 +1199,7 @@ describe('Unknown agent (undefined agentName)', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeSwarmEntry('Some lesson', 0.85),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -1241,7 +1243,7 @@ describe('Prompt injection sanitization', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -1259,7 +1261,7 @@ describe('Prompt injection sanitization', () => {
 				0.85,
 			),
 		];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1291,7 +1293,7 @@ describe('Prompt injection sanitization', () => {
 			source_project: string;
 		})[];
 		entries[0].source_project = 'system:\nprojectwithcontrol';
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1321,7 +1323,7 @@ describe('Run memory wiring', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -1338,7 +1340,7 @@ describe('Run memory wiring', () => {
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Use null checks', 0.85)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1375,7 +1377,7 @@ describe('Run memory wiring', () => {
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Always validate inputs', 0.9)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1413,7 +1415,7 @@ describe('Run memory wiring', () => {
 
 		// Set up knowledge entries before call (first call now injects immediately)
 		const entries = [makeSwarmEntry('Test lesson', 0.8)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1452,7 +1454,7 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',
@@ -1548,7 +1550,7 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
 
 		// Also set up knowledge entries (normal case with both drift and knowledge)
 		const entries = [makeSwarmEntry('Knowledge lesson about testing', 0.85)];
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
@@ -1602,7 +1604,7 @@ describe('Drift-only injection idempotency', () => {
 			current_phase: 1,
 			title: 'Test Project',
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]); // No knowledge entries
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]); // No knowledge entries
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',

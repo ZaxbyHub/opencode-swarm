@@ -181,6 +181,42 @@ for f in tests/unit/agents/*.test.ts; do bun --smol test "$f" --timeout 30000; d
 for f in tests/unit/hooks/*.test.ts; do bun --smol test "$f" --timeout 30000; done
 bun --smol test tests/unit/cli tests/unit/commands tests/unit/config --timeout 120000
 
+**Pre-push mock contract verification: run after Tier 2.**
+After unit tests pass, verify that no mock contract was silently broken by a refactor.
+
+1. Identify test files that mock modules you changed:
+   ```bash
+   # bash — match by filename stem (robust across relative path depths)
+   for src_file in $(git diff --name-only origin/main..HEAD -- 'src/**/*.ts'); do
+     stem=$(basename "$src_file" .ts)
+     grep -rl "mock.module\|vi.mock" tests/ --include="*.ts" | while read test_file; do
+       if grep -q "$stem" "$test_file"; then
+         echo "$test_file"
+       fi
+     done
+   done | sort -u
+   ```
+   ```powershell
+   # PowerShell — match by filename stem
+   $changed = git diff --name-only origin/main..HEAD -- 'src/**/*.ts'
+   foreach ($src in $changed) {
+     $stem = [System.IO.Path]::GetFileNameWithoutExtension($src)
+     Get-ChildItem -Recurse tests/ -Filter "*.test.ts" |
+       Select-String -Pattern "mock\.module|vi\.mock" |
+       Where-Object { $_.Line -match [regex]::Escape($stem) } |
+       ForEach-Object { $_.Path }
+   } | Sort-Object -Unique
+   ```
+2. Run each matching test file individually:
+   ```bash
+   for f in <matching-test-files>; do bun --smol test "$f" --timeout 30000 || exit 1; done
+   ```
+   ```powershell
+   foreach ($f in @("tests/path/to/test1.test.ts")) { bun --smol test $f --timeout 30000 }
+   ```
+3. If any fail with `SyntaxError: Export named 'X' not found`, the `mock.module()` factory is missing exports — update it per the writing-tests skill's "mock.module() Export Completeness" section.
+4. If any fail with `TypeError: undefined is not an object` or empty assertion values, the mock return shape doesn't match the new function contract — update the mock's `mockResolvedValue()` to include new required fields.
+
 # Tier 3 — integration tests
 # IMPORTANT: always run Tier 3 after fixing Tier 2 failures — the same root cause
 # often appears in integration test fixtures that unit tests don't cover.
@@ -217,6 +253,32 @@ When you rename a field in a Zod schema, TypeScript interface, or serialized for
 4. Run Tier 2 and Tier 3 together after fixing all fixtures.
 
 Failing to do this causes test fixtures to write stale-format JSON that passes Zod validation for the write but fails on the read path — a silent correctness hazard.
+
+**Import rename or function signature change: extra step required.**
+When a refactor renames an import, changes a function signature, or changes which function a module calls (e.g. `readMergedKnowledge` → `readContextualKnowledge`):
+1. Search for the old function name across test files, scoped to imports and mock references:
+   ```bash
+   # bash — scoped to imports, mock factories, and mock state calls
+   grep -rnE "import.*oldFunctionName|mock\(.*oldFunctionName|mockResolvedValue|mockClear|mockReset" tests/ --include="*.ts" | grep oldFunctionName
+   ```
+   ```powershell
+   # PowerShell — scoped to imports and mock references
+   Get-ChildItem -Recurse tests/ -Filter "*.test.ts" | Select-String -Pattern "oldFunctionName" | Where-Object { $_.Line -match "import|mock\(|mockResolvedValue|mockClear|mockReset" }
+   ```
+2. For every match, determine if the test's mock must be updated:
+   - If the test imports the old name → update the import
+   - If the test's `mock.module()` / `vi.mock()` provides the old name → update to the new name
+   - If the test's `mockResolvedValue()` / `mockClear()` / `mockReset()` calls reference the old mock variable → update to the new variable name
+3. If the new function signature requires additional data (e.g., a new required field on the return type), update all mock return values and test fixtures to include it.
+4. Run each affected test file individually after fixing:
+   ```bash
+   for f in <affected-test-files>; do bun --smol test "$f" --timeout 30000; done
+   ```
+   ```powershell
+   foreach ($f in @("tests/path/to/test1.test.ts", "tests/path/to/test2.test.ts")) { bun --smol test $f --timeout 30000 }
+   ```
+
+Failing to do this causes tests to reference stale function names in mocks — the mock intercepts nothing, the real function (which doesn't exist) throws, and CI fails with cryptic "received value is empty" errors.
 
 **Agent prompt changes: extra step required.**
 When you edit any agent prompt (`src/agents/*.ts`), tests that assert on prompt content will silently break even if your change appears unrelated. Before pushing:

@@ -490,6 +490,7 @@ export declare const KnowledgeConfigSchema: z.ZodObject<{
     low_utility_threshold: z.ZodDefault<z.ZodNumber>;
     min_retrievals_for_utility: z.ZodDefault<z.ZodNumber>;
     schema_version: z.ZodDefault<z.ZodNumber>;
+    directive_min_confidence: z.ZodDefault<z.ZodNumber>;
     same_project_weight: z.ZodDefault<z.ZodNumber>;
     cross_project_weight: z.ZodDefault<z.ZodNumber>;
     min_encounter_score: z.ZodDefault<z.ZodNumber>;
@@ -511,8 +512,60 @@ export declare const CuratorConfigSchema: z.ZodObject<{
     suppress_warnings: z.ZodDefault<z.ZodBoolean>;
     drift_inject_max_chars: z.ZodDefault<z.ZodNumber>;
     llm_timeout_ms: z.ZodDefault<z.ZodNumber>;
+    skill_generation_enabled: z.ZodDefault<z.ZodBoolean>;
+    skill_generation_mode: z.ZodDefault<z.ZodEnum<{
+        draft: "draft";
+        active: "active";
+    }>>;
+    min_skill_confidence: z.ZodDefault<z.ZodNumber>;
+    min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
+export declare const KnowledgeApplicationConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    mode: z.ZodDefault<z.ZodEnum<{
+        enforce: "enforce";
+        warn: "warn";
+    }>>;
+    min_confidence: z.ZodDefault<z.ZodNumber>;
+    critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
+    require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type KnowledgeApplicationConfig = z.infer<typeof KnowledgeApplicationConfigSchema>;
+export declare const SkillImproverConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    max_calls_per_day: z.ZodDefault<z.ZodNumber>;
+    trigger: z.ZodDefault<z.ZodEnum<{
+        manual: "manual";
+        scheduled: "scheduled";
+    }>>;
+    targets: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+        skills: "skills";
+        spec: "spec";
+        architect_prompt: "architect_prompt";
+        knowledge: "knowledge";
+    }>>>;
+    write_mode: z.ZodDefault<z.ZodEnum<{
+        proposal: "proposal";
+        draft_skills: "draft_skills";
+    }>>;
+    require_user_approval: z.ZodDefault<z.ZodBoolean>;
+    quota_window: z.ZodDefault<z.ZodEnum<{
+        utc: "utc";
+        local: "local";
+    }>>;
+    allow_deterministic_fallback: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type SkillImproverConfig = z.infer<typeof SkillImproverConfigSchema>;
+export declare const SpecWriterConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    allow_spec_write: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type SpecWriterConfig = z.infer<typeof SpecWriterConfigSchema>;
 export declare const SlopDetectorConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     classThreshold: z.ZodDefault<z.ZodNumber>;
@@ -985,6 +1038,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
         low_utility_threshold: z.ZodDefault<z.ZodNumber>;
         min_retrievals_for_utility: z.ZodDefault<z.ZodNumber>;
         schema_version: z.ZodDefault<z.ZodNumber>;
+        directive_min_confidence: z.ZodDefault<z.ZodNumber>;
         same_project_weight: z.ZodDefault<z.ZodNumber>;
         cross_project_weight: z.ZodDefault<z.ZodNumber>;
         min_encounter_score: z.ZodDefault<z.ZodNumber>;
@@ -1005,6 +1059,55 @@ export declare const PluginConfigSchema: z.ZodObject<{
         suppress_warnings: z.ZodDefault<z.ZodBoolean>;
         drift_inject_max_chars: z.ZodDefault<z.ZodNumber>;
         llm_timeout_ms: z.ZodDefault<z.ZodNumber>;
+        skill_generation_enabled: z.ZodDefault<z.ZodBoolean>;
+        skill_generation_mode: z.ZodDefault<z.ZodEnum<{
+            draft: "draft";
+            active: "active";
+        }>>;
+        min_skill_confidence: z.ZodDefault<z.ZodNumber>;
+        min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strip>>;
+    knowledge_application: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        mode: z.ZodDefault<z.ZodEnum<{
+            enforce: "enforce";
+            warn: "warn";
+        }>>;
+        min_confidence: z.ZodDefault<z.ZodNumber>;
+        critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
+        require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    skill_improver: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        max_calls_per_day: z.ZodDefault<z.ZodNumber>;
+        trigger: z.ZodDefault<z.ZodEnum<{
+            manual: "manual";
+            scheduled: "scheduled";
+        }>>;
+        targets: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+            skills: "skills";
+            spec: "spec";
+            architect_prompt: "architect_prompt";
+            knowledge: "knowledge";
+        }>>>;
+        write_mode: z.ZodDefault<z.ZodEnum<{
+            proposal: "proposal";
+            draft_skills: "draft_skills";
+        }>>;
+        require_user_approval: z.ZodDefault<z.ZodBoolean>;
+        quota_window: z.ZodDefault<z.ZodEnum<{
+            utc: "utc";
+            local: "local";
+        }>>;
+        allow_deterministic_fallback: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    spec_writer: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        allow_spec_write: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
     tool_output: z.ZodOptional<z.ZodObject<{
         truncation_enabled: z.ZodDefault<z.ZodBoolean>;

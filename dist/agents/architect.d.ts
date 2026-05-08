@@ -1,4 +1,5 @@
 import type { AgentConfig } from '@opencode-ai/sdk';
+export type { AgentConfig };
 export interface AgentDefinition {
     name: string;
     description?: string;

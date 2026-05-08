@@ -49,6 +49,26 @@ export declare const _internals: {
  */
 export declare function parseKnowledgeRecommendations(llmOutput: string): KnowledgeRecommendation[];
 /**
+ * v2: Strict-JSON parser for the new curator output blocks.
+ *
+ * Curator prompts may now emit JSON-fenced blocks like:
+ *
+ * ```json knowledge_application_findings
+ * [{ "knowledge_id": "...", "expected_behavior": "...", ... }]
+ * ```
+ *
+ * ```json skill_candidates
+ * [{ "slug": "...", "title": "...", ... }]
+ * ```
+ *
+ * Malformed JSON or unexpected types are silently dropped: no knowledge or
+ * skill writes happen when curator output is malformed.
+ */
+export declare function parseStructuredCuratorBlocks(llmOutput: string): {
+    findings: import('./curator-types.js').KnowledgeApplicationFinding[];
+    candidates: import('./curator-types.js').SkillCandidate[];
+};
+/**
  * Read curator summary from .swarm/curator-summary.json
  * @param directory - The workspace directory
  * @returns CuratorSummary if valid, null if missing or invalid
@@ -61,7 +81,19 @@ export declare function readCuratorSummary(directory: string): Promise<CuratorSu
  */
 export declare function writeCuratorSummary(directory: string, summary: CuratorSummary): Promise<void>;
 /**
- * Normalize agent name by stripping common swarm prefixes.
+ * Normalize an agent name to its canonical role.
+ *
+ * v2 (Phase F′ remediation): use the repository's canonical resolver
+ * `getCanonicalAgentRole`, registry-aware. When the generated-agent registry
+ * is populated (post plugin-init), an arbitrary swarm id like
+ * `banana_coder` resolves to `coder` IFF it appears in the registry.
+ * Pre-init (registry empty), the resolver falls back to a permissive
+ * suffix-match against ALL_AGENT_NAMES — preserving today's behaviour for
+ * arbitrary user prefixes without the hard-coded
+ * `(mega|paid|local|lowtier|modelrelay)_` whitelist.
+ *
+ * Lower-casing is preserved for backwards compatibility with the prior
+ * comparator code paths in this file.
  */
 declare function normalizeAgentName(name: string): string;
 /**

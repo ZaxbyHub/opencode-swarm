@@ -32,13 +32,17 @@ import type {
 // ============================================================================
 
 vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
-	readMergedKnowledge: vi.fn(async () => []),
+	readContextualKnowledge: vi.fn(async () => []),
 }));
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons: vi.fn(async () => []),
 }));
 vi.mock('../../../src/plan/manager.js', () => ({
-	loadPlan: vi.fn(async () => ({ current_phase: 1, title: 'Test Project' })),
+	loadPlan: vi.fn(async () => ({
+		current_phase: 1,
+		title: 'Test Project',
+		phases: [{ id: 1, name: 'Setup', tasks: [] }],
+	})),
 }));
 vi.mock('../../../src/hooks/extractors.js', () => ({
 	extractCurrentPhaseFromPlan: vi.fn(() => 'Phase 1: Setup'),
@@ -65,7 +69,7 @@ vi.mock('../../../src/hooks/utils.js', () => ({
 }));
 
 import { extractCurrentPhaseFromPlan } from '../../../src/hooks/extractors.js';
-import { readMergedKnowledge } from '../../../src/hooks/knowledge-reader.js';
+import { readContextualKnowledge } from '../../../src/hooks/knowledge-reader.js';
 import { readRejectedLessons } from '../../../src/hooks/knowledge-store.js';
 import { loadPlan } from '../../../src/plan/manager.js';
 
@@ -155,8 +159,9 @@ describe('Knowledge injection allowlist — architect only', () => {
 		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
 			current_phase: 1,
 			title: 'Test',
+			phases: [{ id: 1, name: 'Setup', tasks: [] }],
 		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
+		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
 			makeEntry(),
 		]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);

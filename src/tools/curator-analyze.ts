@@ -32,7 +32,12 @@ export const curator_analyze: ReturnType<typeof createSwarmTool> =
 			recommendations: z
 				.array(
 					z.object({
-						action: z.enum(['promote', 'archive', 'flag_contradiction']),
+						action: z.enum([
+							'promote',
+							'archive',
+							'flag_contradiction',
+							'rewrite',
+						]),
 						entry_id: z.string().optional(),
 						lesson: z.string(),
 						reason: z.string(),
@@ -79,7 +84,12 @@ export const curator_analyze: ReturnType<typeof createSwarmTool> =
 
 				// Validate recommendations actions if provided
 				if (typedArgs.recommendations) {
-					const validActions = ['promote', 'archive', 'flag_contradiction'];
+					const validActions = [
+						'promote',
+						'archive',
+						'flag_contradiction',
+						'rewrite',
+					];
 					for (const rec of typedArgs.recommendations) {
 						if (!validActions.includes(rec.action)) {
 							return JSON.stringify(

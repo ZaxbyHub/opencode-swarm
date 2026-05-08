@@ -10,6 +10,8 @@ import {
 	readKnowledge,
 } from './knowledge-store.js';
 import type {
+	ActionableDirectiveFields,
+	DirectivePriority,
 	KnowledgeCategory,
 	KnowledgeEntryBase,
 	RejectedLesson,
@@ -351,6 +353,165 @@ export function validateLesson(
 }
 
 // ============================================================================
+// v2: Actionable directive metadata validation
+// ============================================================================
+
+/** Maximum chars allowed per trigger / required-action / forbidden-action string. */
+export const ACTIONABLE_STRING_MAX = 200;
+/** Maximum number of items in any actionable list (triggers, required_actions, etc.). */
+export const ACTIONABLE_LIST_MAX = 20;
+/** Allowed agent / tool name shape (snake_case, alnum/underscore, bounded). */
+const NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+/** Allowed source ref shape: prevents path traversal and control characters. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional sanitation
+const SOURCE_REF_FORBIDDEN = /(\.\.\/|\.\.\\|\0|[\x00-\x1f\x7f])/;
+/** Generated skill paths must be repo-local under one of these prefixes. */
+export const ALLOWED_SKILL_PATH_PREFIXES = [
+	'.opencode/skills/generated/',
+	'.swarm/skills/proposals/',
+];
+
+const VALID_DIRECTIVE_PRIORITIES = new Set<string>([
+	'low',
+	'medium',
+	'high',
+	'critical',
+]);
+
+export interface ActionableValidationResult {
+	valid: boolean;
+	errors: string[];
+}
+
+function isCleanShortString(s: unknown): s is string {
+	if (typeof s !== 'string') return false;
+	if (s.length === 0 || s.length > ACTIONABLE_STRING_MAX) return false;
+	// Reject control characters and null bytes.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional sanitation
+	return !/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/.test(s);
+}
+
+/** Validate a generated_skill_path: must be repo-local and under an allowed prefix. */
+export function validateSkillPath(p: unknown): boolean {
+	if (typeof p !== 'string') return false;
+	if (p.length === 0 || p.length > 256) return false;
+	if (p.includes('\0')) return false;
+	if (path.isAbsolute(p)) return false;
+	if (p.includes('..')) return false;
+	const norm = p.replace(/\\/g, '/');
+	return ALLOWED_SKILL_PATH_PREFIXES.some((prefix) => norm.startsWith(prefix));
+}
+
+/** Validate the optional ActionableDirectiveFields block on a knowledge entry. */
+export function validateActionableFields(
+	fields: ActionableDirectiveFields | undefined,
+): ActionableValidationResult {
+	const errors: string[] = [];
+	if (!fields) return { valid: true, errors };
+
+	function checkStringList(name: string, list: unknown): void {
+		if (list === undefined) return;
+		if (!Array.isArray(list)) {
+			errors.push(`${name} must be an array`);
+			return;
+		}
+		if (list.length > ACTIONABLE_LIST_MAX) {
+			errors.push(`${name} exceeds ${ACTIONABLE_LIST_MAX} items`);
+		}
+		for (const item of list) {
+			if (!isCleanShortString(item)) {
+				errors.push(`${name} contains invalid string`);
+				return;
+			}
+		}
+	}
+
+	function checkNameList(name: string, list: unknown): void {
+		if (list === undefined) return;
+		if (!Array.isArray(list)) {
+			errors.push(`${name} must be an array`);
+			return;
+		}
+		if (list.length > ACTIONABLE_LIST_MAX) {
+			errors.push(`${name} exceeds ${ACTIONABLE_LIST_MAX} items`);
+		}
+		for (const item of list) {
+			if (typeof item !== 'string' || !NAME_PATTERN.test(item)) {
+				errors.push(`${name} contains invalid name`);
+				return;
+			}
+		}
+	}
+
+	checkStringList('triggers', fields.triggers);
+	checkStringList('required_actions', fields.required_actions);
+	checkStringList('forbidden_actions', fields.forbidden_actions);
+	checkStringList('verification_checks', fields.verification_checks);
+	checkNameList('applies_to_agents', fields.applies_to_agents);
+	checkNameList('applies_to_tools', fields.applies_to_tools);
+
+	if (fields.source_refs !== undefined) {
+		if (!Array.isArray(fields.source_refs)) {
+			errors.push('source_refs must be an array');
+		} else if (fields.source_refs.length > ACTIONABLE_LIST_MAX) {
+			errors.push(`source_refs exceeds ${ACTIONABLE_LIST_MAX} items`);
+		} else {
+			for (const ref of fields.source_refs) {
+				if (
+					typeof ref !== 'string' ||
+					ref.length === 0 ||
+					ref.length > ACTIONABLE_STRING_MAX ||
+					SOURCE_REF_FORBIDDEN.test(ref)
+				) {
+					errors.push('source_refs contains invalid value');
+					break;
+				}
+			}
+		}
+	}
+
+	if (fields.source_knowledge_ids !== undefined) {
+		if (!Array.isArray(fields.source_knowledge_ids)) {
+			errors.push('source_knowledge_ids must be an array');
+		} else {
+			for (const id of fields.source_knowledge_ids) {
+				if (typeof id !== 'string' || id.length === 0 || id.length > 64) {
+					errors.push('source_knowledge_ids contains invalid value');
+					break;
+				}
+			}
+		}
+	}
+
+	if (
+		fields.directive_priority !== undefined &&
+		!VALID_DIRECTIVE_PRIORITIES.has(String(fields.directive_priority))
+	) {
+		errors.push('directive_priority must be low|medium|high|critical');
+	}
+
+	if (fields.generated_skill_slug !== undefined) {
+		if (
+			typeof fields.generated_skill_slug !== 'string' ||
+			!/^[a-z0-9][a-z0-9-]{0,63}$/.test(fields.generated_skill_slug)
+		) {
+			errors.push('generated_skill_slug must be a kebab-case slug');
+		}
+	}
+
+	if (
+		fields.generated_skill_path !== undefined &&
+		!validateSkillPath(fields.generated_skill_path)
+	) {
+		errors.push('generated_skill_path must be repo-local under allowed prefix');
+	}
+
+	return { valid: errors.length === 0, errors };
+}
+
+export type { ActionableDirectiveFields, DirectivePriority };
+
+// ============================================================================
 // Quarantine Types
 // ============================================================================
 
@@ -370,11 +531,20 @@ export interface EntryHealthResult {
 // ============================================================================
 
 export function auditEntryHealth(entry: KnowledgeEntryBase): EntryHealthResult {
-	// Check for low-utility entry: high apply count but low utility score
+	// Check for low-utility entry: high shown count but low utility score.
+	// v2 NOTE: We now read shown_count (replaced legacy applied_count, which
+	// was incremented for every "shown" event before v2 and is frozen now).
+	// For older v1 entries the normalizer copies applied_count → shown_count,
+	// so existing on-disk data continues to trip this audit correctly.
 	const utilityScore = (entry as { utility_score?: number }).utility_score;
-	const appliedCount = entry.retrieval_outcomes?.applied_count ?? 0;
+	const ro = entry.retrieval_outcomes as unknown as Record<
+		string,
+		number | undefined
+	>;
+	const shownCount =
+		ro?.shown_count ?? entry.retrieval_outcomes?.applied_count ?? 0;
 
-	if (appliedCount >= 5 && utilityScore !== undefined && utilityScore <= 0) {
+	if (shownCount >= 5 && utilityScore !== undefined && utilityScore <= 0) {
 		return { healthy: false, concern: 'Low-utility entry' };
 	}
 

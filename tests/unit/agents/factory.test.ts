@@ -25,9 +25,9 @@ afterEach(() => {
 
 describe('createAgents', () => {
 	describe('no config', () => {
-		it('returns 14 agents (docs enabled by default, designer opt-in)', () => {
+		it('returns 16 agents (docs enabled by default, designer opt-in)', () => {
 			const agents = createAgents();
-			expect(agents).toHaveLength(14);
+			expect(agents).toHaveLength(16);
 		});
 
 		it('agent names are correct', () => {
@@ -46,7 +46,9 @@ describe('createAgents', () => {
 				'docs',
 				'explorer',
 				'reviewer',
+				'skill_improver',
 				'sme',
+				'spec_writer',
 				'test_engineer',
 				// Note: designer is opt-in (ui_review.enabled=true), not included by default
 			]);
@@ -320,8 +322,8 @@ describe('createAgents', () => {
 			const agents = createAgents(config as unknown as PluginConfig);
 			const sme = agents.find((a) => a.name === 'sme');
 			expect(sme).toBeUndefined();
-			// 14 agents - 1 disabled = 13 agents (docs still included by default)
-			expect(agents).toHaveLength(13);
+			// 16 agents - 1 disabled = 15 agents (docs still included by default)
+			expect(agents).toHaveLength(15);
 		});
 	});
 
@@ -348,7 +350,9 @@ describe('createAgents', () => {
 				'docs',
 				'explorer',
 				'reviewer',
+				'skill_improver',
 				'sme',
+				'spec_writer',
 				'test_engineer',
 				// Note: designer is opt-in, not included by default
 			]);
@@ -378,7 +382,9 @@ describe('createAgents', () => {
 				'local_docs',
 				'local_explorer',
 				'local_reviewer',
+				'local_skill_improver',
 				'local_sme',
+				'local_spec_writer',
 				'local_test_engineer',
 				// Note: designer is opt-in, not included by default
 			]);
@@ -564,7 +570,7 @@ describe('getAgentConfigs', () => {
 
 		const configs = getAgentConfigs(config as unknown as PluginConfig);
 		expect(configs.sme).toBeUndefined();
-		// 14 agents - 1 disabled = 13 agents (docs included by default)
-		expect(Object.keys(configs)).toHaveLength(13);
+		// 16 agents - 1 disabled = 15 agents (docs included by default)
+		expect(Object.keys(configs)).toHaveLength(15);
 	});
 });

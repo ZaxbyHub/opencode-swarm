@@ -448,7 +448,7 @@ describe('updateRetrievalOutcome', () => {
 		expect(rewriteKnowledge).not.toHaveBeenCalled();
 	});
 
-	it('Test 11: increments applied_count and succeeded_after_count on success', async () => {
+	it('Test 11: increments succeeded_after_shown_count on success', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
@@ -459,8 +459,8 @@ describe('updateRetrievalOutcome', () => {
 			lesson: 'Test lesson',
 			retrieval_outcomes: {
 				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 0,
+				failed_after_shown_count: 0,
 			},
 		});
 
@@ -487,12 +487,19 @@ describe('updateRetrievalOutcome', () => {
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.succeeded_after_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.failed_after_count).toBe(0);
+		// v2: applied_count is FROZEN (not auto-incremented from shown)
+		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.succeeded_after_shown_count,
+		).toBe(1);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.failed_after_shown_count,
+		).toBe(0);
 	});
 
-	it('Test 12: increments failed_after_count on failure', async () => {
+	it('Test 12: increments failed_after_shown_count on failure', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
@@ -503,8 +510,8 @@ describe('updateRetrievalOutcome', () => {
 			lesson: 'Test lesson',
 			retrieval_outcomes: {
 				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 0,
+				failed_after_shown_count: 0,
 			},
 		});
 
@@ -531,9 +538,16 @@ describe('updateRetrievalOutcome', () => {
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.succeeded_after_count).toBe(0);
-		expect(updatedEntry?.retrieval_outcomes.failed_after_count).toBe(1);
+		// v2: applied_count is FROZEN (not auto-incremented from shown)
+		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.succeeded_after_shown_count,
+		).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.failed_after_shown_count,
+		).toBe(1);
 	});
 
 	it('Test 13: cleans up phase key from shown file after update', async () => {

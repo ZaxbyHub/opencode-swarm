@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.9.0",
+    version: "7.10.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16072,7 +16072,14 @@ var init_tool_names = __esm(() => {
     "set_qa_gates",
     "web_search",
     "convene_general_council",
-    "write_final_council_evidence"
+    "write_final_council_evidence",
+    "skill_generate",
+    "skill_list",
+    "skill_apply",
+    "skill_inspect",
+    "skill_improve",
+    "spec_write",
+    "knowledge_ack"
   ];
   TOOL_NAME_SET = new Set(TOOL_NAMES);
 });
@@ -16128,6 +16135,8 @@ var init_constants = __esm(() => {
     "council_generalist",
     "council_skeptic",
     "council_domain_expert",
+    "skill_improver",
+    "spec_writer",
     ...QA_AGENTS,
     ...PIPELINE_AGENTS
   ];
@@ -16310,7 +16319,13 @@ var init_constants = __esm(() => {
       "set_qa_gates",
       "convene_general_council",
       "web_search",
-      "write_final_council_evidence"
+      "write_final_council_evidence",
+      "skill_generate",
+      "skill_list",
+      "skill_apply",
+      "skill_inspect",
+      "skill_improve",
+      "knowledge_ack"
     ],
     explorer: [
       "complexity_hotspots",
@@ -16480,7 +16495,32 @@ var init_constants = __esm(() => {
     curator_phase: ["knowledge_recall"],
     council_generalist: [],
     council_skeptic: [],
-    council_domain_expert: []
+    council_domain_expert: [],
+    skill_improver: [
+      "knowledge_recall",
+      "knowledge_query",
+      "skill_list",
+      "skill_inspect",
+      "skill_generate",
+      "skill_improve",
+      "search",
+      "doc_scan",
+      "doc_extract",
+      "web_search"
+    ],
+    spec_writer: [
+      "search",
+      "knowledge_recall",
+      "knowledge_query",
+      "doc_scan",
+      "doc_extract",
+      "req_coverage",
+      "lint_spec",
+      "retrieve_summary",
+      "symbols",
+      "extract_code_blocks",
+      "spec_write"
+    ]
   };
   for (const [agentName, tools] of Object.entries(AGENT_TOOL_MAP)) {
     const invalidTools = tools.filter((tool) => !TOOL_NAME_SET.has(tool));
@@ -16544,6 +16584,14 @@ var init_constants = __esm(() => {
     curator_phase: {
       model: "opencode/gpt-5-nano",
       fallback_models: ["opencode/big-pickle"]
+    },
+    skill_improver: {
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/gpt-5-nano"]
+    },
+    spec_writer: {
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/gpt-5-nano"]
     }
   };
 });
@@ -16577,7 +16625,7 @@ function getCanonicalAgentRole(agentName, generatedAgentNames) {
 function stripKnownSwarmPrefix(agentName) {
   return getCanonicalAgentRole(agentName);
 }
-var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, CuratorConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, PluginConfigSchema;
+var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, PluginConfigSchema;
 var init_schema = __esm(() => {
   init_zod();
   init_constants();
@@ -17018,6 +17066,7 @@ var init_schema = __esm(() => {
     low_utility_threshold: exports_external.number().min(0).max(1).default(0.3),
     min_retrievals_for_utility: exports_external.number().min(1).max(100).default(3),
     schema_version: exports_external.number().int().min(1).default(1),
+    directive_min_confidence: exports_external.number().min(0).max(1).default(0.75),
     same_project_weight: exports_external.number().min(0).max(5).default(1),
     cross_project_weight: exports_external.number().min(0).max(5).default(0.5),
     min_encounter_score: exports_external.number().min(0).max(1).default(0.1),
@@ -17037,7 +17086,36 @@ var init_schema = __esm(() => {
     compliance_report: exports_external.boolean().default(true),
     suppress_warnings: exports_external.boolean().default(true),
     drift_inject_max_chars: exports_external.number().min(100).max(2000).default(500),
-    llm_timeout_ms: exports_external.number().int().min(5000).max(600000).default(300000)
+    llm_timeout_ms: exports_external.number().int().min(5000).max(600000).default(300000),
+    skill_generation_enabled: exports_external.boolean().default(true),
+    skill_generation_mode: exports_external.enum(["draft", "active"]).default("draft"),
+    min_skill_confidence: exports_external.number().min(0).max(1).default(0.85),
+    min_skill_confirmations: exports_external.number().int().min(1).max(50).default(2)
+  });
+  KnowledgeApplicationConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(true),
+    mode: exports_external.enum(["warn", "enforce"]).default("warn"),
+    min_confidence: exports_external.number().min(0).max(1).default(0.85),
+    critical_requires_ack: exports_external.boolean().default(true),
+    require_skill_refs: exports_external.boolean().default(true)
+  });
+  SkillImproverConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(false),
+    model: exports_external.string().nullable().default(null),
+    fallback_models: exports_external.array(exports_external.string()).default([]),
+    max_calls_per_day: exports_external.number().int().min(1).max(1000).default(10),
+    trigger: exports_external.enum(["manual", "scheduled"]).default("manual"),
+    targets: exports_external.array(exports_external.enum(["skills", "spec", "architect_prompt", "knowledge"])).default(["skills", "spec", "architect_prompt", "knowledge"]),
+    write_mode: exports_external.enum(["proposal", "draft_skills"]).default("proposal"),
+    require_user_approval: exports_external.boolean().default(true),
+    quota_window: exports_external.enum(["utc", "local"]).default("utc"),
+    allow_deterministic_fallback: exports_external.boolean().default(true)
+  });
+  SpecWriterConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(true),
+    model: exports_external.string().nullable().default(null),
+    fallback_models: exports_external.array(exports_external.string()).default([]),
+    allow_spec_write: exports_external.boolean().default(true)
   });
   SlopDetectorConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(true),
@@ -17173,6 +17251,9 @@ var init_schema = __esm(() => {
     automation: AutomationConfigSchema.optional(),
     knowledge: KnowledgeConfigSchema.optional(),
     curator: CuratorConfigSchema.optional(),
+    knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+    skill_improver: SkillImproverConfigSchema.optional(),
+    spec_writer: SpecWriterConfigSchema.optional(),
     tool_output: exports_external.object({
       truncation_enabled: exports_external.boolean().default(true),
       max_lines: exports_external.number().min(10).max(500).default(150),
@@ -20723,6 +20804,10 @@ function resetSwarmState() {
   swarmState.opencodeClient = null;
   swarmState.curatorInitAgentNames = [];
   swarmState.curatorPhaseAgentNames = [];
+  swarmState.skillImproverAgentNames = [];
+  swarmState.specWriterAgentNames = [];
+  swarmState.currentCriticalShownIds.clear();
+  swarmState.knowledgeAckDedup.clear();
   swarmState.generatedAgentNames = [];
   _rehydrationCache = null;
   swarmState.fullAutoEnabledInConfig = false;
@@ -20768,6 +20853,10 @@ var init_state = __esm(() => {
     opencodeClient: null,
     curatorInitAgentNames: [],
     curatorPhaseAgentNames: [],
+    skillImproverAgentNames: [],
+    specWriterAgentNames: [],
+    currentCriticalShownIds: new Map,
+    knowledgeAckDedup: new Set,
     generatedAgentNames: [],
     lastBudgetPct: 0,
     agentSessions: defaultRunContext.agentSessions,
@@ -34828,12 +34917,58 @@ async function readKnowledge(filePath) {
     if (!trimmed)
       continue;
     try {
-      results.push(JSON.parse(trimmed));
+      const raw = JSON.parse(trimmed);
+      results.push(normalizeEntry(raw));
     } catch {
       console.warn(`[knowledge-store] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(0, 80)}`);
     }
   }
   return results;
+}
+function normalizeEntry(raw) {
+  if (!raw || typeof raw !== "object")
+    return raw;
+  const obj = raw;
+  if (!("retrieval_outcomes" in obj))
+    return raw;
+  const ro = obj.retrieval_outcomes;
+  if (ro && typeof ro === "object") {
+    if (typeof ro.shown_count !== "number") {
+      ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
+    }
+    if (typeof ro.acknowledged_count !== "number")
+      ro.acknowledged_count = 0;
+    if (typeof ro.applied_explicit_count !== "number") {
+      ro.applied_explicit_count = 0;
+    }
+    if (typeof ro.ignored_count !== "number")
+      ro.ignored_count = 0;
+    if (typeof ro.violated_count !== "number")
+      ro.violated_count = 0;
+    if (typeof ro.succeeded_after_shown_count !== "number") {
+      ro.succeeded_after_shown_count = typeof ro.succeeded_after_count === "number" ? ro.succeeded_after_count : 0;
+    }
+    if (typeof ro.failed_after_shown_count !== "number") {
+      ro.failed_after_shown_count = typeof ro.failed_after_count === "number" ? ro.failed_after_count : 0;
+    }
+  }
+  const arrayFields = [
+    "triggers",
+    "required_actions",
+    "forbidden_actions",
+    "applies_to_agents",
+    "applies_to_tools",
+    "verification_checks",
+    "source_refs",
+    "source_knowledge_ids"
+  ];
+  for (const f of arrayFields) {
+    const v = obj[f];
+    if (v !== undefined && !Array.isArray(v)) {
+      delete obj[f];
+    }
+  }
+  return raw;
 }
 async function readRejectedLessons(directory) {
   return readKnowledge(resolveSwarmRejectedPath(directory));
@@ -35207,7 +35342,7 @@ async function restoreEntry(directory, entryId) {
     }
   }
 }
-var import_proper_lockfile4, DANGEROUS_COMMAND_PATTERNS, SECURITY_DEGRADING_PATTERNS, INVISIBLE_FORMAT_CHARS, INJECTION_PATTERNS, VALID_CATEGORIES, TECH_REFERENCE_WORDS, ACTION_VERB_WORDS, NEGATION_PAIRS;
+var import_proper_lockfile4, DANGEROUS_COMMAND_PATTERNS, SECURITY_DEGRADING_PATTERNS, INVISIBLE_FORMAT_CHARS, INJECTION_PATTERNS, VALID_CATEGORIES, TECH_REFERENCE_WORDS, ACTION_VERB_WORDS, NEGATION_PAIRS, VALID_DIRECTIVE_PRIORITIES;
 var init_knowledge_validator = __esm(() => {
   init_logger();
   init_knowledge_store();
@@ -35313,12 +35448,20 @@ var init_knowledge_validator = __esm(() => {
     ["use", "don't use"],
     ["recommended", "not recommended"]
   ];
+  VALID_DIRECTIVE_PRIORITIES = new Set([
+    "low",
+    "medium",
+    "high",
+    "critical"
+  ]);
 });
 
 // src/hooks/curator.ts
 var init_curator = __esm(() => {
   init_event_bus();
+  init_schema();
   init_manager();
+  init_state();
   init_bun_compat();
   init_logger();
   init_knowledge_store();
@@ -35583,11 +35726,11 @@ async function updateRetrievalOutcome(directory, phaseInfo, phaseSucceeded) {
     const foundInSwarm = new Set;
     for (const entry of entries) {
       if (shownIds.includes(entry.id)) {
-        entry.retrieval_outcomes.applied_count++;
+        const ro = entry.retrieval_outcomes;
         if (phaseSucceeded) {
-          entry.retrieval_outcomes.succeeded_after_count++;
+          ro.succeeded_after_shown_count = (ro.succeeded_after_shown_count ?? 0) + 1;
         } else {
-          entry.retrieval_outcomes.failed_after_count++;
+          ro.failed_after_shown_count = (ro.failed_after_shown_count ?? 0) + 1;
         }
         updated = true;
         foundInSwarm.add(entry.id);
@@ -35607,11 +35750,11 @@ async function updateRetrievalOutcome(directory, phaseInfo, phaseSucceeded) {
     let hiveUpdated = false;
     for (const entry of hiveEntries) {
       if (remainingIds.includes(entry.id)) {
-        entry.retrieval_outcomes.applied_count++;
+        const ro = entry.retrieval_outcomes;
         if (phaseSucceeded) {
-          entry.retrieval_outcomes.succeeded_after_count++;
+          ro.succeeded_after_shown_count = (ro.succeeded_after_shown_count ?? 0) + 1;
         } else {
-          entry.retrieval_outcomes.failed_after_count++;
+          ro.failed_after_shown_count = (ro.failed_after_shown_count ?? 0) + 1;
         }
         hiveUpdated = true;
       }

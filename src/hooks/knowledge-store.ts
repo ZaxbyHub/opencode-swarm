@@ -5,7 +5,11 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
-import type { KnowledgeEntryBase, RejectedLesson } from './knowledge-types.js';
+import type {
+	ActionableDirectiveFields,
+	KnowledgeEntryBase,
+	RejectedLesson,
+} from './knowledge-types.js';
 
 // ============================================================================
 // Path Resolvers
@@ -84,6 +88,8 @@ export function resolveHiveRejectedPath(): string {
 
 // Read JSONL file. Skip lines that fail JSON.parse (log a warning for each skipped line).
 // Returns empty array if file does not exist.
+// v2: each parsed entry is passed through normalizeEntry() so v1 entries get
+// optional v2 fields filled in WITHOUT mutating on-disk JSONL.
 export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 	if (!existsSync(filePath)) return [];
 	const content = await readFile(filePath, 'utf-8');
@@ -92,7 +98,8 @@ export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
-			results.push(JSON.parse(trimmed) as T);
+			const raw = JSON.parse(trimmed) as T;
+			results.push(normalizeEntry(raw));
 		} catch {
 			console.warn(
 				`[knowledge-store] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
@@ -103,6 +110,59 @@ export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 		}
 	}
 	return results;
+}
+
+// v2: Normalize a parsed entry to the current shape in memory.
+// Adds defaulted retrieval-outcome counters for v1 entries; leaves on-disk JSONL untouched.
+// Pass-through for non-knowledge types (RejectedLesson) — only mutates objects with retrieval_outcomes.
+export function normalizeEntry<T>(raw: T): T {
+	if (!raw || typeof raw !== 'object') return raw;
+	const obj = raw as unknown as Record<string, unknown>;
+	if (!('retrieval_outcomes' in obj)) return raw;
+	const ro = obj.retrieval_outcomes as Record<string, unknown> | null;
+	if (ro && typeof ro === 'object') {
+		// Migrate: legacy 'applied_count' represented "shown" before v2.
+		// We preserve it as-is for backward compatibility, but ensure all v2
+		// counters exist with sane defaults.
+		if (typeof ro.shown_count !== 'number') {
+			ro.shown_count =
+				typeof ro.applied_count === 'number' ? ro.applied_count : 0;
+		}
+		if (typeof ro.acknowledged_count !== 'number') ro.acknowledged_count = 0;
+		if (typeof ro.applied_explicit_count !== 'number') {
+			ro.applied_explicit_count = 0;
+		}
+		if (typeof ro.ignored_count !== 'number') ro.ignored_count = 0;
+		if (typeof ro.violated_count !== 'number') ro.violated_count = 0;
+		if (typeof ro.succeeded_after_shown_count !== 'number') {
+			ro.succeeded_after_shown_count =
+				typeof ro.succeeded_after_count === 'number'
+					? ro.succeeded_after_count
+					: 0;
+		}
+		if (typeof ro.failed_after_shown_count !== 'number') {
+			ro.failed_after_shown_count =
+				typeof ro.failed_after_count === 'number' ? ro.failed_after_count : 0;
+		}
+	}
+	// Ensure actionable arrays are at least undefined-or-array (never wrong type).
+	const arrayFields: Array<keyof ActionableDirectiveFields> = [
+		'triggers',
+		'required_actions',
+		'forbidden_actions',
+		'applies_to_agents',
+		'applies_to_tools',
+		'verification_checks',
+		'source_refs',
+		'source_knowledge_ids',
+	];
+	for (const f of arrayFields) {
+		const v = obj[f as string];
+		if (v !== undefined && !Array.isArray(v)) {
+			delete obj[f as string];
+		}
+	}
+	return raw;
 }
 
 // Reads from the swarm-level rejected lessons file

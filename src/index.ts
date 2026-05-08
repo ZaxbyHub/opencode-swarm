@@ -21,6 +21,7 @@ import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
 	GuardrailsConfigSchema,
+	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
@@ -64,6 +65,10 @@ import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
 import { deleteStoredInputArgs } from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
+import {
+	knowledgeApplicationGateBefore,
+	knowledgeApplicationTransformScan,
+} from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
@@ -104,6 +109,7 @@ import {
 	get_qa_gate_profile,
 	gitingest,
 	imports,
+	knowledge_ack,
 	knowledge_add,
 	knowledge_query,
 	knowledge_recall,
@@ -126,6 +132,12 @@ import {
 	search,
 	secretscan,
 	set_qa_gates,
+	skill_apply,
+	skill_generate,
+	skill_improve,
+	skill_inspect,
+	skill_list,
+	spec_write,
 	submit_council_verdicts,
 	submit_phase_council_verdicts,
 	suggestPatch,
@@ -368,6 +380,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 	swarmState.curatorPhaseAgentNames = Object.keys(agents).filter(
 		(k) => k === 'curator_phase' || k.endsWith('_curator_phase'),
+	);
+	// v2: skill_improver and spec_writer agent registries — same multi-swarm
+	// resolution pattern as curator. Used by skill-improver-llm-factory to
+	// pick the right prefixed agent under named swarms.
+	swarmState.skillImproverAgentNames = Object.keys(agents).filter(
+		(k) => k === 'skill_improver' || k.endsWith('_skill_improver'),
+	);
+	swarmState.specWriterAgentNames = Object.keys(agents).filter(
+		(k) => k === 'spec_writer' || k.endsWith('_spec_writer'),
 	);
 	// Populate the generated-agent registry used by Full-Auto v2's strict
 	// canonical-role extraction (resolveGeneratedAgentRole). Without this,
@@ -786,6 +807,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			convene_general_council,
 			curator_analyze,
 			declare_council_criteria,
+			knowledge_ack,
 			knowledge_add,
 			knowledge_recall,
 			knowledge_remove,
@@ -826,6 +848,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			test_impact,
 			todo_extract,
 			search,
+			skill_apply,
+			skill_generate,
+			skill_improve,
+			skill_inspect,
+			skill_list,
+			spec_write,
 			batch_symbols,
 			build_check,
 			suggest_patch: suggestPatch,
@@ -1088,6 +1116,23 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				delegationGateHooks.messagesTransform,
 				delegationSanitizerHook,
 				knowledgeInjectorHook, // v6.17 knowledge injection
+				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
+				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
+				// each via the dedup-aware path. Best-effort; never throws.
+				(input: unknown, output: unknown): Promise<void> => {
+					try {
+						const p = input as { sessionID?: string };
+						return knowledgeApplicationTransformScan(
+							ctx.directory,
+							output as {
+								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+							},
+							p.sessionID,
+						);
+					} catch {
+						return Promise.resolve();
+					}
+				},
 				// Final transformation: consolidate multiple system messages into one
 				(_input: unknown, output: { messages?: unknown[] }): Promise<void> => {
 					if (output.messages) {
@@ -1247,6 +1292,25 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
 			//    critic when escalate_critic is needed.
 			await fullAutoPermissionHook.toolBefore(input, output);
+
+			// 6. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
+			//    Reads in-memory currentCriticalShownIds populated at injection
+			//    time and the in-process ack dedup set. Throws
+			//    KNOWLEDGE_ENFORCE_GATE_DENY for high-risk architect actions
+			//    (save_plan / update_task_status / phase_complete / Task) when
+			//    a critical directive was shown but no ack was recorded.
+			//    In `warn` mode it appends to events.jsonl and returns.
+			await knowledgeApplicationGateBefore(
+				ctx.directory,
+				{
+					tool: input.tool,
+					agent: input.agent,
+					sessionID: input.sessionID,
+				},
+				KnowledgeApplicationConfigSchema.parse(
+					config.knowledge_application ?? {},
+				),
+			);
 			// ---------------------------------------------------------------
 
 			// v6.29: One-time 50% context pressure warning

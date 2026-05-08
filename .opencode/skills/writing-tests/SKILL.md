@@ -189,6 +189,73 @@ afterEach(() => mock.restore());
 | Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
 | File-scoped mock (applies to all tests in file) | `mock.module` at top level + `mockReset()` in `beforeEach` | Preflight tests with `mockLoadPlan.mockReset()` |
 
+## mock.module() Export Completeness
+
+When using `mock.module()` (or `vi.mock()`) with Bun's test runner, the mock factory **MUST provide stubs for ALL named exports** of the target module — not just the ones your test calls. Bun validates the export set at dynamic-import time and throws `SyntaxError: Export named 'X' not found` if any export is missing.
+
+### Why this matters
+
+Transitive imports may reference exports your test never calls directly. For example, if your test mocks `config/schema.js` and only uses `stripKnownSwarmPrefix`, but a transitive dependency imports `PluginConfigSchema` from the same module, the mock MUST include `PluginConfigSchema` as a stub — even though your test never calls it.
+
+When the source module gains new exports (e.g., a PR adds 50 new Zod schemas to `config/schema.ts`), ALL existing `mock.module()` calls targeting that module must be updated — even if the new exports are irrelevant to your test.
+
+### How to verify completeness
+
+Before finalizing a test that uses `mock.module()`:
+
+1. List all runtime exports of the target module (type-only exports are erased at compile time and need no stub):
+   ```bash
+   grep -E "^export (const|function|async function|class) " src/path/to/module.ts
+   ```
+   **Note:** Do NOT include `type` or `interface` exports — Bun erases these at compile time and they need no runtime stub.
+2. Ensure every export name has an entry in your `mock.module()` factory.
+3. Stubs can be minimal:
+   - Functions: `() => null` or `async () => {}`
+   - Zod schemas: use a comprehensive stub that supports common methods:
+     ```typescript
+     const zodStub = {
+       parse: (v: unknown) => v,
+       safeParse: (v: unknown) => ({ success: true as const, data: v }),
+       parseAsync: async (v: unknown) => v,
+     };
+     ```
+   - Constants: appropriate zero values (`''`, `0`, `null`, `[]`, `{}`)
+
+### Verification pattern
+
+```typescript
+// ✅ CORRECT — all exports provided, test uses only the first one
+mock.module('../../../src/config/schema.js', () => ({
+  // The one export your test actually uses
+  stripKnownSwarmPrefix: mockStripFn,
+  // Stubs for transitive import resolution (never called in test)
+  PluginConfigSchema: zodStub,
+  ScoringConfigSchema: zodStub,
+  isKnownCanonicalRole: () => false,
+  // ... all other runtime exports as stubs
+}));
+
+// ❌ WRONG — missing exports cause SyntaxError at module-load time
+mock.module('../../../src/config/schema.js', () => ({
+  stripKnownSwarmPrefix: mockStripFn,
+  // Missing: PluginConfigSchema, ScoringConfigSchema, etc.
+  // → "SyntaxError: Export named 'PluginConfigSchema' not found"
+}));
+```
+
+### What IS and IS NOT test theater
+
+Adding stubs for ESM resolution is NOT test theater — it's a Bun runtime requirement. The distinction:
+
+| Pattern | Test theater? | Why |
+|---------|--------------|-----|
+| Adding `PluginConfigSchema: zodStub` so the module loads | **No** | Required for ESM resolution; stub is never called |
+| Stubbing `validateDirectory` to return `true` then asserting "validation works" | **Yes** | The stub bypasses the logic you should be testing |
+| Using `zodStub` in assertions: `expect(zodStub.parse(input)).toBe(input)` | **Yes** | Testing the stub, not the real code |
+| Adding stubs for ALL 50 Zod schemas in config/schema.ts | **No** | All are required for transitive import resolution |
+
+The stubs exist solely to satisfy the module loader. Test assertions must verify behavior through the real-mocked functions (the ones your test actually calls), not through the stubs.
+
 ### Files Intentionally Using File-Scoped Mocks
 
 Some test files use top-level `mock.module` that must persist across all tests in the file. These files use `mockReset()`/`mockClear()` in `beforeEach` instead of `mock.restore()` in `afterEach`:

@@ -1,0 +1,221 @@
+/**
+ * Tests that skill_improver actually dispatches the LLM delegate when one is
+ * provided, and that quota / source-tagging policies are honoured.
+ *
+ * The factory in src/hooks/skill-improver-llm-factory.ts requires a wired
+ * OpenCode client to return a real delegate; in unit tests we inject a fake
+ * delegate via `req.delegate` and assert dispatch happens.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
+import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { runSkillImprover } from '../../../src/services/skill-improver';
+import { getQuotaState } from '../../../src/services/skill-improver-quota';
+
+let tmp: string;
+beforeEach(() => {
+	mock.restore();
+	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-llm-'));
+});
+afterEach(() => {
+	rmSync(tmp, { recursive: true, force: true });
+	mock.restore();
+});
+
+const cfg = {
+	enabled: true,
+	model: 'openrouter/expensive-model',
+	fallback_models: [] as string[],
+	max_calls_per_day: 5,
+	trigger: 'manual' as const,
+	targets: ['skills'] as Array<
+		'skills' | 'spec' | 'architect_prompt' | 'knowledge'
+	>,
+	write_mode: 'proposal' as const,
+	require_user_approval: true,
+	quota_window: 'utc' as const,
+	allow_deterministic_fallback: true,
+};
+
+async function seedKnowledge(): Promise<void> {
+	await mkdir(path.join(tmp, '.swarm'), { recursive: true });
+	const e: SwarmKnowledgeEntry = {
+		id: '11111111-1111-4111-9111-111111111111',
+		tier: 'swarm',
+		lesson: 'always declare scope before coder delegation',
+		category: 'process',
+		tags: ['scope'],
+		scope: 'global',
+		confidence: 0.95,
+		status: 'established',
+		confirmed_by: [
+			{
+				phase_number: 1,
+				confirmed_at: new Date().toISOString(),
+				project_name: 't',
+			},
+			{
+				phase_number: 2,
+				confirmed_at: new Date().toISOString(),
+				project_name: 't',
+			},
+		],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2,
+		created_at: new Date().toISOString(),
+		updated_at: new Date().toISOString(),
+		project_name: 't',
+		triggers: ['coder delegation'],
+	};
+	await writeFile(
+		resolveSwarmKnowledgePath(tmp),
+		JSON.stringify(e) + '\n',
+		'utf-8',
+	);
+}
+
+describe('skill_improver LLM dispatch', () => {
+	it('invokes the injected delegate and tags proposal source: llm', async () => {
+		await seedKnowledge();
+		let delegateCalled = false;
+		let lastSystemPrompt = '';
+		let lastUserPrompt = '';
+		const delegate = async (sys: string, user: string): Promise<string> => {
+			delegateCalled = true;
+			lastSystemPrompt = sys;
+			lastUserPrompt = user;
+			return [
+				'## Inventory snapshot',
+				'(LLM-derived inventory analysis here)',
+				'',
+				'## Repeated ignored or violated directives',
+				'- 11111111-1111-4111-9111-111111111111 — repeatedly ignored on coder delegation',
+				'',
+				'## Concrete recommendations',
+				'- Compile this directive into a generated SKILL.md',
+				'',
+				'## Optional cluster suggestions for new draft skills',
+				'',
+				'## Risks and known limitations',
+				'- LLM may hallucinate trigger phrases',
+			].join('\n');
+		};
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: cfg,
+			delegate,
+		});
+
+		expect(delegateCalled).toBe(true);
+		expect(r.ran).toBe(true);
+		expect(r.source).toBe('llm');
+		// system prompt must mention skill_improver targets
+		expect(lastSystemPrompt).toContain('skill_improver');
+		// user prompt must include the inventory of known mature candidates
+		expect(lastUserPrompt).toContain('11111111-1111-4111-9111-111111111111');
+
+		const body = readFileSync(r.proposalPath!, 'utf-8');
+		expect(body).toContain('source: llm');
+		expect(body).toContain('LLM-derived inventory');
+		expect(body).not.toContain('deterministic_fallback');
+	});
+
+	it('refuses pre-flight (no quota touched) when no delegate and fallback disabled', async () => {
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, allow_deterministic_fallback: false },
+			// no delegate, no client
+		});
+		expect(r.ran).toBe(false);
+		expect(r.reason).toMatch(/no_llm_client/);
+		// Quota must NOT have been reserved
+		const state = await getQuotaState(tmp, {
+			maxCalls: cfg.max_calls_per_day,
+			window: 'utc',
+		});
+		expect(state.calls_used).toBe(0);
+	});
+
+	it('falls back to deterministic body when delegate undefined and fallback enabled', async () => {
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, allow_deterministic_fallback: true },
+			// no delegate — simulates no OpenCode client
+		});
+		expect(r.ran).toBe(true);
+		expect(r.source).toBe('deterministic_fallback');
+		const body = readFileSync(r.proposalPath!, 'utf-8');
+		expect(body).toContain('source: deterministic_fallback');
+		expect(body).toContain('deterministic fallback');
+	});
+
+	it('LLM call failure consumes the slot (anti-flake policy)', async () => {
+		const delegate = async () => {
+			throw new Error('connection reset by peer');
+		};
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: cfg,
+			delegate,
+		});
+		expect(r.ran).toBe(false);
+		expect(r.reason).toMatch(/llm_call_failed/);
+		expect(r.quota.calls_used).toBe(1);
+	});
+
+	it('empty LLM response counts as failure (slot consumed)', async () => {
+		const delegate = async () => '   \n  \n';
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: cfg,
+			delegate,
+		});
+		expect(r.ran).toBe(false);
+		expect(r.reason).toMatch(/empty LLM response/);
+		expect(r.quota.calls_used).toBe(1);
+	});
+
+	it('quota exhaustion blocks dispatch and writes nothing', async () => {
+		const delegate = async () => '## Inventory snapshot\nok';
+		const tight = { ...cfg, max_calls_per_day: 2 };
+		await runSkillImprover({ directory: tmp, config: tight, delegate });
+		await runSkillImprover({ directory: tmp, config: tight, delegate });
+		const r3 = await runSkillImprover({
+			directory: tmp,
+			config: tight,
+			delegate,
+		});
+		expect(r3.ran).toBe(false);
+		expect(r3.reason).toMatch(/quota/i);
+		// Two proposals should exist, not three
+		const fs = await import('node:fs/promises');
+		const proposals = await fs.readdir(
+			path.join(tmp, '.swarm', 'skill-improver', 'proposals'),
+		);
+		expect(proposals.length).toBe(2);
+	});
+
+	it('does not pre-emptively reserve quota when enabled is false', async () => {
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, enabled: false },
+		});
+		expect(r.ran).toBe(false);
+		// quota file may exist or not; either way calls_used must be 0
+		const state = await getQuotaState(tmp, {
+			maxCalls: cfg.max_calls_per_day,
+			window: 'utc',
+		});
+		expect(state.calls_used).toBe(0);
+	});
+});

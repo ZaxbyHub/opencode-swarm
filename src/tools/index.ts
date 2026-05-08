@@ -21,6 +21,7 @@ export { get_approved_plan } from './get-approved-plan';
 export { get_qa_gate_profile } from './get-qa-gate-profile';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
+export { knowledge_ack } from './knowledge-ack';
 export { knowledge_add } from './knowledge-add';
 export { knowledge_query } from './knowledge-query';
 export { knowledge_recall } from './knowledge-recall';
@@ -86,6 +87,12 @@ export {
 	secretscan,
 } from './secretscan';
 export { set_qa_gates } from './set-qa-gates';
+export { skill_apply } from './skill-apply';
+export { skill_generate } from './skill-generate';
+export { skill_improve } from './skill-improve';
+export { skill_inspect } from './skill-inspect';
+export { skill_list } from './skill-list';
+export { spec_write } from './spec-write';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 
 import { suggestPatch } from './suggest-patch';

@@ -33,7 +33,9 @@ import {
 	CURATOR_PHASE_PROMPT,
 } from '../agents/explorer.js';
 import { getGlobalEventBus } from '../background/event-bus.js';
+import { getCanonicalAgentRole } from '../config/schema.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
 import type {
@@ -196,6 +198,151 @@ export function parseKnowledgeRecommendations(
 }
 
 /**
+ * v2: Strict-JSON parser for the new curator output blocks.
+ *
+ * Curator prompts may now emit JSON-fenced blocks like:
+ *
+ * ```json knowledge_application_findings
+ * [{ "knowledge_id": "...", "expected_behavior": "...", ... }]
+ * ```
+ *
+ * ```json skill_candidates
+ * [{ "slug": "...", "title": "...", ... }]
+ * ```
+ *
+ * Malformed JSON or unexpected types are silently dropped: no knowledge or
+ * skill writes happen when curator output is malformed.
+ */
+export function parseStructuredCuratorBlocks(llmOutput: string): {
+	findings: import('./curator-types.js').KnowledgeApplicationFinding[];
+	candidates: import('./curator-types.js').SkillCandidate[];
+} {
+	const out: {
+		findings: import('./curator-types.js').KnowledgeApplicationFinding[];
+		candidates: import('./curator-types.js').SkillCandidate[];
+	} = { findings: [], candidates: [] };
+	if (!llmOutput || typeof llmOutput !== 'string') return out;
+
+	const fences =
+		/```(?:json|jsonc)?\s+(knowledge_application_findings|skill_candidates)\s*\n([\s\S]*?)\n```/g;
+	for (const m of llmOutput.matchAll(fences)) {
+		const kind = m[1];
+		const body = m[2];
+		try {
+			const parsed = JSON.parse(body);
+			if (!Array.isArray(parsed)) continue;
+			if (kind === 'knowledge_application_findings') {
+				for (const item of parsed) {
+					if (!item || typeof item !== 'object') continue;
+					const knowledge_id = (item as { knowledge_id?: unknown })
+						.knowledge_id;
+					const verdict = (item as { verdict?: unknown }).verdict;
+					if (
+						typeof knowledge_id !== 'string' ||
+						typeof verdict !== 'string' ||
+						!['applied', 'ignored', 'violated', 'not_applicable'].includes(
+							verdict,
+						)
+					) {
+						continue;
+					}
+					const expected = String(
+						(item as { expected_behavior?: unknown }).expected_behavior ?? '',
+					).slice(0, 500);
+					const observed = String(
+						(item as { observed_behavior?: unknown }).observed_behavior ?? '',
+					).slice(0, 500);
+					const refs = Array.isArray(
+						(item as { evidence_refs?: unknown }).evidence_refs,
+					)
+						? (
+								(item as { evidence_refs: unknown[] }).evidence_refs.filter(
+									(r) => typeof r === 'string',
+								) as string[]
+							).slice(0, 20)
+						: [];
+					out.findings.push({
+						knowledge_id,
+						expected_behavior: expected,
+						observed_behavior: observed,
+						verdict: verdict as
+							| 'applied'
+							| 'ignored'
+							| 'violated'
+							| 'not_applicable',
+						evidence_refs: refs,
+					});
+				}
+			} else if (kind === 'skill_candidates') {
+				for (const item of parsed) {
+					if (!item || typeof item !== 'object') continue;
+					const slug = (item as { slug?: unknown }).slug;
+					const title = (item as { title?: unknown }).title;
+					if (typeof slug !== 'string' || typeof title !== 'string') continue;
+					const ids = Array.isArray(
+						(item as { source_knowledge_ids?: unknown }).source_knowledge_ids,
+					)
+						? (
+								(
+									item as { source_knowledge_ids: unknown[] }
+								).source_knowledge_ids.filter(
+									(s) => typeof s === 'string',
+								) as string[]
+							).slice(0, 50)
+						: [];
+					if (ids.length === 0) continue;
+					out.candidates.push({
+						slug: String(slug).slice(0, 64),
+						title: String(title).slice(0, 200),
+						source_knowledge_ids: ids,
+						trigger: String(
+							(item as { trigger?: unknown }).trigger ?? '',
+						).slice(0, 200),
+						required_procedure: arrayOfStrings(
+							(item as { required_procedure?: unknown }).required_procedure,
+						),
+						forbidden_shortcuts: arrayOfStrings(
+							(item as { forbidden_shortcuts?: unknown }).forbidden_shortcuts,
+						),
+						target_agents: arrayOfStrings(
+							(item as { target_agents?: unknown }).target_agents,
+						),
+						reviewer_checks: arrayOfStrings(
+							(item as { reviewer_checks?: unknown }).reviewer_checks,
+						),
+						confidence: clampConf(
+							(item as { confidence?: unknown }).confidence,
+						),
+						reason: String((item as { reason?: unknown }).reason ?? '').slice(
+							0,
+							280,
+						),
+					});
+				}
+			}
+		} catch {
+			// malformed JSON — silently skip; never mutate knowledge from bad output.
+		}
+	}
+	return out;
+}
+
+function arrayOfStrings(v: unknown): string[] {
+	if (!Array.isArray(v)) return [];
+	return v
+		.filter((x) => typeof x === 'string')
+		.map((x) => (x as string).slice(0, 200))
+		.slice(0, 20);
+}
+
+function clampConf(v: unknown): number {
+	if (typeof v !== 'number') return 0.85;
+	if (v < 0) return 0;
+	if (v > 1) return 1;
+	return v;
+}
+
+/**
  * Read curator summary from .swarm/curator-summary.json
  * @param directory - The workspace directory
  * @returns CuratorSummary if valid, null if missing or invalid
@@ -247,12 +394,26 @@ export async function writeCuratorSummary(
 }
 
 /**
- * Normalize agent name by stripping common swarm prefixes.
+ * Normalize an agent name to its canonical role.
+ *
+ * v2 (Phase F′ remediation): use the repository's canonical resolver
+ * `getCanonicalAgentRole`, registry-aware. When the generated-agent registry
+ * is populated (post plugin-init), an arbitrary swarm id like
+ * `banana_coder` resolves to `coder` IFF it appears in the registry.
+ * Pre-init (registry empty), the resolver falls back to a permissive
+ * suffix-match against ALL_AGENT_NAMES — preserving today's behaviour for
+ * arbitrary user prefixes without the hard-coded
+ * `(mega|paid|local|lowtier|modelrelay)_` whitelist.
+ *
+ * Lower-casing is preserved for backwards compatibility with the prior
+ * comparator code paths in this file.
  */
 function normalizeAgentName(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/^(mega|paid|local|lowtier|modelrelay)_/, '');
+	const registry =
+		swarmState.generatedAgentNames.length > 0
+			? swarmState.generatedAgentNames
+			: undefined;
+	return getCanonicalAgentRole(name, registry).toLowerCase();
 }
 
 /**
@@ -377,7 +538,12 @@ export function checkPhaseCompliance(
 	for (let i = 0; i < phaseEvents.length; i++) {
 		const e = phaseEvents[i];
 		try {
-			const eventType = (e as Record<string, unknown>).type;
+			// v2 baseline fix: some emitters use {type: ...} and some use {event: ...}.
+			// Accept either so phase events emitted under the legacy 'event' key are
+			// still recognised (e.g. when phase_complete writes via different paths).
+			const eventType =
+				(e as Record<string, unknown>).type ??
+				(e as Record<string, unknown>).event;
 			const evidenceType = (e as Record<string, unknown>).evidence_type;
 
 			if (
@@ -782,6 +948,9 @@ export async function runCuratorPhase(
 			}));
 
 		let knowledgeRecommendations: KnowledgeRecommendation[] = [];
+		let knowledgeApplicationFindings: import('./curator-types.js').KnowledgeApplicationFinding[] =
+			[];
+		let skillCandidates: import('./curator-types.js').SkillCandidate[] = [];
 		if (llmDelegate) {
 			try {
 				const priorDigest = priorSummary?.digest ?? 'none';
@@ -828,11 +997,16 @@ export async function runCuratorPhase(
 				if (llmOutput?.trim()) {
 					knowledgeRecommendations =
 						_internals.parseKnowledgeRecommendations(llmOutput);
+					const structured = parseStructuredCuratorBlocks(llmOutput);
+					knowledgeApplicationFindings = structured.findings;
+					skillCandidates = structured.candidates;
 				}
 
 				getGlobalEventBus().publish('curator.phase.llm_completed', {
 					phase,
 					recommendations: knowledgeRecommendations.length,
+					skill_candidates: skillCandidates.length,
+					application_findings: knowledgeApplicationFindings.length,
 				});
 			} catch (err) {
 				// LLM failure: fall back to data-only mode (empty recommendations)
@@ -895,12 +1069,47 @@ export async function runCuratorPhase(
 			});
 		}
 
+		// v2: optional skill generation when curator returns skill_candidates and
+		// the curator config opts in. Always uses 'draft' mode here — we never
+		// auto-activate a generated skill from a curator pass; the architect or
+		// a human must call skill_apply explicitly.
+		if (
+			(config as { skill_generation_enabled?: boolean })
+				.skill_generation_enabled === true &&
+			skillCandidates.length > 0
+		) {
+			try {
+				const skillModule = await import('../services/skill-generator.js');
+				for (const cand of skillCandidates) {
+					if (
+						cand.confidence <
+						((config as { min_skill_confidence?: number })
+							.min_skill_confidence ?? 0.85)
+					) {
+						continue;
+					}
+					await skillModule.generateSkills({
+						directory,
+						mode: 'draft',
+						slug: cand.slug,
+						sourceKnowledgeIds: cand.source_knowledge_ids,
+					});
+				}
+			} catch (err) {
+				logger.warn(
+					`[curator] skill draft generation failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+
 		const result: CuratorPhaseResult = {
 			phase,
 			digest: phaseDigest,
 			compliance: complianceObservations,
 			knowledge_recommendations: knowledgeRecommendations,
 			summary_updated: true,
+			knowledge_application_findings: knowledgeApplicationFindings,
+			skill_candidates: skillCandidates,
 		};
 
 		// 9. Emit event

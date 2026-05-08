@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts; do
+          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1

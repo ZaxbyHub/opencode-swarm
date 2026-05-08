@@ -122,8 +122,8 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 			confirmed_by: [],
 			retrieval_outcomes: {
 				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 0,
+				failed_after_shown_count: 0,
 			},
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
@@ -138,11 +138,11 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 			.mock.calls[0];
 		const updated = writtenEntries.find((e: typeof entry) => e.id === lessonId);
 		expect(updated).toBeDefined();
-		expect(updated.retrieval_outcomes.applied_count).toBe(1);
-		expect(updated.retrieval_outcomes.succeeded_after_count).toBe(1);
+		// v2: applied_count is FROZEN (not auto-incremented from shown)
+		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(1);
 	});
 
-	it('increments applied_count and succeeded_after_count when outcome is true', async () => {
+	it('increments succeeded_after_shown_count when outcome is true', async () => {
 		const id = 'lesson-xyz';
 		writeShownFile({ 'Phase 2': [id] });
 
@@ -159,8 +159,8 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 			confirmed_by: [],
 			retrieval_outcomes: {
 				applied_count: 2,
-				succeeded_after_count: 1,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 1,
+				failed_after_shown_count: 0,
 			},
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
@@ -172,11 +172,12 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 		const [, writtenEntries] = (rewriteKnowledge as ReturnType<typeof vi.fn>)
 			.mock.calls[0];
 		const updated = writtenEntries.find((e: typeof entry) => e.id === id);
-		expect(updated.retrieval_outcomes.applied_count).toBe(3); // was 2
-		expect(updated.retrieval_outcomes.succeeded_after_count).toBe(2); // was 1
+		// v2: applied_count is FROZEN — should stay at 2
+		expect(updated.retrieval_outcomes.applied_count).toBe(2);
+		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(2); // was 1
 	});
 
-	it('increments applied_count and failed_after_count when outcome is false', async () => {
+	it('increments failed_after_shown_count when outcome is false', async () => {
 		const id = 'lesson-fail';
 		writeShownFile({ 'Phase 3': [id] });
 
@@ -193,8 +194,8 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 			confirmed_by: [],
 			retrieval_outcomes: {
 				applied_count: 1,
-				succeeded_after_count: 1,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 1,
+				failed_after_shown_count: 0,
 			},
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
@@ -206,9 +207,10 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 		const [, writtenEntries] = (rewriteKnowledge as ReturnType<typeof vi.fn>)
 			.mock.calls[0];
 		const updated = writtenEntries.find((e: typeof entry) => e.id === id);
-		expect(updated.retrieval_outcomes.applied_count).toBe(2);
-		expect(updated.retrieval_outcomes.failed_after_count).toBe(1);
-		expect(updated.retrieval_outcomes.succeeded_after_count).toBe(1); // unchanged
+		// v2: applied_count is FROZEN — should stay at 1
+		expect(updated.retrieval_outcomes.applied_count).toBe(1);
+		expect(updated.retrieval_outcomes.failed_after_shown_count).toBe(1);
+		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(1); // unchanged
 	});
 
 	it('does nothing when no lessons were shown for the given phase', async () => {

@@ -6,6 +6,7 @@ export declare function resolveSwarmRejectedPath(directory: string): string;
 export declare function resolveHiveKnowledgePath(): string;
 export declare function resolveHiveRejectedPath(): string;
 export declare function readKnowledge<T>(filePath: string): Promise<T[]>;
+export declare function normalizeEntry<T>(raw: T): T;
 export declare function readRejectedLessons(directory: string): Promise<RejectedLesson[]>;
 export declare function appendKnowledge<T>(filePath: string, entry: T): Promise<void>;
 export declare function rewriteKnowledge<T>(filePath: string, entries: T[]): Promise<void>;

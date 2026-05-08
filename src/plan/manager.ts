@@ -1359,6 +1359,36 @@ export function derivePlanMarkdown(plan: Plan): string {
 }
 
 /**
+ * Return the id of the current task within the plan's current phase, or
+ * undefined if no incomplete task can be identified. PURE function — no I/O.
+ *
+ * Resolution: among tasks of the current phase, pick the first
+ * in_progress task; otherwise the first non-completed task; otherwise
+ * undefined (between phases / phase exhausted).
+ *
+ * Used by the v2 knowledge-injector to populate `taskId` in the retrieval
+ * context so action-aware ranking and shown-set keying can scope to a
+ * specific task.
+ */
+export function getCurrentTaskId(
+	plan: Plan | null | undefined,
+): string | undefined {
+	if (!plan) return undefined;
+	const currentPhase = plan.current_phase ?? 1;
+	const phase = plan.phases.find((p) => p.id === currentPhase);
+	if (!phase) return undefined;
+	const sortedTasks = [...phase.tasks].sort((a, b) =>
+		compareTaskIds(a.id, b.id),
+	);
+	const inProgress = sortedTasks.find((t) => t.status === 'in_progress');
+	if (inProgress) return inProgress.id;
+	const incomplete = sortedTasks.find(
+		(t) => t.status !== 'completed' && t.status !== 'closed',
+	);
+	return incomplete?.id;
+}
+
+/**
  * Convert existing plan.md to plan.json. PURE function — no I/O.
  */
 export function migrateLegacyPlan(planContent: string, swarmId?: string): Plan {

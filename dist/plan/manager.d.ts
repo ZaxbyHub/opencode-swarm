@@ -98,6 +98,19 @@ export declare function updateTaskStatus(directory: string, taskId: string, stat
  */
 export declare function derivePlanMarkdown(plan: Plan): string;
 /**
+ * Return the id of the current task within the plan's current phase, or
+ * undefined if no incomplete task can be identified. PURE function — no I/O.
+ *
+ * Resolution: among tasks of the current phase, pick the first
+ * in_progress task; otherwise the first non-completed task; otherwise
+ * undefined (between phases / phase exhausted).
+ *
+ * Used by the v2 knowledge-injector to populate `taskId` in the retrieval
+ * context so action-aware ranking and shown-set keying can scope to a
+ * specific task.
+ */
+export declare function getCurrentTaskId(plan: Plan | null | undefined): string | undefined;
+/**
  * Convert existing plan.md to plan.json. PURE function — no I/O.
  */
 export declare function migrateLegacyPlan(planContent: string, swarmId?: string): Plan;
