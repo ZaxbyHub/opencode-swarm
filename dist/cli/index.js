@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.8.0",
+    version: "7.8.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -19756,7 +19756,13 @@ async function handleArchiveCommand(directory, args) {
     const wouldArchiveAge = [];
     const remainingBundles = [];
     for (const taskId of beforeTaskIds) {
-      const result = await loadEvidence(directory, taskId);
+      let result;
+      try {
+        result = await loadEvidence(directory, taskId);
+      } catch (_evidenceErr) {
+        warn("archive: skipping corrupt or unreadable evidence for task", taskId);
+        continue;
+      }
       if (result.status !== "found") {
         continue;
       }
@@ -19811,6 +19817,7 @@ async function handleArchiveCommand(directory, args) {
 var init_archive = __esm(() => {
   init_loader();
   init_manager2();
+  init_utils();
 });
 
 // src/db/project-db.ts
@@ -20817,7 +20824,13 @@ async function handleBenchmarkCommand(directory, args) {
     let totalTestToCodeRatio = 0;
     let qualityEvidenceCount = 0;
     for (const tid of await listEvidenceTaskIds(directory)) {
-      const result = await loadEvidence(directory, tid);
+      let result;
+      try {
+        result = await loadEvidence(directory, tid);
+      } catch (_evidenceErr) {
+        warn("benchmark: skipping corrupt or unreadable evidence for task", tid);
+        continue;
+      }
       if (result.status !== "found")
         continue;
       for (const e of result.bundle.entries) {
@@ -37219,7 +37232,17 @@ async function handleDarkMatterCommand(directory, args) {
       i++;
     }
   }
-  const pairs = await detectDarkMatter(directory, options);
+  let pairs;
+  try {
+    pairs = await _internals10.detectDarkMatter(directory, options);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return `## Dark Matter Analysis Failed
+
+Error analyzing git history: ${errMsg}
+
+Ensure this is a git repository with commit history.`;
+  }
   const output = formatDarkMatterOutput(pairs);
   if (pairs.length > 0) {
     try {
@@ -41625,22 +41648,37 @@ var init_handoff_service = __esm(() => {
 
 // src/commands/handoff.ts
 import crypto4 from "crypto";
-import { renameSync as renameSync7 } from "fs";
+import { renameSync as renameSync7, unlinkSync as unlinkSync4 } from "fs";
 async function handleHandoffCommand(directory, _args) {
   const handoffData = await getHandoffData(directory);
   const markdown = formatHandoffMarkdown(handoffData);
-  const resolvedPath = validateSwarmPath(directory, "handoff.md");
-  const tempPath = `${resolvedPath}.tmp.${crypto4.randomUUID()}`;
-  await bunWrite(tempPath, markdown);
-  renameSync7(tempPath, resolvedPath);
-  const continuationPrompt = formatContinuationPrompt(handoffData);
-  const promptPath = validateSwarmPath(directory, "handoff-prompt.md");
-  const promptTempPath = `${promptPath}.tmp.${crypto4.randomUUID()}`;
-  await bunWrite(promptTempPath, continuationPrompt);
-  renameSync7(promptTempPath, promptPath);
-  await writeSnapshot(directory, swarmState);
-  await flushPendingSnapshot(directory);
-  return `## Handoff Brief Written
+  try {
+    const resolvedPath = validateSwarmPath(directory, "handoff.md");
+    const tempPath = `${resolvedPath}.tmp.${crypto4.randomUUID()}`;
+    await bunWrite(tempPath, markdown);
+    try {
+      renameSync7(tempPath, resolvedPath);
+    } catch (renameErr) {
+      try {
+        unlinkSync4(tempPath);
+      } catch {}
+      throw renameErr;
+    }
+    const continuationPrompt = formatContinuationPrompt(handoffData);
+    const promptPath = validateSwarmPath(directory, "handoff-prompt.md");
+    const promptTempPath = `${promptPath}.tmp.${crypto4.randomUUID()}`;
+    await bunWrite(promptTempPath, continuationPrompt);
+    try {
+      renameSync7(promptTempPath, promptPath);
+    } catch (renameErr) {
+      try {
+        unlinkSync4(promptTempPath);
+      } catch {}
+      throw renameErr;
+    }
+    await writeSnapshot(directory, swarmState);
+    await flushPendingSnapshot(directory);
+    return `## Handoff Brief Written
 
 Brief written to \`.swarm/handoff.md\`.
 Continuation prompt written to \`.swarm/handoff-prompt.md\`.
@@ -41654,6 +41692,16 @@ ${markdown}
 Copy and paste the block below into your next session to resume cleanly:
 
 ${continuationPrompt}`;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return `## Handoff Generated (file write failed)
+
+Handoff data was generated but could not be written to disk: ${errMsg}
+
+The handoff content is included below for manual copy:
+
+${markdown}`;
+  }
 }
 var init_handoff = __esm(() => {
   init_utils2();
@@ -47740,7 +47788,19 @@ async function handleSimulateCommand(directory, args) {
       options.minCommits = val;
     }
   }
-  const darkMatterPairs = await detectDarkMatter(directory, options);
+  let darkMatterPairs;
+  try {
+    darkMatterPairs = await _internals10.detectDarkMatter(directory, options);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return `## Simulate Report
+
+### Error
+
+Error analyzing git history: ${errMsg}
+
+Ensure this is a git repository with commit history.`;
+  }
   const reportLines = [
     "# Simulate Report",
     "",
@@ -47758,15 +47818,21 @@ async function handleSimulateCommand(directory, args) {
   ];
   const report = reportLines.filter(Boolean).join(`
 `);
-  const fs22 = await import("fs/promises");
-  const path37 = await import("path");
-  const reportPath = path37.join(directory, ".swarm", "simulate-report.md");
-  await fs22.mkdir(path37.dirname(reportPath), { recursive: true });
-  await fs22.writeFile(reportPath, report, "utf-8");
+  try {
+    const fs22 = await import("fs/promises");
+    const path37 = await import("path");
+    const reportPath = path37.join(directory, ".swarm", "simulate-report.md");
+    await fs22.mkdir(path37.dirname(reportPath), { recursive: true });
+    await fs22.writeFile(reportPath, report, "utf-8");
+  } catch (err) {
+    const writeErr = err instanceof Error ? err.message : String(err);
+    warn(`simulate: failed to write report to ${directory}/.swarm/simulate-report.md`, writeErr);
+  }
   return `${darkMatterPairs.length} hidden coupling pairs detected`;
 }
 var init_simulate = __esm(() => {
   init_co_change_analyzer();
+  init_utils();
 });
 
 // src/commands/specify.ts
@@ -48213,12 +48279,6 @@ function buildHelpText() {
   return lines.join(`
 `);
 }
-function getHelpText() {
-  if (!_helpText) {
-    _helpText = buildHelpText();
-  }
-  return _helpText;
-}
 function createSwarmCommandHandler(directory, agents) {
   return async (input, output) => {
     if (input.command !== "swarm" && !input.command.startsWith("swarm-")) {
@@ -48244,7 +48304,22 @@ function createSwarmCommandHandler(directory, agents) {
     let text;
     const resolved = resolveCommand(tokens);
     if (!resolved) {
-      text = getHelpText();
+      if (tokens.length === 0) {
+        text = buildHelpText();
+      } else {
+        const attemptedCommand = tokens[0] || "";
+        const MAX_DISPLAY = 100;
+        const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
+        const similar = _internals19.findSimilarCommands(attemptedCommand);
+        const header = `Command \`/swarm ${displayCommand}\` not found.`;
+        const suggestions = similar.length > 0 ? `Did you mean:
+${similar.map((cmd) => `  \u2022 /swarm ${cmd}`).join(`
+`)}` : "";
+        const footer = "Run `/swarm help` for all commands.";
+        text = [header, suggestions, footer].filter(Boolean).join(`
+
+`);
+      }
     } else {
       try {
         text = await resolved.entry.handler({
@@ -48276,7 +48351,6 @@ ${text}`;
     ];
   };
 }
-var _helpText;
 var init_commands = __esm(() => {
   init_registry();
   init_acknowledge_spec_drift();
@@ -48336,14 +48410,38 @@ function levenshteinDistance(a, b) {
 }
 function findSimilarCommands(query) {
   const q = query.toLowerCase();
-  const scored = VALID_COMMANDS.filter((cmd) => {
-    if (cmd.includes(" ") || cmd.includes("-"))
-      return false;
-    return cmd.toLowerCase().includes(q) || q.includes(cmd.toLowerCase());
-  }).map((cmd) => ({
-    cmd,
-    score: cmd.length < q.length ? q.length - cmd.length : _internals19.levenshteinDistance(q, cmd)
-  }));
+  if (q.length > 500) {
+    return [];
+  }
+  const scored = VALID_COMMANDS.map((cmd) => {
+    const cmdLower = cmd.toLowerCase();
+    const fullScore = _internals19.levenshteinDistance(q, cmdLower);
+    let tokenScore = Infinity;
+    if (cmd.includes(" ") || cmd.includes("-")) {
+      const qTokens = q.split(/[\s-]+/);
+      const cmdTokens = cmdLower.split(/[\s-]+/);
+      let totalTokenDist = 0;
+      for (const qt of qTokens) {
+        if (qt.length === 0)
+          continue;
+        let minDist = Infinity;
+        for (const ct of cmdTokens) {
+          if (ct.length === 0)
+            continue;
+          const dist = _internals19.levenshteinDistance(qt, ct);
+          if (dist < minDist)
+            minDist = dist;
+        }
+        totalTokenDist += minDist;
+      }
+      tokenScore = totalTokenDist;
+    }
+    const dashStrippedQ = q.replace(/-/g, "");
+    const dashStrippedCmd = cmdLower.replace(/-/g, "");
+    const dashScore = _internals19.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const score = Math.min(fullScore, tokenScore, dashScore);
+    return { cmd, score };
+  });
   scored.sort((a, b) => a.score - b.score);
   return scored.slice(0, 3).map((s) => s.cmd);
 }

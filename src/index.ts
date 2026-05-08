@@ -857,7 +857,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|plan|agents|history|config|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor-tools|close]',
+						'Swarm management commands: /swarm [status|plan|agents|history|config|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor-tools|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -963,6 +963,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--spec-review]',
 				},
+				'swarm-pr-review': {
+					template: '/swarm pr-review $ARGUMENTS',
+					description:
+						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
+				},
+				'swarm-issue': {
+					template: '/swarm issue $ARGUMENTS',
+					description:
+						'Use /swarm issue to ingest a GitHub issue into the swarm workflow',
+				},
 				'swarm-qa-gates': {
 					template: '/swarm qa-gates $ARGUMENTS',
 					description:
@@ -988,7 +998,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						'Use /swarm turbo to enable turbo mode for faster execution',
 				},
 				'swarm-full-auto': {
-					template: '/swarm-full-auto $ARGUMENTS',
+					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
 				},
 				'swarm-write-retro': {

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/index.js';
 import {
+	_internals,
 	COMMAND_REGISTRY,
 	type CommandEntry,
 	resolveCommand,
@@ -211,17 +212,6 @@ export function buildHelpText(): string {
 	return lines.join('\n');
 }
 
-// Lazy-initialized to avoid circular dependency ReferenceError
-// when VALID_COMMANDS is not yet initialized during module load.
-let _helpText: string | undefined;
-
-function getHelpText(): string {
-	if (!_helpText) {
-		_helpText = buildHelpText();
-	}
-	return _helpText;
-}
-
 /**
  * Creates a command.execute.before handler for /swarm commands.
  * Uses factory pattern to close over directory and agents.
@@ -281,7 +271,24 @@ export function createSwarmCommandHandler(
 		const resolved = resolveCommand(tokens);
 
 		if (!resolved) {
-			text = getHelpText();
+			if (tokens.length === 0) {
+				text = buildHelpText();
+			} else {
+				const attemptedCommand = tokens[0] || '';
+				const MAX_DISPLAY = 100;
+				const displayCommand =
+					attemptedCommand.length > MAX_DISPLAY
+						? `${attemptedCommand.slice(0, MAX_DISPLAY)}...`
+						: attemptedCommand;
+				const similar = _internals.findSimilarCommands(attemptedCommand);
+				const header = `Command \`/swarm ${displayCommand}\` not found.`;
+				const suggestions =
+					similar.length > 0
+						? `Did you mean:\n${similar.map((cmd) => `  • /swarm ${cmd}`).join('\n')}`
+						: '';
+				const footer = 'Run `/swarm help` for all commands.';
+				text = [header, suggestions, footer].filter(Boolean).join('\n\n');
+			}
 		} else {
 			try {
 				text = await resolved.entry.handler({

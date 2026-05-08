@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.8.0",
+    version: "7.8.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -20423,7 +20423,13 @@ async function handleArchiveCommand(directory, args2) {
     const wouldArchiveAge = [];
     const remainingBundles = [];
     for (const taskId of beforeTaskIds) {
-      const result = await loadEvidence(directory, taskId);
+      let result;
+      try {
+        result = await loadEvidence(directory, taskId);
+      } catch (_evidenceErr) {
+        warn("archive: skipping corrupt or unreadable evidence for task", taskId);
+        continue;
+      }
       if (result.status !== "found") {
         continue;
       }
@@ -20478,6 +20484,7 @@ async function handleArchiveCommand(directory, args2) {
 var init_archive = __esm(() => {
   init_loader();
   init_manager2();
+  init_utils();
 });
 
 // src/db/project-db.ts
@@ -27246,7 +27253,13 @@ async function handleBenchmarkCommand(directory, args2) {
     let totalTestToCodeRatio = 0;
     let qualityEvidenceCount = 0;
     for (const tid of await listEvidenceTaskIds(directory)) {
-      const result = await loadEvidence(directory, tid);
+      let result;
+      try {
+        result = await loadEvidence(directory, tid);
+      } catch (_evidenceErr) {
+        warn("benchmark: skipping corrupt or unreadable evidence for task", tid);
+        continue;
+      }
       if (result.status !== "found")
         continue;
       for (const e of result.bundle.entries) {
@@ -44922,7 +44935,17 @@ async function handleDarkMatterCommand(directory, args2) {
       i2++;
     }
   }
-  const pairs = await detectDarkMatter(directory, options);
+  let pairs;
+  try {
+    pairs = await _internals15.detectDarkMatter(directory, options);
+  } catch (err2) {
+    const errMsg = err2 instanceof Error ? err2.message : String(err2);
+    return `## Dark Matter Analysis Failed
+
+Error analyzing git history: ${errMsg}
+
+Ensure this is a git repository with commit history.`;
+  }
   const output = formatDarkMatterOutput(pairs);
   if (pairs.length > 0) {
     try {
@@ -49505,22 +49528,37 @@ var init_handoff_service = __esm(() => {
 
 // src/commands/handoff.ts
 import crypto4 from "node:crypto";
-import { renameSync as renameSync10 } from "node:fs";
+import { renameSync as renameSync10, unlinkSync as unlinkSync5 } from "node:fs";
 async function handleHandoffCommand(directory, _args) {
   const handoffData = await getHandoffData(directory);
   const markdown = formatHandoffMarkdown(handoffData);
-  const resolvedPath = validateSwarmPath(directory, "handoff.md");
-  const tempPath = `${resolvedPath}.tmp.${crypto4.randomUUID()}`;
-  await bunWrite(tempPath, markdown);
-  renameSync10(tempPath, resolvedPath);
-  const continuationPrompt = formatContinuationPrompt(handoffData);
-  const promptPath = validateSwarmPath(directory, "handoff-prompt.md");
-  const promptTempPath = `${promptPath}.tmp.${crypto4.randomUUID()}`;
-  await bunWrite(promptTempPath, continuationPrompt);
-  renameSync10(promptTempPath, promptPath);
-  await writeSnapshot(directory, swarmState);
-  await flushPendingSnapshot(directory);
-  return `## Handoff Brief Written
+  try {
+    const resolvedPath = validateSwarmPath(directory, "handoff.md");
+    const tempPath = `${resolvedPath}.tmp.${crypto4.randomUUID()}`;
+    await bunWrite(tempPath, markdown);
+    try {
+      renameSync10(tempPath, resolvedPath);
+    } catch (renameErr) {
+      try {
+        unlinkSync5(tempPath);
+      } catch {}
+      throw renameErr;
+    }
+    const continuationPrompt = formatContinuationPrompt(handoffData);
+    const promptPath = validateSwarmPath(directory, "handoff-prompt.md");
+    const promptTempPath = `${promptPath}.tmp.${crypto4.randomUUID()}`;
+    await bunWrite(promptTempPath, continuationPrompt);
+    try {
+      renameSync10(promptTempPath, promptPath);
+    } catch (renameErr) {
+      try {
+        unlinkSync5(promptTempPath);
+      } catch {}
+      throw renameErr;
+    }
+    await writeSnapshot(directory, swarmState);
+    await flushPendingSnapshot(directory);
+    return `## Handoff Brief Written
 
 Brief written to \`.swarm/handoff.md\`.
 Continuation prompt written to \`.swarm/handoff-prompt.md\`.
@@ -49534,6 +49572,16 @@ ${markdown}
 Copy and paste the block below into your next session to resume cleanly:
 
 ${continuationPrompt}`;
+  } catch (err2) {
+    const errMsg = err2 instanceof Error ? err2.message : String(err2);
+    return `## Handoff Generated (file write failed)
+
+Handoff data was generated but could not be written to disk: ${errMsg}
+
+The handoff content is included below for manual copy:
+
+${markdown}`;
+  }
 }
 var init_handoff = __esm(() => {
   init_utils2();
@@ -55730,7 +55778,19 @@ async function handleSimulateCommand(directory, args2) {
       options.minCommits = val;
     }
   }
-  const darkMatterPairs = await detectDarkMatter(directory, options);
+  let darkMatterPairs;
+  try {
+    darkMatterPairs = await _internals15.detectDarkMatter(directory, options);
+  } catch (err2) {
+    const errMsg = err2 instanceof Error ? err2.message : String(err2);
+    return `## Simulate Report
+
+### Error
+
+Error analyzing git history: ${errMsg}
+
+Ensure this is a git repository with commit history.`;
+  }
   const reportLines = [
     "# Simulate Report",
     "",
@@ -55748,15 +55808,21 @@ async function handleSimulateCommand(directory, args2) {
   ];
   const report = reportLines.filter(Boolean).join(`
 `);
-  const fs29 = await import("node:fs/promises");
-  const path44 = await import("node:path");
-  const reportPath = path44.join(directory, ".swarm", "simulate-report.md");
-  await fs29.mkdir(path44.dirname(reportPath), { recursive: true });
-  await fs29.writeFile(reportPath, report, "utf-8");
+  try {
+    const fs29 = await import("node:fs/promises");
+    const path44 = await import("node:path");
+    const reportPath = path44.join(directory, ".swarm", "simulate-report.md");
+    await fs29.mkdir(path44.dirname(reportPath), { recursive: true });
+    await fs29.writeFile(reportPath, report, "utf-8");
+  } catch (err2) {
+    const writeErr = err2 instanceof Error ? err2.message : String(err2);
+    warn(`simulate: failed to write report to ${directory}/.swarm/simulate-report.md`, writeErr);
+  }
   return `${darkMatterPairs.length} hidden coupling pairs detected`;
 }
 var init_simulate = __esm(() => {
   init_co_change_analyzer();
+  init_utils();
 });
 
 // src/commands/specify.ts
@@ -56418,12 +56484,6 @@ function buildHelpText() {
   return lines.join(`
 `);
 }
-function getHelpText() {
-  if (!_helpText) {
-    _helpText = buildHelpText();
-  }
-  return _helpText;
-}
 function createSwarmCommandHandler(directory, agents) {
   return async (input, output) => {
     if (input.command !== "swarm" && !input.command.startsWith("swarm-")) {
@@ -56449,7 +56509,22 @@ function createSwarmCommandHandler(directory, agents) {
     let text;
     const resolved = resolveCommand(tokens);
     if (!resolved) {
-      text = getHelpText();
+      if (tokens.length === 0) {
+        text = buildHelpText();
+      } else {
+        const attemptedCommand = tokens[0] || "";
+        const MAX_DISPLAY = 100;
+        const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
+        const similar = _internals24.findSimilarCommands(attemptedCommand);
+        const header = `Command \`/swarm ${displayCommand}\` not found.`;
+        const suggestions = similar.length > 0 ? `Did you mean:
+${similar.map((cmd) => `  • /swarm ${cmd}`).join(`
+`)}` : "";
+        const footer = "Run `/swarm help` for all commands.";
+        text = [header, suggestions, footer].filter(Boolean).join(`
+
+`);
+      }
     } else {
       try {
         text = await resolved.entry.handler({
@@ -56481,7 +56556,6 @@ ${text}`;
     ];
   };
 }
-var _helpText;
 var init_commands = __esm(() => {
   init_registry();
   init_acknowledge_spec_drift();
@@ -56541,14 +56615,38 @@ function levenshteinDistance(a, b) {
 }
 function findSimilarCommands(query) {
   const q = query.toLowerCase();
-  const scored = VALID_COMMANDS.filter((cmd) => {
-    if (cmd.includes(" ") || cmd.includes("-"))
-      return false;
-    return cmd.toLowerCase().includes(q) || q.includes(cmd.toLowerCase());
-  }).map((cmd) => ({
-    cmd,
-    score: cmd.length < q.length ? q.length - cmd.length : _internals24.levenshteinDistance(q, cmd)
-  }));
+  if (q.length > 500) {
+    return [];
+  }
+  const scored = VALID_COMMANDS.map((cmd) => {
+    const cmdLower = cmd.toLowerCase();
+    const fullScore = _internals24.levenshteinDistance(q, cmdLower);
+    let tokenScore = Infinity;
+    if (cmd.includes(" ") || cmd.includes("-")) {
+      const qTokens = q.split(/[\s-]+/);
+      const cmdTokens = cmdLower.split(/[\s-]+/);
+      let totalTokenDist = 0;
+      for (const qt of qTokens) {
+        if (qt.length === 0)
+          continue;
+        let minDist = Infinity;
+        for (const ct of cmdTokens) {
+          if (ct.length === 0)
+            continue;
+          const dist = _internals24.levenshteinDistance(qt, ct);
+          if (dist < minDist)
+            minDist = dist;
+        }
+        totalTokenDist += minDist;
+      }
+      tokenScore = totalTokenDist;
+    }
+    const dashStrippedQ = q.replace(/-/g, "");
+    const dashStrippedCmd = cmdLower.replace(/-/g, "");
+    const dashScore = _internals24.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const score = Math.min(fullScore, tokenScore, dashScore);
+    return { cmd, score };
+  });
   scored.sort((a, b) => a.score - b.score);
   return scored.slice(0, 3).map((s) => s.cmd);
 }
@@ -67108,7 +67206,7 @@ init_state();
 init_utils();
 init_bun_compat();
 init_utils2();
-import { renameSync as renameSync12, unlinkSync as unlinkSync8 } from "node:fs";
+import { renameSync as renameSync12, unlinkSync as unlinkSync9 } from "node:fs";
 import * as nodePath2 from "node:path";
 function createAgentActivityHooks(config3, directory) {
   if (config3.hooks?.agent_activity === false) {
@@ -67186,7 +67284,7 @@ async function doFlush(directory) {
       renameSync12(tempPath, path52);
     } catch (writeError) {
       try {
-        unlinkSync8(tempPath);
+        unlinkSync9(tempPath);
       } catch {}
       throw writeError;
     }
@@ -92476,7 +92574,7 @@ import * as path110 from "node:path";
 
 // src/mutation/engine.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { unlinkSync as unlinkSync13, writeFileSync as writeFileSync22 } from "node:fs";
+import { unlinkSync as unlinkSync14, writeFileSync as writeFileSync22 } from "node:fs";
 import * as path109 from "node:path";
 
 // src/mutation/equivalence.ts
@@ -92715,7 +92813,7 @@ async function executeMutation(patch, testCommand, _testFiles, workingDir) {
         revertError = new Error(`Failed to revert mutation ${patch.id}: ${revertErr}. Working tree may be dirty.`);
       }
       try {
-        unlinkSync13(patchFile);
+        unlinkSync14(patchFile);
       } catch (_unlinkErr) {}
     }
   }
@@ -95384,7 +95482,7 @@ async function initializeOpenCodeSwarm(ctx) {
         ...opencodeConfig.command || {},
         swarm: {
           template: "/swarm $ARGUMENTS",
-          description: "Swarm management commands: /swarm [status|plan|agents|history|config|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor-tools|close]"
+          description: "Swarm management commands: /swarm [status|plan|agents|history|config|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor-tools|close]"
         },
         "swarm-status": {
           template: "/swarm status",
@@ -95474,6 +95572,14 @@ async function initializeOpenCodeSwarm(ctx) {
           template: "/swarm council $ARGUMENTS",
           description: "Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--spec-review]"
         },
+        "swarm-pr-review": {
+          template: "/swarm pr-review $ARGUMENTS",
+          description: "Use /swarm pr-review to launch deep PR review with multi-lane analysis"
+        },
+        "swarm-issue": {
+          template: "/swarm issue $ARGUMENTS",
+          description: "Use /swarm issue to ingest a GitHub issue into the swarm workflow"
+        },
         "swarm-qa-gates": {
           template: "/swarm qa-gates $ARGUMENTS",
           description: "Use /swarm qa-gates to view or modify QA gate profile for the current plan"
@@ -95495,7 +95601,7 @@ async function initializeOpenCodeSwarm(ctx) {
           description: "Use /swarm turbo to enable turbo mode for faster execution"
         },
         "swarm-full-auto": {
-          template: "/swarm-full-auto $ARGUMENTS",
+          template: "/swarm full-auto $ARGUMENTS",
           description: "Toggle Full-Auto Mode for the active session [on|off]"
         },
         "swarm-write-retro": {

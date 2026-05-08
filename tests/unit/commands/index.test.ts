@@ -39,7 +39,7 @@ describe('createSwarmCommandHandler', () => {
 			output,
 		);
 		expect(output.parts).toHaveLength(1);
-		expect((output.parts[0] as any).text).toContain('Swarm Commands');
+		expect((output.parts[0] as any).text).toContain('not found');
 	});
 
 	test('dispatches "status" to handleStatusCommand', async () => {

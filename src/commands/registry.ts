@@ -73,17 +73,50 @@ function levenshteinDistance(a: string, b: string): number {
 
 function findSimilarCommands(query: string): string[] {
 	const q = query.toLowerCase();
-	// Score by similarity (prefer shorter commands that match well)
-	const scored = VALID_COMMANDS.filter((cmd) => {
-		if (cmd.includes(' ') || cmd.includes('-')) return false;
-		return cmd.toLowerCase().includes(q) || q.includes(cmd.toLowerCase());
-	}).map((cmd) => ({
-		cmd,
-		score:
-			cmd.length < q.length
-				? q.length - cmd.length
-				: _internals.levenshteinDistance(q, cmd),
-	}));
+	// Early rejection for oversized queries — prevents DoS via pathological inputs
+	if (q.length > 500) {
+		return [];
+	}
+
+	const scored = VALID_COMMANDS.map((cmd) => {
+		const cmdLower = cmd.toLowerCase();
+
+		// (a) Full command levenshtein distance
+		const fullScore = _internals.levenshteinDistance(q, cmdLower);
+
+		// (b) Token-by-token scoring for compound commands
+		let tokenScore = Infinity;
+		if (cmd.includes(' ') || cmd.includes('-')) {
+			const qTokens = q.split(/[\s-]+/);
+			const cmdTokens = cmdLower.split(/[\s-]+/);
+			let totalTokenDist = 0;
+			for (const qt of qTokens) {
+				if (qt.length === 0) continue;
+				let minDist = Infinity;
+				for (const ct of cmdTokens) {
+					if (ct.length === 0) continue;
+					const dist = _internals.levenshteinDistance(qt, ct);
+					if (dist < minDist) minDist = dist;
+				}
+				totalTokenDist += minDist;
+			}
+			tokenScore = totalTokenDist;
+		}
+
+		// (c) Dash-stripped comparison
+		const dashStrippedQ = q.replace(/-/g, '');
+		const dashStrippedCmd = cmdLower.replace(/-/g, '');
+		const dashScore = _internals.levenshteinDistance(
+			dashStrippedQ,
+			dashStrippedCmd,
+		);
+
+		// Use minimum across all scoring methods
+		const score = Math.min(fullScore, tokenScore, dashScore);
+
+		return { cmd, score };
+	});
+
 	scored.sort((a, b) => a.score - b.score);
 	return scored.slice(0, 3).map((s) => s.cmd);
 }
