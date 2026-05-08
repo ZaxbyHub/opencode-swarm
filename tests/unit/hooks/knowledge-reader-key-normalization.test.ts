@@ -103,7 +103,7 @@ function readShownFile(): Record<string, string[]> {
 // ============================================================================
 
 describe('updateRetrievalOutcome — Phase N key lookup', () => {
-		it('finds entries stored under canonical "Phase N" key', async () => {
+	it('finds entries stored under canonical "Phase N" key', async () => {
 		// Simulate what the fixed recordLessonsShown writes: canonical 'Phase 1'
 		const lessonId = 'lesson-abc-123';
 		writeShownFile({ 'Phase 1': [lessonId] });

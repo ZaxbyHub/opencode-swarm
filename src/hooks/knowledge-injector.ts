@@ -10,11 +10,7 @@ import { createHash } from 'node:crypto';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
-import {
-	clearCriticalShownIds,
-	setCriticalShownIds,
-	swarmState,
-} from '../state.js';
+import { clearCriticalShownIds, setCriticalShownIds } from '../state.js';
 import { warn } from '../utils/logger.js';
 import {
 	buildDriftInjectionText,
