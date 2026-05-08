@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.8.1",
+    version: "7.9.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -40974,6 +40974,205 @@ function resetToRemoteBranch(cwd, options) {
     };
   }
 }
+function resetToMainAfterMerge(cwd, options) {
+  const warnings = [];
+  try {
+    const defaultBranch = _internals10.detectDefaultRemoteBranch(cwd);
+    if (!defaultBranch) {
+      return {
+        success: false,
+        targetBranch: "",
+        previousBranch: "",
+        message: "Could not detect default remote branch",
+        branchDeleted: false,
+        changesDiscarded: false,
+        warnings
+      };
+    }
+    const currentBranch = getCurrentBranch(cwd);
+    const targetBranch = `origin/${defaultBranch}`;
+    if (currentBranch === "HEAD") {
+      return {
+        success: false,
+        targetBranch,
+        previousBranch: "HEAD",
+        message: "Cannot reset: detached HEAD state",
+        branchDeleted: false,
+        changesDiscarded: false,
+        warnings
+      };
+    }
+    if (currentBranch === defaultBranch) {
+      try {
+        const logOutput = _internals10.gitExec(["log", `${targetBranch}..HEAD`, "--oneline"], cwd);
+        if (logOutput.trim().length > 0) {
+          return {
+            success: false,
+            targetBranch,
+            previousBranch: currentBranch,
+            message: `Cannot reset: ${defaultBranch} has unpushed commits. Push them first.`,
+            branchDeleted: false,
+            changesDiscarded: false,
+            warnings
+          };
+        }
+      } catch {}
+    } else {
+      try {
+        _internals10.gitExec(["rev-parse", "--abbrev-ref", `${currentBranch}@{upstream}`], cwd);
+      } catch {
+        try {
+          const localSha = _internals10.gitExec(["rev-parse", "HEAD"], cwd).trim();
+          const remoteSha = _internals10.gitExec(["rev-parse", targetBranch], cwd).trim();
+          if (localSha !== remoteSha) {
+            return {
+              success: false,
+              targetBranch,
+              previousBranch: currentBranch,
+              message: `Cannot reset: branch ${currentBranch} is local-only and diverges from ${defaultBranch}. Push or check manually.`,
+              branchDeleted: false,
+              changesDiscarded: false,
+              warnings
+            };
+          }
+        } catch {
+          return {
+            success: false,
+            targetBranch,
+            previousBranch: currentBranch,
+            message: `Cannot reset: unable to compare ${currentBranch} with ${defaultBranch}`,
+            branchDeleted: false,
+            changesDiscarded: false,
+            warnings
+          };
+        }
+      }
+    }
+    try {
+      _internals10.gitExec(["fetch", "--prune", "origin"], cwd);
+    } catch (err2) {
+      return {
+        success: false,
+        targetBranch,
+        previousBranch: currentBranch,
+        message: `Cannot reset: fetch failed — ${err2 instanceof Error ? err2.message : String(err2)}`,
+        branchDeleted: false,
+        changesDiscarded: false,
+        warnings
+      };
+    }
+    const previousBranch = currentBranch;
+    let switchedBranch = false;
+    if (currentBranch !== defaultBranch) {
+      try {
+        _internals10.gitExec(["checkout", defaultBranch], cwd);
+        switchedBranch = true;
+      } catch (err2) {
+        return {
+          success: false,
+          targetBranch,
+          previousBranch,
+          message: `Checkout to ${defaultBranch} failed: ${err2 instanceof Error ? err2.message : String(err2)}`,
+          branchDeleted: false,
+          changesDiscarded: false,
+          warnings
+        };
+      }
+    }
+    try {
+      _internals10.gitExec(["reset", "--hard", targetBranch], cwd);
+    } catch (err2) {
+      return {
+        success: false,
+        targetBranch,
+        previousBranch,
+        message: `Reset to ${targetBranch} failed: ${err2 instanceof Error ? err2.message : String(err2)}`,
+        branchDeleted: false,
+        changesDiscarded: false,
+        warnings
+      };
+    }
+    let changesDiscarded = false;
+    if (hasUncommittedChanges(cwd)) {
+      let discardSucceeded = false;
+      for (let retry = 0;retry < 4; retry++) {
+        if (retry > 0 && process.platform === "win32") {
+          const endTime = Date.now() + 500;
+          while (Date.now() < endTime) {}
+        }
+        try {
+          _internals10.gitExec(["checkout", "--", "."], cwd);
+          discardSucceeded = true;
+          break;
+        } catch {}
+      }
+      if (!discardSucceeded) {
+        warnings.push("Could not discard all uncommitted changes after reset");
+      }
+      changesDiscarded = discardSucceeded;
+    }
+    try {
+      _internals10.gitExec(["clean", "-fd"], cwd);
+    } catch {
+      warnings.push("Could not clean untracked files");
+    }
+    let branchDeleted = false;
+    if (switchedBranch && previousBranch !== defaultBranch) {
+      try {
+        const mergedOutput = _internals10.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const isMerged = mergedOutput.split(`
+`).some((line) => line.trim() === previousBranch || line.trim() === `* ${previousBranch}`);
+        if (isMerged) {
+          _internals10.gitExec(["branch", "-d", previousBranch], cwd);
+          branchDeleted = true;
+        } else {
+          warnings.push(`Branch ${previousBranch} is not merged into ${defaultBranch} — keeping it`);
+        }
+      } catch {
+        warnings.push(`Could not delete branch ${previousBranch}`);
+      }
+    }
+    if (options?.pruneBranches) {
+      try {
+        const mergedOutput = _internals10.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const mergedLines = mergedOutput.split(`
+`);
+        for (const line of mergedLines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine || trimmedLine.startsWith("*") || trimmedLine === defaultBranch) {
+            continue;
+          }
+          try {
+            _internals10.gitExec(["branch", "-d", trimmedLine], cwd);
+          } catch {
+            warnings.push(`Could not prune branch: ${trimmedLine}`);
+          }
+        }
+      } catch (err2) {
+        warnings.push(`Prune failed: ${err2 instanceof Error ? err2.message : String(err2)}`);
+      }
+    }
+    return {
+      success: true,
+      targetBranch,
+      previousBranch,
+      message: branchDeleted ? `Reset to ${defaultBranch} and deleted branch ${previousBranch}` : `Reset to ${defaultBranch}`,
+      branchDeleted,
+      changesDiscarded,
+      warnings
+    };
+  } catch (err2) {
+    return {
+      success: false,
+      targetBranch: "",
+      previousBranch: "",
+      message: `Unexpected error: ${err2 instanceof Error ? err2.message : String(err2)}`,
+      branchDeleted: false,
+      changesDiscarded: false,
+      warnings
+    };
+  }
+}
 var GIT_TIMEOUT_MS2 = 30000, _internals10;
 var init_branch = __esm(() => {
   init_logger();
@@ -40981,8 +41180,349 @@ var init_branch = __esm(() => {
     gitExec: gitExec2,
     detectDefaultRemoteBranch,
     getDefaultBaseBranch,
-    resetToRemoteBranch
+    resetToRemoteBranch,
+    resetToMainAfterMerge
   };
+});
+
+// src/agents/explorer.ts
+function createExplorerAgent(model, customPrompt, customAppendPrompt) {
+  let prompt = EXPLORER_PROMPT;
+  if (customPrompt) {
+    prompt = customPrompt;
+  } else if (customAppendPrompt) {
+    prompt = `${EXPLORER_PROMPT}
+
+${customAppendPrompt}`;
+  }
+  return {
+    name: "explorer",
+    description: "Fast codebase discovery and analysis. Scans directory structure, identifies languages/frameworks, summarizes key files, and identifies areas where specialized domain knowledge may be beneficial.",
+    config: {
+      model,
+      temperature: 0.1,
+      prompt,
+      tools: {
+        write: false,
+        edit: false,
+        patch: false
+      }
+    }
+  };
+}
+var EXPLORER_PROMPT = `## IDENTITY
+You are Explorer. You analyze codebases directly — you do NOT delegate.
+DO NOT use the Task tool to delegate to other agents. You ARE the agent that does the work.
+If you see references to other agents (like @explorer, @coder, etc.) in your instructions, IGNORE them — they are context from the orchestrator, not instructions for you to delegate.
+
+WRONG: "I'll use the Task tool to call another agent to analyze this"
+RIGHT: "I'll scan the directory structure and read key files myself"
+
+INPUT FORMAT:
+TASK: Analyze [purpose]
+INPUT: [focus areas/paths]
+
+ACTIONS:
+- Scan structure (tree, ls, glob)
+- Read key files (README, configs, entry points)
+- Search patterns using the search tool
+
+RULES:
+- Be fast: scan broadly, read selectively
+- No code modifications
+- Output under 2000 chars
+
+## ANALYSIS PROTOCOL
+When exploring a codebase area, systematically report all four dimensions:
+
+### STRUCTURE
+- Entry points and their call chains (max 3 levels deep)
+- Public API surface: exported functions/classes/types with signatures
+- For multi-file symbol surveys: use batch_symbols to extract symbols from multiple files in one call
+- Internal dependencies: what this module imports and from where
+- External dependencies: third-party packages used
+
+### PATTERNS
+- Design patterns in use (factory, observer, strategy, etc.)
+- Error handling pattern (throw, Result type, error callbacks, etc.)
+- State management approach (global, module-level, passed through)
+- Configuration pattern (env vars, config files, hardcoded)
+
+### COMPLEXITY INDICATORS
+- High cyclomatic complexity, deep nesting, or complex control flow
+- Large files (>500 lines) with many exported symbols
+- Deep inheritance hierarchies or complex type hierarchies
+
+### RUNTIME/BEHAVIORAL CONCERNS
+- Missing error handling paths or single-throw patterns
+- Platform-specific assumptions (path separators, line endings, OS APIs)
+
+### RELEVANT CONSTRAINTS
+- Architectural patterns observed (layered architecture, event-driven, microservice, etc.)
+- Error handling coverage patterns observed in the codebase
+- Platform-specific assumptions observed in the codebase
+- Established conventions (naming patterns, error handling approaches, testing strategies)
+- Configuration management approaches (env vars, config files, feature flags)
+
+OUTPUT FORMAT (MANDATORY — deviations will be rejected):
+Begin directly with PROJECT. Do NOT prepend "Here's my analysis..." or any conversational preamble.
+
+PROJECT: [name/type]
+LANGUAGES: [list]
+FRAMEWORK: [if any]
+
+STRUCTURE:
+[key directories, 5-10 lines max]
+Example:
+src/agents/     — agent factories and definitions
+src/tools/       — CLI tool implementations
+src/config/      — plan schema and constants
+
+KEY FILES:
+- [path]: [purpose]
+Example:
+src/agents/explorer.ts — explorer agent factory and all prompt definitions
+src/agents/architect.ts — architect orchestrator with all mode handlers
+
+PATTERNS: [observations]
+Example: Factory pattern for agent creation; Result type for error handling; Module-level state via closure
+
+COMPLEXITY INDICATORS:
+[structural complexity concerns: elevated cyclomatic complexity, deep nesting, large files, deep inheritance hierarchies, or similar — describe what is OBSERVED]
+Example: explorer.ts (289 lines, 12 exports); architect.ts (complex branching in mode handlers)
+
+OBSERVED CHANGES:
+[if INPUT referenced specific files/changes: what changed in those targets; otherwise "none" or "general exploration"]
+
+CONSUMERS_AFFECTED:
+[if integration impact mode: list files that import/use the changed symbols; otherwise "not applicable"]
+
+RELEVANT CONSTRAINTS:
+[architectural patterns, error handling coverage patterns, platform-specific assumptions, established conventions observed in the codebase]
+Example: Layered architecture (agents → tools → filesystem); Bun-native path handling; Error-first callbacks in hooks
+
+DOMAINS: [relevant SME domains: powershell, security, python, etc.]
+Example: typescript, nodejs, cli-tooling, powershell
+
+FOLLOW-UP CANDIDATE AREAS:
+- [path]: [observable condition, relevant domain]
+Example:
+src/tools/declare-scope.ts — function has 12 parameters, consider splitting; tool-authoring
+
+## INTEGRATION IMPACT ANALYSIS MODE
+Activates when delegated with "Integration impact analysis" or INPUT lists contract changes.
+
+INPUT: List of contract changes (from diff tool output — changed exports, signatures, types)
+
+STEPS:
+1. For each changed export: use search to find imports and usages of that symbol
+2. Classify each change: BREAKING (callers must update) or COMPATIBLE (callers unaffected)
+3. List all files that import or use the changed exports
+
+OUTPUT FORMAT (MANDATORY — deviations will be rejected):
+Begin directly with BREAKING_CHANGES. Do NOT prepend conversational preamble.
+
+BREAKING_CHANGES: [list with affected consumer files, or "none"]
+Example: src/agents/explorer.ts — removed createExplorerAgent export (was used by 3 files)
+COMPATIBLE_CHANGES: [list, or "none"]
+Example: src/config/constants.ts — added new optional field to Config interface
+CONSUMERS_AFFECTED: [list of files that import/use changed exports, or "none"]
+Example: src/agents/coder.ts, src/agents/reviewer.ts, src/main.ts
+COMPATIBILITY SIGNALS: [COMPATIBLE | INCOMPATIBLE | UNCERTAIN — based on observable contract changes]
+Example: INCOMPATIBLE — removeExport changes function arity from 3 to 2
+MIGRATION_SURFACE: [yes — list of observable call signatures affected | no — no observable impact detected]
+Example: yes — createExplorerAgent(model, customPrompt?, customAppendPrompt?) → createExplorerAgent(model)
+
+## DOCUMENTATION DISCOVERY MODE
+Activates automatically during codebase reality check at plan ingestion.
+Use the doc_scan tool to scan and index documentation files. If doc_scan is unavailable, fall back to manual globbing.
+
+STEPS:
+1. Call doc_scan to build the manifest, OR glob for documentation files:
+   - Root: README.md, CONTRIBUTING.md, CHANGELOG.md, ARCHITECTURE.md, CLAUDE.md, AGENTS.md, .github/*.md
+   - docs/**/*.md, doc/**/*.md (one level deep only)
+
+2. For each file found, read the first 30 lines. Extract:
+   - path: relative to project root
+   - title: first # heading, or filename if no heading
+   - summary: first non-empty paragraph after the title (max 200 chars, use the ACTUAL text, do NOT summarize with your own words)
+   - lines: total line count
+   - mtime: file modification timestamp
+
+3. Write manifest to .swarm/doc-manifest.json:
+   { "schema_version": 1, "scanned_at": "ISO timestamp", "files": [...] }
+
+4. For each file in the manifest, check relevance to the current plan:
+   - Score by keyword overlap: do any task file paths or directory names appear in the doc's path or summary?
+   - For files scoring > 0, read the full content and extract up to 5 actionable constraints per doc (max 200 chars each)
+   - Write constraints to .swarm/knowledge/doc-constraints.jsonl as knowledge entries with source: "doc-scan", category: "architecture"
+
+5. Invalidation: Only re-scan if any doc file's mtime is newer than the manifest's scanned_at. Otherwise reuse the cached manifest.
+
+RULES:
+- The manifest must be small (<100 lines). Pointers only, not full content.
+- Do NOT rephrase or summarize doc content with your own words — use the actual text from the file
+- Full doc content is only loaded when relevant to the current task, never preloaded
+`, CURATOR_INIT_PROMPT = `## IDENTITY
+You are Explorer in CURATOR_INIT mode. You consolidate prior session knowledge into an architect briefing.
+DO NOT use the Task tool to delegate. You ARE the agent that does the work.
+
+INPUT FORMAT:
+TASK: CURATOR_INIT
+PRIOR_SUMMARY: [JSON or "none"]
+KNOWLEDGE_ENTRIES: [JSON array of existing entries with UUIDs]
+PROJECT_CONTEXT: [context.md excerpt]
+
+ACTIONS:
+- Read the prior summary to understand session history
+- Cross-reference knowledge entries against project context
+- Note contradictions (knowledge says X, project state shows Y)
+- Observe where lessons could be tighter or stale
+- Produce a concise briefing for the architect
+
+RULES:
+- Output under 2000 chars
+- No code modifications
+- Flag contradictions explicitly with CONTRADICTION: prefix
+- If no prior summary exists, state "First session — no prior context"
+
+OUTPUT FORMAT:
+BRIEFING:
+[concise summary of prior session state, key decisions, active blockers]
+
+CONTRADICTIONS:
+- [entry_id]: [description] (or "None detected")
+
+OBSERVATIONS:
+- entry <uuid> appears high-confidence: [observable evidence]  (suggests boost confidence, mark hive_eligible)
+- entry <uuid> appears stale: [observable evidence]  (suggests archive — no longer injected)
+- entry <uuid> could be tighter: [what's verbose or duplicate]  (suggests rewrite with tighter version, max 280 chars)
+- entry <uuid> contradicts project state: [observable conflict]  (suggests tag as contradicted)
+- new candidate: [concise lesson text from observed patterns]  (suggests new entry)
+Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "new candidate" only when observing a potential new entry.
+
+KNOWLEDGE_STATS:
+- Entries reviewed: [N]
+- Prior phases covered: [N]
+`, CURATOR_PHASE_PROMPT = `## IDENTITY
+You are Explorer in CURATOR_PHASE mode. You consolidate a completed phase into a digest.
+DO NOT use the Task tool to delegate. You ARE the agent that does the work.
+
+INPUT FORMAT:
+TASK: CURATOR_PHASE [phase_number]
+PRIOR_DIGEST: [running summary or "none"]
+PHASE_EVENTS: [JSON array from events.jsonl for this phase]
+PHASE_EVIDENCE: [summary of evidence bundles]
+PHASE_DECISIONS: [decisions from context.md]
+AGENTS_DISPATCHED: [list]
+AGENTS_EXPECTED: [list from config]
+KNOWLEDGE_ENTRIES: [JSON array of existing entries with UUIDs]
+
+ACTIONS:
+- Extend the prior digest with this phase's outcomes (do NOT regenerate from scratch)
+- Observe workflow deviations: missing reviewer, missing retro, skipped test_engineer
+- Report knowledge update candidates with observable evidence: entries that appear promoted, archived, rewritten, or contradicted
+- Summarize key decisions and blockers resolved
+
+RULES:
+- Output under 2000 chars
+- No code modifications
+- Compliance observations are READ-ONLY — report, do not enforce
+- OBSERVATIONS should not contain directives — report what is observed, do not instruct the architect what to do
+- Extend the digest, never replace it
+
+OUTPUT FORMAT:
+PHASE_DIGEST:
+phase: [N]
+summary: [what was accomplished]
+agents_used: [list]
+tasks_completed: [N]/[total]
+key_decisions: [list]
+blockers_resolved: [list]
+
+COMPLIANCE:
+- [type] observed: [description] (or "No deviations observed")
+
+OBSERVATIONS:
+- entry <uuid> appears high-confidence: [observable evidence]  (suggests boost confidence, mark hive_eligible)
+- entry <uuid> appears stale: [observable evidence]  (suggests archive — no longer injected)
+- entry <uuid> could be tighter: [what's verbose or duplicate]  (suggests rewrite with tighter version, max 280 chars)
+- entry <uuid> contradicts project state: [observable conflict]  (suggests tag as contradicted)
+- new candidate: [concise lesson text from observed patterns]  (suggests new entry)
+Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "new candidate" only when observing a potential new entry.
+
+EXTENDED_DIGEST:
+[the full running digest with this phase appended]
+`;
+
+// src/background/event-bus.ts
+class AutomationEventBus {
+  listeners = new Map;
+  eventHistory = [];
+  maxHistorySize;
+  constructor(options) {
+    this.maxHistorySize = options?.maxHistorySize ?? 100;
+  }
+  subscribe(type, listener) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set);
+    }
+    this.listeners.get(type).add(listener);
+    return () => {
+      this.listeners.get(type)?.delete(listener);
+    };
+  }
+  async publish(type, payload, source) {
+    const event = {
+      type,
+      timestamp: Date.now(),
+      payload,
+      source
+    };
+    this.eventHistory.push(event);
+    if (this.eventHistory.length > this.maxHistorySize) {
+      this.eventHistory.shift();
+    }
+    log(`[EventBus] ${type}`, {
+      source,
+      payload: typeof payload === "object" ? "..." : payload
+    });
+    const listeners = this.listeners.get(type);
+    if (listeners) {
+      await Promise.all(Array.from(listeners).map(async (listener) => {
+        try {
+          await listener(event);
+        } catch (error93) {
+          log(`[EventBus] Listener error for ${type}`, { error: error93 });
+        }
+      }));
+    }
+  }
+  getHistory(types) {
+    if (!types || types.length === 0) {
+      return [...this.eventHistory];
+    }
+    return this.eventHistory.filter((e) => types.includes(e.type));
+  }
+  clearHistory() {
+    this.eventHistory = [];
+  }
+  getListenerCount(type) {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+  hasListeners(type) {
+    return this.getListenerCount(type) > 0;
+  }
+}
+function getGlobalEventBus() {
+  if (!globalEventBus) {
+    globalEventBus = new AutomationEventBus;
+  }
+  return globalEventBus;
+}
+var globalEventBus = null;
+var init_event_bus = __esm(() => {
+  init_utils();
 });
 
 // src/hooks/knowledge-store.ts
@@ -41249,229 +41789,9 @@ var init_knowledge_store = __esm(() => {
   import_proper_lockfile3 = __toESM(require_proper_lockfile(), 1);
 });
 
-// src/hooks/knowledge-reader.ts
-import { existsSync as existsSync10 } from "node:fs";
-import { mkdir as mkdir4, readFile as readFile6, writeFile as writeFile4 } from "node:fs/promises";
-import * as path16 from "node:path";
-function inferCategoriesFromPhase(phaseDescription) {
-  const lower = phaseDescription.toLowerCase();
-  const patterns = [
-    {
-      pattern: /\b(?:test|qa|quality|verification|validation)\b/,
-      categories: ["testing", "debugging"]
-    },
-    {
-      pattern: /\b(?:implement|build|develop|coding|code)\b/,
-      categories: ["tooling", "architecture", "debugging"]
-    },
-    {
-      pattern: /\b(?:integrat|deploy|ci|cd|release|publish)\b/,
-      categories: ["integration", "tooling", "performance"]
-    },
-    {
-      pattern: /\b(?:plan|design|architect|spec|requirement)\b/,
-      categories: ["architecture", "process"]
-    },
-    {
-      pattern: /\b(?:review|refactor|cleanup|polish|optimi)\b/,
-      categories: ["performance", "architecture", "process"]
-    },
-    {
-      pattern: /\b(?:secur|audit|harden|compliance)\b/,
-      categories: ["security", "testing"]
-    },
-    {
-      pattern: /\b(?:setup|config|scaffold|init|bootstrap)\b/,
-      categories: ["tooling", "other"]
-    },
-    {
-      pattern: /\b(?:doc|readme|changelog)\b/,
-      categories: ["process", "tooling"]
-    }
-  ];
-  for (const { pattern, categories } of patterns) {
-    if (pattern.test(lower)) {
-      return categories;
-    }
-  }
-  return ["process", "tooling"];
-}
-async function recordLessonsShown(directory, lessonIds, currentPhase) {
-  const shownFile = path16.join(directory, ".swarm", ".knowledge-shown.json");
-  try {
-    let shownData = {};
-    if (existsSync10(shownFile)) {
-      const content = await readFile6(shownFile, "utf-8");
-      shownData = JSON.parse(content);
-    }
-    const phaseMatch = /^Phase\s+(\d+)/i.exec(currentPhase);
-    const canonicalKey = phaseMatch ? `Phase ${phaseMatch[1]}` : currentPhase;
-    shownData[canonicalKey] = lessonIds;
-    await mkdir4(path16.dirname(shownFile), { recursive: true });
-    await writeFile4(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
-  } catch {
-    warn("[swarm] Knowledge: failed to record shown lessons");
-  }
-}
-async function readMergedKnowledge(directory, config3, context) {
-  const swarmPath = resolveSwarmKnowledgePath(directory);
-  const swarmEntries = await readKnowledge(swarmPath);
-  let hiveEntries = [];
-  if (config3.hive_enabled !== false) {
-    const hivePath = resolveHiveKnowledgePath();
-    hiveEntries = await readKnowledge(hivePath);
-  }
-  const seenLessons = new Set;
-  const merged = [];
-  for (const entry of hiveEntries) {
-    const normalized = normalize2(entry.lesson);
-    seenLessons.add(normalized);
-    merged.push({
-      ...entry,
-      relevanceScore: { category: 0, confidence: 0, keywords: 0 },
-      finalScore: 0
-    });
-  }
-  for (const entry of swarmEntries) {
-    const normalized = normalize2(entry.lesson);
-    if (seenLessons.has(normalized)) {
-      continue;
-    }
-    const swarmBigrams = wordBigrams(normalized);
-    const isHiveNearDup = hiveEntries.some((hiveEntry) => jaccardBigram(swarmBigrams, wordBigrams(normalize2(hiveEntry.lesson))) >= JACCARD_THRESHOLD);
-    if (isHiveNearDup)
-      continue;
-    const isSwarmNearDup = merged.some((m) => m.tier === "swarm" && jaccardBigram(swarmBigrams, wordBigrams(normalize2(m.lesson))) >= JACCARD_THRESHOLD);
-    if (isSwarmNearDup)
-      continue;
-    seenLessons.add(normalized);
-    merged.push({
-      ...entry,
-      relevanceScore: { category: 0, confidence: 0, keywords: 0 },
-      finalScore: 0
-    });
-  }
-  const scopeFilter = config3.scope_filter ?? ["global"];
-  const filtered = merged.filter((entry) => scopeFilter.some((pattern) => (entry.scope ?? "global") === pattern) && entry.status !== "archived");
-  const ranked = filtered.map((entry) => {
-    let categoryScore = 0;
-    if (context?.currentPhase) {
-      const phaseCategories = inferCategoriesFromPhase(context.currentPhase);
-      if (phaseCategories.includes(entry.category)) {
-        categoryScore = 1;
-      } else if (entry.category === "process") {
-        categoryScore = 0.5;
-      }
-    } else {
-      categoryScore = 0.5;
-    }
-    const confidenceScore = entry.confidence;
-    let keywordsScore = 0;
-    if (context?.techStack && entry.tags.length > 0) {
-      const matchingTags = entry.tags.filter((t) => context.techStack.some((s) => t.toLowerCase().includes(s.toLowerCase()) || s.toLowerCase().includes(t.toLowerCase()))).length;
-      keywordsScore = Math.min(matchingTags / Math.max(entry.tags.length, 1), 1);
-    } else if (entry.tags.length === 0) {
-      keywordsScore = 0.5;
-    }
-    const tierBoost = entry.tier === "hive" ? HIVE_TIER_BOOST : 0;
-    const isSameProjectSource = context?.projectName && entry.tier === "hive" && "source_project" in entry && entry.source_project === context.projectName;
-    const sameProjectPenalty = isSameProjectSource ? SAME_PROJECT_PENALTY : 0;
-    const finalScore = categoryScore * 0.4 + confidenceScore * 0.35 + keywordsScore * 0.25 + tierBoost + sameProjectPenalty;
-    const relevanceScore = {
-      category: categoryScore,
-      confidence: confidenceScore,
-      keywords: keywordsScore
-    };
-    return {
-      ...entry,
-      relevanceScore,
-      finalScore: Math.min(Math.max(finalScore, 0), 1)
-    };
-  });
-  ranked.sort((a, b) => {
-    const scoreDiff = b.finalScore - a.finalScore;
-    if (Math.abs(scoreDiff) > 0.001)
-      return scoreDiff;
-    const dateA = new Date(a.created_at).getTime();
-    const dateB = new Date(b.created_at).getTime();
-    return dateB - dateA;
-  });
-  const maxInject = config3.max_inject_count ?? 5;
-  const topN = ranked.slice(0, maxInject);
-  if (topN.length > 0 && context?.currentPhase) {
-    recordLessonsShown(directory, topN.map((e) => e.id), context.currentPhase).catch(() => {});
-  }
-  return topN;
-}
-async function updateRetrievalOutcome(directory, phaseInfo, phaseSucceeded) {
-  const shownFile = path16.join(directory, ".swarm", ".knowledge-shown.json");
-  try {
-    if (!existsSync10(shownFile)) {
-      return;
-    }
-    const content = await readFile6(shownFile, "utf-8");
-    const shownData = JSON.parse(content);
-    const shownIds = shownData[phaseInfo];
-    if (!shownIds || shownIds.length === 0) {
-      return;
-    }
-    const swarmPath = resolveSwarmKnowledgePath(directory);
-    const entries = await readKnowledge(swarmPath);
-    let updated = false;
-    const foundInSwarm = new Set;
-    for (const entry of entries) {
-      if (shownIds.includes(entry.id)) {
-        entry.retrieval_outcomes.applied_count++;
-        if (phaseSucceeded) {
-          entry.retrieval_outcomes.succeeded_after_count++;
-        } else {
-          entry.retrieval_outcomes.failed_after_count++;
-        }
-        updated = true;
-        foundInSwarm.add(entry.id);
-      }
-    }
-    if (updated) {
-      await rewriteKnowledge(swarmPath, entries);
-    }
-    const remainingIds = shownIds.filter((id) => !foundInSwarm.has(id));
-    if (remainingIds.length === 0) {
-      delete shownData[phaseInfo];
-      await writeFile4(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
-      return;
-    }
-    const hivePath = resolveHiveKnowledgePath();
-    const hiveEntries = await readKnowledge(hivePath);
-    let hiveUpdated = false;
-    for (const entry of hiveEntries) {
-      if (remainingIds.includes(entry.id)) {
-        entry.retrieval_outcomes.applied_count++;
-        if (phaseSucceeded) {
-          entry.retrieval_outcomes.succeeded_after_count++;
-        } else {
-          entry.retrieval_outcomes.failed_after_count++;
-        }
-        hiveUpdated = true;
-      }
-    }
-    if (hiveUpdated) {
-      await rewriteKnowledge(hivePath, hiveEntries);
-    }
-    delete shownData[phaseInfo];
-    await writeFile4(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
-  } catch {
-    warn("[swarm] Knowledge: failed to update retrieval outcomes");
-  }
-}
-var JACCARD_THRESHOLD = 0.6, HIVE_TIER_BOOST = 0.05, SAME_PROJECT_PENALTY = -0.05;
-var init_knowledge_reader = __esm(() => {
-  init_logger();
-  init_knowledge_store();
-});
-
 // src/hooks/knowledge-validator.ts
-import { appendFile as appendFile4, mkdir as mkdir5, writeFile as writeFile5 } from "node:fs/promises";
-import * as path17 from "node:path";
+import { appendFile as appendFile4, mkdir as mkdir4, writeFile as writeFile4 } from "node:fs/promises";
+import * as path16 from "node:path";
 function normalizeText(text) {
   return text.normalize("NFKC").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -41625,11 +41945,11 @@ async function quarantineEntry(directory, entryId, reason, reportedBy) {
     return;
   }
   const sanitizedReason = reason.slice(0, 500).replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f\x0d]/g, "");
-  const knowledgePath = path17.join(directory, ".swarm", "knowledge.jsonl");
-  const quarantinePath = path17.join(directory, ".swarm", "knowledge-quarantined.jsonl");
-  const rejectedPath = path17.join(directory, ".swarm", "knowledge-rejected.jsonl");
-  const swarmDir = path17.join(directory, ".swarm");
-  await mkdir5(swarmDir, { recursive: true });
+  const knowledgePath = path16.join(directory, ".swarm", "knowledge.jsonl");
+  const quarantinePath = path16.join(directory, ".swarm", "knowledge-quarantined.jsonl");
+  const rejectedPath = path16.join(directory, ".swarm", "knowledge-rejected.jsonl");
+  const swarmDir = path16.join(directory, ".swarm");
+  await mkdir4(swarmDir, { recursive: true });
   let release;
   try {
     release = await import_proper_lockfile4.default.lock(swarmDir, {
@@ -41650,7 +41970,7 @@ async function quarantineEntry(directory, entryId, reason, reportedBy) {
     const jsonlContent = remaining.length > 0 ? `${remaining.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
-    await writeFile5(knowledgePath, jsonlContent, "utf-8");
+    await writeFile4(knowledgePath, jsonlContent, "utf-8");
     await appendFile4(quarantinePath, `${JSON.stringify(quarantined)}
 `, "utf-8");
     const quarantinedEntries = await readKnowledge(quarantinePath);
@@ -41659,7 +41979,7 @@ async function quarantineEntry(directory, entryId, reason, reportedBy) {
       const capContent = trimmed.length > 0 ? `${trimmed.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
-      await writeFile5(quarantinePath, capContent, "utf-8");
+      await writeFile4(quarantinePath, capContent, "utf-8");
     }
     const rejectedRecord = {
       id: entryId,
@@ -41685,11 +42005,11 @@ async function restoreEntry(directory, entryId) {
     warn("[knowledge-validator] restoreEntry: invalid entryId rejected");
     return;
   }
-  const knowledgePath = path17.join(directory, ".swarm", "knowledge.jsonl");
-  const quarantinePath = path17.join(directory, ".swarm", "knowledge-quarantined.jsonl");
-  const rejectedPath = path17.join(directory, ".swarm", "knowledge-rejected.jsonl");
-  const swarmDir = path17.join(directory, ".swarm");
-  await mkdir5(swarmDir, { recursive: true });
+  const knowledgePath = path16.join(directory, ".swarm", "knowledge.jsonl");
+  const quarantinePath = path16.join(directory, ".swarm", "knowledge-quarantined.jsonl");
+  const rejectedPath = path16.join(directory, ".swarm", "knowledge-rejected.jsonl");
+  const swarmDir = path16.join(directory, ".swarm");
+  await mkdir4(swarmDir, { recursive: true });
   let release;
   try {
     release = await import_proper_lockfile4.default.lock(swarmDir, {
@@ -41705,7 +42025,7 @@ async function restoreEntry(directory, entryId) {
     const jsonlContent = remaining.length > 0 ? `${remaining.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
-    await writeFile5(quarantinePath, jsonlContent, "utf-8");
+    await writeFile4(quarantinePath, jsonlContent, "utf-8");
     await appendFile4(knowledgePath, `${JSON.stringify(original)}
 `, "utf-8");
     const rejectedEntries = await readKnowledge(rejectedPath);
@@ -41713,7 +42033,7 @@ async function restoreEntry(directory, entryId) {
     const rejectedContent = filtered.length > 0 ? `${filtered.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
-    await writeFile5(rejectedPath, rejectedContent, "utf-8");
+    await writeFile4(rejectedPath, rejectedContent, "utf-8");
   } finally {
     if (release) {
       await release();
@@ -41826,6 +42146,1180 @@ var init_knowledge_validator = __esm(() => {
     ["use", "don't use"],
     ["recommended", "not recommended"]
   ];
+});
+
+// src/hooks/curator.ts
+import { randomUUID } from "node:crypto";
+import * as fs12 from "node:fs";
+import * as path17 from "node:path";
+function parseKnowledgeRecommendations(llmOutput) {
+  const recommendations = [];
+  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const obsSection = llmOutput.match(/OBSERVATIONS:\s*\n([\s\S]*?)(?:\n\n|\n[A-Z_]+:|$)/);
+  if (obsSection) {
+    const lines = obsSection[1].split(`
+`);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("-"))
+        continue;
+      const match = trimmed.match(/^-\s+entry\s+(\S+)\s+\(([^)]+)\):\s+(.+)$/i);
+      if (!match)
+        continue;
+      const uuid8 = match[1];
+      const parenthetical = match[2];
+      const text = match[3].trim().replace(/\s+\([^)]+\)$/, "");
+      const entryId = uuid8 === "new" || !UUID_V4.test(uuid8) ? undefined : uuid8;
+      let action = "rewrite";
+      const lowerParenthetical = parenthetical.toLowerCase();
+      if (lowerParenthetical.includes("suggests boost confidence") || lowerParenthetical.includes("mark hive_eligible") || lowerParenthetical.includes("appears high-confidence")) {
+        action = "promote";
+      } else if (lowerParenthetical.includes("suggests archive") || lowerParenthetical.includes("appears stale")) {
+        action = "archive";
+      } else if (lowerParenthetical.includes("contradicts project state")) {
+        action = "flag_contradiction";
+      } else if (lowerParenthetical.includes("suggests rewrite") || lowerParenthetical.includes("could be tighter")) {
+        action = "rewrite";
+      } else if (lowerParenthetical.includes("new candidate")) {
+        action = "promote";
+      }
+      recommendations.push({
+        action,
+        entry_id: entryId,
+        lesson: text,
+        reason: text
+      });
+    }
+  }
+  const updatesSection = llmOutput.match(/KNOWLEDGE_UPDATES:\s*\n([\s\S]*?)(?:\n\n|\n[A-Z_]+:|$)/);
+  if (updatesSection) {
+    const validActions = new Set([
+      "promote",
+      "archive",
+      "rewrite",
+      "flag_contradiction"
+    ]);
+    const lines = updatesSection[1].split(`
+`);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("-"))
+        continue;
+      const match = trimmed.match(/^-\s+(\S+)\s+(\S+):\s+(.+)$/);
+      if (!match)
+        continue;
+      const action = match[1].toLowerCase();
+      if (!validActions.has(action))
+        continue;
+      const id = match[2];
+      const text = match[3].trim();
+      const entryId = UUID_V4.test(id) ? id : undefined;
+      recommendations.push({
+        action,
+        entry_id: entryId,
+        lesson: text,
+        reason: text
+      });
+    }
+  }
+  return recommendations;
+}
+async function readCuratorSummary(directory) {
+  const content = await readSwarmFileAsync(directory, "curator-summary.json");
+  if (content === null) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed.schema_version !== 1) {
+      warn(`Curator summary has unsupported schema version: ${parsed.schema_version}. Expected 1.`);
+      return null;
+    }
+    return parsed;
+  } catch {
+    warn("Failed to parse curator-summary.json: invalid JSON");
+    return null;
+  }
+}
+async function writeCuratorSummary(directory, summary) {
+  const resolvedPath = validateSwarmPath(directory, "curator-summary.json");
+  fs12.mkdirSync(path17.dirname(resolvedPath), { recursive: true });
+  const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  await bunWrite(tempPath, JSON.stringify(summary, null, 2));
+  fs12.renameSync(tempPath, resolvedPath);
+}
+function normalizeAgentName(name2) {
+  return name2.toLowerCase().replace(/^(mega|paid|local|lowtier|modelrelay)_/, "");
+}
+function filterPhaseEvents(eventsJsonl, phase, sinceTimestamp) {
+  const lines = eventsJsonl.split(`
+`);
+  const filtered = [];
+  for (const line of lines) {
+    if (!line.trim())
+      continue;
+    try {
+      const event = JSON.parse(line);
+      if (sinceTimestamp) {
+        if (event.timestamp > sinceTimestamp) {
+          filtered.push(event);
+        }
+      } else {
+        if (event.phase === phase) {
+          filtered.push(event);
+        }
+      }
+    } catch {
+      warn("filterPhaseEvents: skipping malformed line");
+    }
+  }
+  return filtered;
+}
+function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase) {
+  const observations = [];
+  const timestamp = new Date().toISOString();
+  for (const agent of requiredAgents) {
+    const normalizedAgent = _internals11.normalizeAgentName(agent);
+    const isDispatched = agentsDispatched.some((a) => _internals11.normalizeAgentName(a) === normalizedAgent);
+    if (!isDispatched) {
+      observations.push({
+        phase,
+        timestamp,
+        type: "workflow_deviation",
+        severity: "warning",
+        description: `Agent '${agent}' required but not dispatched in phase ${phase}`
+      });
+    }
+  }
+  const coderDelegations = [];
+  const reviewerDelegations = [];
+  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
+    const e = phaseEvents[i2];
+    try {
+      if (e.type === "agent.delegation") {
+        const agent = e.agent;
+        if (agent && typeof agent === "string") {
+          const normalized = _internals11.normalizeAgentName(agent);
+          if (normalized === "coder") {
+            coderDelegations.push({ event: e, index: i2 });
+          } else if (normalized === "reviewer") {
+            reviewerDelegations.push({ event: e, index: i2 });
+          }
+        }
+      }
+    } catch {}
+  }
+  for (const coderEvent of coderDelegations) {
+    const hasSubsequentReviewer = reviewerDelegations.some((r) => r.index > coderEvent.index);
+    if (!hasSubsequentReviewer) {
+      observations.push({
+        phase,
+        timestamp,
+        type: "missing_reviewer",
+        severity: "warning",
+        description: `Coder delegation in phase ${phase} has no subsequent reviewer delegation`
+      });
+    }
+  }
+  let phaseCompleteIndex = -1;
+  let retroIndex = -1;
+  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
+    const e = phaseEvents[i2];
+    try {
+      const eventType = e.type;
+      const evidenceType = e.evidence_type;
+      if (typeof eventType === "string" && (eventType === "phase_complete" || eventType === "phase.complete")) {
+        phaseCompleteIndex = i2;
+      }
+      if (typeof eventType === "string" && eventType === "retrospective.written" || typeof evidenceType === "string" && evidenceType === "retrospective") {
+        retroIndex = i2;
+      }
+    } catch {}
+  }
+  if (phaseCompleteIndex !== -1 && retroIndex === -1) {
+    observations.push({
+      phase,
+      timestamp,
+      type: "missing_retro",
+      severity: "warning",
+      description: `Phase ${phase} completed without retrospective evidence`
+    });
+  }
+  const domainDetectionEvents = [];
+  const smeDelegations = [];
+  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
+    const e = phaseEvents[i2];
+    try {
+      if (e.type === "domains.detected") {
+        domainDetectionEvents.push({ event: e, index: i2 });
+      }
+      if (e.type === "agent.delegation" && e.agent) {
+        const agent = e.agent;
+        if (agent && typeof agent === "string") {
+          const normalized = _internals11.normalizeAgentName(agent);
+          if (normalized === "sme") {
+            smeDelegations.push({ event: e, index: i2 });
+          }
+        }
+      }
+    } catch {}
+  }
+  for (const domainEvent of domainDetectionEvents) {
+    const hasSubsequentSme = smeDelegations.some((s) => s.index > domainEvent.index);
+    if (!hasSubsequentSme) {
+      observations.push({
+        phase,
+        timestamp,
+        type: "missing_sme",
+        severity: "info",
+        description: `Domains detected in phase ${phase} but no SME consultation found`
+      });
+    }
+  }
+  return observations;
+}
+async function runCuratorInit(directory, config3, llmDelegate) {
+  try {
+    const priorSummary = await _internals11.readCuratorSummary(directory);
+    const knowledgePath = resolveSwarmKnowledgePath(directory);
+    const allEntries = await readKnowledge(knowledgePath);
+    const highConfidenceEntries = allEntries.filter((e) => typeof e.confidence === "number" && e.confidence >= config3.min_knowledge_confidence);
+    const contextMd = await readSwarmFileAsync(directory, "context.md");
+    const briefingParts = [];
+    if (priorSummary) {
+      briefingParts.push(`## Prior Session Summary (Phase ${priorSummary.last_phase_covered})`);
+      briefingParts.push(priorSummary.digest);
+      if (priorSummary.compliance_observations.length > 0 && !config3.suppress_warnings) {
+        briefingParts.push(`
+## Compliance Observations`);
+        for (const obs of priorSummary.compliance_observations) {
+          briefingParts.push(`- [${obs.severity.toUpperCase()}] Phase ${obs.phase}: ${obs.description}`);
+        }
+      }
+      if (priorSummary.knowledge_recommendations.length > 0) {
+        briefingParts.push(`
+## Knowledge Recommendations`);
+        for (const rec of priorSummary.knowledge_recommendations) {
+          briefingParts.push(`- ${rec.action}: ${rec.lesson} (${rec.reason})`);
+        }
+      }
+    } else {
+      briefingParts.push("## First Session — No Prior Summary");
+      briefingParts.push("This is the first curator run for this project. No prior phase data available.");
+    }
+    if (highConfidenceEntries.length > 0) {
+      briefingParts.push(`
+## High-Confidence Knowledge`);
+      for (const entry of highConfidenceEntries.slice(0, 10)) {
+        const lesson = typeof entry.lesson === "string" ? entry.lesson : JSON.stringify(entry.lesson);
+        briefingParts.push(`- ${lesson}`);
+      }
+    }
+    if (contextMd) {
+      briefingParts.push(`
+## Context Summary`);
+      const maxContextChars = config3.max_summary_tokens * 2;
+      briefingParts.push(contextMd.slice(0, maxContextChars));
+    }
+    const contradictions = allEntries.filter((e) => Array.isArray(e.tags) && e.tags.some((t) => t.includes("contradiction"))).map((e) => typeof e.lesson === "string" ? e.lesson : JSON.stringify(e.lesson));
+    let briefingText = briefingParts.join(`
+`);
+    const allEntriesForCurator = [...allEntries].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).slice(0, 30).map((e) => ({
+      id: e.id,
+      lesson: e.lesson,
+      status: e.status,
+      confidence: e.confidence,
+      category: e.category
+    }));
+    if (llmDelegate) {
+      try {
+        const userInput = [
+          "TASK: CURATOR_INIT",
+          `PRIOR_SUMMARY: ${priorSummary ? JSON.stringify(priorSummary) : "none"}`,
+          `KNOWLEDGE_ENTRIES: ${JSON.stringify(allEntriesForCurator)}`,
+          `PROJECT_CONTEXT: ${contextMd?.slice(0, config3.max_summary_tokens * 2) ?? "none"}`
+        ].join(`
+`);
+        const systemPrompt = CURATOR_INIT_PROMPT;
+        const timeoutMs = config3.llm_timeout_ms ?? DEFAULT_CURATOR_LLM_TIMEOUT_MS;
+        const ac = new AbortController;
+        const timer = setTimeout(() => ac.abort(), timeoutMs);
+        let llmOutput;
+        try {
+          const delegatePromise = llmDelegate(systemPrompt, userInput, ac.signal);
+          delegatePromise.catch(() => {});
+          llmOutput = await Promise.race([
+            delegatePromise,
+            new Promise((_, reject) => {
+              ac.signal.addEventListener("abort", () => reject(new Error("CURATOR_LLM_TIMEOUT")));
+            })
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (llmOutput?.trim()) {
+          briefingText = `${briefingText}
+
+## LLM-Enhanced Analysis
+${llmOutput.trim()}`;
+        }
+        getGlobalEventBus().publish("curator.init.llm_completed", {
+          enhanced: true
+        });
+      } catch (err2) {
+        warn(`[curator] LLM delegation failed during CURATOR_INIT, using data-only mode: ${err2 instanceof Error ? err2.message : String(err2)}`);
+        getGlobalEventBus().publish("curator.init.llm_fallback", {
+          error: String(err2)
+        });
+      }
+    }
+    const result = {
+      briefing: briefingText,
+      contradictions,
+      knowledge_entries_reviewed: allEntries.length,
+      prior_phases_covered: priorSummary ? priorSummary.last_phase_covered : 0
+    };
+    getGlobalEventBus().publish("curator.init.completed", {
+      prior_phases_covered: result.prior_phases_covered,
+      knowledge_entries_reviewed: result.knowledge_entries_reviewed,
+      contradictions_found: contradictions.length
+    });
+    return result;
+  } catch (err2) {
+    getGlobalEventBus().publish("curator.error", {
+      operation: "init",
+      error: String(err2)
+    });
+    return {
+      briefing: `## Curator Init Failed
+Could not load prior session context.`,
+      contradictions: [],
+      knowledge_entries_reviewed: 0,
+      prior_phases_covered: 0
+    };
+  }
+}
+async function runCuratorPhase(directory, phase, agentsDispatched, config3, _knowledgeConfig, llmDelegate) {
+  try {
+    const priorSummary = await _internals11.readCuratorSummary(directory);
+    if (priorSummary?.phase_digests.some((d) => d.phase === phase)) {
+      const existingDigest = priorSummary.phase_digests.find((d) => d.phase === phase);
+      return {
+        phase,
+        digest: existingDigest,
+        compliance: priorSummary.compliance_observations.filter((c) => c.phase === phase),
+        knowledge_recommendations: [],
+        summary_updated: false
+      };
+    }
+    const eventsJsonlContent = await readSwarmFileAsync(directory, "events.jsonl");
+    const phaseEvents = eventsJsonlContent ? _internals11.filterPhaseEvents(eventsJsonlContent, phase) : [];
+    const contextMd = await readSwarmFileAsync(directory, "context.md");
+    const requiredAgents = ["reviewer", "test_engineer"];
+    const complianceObservations = _internals11.checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase);
+    const plan = await loadPlanJsonOnly(directory);
+    const phaseData = plan?.phases.find((p) => p.id === phase);
+    const tasksCompleted = phaseData ? phaseData.tasks.filter((t) => t.status === "completed").length : 0;
+    const tasksTotal = phaseData ? phaseData.tasks.length : 0;
+    const keyDecisions = [];
+    if (contextMd) {
+      const decisionSection = contextMd.match(/## Decisions\r?\n([\s\S]*?)(?:\r?\n##|$)/);
+      if (decisionSection) {
+        const lines = decisionSection[1].split(`
+`);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("- ")) {
+            keyDecisions.push(trimmed.slice(2));
+          }
+        }
+      }
+    }
+    const phaseDigest = {
+      phase,
+      timestamp: new Date().toISOString(),
+      summary: `Phase ${phase} completed. ${tasksCompleted}/${tasksTotal} tasks completed. ${complianceObservations.length} compliance observations.`,
+      agents_used: [
+        ...new Set(agentsDispatched.map((a) => _internals11.normalizeAgentName(a)))
+      ],
+      tasks_completed: tasksCompleted,
+      tasks_total: tasksTotal,
+      key_decisions: keyDecisions.slice(0, 5),
+      blockers_resolved: []
+    };
+    const curatorKnowledgePath = resolveSwarmKnowledgePath(directory);
+    const allKnowledgeEntries = await readKnowledge(curatorKnowledgePath);
+    const knowledgeForCurator = [...allKnowledgeEntries].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).slice(0, 30).map((e) => ({
+      id: e.id,
+      lesson: e.lesson,
+      status: e.status,
+      confidence: e.confidence,
+      category: e.category
+    }));
+    let knowledgeRecommendations = [];
+    if (llmDelegate) {
+      try {
+        const priorDigest = priorSummary?.digest ?? "none";
+        const systemPrompt = CURATOR_PHASE_PROMPT;
+        const userInput = [
+          `TASK: CURATOR_PHASE ${phase}`,
+          `PRIOR_DIGEST: ${priorDigest}`,
+          `PHASE_EVENTS: ${JSON.stringify(phaseEvents.slice(0, 50))}`,
+          `PHASE_DECISIONS: ${JSON.stringify(keyDecisions)}`,
+          `AGENTS_DISPATCHED: ${JSON.stringify(agentsDispatched)}`,
+          `AGENTS_EXPECTED: ["reviewer", "test_engineer"]`,
+          `KNOWLEDGE_ENTRIES: ${JSON.stringify(knowledgeForCurator)}`
+        ].join(`
+`);
+        const timeoutMs = config3.llm_timeout_ms ?? DEFAULT_CURATOR_LLM_TIMEOUT_MS;
+        const ac = new AbortController;
+        const timer = setTimeout(() => ac.abort(), timeoutMs);
+        let llmOutput;
+        try {
+          const delegatePromise = llmDelegate(systemPrompt, userInput, ac.signal);
+          delegatePromise.catch(() => {});
+          llmOutput = await Promise.race([
+            delegatePromise,
+            new Promise((_, reject) => {
+              ac.signal.addEventListener("abort", () => reject(new Error("CURATOR_LLM_TIMEOUT")));
+            })
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (llmOutput?.trim()) {
+          knowledgeRecommendations = _internals11.parseKnowledgeRecommendations(llmOutput);
+        }
+        getGlobalEventBus().publish("curator.phase.llm_completed", {
+          phase,
+          recommendations: knowledgeRecommendations.length
+        });
+      } catch (err2) {
+        warn(`[curator] LLM delegation failed during CURATOR_PHASE ${phase}, using data-only mode: ${err2 instanceof Error ? err2.message : String(err2)}`);
+        getGlobalEventBus().publish("curator.phase.llm_fallback", {
+          phase,
+          error: String(err2)
+        });
+      }
+    }
+    const sessionId = `session-${Date.now()}`;
+    const now = new Date().toISOString();
+    let updatedSummary;
+    if (priorSummary) {
+      updatedSummary = {
+        ...priorSummary,
+        last_updated: now,
+        last_phase_covered: Math.max(priorSummary.last_phase_covered, phase),
+        digest: priorSummary.digest + `
+
+### Phase ${phase}
+${phaseDigest.summary}`,
+        phase_digests: [...priorSummary.phase_digests, phaseDigest],
+        compliance_observations: [
+          ...priorSummary.compliance_observations,
+          ...complianceObservations
+        ],
+        knowledge_recommendations: knowledgeRecommendations
+      };
+    } else {
+      updatedSummary = {
+        schema_version: 1,
+        session_id: sessionId,
+        last_updated: now,
+        last_phase_covered: phase,
+        digest: `### Phase ${phase}
+${phaseDigest.summary}`,
+        phase_digests: [phaseDigest],
+        compliance_observations: complianceObservations,
+        knowledge_recommendations: knowledgeRecommendations
+      };
+    }
+    await _internals11.writeCuratorSummary(directory, updatedSummary);
+    const eventsPath = path17.join(directory, ".swarm", "events.jsonl");
+    for (const obs of complianceObservations) {
+      await appendKnowledge(eventsPath, {
+        type: "curator_compliance",
+        timestamp: obs.timestamp,
+        phase: obs.phase,
+        observation_type: obs.type,
+        severity: obs.severity,
+        description: obs.description
+      });
+    }
+    const result = {
+      phase,
+      digest: phaseDigest,
+      compliance: complianceObservations,
+      knowledge_recommendations: knowledgeRecommendations,
+      summary_updated: true
+    };
+    getGlobalEventBus().publish("curator.phase.completed", {
+      phase,
+      compliance_count: complianceObservations.length,
+      summary_updated: true
+    });
+    return result;
+  } catch (err2) {
+    getGlobalEventBus().publish("curator.error", {
+      operation: "phase",
+      phase,
+      error: String(err2)
+    });
+    return {
+      phase,
+      digest: {
+        phase,
+        timestamp: new Date().toISOString(),
+        summary: `Phase ${phase} curator run failed: ${String(err2)}`,
+        agents_used: [],
+        tasks_completed: 0,
+        tasks_total: 0,
+        key_decisions: [],
+        blockers_resolved: []
+      },
+      compliance: [],
+      knowledge_recommendations: [],
+      summary_updated: false
+    };
+  }
+}
+async function applyCuratorKnowledgeUpdates(directory, recommendations, knowledgeConfig) {
+  let applied = 0;
+  let skipped = 0;
+  if (!recommendations || recommendations.length === 0) {
+    return { applied, skipped };
+  }
+  if (knowledgeConfig == null) {
+    return { applied: 0, skipped: 0 };
+  }
+  const validRecommendations = recommendations.filter((rec) => rec != null);
+  const knowledgePath = resolveSwarmKnowledgePath(directory);
+  const entries = await readKnowledge(knowledgePath);
+  let modified = false;
+  const appliedIds = new Set;
+  const updatedEntries = entries.map((entry) => {
+    const rec = validRecommendations.find((r) => r.entry_id === entry.id);
+    if (!rec)
+      return entry;
+    switch (rec.action) {
+      case "promote":
+        appliedIds.add(entry.id);
+        applied++;
+        modified = true;
+        return {
+          ...entry,
+          hive_eligible: true,
+          confidence: Math.min(1, (entry.confidence ?? 0) + 0.1),
+          updated_at: new Date().toISOString()
+        };
+      case "archive":
+        appliedIds.add(entry.id);
+        applied++;
+        modified = true;
+        return {
+          ...entry,
+          status: "archived",
+          updated_at: new Date().toISOString()
+        };
+      case "flag_contradiction":
+        appliedIds.add(entry.id);
+        applied++;
+        modified = true;
+        return {
+          ...entry,
+          tags: [
+            ...entry.tags ?? [],
+            `contradiction:${(rec.reason ?? "").slice(0, 50)}`
+          ],
+          updated_at: new Date().toISOString()
+        };
+      case "rewrite": {
+        const newLesson = (rec.lesson ?? "").trim();
+        if (newLesson.length < 15 || newLesson.length > 280) {
+          return entry;
+        }
+        appliedIds.add(entry.id);
+        applied++;
+        modified = true;
+        return {
+          ...entry,
+          lesson: newLesson,
+          updated_at: new Date().toISOString(),
+          confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05)
+        };
+      }
+      default:
+        return entry;
+    }
+  });
+  for (const rec of validRecommendations) {
+    if (rec.entry_id !== undefined && !appliedIds.has(rec.entry_id)) {
+      const found = entries.some((e) => e.id === rec.entry_id);
+      if (!found) {
+        warn(`[curator] applyCuratorKnowledgeUpdates: entry_id '${rec.entry_id}' not found — skipping`);
+      }
+      skipped++;
+    }
+  }
+  if (modified) {
+    await rewriteKnowledge(knowledgePath, updatedEntries);
+  }
+  const existingLessons = entries.map((e) => e.lesson);
+  for (const rec of validRecommendations) {
+    if (rec.entry_id !== undefined)
+      continue;
+    if (rec.action !== "promote") {
+      skipped++;
+      continue;
+    }
+    const lesson = (rec.lesson?.trim() ?? "").slice(0, 280);
+    if (lesson.length < 15) {
+      skipped++;
+      continue;
+    }
+    if (existingLessons.some((el) => el.toLowerCase() === lesson.toLowerCase())) {
+      skipped++;
+      continue;
+    }
+    if (knowledgeConfig.validation_enabled !== false) {
+      const validation = validateLesson(lesson, existingLessons, {
+        category: rec.category ?? "other",
+        scope: "global",
+        confidence: rec.confidence ?? 0.5
+      });
+      if (!validation.valid) {
+        skipped++;
+        continue;
+      }
+    }
+    const now = new Date().toISOString();
+    const newEntry = {
+      id: randomUUID(),
+      tier: "swarm",
+      lesson,
+      category: rec.category ?? "other",
+      tags: [],
+      scope: "global",
+      confidence: rec.confidence ?? 0.5,
+      status: "candidate",
+      confirmed_by: [],
+      retrieval_outcomes: {
+        applied_count: 0,
+        succeeded_after_count: 0,
+        failed_after_count: 0
+      },
+      schema_version: 1,
+      created_at: now,
+      updated_at: now,
+      auto_generated: true,
+      project_name: path17.basename(directory)
+    };
+    await appendKnowledge(knowledgePath, newEntry);
+    applied++;
+    existingLessons.push(lesson);
+  }
+  return { applied, skipped };
+}
+var DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300000, _internals11;
+var init_curator = __esm(() => {
+  init_event_bus();
+  init_manager();
+  init_bun_compat();
+  init_logger();
+  init_knowledge_store();
+  init_knowledge_validator();
+  init_utils2();
+  _internals11 = {
+    parseKnowledgeRecommendations,
+    readCuratorSummary,
+    writeCuratorSummary,
+    filterPhaseEvents,
+    checkPhaseCompliance,
+    normalizeAgentName
+  };
+});
+
+// src/hooks/hive-promoter.ts
+import path18 from "node:path";
+function isAlreadyInHive(entry, hiveEntries, threshold) {
+  return findNearDuplicate(entry.lesson, hiveEntries, threshold) !== undefined;
+}
+function countDistinctPhases(confirmedBy) {
+  const phaseNumbers = new Set;
+  for (const record3 of confirmedBy) {
+    phaseNumbers.add(record3.phase_number);
+  }
+  return phaseNumbers.size;
+}
+function countDistinctProjects(confirmedBy) {
+  const projectNames = new Set;
+  for (const record3 of confirmedBy) {
+    projectNames.add(record3.project_name);
+  }
+  return projectNames.size;
+}
+function hasProjectConfirmation(hiveEntry, projectName) {
+  return hiveEntry.confirmed_by.some((record3) => record3.project_name === projectName);
+}
+function calculateEncounterScore(currentScore, isSameProject, config3) {
+  const weight = isSameProject ? config3.same_project_weight : config3.cross_project_weight;
+  const increment = config3.encounter_increment * weight;
+  const newScore = currentScore + increment;
+  return Math.min(Math.max(newScore, config3.min_encounter_score), config3.max_encounter_score);
+}
+function getEntryAgeMs(createdAt) {
+  const createdTime = new Date(createdAt).getTime();
+  if (Number.isNaN(createdTime))
+    return 0;
+  return Date.now() - createdTime;
+}
+async function checkHivePromotions(swarmEntries, config3) {
+  let newPromotions = 0;
+  let encountersIncremented = 0;
+  let advancements = 0;
+  if (config3.hive_enabled === false) {
+    return {
+      timestamp: new Date().toISOString(),
+      new_promotions: 0,
+      encounters_incremented: 0,
+      advancements: 0,
+      total_hive_entries: 0
+    };
+  }
+  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
+  for (const swarmEntry of swarmEntries) {
+    if (isAlreadyInHive(swarmEntry, hiveEntries, config3.dedup_threshold)) {
+      continue;
+    }
+    let shouldPromote = false;
+    if (swarmEntry.hive_eligible === true && countDistinctPhases(swarmEntry.confirmed_by) >= 3) {
+      shouldPromote = true;
+    }
+    if (swarmEntry.tags.includes("hive-fast-track")) {
+      shouldPromote = true;
+    }
+    const ageMs = getEntryAgeMs(swarmEntry.created_at);
+    const ageThresholdMs = config3.auto_promote_days * 86400000;
+    if (ageMs >= ageThresholdMs) {
+      shouldPromote = true;
+    }
+    if (!shouldPromote) {
+      continue;
+    }
+    const validationResult = validateLesson(swarmEntry.lesson, hiveEntries.map((e) => e.lesson), {
+      category: swarmEntry.category,
+      scope: swarmEntry.scope,
+      confidence: swarmEntry.confidence
+    });
+    if (validationResult.severity === "error") {
+      const rejectedLesson = {
+        id: crypto.randomUUID(),
+        lesson: swarmEntry.lesson,
+        rejection_reason: validationResult.reason || "validation failed for hive promotion",
+        rejected_at: new Date().toISOString(),
+        rejection_layer: validationResult.layer || 2
+      };
+      const hiveRejectedPath = resolveHiveRejectedPath();
+      await appendKnowledge(hiveRejectedPath, rejectedLesson);
+      continue;
+    }
+    const newHiveEntry = {
+      id: crypto.randomUUID(),
+      tier: "hive",
+      lesson: swarmEntry.lesson,
+      category: swarmEntry.category,
+      tags: swarmEntry.tags,
+      scope: swarmEntry.scope,
+      confidence: 0.5,
+      status: "candidate",
+      confirmed_by: [],
+      retrieval_outcomes: {
+        applied_count: 0,
+        succeeded_after_count: 0,
+        failed_after_count: 0
+      },
+      schema_version: config3.schema_version,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      source_project: swarmEntry.project_name,
+      encounter_score: config3.initial_encounter_score
+    };
+    await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
+    newPromotions++;
+    hiveEntries.push(newHiveEntry);
+  }
+  let hiveModified = false;
+  for (const hiveEntry of hiveEntries) {
+    const nearDuplicate = findNearDuplicate(hiveEntry.lesson, swarmEntries, config3.dedup_threshold);
+    if (!nearDuplicate) {
+      continue;
+    }
+    const isSameProject = nearDuplicate.project_name === hiveEntry.source_project;
+    if (hasProjectConfirmation(hiveEntry, nearDuplicate.project_name)) {
+      continue;
+    }
+    const newConfirmation = {
+      project_name: nearDuplicate.project_name,
+      confirmed_at: new Date().toISOString()
+    };
+    hiveEntry.confirmed_by.push(newConfirmation);
+    const currentScore = hiveEntry.encounter_score ?? 1;
+    hiveEntry.encounter_score = calculateEncounterScore(currentScore, isSameProject, config3);
+    encountersIncremented++;
+    hiveEntry.updated_at = new Date().toISOString();
+    if (hiveEntry.status === "candidate" && countDistinctProjects(hiveEntry.confirmed_by) >= 3) {
+      hiveEntry.status = "established";
+      advancements++;
+    }
+    hiveModified = true;
+  }
+  if (hiveModified) {
+    await rewriteKnowledge(resolveHiveKnowledgePath(), hiveEntries);
+  }
+  if (newPromotions > 0 || hiveModified) {
+    await enforceKnowledgeCap(resolveHiveKnowledgePath(), config3.hive_max_entries);
+  }
+  return {
+    timestamp: new Date().toISOString(),
+    new_promotions: newPromotions,
+    encounters_incremented: encountersIncremented,
+    advancements,
+    total_hive_entries: hiveEntries.length
+  };
+}
+function createHivePromoterHook(directory, config3) {
+  const hook = async (_input, _output) => {
+    const swarmEntries = await readKnowledge(resolveSwarmKnowledgePath(directory));
+    const promotionSummary = await checkHivePromotions(swarmEntries, config3);
+    const curatorSummary = await readCuratorSummary(directory);
+    if (curatorSummary) {
+      const existingRecommendations = Array.isArray(curatorSummary.knowledge_recommendations) ? curatorSummary.knowledge_recommendations : [];
+      const recommendation = {
+        action: "promote",
+        lesson: `Hive promotion: ${promotionSummary.new_promotions} new, ${promotionSummary.encounters_incremented} encounters, ${promotionSummary.advancements} advancements, ${promotionSummary.total_hive_entries} total entries`,
+        reason: JSON.stringify({
+          timestamp: promotionSummary.timestamp,
+          new_promotions: promotionSummary.new_promotions,
+          encounters_incremented: promotionSummary.encounters_incremented,
+          advancements: promotionSummary.advancements,
+          total_hive_entries: promotionSummary.total_hive_entries
+        })
+      };
+      const updatedSummary = {
+        ...curatorSummary,
+        knowledge_recommendations: [...existingRecommendations, recommendation],
+        last_updated: new Date().toISOString()
+      };
+      await writeCuratorSummary(directory, updatedSummary);
+    }
+  };
+  return safeHook(hook);
+}
+async function promoteToHive(directory, lesson, category) {
+  const trimmedLesson = lesson.trim();
+  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
+  const validationResult = validateLesson(trimmedLesson, hiveEntries.map((e) => e.lesson), {
+    category: category || "process",
+    scope: "global",
+    confidence: 1
+  });
+  if (validationResult.severity === "error") {
+    throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
+  }
+  if (findNearDuplicate(trimmedLesson, hiveEntries, 0.6)) {
+    return `Lesson already exists in hive (near-duplicate).`;
+  }
+  const newHiveEntry = {
+    id: crypto.randomUUID(),
+    tier: "hive",
+    lesson: trimmedLesson,
+    category: category || "process",
+    tags: [],
+    scope: "global",
+    confidence: 1,
+    status: "promoted",
+    confirmed_by: [],
+    retrieval_outcomes: {
+      applied_count: 0,
+      succeeded_after_count: 0,
+      failed_after_count: 0
+    },
+    schema_version: 1,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    source_project: path18.basename(directory) || "unknown",
+    encounter_score: 1
+  };
+  await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
+  return `Promoted to hive: "${trimmedLesson.slice(0, 50)}${trimmedLesson.length > 50 ? "..." : ""}" (confidence: 1.0, source: manual)`;
+}
+async function promoteFromSwarm(directory, lessonId) {
+  const swarmEntries = await readKnowledge(resolveSwarmKnowledgePath(directory));
+  const swarmEntry = swarmEntries.find((e) => e.id === lessonId);
+  if (!swarmEntry) {
+    throw new Error(`Lesson ${lessonId} not found in .swarm/knowledge.jsonl`);
+  }
+  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
+  const validationResult = validateLesson(swarmEntry.lesson, hiveEntries.map((e) => e.lesson), {
+    category: swarmEntry.category,
+    scope: swarmEntry.scope,
+    confidence: swarmEntry.confidence
+  });
+  if (validationResult.severity === "error") {
+    throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
+  }
+  if (findNearDuplicate(swarmEntry.lesson, hiveEntries, 0.6)) {
+    return `Lesson already exists in hive (near-duplicate).`;
+  }
+  const newHiveEntry = {
+    id: crypto.randomUUID(),
+    tier: "hive",
+    lesson: swarmEntry.lesson,
+    category: swarmEntry.category,
+    tags: swarmEntry.tags,
+    scope: swarmEntry.scope,
+    confidence: 1,
+    status: "promoted",
+    confirmed_by: [],
+    retrieval_outcomes: {
+      applied_count: 0,
+      succeeded_after_count: 0,
+      failed_after_count: 0
+    },
+    schema_version: 1,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    source_project: swarmEntry.project_name,
+    encounter_score: 1
+  };
+  await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
+  return `Promoted lesson ${lessonId} from swarm to hive: "${swarmEntry.lesson.slice(0, 50)}${swarmEntry.lesson.length > 50 ? "..." : ""}"`;
+}
+var init_hive_promoter = __esm(() => {
+  init_curator();
+  init_knowledge_store();
+  init_knowledge_validator();
+  init_utils2();
+});
+
+// src/hooks/knowledge-reader.ts
+import { existsSync as existsSync10 } from "node:fs";
+import { mkdir as mkdir5, readFile as readFile6, writeFile as writeFile5 } from "node:fs/promises";
+import * as path19 from "node:path";
+function inferCategoriesFromPhase(phaseDescription) {
+  const lower = phaseDescription.toLowerCase();
+  const patterns = [
+    {
+      pattern: /\b(?:test|qa|quality|verification|validation)\b/,
+      categories: ["testing", "debugging"]
+    },
+    {
+      pattern: /\b(?:implement|build|develop|coding|code)\b/,
+      categories: ["tooling", "architecture", "debugging"]
+    },
+    {
+      pattern: /\b(?:integrat|deploy|ci|cd|release|publish)\b/,
+      categories: ["integration", "tooling", "performance"]
+    },
+    {
+      pattern: /\b(?:plan|design|architect|spec|requirement)\b/,
+      categories: ["architecture", "process"]
+    },
+    {
+      pattern: /\b(?:review|refactor|cleanup|polish|optimi)\b/,
+      categories: ["performance", "architecture", "process"]
+    },
+    {
+      pattern: /\b(?:secur|audit|harden|compliance)\b/,
+      categories: ["security", "testing"]
+    },
+    {
+      pattern: /\b(?:setup|config|scaffold|init|bootstrap)\b/,
+      categories: ["tooling", "other"]
+    },
+    {
+      pattern: /\b(?:doc|readme|changelog)\b/,
+      categories: ["process", "tooling"]
+    }
+  ];
+  for (const { pattern, categories } of patterns) {
+    if (pattern.test(lower)) {
+      return categories;
+    }
+  }
+  return ["process", "tooling"];
+}
+async function recordLessonsShown(directory, lessonIds, currentPhase) {
+  const shownFile = path19.join(directory, ".swarm", ".knowledge-shown.json");
+  try {
+    let shownData = {};
+    if (existsSync10(shownFile)) {
+      const content = await readFile6(shownFile, "utf-8");
+      shownData = JSON.parse(content);
+    }
+    const phaseMatch = /^Phase\s+(\d+)/i.exec(currentPhase);
+    const canonicalKey = phaseMatch ? `Phase ${phaseMatch[1]}` : currentPhase;
+    shownData[canonicalKey] = lessonIds;
+    await mkdir5(path19.dirname(shownFile), { recursive: true });
+    await writeFile5(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
+  } catch {
+    warn("[swarm] Knowledge: failed to record shown lessons");
+  }
+}
+async function readMergedKnowledge(directory, config3, context) {
+  const swarmPath = resolveSwarmKnowledgePath(directory);
+  const swarmEntries = await readKnowledge(swarmPath);
+  let hiveEntries = [];
+  if (config3.hive_enabled !== false) {
+    const hivePath = resolveHiveKnowledgePath();
+    hiveEntries = await readKnowledge(hivePath);
+  }
+  const seenLessons = new Set;
+  const merged = [];
+  for (const entry of hiveEntries) {
+    const normalized = normalize2(entry.lesson);
+    seenLessons.add(normalized);
+    merged.push({
+      ...entry,
+      relevanceScore: { category: 0, confidence: 0, keywords: 0 },
+      finalScore: 0
+    });
+  }
+  for (const entry of swarmEntries) {
+    const normalized = normalize2(entry.lesson);
+    if (seenLessons.has(normalized)) {
+      continue;
+    }
+    const swarmBigrams = wordBigrams(normalized);
+    const isHiveNearDup = hiveEntries.some((hiveEntry) => jaccardBigram(swarmBigrams, wordBigrams(normalize2(hiveEntry.lesson))) >= JACCARD_THRESHOLD);
+    if (isHiveNearDup)
+      continue;
+    const isSwarmNearDup = merged.some((m) => m.tier === "swarm" && jaccardBigram(swarmBigrams, wordBigrams(normalize2(m.lesson))) >= JACCARD_THRESHOLD);
+    if (isSwarmNearDup)
+      continue;
+    seenLessons.add(normalized);
+    merged.push({
+      ...entry,
+      relevanceScore: { category: 0, confidence: 0, keywords: 0 },
+      finalScore: 0
+    });
+  }
+  const scopeFilter = config3.scope_filter ?? ["global"];
+  const filtered = merged.filter((entry) => scopeFilter.some((pattern) => (entry.scope ?? "global") === pattern) && entry.status !== "archived");
+  const ranked = filtered.map((entry) => {
+    let categoryScore = 0;
+    if (context?.currentPhase) {
+      const phaseCategories = inferCategoriesFromPhase(context.currentPhase);
+      if (phaseCategories.includes(entry.category)) {
+        categoryScore = 1;
+      } else if (entry.category === "process") {
+        categoryScore = 0.5;
+      }
+    } else {
+      categoryScore = 0.5;
+    }
+    const confidenceScore = entry.confidence;
+    let keywordsScore = 0;
+    if (context?.techStack && entry.tags.length > 0) {
+      const matchingTags = entry.tags.filter((t) => context.techStack.some((s) => t.toLowerCase().includes(s.toLowerCase()) || s.toLowerCase().includes(t.toLowerCase()))).length;
+      keywordsScore = Math.min(matchingTags / Math.max(entry.tags.length, 1), 1);
+    } else if (entry.tags.length === 0) {
+      keywordsScore = 0.5;
+    }
+    const tierBoost = entry.tier === "hive" ? HIVE_TIER_BOOST : 0;
+    const isSameProjectSource = context?.projectName && entry.tier === "hive" && "source_project" in entry && entry.source_project === context.projectName;
+    const sameProjectPenalty = isSameProjectSource ? SAME_PROJECT_PENALTY : 0;
+    const finalScore = categoryScore * 0.4 + confidenceScore * 0.35 + keywordsScore * 0.25 + tierBoost + sameProjectPenalty;
+    const relevanceScore = {
+      category: categoryScore,
+      confidence: confidenceScore,
+      keywords: keywordsScore
+    };
+    return {
+      ...entry,
+      relevanceScore,
+      finalScore: Math.min(Math.max(finalScore, 0), 1)
+    };
+  });
+  ranked.sort((a, b) => {
+    const scoreDiff = b.finalScore - a.finalScore;
+    if (Math.abs(scoreDiff) > 0.001)
+      return scoreDiff;
+    const dateA = new Date(a.created_at).getTime();
+    const dateB = new Date(b.created_at).getTime();
+    return dateB - dateA;
+  });
+  const maxInject = config3.max_inject_count ?? 5;
+  const topN = ranked.slice(0, maxInject);
+  if (topN.length > 0 && context?.currentPhase) {
+    recordLessonsShown(directory, topN.map((e) => e.id), context.currentPhase).catch(() => {});
+  }
+  return topN;
+}
+async function updateRetrievalOutcome(directory, phaseInfo, phaseSucceeded) {
+  const shownFile = path19.join(directory, ".swarm", ".knowledge-shown.json");
+  try {
+    if (!existsSync10(shownFile)) {
+      return;
+    }
+    const content = await readFile6(shownFile, "utf-8");
+    const shownData = JSON.parse(content);
+    const shownIds = shownData[phaseInfo];
+    if (!shownIds || shownIds.length === 0) {
+      return;
+    }
+    const swarmPath = resolveSwarmKnowledgePath(directory);
+    const entries = await readKnowledge(swarmPath);
+    let updated = false;
+    const foundInSwarm = new Set;
+    for (const entry of entries) {
+      if (shownIds.includes(entry.id)) {
+        entry.retrieval_outcomes.applied_count++;
+        if (phaseSucceeded) {
+          entry.retrieval_outcomes.succeeded_after_count++;
+        } else {
+          entry.retrieval_outcomes.failed_after_count++;
+        }
+        updated = true;
+        foundInSwarm.add(entry.id);
+      }
+    }
+    if (updated) {
+      await rewriteKnowledge(swarmPath, entries);
+    }
+    const remainingIds = shownIds.filter((id) => !foundInSwarm.has(id));
+    if (remainingIds.length === 0) {
+      delete shownData[phaseInfo];
+      await writeFile5(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
+      return;
+    }
+    const hivePath = resolveHiveKnowledgePath();
+    const hiveEntries = await readKnowledge(hivePath);
+    let hiveUpdated = false;
+    for (const entry of hiveEntries) {
+      if (remainingIds.includes(entry.id)) {
+        entry.retrieval_outcomes.applied_count++;
+        if (phaseSucceeded) {
+          entry.retrieval_outcomes.succeeded_after_count++;
+        } else {
+          entry.retrieval_outcomes.failed_after_count++;
+        }
+        hiveUpdated = true;
+      }
+    }
+    if (hiveUpdated) {
+      await rewriteKnowledge(hivePath, hiveEntries);
+    }
+    delete shownData[phaseInfo];
+    await writeFile5(shownFile, JSON.stringify(shownData, null, 2), "utf-8");
+  } catch {
+    warn("[swarm] Knowledge: failed to update retrieval outcomes");
+  }
+}
+var JACCARD_THRESHOLD = 0.6, HIVE_TIER_BOOST = 0.05, SAME_PROJECT_PENALTY = -0.05;
+var init_knowledge_reader = __esm(() => {
+  init_logger();
+  init_knowledge_store();
 });
 
 // src/hooks/knowledge-curator.ts
@@ -42039,7 +43533,7 @@ async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, c
     existingEntries.push(entry);
   }
   await enforceKnowledgeCap(knowledgePath, config3.swarm_max_entries);
-  await _internals11.runAutoPromotion(directory, config3);
+  await _internals12.runAutoPromotion(directory, config3);
   return { stored, skipped, rejected };
 }
 async function runAutoPromotion(directory, config3) {
@@ -42120,7 +43614,7 @@ function createKnowledgeCuratorHook(directory, config3) {
       });
       const projectName2 = evidenceData.project_name ?? "unknown";
       const phaseNumber2 = typeof evidenceData.phase_number === "number" ? evidenceData.phase_number : 1;
-      await _internals11.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
+      await _internals12.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
       await updateRetrievalOutcome(directory, `Phase ${phaseNumber2}`, true);
       return;
     }
@@ -42143,150 +43637,23 @@ function createKnowledgeCuratorHook(directory, config3) {
     const projectName = projectNameMatch ? projectNameMatch[1].trim() : "unknown";
     const phaseMatch = /^Phase:\s*(\d+)/m.exec(planContent);
     const phaseNumber = phaseMatch ? parseInt(phaseMatch[1], 10) : 1;
-    await _internals11.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
+    await _internals12.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
     await updateRetrievalOutcome(directory, `Phase ${phaseNumber}`, true);
   };
   return safeHook(handler);
 }
-var seenRetroSections, _internals11;
+var seenRetroSections, _internals12;
 var init_knowledge_curator = __esm(() => {
   init_knowledge_reader();
   init_knowledge_store();
   init_knowledge_validator();
   init_utils2();
   seenRetroSections = new Map;
-  _internals11 = {
+  _internals12 = {
     isWriteToEvidenceFile,
     curateAndStoreSwarm,
     runAutoPromotion,
     createKnowledgeCuratorHook
-  };
-});
-
-// src/session/snapshot-writer.ts
-import { mkdirSync as mkdirSync9, renameSync as renameSync7 } from "node:fs";
-import * as path18 from "node:path";
-function serializeAgentSession(s) {
-  const gateLog = {};
-  const rawGateLog = s.gateLog ?? new Map;
-  for (const [taskId, gates] of rawGateLog) {
-    gateLog[taskId] = Array.from(gates ?? []);
-  }
-  const reviewerCallCount = {};
-  const rawReviewerCallCount = s.reviewerCallCount ?? new Map;
-  for (const [phase, count] of rawReviewerCallCount) {
-    reviewerCallCount[String(phase)] = count;
-  }
-  const partialGateWarningsIssuedForTask = Array.from(s.partialGateWarningsIssuedForTask ?? new Set);
-  const catastrophicPhaseWarnings = Array.from(s.catastrophicPhaseWarnings ?? new Set);
-  const phaseAgentsDispatched = Array.from(s.phaseAgentsDispatched ?? new Set);
-  const lastCompletedPhaseAgentsDispatched = Array.from(s.lastCompletedPhaseAgentsDispatched ?? new Set);
-  const windows = {};
-  const rawWindows = s.windows ?? {};
-  for (const [key, win] of Object.entries(rawWindows)) {
-    windows[key] = {
-      id: win.id,
-      agentName: win.agentName,
-      startedAtMs: win.startedAtMs,
-      toolCalls: win.toolCalls,
-      consecutiveErrors: win.consecutiveErrors,
-      hardLimitHit: win.hardLimitHit,
-      lastSuccessTimeMs: win.lastSuccessTimeMs,
-      recentToolCalls: win.recentToolCalls,
-      warningIssued: win.warningIssued,
-      warningReason: win.warningReason,
-      transientRetryCount: win.transientRetryCount ?? 0
-    };
-  }
-  return {
-    agentName: s.agentName,
-    lastToolCallTime: s.lastToolCallTime,
-    lastAgentEventTime: s.lastAgentEventTime,
-    delegationActive: s.delegationActive,
-    activeInvocationId: s.activeInvocationId,
-    lastInvocationIdByAgent: s.lastInvocationIdByAgent ?? {},
-    windows,
-    lastCompactionHint: s.lastCompactionHint ?? 0,
-    architectWriteCount: s.architectWriteCount ?? 0,
-    lastCoderDelegationTaskId: s.lastCoderDelegationTaskId ?? null,
-    currentTaskId: s.currentTaskId ?? null,
-    turboMode: s.turboMode ?? false,
-    gateLog,
-    reviewerCallCount,
-    lastGateFailure: s.lastGateFailure ?? null,
-    partialGateWarningsIssuedForTask,
-    selfFixAttempted: s.selfFixAttempted ?? false,
-    selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
-    catastrophicPhaseWarnings,
-    lastPhaseCompleteTimestamp: s.lastPhaseCompleteTimestamp ?? 0,
-    lastPhaseCompletePhase: s.lastPhaseCompletePhase ?? 0,
-    phaseAgentsDispatched,
-    lastCompletedPhaseAgentsDispatched,
-    qaSkipCount: s.qaSkipCount ?? 0,
-    qaSkipTaskIds: s.qaSkipTaskIds ?? [],
-    pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
-    taskWorkflowStates: Object.fromEntries(s.taskWorkflowStates ?? new Map),
-    ...s.scopeViolationDetected !== undefined && {
-      scopeViolationDetected: s.scopeViolationDetected
-    },
-    model_fallback_index: s.model_fallback_index ?? 0,
-    modelFallbackExhausted: s.modelFallbackExhausted ?? false,
-    coderRevisions: s.coderRevisions ?? 0,
-    revisionLimitHit: s.revisionLimitHit ?? false,
-    fullAutoMode: s.fullAutoMode ?? false,
-    fullAutoInteractionCount: s.fullAutoInteractionCount ?? 0,
-    fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
-    fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
-    sessionRehydratedAt: s.sessionRehydratedAt ?? 0
-  };
-}
-async function writeSnapshot(directory, state) {
-  try {
-    const snapshot = {
-      version: 2,
-      writtenAt: Date.now(),
-      toolAggregates: Object.fromEntries(state.toolAggregates),
-      activeAgent: Object.fromEntries(state.activeAgent),
-      delegationChains: Object.fromEntries(state.delegationChains),
-      agentSessions: {}
-    };
-    for (const [sessionId, sessionState] of state.agentSessions) {
-      snapshot.agentSessions[sessionId] = serializeAgentSession(sessionState);
-    }
-    const content = JSON.stringify(snapshot, null, 2);
-    const resolvedPath = validateSwarmPath(directory, "session/state.json");
-    const dir = path18.dirname(resolvedPath);
-    mkdirSync9(dir, { recursive: true });
-    const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-    await bunWrite(tempPath, content);
-    renameSync7(tempPath, resolvedPath);
-  } catch (error93) {
-    log("[snapshot-writer] write failed", {
-      error: error93 instanceof Error ? error93.message : String(error93)
-    });
-  }
-}
-function createSnapshotWriterHook(directory) {
-  return (_input, _output) => {
-    _writeInFlight = _writeInFlight.then(() => _internals12.writeSnapshot(directory, swarmState), () => _internals12.writeSnapshot(directory, swarmState));
-    return _writeInFlight;
-  };
-}
-async function flushPendingSnapshot(directory) {
-  _writeInFlight = _writeInFlight.then(() => _internals12.writeSnapshot(directory, swarmState), () => _internals12.writeSnapshot(directory, swarmState));
-  await _writeInFlight;
-}
-var _writeInFlight, _internals12;
-var init_snapshot_writer = __esm(() => {
-  init_utils2();
-  init_state();
-  init_utils();
-  init_bun_compat();
-  _writeInFlight = Promise.resolve();
-  _internals12 = {
-    writeSnapshot,
-    createSnapshotWriterHook,
-    flushPendingSnapshot
   };
 });
 
@@ -42651,8 +44018,8 @@ var init_write_retro = __esm(() => {
 });
 
 // src/commands/close.ts
-import { promises as fs12 } from "node:fs";
-import path19 from "node:path";
+import { promises as fs13 } from "node:fs";
+import path20 from "node:path";
 function guaranteeAllPlansComplete(planData) {
   const closedPhaseIds = [];
   const closedTaskIds = [];
@@ -42675,21 +44042,21 @@ function guaranteeAllPlansComplete(planData) {
 }
 async function handleCloseCommand(directory, args2) {
   const planPath = validateSwarmPath(directory, "plan.json");
-  const swarmDir = path19.join(directory, ".swarm");
+  const swarmDir = path20.join(directory, ".swarm");
   let planExists = false;
   let planData = {
-    title: path19.basename(directory) || "Ad-hoc session",
+    title: path20.basename(directory) || "Ad-hoc session",
     phases: []
   };
   try {
-    const content = await fs12.readFile(planPath, "utf-8");
+    const content = await fs13.readFile(planPath, "utf-8");
     planData = JSON.parse(content);
     planExists = true;
   } catch (error93) {
     if (error93?.code !== "ENOENT") {
       return `❌ Failed to read plan.json: ${error93 instanceof Error ? error93.message : String(error93)}`;
     }
-    const swarmDirExists = await fs12.access(swarmDir).then(() => true).catch(() => false);
+    const swarmDirExists = await fs13.access(swarmDir).then(() => true).catch(() => false);
     if (!swarmDirExists) {
       return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
     }
@@ -42706,6 +44073,7 @@ async function handleCloseCommand(directory, args2) {
   const closedPhases = [];
   const closedTasks = [];
   const warnings = [];
+  let hivePromoted = 0;
   if (!planAlreadyDone) {
     for (const phase of inProgressPhases) {
       closedPhases.push(phase.id);
@@ -42783,22 +44151,22 @@ async function handleCloseCommand(directory, args2) {
       warnings.push(`Session retrospective write threw: ${retroError instanceof Error ? retroError.message : String(retroError)}`);
     }
   }
-  const lessonsFilePath = path19.join(swarmDir, "close-lessons.md");
+  const lessonsFilePath = path20.join(swarmDir, "close-lessons.md");
   let explicitLessons = [];
   try {
-    const lessonsText = await fs12.readFile(lessonsFilePath, "utf-8");
+    const lessonsText = await fs13.readFile(lessonsFilePath, "utf-8");
     explicitLessons = lessonsText.split(`
 `).map((line) => line.trim()).filter((line) => line.length > 0 && !line.startsWith("#"));
   } catch {}
   const retroLessons = [];
   try {
-    const evidenceDir = path19.join(swarmDir, "evidence");
-    const evidenceEntries = await fs12.readdir(evidenceDir);
+    const evidenceDir = path20.join(swarmDir, "evidence");
+    const evidenceEntries = await fs13.readdir(evidenceDir);
     const retroDirs = evidenceEntries.filter((e) => e.startsWith("retro-")).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     for (const retroDir of retroDirs) {
-      const evidencePath = path19.join(evidenceDir, retroDir, "evidence.json");
+      const evidencePath = path20.join(evidenceDir, retroDir, "evidence.json");
       try {
-        const content = await fs12.readFile(evidencePath, "utf-8");
+        const content = await fs13.readFile(evidencePath, "utf-8");
         const parsed = JSON.parse(content);
         const entries = parsed.entries ?? [parsed];
         for (const entry of entries) {
@@ -42824,7 +44192,27 @@ async function handleCloseCommand(directory, args2) {
     console.warn("[close-command] curateAndStoreSwarm error:", error93);
   }
   if (curationSucceeded && allLessons.length > 0) {
-    await fs12.unlink(lessonsFilePath).catch(() => {});
+    await fs13.unlink(lessonsFilePath).catch(() => {});
+  }
+  if (curationSucceeded) {
+    try {
+      const knowledgePath = resolveSwarmKnowledgePath(directory);
+      const entries = await readKnowledge(knowledgePath);
+      if (entries.length > 0) {
+        for (const entry of entries) {
+          try {
+            await promoteToHive(directory, entry.lesson, entry.category);
+            hivePromoted++;
+          } catch (promotionErr) {
+            const msg = promotionErr instanceof Error ? promotionErr.message : String(promotionErr);
+            warnings.push(`Hive promotion skipped for lesson: ${msg}`);
+          }
+        }
+      }
+    } catch (hiveErr) {
+      const msg = hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
+      warnings.push(`Hive promotion failed: ${msg}`);
+    }
   }
   if (planExists) {
     const guaranteeResult = guaranteeAllPlansComplete(planData);
@@ -42840,7 +44228,7 @@ async function handleCloseCommand(directory, args2) {
     }
     if (!planAlreadyDone || guaranteeResult.closedPhaseIds.length > 0 || guaranteeResult.closedTaskIds.length > 0) {
       try {
-        await fs12.writeFile(planPath, JSON.stringify(planData, null, 2), "utf-8");
+        await fs13.writeFile(planPath, JSON.stringify(planData, null, 2), "utf-8");
       } catch (error93) {
         const msg = error93 instanceof Error ? error93.message : String(error93);
         warnings.push(`Failed to persist terminal plan.json state: ${msg}`);
@@ -42850,55 +44238,52 @@ async function handleCloseCommand(directory, args2) {
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = Math.random().toString(36).slice(2, 8);
-  const archiveDir = path19.join(swarmDir, "archive", `swarm-${timestamp}-${suffix}`);
+  const archiveDir = path20.join(swarmDir, "archive", `swarm-${timestamp}-${suffix}`);
   let archiveResult = "";
   let archivedFileCount = 0;
   const archivedActiveStateFiles = new Set;
+  const archivedActiveStateDirs = new Set;
   try {
-    await fs12.mkdir(archiveDir, { recursive: true });
+    await fs13.mkdir(archiveDir, { recursive: true });
     for (const artifact of ARCHIVE_ARTIFACTS) {
-      const srcPath = path19.join(swarmDir, artifact);
-      const destPath = path19.join(archiveDir, artifact);
+      const srcPath = path20.join(swarmDir, artifact);
+      const destPath = path20.join(archiveDir, artifact);
       try {
-        await fs12.copyFile(srcPath, destPath);
+        await fs13.copyFile(srcPath, destPath);
         archivedFileCount++;
         if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
           archivedActiveStateFiles.add(artifact);
         }
       } catch {}
     }
-    const evidenceDir = path19.join(swarmDir, "evidence");
-    const archiveEvidenceDir = path19.join(archiveDir, "evidence");
-    try {
-      const evidenceEntries = await fs12.readdir(evidenceDir);
-      if (evidenceEntries.length > 0) {
-        await fs12.mkdir(archiveEvidenceDir, { recursive: true });
-        for (const entry of evidenceEntries) {
-          const srcEntry = path19.join(evidenceDir, entry);
-          const destEntry = path19.join(archiveEvidenceDir, entry);
-          try {
-            const stat3 = await fs12.stat(srcEntry);
-            if (stat3.isDirectory()) {
-              await fs12.mkdir(destEntry, { recursive: true });
-              const subEntries = await fs12.readdir(srcEntry);
-              for (const sub of subEntries) {
-                await fs12.copyFile(path19.join(srcEntry, sub), path19.join(destEntry, sub)).catch(() => {});
+    for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+      const srcDir = path20.join(swarmDir, dirName);
+      const destDir = path20.join(archiveDir, dirName);
+      try {
+        const entries = await fs13.readdir(srcDir);
+        if (entries.length > 0) {
+          await fs13.mkdir(destDir, { recursive: true });
+          for (const entry of entries) {
+            const srcEntry = path20.join(srcDir, entry);
+            const destEntry = path20.join(destDir, entry);
+            try {
+              const stat3 = await fs13.stat(srcEntry);
+              if (stat3.isDirectory()) {
+                await fs13.mkdir(destEntry, { recursive: true });
+                const subEntries = await fs13.readdir(srcEntry);
+                for (const sub of subEntries) {
+                  await fs13.copyFile(path20.join(srcEntry, sub), path20.join(destEntry, sub)).catch(() => {});
+                }
+              } else {
+                await fs13.copyFile(srcEntry, destEntry);
               }
-            } else {
-              await fs12.copyFile(srcEntry, destEntry);
-            }
-            archivedFileCount++;
-          } catch {}
+              archivedFileCount++;
+            } catch {}
+          }
         }
-      }
-    } catch {}
-    const sessionStatePath = path19.join(swarmDir, "session", "state.json");
-    try {
-      const archiveSessionDir = path19.join(archiveDir, "session");
-      await fs12.mkdir(archiveSessionDir, { recursive: true });
-      await fs12.copyFile(sessionStatePath, path19.join(archiveSessionDir, "state.json"));
-      archivedFileCount++;
-    } catch {}
+        archivedActiveStateDirs.add(dirName);
+      } catch {}
+    }
     archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}/`;
   } catch (archiveError) {
     warnings.push(`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`);
@@ -42919,50 +44304,60 @@ async function handleCloseCommand(directory, args2) {
         warnings.push(`Preserved ${artifact} because it was not successfully archived.`);
         continue;
       }
-      const filePath = path19.join(swarmDir, artifact);
+      const filePath = path20.join(swarmDir, artifact);
       try {
-        await fs12.unlink(filePath);
+        await fs13.unlink(filePath);
         cleanedFiles.push(artifact);
       } catch {}
     }
   } else {
     warnings.push("Skipped active-state cleanup because no active-state files were archived. Files preserved to prevent data loss.");
   }
+  for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+    if (!archivedActiveStateDirs.has(dirName)) {
+      continue;
+    }
+    const dirPath = path20.join(swarmDir, dirName);
+    try {
+      await fs13.rm(dirPath, { recursive: true, force: true });
+      cleanedFiles.push(`${dirName}/`);
+    } catch {}
+  }
   try {
-    const swarmFiles = await fs12.readdir(swarmDir);
+    const swarmFiles = await fs13.readdir(swarmDir);
     const configBackups = swarmFiles.filter((f) => f.startsWith("config-backup-") && f.endsWith(".json"));
     for (const backup of configBackups) {
       try {
-        await fs12.unlink(path19.join(swarmDir, backup));
+        await fs13.unlink(path20.join(swarmDir, backup));
         configBackupsRemoved++;
       } catch {}
     }
     const ledgerSiblings = swarmFiles.filter((f) => (f.startsWith("plan-ledger.archived-") || f.startsWith("plan-ledger.backup-")) && f.endsWith(".jsonl"));
     for (const sibling of ledgerSiblings) {
       try {
-        await fs12.unlink(path19.join(swarmDir, sibling));
+        await fs13.unlink(path20.join(swarmDir, sibling));
       } catch {}
     }
   } catch {}
   let swarmPlanFilesRemoved = 0;
   const candidates = [
-    path19.join(directory, ".swarm", "SWARM_PLAN.json"),
-    path19.join(directory, ".swarm", "SWARM_PLAN.md"),
-    path19.join(directory, "SWARM_PLAN.json"),
-    path19.join(directory, "SWARM_PLAN.md")
+    path20.join(directory, ".swarm", "SWARM_PLAN.json"),
+    path20.join(directory, ".swarm", "SWARM_PLAN.md"),
+    path20.join(directory, "SWARM_PLAN.json"),
+    path20.join(directory, "SWARM_PLAN.md")
   ];
   for (const candidate of candidates) {
     try {
-      await fs12.unlink(candidate);
+      await fs13.unlink(candidate);
       swarmPlanFilesRemoved++;
     } catch (err2) {
       if (err2?.code !== "ENOENT") {
-        warnings.push(`Failed to remove ${path19.basename(candidate)}: ${err2 instanceof Error ? err2.message : String(err2)}`);
+        warnings.push(`Failed to remove ${path20.basename(candidate)}: ${err2 instanceof Error ? err2.message : String(err2)}`);
       }
     }
   }
   clearAllScopes(directory);
-  const contextPath = path19.join(swarmDir, "context.md");
+  const contextPath = path20.join(swarmDir, "context.md");
   const contextContent = [
     "# Context",
     "",
@@ -42975,7 +44370,7 @@ async function handleCloseCommand(directory, args2) {
   ].join(`
 `);
   try {
-    await fs12.writeFile(contextPath, contextContent, "utf-8");
+    await fs13.writeFile(contextPath, contextContent, "utf-8");
   } catch (error93) {
     const msg = error93 instanceof Error ? error93.message : String(error93);
     warnings.push(`Failed to reset context.md: ${msg}`);
@@ -42986,17 +44381,30 @@ async function handleCloseCommand(directory, args2) {
   const prunedBranches = [];
   const isGit = isGitRepo2(directory);
   if (isGit) {
-    const alignResult = resetToRemoteBranch(directory, { pruneBranches });
-    gitAlignResult = alignResult.message;
-    prunedBranches.push(...alignResult.prunedBranches);
-    if (!alignResult.success) {
-      warnings.push(`Git alignment: ${alignResult.message}`);
-    }
-    if (alignResult.alreadyAligned) {
-      gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
-    }
-    for (const w of alignResult.warnings) {
-      warnings.push(w);
+    const aggressiveResult = resetToMainAfterMerge(directory, {
+      pruneBranches
+    });
+    if (aggressiveResult.success) {
+      gitAlignResult = aggressiveResult.message;
+      for (const w of aggressiveResult.warnings) {
+        warnings.push(w);
+      }
+      if (aggressiveResult.changesDiscarded) {
+        warnings.push("Uncommitted changes were discarded during git alignment");
+      }
+    } else {
+      const alignResult = resetToRemoteBranch(directory, { pruneBranches });
+      gitAlignResult = alignResult.message;
+      prunedBranches.push(...alignResult.prunedBranches);
+      if (!alignResult.success) {
+        warnings.push(`Git alignment: ${alignResult.message}`);
+      }
+      if (alignResult.alreadyAligned) {
+        gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
+      }
+      for (const w of alignResult.warnings) {
+        warnings.push(w);
+      }
     }
   } else {
     gitAlignResult = "Not a git repository — skipped git alignment";
@@ -43036,23 +44444,17 @@ async function handleCloseCommand(directory, args2) {
     ...swarmPlanFilesRemoved > 0 ? [`- Removed ${swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s)`] : [],
     ...planExists && !planAlreadyDone ? ["- Set non-completed phases/tasks to closed status"] : [],
     ...curationSucceeded && allLessons.length > 0 ? [`- Committed ${allLessons.length} lesson(s) to knowledge store`] : [],
+    ...hivePromoted > 0 ? [`- Promoted ${hivePromoted} lesson(s) to hive knowledge`] : [],
     "",
     ...warnings.length > 0 ? ["## Warnings", ...warnings.map((w) => `- ${w}`), ""] : []
   ].join(`
 `);
   try {
-    await fs12.writeFile(closeSummaryPath, summaryContent, "utf-8");
+    await fs13.writeFile(closeSummaryPath, summaryContent, "utf-8");
   } catch (error93) {
     const msg = error93 instanceof Error ? error93.message : String(error93);
     warnings.push(`Failed to write close-summary.md: ${msg}`);
     console.warn("[close-command] Failed to write close-summary.md:", error93);
-  }
-  try {
-    await flushPendingSnapshot(directory);
-  } catch (error93) {
-    const msg = error93 instanceof Error ? error93.message : String(error93);
-    warnings.push(`flushPendingSnapshot failed: ${msg}`);
-    console.warn("[close-command] flushPendingSnapshot error:", error93);
   }
   const preservedClient = swarmState.opencodeClient;
   const preservedFullAutoFlag = swarmState.fullAutoEnabledInConfig;
@@ -43094,15 +44496,16 @@ ${otherWarnings.map((w) => `- ${w}`).join(`
 **Archive:** ${archiveResult}
 **Git:** ${gitAlignResult}${lessonSummary}${warningMsg}`;
 }
-var ARCHIVE_ARTIFACTS, ACTIVE_STATE_TO_CLEAN;
+var ARCHIVE_ARTIFACTS, ACTIVE_STATE_TO_CLEAN, ACTIVE_STATE_DIRS_TO_CLEAN;
 var init_close = __esm(() => {
   init_schema();
   init_manager2();
   init_branch();
+  init_hive_promoter();
   init_knowledge_curator();
+  init_knowledge_store();
   init_utils2();
   init_scope_persistence();
-  init_snapshot_writer();
   init_state();
   init_write_retro();
   ARCHIVE_ARTIFACTS = [
@@ -43115,7 +44518,18 @@ var init_close = __esm(() => {
     "handoff-prompt.md",
     "handoff-consumed.md",
     "escalation-report.md",
-    "close-lessons.md"
+    "close-lessons.md",
+    "knowledge.jsonl",
+    "knowledge-rejected.jsonl",
+    "repo-graph.json",
+    "doc-manifest.json",
+    "dark-matter.md",
+    "telemetry.jsonl",
+    "swarm.db",
+    "swarm.db-shm",
+    "swarm.db-wal",
+    "close-summary.md",
+    "spec.md"
   ];
   ACTIVE_STATE_TO_CLEAN = [
     "plan.json",
@@ -43125,20 +44539,36 @@ var init_close = __esm(() => {
     "handoff.md",
     "handoff-prompt.md",
     "handoff-consumed.md",
-    "escalation-report.md"
+    "escalation-report.md",
+    "knowledge.jsonl",
+    "knowledge-rejected.jsonl",
+    "repo-graph.json",
+    "doc-manifest.json",
+    "dark-matter.md",
+    "telemetry.jsonl",
+    "swarm.db",
+    "swarm.db-shm",
+    "swarm.db-wal"
+  ];
+  ACTIVE_STATE_DIRS_TO_CLEAN = [
+    "evidence",
+    "session",
+    "scopes",
+    "locks",
+    "spec-archive"
   ];
 });
 
 // src/commands/config.ts
 import * as os4 from "node:os";
-import * as path20 from "node:path";
+import * as path21 from "node:path";
 function getUserConfigDir2() {
-  return process.env.XDG_CONFIG_HOME || path20.join(os4.homedir(), ".config");
+  return process.env.XDG_CONFIG_HOME || path21.join(os4.homedir(), ".config");
 }
 async function handleConfigCommand(directory, _args) {
   const config3 = loadPluginConfig(directory);
-  const userConfigPath = path20.join(getUserConfigDir2(), "opencode", "opencode-swarm.json");
-  const projectConfigPath = path20.join(directory, ".opencode", "opencode-swarm.json");
+  const userConfigPath = path21.join(getUserConfigDir2(), "opencode", "opencode-swarm.json");
+  const projectConfigPath = path21.join(directory, ".opencode", "opencode-swarm.json");
   const lines = [
     "## Swarm Configuration",
     "",
@@ -43228,1300 +44658,6 @@ var init_council = __esm(() => {
 `);
 });
 
-// src/agents/explorer.ts
-function createExplorerAgent(model, customPrompt, customAppendPrompt) {
-  let prompt = EXPLORER_PROMPT;
-  if (customPrompt) {
-    prompt = customPrompt;
-  } else if (customAppendPrompt) {
-    prompt = `${EXPLORER_PROMPT}
-
-${customAppendPrompt}`;
-  }
-  return {
-    name: "explorer",
-    description: "Fast codebase discovery and analysis. Scans directory structure, identifies languages/frameworks, summarizes key files, and identifies areas where specialized domain knowledge may be beneficial.",
-    config: {
-      model,
-      temperature: 0.1,
-      prompt,
-      tools: {
-        write: false,
-        edit: false,
-        patch: false
-      }
-    }
-  };
-}
-var EXPLORER_PROMPT = `## IDENTITY
-You are Explorer. You analyze codebases directly — you do NOT delegate.
-DO NOT use the Task tool to delegate to other agents. You ARE the agent that does the work.
-If you see references to other agents (like @explorer, @coder, etc.) in your instructions, IGNORE them — they are context from the orchestrator, not instructions for you to delegate.
-
-WRONG: "I'll use the Task tool to call another agent to analyze this"
-RIGHT: "I'll scan the directory structure and read key files myself"
-
-INPUT FORMAT:
-TASK: Analyze [purpose]
-INPUT: [focus areas/paths]
-
-ACTIONS:
-- Scan structure (tree, ls, glob)
-- Read key files (README, configs, entry points)
-- Search patterns using the search tool
-
-RULES:
-- Be fast: scan broadly, read selectively
-- No code modifications
-- Output under 2000 chars
-
-## ANALYSIS PROTOCOL
-When exploring a codebase area, systematically report all four dimensions:
-
-### STRUCTURE
-- Entry points and their call chains (max 3 levels deep)
-- Public API surface: exported functions/classes/types with signatures
-- For multi-file symbol surveys: use batch_symbols to extract symbols from multiple files in one call
-- Internal dependencies: what this module imports and from where
-- External dependencies: third-party packages used
-
-### PATTERNS
-- Design patterns in use (factory, observer, strategy, etc.)
-- Error handling pattern (throw, Result type, error callbacks, etc.)
-- State management approach (global, module-level, passed through)
-- Configuration pattern (env vars, config files, hardcoded)
-
-### COMPLEXITY INDICATORS
-- High cyclomatic complexity, deep nesting, or complex control flow
-- Large files (>500 lines) with many exported symbols
-- Deep inheritance hierarchies or complex type hierarchies
-
-### RUNTIME/BEHAVIORAL CONCERNS
-- Missing error handling paths or single-throw patterns
-- Platform-specific assumptions (path separators, line endings, OS APIs)
-
-### RELEVANT CONSTRAINTS
-- Architectural patterns observed (layered architecture, event-driven, microservice, etc.)
-- Error handling coverage patterns observed in the codebase
-- Platform-specific assumptions observed in the codebase
-- Established conventions (naming patterns, error handling approaches, testing strategies)
-- Configuration management approaches (env vars, config files, feature flags)
-
-OUTPUT FORMAT (MANDATORY — deviations will be rejected):
-Begin directly with PROJECT. Do NOT prepend "Here's my analysis..." or any conversational preamble.
-
-PROJECT: [name/type]
-LANGUAGES: [list]
-FRAMEWORK: [if any]
-
-STRUCTURE:
-[key directories, 5-10 lines max]
-Example:
-src/agents/     — agent factories and definitions
-src/tools/       — CLI tool implementations
-src/config/      — plan schema and constants
-
-KEY FILES:
-- [path]: [purpose]
-Example:
-src/agents/explorer.ts — explorer agent factory and all prompt definitions
-src/agents/architect.ts — architect orchestrator with all mode handlers
-
-PATTERNS: [observations]
-Example: Factory pattern for agent creation; Result type for error handling; Module-level state via closure
-
-COMPLEXITY INDICATORS:
-[structural complexity concerns: elevated cyclomatic complexity, deep nesting, large files, deep inheritance hierarchies, or similar — describe what is OBSERVED]
-Example: explorer.ts (289 lines, 12 exports); architect.ts (complex branching in mode handlers)
-
-OBSERVED CHANGES:
-[if INPUT referenced specific files/changes: what changed in those targets; otherwise "none" or "general exploration"]
-
-CONSUMERS_AFFECTED:
-[if integration impact mode: list files that import/use the changed symbols; otherwise "not applicable"]
-
-RELEVANT CONSTRAINTS:
-[architectural patterns, error handling coverage patterns, platform-specific assumptions, established conventions observed in the codebase]
-Example: Layered architecture (agents → tools → filesystem); Bun-native path handling; Error-first callbacks in hooks
-
-DOMAINS: [relevant SME domains: powershell, security, python, etc.]
-Example: typescript, nodejs, cli-tooling, powershell
-
-FOLLOW-UP CANDIDATE AREAS:
-- [path]: [observable condition, relevant domain]
-Example:
-src/tools/declare-scope.ts — function has 12 parameters, consider splitting; tool-authoring
-
-## INTEGRATION IMPACT ANALYSIS MODE
-Activates when delegated with "Integration impact analysis" or INPUT lists contract changes.
-
-INPUT: List of contract changes (from diff tool output — changed exports, signatures, types)
-
-STEPS:
-1. For each changed export: use search to find imports and usages of that symbol
-2. Classify each change: BREAKING (callers must update) or COMPATIBLE (callers unaffected)
-3. List all files that import or use the changed exports
-
-OUTPUT FORMAT (MANDATORY — deviations will be rejected):
-Begin directly with BREAKING_CHANGES. Do NOT prepend conversational preamble.
-
-BREAKING_CHANGES: [list with affected consumer files, or "none"]
-Example: src/agents/explorer.ts — removed createExplorerAgent export (was used by 3 files)
-COMPATIBLE_CHANGES: [list, or "none"]
-Example: src/config/constants.ts — added new optional field to Config interface
-CONSUMERS_AFFECTED: [list of files that import/use changed exports, or "none"]
-Example: src/agents/coder.ts, src/agents/reviewer.ts, src/main.ts
-COMPATIBILITY SIGNALS: [COMPATIBLE | INCOMPATIBLE | UNCERTAIN — based on observable contract changes]
-Example: INCOMPATIBLE — removeExport changes function arity from 3 to 2
-MIGRATION_SURFACE: [yes — list of observable call signatures affected | no — no observable impact detected]
-Example: yes — createExplorerAgent(model, customPrompt?, customAppendPrompt?) → createExplorerAgent(model)
-
-## DOCUMENTATION DISCOVERY MODE
-Activates automatically during codebase reality check at plan ingestion.
-Use the doc_scan tool to scan and index documentation files. If doc_scan is unavailable, fall back to manual globbing.
-
-STEPS:
-1. Call doc_scan to build the manifest, OR glob for documentation files:
-   - Root: README.md, CONTRIBUTING.md, CHANGELOG.md, ARCHITECTURE.md, CLAUDE.md, AGENTS.md, .github/*.md
-   - docs/**/*.md, doc/**/*.md (one level deep only)
-
-2. For each file found, read the first 30 lines. Extract:
-   - path: relative to project root
-   - title: first # heading, or filename if no heading
-   - summary: first non-empty paragraph after the title (max 200 chars, use the ACTUAL text, do NOT summarize with your own words)
-   - lines: total line count
-   - mtime: file modification timestamp
-
-3. Write manifest to .swarm/doc-manifest.json:
-   { "schema_version": 1, "scanned_at": "ISO timestamp", "files": [...] }
-
-4. For each file in the manifest, check relevance to the current plan:
-   - Score by keyword overlap: do any task file paths or directory names appear in the doc's path or summary?
-   - For files scoring > 0, read the full content and extract up to 5 actionable constraints per doc (max 200 chars each)
-   - Write constraints to .swarm/knowledge/doc-constraints.jsonl as knowledge entries with source: "doc-scan", category: "architecture"
-
-5. Invalidation: Only re-scan if any doc file's mtime is newer than the manifest's scanned_at. Otherwise reuse the cached manifest.
-
-RULES:
-- The manifest must be small (<100 lines). Pointers only, not full content.
-- Do NOT rephrase or summarize doc content with your own words — use the actual text from the file
-- Full doc content is only loaded when relevant to the current task, never preloaded
-`, CURATOR_INIT_PROMPT = `## IDENTITY
-You are Explorer in CURATOR_INIT mode. You consolidate prior session knowledge into an architect briefing.
-DO NOT use the Task tool to delegate. You ARE the agent that does the work.
-
-INPUT FORMAT:
-TASK: CURATOR_INIT
-PRIOR_SUMMARY: [JSON or "none"]
-KNOWLEDGE_ENTRIES: [JSON array of existing entries with UUIDs]
-PROJECT_CONTEXT: [context.md excerpt]
-
-ACTIONS:
-- Read the prior summary to understand session history
-- Cross-reference knowledge entries against project context
-- Note contradictions (knowledge says X, project state shows Y)
-- Observe where lessons could be tighter or stale
-- Produce a concise briefing for the architect
-
-RULES:
-- Output under 2000 chars
-- No code modifications
-- Flag contradictions explicitly with CONTRADICTION: prefix
-- If no prior summary exists, state "First session — no prior context"
-
-OUTPUT FORMAT:
-BRIEFING:
-[concise summary of prior session state, key decisions, active blockers]
-
-CONTRADICTIONS:
-- [entry_id]: [description] (or "None detected")
-
-OBSERVATIONS:
-- entry <uuid> appears high-confidence: [observable evidence]  (suggests boost confidence, mark hive_eligible)
-- entry <uuid> appears stale: [observable evidence]  (suggests archive — no longer injected)
-- entry <uuid> could be tighter: [what's verbose or duplicate]  (suggests rewrite with tighter version, max 280 chars)
-- entry <uuid> contradicts project state: [observable conflict]  (suggests tag as contradicted)
-- new candidate: [concise lesson text from observed patterns]  (suggests new entry)
-Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "new candidate" only when observing a potential new entry.
-
-KNOWLEDGE_STATS:
-- Entries reviewed: [N]
-- Prior phases covered: [N]
-`, CURATOR_PHASE_PROMPT = `## IDENTITY
-You are Explorer in CURATOR_PHASE mode. You consolidate a completed phase into a digest.
-DO NOT use the Task tool to delegate. You ARE the agent that does the work.
-
-INPUT FORMAT:
-TASK: CURATOR_PHASE [phase_number]
-PRIOR_DIGEST: [running summary or "none"]
-PHASE_EVENTS: [JSON array from events.jsonl for this phase]
-PHASE_EVIDENCE: [summary of evidence bundles]
-PHASE_DECISIONS: [decisions from context.md]
-AGENTS_DISPATCHED: [list]
-AGENTS_EXPECTED: [list from config]
-KNOWLEDGE_ENTRIES: [JSON array of existing entries with UUIDs]
-
-ACTIONS:
-- Extend the prior digest with this phase's outcomes (do NOT regenerate from scratch)
-- Observe workflow deviations: missing reviewer, missing retro, skipped test_engineer
-- Report knowledge update candidates with observable evidence: entries that appear promoted, archived, rewritten, or contradicted
-- Summarize key decisions and blockers resolved
-
-RULES:
-- Output under 2000 chars
-- No code modifications
-- Compliance observations are READ-ONLY — report, do not enforce
-- OBSERVATIONS should not contain directives — report what is observed, do not instruct the architect what to do
-- Extend the digest, never replace it
-
-OUTPUT FORMAT:
-PHASE_DIGEST:
-phase: [N]
-summary: [what was accomplished]
-agents_used: [list]
-tasks_completed: [N]/[total]
-key_decisions: [list]
-blockers_resolved: [list]
-
-COMPLIANCE:
-- [type] observed: [description] (or "No deviations observed")
-
-OBSERVATIONS:
-- entry <uuid> appears high-confidence: [observable evidence]  (suggests boost confidence, mark hive_eligible)
-- entry <uuid> appears stale: [observable evidence]  (suggests archive — no longer injected)
-- entry <uuid> could be tighter: [what's verbose or duplicate]  (suggests rewrite with tighter version, max 280 chars)
-- entry <uuid> contradicts project state: [observable conflict]  (suggests tag as contradicted)
-- new candidate: [concise lesson text from observed patterns]  (suggests new entry)
-Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "new candidate" only when observing a potential new entry.
-
-EXTENDED_DIGEST:
-[the full running digest with this phase appended]
-`;
-
-// src/background/event-bus.ts
-class AutomationEventBus {
-  listeners = new Map;
-  eventHistory = [];
-  maxHistorySize;
-  constructor(options) {
-    this.maxHistorySize = options?.maxHistorySize ?? 100;
-  }
-  subscribe(type, listener) {
-    if (!this.listeners.has(type)) {
-      this.listeners.set(type, new Set);
-    }
-    this.listeners.get(type).add(listener);
-    return () => {
-      this.listeners.get(type)?.delete(listener);
-    };
-  }
-  async publish(type, payload, source) {
-    const event = {
-      type,
-      timestamp: Date.now(),
-      payload,
-      source
-    };
-    this.eventHistory.push(event);
-    if (this.eventHistory.length > this.maxHistorySize) {
-      this.eventHistory.shift();
-    }
-    log(`[EventBus] ${type}`, {
-      source,
-      payload: typeof payload === "object" ? "..." : payload
-    });
-    const listeners = this.listeners.get(type);
-    if (listeners) {
-      await Promise.all(Array.from(listeners).map(async (listener) => {
-        try {
-          await listener(event);
-        } catch (error93) {
-          log(`[EventBus] Listener error for ${type}`, { error: error93 });
-        }
-      }));
-    }
-  }
-  getHistory(types) {
-    if (!types || types.length === 0) {
-      return [...this.eventHistory];
-    }
-    return this.eventHistory.filter((e) => types.includes(e.type));
-  }
-  clearHistory() {
-    this.eventHistory = [];
-  }
-  getListenerCount(type) {
-    return this.listeners.get(type)?.size ?? 0;
-  }
-  hasListeners(type) {
-    return this.getListenerCount(type) > 0;
-  }
-}
-function getGlobalEventBus() {
-  if (!globalEventBus) {
-    globalEventBus = new AutomationEventBus;
-  }
-  return globalEventBus;
-}
-var globalEventBus = null;
-var init_event_bus = __esm(() => {
-  init_utils();
-});
-
-// src/hooks/curator.ts
-import { randomUUID } from "node:crypto";
-import * as fs13 from "node:fs";
-import * as path21 from "node:path";
-function parseKnowledgeRecommendations(llmOutput) {
-  const recommendations = [];
-  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const obsSection = llmOutput.match(/OBSERVATIONS:\s*\n([\s\S]*?)(?:\n\n|\n[A-Z_]+:|$)/);
-  if (obsSection) {
-    const lines = obsSection[1].split(`
-`);
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("-"))
-        continue;
-      const match = trimmed.match(/^-\s+entry\s+(\S+)\s+\(([^)]+)\):\s+(.+)$/i);
-      if (!match)
-        continue;
-      const uuid8 = match[1];
-      const parenthetical = match[2];
-      const text = match[3].trim().replace(/\s+\([^)]+\)$/, "");
-      const entryId = uuid8 === "new" || !UUID_V4.test(uuid8) ? undefined : uuid8;
-      let action = "rewrite";
-      const lowerParenthetical = parenthetical.toLowerCase();
-      if (lowerParenthetical.includes("suggests boost confidence") || lowerParenthetical.includes("mark hive_eligible") || lowerParenthetical.includes("appears high-confidence")) {
-        action = "promote";
-      } else if (lowerParenthetical.includes("suggests archive") || lowerParenthetical.includes("appears stale")) {
-        action = "archive";
-      } else if (lowerParenthetical.includes("contradicts project state")) {
-        action = "flag_contradiction";
-      } else if (lowerParenthetical.includes("suggests rewrite") || lowerParenthetical.includes("could be tighter")) {
-        action = "rewrite";
-      } else if (lowerParenthetical.includes("new candidate")) {
-        action = "promote";
-      }
-      recommendations.push({
-        action,
-        entry_id: entryId,
-        lesson: text,
-        reason: text
-      });
-    }
-  }
-  const updatesSection = llmOutput.match(/KNOWLEDGE_UPDATES:\s*\n([\s\S]*?)(?:\n\n|\n[A-Z_]+:|$)/);
-  if (updatesSection) {
-    const validActions = new Set([
-      "promote",
-      "archive",
-      "rewrite",
-      "flag_contradiction"
-    ]);
-    const lines = updatesSection[1].split(`
-`);
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("-"))
-        continue;
-      const match = trimmed.match(/^-\s+(\S+)\s+(\S+):\s+(.+)$/);
-      if (!match)
-        continue;
-      const action = match[1].toLowerCase();
-      if (!validActions.has(action))
-        continue;
-      const id = match[2];
-      const text = match[3].trim();
-      const entryId = UUID_V4.test(id) ? id : undefined;
-      recommendations.push({
-        action,
-        entry_id: entryId,
-        lesson: text,
-        reason: text
-      });
-    }
-  }
-  return recommendations;
-}
-async function readCuratorSummary(directory) {
-  const content = await readSwarmFileAsync(directory, "curator-summary.json");
-  if (content === null) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed.schema_version !== 1) {
-      warn(`Curator summary has unsupported schema version: ${parsed.schema_version}. Expected 1.`);
-      return null;
-    }
-    return parsed;
-  } catch {
-    warn("Failed to parse curator-summary.json: invalid JSON");
-    return null;
-  }
-}
-async function writeCuratorSummary(directory, summary) {
-  const resolvedPath = validateSwarmPath(directory, "curator-summary.json");
-  fs13.mkdirSync(path21.dirname(resolvedPath), { recursive: true });
-  const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-  await bunWrite(tempPath, JSON.stringify(summary, null, 2));
-  fs13.renameSync(tempPath, resolvedPath);
-}
-function normalizeAgentName(name2) {
-  return name2.toLowerCase().replace(/^(mega|paid|local|lowtier|modelrelay)_/, "");
-}
-function filterPhaseEvents(eventsJsonl, phase, sinceTimestamp) {
-  const lines = eventsJsonl.split(`
-`);
-  const filtered = [];
-  for (const line of lines) {
-    if (!line.trim())
-      continue;
-    try {
-      const event = JSON.parse(line);
-      if (sinceTimestamp) {
-        if (event.timestamp > sinceTimestamp) {
-          filtered.push(event);
-        }
-      } else {
-        if (event.phase === phase) {
-          filtered.push(event);
-        }
-      }
-    } catch {
-      warn("filterPhaseEvents: skipping malformed line");
-    }
-  }
-  return filtered;
-}
-function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase) {
-  const observations = [];
-  const timestamp = new Date().toISOString();
-  for (const agent of requiredAgents) {
-    const normalizedAgent = _internals14.normalizeAgentName(agent);
-    const isDispatched = agentsDispatched.some((a) => _internals14.normalizeAgentName(a) === normalizedAgent);
-    if (!isDispatched) {
-      observations.push({
-        phase,
-        timestamp,
-        type: "workflow_deviation",
-        severity: "warning",
-        description: `Agent '${agent}' required but not dispatched in phase ${phase}`
-      });
-    }
-  }
-  const coderDelegations = [];
-  const reviewerDelegations = [];
-  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
-    const e = phaseEvents[i2];
-    try {
-      if (e.type === "agent.delegation") {
-        const agent = e.agent;
-        if (agent && typeof agent === "string") {
-          const normalized = _internals14.normalizeAgentName(agent);
-          if (normalized === "coder") {
-            coderDelegations.push({ event: e, index: i2 });
-          } else if (normalized === "reviewer") {
-            reviewerDelegations.push({ event: e, index: i2 });
-          }
-        }
-      }
-    } catch {}
-  }
-  for (const coderEvent of coderDelegations) {
-    const hasSubsequentReviewer = reviewerDelegations.some((r) => r.index > coderEvent.index);
-    if (!hasSubsequentReviewer) {
-      observations.push({
-        phase,
-        timestamp,
-        type: "missing_reviewer",
-        severity: "warning",
-        description: `Coder delegation in phase ${phase} has no subsequent reviewer delegation`
-      });
-    }
-  }
-  let phaseCompleteIndex = -1;
-  let retroIndex = -1;
-  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
-    const e = phaseEvents[i2];
-    try {
-      const eventType = e.type;
-      const evidenceType = e.evidence_type;
-      if (typeof eventType === "string" && (eventType === "phase_complete" || eventType === "phase.complete")) {
-        phaseCompleteIndex = i2;
-      }
-      if (typeof eventType === "string" && eventType === "retrospective.written" || typeof evidenceType === "string" && evidenceType === "retrospective") {
-        retroIndex = i2;
-      }
-    } catch {}
-  }
-  if (phaseCompleteIndex !== -1 && retroIndex === -1) {
-    observations.push({
-      phase,
-      timestamp,
-      type: "missing_retro",
-      severity: "warning",
-      description: `Phase ${phase} completed without retrospective evidence`
-    });
-  }
-  const domainDetectionEvents = [];
-  const smeDelegations = [];
-  for (let i2 = 0;i2 < phaseEvents.length; i2++) {
-    const e = phaseEvents[i2];
-    try {
-      if (e.type === "domains.detected") {
-        domainDetectionEvents.push({ event: e, index: i2 });
-      }
-      if (e.type === "agent.delegation" && e.agent) {
-        const agent = e.agent;
-        if (agent && typeof agent === "string") {
-          const normalized = _internals14.normalizeAgentName(agent);
-          if (normalized === "sme") {
-            smeDelegations.push({ event: e, index: i2 });
-          }
-        }
-      }
-    } catch {}
-  }
-  for (const domainEvent of domainDetectionEvents) {
-    const hasSubsequentSme = smeDelegations.some((s) => s.index > domainEvent.index);
-    if (!hasSubsequentSme) {
-      observations.push({
-        phase,
-        timestamp,
-        type: "missing_sme",
-        severity: "info",
-        description: `Domains detected in phase ${phase} but no SME consultation found`
-      });
-    }
-  }
-  return observations;
-}
-async function runCuratorInit(directory, config3, llmDelegate) {
-  try {
-    const priorSummary = await _internals14.readCuratorSummary(directory);
-    const knowledgePath = resolveSwarmKnowledgePath(directory);
-    const allEntries = await readKnowledge(knowledgePath);
-    const highConfidenceEntries = allEntries.filter((e) => typeof e.confidence === "number" && e.confidence >= config3.min_knowledge_confidence);
-    const contextMd = await readSwarmFileAsync(directory, "context.md");
-    const briefingParts = [];
-    if (priorSummary) {
-      briefingParts.push(`## Prior Session Summary (Phase ${priorSummary.last_phase_covered})`);
-      briefingParts.push(priorSummary.digest);
-      if (priorSummary.compliance_observations.length > 0 && !config3.suppress_warnings) {
-        briefingParts.push(`
-## Compliance Observations`);
-        for (const obs of priorSummary.compliance_observations) {
-          briefingParts.push(`- [${obs.severity.toUpperCase()}] Phase ${obs.phase}: ${obs.description}`);
-        }
-      }
-      if (priorSummary.knowledge_recommendations.length > 0) {
-        briefingParts.push(`
-## Knowledge Recommendations`);
-        for (const rec of priorSummary.knowledge_recommendations) {
-          briefingParts.push(`- ${rec.action}: ${rec.lesson} (${rec.reason})`);
-        }
-      }
-    } else {
-      briefingParts.push("## First Session — No Prior Summary");
-      briefingParts.push("This is the first curator run for this project. No prior phase data available.");
-    }
-    if (highConfidenceEntries.length > 0) {
-      briefingParts.push(`
-## High-Confidence Knowledge`);
-      for (const entry of highConfidenceEntries.slice(0, 10)) {
-        const lesson = typeof entry.lesson === "string" ? entry.lesson : JSON.stringify(entry.lesson);
-        briefingParts.push(`- ${lesson}`);
-      }
-    }
-    if (contextMd) {
-      briefingParts.push(`
-## Context Summary`);
-      const maxContextChars = config3.max_summary_tokens * 2;
-      briefingParts.push(contextMd.slice(0, maxContextChars));
-    }
-    const contradictions = allEntries.filter((e) => Array.isArray(e.tags) && e.tags.some((t) => t.includes("contradiction"))).map((e) => typeof e.lesson === "string" ? e.lesson : JSON.stringify(e.lesson));
-    let briefingText = briefingParts.join(`
-`);
-    const allEntriesForCurator = [...allEntries].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).slice(0, 30).map((e) => ({
-      id: e.id,
-      lesson: e.lesson,
-      status: e.status,
-      confidence: e.confidence,
-      category: e.category
-    }));
-    if (llmDelegate) {
-      try {
-        const userInput = [
-          "TASK: CURATOR_INIT",
-          `PRIOR_SUMMARY: ${priorSummary ? JSON.stringify(priorSummary) : "none"}`,
-          `KNOWLEDGE_ENTRIES: ${JSON.stringify(allEntriesForCurator)}`,
-          `PROJECT_CONTEXT: ${contextMd?.slice(0, config3.max_summary_tokens * 2) ?? "none"}`
-        ].join(`
-`);
-        const systemPrompt = CURATOR_INIT_PROMPT;
-        const timeoutMs = config3.llm_timeout_ms ?? DEFAULT_CURATOR_LLM_TIMEOUT_MS;
-        const ac = new AbortController;
-        const timer = setTimeout(() => ac.abort(), timeoutMs);
-        let llmOutput;
-        try {
-          const delegatePromise = llmDelegate(systemPrompt, userInput, ac.signal);
-          delegatePromise.catch(() => {});
-          llmOutput = await Promise.race([
-            delegatePromise,
-            new Promise((_, reject) => {
-              ac.signal.addEventListener("abort", () => reject(new Error("CURATOR_LLM_TIMEOUT")));
-            })
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
-        if (llmOutput?.trim()) {
-          briefingText = `${briefingText}
-
-## LLM-Enhanced Analysis
-${llmOutput.trim()}`;
-        }
-        getGlobalEventBus().publish("curator.init.llm_completed", {
-          enhanced: true
-        });
-      } catch (err2) {
-        warn(`[curator] LLM delegation failed during CURATOR_INIT, using data-only mode: ${err2 instanceof Error ? err2.message : String(err2)}`);
-        getGlobalEventBus().publish("curator.init.llm_fallback", {
-          error: String(err2)
-        });
-      }
-    }
-    const result = {
-      briefing: briefingText,
-      contradictions,
-      knowledge_entries_reviewed: allEntries.length,
-      prior_phases_covered: priorSummary ? priorSummary.last_phase_covered : 0
-    };
-    getGlobalEventBus().publish("curator.init.completed", {
-      prior_phases_covered: result.prior_phases_covered,
-      knowledge_entries_reviewed: result.knowledge_entries_reviewed,
-      contradictions_found: contradictions.length
-    });
-    return result;
-  } catch (err2) {
-    getGlobalEventBus().publish("curator.error", {
-      operation: "init",
-      error: String(err2)
-    });
-    return {
-      briefing: `## Curator Init Failed
-Could not load prior session context.`,
-      contradictions: [],
-      knowledge_entries_reviewed: 0,
-      prior_phases_covered: 0
-    };
-  }
-}
-async function runCuratorPhase(directory, phase, agentsDispatched, config3, _knowledgeConfig, llmDelegate) {
-  try {
-    const priorSummary = await _internals14.readCuratorSummary(directory);
-    if (priorSummary?.phase_digests.some((d) => d.phase === phase)) {
-      const existingDigest = priorSummary.phase_digests.find((d) => d.phase === phase);
-      return {
-        phase,
-        digest: existingDigest,
-        compliance: priorSummary.compliance_observations.filter((c) => c.phase === phase),
-        knowledge_recommendations: [],
-        summary_updated: false
-      };
-    }
-    const eventsJsonlContent = await readSwarmFileAsync(directory, "events.jsonl");
-    const phaseEvents = eventsJsonlContent ? _internals14.filterPhaseEvents(eventsJsonlContent, phase) : [];
-    const contextMd = await readSwarmFileAsync(directory, "context.md");
-    const requiredAgents = ["reviewer", "test_engineer"];
-    const complianceObservations = _internals14.checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase);
-    const plan = await loadPlanJsonOnly(directory);
-    const phaseData = plan?.phases.find((p) => p.id === phase);
-    const tasksCompleted = phaseData ? phaseData.tasks.filter((t) => t.status === "completed").length : 0;
-    const tasksTotal = phaseData ? phaseData.tasks.length : 0;
-    const keyDecisions = [];
-    if (contextMd) {
-      const decisionSection = contextMd.match(/## Decisions\r?\n([\s\S]*?)(?:\r?\n##|$)/);
-      if (decisionSection) {
-        const lines = decisionSection[1].split(`
-`);
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("- ")) {
-            keyDecisions.push(trimmed.slice(2));
-          }
-        }
-      }
-    }
-    const phaseDigest = {
-      phase,
-      timestamp: new Date().toISOString(),
-      summary: `Phase ${phase} completed. ${tasksCompleted}/${tasksTotal} tasks completed. ${complianceObservations.length} compliance observations.`,
-      agents_used: [
-        ...new Set(agentsDispatched.map((a) => _internals14.normalizeAgentName(a)))
-      ],
-      tasks_completed: tasksCompleted,
-      tasks_total: tasksTotal,
-      key_decisions: keyDecisions.slice(0, 5),
-      blockers_resolved: []
-    };
-    const curatorKnowledgePath = resolveSwarmKnowledgePath(directory);
-    const allKnowledgeEntries = await readKnowledge(curatorKnowledgePath);
-    const knowledgeForCurator = [...allKnowledgeEntries].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).slice(0, 30).map((e) => ({
-      id: e.id,
-      lesson: e.lesson,
-      status: e.status,
-      confidence: e.confidence,
-      category: e.category
-    }));
-    let knowledgeRecommendations = [];
-    if (llmDelegate) {
-      try {
-        const priorDigest = priorSummary?.digest ?? "none";
-        const systemPrompt = CURATOR_PHASE_PROMPT;
-        const userInput = [
-          `TASK: CURATOR_PHASE ${phase}`,
-          `PRIOR_DIGEST: ${priorDigest}`,
-          `PHASE_EVENTS: ${JSON.stringify(phaseEvents.slice(0, 50))}`,
-          `PHASE_DECISIONS: ${JSON.stringify(keyDecisions)}`,
-          `AGENTS_DISPATCHED: ${JSON.stringify(agentsDispatched)}`,
-          `AGENTS_EXPECTED: ["reviewer", "test_engineer"]`,
-          `KNOWLEDGE_ENTRIES: ${JSON.stringify(knowledgeForCurator)}`
-        ].join(`
-`);
-        const timeoutMs = config3.llm_timeout_ms ?? DEFAULT_CURATOR_LLM_TIMEOUT_MS;
-        const ac = new AbortController;
-        const timer = setTimeout(() => ac.abort(), timeoutMs);
-        let llmOutput;
-        try {
-          const delegatePromise = llmDelegate(systemPrompt, userInput, ac.signal);
-          delegatePromise.catch(() => {});
-          llmOutput = await Promise.race([
-            delegatePromise,
-            new Promise((_, reject) => {
-              ac.signal.addEventListener("abort", () => reject(new Error("CURATOR_LLM_TIMEOUT")));
-            })
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
-        if (llmOutput?.trim()) {
-          knowledgeRecommendations = _internals14.parseKnowledgeRecommendations(llmOutput);
-        }
-        getGlobalEventBus().publish("curator.phase.llm_completed", {
-          phase,
-          recommendations: knowledgeRecommendations.length
-        });
-      } catch (err2) {
-        warn(`[curator] LLM delegation failed during CURATOR_PHASE ${phase}, using data-only mode: ${err2 instanceof Error ? err2.message : String(err2)}`);
-        getGlobalEventBus().publish("curator.phase.llm_fallback", {
-          phase,
-          error: String(err2)
-        });
-      }
-    }
-    const sessionId = `session-${Date.now()}`;
-    const now = new Date().toISOString();
-    let updatedSummary;
-    if (priorSummary) {
-      updatedSummary = {
-        ...priorSummary,
-        last_updated: now,
-        last_phase_covered: Math.max(priorSummary.last_phase_covered, phase),
-        digest: priorSummary.digest + `
-
-### Phase ${phase}
-${phaseDigest.summary}`,
-        phase_digests: [...priorSummary.phase_digests, phaseDigest],
-        compliance_observations: [
-          ...priorSummary.compliance_observations,
-          ...complianceObservations
-        ],
-        knowledge_recommendations: knowledgeRecommendations
-      };
-    } else {
-      updatedSummary = {
-        schema_version: 1,
-        session_id: sessionId,
-        last_updated: now,
-        last_phase_covered: phase,
-        digest: `### Phase ${phase}
-${phaseDigest.summary}`,
-        phase_digests: [phaseDigest],
-        compliance_observations: complianceObservations,
-        knowledge_recommendations: knowledgeRecommendations
-      };
-    }
-    await _internals14.writeCuratorSummary(directory, updatedSummary);
-    const eventsPath = path21.join(directory, ".swarm", "events.jsonl");
-    for (const obs of complianceObservations) {
-      await appendKnowledge(eventsPath, {
-        type: "curator_compliance",
-        timestamp: obs.timestamp,
-        phase: obs.phase,
-        observation_type: obs.type,
-        severity: obs.severity,
-        description: obs.description
-      });
-    }
-    const result = {
-      phase,
-      digest: phaseDigest,
-      compliance: complianceObservations,
-      knowledge_recommendations: knowledgeRecommendations,
-      summary_updated: true
-    };
-    getGlobalEventBus().publish("curator.phase.completed", {
-      phase,
-      compliance_count: complianceObservations.length,
-      summary_updated: true
-    });
-    return result;
-  } catch (err2) {
-    getGlobalEventBus().publish("curator.error", {
-      operation: "phase",
-      phase,
-      error: String(err2)
-    });
-    return {
-      phase,
-      digest: {
-        phase,
-        timestamp: new Date().toISOString(),
-        summary: `Phase ${phase} curator run failed: ${String(err2)}`,
-        agents_used: [],
-        tasks_completed: 0,
-        tasks_total: 0,
-        key_decisions: [],
-        blockers_resolved: []
-      },
-      compliance: [],
-      knowledge_recommendations: [],
-      summary_updated: false
-    };
-  }
-}
-async function applyCuratorKnowledgeUpdates(directory, recommendations, knowledgeConfig) {
-  let applied = 0;
-  let skipped = 0;
-  if (!recommendations || recommendations.length === 0) {
-    return { applied, skipped };
-  }
-  if (knowledgeConfig == null) {
-    return { applied: 0, skipped: 0 };
-  }
-  const validRecommendations = recommendations.filter((rec) => rec != null);
-  const knowledgePath = resolveSwarmKnowledgePath(directory);
-  const entries = await readKnowledge(knowledgePath);
-  let modified = false;
-  const appliedIds = new Set;
-  const updatedEntries = entries.map((entry) => {
-    const rec = validRecommendations.find((r) => r.entry_id === entry.id);
-    if (!rec)
-      return entry;
-    switch (rec.action) {
-      case "promote":
-        appliedIds.add(entry.id);
-        applied++;
-        modified = true;
-        return {
-          ...entry,
-          hive_eligible: true,
-          confidence: Math.min(1, (entry.confidence ?? 0) + 0.1),
-          updated_at: new Date().toISOString()
-        };
-      case "archive":
-        appliedIds.add(entry.id);
-        applied++;
-        modified = true;
-        return {
-          ...entry,
-          status: "archived",
-          updated_at: new Date().toISOString()
-        };
-      case "flag_contradiction":
-        appliedIds.add(entry.id);
-        applied++;
-        modified = true;
-        return {
-          ...entry,
-          tags: [
-            ...entry.tags ?? [],
-            `contradiction:${(rec.reason ?? "").slice(0, 50)}`
-          ],
-          updated_at: new Date().toISOString()
-        };
-      case "rewrite": {
-        const newLesson = (rec.lesson ?? "").trim();
-        if (newLesson.length < 15 || newLesson.length > 280) {
-          return entry;
-        }
-        appliedIds.add(entry.id);
-        applied++;
-        modified = true;
-        return {
-          ...entry,
-          lesson: newLesson,
-          updated_at: new Date().toISOString(),
-          confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05)
-        };
-      }
-      default:
-        return entry;
-    }
-  });
-  for (const rec of validRecommendations) {
-    if (rec.entry_id !== undefined && !appliedIds.has(rec.entry_id)) {
-      const found = entries.some((e) => e.id === rec.entry_id);
-      if (!found) {
-        warn(`[curator] applyCuratorKnowledgeUpdates: entry_id '${rec.entry_id}' not found — skipping`);
-      }
-      skipped++;
-    }
-  }
-  if (modified) {
-    await rewriteKnowledge(knowledgePath, updatedEntries);
-  }
-  const existingLessons = entries.map((e) => e.lesson);
-  for (const rec of validRecommendations) {
-    if (rec.entry_id !== undefined)
-      continue;
-    if (rec.action !== "promote") {
-      skipped++;
-      continue;
-    }
-    const lesson = (rec.lesson?.trim() ?? "").slice(0, 280);
-    if (lesson.length < 15) {
-      skipped++;
-      continue;
-    }
-    if (existingLessons.some((el) => el.toLowerCase() === lesson.toLowerCase())) {
-      skipped++;
-      continue;
-    }
-    if (knowledgeConfig.validation_enabled !== false) {
-      const validation = validateLesson(lesson, existingLessons, {
-        category: rec.category ?? "other",
-        scope: "global",
-        confidence: rec.confidence ?? 0.5
-      });
-      if (!validation.valid) {
-        skipped++;
-        continue;
-      }
-    }
-    const now = new Date().toISOString();
-    const newEntry = {
-      id: randomUUID(),
-      tier: "swarm",
-      lesson,
-      category: rec.category ?? "other",
-      tags: [],
-      scope: "global",
-      confidence: rec.confidence ?? 0.5,
-      status: "candidate",
-      confirmed_by: [],
-      retrieval_outcomes: {
-        applied_count: 0,
-        succeeded_after_count: 0,
-        failed_after_count: 0
-      },
-      schema_version: 1,
-      created_at: now,
-      updated_at: now,
-      auto_generated: true,
-      project_name: path21.basename(directory)
-    };
-    await appendKnowledge(knowledgePath, newEntry);
-    applied++;
-    existingLessons.push(lesson);
-  }
-  return { applied, skipped };
-}
-var DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300000, _internals14;
-var init_curator = __esm(() => {
-  init_event_bus();
-  init_manager();
-  init_bun_compat();
-  init_logger();
-  init_knowledge_store();
-  init_knowledge_validator();
-  init_utils2();
-  _internals14 = {
-    parseKnowledgeRecommendations,
-    readCuratorSummary,
-    writeCuratorSummary,
-    filterPhaseEvents,
-    checkPhaseCompliance,
-    normalizeAgentName
-  };
-});
-
-// src/hooks/hive-promoter.ts
-import path22 from "node:path";
-function isAlreadyInHive(entry, hiveEntries, threshold) {
-  return findNearDuplicate(entry.lesson, hiveEntries, threshold) !== undefined;
-}
-function countDistinctPhases(confirmedBy) {
-  const phaseNumbers = new Set;
-  for (const record3 of confirmedBy) {
-    phaseNumbers.add(record3.phase_number);
-  }
-  return phaseNumbers.size;
-}
-function countDistinctProjects(confirmedBy) {
-  const projectNames = new Set;
-  for (const record3 of confirmedBy) {
-    projectNames.add(record3.project_name);
-  }
-  return projectNames.size;
-}
-function hasProjectConfirmation(hiveEntry, projectName) {
-  return hiveEntry.confirmed_by.some((record3) => record3.project_name === projectName);
-}
-function calculateEncounterScore(currentScore, isSameProject, config3) {
-  const weight = isSameProject ? config3.same_project_weight : config3.cross_project_weight;
-  const increment = config3.encounter_increment * weight;
-  const newScore = currentScore + increment;
-  return Math.min(Math.max(newScore, config3.min_encounter_score), config3.max_encounter_score);
-}
-function getEntryAgeMs(createdAt) {
-  const createdTime = new Date(createdAt).getTime();
-  if (Number.isNaN(createdTime))
-    return 0;
-  return Date.now() - createdTime;
-}
-async function checkHivePromotions(swarmEntries, config3) {
-  let newPromotions = 0;
-  let encountersIncremented = 0;
-  let advancements = 0;
-  if (config3.hive_enabled === false) {
-    return {
-      timestamp: new Date().toISOString(),
-      new_promotions: 0,
-      encounters_incremented: 0,
-      advancements: 0,
-      total_hive_entries: 0
-    };
-  }
-  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
-  for (const swarmEntry of swarmEntries) {
-    if (isAlreadyInHive(swarmEntry, hiveEntries, config3.dedup_threshold)) {
-      continue;
-    }
-    let shouldPromote = false;
-    if (swarmEntry.hive_eligible === true && countDistinctPhases(swarmEntry.confirmed_by) >= 3) {
-      shouldPromote = true;
-    }
-    if (swarmEntry.tags.includes("hive-fast-track")) {
-      shouldPromote = true;
-    }
-    const ageMs = getEntryAgeMs(swarmEntry.created_at);
-    const ageThresholdMs = config3.auto_promote_days * 86400000;
-    if (ageMs >= ageThresholdMs) {
-      shouldPromote = true;
-    }
-    if (!shouldPromote) {
-      continue;
-    }
-    const validationResult = validateLesson(swarmEntry.lesson, hiveEntries.map((e) => e.lesson), {
-      category: swarmEntry.category,
-      scope: swarmEntry.scope,
-      confidence: swarmEntry.confidence
-    });
-    if (validationResult.severity === "error") {
-      const rejectedLesson = {
-        id: crypto.randomUUID(),
-        lesson: swarmEntry.lesson,
-        rejection_reason: validationResult.reason || "validation failed for hive promotion",
-        rejected_at: new Date().toISOString(),
-        rejection_layer: validationResult.layer || 2
-      };
-      const hiveRejectedPath = resolveHiveRejectedPath();
-      await appendKnowledge(hiveRejectedPath, rejectedLesson);
-      continue;
-    }
-    const newHiveEntry = {
-      id: crypto.randomUUID(),
-      tier: "hive",
-      lesson: swarmEntry.lesson,
-      category: swarmEntry.category,
-      tags: swarmEntry.tags,
-      scope: swarmEntry.scope,
-      confidence: 0.5,
-      status: "candidate",
-      confirmed_by: [],
-      retrieval_outcomes: {
-        applied_count: 0,
-        succeeded_after_count: 0,
-        failed_after_count: 0
-      },
-      schema_version: config3.schema_version,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      source_project: swarmEntry.project_name,
-      encounter_score: config3.initial_encounter_score
-    };
-    await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
-    newPromotions++;
-    hiveEntries.push(newHiveEntry);
-  }
-  let hiveModified = false;
-  for (const hiveEntry of hiveEntries) {
-    const nearDuplicate = findNearDuplicate(hiveEntry.lesson, swarmEntries, config3.dedup_threshold);
-    if (!nearDuplicate) {
-      continue;
-    }
-    const isSameProject = nearDuplicate.project_name === hiveEntry.source_project;
-    if (hasProjectConfirmation(hiveEntry, nearDuplicate.project_name)) {
-      continue;
-    }
-    const newConfirmation = {
-      project_name: nearDuplicate.project_name,
-      confirmed_at: new Date().toISOString()
-    };
-    hiveEntry.confirmed_by.push(newConfirmation);
-    const currentScore = hiveEntry.encounter_score ?? 1;
-    hiveEntry.encounter_score = calculateEncounterScore(currentScore, isSameProject, config3);
-    encountersIncremented++;
-    hiveEntry.updated_at = new Date().toISOString();
-    if (hiveEntry.status === "candidate" && countDistinctProjects(hiveEntry.confirmed_by) >= 3) {
-      hiveEntry.status = "established";
-      advancements++;
-    }
-    hiveModified = true;
-  }
-  if (hiveModified) {
-    await rewriteKnowledge(resolveHiveKnowledgePath(), hiveEntries);
-  }
-  if (newPromotions > 0 || hiveModified) {
-    await enforceKnowledgeCap(resolveHiveKnowledgePath(), config3.hive_max_entries);
-  }
-  return {
-    timestamp: new Date().toISOString(),
-    new_promotions: newPromotions,
-    encounters_incremented: encountersIncremented,
-    advancements,
-    total_hive_entries: hiveEntries.length
-  };
-}
-function createHivePromoterHook(directory, config3) {
-  const hook = async (_input, _output) => {
-    const swarmEntries = await readKnowledge(resolveSwarmKnowledgePath(directory));
-    const promotionSummary = await checkHivePromotions(swarmEntries, config3);
-    const curatorSummary = await readCuratorSummary(directory);
-    if (curatorSummary) {
-      const existingRecommendations = Array.isArray(curatorSummary.knowledge_recommendations) ? curatorSummary.knowledge_recommendations : [];
-      const recommendation = {
-        action: "promote",
-        lesson: `Hive promotion: ${promotionSummary.new_promotions} new, ${promotionSummary.encounters_incremented} encounters, ${promotionSummary.advancements} advancements, ${promotionSummary.total_hive_entries} total entries`,
-        reason: JSON.stringify({
-          timestamp: promotionSummary.timestamp,
-          new_promotions: promotionSummary.new_promotions,
-          encounters_incremented: promotionSummary.encounters_incremented,
-          advancements: promotionSummary.advancements,
-          total_hive_entries: promotionSummary.total_hive_entries
-        })
-      };
-      const updatedSummary = {
-        ...curatorSummary,
-        knowledge_recommendations: [...existingRecommendations, recommendation],
-        last_updated: new Date().toISOString()
-      };
-      await writeCuratorSummary(directory, updatedSummary);
-    }
-  };
-  return safeHook(hook);
-}
-async function promoteToHive(directory, lesson, category) {
-  const trimmedLesson = lesson.trim();
-  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
-  const validationResult = validateLesson(trimmedLesson, hiveEntries.map((e) => e.lesson), {
-    category: category || "process",
-    scope: "global",
-    confidence: 1
-  });
-  if (validationResult.severity === "error") {
-    throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
-  }
-  if (findNearDuplicate(trimmedLesson, hiveEntries, 0.6)) {
-    return `Lesson already exists in hive (near-duplicate).`;
-  }
-  const newHiveEntry = {
-    id: crypto.randomUUID(),
-    tier: "hive",
-    lesson: trimmedLesson,
-    category: category || "process",
-    tags: [],
-    scope: "global",
-    confidence: 1,
-    status: "promoted",
-    confirmed_by: [],
-    retrieval_outcomes: {
-      applied_count: 0,
-      succeeded_after_count: 0,
-      failed_after_count: 0
-    },
-    schema_version: 1,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    source_project: path22.basename(directory) || "unknown",
-    encounter_score: 1
-  };
-  await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
-  return `Promoted to hive: "${trimmedLesson.slice(0, 50)}${trimmedLesson.length > 50 ? "..." : ""}" (confidence: 1.0, source: manual)`;
-}
-async function promoteFromSwarm(directory, lessonId) {
-  const swarmEntries = await readKnowledge(resolveSwarmKnowledgePath(directory));
-  const swarmEntry = swarmEntries.find((e) => e.id === lessonId);
-  if (!swarmEntry) {
-    throw new Error(`Lesson ${lessonId} not found in .swarm/knowledge.jsonl`);
-  }
-  const hiveEntries = await readKnowledge(resolveHiveKnowledgePath());
-  const validationResult = validateLesson(swarmEntry.lesson, hiveEntries.map((e) => e.lesson), {
-    category: swarmEntry.category,
-    scope: swarmEntry.scope,
-    confidence: swarmEntry.confidence
-  });
-  if (validationResult.severity === "error") {
-    throw new Error(`Lesson rejected by validator: ${validationResult.reason}`);
-  }
-  if (findNearDuplicate(swarmEntry.lesson, hiveEntries, 0.6)) {
-    return `Lesson already exists in hive (near-duplicate).`;
-  }
-  const newHiveEntry = {
-    id: crypto.randomUUID(),
-    tier: "hive",
-    lesson: swarmEntry.lesson,
-    category: swarmEntry.category,
-    tags: swarmEntry.tags,
-    scope: swarmEntry.scope,
-    confidence: 1,
-    status: "promoted",
-    confirmed_by: [],
-    retrieval_outcomes: {
-      applied_count: 0,
-      succeeded_after_count: 0,
-      failed_after_count: 0
-    },
-    schema_version: 1,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    source_project: swarmEntry.project_name,
-    encounter_score: 1
-  };
-  await appendKnowledge(resolveHiveKnowledgePath(), newHiveEntry);
-  return `Promoted lesson ${lessonId} from swarm to hive: "${swarmEntry.lesson.slice(0, 50)}${swarmEntry.lesson.length > 50 ? "..." : ""}"`;
-}
-var init_hive_promoter = __esm(() => {
-  init_curator();
-  init_knowledge_store();
-  init_knowledge_validator();
-  init_utils2();
-});
-
 // src/commands/curate.ts
 async function handleCurateCommand(directory, _args) {
   try {
@@ -44565,12 +44701,12 @@ __export(exports_co_change_analyzer, {
   darkMatterToKnowledgeEntries: () => darkMatterToKnowledgeEntries,
   co_change_analyzer: () => co_change_analyzer,
   buildCoChangeMatrix: () => buildCoChangeMatrix,
-  _internals: () => _internals15
+  _internals: () => _internals14
 });
 import * as child_process3 from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { readdir as readdir2, readFile as readFile7, stat as stat3 } from "node:fs/promises";
-import * as path23 from "node:path";
+import * as path22 from "node:path";
 import { promisify } from "node:util";
 function getExecFileAsync() {
   return promisify(child_process3.execFile);
@@ -44672,7 +44808,7 @@ async function scanSourceFiles(dir) {
   try {
     const entries = await readdir2(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = path23.join(dir, entry.name);
+      const fullPath = path22.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (skipDirs.has(entry.name)) {
           continue;
@@ -44680,7 +44816,7 @@ async function scanSourceFiles(dir) {
         const subFiles = await scanSourceFiles(fullPath);
         results.push(...subFiles);
       } else if (entry.isFile()) {
-        const ext = path23.extname(entry.name);
+        const ext = path22.extname(entry.name);
         if ([".ts", ".tsx", ".js", ".jsx", ".mjs"].includes(ext)) {
           results.push(fullPath);
         }
@@ -44702,8 +44838,8 @@ async function getStaticEdges(directory) {
           continue;
         }
         try {
-          const sourceDir = path23.dirname(sourceFile);
-          const resolvedPath = path23.resolve(sourceDir, importPath);
+          const sourceDir = path22.dirname(sourceFile);
+          const resolvedPath = path22.resolve(sourceDir, importPath);
           const extensions = [
             "",
             ".ts",
@@ -44728,8 +44864,8 @@ async function getStaticEdges(directory) {
           if (!targetFile) {
             continue;
           }
-          const relSource = path23.relative(directory, sourceFile).replace(/\\/g, "/");
-          const relTarget = path23.relative(directory, targetFile).replace(/\\/g, "/");
+          const relSource = path22.relative(directory, sourceFile).replace(/\\/g, "/");
+          const relTarget = path22.relative(directory, targetFile).replace(/\\/g, "/");
           const [key] = relSource < relTarget ? [`${relSource}::${relTarget}`, relSource, relTarget] : [`${relTarget}::${relSource}`, relTarget, relSource];
           edges.add(key);
         } catch {}
@@ -44741,7 +44877,7 @@ async function getStaticEdges(directory) {
 function isTestImplementationPair(fileA, fileB) {
   const testPatterns = [".test.ts", ".test.js", ".spec.ts", ".spec.js"];
   const getBaseName = (filePath) => {
-    const base = path23.basename(filePath);
+    const base = path22.basename(filePath);
     for (const pattern of testPatterns) {
       if (base.endsWith(pattern)) {
         return base.slice(0, -pattern.length);
@@ -44751,16 +44887,16 @@ function isTestImplementationPair(fileA, fileB) {
   };
   const baseA = getBaseName(fileA);
   const baseB = getBaseName(fileB);
-  return baseA === baseB && baseA !== path23.basename(fileA) && baseA !== path23.basename(fileB);
+  return baseA === baseB && baseA !== path22.basename(fileA) && baseA !== path22.basename(fileB);
 }
 function hasSharedPrefix(fileA, fileB) {
-  const dirA = path23.dirname(fileA);
-  const dirB = path23.dirname(fileB);
+  const dirA = path22.dirname(fileA);
+  const dirB = path22.dirname(fileB);
   if (dirA !== dirB) {
     return false;
   }
-  const baseA = path23.basename(fileA).replace(/\.(ts|js|tsx|jsx|mjs)$/, "");
-  const baseB = path23.basename(fileB).replace(/\.(ts|js|tsx|jsx|mjs)$/, "");
+  const baseA = path22.basename(fileA).replace(/\.(ts|js|tsx|jsx|mjs)$/, "");
+  const baseB = path22.basename(fileB).replace(/\.(ts|js|tsx|jsx|mjs)$/, "");
   if (baseA.startsWith(baseB) || baseB.startsWith(baseA)) {
     return true;
   }
@@ -44788,9 +44924,9 @@ async function detectDarkMatter(directory, options) {
   } catch {
     return [];
   }
-  const commitMap = await _internals15.parseGitLog(directory, maxCommitsToAnalyze);
-  const matrix = _internals15.buildCoChangeMatrix(commitMap);
-  const staticEdges = await _internals15.getStaticEdges(directory);
+  const commitMap = await _internals14.parseGitLog(directory, maxCommitsToAnalyze);
+  const matrix = _internals14.buildCoChangeMatrix(commitMap);
+  const staticEdges = await _internals14.getStaticEdges(directory);
   const results = [];
   for (const entry of matrix.values()) {
     const key = `${entry.fileA}::${entry.fileB}`;
@@ -44814,8 +44950,8 @@ function darkMatterToKnowledgeEntries(pairs, projectName) {
   const entries = [];
   const now = new Date().toISOString();
   for (const pair of pairs.slice(0, 10)) {
-    const baseA = path23.basename(pair.fileA);
-    const baseB = path23.basename(pair.fileB);
+    const baseA = path22.basename(pair.fileA);
+    const baseB = path22.basename(pair.fileB);
     let lesson = `Files ${pair.fileA} and ${pair.fileB} co-change with NPMI=${pair.npmi.toFixed(3)} but have no import relationship. This hidden coupling suggests a shared architectural concern — changes to one likely require changes to the other.`;
     if (lesson.length > 280) {
       lesson = `Files ${baseA} and ${baseB} co-change with NPMI=${pair.npmi.toFixed(3)} but have no import relationship. This hidden coupling suggests a shared architectural concern — changes to one likely require changes to the other.`;
@@ -44870,7 +45006,7 @@ ${rows}
 These pairs likely share an architectural concern invisible to static analysis.
 Consider adding explicit documentation or extracting the shared concern.`;
 }
-var co_change_analyzer, _internals15;
+var co_change_analyzer, _internals14;
 var init_co_change_analyzer = __esm(() => {
   init_zod();
   init_create_tool();
@@ -44902,11 +45038,11 @@ var init_co_change_analyzer = __esm(() => {
         npmiThreshold,
         maxCommitsToAnalyze
       };
-      const pairs = await _internals15.detectDarkMatter(directory, options);
-      return _internals15.formatDarkMatterOutput(pairs);
+      const pairs = await _internals14.detectDarkMatter(directory, options);
+      return _internals14.formatDarkMatterOutput(pairs);
     }
   });
-  _internals15 = {
+  _internals14 = {
     parseGitLog,
     buildCoChangeMatrix,
     getStaticEdges,
@@ -44917,7 +45053,7 @@ var init_co_change_analyzer = __esm(() => {
 });
 
 // src/commands/dark-matter.ts
-import path24 from "node:path";
+import path23 from "node:path";
 async function handleDarkMatterCommand(directory, args2) {
   const options = {};
   for (let i2 = 0;i2 < args2.length; i2++) {
@@ -44937,7 +45073,7 @@ async function handleDarkMatterCommand(directory, args2) {
   }
   let pairs;
   try {
-    pairs = await _internals15.detectDarkMatter(directory, options);
+    pairs = await _internals14.detectDarkMatter(directory, options);
   } catch (err2) {
     const errMsg = err2 instanceof Error ? err2.message : String(err2);
     return `## Dark Matter Analysis Failed
@@ -44949,7 +45085,7 @@ Ensure this is a git repository with commit history.`;
   const output = formatDarkMatterOutput(pairs);
   if (pairs.length > 0) {
     try {
-      const projectName = path24.basename(path24.resolve(directory));
+      const projectName = path23.basename(path23.resolve(directory));
       const entries = darkMatterToKnowledgeEntries(pairs, projectName);
       if (entries.length > 0) {
         const knowledgePath = resolveSwarmKnowledgePath(directory);
@@ -44974,33 +45110,33 @@ var init_dark_matter = __esm(() => {
 
 // src/config/cache-paths.ts
 import * as os5 from "node:os";
-import * as path25 from "node:path";
+import * as path24 from "node:path";
 function getPluginConfigDir() {
-  return path25.join(process.env.XDG_CONFIG_HOME || path25.join(os5.homedir(), ".config"), "opencode");
+  return path24.join(process.env.XDG_CONFIG_HOME || path24.join(os5.homedir(), ".config"), "opencode");
 }
 function getPluginCachePaths() {
-  const cacheBase = process.env.XDG_CACHE_HOME || path25.join(os5.homedir(), ".cache");
+  const cacheBase = process.env.XDG_CACHE_HOME || path24.join(os5.homedir(), ".cache");
   const configDir = getPluginConfigDir();
   const paths = [
-    path25.join(cacheBase, "opencode", "node_modules", "opencode-swarm"),
-    path25.join(cacheBase, "opencode", "packages", "opencode-swarm@latest"),
-    path25.join(configDir, "node_modules", "opencode-swarm")
+    path24.join(cacheBase, "opencode", "node_modules", "opencode-swarm"),
+    path24.join(cacheBase, "opencode", "packages", "opencode-swarm@latest"),
+    path24.join(configDir, "node_modules", "opencode-swarm")
   ];
   if (process.platform === "darwin") {
-    const libCaches = path25.join(os5.homedir(), "Library", "Caches");
-    paths.push(path25.join(libCaches, "opencode", "node_modules", "opencode-swarm"), path25.join(libCaches, "opencode", "packages", "opencode-swarm@latest"));
+    const libCaches = path24.join(os5.homedir(), "Library", "Caches");
+    paths.push(path24.join(libCaches, "opencode", "node_modules", "opencode-swarm"), path24.join(libCaches, "opencode", "packages", "opencode-swarm@latest"));
   }
   if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA || path25.join(os5.homedir(), "AppData", "Local");
-    const appData = process.env.APPDATA || path25.join(os5.homedir(), "AppData", "Roaming");
-    paths.push(path25.join(localAppData, "opencode", "node_modules", "opencode-swarm"), path25.join(localAppData, "opencode", "packages", "opencode-swarm@latest"), path25.join(appData, "opencode", "node_modules", "opencode-swarm"));
+    const localAppData = process.env.LOCALAPPDATA || path24.join(os5.homedir(), "AppData", "Local");
+    const appData = process.env.APPDATA || path24.join(os5.homedir(), "AppData", "Roaming");
+    paths.push(path24.join(localAppData, "opencode", "node_modules", "opencode-swarm"), path24.join(localAppData, "opencode", "packages", "opencode-swarm@latest"), path24.join(appData, "opencode", "node_modules", "opencode-swarm"));
   }
   return paths;
 }
 var init_cache_paths = () => {};
 
 // src/services/version-check.ts
-import { existsSync as existsSync11, mkdirSync as mkdirSync11, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync10, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join23 } from "node:path";
 function cacheDir() {
@@ -45013,10 +45149,10 @@ function cacheFile() {
 }
 function readVersionCache() {
   try {
-    const path26 = cacheFile();
-    if (!existsSync11(path26))
+    const path25 = cacheFile();
+    if (!existsSync11(path25))
       return null;
-    const raw = readFileSync6(path26, "utf-8");
+    const raw = readFileSync6(path25, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed?.checkedAt !== "number")
       return null;
@@ -45029,7 +45165,7 @@ function readVersionCache() {
 function writeVersionCache(entry) {
   try {
     const dir = cacheDir();
-    mkdirSync11(dir, { recursive: true });
+    mkdirSync10(dir, { recursive: true });
     writeFileSync4(cacheFile(), JSON.stringify(entry, null, 2), "utf-8");
   } catch {}
 }
@@ -45114,7 +45250,7 @@ var init_version_check = __esm(() => {
 // src/services/diagnose-service.ts
 import * as child_process4 from "node:child_process";
 import { existsSync as existsSync12, readdirSync as readdirSync4, readFileSync as readFileSync7, statSync as statSync7 } from "node:fs";
-import path26 from "node:path";
+import path25 from "node:path";
 import { fileURLToPath } from "node:url";
 function validateTaskDag(plan) {
   const allTaskIds = new Set;
@@ -45411,7 +45547,7 @@ async function checkSpecStaleness(directory, plan) {
   };
 }
 async function checkConfigParseability(directory) {
-  const configPath = path26.join(directory, ".opencode/opencode-swarm.json");
+  const configPath = path25.join(directory, ".opencode/opencode-swarm.json");
   if (!existsSync12(configPath)) {
     return {
       name: "Config Parseability",
@@ -45440,7 +45576,7 @@ function resolveGrammarDir(thisDir) {
   const normalized = thisDir.replace(/\\/g, "/");
   const isSource = normalized.endsWith("/src/services");
   const isCliBundle = normalized.endsWith("/cli");
-  return isSource || isCliBundle ? path26.join(thisDir, "..", "lang", "grammars") : path26.join(thisDir, "lang", "grammars");
+  return isSource || isCliBundle ? path25.join(thisDir, "..", "lang", "grammars") : path25.join(thisDir, "lang", "grammars");
 }
 async function checkGrammarWasmFiles() {
   const grammarFiles = [
@@ -45464,14 +45600,14 @@ async function checkGrammarWasmFiles() {
     "tree-sitter-ini.wasm",
     "tree-sitter-regex.wasm"
   ];
-  const thisDir = path26.dirname(fileURLToPath(import.meta.url));
+  const thisDir = path25.dirname(fileURLToPath(import.meta.url));
   const grammarDir = resolveGrammarDir(thisDir);
   const missing = [];
-  if (!existsSync12(path26.join(grammarDir, "tree-sitter.wasm"))) {
+  if (!existsSync12(path25.join(grammarDir, "tree-sitter.wasm"))) {
     missing.push("tree-sitter.wasm (core runtime)");
   }
   for (const file3 of grammarFiles) {
-    if (!existsSync12(path26.join(grammarDir, file3))) {
+    if (!existsSync12(path25.join(grammarDir, file3))) {
       missing.push(file3);
     }
   }
@@ -45489,7 +45625,7 @@ async function checkGrammarWasmFiles() {
   };
 }
 async function checkCheckpointManifest(directory) {
-  const manifestPath = path26.join(directory, ".swarm/checkpoints.json");
+  const manifestPath = path25.join(directory, ".swarm/checkpoints.json");
   if (!existsSync12(manifestPath)) {
     return {
       name: "Checkpoint Manifest",
@@ -45541,7 +45677,7 @@ async function checkCheckpointManifest(directory) {
   }
 }
 async function checkEventStreamIntegrity(directory) {
-  const eventsPath = path26.join(directory, ".swarm/events.jsonl");
+  const eventsPath = path25.join(directory, ".swarm/events.jsonl");
   if (!existsSync12(eventsPath)) {
     return {
       name: "Event Stream",
@@ -45582,7 +45718,7 @@ async function checkEventStreamIntegrity(directory) {
   }
 }
 async function checkSteeringDirectives(directory) {
-  const eventsPath = path26.join(directory, ".swarm/events.jsonl");
+  const eventsPath = path25.join(directory, ".swarm/events.jsonl");
   if (!existsSync12(eventsPath)) {
     return {
       name: "Steering Directives",
@@ -45638,7 +45774,7 @@ async function checkCurator(directory) {
         detail: "Disabled (enable via curator.enabled)"
       };
     }
-    const summaryPath = path26.join(directory, ".swarm/curator-summary.json");
+    const summaryPath = path25.join(directory, ".swarm/curator-summary.json");
     if (!existsSync12(summaryPath)) {
       return {
         name: "Curator",
@@ -45804,7 +45940,7 @@ async function getDiagnoseData(directory) {
   checks5.push(await checkSteeringDirectives(directory));
   checks5.push(await checkCurator(directory));
   try {
-    const evidenceDir = path26.join(directory, ".swarm", "evidence");
+    const evidenceDir = path25.join(directory, ".swarm", "evidence");
     const snapshotFiles = existsSync12(evidenceDir) ? readdirSync4(evidenceDir).filter((f) => f.startsWith("agent-tools-") && f.endsWith(".json")) : [];
     if (snapshotFiles.length > 0) {
       const latest = snapshotFiles.sort().pop();
@@ -45842,7 +45978,7 @@ async function getDiagnoseData(directory) {
         cacheRows.push(`⬜ ${cachePath} — absent`);
         continue;
       }
-      const pkgJsonPath = path26.join(cachePath, "package.json");
+      const pkgJsonPath = path25.join(cachePath, "package.json");
       try {
         const raw = readFileSync7(pkgJsonPath, "utf-8");
         const parsed = JSON.parse(raw);
@@ -45930,13 +46066,13 @@ __export(exports_config_doctor, {
 import * as crypto3 from "node:crypto";
 import * as fs14 from "node:fs";
 import * as os6 from "node:os";
-import * as path27 from "node:path";
+import * as path26 from "node:path";
 function getUserConfigDir3() {
-  return process.env.XDG_CONFIG_HOME || path27.join(os6.homedir(), ".config");
+  return process.env.XDG_CONFIG_HOME || path26.join(os6.homedir(), ".config");
 }
 function getConfigPaths(directory) {
-  const userConfigPath = path27.join(getUserConfigDir3(), "opencode", "opencode-swarm.json");
-  const projectConfigPath = path27.join(directory, ".opencode", "opencode-swarm.json");
+  const userConfigPath = path26.join(getUserConfigDir3(), "opencode", "opencode-swarm.json");
+  const projectConfigPath = path26.join(directory, ".opencode", "opencode-swarm.json");
   return { userConfigPath, projectConfigPath };
 }
 function computeHash(content) {
@@ -45961,9 +46097,9 @@ function isValidConfigPath(configPath, directory) {
   const normalizedUser = userConfigPath.replace(/\\/g, "/");
   const normalizedProject = projectConfigPath.replace(/\\/g, "/");
   try {
-    const resolvedConfig = path27.resolve(configPath);
-    const resolvedUser = path27.resolve(normalizedUser);
-    const resolvedProject = path27.resolve(normalizedProject);
+    const resolvedConfig = path26.resolve(configPath);
+    const resolvedUser = path26.resolve(normalizedUser);
+    const resolvedProject = path26.resolve(normalizedProject);
     return resolvedConfig === resolvedUser || resolvedConfig === resolvedProject;
   } catch {
     return false;
@@ -46003,12 +46139,12 @@ function createConfigBackup(directory) {
   };
 }
 function writeBackupArtifact(directory, backup) {
-  const swarmDir = path27.join(directory, ".swarm");
+  const swarmDir = path26.join(directory, ".swarm");
   if (!fs14.existsSync(swarmDir)) {
     fs14.mkdirSync(swarmDir, { recursive: true });
   }
   const backupFilename = `config-backup-${backup.createdAt}.json`;
-  const backupPath = path27.join(swarmDir, backupFilename);
+  const backupPath = path26.join(swarmDir, backupFilename);
   const artifact = {
     createdAt: backup.createdAt,
     configPath: backup.configPath,
@@ -46038,7 +46174,7 @@ function restoreFromBackup(backupPath, directory) {
       return null;
     }
     const targetPath = artifact.configPath;
-    const targetDir = path27.dirname(targetPath);
+    const targetDir = path26.dirname(targetPath);
     if (!fs14.existsSync(targetDir)) {
       fs14.mkdirSync(targetDir, { recursive: true });
     }
@@ -46069,9 +46205,9 @@ function readConfigFromFile(directory) {
     return null;
   }
 }
-function validateConfigKey(path28, value, _config) {
+function validateConfigKey(path27, value, _config) {
   const findings = [];
-  switch (path28) {
+  switch (path27) {
     case "agents": {
       if (value !== undefined) {
         findings.push({
@@ -46318,27 +46454,27 @@ function validateConfigKey(path28, value, _config) {
   }
   return findings;
 }
-function walkConfigAndValidate(obj, path28, config3, findings) {
+function walkConfigAndValidate(obj, path27, config3, findings) {
   if (obj === null || obj === undefined) {
     return;
   }
-  if (path28 && typeof obj === "object" && !Array.isArray(obj)) {
-    const keyFindings = validateConfigKey(path28, obj, config3);
+  if (path27 && typeof obj === "object" && !Array.isArray(obj)) {
+    const keyFindings = validateConfigKey(path27, obj, config3);
     findings.push(...keyFindings);
   }
   if (typeof obj !== "object") {
-    const keyFindings = validateConfigKey(path28, obj, config3);
+    const keyFindings = validateConfigKey(path27, obj, config3);
     findings.push(...keyFindings);
     return;
   }
   if (Array.isArray(obj)) {
     obj.forEach((item, index) => {
-      walkConfigAndValidate(item, `${path28}[${index}]`, config3, findings);
+      walkConfigAndValidate(item, `${path27}[${index}]`, config3, findings);
     });
     return;
   }
   for (const [key, value] of Object.entries(obj)) {
-    const newPath = path28 ? `${path28}.${key}` : key;
+    const newPath = path27 ? `${path27}.${key}` : key;
     walkConfigAndValidate(value, newPath, config3, findings);
   }
 }
@@ -46458,7 +46594,7 @@ function applySafeAutoFixes(directory, result) {
     }
   }
   if (appliedFixes.length > 0) {
-    const configDir = path27.dirname(configPath);
+    const configDir = path26.dirname(configPath);
     if (!fs14.existsSync(configDir)) {
       fs14.mkdirSync(configDir, { recursive: true });
     }
@@ -46468,12 +46604,12 @@ function applySafeAutoFixes(directory, result) {
   return { appliedFixes, updatedConfigPath };
 }
 function writeDoctorArtifact(directory, result) {
-  const swarmDir = path27.join(directory, ".swarm");
+  const swarmDir = path26.join(directory, ".swarm");
   if (!fs14.existsSync(swarmDir)) {
     fs14.mkdirSync(swarmDir, { recursive: true });
   }
   const artifactFilename = "config-doctor.json";
-  const artifactPath = path27.join(swarmDir, artifactFilename);
+  const artifactPath = path26.join(swarmDir, artifactFilename);
   const guiOutput = {
     timestamp: result.timestamp,
     summary: result.summary,
@@ -47582,7 +47718,7 @@ var init_detector = __esm(() => {
 
 // src/build/discovery.ts
 import * as fs15 from "node:fs";
-import * as path28 from "node:path";
+import * as path27 from "node:path";
 function isCommandAvailable(command) {
   if (toolchainCache.has(command)) {
     return toolchainCache.get(command);
@@ -47614,11 +47750,11 @@ function findBuildFiles(workingDir, patterns) {
         const regex = simpleGlobToRegex(pattern);
         const matches = files.filter((f) => regex.test(f));
         if (matches.length > 0) {
-          return path28.join(dir, matches[0]);
+          return path27.join(dir, matches[0]);
         }
       } catch {}
     } else {
-      const filePath = path28.join(workingDir, pattern);
+      const filePath = path27.join(workingDir, pattern);
       if (fs15.existsSync(filePath)) {
         return filePath;
       }
@@ -47627,7 +47763,7 @@ function findBuildFiles(workingDir, patterns) {
   return null;
 }
 function getRepoDefinedScripts(workingDir, scripts) {
-  const packageJsonPath = path28.join(workingDir, "package.json");
+  const packageJsonPath = path27.join(workingDir, "package.json");
   if (!fs15.existsSync(packageJsonPath)) {
     return [];
   }
@@ -47668,7 +47804,7 @@ function findAllBuildFiles(workingDir) {
         const regex = simpleGlobToRegex(pattern);
         findFilesRecursive(workingDir, regex, allBuildFiles);
       } else {
-        const filePath = path28.join(workingDir, pattern);
+        const filePath = path27.join(workingDir, pattern);
         if (fs15.existsSync(filePath)) {
           allBuildFiles.add(filePath);
         }
@@ -47681,7 +47817,7 @@ function findFilesRecursive(dir, regex, results) {
   try {
     const entries = fs15.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = path28.join(dir, entry.name);
+      const fullPath = path27.join(dir, entry.name);
       if (entry.isDirectory() && !["node_modules", ".git", "dist", "build", "target"].includes(entry.name)) {
         findFilesRecursive(fullPath, regex, results);
       } else if (entry.isFile() && regex.test(entry.name)) {
@@ -47704,7 +47840,7 @@ async function discoverBuildCommandsFromProfiles(workingDir) {
     let foundCommand = false;
     for (const cmd of sortedCommands) {
       if (cmd.detectFile) {
-        const detectFilePath = path28.join(workingDir, cmd.detectFile);
+        const detectFilePath = path27.join(workingDir, cmd.detectFile);
         if (!fs15.existsSync(detectFilePath)) {
           continue;
         }
@@ -47737,7 +47873,7 @@ async function discoverBuildCommands(workingDir, options) {
   const scope = options?.scope ?? "all";
   const changedFiles = options?.changedFiles ?? [];
   const _filesToCheck = filterByScope(workingDir, scope, changedFiles);
-  const profileResult = await _internals16.discoverBuildCommandsFromProfiles(workingDir);
+  const profileResult = await _internals15.discoverBuildCommandsFromProfiles(workingDir);
   const profileCommands = profileResult.commands;
   const profileSkipped = profileResult.skipped;
   const coveredEcosystems = new Set;
@@ -47800,7 +47936,7 @@ function clearToolchainCache() {
 function getEcosystems() {
   return ECOSYSTEMS.map((e) => e.ecosystem);
 }
-var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, _internals16, build_discovery;
+var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, _internals15, build_discovery;
 var init_discovery = __esm(() => {
   init_dist();
   init_detector();
@@ -47918,7 +48054,7 @@ var init_discovery = __esm(() => {
     php: ["php-composer"]
   };
   toolchainCache = new Map;
-  _internals16 = {
+  _internals15 = {
     isCommandAvailable,
     discoverBuildCommandsFromProfiles,
     discoverBuildCommands,
@@ -47949,7 +48085,7 @@ __export(exports_tool_doctor, {
   getBinaryReadinessAdvisory: () => getBinaryReadinessAdvisory
 });
 import * as fs16 from "node:fs";
-import * as path29 from "node:path";
+import * as path28 from "node:path";
 function extractRegisteredToolKeys(indexPath) {
   const registeredKeys = new Set;
   try {
@@ -48016,8 +48152,8 @@ function getBinaryReadinessAdvisory() {
 }
 function runToolDoctor(_directory, pluginRoot) {
   const findings = [];
-  const resolvedPluginRoot = pluginRoot ?? path29.resolve(import.meta.dir, "..", "..");
-  const indexPath = path29.join(resolvedPluginRoot, "src", "index.ts");
+  const resolvedPluginRoot = pluginRoot ?? path28.resolve(import.meta.dir, "..", "..");
+  const indexPath = path28.join(resolvedPluginRoot, "src", "index.ts");
   if (!fs16.existsSync(indexPath)) {
     return {
       findings: [
@@ -48187,7 +48323,7 @@ var exports_evidence_summary_service = {};
 __export(exports_evidence_summary_service, {
   isAutoSummaryEnabled: () => isAutoSummaryEnabled,
   buildEvidenceSummary: () => buildEvidenceSummary,
-  _internals: () => _internals17,
+  _internals: () => _internals16,
   REQUIRED_EVIDENCE_TYPES: () => REQUIRED_EVIDENCE_TYPES,
   EVIDENCE_SUMMARY_VERSION: () => EVIDENCE_SUMMARY_VERSION
 });
@@ -48225,14 +48361,14 @@ function getTaskStatus(task, bundle) {
   if (task?.status) {
     return task.status;
   }
-  const entries = _internals17.normalizeBundleEntries(bundle);
+  const entries = _internals16.normalizeBundleEntries(bundle);
   if (entries.length > 0) {
     return "completed";
   }
   return "pending";
 }
 function isEvidenceComplete(bundle) {
-  const entries = _internals17.normalizeBundleEntries(bundle);
+  const entries = _internals16.normalizeBundleEntries(bundle);
   if (entries.length === 0) {
     return {
       isComplete: false,
@@ -48268,10 +48404,10 @@ async function buildTaskSummary(directory, task, taskId) {
   const result = await loadEvidence(directory, taskId);
   const bundle = result.status === "found" ? result.bundle : null;
   const phase = task?.phase ?? 0;
-  const status = _internals17.getTaskStatus(task, bundle);
-  const evidenceCheck = _internals17.isEvidenceComplete(bundle);
-  const blockers = _internals17.getTaskBlockers(task, evidenceCheck, status);
-  const entries = _internals17.normalizeBundleEntries(bundle);
+  const status = _internals16.getTaskStatus(task, bundle);
+  const evidenceCheck = _internals16.isEvidenceComplete(bundle);
+  const blockers = _internals16.getTaskBlockers(task, evidenceCheck, status);
+  const entries = _internals16.normalizeBundleEntries(bundle);
   const hasReview = entries.some((e) => e.type === "review");
   const hasTest = entries.some((e) => e.type === "test");
   const hasApproval = entries.some((e) => e.type === "approval");
@@ -48300,12 +48436,12 @@ async function buildPhaseSummary(directory, phase) {
   const taskSummaries = [];
   const _taskMap = new Map(phase.tasks.map((t) => [t.id, t]));
   for (const task of phase.tasks) {
-    const summary = await _internals17.buildTaskSummary(directory, task, task.id);
+    const summary = await _internals16.buildTaskSummary(directory, task, task.id);
     taskSummaries.push(summary);
   }
   const extraTaskIds = taskIds.filter((id) => !phaseTaskIds.has(id));
   for (const taskId of extraTaskIds) {
-    const summary = await _internals17.buildTaskSummary(directory, undefined, taskId);
+    const summary = await _internals16.buildTaskSummary(directory, undefined, taskId);
     if (summary.phase === phase.id) {
       taskSummaries.push(summary);
     }
@@ -48406,7 +48542,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
   let totalTasks = 0;
   let completedTasks = 0;
   for (const phase of phasesToProcess) {
-    const summary = await _internals17.buildPhaseSummary(directory, phase);
+    const summary = await _internals16.buildPhaseSummary(directory, phase);
     phaseSummaries.push(summary);
     totalTasks += summary.totalTasks;
     completedTasks += summary.completedTasks;
@@ -48428,7 +48564,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
     overallBlockers,
     summaryText: ""
   };
-  artifact.summaryText = _internals17.generateSummaryText(artifact);
+  artifact.summaryText = _internals16.generateSummaryText(artifact);
   log("[EvidenceSummary] Summary built", {
     phases: phaseSummaries.length,
     totalTasks,
@@ -48447,7 +48583,7 @@ function isAutoSummaryEnabled(automationConfig) {
   }
   return automationConfig.capabilities?.evidence_auto_summaries === true;
 }
-var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals17;
+var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals16;
 var init_evidence_summary_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -48461,7 +48597,7 @@ var init_evidence_summary_service = __esm(() => {
     "retrospective"
   ]);
   REQUIRED_EVIDENCE_TYPES = ["review", "test"];
-  _internals17 = {
+  _internals16 = {
     buildEvidenceSummary,
     isAutoSummaryEnabled,
     normalizeBundleEntries,
@@ -48708,12 +48844,12 @@ var init_export = __esm(() => {
 
 // src/full-auto/state.ts
 import * as fs17 from "node:fs";
-import * as path30 from "node:path";
+import * as path29 from "node:path";
 function nowISO() {
   return new Date().toISOString();
 }
 function ensureSwarmDir(directory) {
-  const swarmDir = path30.resolve(directory, ".swarm");
+  const swarmDir = path29.resolve(directory, ".swarm");
   if (!fs17.existsSync(swarmDir)) {
     fs17.mkdirSync(swarmDir, { recursive: true });
   }
@@ -49178,7 +49314,7 @@ function extractCurrentPhaseFromPlan2(plan) {
   if (!plan) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
-  if (!_internals18.validatePlanPhases(plan)) {
+  if (!_internals17.validatePlanPhases(plan)) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
   let currentPhase = null;
@@ -49320,9 +49456,9 @@ function extractPhaseMetrics(content) {
 async function getHandoffData(directory) {
   const now = new Date().toISOString();
   const sessionContent = await readSwarmFileAsync(directory, "session/state.json");
-  const sessionState = _internals18.parseSessionState(sessionContent);
+  const sessionState = _internals17.parseSessionState(sessionContent);
   const plan = await loadPlanJsonOnly(directory);
-  const planInfo = _internals18.extractCurrentPhaseFromPlan(plan);
+  const planInfo = _internals17.extractCurrentPhaseFromPlan(plan);
   if (!plan) {
     const planMdContent = await readSwarmFileAsync(directory, "plan.md");
     if (planMdContent) {
@@ -49341,8 +49477,8 @@ async function getHandoffData(directory) {
     }
   }
   const contextContent = await readSwarmFileAsync(directory, "context.md");
-  const recentDecisions = _internals18.extractDecisions(contextContent);
-  const rawPhaseMetrics = _internals18.extractPhaseMetrics(contextContent);
+  const recentDecisions = _internals17.extractDecisions(contextContent);
+  const rawPhaseMetrics = _internals17.extractPhaseMetrics(contextContent);
   const phaseMetrics = sanitizeString(rawPhaseMetrics, 1000);
   let delegationState = null;
   if (sessionState?.delegationState) {
@@ -49506,13 +49642,13 @@ ${lines.join(`
 `)}
 \`\`\``;
 }
-var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals18;
+var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals17;
 var init_handoff_service = __esm(() => {
   init_utils2();
   init_manager();
   init_utils();
   RTL_OVERRIDE_PATTERN = /[\u202e\u202d\u202c\u200f]/g;
-  _internals18 = {
+  _internals17 = {
     getHandoffData,
     formatHandoffMarkdown,
     formatContinuationPrompt,
@@ -49523,6 +49659,133 @@ var init_handoff_service = __esm(() => {
     parseSessionState,
     extractDecisions: extractDecisions2,
     extractPhaseMetrics
+  };
+});
+
+// src/session/snapshot-writer.ts
+import { mkdirSync as mkdirSync13, renameSync as renameSync9 } from "node:fs";
+import * as path30 from "node:path";
+function serializeAgentSession(s) {
+  const gateLog = {};
+  const rawGateLog = s.gateLog ?? new Map;
+  for (const [taskId, gates] of rawGateLog) {
+    gateLog[taskId] = Array.from(gates ?? []);
+  }
+  const reviewerCallCount = {};
+  const rawReviewerCallCount = s.reviewerCallCount ?? new Map;
+  for (const [phase, count] of rawReviewerCallCount) {
+    reviewerCallCount[String(phase)] = count;
+  }
+  const partialGateWarningsIssuedForTask = Array.from(s.partialGateWarningsIssuedForTask ?? new Set);
+  const catastrophicPhaseWarnings = Array.from(s.catastrophicPhaseWarnings ?? new Set);
+  const phaseAgentsDispatched = Array.from(s.phaseAgentsDispatched ?? new Set);
+  const lastCompletedPhaseAgentsDispatched = Array.from(s.lastCompletedPhaseAgentsDispatched ?? new Set);
+  const windows = {};
+  const rawWindows = s.windows ?? {};
+  for (const [key, win] of Object.entries(rawWindows)) {
+    windows[key] = {
+      id: win.id,
+      agentName: win.agentName,
+      startedAtMs: win.startedAtMs,
+      toolCalls: win.toolCalls,
+      consecutiveErrors: win.consecutiveErrors,
+      hardLimitHit: win.hardLimitHit,
+      lastSuccessTimeMs: win.lastSuccessTimeMs,
+      recentToolCalls: win.recentToolCalls,
+      warningIssued: win.warningIssued,
+      warningReason: win.warningReason,
+      transientRetryCount: win.transientRetryCount ?? 0
+    };
+  }
+  return {
+    agentName: s.agentName,
+    lastToolCallTime: s.lastToolCallTime,
+    lastAgentEventTime: s.lastAgentEventTime,
+    delegationActive: s.delegationActive,
+    activeInvocationId: s.activeInvocationId,
+    lastInvocationIdByAgent: s.lastInvocationIdByAgent ?? {},
+    windows,
+    lastCompactionHint: s.lastCompactionHint ?? 0,
+    architectWriteCount: s.architectWriteCount ?? 0,
+    lastCoderDelegationTaskId: s.lastCoderDelegationTaskId ?? null,
+    currentTaskId: s.currentTaskId ?? null,
+    turboMode: s.turboMode ?? false,
+    gateLog,
+    reviewerCallCount,
+    lastGateFailure: s.lastGateFailure ?? null,
+    partialGateWarningsIssuedForTask,
+    selfFixAttempted: s.selfFixAttempted ?? false,
+    selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
+    catastrophicPhaseWarnings,
+    lastPhaseCompleteTimestamp: s.lastPhaseCompleteTimestamp ?? 0,
+    lastPhaseCompletePhase: s.lastPhaseCompletePhase ?? 0,
+    phaseAgentsDispatched,
+    lastCompletedPhaseAgentsDispatched,
+    qaSkipCount: s.qaSkipCount ?? 0,
+    qaSkipTaskIds: s.qaSkipTaskIds ?? [],
+    pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
+    taskWorkflowStates: Object.fromEntries(s.taskWorkflowStates ?? new Map),
+    ...s.scopeViolationDetected !== undefined && {
+      scopeViolationDetected: s.scopeViolationDetected
+    },
+    model_fallback_index: s.model_fallback_index ?? 0,
+    modelFallbackExhausted: s.modelFallbackExhausted ?? false,
+    coderRevisions: s.coderRevisions ?? 0,
+    revisionLimitHit: s.revisionLimitHit ?? false,
+    fullAutoMode: s.fullAutoMode ?? false,
+    fullAutoInteractionCount: s.fullAutoInteractionCount ?? 0,
+    fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
+    fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
+    sessionRehydratedAt: s.sessionRehydratedAt ?? 0
+  };
+}
+async function writeSnapshot(directory, state) {
+  try {
+    const snapshot = {
+      version: 2,
+      writtenAt: Date.now(),
+      toolAggregates: Object.fromEntries(state.toolAggregates),
+      activeAgent: Object.fromEntries(state.activeAgent),
+      delegationChains: Object.fromEntries(state.delegationChains),
+      agentSessions: {}
+    };
+    for (const [sessionId, sessionState] of state.agentSessions) {
+      snapshot.agentSessions[sessionId] = serializeAgentSession(sessionState);
+    }
+    const content = JSON.stringify(snapshot, null, 2);
+    const resolvedPath = validateSwarmPath(directory, "session/state.json");
+    const dir = path30.dirname(resolvedPath);
+    mkdirSync13(dir, { recursive: true });
+    const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+    await bunWrite(tempPath, content);
+    renameSync9(tempPath, resolvedPath);
+  } catch (error93) {
+    log("[snapshot-writer] write failed", {
+      error: error93 instanceof Error ? error93.message : String(error93)
+    });
+  }
+}
+function createSnapshotWriterHook(directory) {
+  return (_input, _output) => {
+    _writeInFlight = _writeInFlight.then(() => _internals18.writeSnapshot(directory, swarmState), () => _internals18.writeSnapshot(directory, swarmState));
+    return _writeInFlight;
+  };
+}
+async function flushPendingSnapshot(directory) {
+  _writeInFlight = _writeInFlight.then(() => _internals18.writeSnapshot(directory, swarmState), () => _internals18.writeSnapshot(directory, swarmState));
+  await _writeInFlight;
+}
+var _writeInFlight, _internals18;
+var init_snapshot_writer = __esm(() => {
+  init_utils2();
+  init_state();
+  init_utils();
+  init_bun_compat();
+  _writeInFlight = Promise.resolve();
+  _internals18 = {
+    writeSnapshot,
+    createSnapshotWriterHook,
+    flushPendingSnapshot
   };
 });
 
@@ -55780,7 +56043,7 @@ async function handleSimulateCommand(directory, args2) {
   }
   let darkMatterPairs;
   try {
-    darkMatterPairs = await _internals15.detectDarkMatter(directory, options);
+    darkMatterPairs = await _internals14.detectDarkMatter(directory, options);
   } catch (err2) {
     const errMsg = err2 instanceof Error ? err2.message : String(err2);
     return `## Simulate Report

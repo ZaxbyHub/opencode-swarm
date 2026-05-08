@@ -2,12 +2,20 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema';
 import { archiveEvidence } from '../evidence/manager';
-import { isGitRepo, resetToRemoteBranch } from '../git/branch';
+import {
+	isGitRepo,
+	resetToMainAfterMerge,
+	resetToRemoteBranch,
+} from '../git/branch';
+import { promoteToHive } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
+import {
+	readKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../hooks/knowledge-store';
 import { validateSwarmPath } from '../hooks/utils';
 
 import { clearAllScopes } from '../scope/scope-persistence';
-import { flushPendingSnapshot } from '../session/snapshot-writer';
 import { resetSwarmState, swarmState } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
@@ -28,7 +36,7 @@ interface PlanData {
 }
 
 /**
- * Artifacts to include in the archive bundle.
+ * Flat-file artifacts to include in the archive bundle.
  * Each entry is a relative path under .swarm/.
  *
  * plan-ledger.jsonl is included so the archive bundle is a self-contained
@@ -47,10 +55,21 @@ const ARCHIVE_ARTIFACTS = [
 	'handoff-consumed.md',
 	'escalation-report.md',
 	'close-lessons.md',
+	'knowledge.jsonl',
+	'knowledge-rejected.jsonl',
+	'repo-graph.json',
+	'doc-manifest.json',
+	'dark-matter.md',
+	'telemetry.jsonl',
+	'swarm.db',
+	'swarm.db-shm',
+	'swarm.db-wal',
+	'close-summary.md',
+	'spec.md',
 ];
 
 /**
- * Active-state files/dirs to clean after archiving so future swarms start clean.
+ * Active-state flat files to clean after archiving so future swarms start clean.
  *
  * plan.json, plan.md, and plan-ledger.jsonl are all removed so the next /swarm
  * session starts with a clean slate. The user's original ask for /swarm close
@@ -65,6 +84,13 @@ const ARCHIVE_ARTIFACTS = [
  * leaving it behind re-enables the exact bug this cleanup is meant to fix.
  * The archive-first guard below ensures we only delete files we successfully
  * copied to the archive bundle, so the audit trail is preserved in the bundle.
+ *
+ * knowledge.jsonl, knowledge-rejected.jsonl, repo-graph.json, doc-manifest.json,
+ * dark-matter.md, telemetry.jsonl, swarm.db, swarm.db-shm, and swarm.db-wal are
+ * session-generated artifacts that do not persist meaningfully across sessions —
+ * they are recreated on next session init and must be removed to avoid stale-state
+ * interference. close-summary.md and spec.md are NOT cleaned because close-summary.md
+ * is written as the final close output after cleanup and spec.md may not exist.
  */
 const ACTIVE_STATE_TO_CLEAN = [
 	'plan.json',
@@ -75,6 +101,28 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'handoff-prompt.md',
 	'handoff-consumed.md',
 	'escalation-report.md',
+	'knowledge.jsonl',
+	'knowledge-rejected.jsonl',
+	'repo-graph.json',
+	'doc-manifest.json',
+	'dark-matter.md',
+	'telemetry.jsonl',
+	'swarm.db',
+	'swarm.db-shm',
+	'swarm.db-wal',
+];
+
+/**
+ * Active-state directories to archive and clean after archiving.
+ * These contain session-generated data that must be removed so future
+ * swarms start clean. Each entry is a relative path under .swarm/.
+ */
+const ACTIVE_STATE_DIRS_TO_CLEAN = [
+	'evidence',
+	'session',
+	'scopes',
+	'locks',
+	'spec-archive',
 ];
 
 /**
@@ -179,6 +227,7 @@ export async function handleCloseCommand(
 	const closedPhases: number[] = [];
 	const closedTasks: string[] = [];
 	const warnings: string[] = [];
+	let hivePromoted = 0;
 
 	// ─── STAGE 1: FINALIZE ───────────────────────────────────────────
 	if (!planAlreadyDone) {
@@ -364,6 +413,37 @@ export async function handleCloseCommand(
 		await fs.unlink(lessonsFilePath).catch(() => {});
 	}
 
+	// ─── HIVE PROMOTION ──────────────────────────────────────────────
+	// Promote swarm lessons to cross-project hive knowledge.
+	// Non-blocking: failures are logged as warnings, close still succeeds.
+	if (curationSucceeded) {
+		try {
+			const knowledgePath = resolveSwarmKnowledgePath(directory);
+			const entries = await readKnowledge<{
+				id: string;
+				lesson: string;
+				category: string;
+			}>(knowledgePath);
+			if (entries.length > 0) {
+				for (const entry of entries) {
+					try {
+						await promoteToHive(directory, entry.lesson, entry.category);
+						hivePromoted++;
+					} catch (promotionErr) {
+						const msg =
+							promotionErr instanceof Error
+								? promotionErr.message
+								: String(promotionErr);
+						warnings.push(`Hive promotion skipped for lesson: ${msg}`);
+					}
+				}
+			}
+		} catch (hiveErr) {
+			const msg = hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
+			warnings.push(`Hive promotion failed: ${msg}`);
+		}
+	}
+
 	// ─── ALL-PLANS-COMPLETE GUARANTEE ────────────────────────────────
 	if (planExists) {
 		const guaranteeResult = guaranteeAllPlansComplete(planData);
@@ -412,6 +492,9 @@ export async function handleCloseCommand(
 	/** Track which active-state files were successfully backed up to the archive.
 	 *  Only these files are safe to delete in the clean stage. */
 	const archivedActiveStateFiles = new Set<string>();
+	/** Track which active-state directories were successfully backed up to the archive.
+	 *  Only these directories are safe to delete in the clean stage. */
+	const archivedActiveStateDirs = new Set<string>();
 
 	try {
 		await fs.mkdir(archiveDir, { recursive: true });
@@ -431,51 +514,43 @@ export async function handleCloseCommand(
 			}
 		}
 
-		// Archive evidence directory
-		const evidenceDir = path.join(swarmDir, 'evidence');
-		const archiveEvidenceDir = path.join(archiveDir, 'evidence');
-		try {
-			const evidenceEntries = await fs.readdir(evidenceDir);
-			if (evidenceEntries.length > 0) {
-				await fs.mkdir(archiveEvidenceDir, { recursive: true });
-				for (const entry of evidenceEntries) {
-					const srcEntry = path.join(evidenceDir, entry);
-					const destEntry = path.join(archiveEvidenceDir, entry);
-					try {
-						const stat = await fs.stat(srcEntry);
-						if (stat.isDirectory()) {
-							await fs.mkdir(destEntry, { recursive: true });
-							const subEntries = await fs.readdir(srcEntry);
-							for (const sub of subEntries) {
-								await fs
-									.copyFile(path.join(srcEntry, sub), path.join(destEntry, sub))
-									.catch(() => {});
+		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
+		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+			const srcDir = path.join(swarmDir, dirName);
+			const destDir = path.join(archiveDir, dirName);
+			try {
+				const entries = await fs.readdir(srcDir);
+				if (entries.length > 0) {
+					await fs.mkdir(destDir, { recursive: true });
+					for (const entry of entries) {
+						const srcEntry = path.join(srcDir, entry);
+						const destEntry = path.join(destDir, entry);
+						try {
+							const stat = await fs.stat(srcEntry);
+							if (stat.isDirectory()) {
+								await fs.mkdir(destEntry, { recursive: true });
+								const subEntries = await fs.readdir(srcEntry);
+								for (const sub of subEntries) {
+									await fs
+										.copyFile(
+											path.join(srcEntry, sub),
+											path.join(destEntry, sub),
+										)
+										.catch(() => {});
+								}
+							} else {
+								await fs.copyFile(srcEntry, destEntry);
 							}
-						} else {
-							await fs.copyFile(srcEntry, destEntry);
+							archivedFileCount++;
+						} catch {
+							// Per-entry failure is non-blocking
 						}
-						archivedFileCount++;
-					} catch {
-						// Per-entry failure is non-blocking
 					}
 				}
+				archivedActiveStateDirs.add(dirName);
+			} catch {
+				// Directory may not exist — skip silently
 			}
-		} catch {
-			// evidence dir may not exist
-		}
-
-		// Archive session state
-		const sessionStatePath = path.join(swarmDir, 'session', 'state.json');
-		try {
-			const archiveSessionDir = path.join(archiveDir, 'session');
-			await fs.mkdir(archiveSessionDir, { recursive: true });
-			await fs.copyFile(
-				sessionStatePath,
-				path.join(archiveSessionDir, 'state.json'),
-			);
-			archivedFileCount++;
-		} catch {
-			// session state may not exist
 		}
 
 		archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}/`;
@@ -523,6 +598,22 @@ export async function handleCloseCommand(
 		warnings.push(
 			'Skipped active-state cleanup because no active-state files were archived. Files preserved to prevent data loss.',
 		);
+	}
+
+	// Delete directories that were successfully archived
+	// Uses archive-first-guard: only delete directories we confirmed are in the archive
+	for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+		if (!archivedActiveStateDirs.has(dirName)) {
+			// Directory was NOT archived — do not delete
+			continue;
+		}
+		const dirPath = path.join(swarmDir, dirName);
+		try {
+			await fs.rm(dirPath, { recursive: true, force: true });
+			cleanedFiles.push(`${dirName}/`);
+		} catch {
+			// Per-directory failure is non-blocking
+		}
 	}
 
 	// Remove stale config-backup-*.json files AND ledger sibling files
@@ -620,18 +711,35 @@ export async function handleCloseCommand(
 
 	const isGit = isGitRepo(directory);
 	if (isGit) {
-		const alignResult = resetToRemoteBranch(directory, { pruneBranches });
-		gitAlignResult = alignResult.message;
-		prunedBranches.push(...alignResult.prunedBranches);
+		// Try aggressive reset first (handles post-merge scenario with uncommitted changes)
+		const aggressiveResult = resetToMainAfterMerge(directory, {
+			pruneBranches,
+		});
+		if (aggressiveResult.success) {
+			gitAlignResult = aggressiveResult.message;
+			for (const w of aggressiveResult.warnings) {
+				warnings.push(w);
+			}
+			if (aggressiveResult.changesDiscarded) {
+				warnings.push(
+					'Uncommitted changes were discarded during git alignment',
+				);
+			}
+		} else {
+			// Fallback to cautious reset (preserves uncommitted changes)
+			const alignResult = resetToRemoteBranch(directory, { pruneBranches });
+			gitAlignResult = alignResult.message;
+			prunedBranches.push(...alignResult.prunedBranches);
 
-		if (!alignResult.success) {
-			warnings.push(`Git alignment: ${alignResult.message}`);
-		}
-		if (alignResult.alreadyAligned) {
-			gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
-		}
-		for (const w of alignResult.warnings) {
-			warnings.push(w);
+			if (!alignResult.success) {
+				warnings.push(`Git alignment: ${alignResult.message}`);
+			}
+			if (alignResult.alreadyAligned) {
+				gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
+			}
+			for (const w of alignResult.warnings) {
+				warnings.push(w);
+			}
 		}
 	} else {
 		gitAlignResult = 'Not a git repository — skipped git alignment';
@@ -700,6 +808,9 @@ export async function handleCloseCommand(
 		...(curationSucceeded && allLessons.length > 0
 			? [`- Committed ${allLessons.length} lesson(s) to knowledge store`]
 			: []),
+		...(hivePromoted > 0
+			? [`- Promoted ${hivePromoted} lesson(s) to hive knowledge`]
+			: []),
 		'',
 		...(warnings.length > 0
 			? ['## Warnings', ...warnings.map((w) => `- ${w}`), '']
@@ -712,15 +823,6 @@ export async function handleCloseCommand(
 		const msg = error instanceof Error ? error.message : String(error);
 		warnings.push(`Failed to write close-summary.md: ${msg}`);
 		console.warn('[close-command] Failed to write close-summary.md:', error);
-	}
-
-	// Flush snapshot before clearing sessions
-	try {
-		await flushPendingSnapshot(directory);
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`flushPendingSnapshot failed: ${msg}`);
-		console.warn('[close-command] flushPendingSnapshot error:', error);
 	}
 
 	// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
