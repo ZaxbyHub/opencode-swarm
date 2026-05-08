@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.10.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.9.0...v7.10.0) (2026-05-08)
+
+
+### Features
+
+* **close:** full artifact cleanup, aggressive git reset, and hive promotion ([#800](https://github.com/zaxbysauce/opencode-swarm/issues/800)) ([02dae18](https://github.com/zaxbysauce/opencode-swarm/commit/02dae1812d0521b28831bb1fa8e7ff46e1044b4b))
+
 ## [7.9.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.8.1...v7.9.0) (2026-05-08)
 
 

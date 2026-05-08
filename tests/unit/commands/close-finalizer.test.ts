@@ -80,6 +80,14 @@ mock.module('../../../src/git/branch.js', () => ({
 		prunedBranches: [],
 		warnings: [],
 	}),
+	resetToMainAfterMerge: () => ({
+		success: true,
+		targetBranch: 'origin/main',
+		previousBranch: 'main',
+		message: 'Already on main',
+		branchDeleted: false,
+		warnings: [],
+	}),
 }));
 
 mock.module('../../../src/plan/checkpoint.js', () => ({

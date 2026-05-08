@@ -506,7 +506,8 @@ describe('handleCloseCommand', () => {
 	});
 
 	describe('Clears state', () => {
-		it('should call flushPendingSnapshot', async () => {
+		it('should NOT call flushPendingSnapshot during close', async () => {
+			// flushPendingSnapshot was removed — close clears session state instead of flushing it
 			const planData = {
 				title: 'Test Project',
 				phases: [
@@ -525,8 +526,7 @@ describe('handleCloseCommand', () => {
 
 			await handleCloseCommand(testDir, []);
 
-			expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
-			expect(mockFlushPendingSnapshot).toHaveBeenCalledWith(testDir);
+			expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 		});
 	});
 
@@ -795,11 +795,11 @@ describe('handleCloseCommand', () => {
 				expect(mockCurateAndStoreSwarm).toHaveBeenCalledTimes(1);
 			});
 
-			it('PF5: No plan.json → flushPendingSnapshot IS called', async () => {
+			it('PF5: No plan.json → flushPendingSnapshot is NOT called', async () => {
 				// No plan.json — plan-free session
 				await handleCloseCommand(testDir, []);
 
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 			});
 
 			it('PF6: Malformed plan.json (exists but invalid JSON) → returns error containing "Failed to read plan.json"', async () => {
@@ -1700,7 +1700,7 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('terminal state');
 			});
 
-			it('PF_P1_D: Plan with all phases complete → flushPendingSnapshot is still called', async () => {
+			it('PF_P1_D: Plan with all phases complete → flushPendingSnapshot is NOT called', async () => {
 				const planData = {
 					title: 'Test Project',
 					phases: [
@@ -1719,8 +1719,8 @@ describe('handleCloseCommand', () => {
 
 				await handleCloseCommand(testDir, []);
 
-				// State flushes even when plan is already done
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				// State is cleared, not flushed
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 			});
 		});
 
@@ -1786,7 +1786,7 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('finalized');
 				// Cleanup ran despite the error
 				expect(mockArchiveEvidence).toHaveBeenCalledTimes(1);
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 				// Warning mentions the thrown error
 				expect(result).toContain('Warnings');
 				expect(result).toContain('retro write failed');
