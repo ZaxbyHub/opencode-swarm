@@ -9,12 +9,7 @@
  *   - Overall promotion failure is non-blocking
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -32,7 +27,9 @@ const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 const mockCurateAndStoreSwarm = mock(async () => {});
 const mockArchiveEvidence = mock(async () => {});
 const mockFlushPendingSnapshot = mock(async () => {});
-const mockPromoteToHive = mock(async (_dir: string, _lesson: string, _category: string) => {});
+const mockPromoteToHive = mock(
+	async (_dir: string, _lesson: string, _category: string) => {},
+);
 const mockReadKnowledge = mock(async (_path: string) => [
 	{ id: 'entry-1', lesson: 'Lesson one', category: 'process' },
 ]);
