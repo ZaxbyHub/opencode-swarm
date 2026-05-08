@@ -26,6 +26,15 @@ const initializedLanguages = new Set<string>();
 let treeSitterInitPromise: Promise<void> | null = null;
 
 /**
+ * DI seam for testing — overridable reference to TreeSitterParser.init.
+ * Tests can replace this with a spy/mock to observe init calls without
+ * mock.module leakage. Restore the original reference in afterEach.
+ */
+export const _internals = {
+	parserInit: TreeSitterParser.init as (opts?: { locateFile: (scriptName: string) => string }) => Promise<void>,
+};
+
+/**
  * Initialize the tree-sitter WASM runtime
  * Must be called before creating any parsers
  */
@@ -38,12 +47,12 @@ async function initTreeSitter(): Promise<void> {
 			if (isSource) {
 				// In dev, web-tree-sitter's own import.meta.url resolves tree-sitter.wasm
 				// correctly from node_modules/web-tree-sitter/
-				await TreeSitterParser.init();
+				await _internals.parserInit();
 			} else {
 				// In bundle, import.meta.url points to dist/index.js so web-tree-sitter
 				// looks for dist/tree-sitter.wasm — redirect to dist/lang/grammars/
 				const grammarsDir = getGrammarsDirAbsolute();
-				await TreeSitterParser.init({
+				await _internals.parserInit({
 					locateFile(scriptName: string) {
 						return path.join(grammarsDir, scriptName);
 					},

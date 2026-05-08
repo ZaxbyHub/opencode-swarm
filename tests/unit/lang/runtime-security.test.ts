@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
+	_internals,
 	clearParserCache,
 	getSupportedLanguages,
 	isGrammarAvailable,
@@ -418,6 +419,116 @@ describe('runtime.ts - Security Verification Tests', () => {
 			expect(p2).toBeDefined();
 			expect(p3).toBeDefined();
 			// Cache settles to one entry after all callers complete
+			expect(parserCache.size).toBe(1);
+		});
+	});
+
+	describe('12. Parser.init() call count verification', () => {
+		let originalInit: typeof _internals.parserInit;
+		let initCallCount: number;
+
+		beforeEach(() => {
+			clearParserCache();
+			initCallCount = 0;
+			originalInit = _internals.parserInit;
+			// Spy on parserInit to count calls while still delegating to real impl
+			_internals.parserInit = (async (opts?) => {
+				initCallCount++;
+				return originalInit(opts);
+			}) as typeof _internals.parserInit;
+		});
+
+		afterEach(() => {
+			_internals.parserInit = originalInit;
+			clearParserCache();
+		});
+
+		it('should call Parser.init exactly once across concurrent multi-language loads', async () => {
+			await Promise.all([
+				loadGrammar('javascript'),
+				loadGrammar('python'),
+				loadGrammar('typescript'),
+			]);
+			expect(initCallCount).toBe(1);
+		});
+
+		it('should call Parser.init exactly once across concurrent same-language loads', async () => {
+			await Promise.all([
+				loadGrammar('javascript'),
+				loadGrammar('javascript'),
+				loadGrammar('javascript'),
+			]);
+			expect(initCallCount).toBe(1);
+		});
+
+		it('should reuse already-resolved promise without re-invoking init', async () => {
+			await loadGrammar('javascript'); // init fires
+			expect(initCallCount).toBe(1);
+			await loadGrammar('python'); // init already resolved, no re-invoke
+			expect(initCallCount).toBe(1);
+		});
+	});
+
+	describe('13. Init failure retry path', () => {
+		let originalInit: typeof _internals.parserInit;
+		let failCount: number;
+
+		beforeEach(() => {
+			clearParserCache();
+			failCount = 0;
+			originalInit = _internals.parserInit;
+		});
+
+		afterEach(() => {
+			_internals.parserInit = originalInit;
+			clearParserCache();
+		});
+
+		it('should null the init promise after failure and allow retry', async () => {
+			// First attempt fails
+			_internals.parserInit = async () => {
+				failCount++;
+				throw new Error('Simulated transient init failure');
+			};
+
+			let firstError: Error | null = null;
+			try {
+				await loadGrammar('javascript');
+			} catch (err) {
+				firstError = err as Error;
+			}
+			expect(firstError).toBeDefined();
+			expect(firstError!.message).toContain('Simulated transient init failure');
+			expect(failCount).toBe(1);
+
+			// Second attempt succeeds (restore real init)
+			_internals.parserInit = originalInit;
+			const parser = await loadGrammar('javascript');
+			expect(parser).toBeDefined();
+			expect(parserCache.size).toBe(1);
+		});
+
+		it('should propagate failure to all concurrent callers but allow retry', async () => {
+			// All concurrent callers hit the same failing init
+			_internals.parserInit = async () => {
+				throw new Error('Transient init failure');
+			};
+
+			const results = await Promise.allSettled([
+				loadGrammar('javascript'),
+				loadGrammar('python'),
+				loadGrammar('typescript'),
+			]);
+
+			// All three should reject
+			for (const r of results) {
+				expect(r.status).toBe('rejected');
+			}
+
+			// Restore and retry — should now succeed
+			_internals.parserInit = originalInit;
+			const parser = await loadGrammar('javascript');
+			expect(parser).toBeDefined();
 			expect(parserCache.size).toBe(1);
 		});
 	});
