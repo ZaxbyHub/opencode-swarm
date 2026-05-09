@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.11.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.11.0...v7.11.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **architect:** harden anti-rationalization against time-pressure self-coding patterns ([#804](https://github.com/zaxbysauce/opencode-swarm/issues/804)) ([7d968f3](https://github.com/zaxbysauce/opencode-swarm/commit/7d968f36d06ee0c09558deb198bd7d32d06d5fdc))
+
 ## [7.11.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.10.0...v7.11.0) (2026-05-08)
 
 
