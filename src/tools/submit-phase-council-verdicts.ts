@@ -1,4 +1,11 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
@@ -194,15 +201,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				? null
 				: getPhaseMutationGapFinding(input.phaseNumber, workingDir);
 			if (mutationGapFinding) {
-				if (
-					mutationGapFinding.severity === 'HIGH' ||
-					mutationGapFinding.severity === 'MEDIUM'
-				) {
-					synthesis.requiredFixes.push(mutationGapFinding);
-				} else {
-					synthesis.advisoryFindings.push(mutationGapFinding);
-				}
-				synthesis.unifiedFeedbackMd += `\n\n### Mutation Coverage Gap\n- **[${mutationGapFinding.severity}]** \`${mutationGapFinding.location}\` (${mutationGapFinding.category}) — ${mutationGapFinding.detail}\n  _Evidence:_ ${mutationGapFinding.evidence}`;
+				addMutationGapFindingToSynthesis(synthesis, mutationGapFinding);
 				writePhaseCouncilEvidence(workingDir, synthesis);
 			}
 
@@ -365,6 +364,32 @@ function writePhaseCouncilEvidence(
 	};
 
 	const tempFile = `${evidenceFile}.tmp-${Date.now()}`;
-	writeFileSync(tempFile, JSON.stringify(evidenceBundle, null, 2), 'utf-8');
-	renameSync(tempFile, evidenceFile);
+	try {
+		writeFileSync(tempFile, JSON.stringify(evidenceBundle, null, 2), 'utf-8');
+		renameSync(tempFile, evidenceFile);
+	} finally {
+		if (existsSync(tempFile)) {
+			unlinkSync(tempFile);
+		}
+	}
+}
+
+function addMutationGapFindingToSynthesis(
+	synthesis: {
+		requiredFixes: CouncilFinding[];
+		advisoryFindings: CouncilFinding[];
+		unifiedFeedbackMd: string;
+	},
+	finding: CouncilFinding,
+): void {
+	if (finding.severity === 'HIGH' || finding.severity === 'MEDIUM') {
+		synthesis.requiredFixes.push(finding);
+	} else {
+		synthesis.advisoryFindings.push(finding);
+	}
+	synthesis.unifiedFeedbackMd += formatMutationGapFeedback(finding);
+}
+
+function formatMutationGapFeedback(finding: CouncilFinding): string {
+	return `\n\n### Mutation Coverage Gap\n- **[${finding.severity}]** \`${finding.location}\` (${finding.category}) — ${finding.detail}\n  _Evidence:_ ${finding.evidence}`;
 }
