@@ -55,11 +55,45 @@ import { normalizeToolName } from './normalize-tool-name';
 const storedInputArgs = new Map<string, unknown>();
 
 /**
+ * v6.33: Known HTTP status codes that indicate transient provider errors.
+ */
+const TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
+
+/**
+ * Extracts an HTTP status code from an error message string.
+ * Matches common provider formats: "Error 500", "HTTP 500", "500 Internal Server Error", "status: 500".
+ * Returns the numeric code if found and it's a 3-digit number, or null.
+ */
+function extractStatusCode(errorMsg: string): number | null {
+	// Target known transient status codes specifically to avoid false extraction
+	// of arbitrary 3-digit numbers (e.g., "300 seconds timeout")
+	const match = errorMsg.match(/\b(408|429|500|502|503|504|529)\b/);
+	if (match) {
+		return parseInt(match[1], 10);
+	}
+	return null;
+}
+
+/**
  * v6.33: Regex pattern for transient model errors that should trigger fallback.
  * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
  */
 const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|503|529|timeout|overloaded|model.?not.?found|temporarily unavailable|server error/i;
+	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|server.?error|connection.?(refused|reset|timeout)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+
+/**
+ * v7.12: Regex pattern for degraded model errors — context-length/token-limit/content-filter
+ * errors that indicate the provider is rejecting this specific input, not a transient failure.
+ * These do NOT increment consecutiveErrors or transientRetryCount.
+ */
+const DEGRADED_ERROR_PATTERN =
+	/context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
+
+/**
+ * v7.x: Subset of DEGRADED_ERROR_PATTERN that indicates a policy/content-filter violation
+ * (not a size issue). Used to differentiate advisory text for content-filter vs size errors.
+ */
+const CONTENT_FILTER_PATTERN = /content.?filter/i;
 
 /**
  * Retrieves stored input args for a given callID.
@@ -2460,27 +2494,94 @@ export function createGuardrailsHooks(
 				// window. This is independent of model fallback — previously the bypass required
 				// !modelFallbackExhausted, which expired immediately when no fallback_models were
 				// configured, causing the circuit breaker to fire after a single transient error.
+				// Check HTTP status code first (more reliable than keyword matching)
+				const extractedStatus =
+					typeof errorContent === 'string'
+						? extractStatusCode(errorContent)
+						: null;
+				const isTransientStatusCode =
+					extractedStatus !== null &&
+					TRANSIENT_STATUS_CODES.has(extractedStatus);
+
+				// Fall back to keyword matching if no status code found
 				const isTransientPatternMatch =
 					typeof errorContent === 'string' &&
 					TRANSIENT_MODEL_ERROR_PATTERN.test(errorContent);
 
+				const isTransientMatch =
+					isTransientStatusCode || isTransientPatternMatch;
+
 				const isTransient =
 					!!session &&
-					isTransientPatternMatch &&
+					isTransientMatch &&
 					window.transientRetryCount < cfg.max_transient_retries;
 
-				if (!isTransient) {
-					window.consecutiveErrors++;
-				} else {
+				// Degraded errors (context-length, token-limit) bypass both counters
+				const isDegraded =
+					!isTransient &&
+					typeof errorContent === 'string' &&
+					DEGRADED_ERROR_PATTERN.test(errorContent);
+
+				if (isTransient) {
 					window.transientRetryCount++;
+				} else if (isDegraded) {
+					// Degraded errors do NOT increment consecutiveErrors or transientRetryCount
+					// They indicate the provider is rejecting this specific input, not a logic error
+					const isContentFilter =
+						typeof errorContent === 'string' &&
+						CONTENT_FILTER_PATTERN.test(errorContent);
+
+					if (session && !session.modelFallbackExhausted) {
+						session.model_fallback_index++;
+
+						// Track modelFallbackExhausted for degraded errors (mirrors transient branch pattern)
+						const baseAgentName = session.agentName
+							? session.agentName.replace(/^[^_]+[_]/, '')
+							: '';
+						const swarmAgents = getSwarmAgents();
+						const fallbackModels =
+							swarmAgents?.[baseAgentName]?.fallback_models;
+						session.modelFallbackExhausted =
+							!fallbackModels ||
+							session.model_fallback_index > fallbackModels.length;
+
+						session.pendingAdvisoryMessages ??= [];
+						if (isContentFilter) {
+							session.pendingAdvisoryMessages.push(
+								`DEGRADED: Content policy violation detected (content filter). Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
+									`The input may need content modification to comply with provider policies.`,
+							);
+						} else {
+							session.pendingAdvisoryMessages.push(
+								`DEGRADED: Context-limit or token-limit error detected. Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
+									`Consider reducing input size or using /swarm handoff to switch models.`,
+							);
+						}
+					} else if (session) {
+						session.pendingAdvisoryMessages ??= [];
+						if (isContentFilter) {
+							session.pendingAdvisoryMessages.push(
+								`DEGRADED: Content policy violation detected (content filter). No fallback models available. ` +
+									`The input may need content modification to comply with provider policies.`,
+							);
+						} else {
+							session.pendingAdvisoryMessages.push(
+								`DEGRADED: Context-limit or token-limit error detected. No fallback models available. ` +
+									`Consider reducing input size or add "fallback_models" config.`,
+							);
+						}
+					}
+				} else {
+					window.consecutiveErrors++;
 				}
 
 				// v6.33: Model fallback detection for transient model failures
 				// Only check for subagent sessions (not architect)
 				if (
 					session &&
-					isTransientPatternMatch &&
-					!session.modelFallbackExhausted
+					isTransientMatch &&
+					!session.modelFallbackExhausted &&
+					!isDegraded
 				) {
 					// Increment fallback index
 					session.model_fallback_index++;
@@ -2541,6 +2642,22 @@ export function createGuardrailsHooks(
 
 					// Reset fallback index on next successful task completion
 					// (handled by the success path below)
+				}
+
+				// Advisory for transient errors that didn't trigger model fallback
+				// (fallback exhausted or no fallback configured)
+				if (session && isTransient && isTransientMatch) {
+					session.pendingAdvisoryMessages ??= [];
+					// Only emit if no TRANSIENT ERROR advisory already exists (dedup via .some)
+					if (
+						!session.pendingAdvisoryMessages.some((m: string) =>
+							m.startsWith('TRANSIENT ERROR:'),
+						)
+					) {
+						session.pendingAdvisoryMessages.push(
+							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${cfg.max_transient_retries ?? 5}). Retrying...`,
+						);
+					}
 				}
 			} else {
 				window.consecutiveErrors = 0;

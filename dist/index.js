@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.10.0",
+    version: "7.11.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -23787,6 +23787,13 @@ var init_normalize_tool_name = __esm(() => {
 import * as fsSync2 from "node:fs";
 import * as fs8 from "node:fs/promises";
 import * as path10 from "node:path";
+function extractStatusCode(errorMsg) {
+  const match = errorMsg.match(/\b(408|429|500|502|503|504|529)\b/);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  return null;
+}
 function getStoredInputArgs(callID) {
   return storedInputArgs.get(callID);
 }
@@ -24995,14 +25002,40 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       if (hasError) {
         const outputStr = typeof output.output === "string" ? output.output : "";
         const errorContent = output.error ?? outputStr;
+        const extractedStatus = typeof errorContent === "string" ? extractStatusCode(errorContent) : null;
+        const isTransientStatusCode = extractedStatus !== null && TRANSIENT_STATUS_CODES.has(extractedStatus);
         const isTransientPatternMatch = typeof errorContent === "string" && TRANSIENT_MODEL_ERROR_PATTERN.test(errorContent);
-        const isTransient = !!session && isTransientPatternMatch && window2.transientRetryCount < cfg.max_transient_retries;
-        if (!isTransient) {
-          window2.consecutiveErrors++;
-        } else {
+        const isTransientMatch = isTransientStatusCode || isTransientPatternMatch;
+        const isTransient = !!session && isTransientMatch && window2.transientRetryCount < cfg.max_transient_retries;
+        const isDegraded = !isTransient && typeof errorContent === "string" && DEGRADED_ERROR_PATTERN.test(errorContent);
+        if (isTransient) {
           window2.transientRetryCount++;
+        } else if (isDegraded) {
+          const isContentFilter = typeof errorContent === "string" && CONTENT_FILTER_PATTERN.test(errorContent);
+          if (session && !session.modelFallbackExhausted) {
+            session.model_fallback_index++;
+            const baseAgentName = session.agentName ? session.agentName.replace(/^[^_]+[_]/, "") : "";
+            const swarmAgents = getSwarmAgents();
+            const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
+            session.modelFallbackExhausted = !fallbackModels || session.model_fallback_index > fallbackModels.length;
+            session.pendingAdvisoryMessages ??= [];
+            if (isContentFilter) {
+              session.pendingAdvisoryMessages.push(`DEGRADED: Content policy violation detected (content filter). Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` + `The input may need content modification to comply with provider policies.`);
+            } else {
+              session.pendingAdvisoryMessages.push(`DEGRADED: Context-limit or token-limit error detected. Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` + `Consider reducing input size or using /swarm handoff to switch models.`);
+            }
+          } else if (session) {
+            session.pendingAdvisoryMessages ??= [];
+            if (isContentFilter) {
+              session.pendingAdvisoryMessages.push(`DEGRADED: Content policy violation detected (content filter). No fallback models available. ` + `The input may need content modification to comply with provider policies.`);
+            } else {
+              session.pendingAdvisoryMessages.push(`DEGRADED: Context-limit or token-limit error detected. No fallback models available. ` + `Consider reducing input size or add "fallback_models" config.`);
+            }
+          }
+        } else {
+          window2.consecutiveErrors++;
         }
-        if (session && isTransientPatternMatch && !session.modelFallbackExhausted) {
+        if (session && isTransientMatch && !session.modelFallbackExhausted && !isDegraded) {
           session.model_fallback_index++;
           const baseAgentName = session.agentName ? session.agentName.replace(/^[^_]+[_]/, "") : "";
           const swarmAgents = getSwarmAgents();
@@ -25022,6 +25055,12 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
           }
           telemetry.modelFallback(input.sessionID, session.agentName, primaryModel, fallbackModel ?? "none", "transient_model_error");
           swarmState.pendingEvents++;
+        }
+        if (session && isTransient && isTransientMatch) {
+          session.pendingAdvisoryMessages ??= [];
+          if (!session.pendingAdvisoryMessages.some((m) => m.startsWith("TRANSIENT ERROR:"))) {
+            session.pendingAdvisoryMessages.push(`TRANSIENT ERROR: Provider error detected (attempt ${window2.transientRetryCount}/${cfg.max_transient_retries ?? 5}). Retrying...`);
+          }
         }
       } else {
         window2.consecutiveErrors = 0;
@@ -25595,7 +25634,7 @@ function checkFileAuthorityWithRules(agentName, filePath, cwd, effectiveRules, o
   }
   return { allowed: true };
 }
-var import_picomatch, storedInputArgs, TRANSIENT_MODEL_ERROR_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
+var import_picomatch, storedInputArgs, TRANSIENT_STATUS_CODES, TRANSIENT_MODEL_ERROR_PATTERN, DEGRADED_ERROR_PATTERN, CONTENT_FILTER_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
 var init_guardrails = __esm(() => {
   init_quick_lru();
   init_agents2();
@@ -25616,7 +25655,10 @@ var init_guardrails = __esm(() => {
   init_normalize_tool_name();
   import_picomatch = __toESM(require_picomatch2(), 1);
   storedInputArgs = new Map;
-  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|503|529|timeout|overloaded|model.?not.?found|temporarily unavailable|server error/i;
+  TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
+  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|server.?error|connection.?(refused|reset|timeout)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+  DEGRADED_ERROR_PATTERN = /context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
+  CONTENT_FILTER_PATTERN = /content.?filter/i;
   toolCallsSinceLastWrite = new Map;
   noOpWarningIssued = new Set;
   consecutiveNoToolTurns = new Map;
