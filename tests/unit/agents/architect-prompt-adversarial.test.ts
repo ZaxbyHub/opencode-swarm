@@ -1175,8 +1175,6 @@ describe('architect prompt: time-pressure anti-rationalization coverage in Rule 
 	});
 
 	it('section 6h EDIT AUTHORITY addresses "fix so obvious it does not need a coder" rationalization', () => {
-		expect(prompt).toContain(
-			"fix is so obvious it doesn't need a coder",
-		);
+		expect(prompt).toContain("fix is so obvious it doesn't need a coder");
 	});
 });
