@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.12.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.11.1...v7.12.0) (2026-05-10)
+
+
+### Features
+
+* **guardrails:** add three-tier error classification for provider error resilience (closes [#756](https://github.com/zaxbysauce/opencode-swarm/issues/756)) ([4d3691b](https://github.com/zaxbysauce/opencode-swarm/commit/4d3691b8ec70318161d40d62a4ad6a227480aef9))
+
 ## [7.11.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.11.0...v7.11.1) (2026-05-09)
 
 
