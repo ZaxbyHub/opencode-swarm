@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.13.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.0...v7.13.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* **install:** write minimal project config instead of DEFAULT_AGENT_CONFIGS ([#811](https://github.com/zaxbysauce/opencode-swarm/issues/811)) ([8534996](https://github.com/zaxbysauce/opencode-swarm/commit/8534996749f62ebdcb6ee61b8ceb67c6faf88ac4)), closes [#797](https://github.com/zaxbysauce/opencode-swarm/issues/797)
+
 ## [7.13.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.12.0...v7.13.0) (2026-05-10)
 
 
