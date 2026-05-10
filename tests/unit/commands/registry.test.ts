@@ -107,6 +107,7 @@ describe('CommandEntry — category field', () => {
 			'council',
 			'pr-review',
 			'issue',
+			'deep-dive',
 		];
 		for (const name of agentCommands) {
 			const entry = COMMAND_REGISTRY[name as RegisteredCommand];
@@ -158,6 +159,12 @@ describe('CommandEntry — aliasOf field', () => {
 			'evidence-summary' as RegisteredCommand
 		] as CommandEntry;
 		expect(evidenceSummary?.aliasOf).toBe('evidence summary');
+
+		// 'deep dive' is an alias of 'deep-dive'
+		const deepDiveAlias = COMMAND_REGISTRY[
+			'deep dive' as RegisteredCommand
+		] as CommandEntry;
+		expect(deepDiveAlias?.aliasOf).toBe('deep-dive');
 	});
 });
 
@@ -646,6 +653,7 @@ describe('COMMAND_REGISTRY alias entries — completeness', () => {
 			'health',
 			'check',
 			'clear',
+			'deep dive',
 		];
 		for (const alias of knownAliases) {
 			expect(Object.hasOwn(COMMAND_REGISTRY, alias)).toBe(true);
@@ -705,5 +713,81 @@ describe('COMMAND_REGISTRY alias entries — completeness', () => {
 		] as CommandEntry;
 		const resetSessionEntry = COMMAND_REGISTRY['reset-session'] as CommandEntry;
 		expect(clearEntry.category).toBe(resetSessionEntry.category);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// deep-dive command — FR-025 through FR-028 registration verification
+// ---------------------------------------------------------------------------
+describe('deep-dive command registration (FR-025 through FR-028)', () => {
+	test('deep-dive entry exists in COMMAND_REGISTRY', () => {
+		expect(Object.hasOwn(COMMAND_REGISTRY, 'deep-dive')).toBe(true);
+	});
+
+	test('deep-dive entry has a handler function', () => {
+		const entry = COMMAND_REGISTRY['deep-dive' as RegisteredCommand];
+		expect(typeof entry.handler).toBe('function');
+	});
+
+	test('deep-dive entry has non-empty description', () => {
+		const entry = COMMAND_REGISTRY['deep-dive' as RegisteredCommand];
+		expect(typeof entry.description).toBe('string');
+		expect(entry.description.length).toBeGreaterThan(0);
+	});
+
+	test('deep-dive entry has args field', () => {
+		const entry = COMMAND_REGISTRY['deep-dive' as RegisteredCommand];
+		expect(entry.args).toBe(
+			'<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
+		);
+	});
+
+	test('deep-dive entry has details field', () => {
+		const entry = COMMAND_REGISTRY['deep-dive' as RegisteredCommand];
+		expect(entry.details).toContain('parallel explorer waves');
+		expect(entry.details).toContain('always 2 parallel reviewers');
+		expect(entry.details).toContain('critic challenge');
+	});
+
+	test('deep-dive entry has category "agent"', () => {
+		const entry = COMMAND_REGISTRY[
+			'deep-dive' as RegisteredCommand
+		] as CommandEntry;
+		expect(entry.category).toBe('agent');
+	});
+
+	test('deep dive alias entry exists in COMMAND_REGISTRY', () => {
+		expect(Object.hasOwn(COMMAND_REGISTRY, 'deep dive')).toBe(true);
+	});
+
+	test('deep dive alias has aliasOf pointing to deep-dive', () => {
+		const entry = COMMAND_REGISTRY[
+			'deep dive' as RegisteredCommand
+		] as CommandEntry;
+		expect(entry.aliasOf).toBe('deep-dive');
+	});
+
+	test('deep dive alias inherits category from deep-dive', () => {
+		const deepDiveEntry = COMMAND_REGISTRY[
+			'deep-dive' as RegisteredCommand
+		] as CommandEntry;
+		const deepDiveAliasEntry = COMMAND_REGISTRY[
+			'deep dive' as RegisteredCommand
+		] as CommandEntry;
+		expect(deepDiveAliasEntry.category).toBe(deepDiveEntry.category);
+	});
+
+	test('resolveCommand resolves deep-dive correctly', () => {
+		const result = resolveCommand(['deep-dive']);
+		expect(result).not.toBeNull();
+		expect(result!.key).toBe('deep-dive');
+		expect(result!.entry.category).toBe('agent');
+	});
+
+	test('resolveCommand resolves deep dive alias to deep-dive handler', () => {
+		const result = resolveCommand(['deep', 'dive']);
+		expect(result).not.toBeNull();
+		expect(result!.key).toBe('deep dive');
+		expect(result!.entry.aliasOf).toBe('deep-dive');
 	});
 });

@@ -1000,6 +1000,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
 				},
+				'swarm-deep-dive': {
+					template: '/swarm deep-dive $ARGUMENTS',
+					description:
+						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
 					description:

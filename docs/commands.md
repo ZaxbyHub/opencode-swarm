@@ -130,6 +130,52 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 
 **No-args behavior:** prints a usage string. The command never throws on bad input.
 
+### `/swarm deep-dive [--profile <name>] [--max-explorers <n>] [--json] [--skip-update] [--allow-dirty]`
+
+Read-only codebase audit using parallel explorer waves with independent reviewer verification and sequential critic challenge.
+
+| Alias |
+|-------|
+| `/swarm deep dive` |
+
+**Command forms:**
+- `/swarm deep-dive` — standard profile (default)
+- `/swarm deep-dive --profile security` — security-focused audit
+- `/swarm deep-dive --profile full --json` — full audit with machine-readable output
+- `/swarm deep dive --max-explorers 4` — alias form with reduced parallelism
+
+**Workflow:**
+1. **Repo Readiness** — verify clean git state (unless `--allow-dirty`)
+2. **Scope Resolution** — import proximity grouping with 8-file cap per mission
+3. **Explorer Waves** — parallel explorer lanes covering scope mapping, data flow, runtime behavior, UX, security, testing, performance, and documentation
+4. **Reviewer Verification** — always 2 parallel reviewers confirm each finding with file:line evidence
+5. **Critic Challenge** — sequential adversarial pass on HIGH/CRITICAL findings only
+6. **Final Report** — synthesized findings table with severity, category, and remediation guidance
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--profile <name>` | `standard` | Audit profile: `standard`, `security`, `ux`, `architecture`, `full` |
+| `--max-explorers <n>` | `4` | Parallel explorer lanes (range: 1–8) |
+| `--json` | — | Emit machine-readable JSON output |
+| `--skip-update` | — | Skip OpenCode update check before audit |
+| `--allow-dirty` | — | Allow audit on dirty git state (uncommitted changes) |
+
+**Profiles:**
+
+| Profile | Focus areas |
+|---------|-------------|
+| `standard` | General code quality, correctness, and maintainability |
+| `security` | Vulnerability patterns, injection risks, secrets exposure |
+| `ux` | User experience, accessibility, API ergonomics |
+| `architecture` | System design, coupling, extensibility |
+| `full` | All focus areas combined |
+
+**Note:** This is a read-only audit. It does not modify source code, create branches, or write to the codebase.
+
+**No-args behavior:** prints a usage string. The command never throws on bad input.
+
 ### `/swarm issue <issue-url|owner/repo#N|N> [--plan] [--trace] [--no-repro]`
 
 Ingest a GitHub issue into the swarm workflow for root-cause localization and resolution spec generation.

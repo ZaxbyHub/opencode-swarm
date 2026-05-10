@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.13.1",
+    version: "7.13.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -46059,6 +46059,118 @@ var init_dark_matter = __esm(() => {
   init_co_change_analyzer();
 });
 
+// src/commands/deep-dive.ts
+function sanitizeScope(raw) {
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  const stripped = collapsed.replace(/\[\s*MODE\s*:[^\]]*\]/gi, "");
+  const normalized = stripped.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_SCOPE_LEN)
+    return normalized;
+  return `${normalized.slice(0, MAX_SCOPE_LEN)}…`;
+}
+function isValidPositiveInteger(raw) {
+  if (!raw || !/^\d+$/.test(raw))
+    return false;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0)
+    return false;
+  return true;
+}
+function parseArgs2(args2) {
+  const result = {
+    profile: DEFAULT_PROFILE,
+    maxExplorers: DEFAULT_MAX_EXPLORERS,
+    output: "markdown",
+    updateMain: true,
+    allowDirty: false,
+    rest: []
+  };
+  let i2 = 0;
+  while (i2 < args2.length) {
+    const token = args2[i2];
+    if (token === "--profile") {
+      if (i2 + 1 >= args2.length) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args2[++i2];
+      if (!PROFILES.has(value)) {
+        return {
+          ...result,
+          error: `Invalid profile "${value}". Must be one of: standard, security, ux, architecture, full.`
+        };
+      }
+      result.profile = value;
+    } else if (token === "--max-explorers") {
+      if (i2 + 1 >= args2.length) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args2[++i2];
+      if (!isValidPositiveInteger(value) || value.includes(".") || value.startsWith("0x") || value.startsWith("0X") || Number(value) < 1 || Number(value) > 8) {
+        return {
+          ...result,
+          error: `Invalid --max-explorers value "${value}". Must be an integer between 1 and 8.`
+        };
+      }
+      result.maxExplorers = Number(value);
+      result.maxExplorersExplicit = true;
+    } else if (token === "--json") {
+      result.output = "json";
+    } else if (token === "--skip-update") {
+      result.updateMain = false;
+    } else if (token === "--allow-dirty") {
+      result.allowDirty = true;
+    } else if (token.startsWith("--")) {
+      return { ...result, error: `Unknown flag "${token}"` };
+    } else {
+      result.rest.push(token);
+    }
+    i2++;
+  }
+  return result;
+}
+async function handleDeepDiveCommand(_directory, args2) {
+  const parsed = parseArgs2(args2);
+  if (parsed.error) {
+    return `Error: ${parsed.error}
+
+${USAGE2}`;
+  }
+  const scope = sanitizeScope(parsed.rest.join(" "));
+  if (!scope) {
+    return USAGE2;
+  }
+  if (parsed.profile === "full" && !parsed.maxExplorersExplicit) {
+    parsed.maxExplorers = FULL_PROFILE_DEFAULT_MAX_EXPLORERS;
+  }
+  const header = `[MODE: DEEP_DIVE profile=${parsed.profile} max_explorers=${parsed.maxExplorers} output=${parsed.output} update_main=${parsed.updateMain} allow_dirty=${parsed.allowDirty}] ${scope}`;
+  return header;
+}
+var MAX_SCOPE_LEN = 2000, PROFILES, DEFAULT_PROFILE = "standard", DEFAULT_MAX_EXPLORERS = 6, FULL_PROFILE_DEFAULT_MAX_EXPLORERS = 8, USAGE2 = `Usage: /swarm deep-dive <scope> [--profile standard|security|ux|architecture|full] [--max-explorers N] [--json] [--skip-update] [--allow-dirty]
+
+Run a bounded, evidence-backed deep dive on an application section.
+
+Examples:
+  /swarm deep-dive auth
+  /swarm deep dive src/commands --profile architecture
+  /swarm deep-dive "settings page" --profile ux
+  /swarm deep-dive src/security --profile security --max-explorers 5
+
+Flags:
+  --profile <name>       standard, security, ux, architecture, or full
+  --max-explorers <N>    explorer runs per wave, 1..8
+  --json                 include machine-readable JSON in the final report
+  --skip-update          skip the repo update-to-main preflight
+  --allow-dirty          allow audit to proceed with dirty worktree`;
+var init_deep_dive = __esm(() => {
+  PROFILES = new Set([
+    "standard",
+    "security",
+    "ux",
+    "architecture",
+    "full"
+  ]);
+});
+
 // src/config/cache-paths.ts
 import * as os5 from "node:os";
 import * as path25 from "node:path";
@@ -51013,7 +51125,7 @@ function validateAndSanitizeUrl(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs2(args2) {
+function parseArgs3(args2) {
   const out2 = {
     plan: false,
     trace: false,
@@ -51104,24 +51216,24 @@ function parseGitRemoteUrl(remoteUrl) {
   return null;
 }
 function handleIssueCommand(_directory, args2) {
-  const parsed = parseArgs2(args2);
+  const parsed = parseArgs3(args2);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE2;
+    return USAGE3;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const issueInfo = parseIssueRef(isFullUrl ? sanitizeUrl(rawInput) : rawInput);
   if (!issueInfo) {
     return `Error: Could not parse issue reference from "${rawInput}"
 
-${USAGE2}`;
+${USAGE3}`;
   }
   const issueUrl = `https://github.com/${issueInfo.owner}/${issueInfo.repo}/issues/${issueInfo.number}`;
   const result = validateAndSanitizeUrl(issueUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE2}`;
+${USAGE3}`;
   }
   const flags2 = [];
   if (parsed.plan)
@@ -51133,9 +51245,9 @@ ${USAGE2}`;
   const flagsStr = flags2.length > 0 ? ` ${flags2.join(" ")}` : "";
   return `[MODE: ISSUE_INGEST issue="${result.sanitized}"${flagsStr}]`;
 }
-var MAX_URL_LEN = 2048, USAGE2;
+var MAX_URL_LEN = 2048, USAGE3;
 var init_issue = __esm(() => {
-  USAGE2 = [
+  USAGE3 = [
     "Usage: /swarm issue <url|owner/repo#N|N> [--plan] [--trace] [--no-repro]",
     "",
     "Ingest a GitHub issue into the swarm workflow.",
@@ -51752,7 +51864,7 @@ function validateAndSanitizeUrl2(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs3(args2) {
+function parseArgs4(args2) {
   const out2 = { council: false, rest: [] };
   for (const token of args2) {
     if (token === "--council") {
@@ -51836,31 +51948,31 @@ function parseGitRemoteUrl2(remoteUrl) {
   return null;
 }
 function handlePrReviewCommand(_directory, args2) {
-  const parsed = parseArgs3(args2);
+  const parsed = parseArgs4(args2);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE3;
+    return USAGE4;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const prInfo = parsePrRef(isFullUrl ? sanitizeUrl2(rawInput) : rawInput);
   if (!prInfo) {
     return `Error: Could not parse PR reference from "${rawInput}"
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const prUrl = `https://github.com/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.number}`;
   const result = validateAndSanitizeUrl2(prUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const councilFlag = parsed.council ? "council=true" : "council=false";
   return `[MODE: PR_REVIEW pr="${result.sanitized}" ${councilFlag}]`;
 }
-var MAX_URL_LEN2 = 2048, USAGE3;
+var MAX_URL_LEN2 = 2048, USAGE4;
 var init_pr_review = __esm(() => {
-  USAGE3 = [
+  USAGE4 = [
     "Usage: /swarm pr-review <url|owner/repo#N|N> [--council]",
     "",
     "Run a full swarm PR review on a GitHub pull request.",
@@ -57590,6 +57702,7 @@ __export(exports_commands, {
   handleEvidenceCommand: () => handleEvidenceCommand,
   handleDoctorCommand: () => handleDoctorCommand,
   handleDiagnoseCommand: () => handleDiagnoseCommand,
+  handleDeepDiveCommand: () => handleDeepDiveCommand,
   handleDarkMatterCommand: () => handleDarkMatterCommand,
   handleCurateCommand: () => handleCurateCommand,
   handleCouncilCommand: () => handleCouncilCommand,
@@ -57793,6 +57906,7 @@ var init_commands = __esm(() => {
   init_council();
   init_curate();
   init_dark_matter();
+  init_deep_dive();
   init_diagnose();
   init_doctor();
   init_evidence();
@@ -58010,6 +58124,7 @@ var init_registry = __esm(() => {
   init_council();
   init_curate();
   init_dark_matter();
+  init_deep_dive();
   init_diagnose();
   init_doctor();
   init_evidence();
@@ -58288,6 +58403,20 @@ var init_registry = __esm(() => {
       args: "<pr-url|owner/repo#N|N> [--council]",
       details: "Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).",
       category: "agent"
+    },
+    "deep-dive": {
+      handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+      description: "Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]",
+      args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]",
+      details: "Runs a read-only deep audit of the specified scope using parallel explorer waves (8-file cap per mission, ~3500 line guardrail), always 2 parallel reviewers for verification, and sequential critic challenge on HIGH/CRITICAL findings. Profiles select explorer lanes: standard (5 lanes), security, ux, architecture, full (all 8 lanes). Emits a structured findings report without mutating source code.",
+      category: "agent"
+    },
+    "deep dive": {
+      handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+      description: "Alias for /swarm deep-dive — launch deep codebase audit",
+      args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]",
+      category: "agent",
+      aliasOf: "deep-dive"
     },
     issue: {
       handler: async (ctx) => handleIssueCommand(ctx.directory, ctx.args),
@@ -59785,7 +59914,130 @@ Do NOT share other agents' responses at this stage.
    - CITE THE STRONGEST SOURCES: link key claims with [title](url) format from the source list in the synthesis. Pick the most reputable source per claim; do not cite duplicates.
    - BE CONCISE: a few short paragraphs plus a bulleted summary. Expand only when the question genuinely requires it.
    - HARD CONSTRAINTS: You MUST NOT invent claims not present in the council's responses. You MUST NOT add new web research. You MUST NOT favor a position based on confidence alone.
-   Preface the answer with one line listing the participating models (reviewer model as generalist, critic model as skeptic, SME model as domain expert). Do NOT present raw per-member JSON.
+    Preface the answer with one line listing the participating models (reviewer model as generalist, critic model as skeptic, SME model as domain expert). Do NOT present raw per-member JSON.
+
+### MODE: DEEP_DIVE
+Activates when: architect receives \`[MODE: DEEP_DIVE profile=X max_explorers=N output=X update_main=X allow_dirty=X] <scope>\` signal from the deep-dive command handler.
+
+Purpose: Perform a read-only deep audit of the specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
+
+#### STEP 0 — PARSE HEADER
+Parse the MODE: DEEP_DIVE header to extract:
+- \`scope\`: the codebase area to audit (e.g., "auth", "payment flow", "src/hooks/")
+- \`profile\`: one of standard | security | ux | architecture | full (default: standard)
+- \`max_explorers\`: integer 1..8 (default: 6, or 8 for full profile)
+- \`output\`: markdown | json (default: markdown)
+- \`update_main\`: boolean (default: true) — whether to fetch/ff-only main before starting
+- \`allow_dirty\`: boolean (default: false) — whether to proceed with uncommitted changes
+
+If the header is malformed or missing required fields, report the error and stop.
+
+#### STEP 1 — REPO READINESS
+1. Check git working tree status. If dirty and \`allow_dirty\` is false, warn the user and ask whether to proceed. Do NOT proceed automatically.
+2. If \`update_main\` is true and tree is clean: \`git fetch origin main && git checkout main && git merge --ff-only origin/main\`. If ff-only fails, warn the user and ask before proceeding.
+3. Record the current HEAD commit hash for the report.
+
+#### STEP 2 — SCOPE RESOLUTION
+Use the following tools to map the audit scope:
+1. \`repo_map\` with action "build" to establish the code graph
+2. \`repo_map\` with action "localization" for the scope target
+3. \`symbols\` and \`batch_symbols\` on key files identified by localization
+4. \`imports\` to trace dependency boundaries
+5. \`doc_scan\` if documentation coverage is relevant
+6. \`knowledge_recall\` with query matching the scope domain
+
+Produce a SCOPE MAP: list of files, modules, and interfaces within the audit boundary. Cap at 50 files total.
+
+#### STEP 3 — EXPLORER MISSIONS (Parallel Waves)
+Dispatch explorer waves using parallel Task calls. Each wave contains up to \`max_explorers\` missions.
+
+**File caps per mission:**
+- 8 files maximum per mission
+- ~3500 total lines across all files in a mission
+- Group files by import proximity (files that import each other go in the same mission)
+
+**Profile-based lane selection — each profile activates specific lanes:**
+
+| Lane | Template | standard | security | ux | architecture | full |
+|------|----------|----------|----------|----|-------------|------|
+| SCOPE_MAP | Map structure, exports, boundaries | ✓ | ✓ | ✓ | ✓ | ✓ |
+| WIRING_DATAFLOW | Trace data flow, API contracts, state propagation | ✓ | ✓ | | ✓ | ✓ |
+| RUNTIME_BEHAVIOR | Error handling, edge cases, lifecycle, async patterns | ✓ | | | ✓ | ✓ |
+| UX_FLOW | User-facing behavior, accessibility, responsiveness | | | ✓ | | ✓ |
+| SECURITY_TRUST | Auth boundaries, input validation, trust transitions | | ✓ | | | ✓ |
+| TEST_COVERAGE | Coverage gaps, flaky tests, missing assertions | ✓ | | | | ✓ |
+| PERFORMANCE_RELIABILITY | Resource leaks, N+1 queries, race conditions | | | | ✓ | ✓ |
+| DOCS_CONFIG_DEPLOYMENT | Config consistency, docs accuracy, deployment drift | | | | | ✓ |
+
+Each explorer mission receives:
+- Lane template name and description
+- Assigned files (8 max, grouped by import proximity)
+- The scope map context from Step 2
+- Instruction: "You are performing a [LANE] audit. Report findings as candidate observations with severity (INFO/LOW/MEDIUM/HIGH/CRITICAL), location, and evidence."
+
+Explorer missions are dispatched in parallel waves. Wait for ALL missions in a wave to complete before dispatching the next wave.
+
+Explorers generate CANDIDATE FINDINGS only — they do NOT make verdicts. All findings are unverified until Step 5.
+
+#### STEP 4 — NORMALIZE CANDIDATES
+1. Collect all candidate findings from all explorer missions.
+2. Deduplicate: merge findings that reference the same location and issue.
+3. Assign DD-C001 through DD-CNNN identifiers to unique findings.
+4. Cap at 10 findings per shard (see Step 5 for sharding).
+5. Sort by severity (CRITICAL → HIGH → MEDIUM → LOW → INFO).
+
+#### STEP 5 — ALWAYS 2 PARALLEL REVIEWERS
+Split the verified candidates into 2 shards of ≤10 candidates each. Dispatch 2 parallel \`{{AGENT_PREFIX}}reviewer\` calls.
+
+Each reviewer receives:
+- Their shard of candidates (up to 10)
+- The scope map context
+- The original scope description
+- Instruction: "Verify or reject each candidate finding. For each: verdict (VERIFIED / REJECTED / NEEDS_MORE_EVIDENCE), confidence (0-1), and brief reasoning."
+
+Reviewers MUST NOT suggest fixes — they verify findings only.
+
+#### STEP 5b — REVIEWER MERGE/DEDUP
+After both reviewers return, perform a lightweight sync pass:
+1. Cross-reference findings between reviewers — flag correlations
+2. Deduplicate any findings both reviewers verified independently
+3. For NEEDS_MORE_EVIDENCE findings: if the other reviewer verified a related finding, merge
+4. Produce a unified findings list with verified/rejected status
+
+#### STEP 6 — CRITIC CHALLENGE (HIGH/CRITICAL only)
+For verified findings rated HIGH or CRITICAL, dispatch sequential critic passes:
+
+**Pass 1 — False-positive / root-cause challenge:**
+- \`{{AGENT_PREFIX}}critic\` receives each HIGH/CRITICAL finding
+- Challenge: "Is this a false positive? Is the root cause correctly identified? Provide verdict: SURVIVES / DOWNGRADE / REJECT"
+- Only findings that SURVIVE proceed to Pass 2
+
+**Pass 2 — Impact / severity challenge:**
+- \`{{AGENT_PREFIX}}critic\` receives surviving findings
+- Challenge: "Is the severity correctly rated? Could this be lower impact than claimed? Provide verdict: SURVIVES / DOWNGRADE / REJECT"
+- Final severity is the critic's assessed severity
+
+CRITICAL: Do NOT challenge MEDIUM/LOW/INFO findings. Only HIGH and CRITICAL go through critic review.
+
+#### STEP 7 — FINAL REPORT
+Assemble and present the audit report:
+
+1. **Wiring Map**: Visual summary of the scope's module structure and data flow
+2. **Functionality Assessment**: High-level summary of what the scope does and how well
+3. **Verified Findings Table**: DD-ID, severity, location, description, evidence
+4. **Rejected Candidates**: Brief list with rejection reasons
+5. **Enhancements**: Non-blocking improvement suggestions
+6. **Recommended Implementation Phases**: If findings suggest follow-up work, outline phases
+7. **JSON Block** (when output=json): Structured machine-readable findings
+
+IMPORTANT CONSTRAINTS for MODE: DEEP_DIVE:
+- Do NOT mutate source code under any circumstances
+- Do NOT delegate to coder
+- Do NOT call declare_scope
+- Do NOT create or modify any files outside .swarm/
+- No final finding may appear in the report without reviewer verification
+- Explorers generate candidate findings only — reviewers verify or reject
+- Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
 
 ### MODE: ISSUE_INGEST
 Activates when: user invokes \`/swarm issue <url>\`; OR architect receives \`[MODE: ISSUE_INGEST issue="<url>"]\` signal.
@@ -98221,6 +98473,10 @@ async function initializeOpenCodeSwarm(ctx) {
         "swarm-pr-review": {
           template: "/swarm pr-review $ARGUMENTS",
           description: "Use /swarm pr-review to launch deep PR review with multi-lane analysis"
+        },
+        "swarm-deep-dive": {
+          template: "/swarm deep-dive $ARGUMENTS",
+          description: "Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge"
         },
         "swarm-issue": {
           template: "/swarm issue $ARGUMENTS",

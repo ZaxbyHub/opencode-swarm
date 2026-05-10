@@ -293,6 +293,20 @@ export declare const COMMAND_REGISTRY: {
         readonly details: "Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).";
         readonly category: "agent";
     };
+    readonly 'deep-dive': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]";
+        readonly args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]";
+        readonly details: "Runs a read-only deep audit of the specified scope using parallel explorer waves (8-file cap per mission, ~3500 line guardrail), always 2 parallel reviewers for verification, and sequential critic challenge on HIGH/CRITICAL findings. Profiles select explorer lanes: standard (5 lanes), security, ux, architecture, full (all 8 lanes). Emits a structured findings report without mutating source code.";
+        readonly category: "agent";
+    };
+    readonly 'deep dive': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Alias for /swarm deep-dive — launch deep codebase audit";
+        readonly args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]";
+        readonly category: "agent";
+        readonly aliasOf: "deep-dive";
+    };
     readonly issue: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Ingest a GitHub issue into the swarm workflow [url] [--plan] [--trace] [--no-repro]";

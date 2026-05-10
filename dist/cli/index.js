@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.13.1",
+    version: "7.13.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -37549,6 +37549,118 @@ var init_dark_matter = __esm(() => {
   init_co_change_analyzer();
 });
 
+// src/commands/deep-dive.ts
+function sanitizeScope(raw) {
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  const stripped = collapsed.replace(/\[\s*MODE\s*:[^\]]*\]/gi, "");
+  const normalized = stripped.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_SCOPE_LEN)
+    return normalized;
+  return `${normalized.slice(0, MAX_SCOPE_LEN)}\u2026`;
+}
+function isValidPositiveInteger(raw) {
+  if (!raw || !/^\d+$/.test(raw))
+    return false;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0)
+    return false;
+  return true;
+}
+function parseArgs2(args) {
+  const result = {
+    profile: DEFAULT_PROFILE,
+    maxExplorers: DEFAULT_MAX_EXPLORERS,
+    output: "markdown",
+    updateMain: true,
+    allowDirty: false,
+    rest: []
+  };
+  let i = 0;
+  while (i < args.length) {
+    const token = args[i];
+    if (token === "--profile") {
+      if (i + 1 >= args.length) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args[++i];
+      if (!PROFILES.has(value)) {
+        return {
+          ...result,
+          error: `Invalid profile "${value}". Must be one of: standard, security, ux, architecture, full.`
+        };
+      }
+      result.profile = value;
+    } else if (token === "--max-explorers") {
+      if (i + 1 >= args.length) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args[++i];
+      if (!isValidPositiveInteger(value) || value.includes(".") || value.startsWith("0x") || value.startsWith("0X") || Number(value) < 1 || Number(value) > 8) {
+        return {
+          ...result,
+          error: `Invalid --max-explorers value "${value}". Must be an integer between 1 and 8.`
+        };
+      }
+      result.maxExplorers = Number(value);
+      result.maxExplorersExplicit = true;
+    } else if (token === "--json") {
+      result.output = "json";
+    } else if (token === "--skip-update") {
+      result.updateMain = false;
+    } else if (token === "--allow-dirty") {
+      result.allowDirty = true;
+    } else if (token.startsWith("--")) {
+      return { ...result, error: `Unknown flag "${token}"` };
+    } else {
+      result.rest.push(token);
+    }
+    i++;
+  }
+  return result;
+}
+async function handleDeepDiveCommand(_directory, args) {
+  const parsed = parseArgs2(args);
+  if (parsed.error) {
+    return `Error: ${parsed.error}
+
+${USAGE2}`;
+  }
+  const scope = sanitizeScope(parsed.rest.join(" "));
+  if (!scope) {
+    return USAGE2;
+  }
+  if (parsed.profile === "full" && !parsed.maxExplorersExplicit) {
+    parsed.maxExplorers = FULL_PROFILE_DEFAULT_MAX_EXPLORERS;
+  }
+  const header = `[MODE: DEEP_DIVE profile=${parsed.profile} max_explorers=${parsed.maxExplorers} output=${parsed.output} update_main=${parsed.updateMain} allow_dirty=${parsed.allowDirty}] ${scope}`;
+  return header;
+}
+var MAX_SCOPE_LEN = 2000, PROFILES, DEFAULT_PROFILE = "standard", DEFAULT_MAX_EXPLORERS = 6, FULL_PROFILE_DEFAULT_MAX_EXPLORERS = 8, USAGE2 = `Usage: /swarm deep-dive <scope> [--profile standard|security|ux|architecture|full] [--max-explorers N] [--json] [--skip-update] [--allow-dirty]
+
+Run a bounded, evidence-backed deep dive on an application section.
+
+Examples:
+  /swarm deep-dive auth
+  /swarm deep dive src/commands --profile architecture
+  /swarm deep-dive "settings page" --profile ux
+  /swarm deep-dive src/security --profile security --max-explorers 5
+
+Flags:
+  --profile <name>       standard, security, ux, architecture, or full
+  --max-explorers <N>    explorer runs per wave, 1..8
+  --json                 include machine-readable JSON in the final report
+  --skip-update          skip the repo update-to-main preflight
+  --allow-dirty          allow audit to proceed with dirty worktree`;
+var init_deep_dive = __esm(() => {
+  PROFILES = new Set([
+    "standard",
+    "security",
+    "ux",
+    "architecture",
+    "full"
+  ]);
+});
+
 // src/config/cache-paths.ts
 import * as os5 from "os";
 import * as path18 from "path";
@@ -42326,7 +42438,7 @@ function validateAndSanitizeUrl(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs2(args) {
+function parseArgs3(args) {
   const out = {
     plan: false,
     trace: false,
@@ -42417,24 +42529,24 @@ function parseGitRemoteUrl(remoteUrl) {
   return null;
 }
 function handleIssueCommand(_directory, args) {
-  const parsed = parseArgs2(args);
+  const parsed = parseArgs3(args);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE2;
+    return USAGE3;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const issueInfo = parseIssueRef(isFullUrl ? sanitizeUrl(rawInput) : rawInput);
   if (!issueInfo) {
     return `Error: Could not parse issue reference from "${rawInput}"
 
-${USAGE2}`;
+${USAGE3}`;
   }
   const issueUrl = `https://github.com/${issueInfo.owner}/${issueInfo.repo}/issues/${issueInfo.number}`;
   const result = validateAndSanitizeUrl(issueUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE2}`;
+${USAGE3}`;
   }
   const flags = [];
   if (parsed.plan)
@@ -42446,9 +42558,9 @@ ${USAGE2}`;
   const flagsStr = flags.length > 0 ? ` ${flags.join(" ")}` : "";
   return `[MODE: ISSUE_INGEST issue="${result.sanitized}"${flagsStr}]`;
 }
-var MAX_URL_LEN = 2048, USAGE2;
+var MAX_URL_LEN = 2048, USAGE3;
 var init_issue = __esm(() => {
-  USAGE2 = [
+  USAGE3 = [
     "Usage: /swarm issue <url|owner/repo#N|N> [--plan] [--trace] [--no-repro]",
     "",
     "Ingest a GitHub issue into the swarm workflow.",
@@ -43065,7 +43177,7 @@ function validateAndSanitizeUrl2(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs3(args) {
+function parseArgs4(args) {
   const out = { council: false, rest: [] };
   for (const token of args) {
     if (token === "--council") {
@@ -43149,31 +43261,31 @@ function parseGitRemoteUrl2(remoteUrl) {
   return null;
 }
 function handlePrReviewCommand(_directory, args) {
-  const parsed = parseArgs3(args);
+  const parsed = parseArgs4(args);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE3;
+    return USAGE4;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const prInfo = parsePrRef(isFullUrl ? sanitizeUrl2(rawInput) : rawInput);
   if (!prInfo) {
     return `Error: Could not parse PR reference from "${rawInput}"
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const prUrl = `https://github.com/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.number}`;
   const result = validateAndSanitizeUrl2(prUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const councilFlag = parsed.council ? "council=true" : "council=false";
   return `[MODE: PR_REVIEW pr="${result.sanitized}" ${councilFlag}]`;
 }
-var MAX_URL_LEN2 = 2048, USAGE3;
+var MAX_URL_LEN2 = 2048, USAGE4;
 var init_pr_review = __esm(() => {
-  USAGE3 = [
+  USAGE4 = [
     "Usage: /swarm pr-review <url|owner/repo#N|N> [--council]",
     "",
     "Run a full swarm PR review on a GitHub pull request.",
@@ -48578,6 +48690,7 @@ __export(exports_commands, {
   handleEvidenceCommand: () => handleEvidenceCommand,
   handleDoctorCommand: () => handleDoctorCommand,
   handleDiagnoseCommand: () => handleDiagnoseCommand,
+  handleDeepDiveCommand: () => handleDeepDiveCommand,
   handleDarkMatterCommand: () => handleDarkMatterCommand,
   handleCurateCommand: () => handleCurateCommand,
   handleCouncilCommand: () => handleCouncilCommand,
@@ -48781,6 +48894,7 @@ var init_commands = __esm(() => {
   init_council();
   init_curate();
   init_dark_matter();
+  init_deep_dive();
   init_diagnose();
   init_doctor();
   init_evidence();
@@ -48998,6 +49112,7 @@ var init_registry = __esm(() => {
   init_council();
   init_curate();
   init_dark_matter();
+  init_deep_dive();
   init_diagnose();
   init_doctor();
   init_evidence();
@@ -49276,6 +49391,20 @@ var init_registry = __esm(() => {
       args: "<pr-url|owner/repo#N|N> [--council]",
       details: "Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).",
       category: "agent"
+    },
+    "deep-dive": {
+      handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+      description: "Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]",
+      args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]",
+      details: "Runs a read-only deep audit of the specified scope using parallel explorer waves (8-file cap per mission, ~3500 line guardrail), always 2 parallel reviewers for verification, and sequential critic challenge on HIGH/CRITICAL findings. Profiles select explorer lanes: standard (5 lanes), security, ux, architecture, full (all 8 lanes). Emits a structured findings report without mutating source code.",
+      category: "agent"
+    },
+    "deep dive": {
+      handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+      description: "Alias for /swarm deep-dive \u2014 launch deep codebase audit",
+      args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]",
+      category: "agent",
+      aliasOf: "deep-dive"
     },
     issue: {
       handler: async (ctx) => handleIssueCommand(ctx.directory, ctx.args),

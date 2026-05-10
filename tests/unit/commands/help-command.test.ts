@@ -42,6 +42,13 @@ describe('handleHelpCommand() — Task 2.3 changes', () => {
 			expect(result).toContain('### Utility');
 		});
 
+		test('returns full help with deep-dive in Agent category', async () => {
+			const ctx: CommandContext = { ...baseCtx, args: [] };
+			const result = await handleHelpCommand(ctx);
+			// deep-dive should appear in the Agent section
+			expect(result).toContain('/swarm deep-dive');
+		});
+
 		test('returns full help with all top-level commands listed', async () => {
 			const ctx: CommandContext = { ...baseCtx, args: [] };
 			const result = await handleHelpCommand(ctx);

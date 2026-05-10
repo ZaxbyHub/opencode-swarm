@@ -12,6 +12,7 @@ import { handleConfigCommand } from './config.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
+import { handleDeepDiveCommand } from './deep-dive.js';
 import { handleDiagnoseCommand } from './diagnose.js';
 import { handleDoctorCommand, handleDoctorToolsCommand } from './doctor.js';
 import {
@@ -523,6 +524,22 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
+	},
+	'deep-dive': {
+		handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+		description:
+			'Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]',
+		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
+		details:
+			'Runs a read-only deep audit of the specified scope using parallel explorer waves (8-file cap per mission, ~3500 line guardrail), always 2 parallel reviewers for verification, and sequential critic challenge on HIGH/CRITICAL findings. Profiles select explorer lanes: standard (5 lanes), security, ux, architecture, full (all 8 lanes). Emits a structured findings report without mutating source code.',
+		category: 'agent',
+	},
+	'deep dive': {
+		handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+		description: 'Alias for /swarm deep-dive — launch deep codebase audit',
+		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
+		category: 'agent',
+		aliasOf: 'deep-dive',
 	},
 	issue: {
 		handler: async (ctx) => handleIssueCommand(ctx.directory, ctx.args),

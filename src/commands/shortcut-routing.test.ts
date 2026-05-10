@@ -323,6 +323,25 @@ describe('swarm-* shortcut command routing', () => {
 			// Must NOT fall through to generic help text
 			expect(text).not.toContain('## Swarm Commands');
 		});
+
+		it('routes swarm-deep-dive shortcut (not help text)', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const output = { parts: [] as unknown[] };
+
+			await handler(
+				{
+					command: 'swarm-deep-dive',
+					arguments: '',
+					sessionID: sessionId,
+				},
+				output,
+			);
+
+			expect(output.parts).toHaveLength(1);
+			const text = (output.parts[0] as { text: string }).text;
+			// Must NOT fall through to generic help text
+			expect(text).not.toContain('## Swarm Commands');
+		});
 	});
 
 	describe('swarm-* shortcut with unknown subcommand shows help', () => {
