@@ -59934,7 +59934,7 @@ If the header is malformed or missing required fields, report the error and stop
 
 #### STEP 1 — REPO READINESS
 1. Check git working tree status. If dirty and \`allow_dirty\` is false, warn the user and ask whether to proceed. Do NOT proceed automatically.
-2. If \`update_main\` is true and tree is clean: \`git fetch origin main && git checkout main && git merge --ff-only origin/main\`. If ff-only fails, warn the user and ask before proceeding.
+2. If \`update_main\` is true and tree is clean: check current branch. If not on \`main\`, report current branch to user and ASK FOR CONFIRMATION before switching. Only after explicit user approval: \`git fetch origin main && git checkout main && git merge --ff-only origin/main\`. If ff-only fails, warn the user and ask before proceeding.
 3. Record the current HEAD commit hash for the report.
 
 #### STEP 2 — SCOPE RESOLUTION
