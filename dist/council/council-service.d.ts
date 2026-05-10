@@ -15,7 +15,7 @@ export declare function synthesizeCouncilVerdicts(taskId: string, swarmId: strin
  * Reuses the same veto detection, conflict detection, and finding
  * classification logic as per-task council, but scoped to a phase number.
  *
- * Evidence is written to .swarm/evidence/{phase}/phase-council.json relative
- * to workingDir (or cwd).
+ * Pure computation — no I/O. File writes are the caller's responsibility
+ * (see writePhaseCouncilEvidence in submit-phase-council-verdicts.ts).
  */
-export declare function synthesizePhaseCouncilAdvisory(phaseNumber: number, phaseSummary: string, verdicts: CouncilMemberVerdict[], roundNumber: number, config?: Partial<CouncilConfig>, workingDir?: string): PhaseCouncilSynthesis;
+export declare function synthesizePhaseCouncilAdvisory(phaseNumber: number, phaseSummary: string, verdicts: CouncilMemberVerdict[], roundNumber: number, config?: Partial<CouncilConfig>, _workingDir?: string): PhaseCouncilSynthesis;

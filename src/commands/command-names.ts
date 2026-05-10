@@ -6,4 +6,6 @@ export const COMMAND_NAMES: readonly CommandName[] = Object.freeze(
 	Object.keys(COMMAND_REGISTRY) as CommandName[],
 );
 
-export const COMMAND_NAME_SET: ReadonlySet<CommandName> = new Set(COMMAND_NAMES);
+export const COMMAND_NAME_SET: ReadonlySet<CommandName> = new Set(
+	COMMAND_NAMES,
+);

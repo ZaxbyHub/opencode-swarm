@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.11.1",
+    version: "7.12.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -48776,6 +48776,7 @@ var init_commands = __esm(() => {
   init_benchmark();
   init_checkpoint2();
   init_close();
+  init_command_names();
   init_config2();
   init_council();
   init_curate();
@@ -48793,7 +48794,6 @@ var init_commands = __esm(() => {
   init_promote();
   init_qa_gates();
   init_registry();
-  init_command_names();
   init_registry();
   init_reset();
   init_reset_session();

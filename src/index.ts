@@ -900,8 +900,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				},
 				'swarm-plan': {
 					template: '/swarm plan $ARGUMENTS',
-					description:
-						'Deprecated alias for /swarm show-plan',
+					description: 'Deprecated alias for /swarm show-plan',
 				},
 				'swarm-agents': {
 					template: '/swarm agents',

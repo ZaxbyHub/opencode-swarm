@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { synthesizePhaseCouncilAdvisory } from '../../../src/council/council-service';
@@ -381,48 +381,32 @@ describe('synthesizePhaseCouncilAdvisory', () => {
 		});
 	});
 
-	describe('evidence file write', () => {
-		test('evidence file is created with correct schema', () => {
+	describe('return value', () => {
+		test('return value has correct schema for APPROVE verdict', () => {
 			const verdicts: CouncilMemberVerdict[] = [
 				makeVerdict('critic', 'APPROVE'),
 				makeVerdict('reviewer', 'APPROVE'),
 				makeVerdict('sme', 'APPROVE'),
 			];
 
-			synthesizePhaseCouncilAdvisory(
+			const result = synthesizePhaseCouncilAdvisory(
 				PHASE_NUMBER,
 				PHASE_SUMMARY,
 				verdicts,
 				1,
 				{},
-				tempDir,
 			);
 
-			const evidencePath = join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				String(PHASE_NUMBER),
-				'phase-council.json',
-			);
-			const content = readFileSync(evidencePath, 'utf-8');
-			const parsed = JSON.parse(content);
-
-			expect(parsed.entries).toBeDefined();
-			expect(Array.isArray(parsed.entries)).toBeTrue();
-			expect(parsed.entries.length).toBeGreaterThan(0);
-
-			const entry = parsed.entries[0];
-			expect(entry.type).toBe('phase-council');
-			expect(entry.phase_number).toBe(PHASE_NUMBER);
-			expect(entry.scope).toBe('phase');
-			expect(entry.verdict).toBe('APPROVE');
-			expect(entry.quorumSize).toBe(3);
-			expect(entry.timestamp).toBeDefined();
-			expect(typeof entry.timestamp).toBe('string');
+			expect(result.overallVerdict).toBe('APPROVE');
+			expect(result.quorumSize).toBe(3);
+			expect(result.phaseNumber).toBe(PHASE_NUMBER);
+			expect(result.scope).toBe('phase');
+			expect(result.timestamp).toBeDefined();
+			expect(typeof result.timestamp).toBe('string');
+			expect(result.vetoedBy).toBeNull();
 		});
 
-		test('evidence file contains requiredFixes when present', () => {
+		test('return value contains requiredFixes when present', () => {
 			const verdicts: CouncilMemberVerdict[] = [
 				makeVerdict('critic', 'REJECT', [
 					makeFinding('HIGH', 'src/bug.ts:1', 'Critical bug'),
@@ -431,63 +415,38 @@ describe('synthesizePhaseCouncilAdvisory', () => {
 				makeVerdict('sme', 'APPROVE'),
 			];
 
-			synthesizePhaseCouncilAdvisory(
+			const result = synthesizePhaseCouncilAdvisory(
 				PHASE_NUMBER,
 				PHASE_SUMMARY,
 				verdicts,
 				1,
 				{},
-				tempDir,
 			);
 
-			const evidencePath = join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				String(PHASE_NUMBER),
-				'phase-council.json',
-			);
-			const content = readFileSync(evidencePath, 'utf-8');
-			const parsed = JSON.parse(content);
-
-			const entry = parsed.entries[0];
-			expect(entry.requiredFixes).toBeDefined();
-			expect(Array.isArray(entry.requiredFixes)).toBeTrue();
-			expect(entry.requiredFixes.length).toBe(1);
-			expect(entry.requiredFixes[0].severity).toBe('HIGH');
-			expect(entry.requiredFixes[0].location).toBe('src/bug.ts:1');
+			expect(result.requiredFixes).toBeDefined();
+			expect(result.requiredFixes.length).toBe(1);
+			expect(result.requiredFixes[0].severity).toBe('HIGH');
+			expect(result.requiredFixes[0].location).toBe('src/bug.ts:1');
 		});
 
-		test('evidence file contains advisoryNotes with quorum warning', () => {
+		test('return value contains advisoryNotes with quorum warning', () => {
 			const verdicts: CouncilMemberVerdict[] = [
 				makeVerdict('critic', 'APPROVE'),
 				makeVerdict('reviewer', 'APPROVE'),
 			];
 
-			synthesizePhaseCouncilAdvisory(
+			const result = synthesizePhaseCouncilAdvisory(
 				PHASE_NUMBER,
 				PHASE_SUMMARY,
 				verdicts,
 				1,
 				{},
-				tempDir,
 			);
 
-			const evidencePath = join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				String(PHASE_NUMBER),
-				'phase-council.json',
-			);
-			const content = readFileSync(evidencePath, 'utf-8');
-			const parsed = JSON.parse(content);
-
-			const entry = parsed.entries[0];
-			expect(entry.advisoryNotes).toBeDefined();
-			expect(Array.isArray(entry.advisoryNotes)).toBeTrue();
+			expect(result.advisoryNotes).toBeDefined();
+			expect(Array.isArray(result.advisoryNotes)).toBeTrue();
 			expect(
-				entry.advisoryNotes.some((n: string) => n.includes('quorum')),
+				result.advisoryNotes.some((n) => n.includes('quorum')),
 			).toBeTrue();
 		});
 	});

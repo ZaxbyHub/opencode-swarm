@@ -202,8 +202,8 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				: getPhaseMutationGapFinding(input.phaseNumber, workingDir);
 			if (mutationGapFinding) {
 				addMutationGapFindingToSynthesis(synthesis, mutationGapFinding);
-				writePhaseCouncilEvidence(workingDir, synthesis);
 			}
+			writePhaseCouncilEvidence(workingDir, synthesis);
 
 			return JSON.stringify(
 				{
@@ -283,6 +283,17 @@ function getPhaseMutationGapFinding(
 					'Mutation gate reported WARN; mutation coverage may be insufficient.',
 				evidence:
 					'mutation-gate.json recorded verdict="warn" indicating below-pass mutation quality.',
+			};
+		}
+		if (gateEntry.verdict === 'fail') {
+			return {
+				severity: 'HIGH',
+				category: 'mutation_gap',
+				location: `.swarm/evidence/${phaseNumber}/mutation-gate.json`,
+				detail:
+					'Mutation gate reported FAIL; mutation testing quality is below the required threshold.',
+				evidence:
+					'mutation-gate.json recorded verdict="fail" indicating insufficient mutation kill rate.',
 			};
 		}
 		return null;

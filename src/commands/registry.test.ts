@@ -61,7 +61,9 @@ describe('CommandEntry type has new fields', () => {
 		expect(
 			(COMMAND_REGISTRY['status'] as CommandEntry).deprecated,
 		).toBeUndefined();
-		expect((COMMAND_REGISTRY['show-plan'] as CommandEntry).aliasOf).toBeUndefined();
+		expect(
+			(COMMAND_REGISTRY['show-plan'] as CommandEntry).aliasOf,
+		).toBeUndefined();
 		expect(
 			(COMMAND_REGISTRY['show-plan'] as CommandEntry).deprecated,
 		).toBeUndefined();

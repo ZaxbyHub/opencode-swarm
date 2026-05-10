@@ -9,8 +9,6 @@
  * sibling modules (criteria-store, council-evidence-writer).
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
 import type {
 	CouncilAgent,
 	CouncilConfig,
@@ -239,8 +237,8 @@ function buildUnifiedFeedback(
  * Reuses the same veto detection, conflict detection, and finding
  * classification logic as per-task council, but scoped to a phase number.
  *
- * Evidence is written to .swarm/evidence/{phase}/phase-council.json relative
- * to workingDir (or cwd).
+ * Pure computation — no I/O. File writes are the caller's responsibility
+ * (see writePhaseCouncilEvidence in submit-phase-council-verdicts.ts).
  */
 export function synthesizePhaseCouncilAdvisory(
 	phaseNumber: number,
@@ -248,7 +246,7 @@ export function synthesizePhaseCouncilAdvisory(
 	verdicts: CouncilMemberVerdict[],
 	roundNumber: number,
 	config: Partial<CouncilConfig> = {},
-	workingDir?: string,
+	_workingDir?: string,
 ): PhaseCouncilSynthesis {
 	const cfg: CouncilConfig = { ...COUNCIL_DEFAULTS, ...config };
 	const timestamp = new Date().toISOString();
@@ -326,60 +324,6 @@ export function synthesizePhaseCouncilAdvisory(
 
 	// ── Evidence path ───────────────────────────────────────────────────
 	const evidencePath = `.swarm/evidence/${phaseNumber}/phase-council.json`;
-
-	// ── Write evidence file ─────────────────────────────────────────────
-	const baseDir = workingDir ?? process.cwd();
-	const evidenceDir = path.join(
-		baseDir,
-		'.swarm',
-		'evidence',
-		String(phaseNumber),
-	);
-	fs.mkdirSync(evidenceDir, { recursive: true });
-	const evidenceFile = path.join(evidenceDir, 'phase-council.json');
-	const evidenceBundle = {
-		entries: [
-			{
-				type: 'phase-council',
-				phase_number: phaseNumber,
-				scope: 'phase',
-				timestamp,
-				verdict: overallVerdict,
-				quorumSize,
-				phaseSummary,
-				requiredFixes: requiredFixes.map((f) => ({
-					severity: f.severity,
-					category: f.category,
-					location: f.location,
-					detail: f.detail,
-					evidence: f.evidence,
-				})),
-				advisoryNotes,
-				advisoryFindings: advisoryFindings.map((f) => ({
-					severity: f.severity,
-					category: f.category,
-					location: f.location,
-					detail: f.detail,
-					evidence: f.evidence,
-				})),
-				roundNumber,
-				allCriteriaMet,
-			},
-		],
-	};
-	try {
-		const tempFile = `${evidenceFile}.tmp-${Date.now()}`;
-		fs.writeFileSync(
-			tempFile,
-			JSON.stringify(evidenceBundle, null, 2),
-			'utf-8',
-		);
-		fs.renameSync(tempFile, evidenceFile);
-	} catch (writeErr) {
-		console.warn(
-			`[phase-council] Failed to write phase-council evidence to ${evidenceFile}: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
-		);
-	}
 
 	return {
 		phaseNumber,
