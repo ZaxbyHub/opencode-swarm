@@ -7,9 +7,7 @@
       "Bash(git fetch *)",
       "Bash(git checkout *)",
       "Bash(git config *)",
-      "Bash(git -C \"C:\\\\ClaudeCode\\\\opencode-swarm\" log --oneline -5)",
-      "Bash(mkdir -p /home/user/opencode-swarm/.claude/session)",
-      "Bash(mkdir -p /home/user/opencode-swarm/.claude/issue-traces/808)"
+      "Bash(git -C \"C:\\\\ClaudeCode\\\\opencode-swarm\" log --oneline -5)"
     ]
   }
 }

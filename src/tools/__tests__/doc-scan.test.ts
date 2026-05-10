@@ -173,6 +173,30 @@ describe('scanDocIndex — symlink handling', () => {
 		expect(paths.some((p) => p.startsWith('loop/'))).toBe(false);
 		expect(paths).toContain('README.md');
 	});
+
+	test('does not index a symlink whose target lies outside the project root', async () => {
+		// /etc/hosts is a real file on Linux/macOS outside any tmpDir
+		const externalTarget = '/etc/hosts';
+		if (!fs.existsSync(externalTarget)) return; // skip on platforms without /etc/hosts
+
+		fs.mkdirSync(path.join(tmpDir, 'docs'), { recursive: true });
+		const linkPath = path.join(tmpDir, 'docs', 'outside.md');
+		try {
+			fs.symlinkSync(externalTarget, linkPath);
+		} catch {
+			return; // skip on platforms that disallow symlinks
+		}
+
+		mkfile('README.md', '# Real readme');
+
+		const { manifest } = await scanDocIndex(tmpDir);
+		const paths = manifest.files.map((f) => f.path);
+
+		// Symlink target is outside the project root — must not be indexed
+		expect(paths.some((p) => p.includes('outside.md'))).toBe(false);
+		// Real files are still indexed
+		expect(paths).toContain('README.md');
+	});
 });
 
 describe('scanDocIndex — error handling', () => {
@@ -187,6 +211,20 @@ describe('scanDocIndex — error handling', () => {
 		// Must NOT have written a manifest to disk (the directory doesn't exist)
 		const manifestFile = path.join(nonExistent, '.swarm', 'doc-manifest.json');
 		expect(fs.existsSync(manifestFile)).toBe(false);
+	});
+});
+
+describe('scanDocIndex — file cap', () => {
+	test('caps indexed files at MAX_INDEXED_FILES (100) and exits walk early', async () => {
+		// Create 105 docs matching docs/**/*.md — all would match without the cap
+		for (let i = 1; i <= 105; i++) {
+			mkfile(`docs/file${String(i).padStart(3, '0')}.md`, `# Doc ${i}`);
+		}
+
+		const { manifest } = await scanDocIndex(tmpDir);
+
+		// Must be capped at 100, not 105
+		expect(manifest.files.length).toBe(100);
 	});
 });
 

@@ -1,6 +1,13 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	stat,
+	writeFile,
+} from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { DocsConfigSchema } from '../config/schema.js';
@@ -233,6 +240,7 @@ export async function scanDocIndex(
 	// build output trees (bazel-out, bazel-bin, node_modules, target, etc.)
 	// are never traversed. This avoids the synchronous event-loop block that
 	// readdirSync({recursive:true}) causes in monorepos with millions of files.
+	const resolvedDirectory = await realpath(directory).catch(() => directory);
 	const discoveredFiles: DocManifestFile[] = [];
 	let rootReadable = false;
 
@@ -246,19 +254,30 @@ export async function scanDocIndex(
 		}
 
 		for (const entry of entries) {
+			// Stop processing as soon as the cap is reached — avoids stat-ing and
+			// reading files that will be discarded by the post-walk splice.
+			if (discoveredFiles.length >= MAX_INDEXED_FILES) return;
+
 			const isDir = entry.isDirectory();
 			let isFile = entry.isFile();
 
 			// Follow symlinks for files so symlinked docs are indexed, matching
 			// the old readdirSync({recursive:true}) + statSync behavior.
 			// Directory symlinks are intentionally NOT followed to avoid cycles.
+			// realpath() resolves the canonical target path and enforces that it
+			// stays inside the project root, preventing traversal to /etc/passwd etc.
 			if (entry.isSymbolicLink()) {
 				try {
-					const targetStat = await stat(path.join(dir, entry.name));
+					const symlinkPath = path.join(dir, entry.name);
+					const resolved = await realpath(symlinkPath);
+					const rel = path.relative(resolvedDirectory, resolved);
+					// Reject if the target escapes the project root
+					if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+					const targetStat = await stat(symlinkPath);
 					isFile = targetStat.isFile();
 					// isDir stays false — don't recurse into symlinked directories
 				} catch {
-					continue; // broken symlink — skip
+					continue; // broken symlink or unresolvable — skip
 				}
 			}
 
