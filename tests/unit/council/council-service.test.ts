@@ -445,9 +445,7 @@ describe('synthesizePhaseCouncilAdvisory', () => {
 
 			expect(result.advisoryNotes).toBeDefined();
 			expect(Array.isArray(result.advisoryNotes)).toBeTrue();
-			expect(
-				result.advisoryNotes.some((n) => n.includes('quorum')),
-			).toBeTrue();
+			expect(result.advisoryNotes.some((n) => n.includes('quorum'))).toBeTrue();
 		});
 	});
 
