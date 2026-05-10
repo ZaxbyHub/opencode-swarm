@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.13.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.1...v7.13.2) (2026-05-10)
+
+
+### Bug Fixes
+
+* **doc-scan:** replace blocking readdirSync with async pruning walk to prevent event-loop hang ([#814](https://github.com/zaxbysauce/opencode-swarm/issues/814)) ([4268c2d](https://github.com/zaxbysauce/opencode-swarm/commit/4268c2dda0244ba7f99cfd6fbf56b18cc6d7b575))
+
 ## [7.13.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.0...v7.13.1) (2026-05-10)
 
 
