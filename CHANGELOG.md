@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.14.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.2...v7.14.0) (2026-05-10)
+
+
+### Features
+
+* **commands:** add /swarm deep-dive read-only audit command ([#816](https://github.com/zaxbysauce/opencode-swarm/issues/816)) ([2d37304](https://github.com/zaxbysauce/opencode-swarm/commit/2d373044317e45f6eee0b9b94203281027d89048))
+
 ## [7.13.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.1...v7.13.2) (2026-05-10)
 
 
