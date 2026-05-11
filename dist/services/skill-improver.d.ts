@@ -40,6 +40,7 @@ export interface SkillImproveRequest {
     maxCalls?: number;
     now?: Date;
     sessionId?: string;
+    signal?: AbortSignal;
     /** Test-only seam: inject a delegate. When undefined, the service uses
      *  createSkillImproverLLMDelegate(directory, sessionId) which returns
      *  undefined unless swarmState.opencodeClient is wired. */

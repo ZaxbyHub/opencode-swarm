@@ -1,3 +1,11 @@
+interface CloseCommandOptions {
+    sessionID?: string;
+    skillReviewTimeoutMs?: number;
+}
+interface CloseKnowledgeEntry {
+    created_at?: string;
+}
+declare function countSessionKnowledgeEntries(entries: CloseKnowledgeEntry[], sessionStart: string | undefined, fallbackCount: number): number;
 /**
  * Handles /swarm close command - performs full terminal session finalization:
  * 0. Guarantee: mark all incomplete phases/tasks as closed
@@ -8,4 +16,9 @@
  *
  * Must be idempotent - safe to run multiple times.
  */
-export declare function handleCloseCommand(directory: string, args: string[]): Promise<string>;
+export declare function handleCloseCommand(directory: string, args: string[], options?: CloseCommandOptions): Promise<string>;
+export declare const _internals: {
+    countSessionKnowledgeEntries: typeof countSessionKnowledgeEntries;
+    CLOSE_SKILL_REVIEW_TIMEOUT_MS: number;
+};
+export {};

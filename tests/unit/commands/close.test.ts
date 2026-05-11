@@ -58,6 +58,47 @@ const mockArchiveEvidence = mock(async () => {});
 
 const mockFlushPendingSnapshot = mock(async () => {});
 
+const mockPromoteToHive = mock(
+	async (_dir: string, _lesson: string, _category: string) => {},
+);
+
+let forceSkillReviewConfigError = false;
+const mockLoadPluginConfigWithMeta = mock((_directory: string) => {
+	if (forceSkillReviewConfigError) throw new Error('bad config');
+	return {
+		config: {
+			skill_improver: {
+				enabled: true,
+				max_calls_per_day: 10,
+				trigger: 'manual',
+				targets: ['skills', 'spec', 'architect_prompt', 'knowledge'],
+				write_mode: 'proposal',
+				require_user_approval: true,
+				quota_window: 'utc',
+				allow_deterministic_fallback: true,
+			},
+		},
+		loadedFromFile: null,
+	};
+});
+
+const mockRunSkillImprover = mock(async () => ({
+	ran: true,
+	proposalPath: path.join(
+		testDir,
+		'.swarm',
+		'skill-improver',
+		'proposals',
+		'proposal.md',
+	),
+	source: 'deterministic_fallback',
+	quota: { date: '2026-05-11', calls_used: 1, max_calls: 10 },
+}));
+
+let forceSkillReviewTimeout = false;
+let observedSkillReviewSignal: AbortSignal | undefined;
+let observedSkillReviewAborted = false;
+
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
 }));
@@ -66,12 +107,41 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 	curateAndStoreSwarm: mockCurateAndStoreSwarm,
 }));
 
+mock.module('../../../src/hooks/hive-promoter.js', () => ({
+	promoteToHive: mockPromoteToHive,
+}));
+
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+}));
+
+mock.module('../../../src/config.js', () => ({
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+mock.module('../../../src/config/index.js', () => ({
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+mock.module('../../../src/services/skill-improver.js', () => ({
+	runSkillImprover: mock(async (req: { signal?: AbortSignal } = {}) => {
+		observedSkillReviewSignal = req.signal;
+		if (forceSkillReviewTimeout) {
+			req.signal?.addEventListener(
+				'abort',
+				() => {
+					observedSkillReviewAborted = true;
+				},
+				{ once: true },
+			);
+			return await new Promise<never>(() => {});
+		}
+		return await mockRunSkillImprover(req);
+	}),
 }));
 
 // Shared mock for swarmState + reset counter so tests can verify the full
@@ -90,6 +160,7 @@ const mockSwarmState = {
 	environmentProfiles: new Map(),
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
+	skillImproverAgentNames: [] as string[],
 };
 
 let resetSwarmStateCallCount = 0;
@@ -109,6 +180,7 @@ function mockResetSwarmState(): void {
 	mockSwarmState.environmentProfiles.clear();
 	mockSwarmState.curatorInitAgentNames = [];
 	mockSwarmState.curatorPhaseAgentNames = [];
+	mockSwarmState.skillImproverAgentNames = [];
 }
 
 mock.module('../../../src/state.js', () => ({
@@ -118,7 +190,9 @@ mock.module('../../../src/state.js', () => ({
 }));
 
 // Import after mock setup
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const { handleCloseCommand, _internals } = await import(
+	'../../../src/commands/close.js'
+);
 
 // ── DI Conversion Summary ────────────────────────────────────────────
 //
@@ -148,6 +222,13 @@ describe('handleCloseCommand', () => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
+		mockPromoteToHive.mockClear();
+		mockLoadPluginConfigWithMeta.mockClear();
+		mockRunSkillImprover.mockClear();
+		forceSkillReviewTimeout = false;
+		observedSkillReviewSignal = undefined;
+		observedSkillReviewAborted = false;
+		forceSkillReviewConfigError = false;
 		resetSwarmStateCallCount = 0;
 		// Re-seed the mock state for each test so reset assertions are isolated.
 		mockSwarmState.opencodeClient = {
@@ -159,6 +240,10 @@ describe('handleCloseCommand', () => {
 			'swarm2_curator_init',
 		];
 		mockSwarmState.curatorPhaseAgentNames = ['curator_phase'];
+		mockSwarmState.skillImproverAgentNames = [
+			'skill_improver',
+			'swarm2_skill_improver',
+		];
 		mockSwarmState.activeToolCalls.set('tool-a', { stale: true });
 		mockSwarmState.agentSessions.set('session-1', { stale: true });
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-command-test-'));
@@ -1565,6 +1650,192 @@ describe('handleCloseCommand', () => {
 				expect(mockSwarmState.curatorPhaseAgentNames).toEqual([
 					'curator_phase',
 				]);
+				expect(mockSwarmState.skillImproverAgentNames).toEqual([
+					'skill_improver',
+					'swarm2_skill_improver',
+				]);
+			});
+		});
+
+		// =====================================================================
+		// Group: Skill review hint and opt-in review (Issue #802)
+		// =====================================================================
+
+		describe('Skill review hint and opt-in review (Issue #802)', () => {
+			it('shows skill compilation hint when close curation stores knowledge entries', async () => {
+				mockCurateAndStoreSwarm.mockImplementationOnce(async () => ({
+					stored: 2,
+					skipped: 0,
+					rejected: 0,
+				}));
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Capture recurring test setup as a reusable skill\nCapture release note checklist',
+				);
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Skill Hint Test',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				const result = await handleCloseCommand(testDir, []);
+				const summary = readFileSync(
+					path.join(testDir, '.swarm', 'close-summary.md'),
+					'utf-8',
+				);
+
+				expect(result).toContain('2 knowledge entries created this session');
+				expect(result).toContain('skill_improve');
+				expect(result).toContain('skill_generate');
+				expect(summary).toContain('2 knowledge entries created this session');
+			});
+
+			it('does not show skill compilation hint when no knowledge entries were created', async () => {
+				mockCurateAndStoreSwarm.mockImplementationOnce(async () => ({
+					stored: 0,
+					skipped: 0,
+					rejected: 0,
+				}));
+
+				const result = await handleCloseCommand(testDir, []);
+				const summary = readFileSync(
+					path.join(testDir, '.swarm', 'close-summary.md'),
+					'utf-8',
+				);
+
+				expect(result).not.toContain('knowledge entries created this session');
+				expect(result).not.toContain('skill_improve');
+				expect(summary).not.toContain('knowledge entries created this session');
+			});
+
+			it('counts knowledge entries at and after session start while ignoring older and invalid timestamps', async () => {
+				mockSwarmState.agentSessions.set('session-1', {
+					lastAgentEventTime: Date.parse('2026-05-11T10:00:00.000Z'),
+				});
+				mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+				writeFileSync(
+					path.join(testDir, '.swarm', 'knowledge.jsonl'),
+					[
+						{
+							id: 'before',
+							lesson: 'Old lesson',
+							category: 'process',
+							created_at: '2026-05-11T09:59:59.999Z',
+						},
+						{
+							id: 'equal',
+							lesson: 'Boundary lesson',
+							category: 'process',
+							created_at: '2026-05-11T10:00:00.000Z',
+						},
+						{
+							id: 'after',
+							lesson: 'Fresh lesson',
+							category: 'process',
+							created_at: '2026-05-11T10:01:00.000Z',
+						},
+						{
+							id: 'invalid',
+							lesson: 'Invalid timestamp lesson',
+							category: 'process',
+							created_at: 'not-a-date',
+						},
+					]
+						.map((entry) => JSON.stringify(entry))
+						.join('\n'),
+				);
+
+				const result = await handleCloseCommand(testDir, []);
+
+				expect(result).toContain('2 knowledge entries created this session');
+			});
+
+			it('count helper falls back when session start is missing or invalid', () => {
+				const entries = [
+					{ created_at: '2026-05-11T10:00:00.000Z' },
+					{ created_at: '2026-05-11T10:01:00.000Z' },
+				];
+
+				expect(
+					_internals.countSessionKnowledgeEntries(entries, undefined, 4),
+				).toBe(4);
+				expect(
+					_internals.countSessionKnowledgeEntries(entries, 'not-a-date', 3),
+				).toBe(3);
+			});
+
+			it('does not call skill improver on the default close path', async () => {
+				await handleCloseCommand(testDir, []);
+
+				expect(mockRunSkillImprover).not.toHaveBeenCalled();
+			});
+
+			it('runs skill improver in proposal mode when --skill-review is passed', async () => {
+				const result = await handleCloseCommand(testDir, ['--skill-review'], {
+					sessionID: 'session-802',
+				});
+
+				expect(mockRunSkillImprover).toHaveBeenCalledTimes(1);
+				expect(mockRunSkillImprover).toHaveBeenCalledWith(
+					expect.objectContaining({
+						directory: testDir,
+						targets: ['skills', 'knowledge'],
+						mode: 'proposal',
+						sessionId: 'session-802',
+					}),
+				);
+				expect(result).toContain('Skill review proposal generated');
+				expect(result).toContain('proposal.md');
+			});
+
+			it('reports skill improver refusal without blocking close', async () => {
+				mockRunSkillImprover.mockImplementationOnce(async () => ({
+					ran: false,
+					reason: 'quota exhausted',
+					quota: { date: '2026-05-11', calls_used: 10, max_calls: 10 },
+				}));
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review skipped: quota exhausted');
+			});
+
+			it('reports skill improver throws without blocking close', async () => {
+				mockRunSkillImprover.mockImplementationOnce(async () => {
+					throw new Error('service exploded');
+				});
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review failed: service exploded');
+			});
+
+			it('reports skill improver timeout without blocking close', async () => {
+				forceSkillReviewTimeout = true;
+
+				const result = await handleCloseCommand(testDir, ['--skill-review'], {
+					skillReviewTimeoutMs: 1,
+				});
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('skill_review exceeded');
+				expect(observedSkillReviewSignal).toBeDefined();
+				expect(observedSkillReviewAborted).toBe(true);
+			});
+
+			it('reports skill-review config load failures without blocking close', async () => {
+				forceSkillReviewConfigError = true;
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review failed: bad config');
 			});
 		});
 

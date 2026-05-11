@@ -235,15 +235,15 @@ export declare const COMMAND_REGISTRY: {
     readonly finalize: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Use /swarm finalize to finalize the swarm project and archive evidence";
-        readonly details: "Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs safe git ff-only to main. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation.";
-        readonly args: "--prune-branches";
+        readonly details: "Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs safe git ff-only to main. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode.";
+        readonly args: "--prune-branches, --skill-review";
         readonly category: "core";
     };
     readonly close: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Use /swarm close (deprecated alias) to finalize and archive swarm state";
         readonly details: "Deprecated alias for /swarm finalize. Preserved for backward compatibility.";
-        readonly args: "--prune-branches";
+        readonly args: "--prune-branches, --skill-review";
         readonly category: "core";
         readonly aliasOf: "finalize";
         readonly deprecated: true;

@@ -1344,8 +1344,8 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm specify [description]` | Generate or import a feature specification |
 | `/swarm clarify [topic]` | Clarify and refine an existing feature specification |
 | `/swarm analyze` | Analyze spec.md vs plan.md for requirement coverage gaps |
-| `/swarm finalize [--prune-branches]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, context.md reset, config-backup cleanup, optional branch pruning |
-| `/swarm close [--prune-branches]` | Deprecated alias for `/swarm finalize [--prune-branches]` |
+| `/swarm finalize [--prune-branches] [--skill-review]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, context.md reset, config-backup cleanup, optional branch pruning, optional skill-improver proposal |
+| `/swarm close [--prune-branches] [--skill-review]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review]` |
 | `/swarm write-retro` | Write a phase retrospective manually |
 | `/swarm handoff` | Generate a handoff summary for context-budget-critical sessions |
 | `/swarm simulate` | Simulate plan execution without writing code |

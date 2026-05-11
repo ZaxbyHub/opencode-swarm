@@ -355,7 +355,7 @@ Named snapshots of `.swarm/` state.
 
 Restore `.swarm/` to a phase checkpoint (`checkpoints/phase-<N>`). Writes a rollback event to `events.jsonl`. Without a phase argument, lists available checkpoints.
 
-### `/swarm finalize [--prune-branches]`
+### `/swarm finalize [--prune-branches] [--skill-review]`
 
 Idempotent 4-stage project finalization:
 1. **Finalize** — write retrospectives for in-progress phases.
@@ -364,8 +364,10 @@ Idempotent 4-stage project finalization:
 4. **Align** — safe git `ff-only` to `main`.
 
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
+When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
+Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
 
-`/swarm close [--prune-branches]` remains available as a deprecated alias.
+`/swarm close [--prune-branches] [--skill-review]` remains available as a deprecated alias.
 
 ---
 

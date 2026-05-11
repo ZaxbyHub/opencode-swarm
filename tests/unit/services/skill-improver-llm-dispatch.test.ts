@@ -130,6 +130,30 @@ describe('skill_improver LLM dispatch', () => {
 		expect(body).not.toContain('deterministic_fallback');
 	});
 
+	it('uses request mode in the LLM prompt instead of raw config write_mode', async () => {
+		await seedKnowledge();
+		let lastSystemPrompt = '';
+		const delegate = async (sys: string): Promise<string> => {
+			lastSystemPrompt = sys;
+			return '## Inventory snapshot\nLLM proposal mode review';
+		};
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, write_mode: 'draft_skills' },
+			targets: ['skills', 'knowledge'],
+			mode: 'proposal',
+			delegate,
+		});
+
+		expect(r.ran).toBe(true);
+		expect(lastSystemPrompt).toContain('Mode: proposal');
+		expect(lastSystemPrompt).not.toContain('Mode: draft_skills');
+		expect(existsSync(path.join(tmp, '.swarm', 'skills', 'proposals'))).toBe(
+			false,
+		);
+	});
+
 	it('refuses pre-flight (no quota touched) when no delegate and fallback disabled', async () => {
 		const r = await runSkillImprover({
 			directory: tmp,
@@ -144,6 +168,54 @@ describe('skill_improver LLM dispatch', () => {
 			window: 'utc',
 		});
 		expect(state.calls_used).toBe(0);
+	});
+
+	it('aborts before quota or fallback proposal side effects when signal is already aborted', async () => {
+		const controller = new AbortController();
+		controller.abort();
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, allow_deterministic_fallback: true },
+			signal: controller.signal,
+		});
+
+		expect(r.ran).toBe(false);
+		expect(r.reason).toContain('aborted');
+		const state = await getQuotaState(tmp, {
+			maxCalls: cfg.max_calls_per_day,
+			window: 'utc',
+		});
+		expect(state.calls_used).toBe(0);
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skill-improver', 'proposals')),
+		).toBe(false);
+	});
+
+	it('does not write a proposal when aborted after an LLM response', async () => {
+		const controller = new AbortController();
+		const delegate = async (): Promise<string> => {
+			controller.abort();
+			return '## Inventory snapshot\nlate abort after model response';
+		};
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: cfg,
+			delegate,
+			signal: controller.signal,
+		});
+
+		expect(r.ran).toBe(false);
+		expect(r.reason).toContain('aborted');
+		const state = await getQuotaState(tmp, {
+			maxCalls: cfg.max_calls_per_day,
+			window: 'utc',
+		});
+		expect(state.calls_used).toBe(1);
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skill-improver', 'proposals')),
+		).toBe(false);
 	});
 
 	it('falls back to deterministic body when delegate undefined and fallback enabled', async () => {

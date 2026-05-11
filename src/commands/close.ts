@@ -1,6 +1,10 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { KnowledgeConfigSchema } from '../config/schema';
+import { loadPluginConfigWithMeta } from '../config';
+import {
+	KnowledgeConfigSchema,
+	SkillImproverConfigSchema,
+} from '../config/schema';
 import { archiveEvidence } from '../evidence/manager';
 import {
 	isGitRepo,
@@ -16,6 +20,11 @@ import {
 import { validateSwarmPath } from '../hooks/utils';
 
 import { clearAllScopes } from '../scope/scope-persistence';
+import {
+	runSkillImprover,
+	type SkillImproveRequest,
+	type SkillImproveResult,
+} from '../services/skill-improver';
 import { resetSwarmState, swarmState } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
@@ -33,6 +42,63 @@ interface PlanPhase {
 interface PlanData {
 	title: string;
 	phases: PlanPhase[];
+}
+
+interface CloseCommandOptions {
+	sessionID?: string;
+	skillReviewTimeoutMs?: number;
+}
+
+interface CurationCounts {
+	stored: number;
+	skipped: number;
+	rejected: number;
+}
+
+interface CloseKnowledgeEntry {
+	created_at?: string;
+}
+
+const CLOSE_SKILL_REVIEW_TIMEOUT_MS = 120_000;
+
+async function runAbortableSkillReview(
+	req: SkillImproveRequest,
+	timeoutMs: number,
+): Promise<SkillImproveResult> {
+	const controller = new AbortController();
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const skillReviewPromise = runSkillImprover({
+		...req,
+		signal: controller.signal,
+	});
+	const timeoutPromise = new Promise<never>((_, reject) => {
+		timeout = setTimeout(() => {
+			reject(new Error(`skill_review exceeded ${timeoutMs}ms budget`));
+			controller.abort();
+		}, timeoutMs);
+	});
+
+	try {
+		return await Promise.race([skillReviewPromise, timeoutPromise]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+function countSessionKnowledgeEntries(
+	entries: CloseKnowledgeEntry[],
+	sessionStart: string | undefined,
+	fallbackCount: number,
+): number {
+	if (!sessionStart) return fallbackCount;
+	const sessionStartMs = Date.parse(sessionStart);
+	if (!Number.isFinite(sessionStartMs)) return fallbackCount;
+
+	return entries.filter((entry) => {
+		if (typeof entry.created_at !== 'string') return false;
+		const createdAtMs = Date.parse(entry.created_at);
+		return Number.isFinite(createdAtMs) && createdAtMs >= sessionStartMs;
+	}).length;
 }
 
 /**
@@ -176,6 +242,7 @@ function guaranteeAllPlansComplete(planData: PlanData): {
 export async function handleCloseCommand(
 	directory: string,
 	args: string[],
+	options: CloseCommandOptions = {},
 ): Promise<string> {
 	const planPath = validateSwarmPath(directory, 'plan.json');
 	const swarmDir = path.join(directory, '.swarm');
@@ -207,6 +274,7 @@ export async function handleCloseCommand(
 	const phases = planData.phases ?? [];
 	const inProgressPhases = phases.filter((p) => p.status === 'in_progress');
 	const isForced = args.includes('--force');
+	const runSkillReview = args.includes('--skill-review');
 
 	// planAlreadyDone: skip retro writing and plan mutation, but still run all cleanup steps
 	let planAlreadyDone = false;
@@ -394,8 +462,9 @@ export async function handleCloseCommand(
 	const allLessons = [...new Set([...explicitLessons, ...retroLessons])];
 
 	let curationSucceeded = false;
+	let curationResult: CurationCounts | undefined;
 	try {
-		await curateAndStoreSwarm(
+		curationResult = await curateAndStoreSwarm(
 			allLessons,
 			projectName,
 			{ phase_number: 0 },
@@ -441,6 +510,69 @@ export async function handleCloseCommand(
 		} catch (hiveErr) {
 			const msg = hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
 			warnings.push(`Hive promotion failed: ${msg}`);
+		}
+	}
+
+	const fallbackKnowledgeCreated = curationResult?.stored ?? 0;
+	let sessionKnowledgeCreated = fallbackKnowledgeCreated;
+	try {
+		const knowledgePath = resolveSwarmKnowledgePath(directory);
+		const entries = await readKnowledge<CloseKnowledgeEntry>(knowledgePath);
+		sessionKnowledgeCreated = countSessionKnowledgeEntries(
+			entries,
+			sessionStart,
+			fallbackKnowledgeCreated,
+		);
+	} catch (knowledgeErr) {
+		const msg =
+			knowledgeErr instanceof Error
+				? knowledgeErr.message
+				: String(knowledgeErr);
+		warnings.push(`Knowledge session count failed: ${msg}`);
+	}
+
+	const knowledgeSkillHint =
+		sessionKnowledgeCreated > 0
+			? `${sessionKnowledgeCreated} knowledge entries created this session. Consider running skill_improve or skill_generate to compile mature entries into skills.`
+			: '';
+
+	let skillReviewSummary = '';
+	if (runSkillReview) {
+		try {
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			const skillImproverConfig = SkillImproverConfigSchema.parse(
+				loadedConfig.skill_improver ?? {},
+			);
+			const skillReviewResult = await runAbortableSkillReview(
+				{
+					directory,
+					config: skillImproverConfig,
+					targets: ['skills', 'knowledge'],
+					mode: 'proposal',
+					sessionId: options.sessionID,
+				},
+				options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
+			);
+			if (skillReviewResult.ran) {
+				const proposal = skillReviewResult.proposalPath
+					? ` Proposal: ${skillReviewResult.proposalPath}.`
+					: '';
+				const source = skillReviewResult.source
+					? ` Source: ${skillReviewResult.source}.`
+					: '';
+				skillReviewSummary = `Skill review proposal generated.${proposal}${source}`;
+			} else {
+				const reason = skillReviewResult.reason ?? 'unknown reason';
+				skillReviewSummary = `Skill review skipped: ${reason}`;
+				warnings.push(skillReviewSummary);
+			}
+		} catch (skillReviewErr) {
+			const msg =
+				skillReviewErr instanceof Error
+					? skillReviewErr.message
+					: String(skillReviewErr);
+			skillReviewSummary = `Skill review failed: ${msg}`;
+			warnings.push(skillReviewSummary);
 		}
 	}
 
@@ -780,6 +912,14 @@ export async function handleCloseCommand(
 		...(allLessons.length > 0
 			? ['| --- | --- |', ...allLessons.map((l, i) => `| ${i + 1} | ${l} |`)]
 			: []),
+		...(knowledgeSkillHint ? ['', knowledgeSkillHint] : []),
+		...(runSkillReview
+			? [
+					'',
+					'## Skill Review',
+					skillReviewSummary || 'Skill review completed without details.',
+				]
+			: []),
 		'',
 		'## Local Repo State',
 		...(gitAlignResult
@@ -841,15 +981,19 @@ export async function handleCloseCommand(
 	//     init from the built agent map. curator-llm-factory.ts depends on
 	//     them at every curator call; clearing them would silently break the
 	//     curator path until the plugin reloads.
+	//   - skillImproverAgentNames: same plugin-init registry contract as the
+	//     curator names, used to route prefixed multi-swarm skill reviews.
 	const preservedClient = swarmState.opencodeClient;
 	const preservedFullAutoFlag = swarmState.fullAutoEnabledInConfig;
 	const preservedCuratorInitNames = swarmState.curatorInitAgentNames;
 	const preservedCuratorPhaseNames = swarmState.curatorPhaseAgentNames;
+	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
 	resetSwarmState();
 	swarmState.opencodeClient = preservedClient;
 	swarmState.fullAutoEnabledInConfig = preservedFullAutoFlag;
 	swarmState.curatorInitAgentNames = preservedCuratorInitNames;
 	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseNames;
+	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
 
 	// Separate retro-specific warnings for prominent display
 	const retroWarnings = warnings.filter(
@@ -876,9 +1020,20 @@ export async function handleCloseCommand(
 		curationSucceeded && allLessons.length > 0
 			? `\n\n**Lessons Committed:** ${allLessons.length} lesson(s) committed to knowledge store`
 			: '';
+	const knowledgeHintSummary = knowledgeSkillHint
+		? `\n\n**Knowledge Review:** ${knowledgeSkillHint}`
+		: '';
+	const skillReviewOutput = skillReviewSummary
+		? `\n\n**Skill Review:** ${skillReviewSummary}`
+		: '';
 
 	if (planAlreadyDone) {
-		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${warningMsg}`;
+		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
 	}
-	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${warningMsg}`;
+	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
 }
+
+export const _internals = {
+	countSessionKnowledgeEntries,
+	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
+};

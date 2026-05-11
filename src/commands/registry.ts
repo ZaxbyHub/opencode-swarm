@@ -445,21 +445,27 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 	},
 	finalize: {
-		handler: (ctx) => handleCloseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleCloseCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
 		description:
 			'Use /swarm finalize to finalize the swarm project and archive evidence',
 		details:
-			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs safe git ff-only to main. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation.',
-		args: '--prune-branches',
+			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs safe git ff-only to main. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode.',
+		args: '--prune-branches, --skill-review',
 		category: 'core',
 	},
 	close: {
-		handler: (ctx) => handleCloseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleCloseCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
 		description:
 			'Use /swarm close (deprecated alias) to finalize and archive swarm state',
 		details:
 			'Deprecated alias for /swarm finalize. Preserved for backward compatibility.',
-		args: '--prune-branches',
+		args: '--prune-branches, --skill-review',
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,

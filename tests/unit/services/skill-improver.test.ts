@@ -95,7 +95,9 @@ describe('runSkillImprover', () => {
 			config: baseConfig,
 		});
 		expect(r.ran).toBe(true);
-		expect(r.proposalPath).toContain('.swarm/skill-improver/proposals/');
+		expect(r.proposalPath?.replace(/\\/g, '/')).toContain(
+			'.swarm/skill-improver/proposals/',
+		);
 		expect(existsSync(r.proposalPath!)).toBe(true);
 		const body = readFileSync(r.proposalPath!, 'utf-8');
 		expect(body).toContain('# Skill Improvement Proposal');

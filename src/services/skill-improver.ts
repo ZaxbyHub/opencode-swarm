@@ -67,6 +67,7 @@ export interface SkillImproveRequest {
 	maxCalls?: number;
 	now?: Date;
 	sessionId?: string;
+	signal?: AbortSignal;
 	/** Test-only seam: inject a delegate. When undefined, the service uses
 	 *  createSkillImproverLLMDelegate(directory, sessionId) which returns
 	 *  undefined unless swarmState.opencodeClient is wired. */
@@ -178,6 +179,20 @@ ${matureRows || '(none)'}
 `;
 }
 
+function isAbortError(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		(err.name === 'AbortError' || err.message === 'skill_improver_aborted')
+	);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	const err = new Error('skill_improver_aborted');
+	err.name = 'AbortError';
+	throw err;
+}
+
 function buildDeterministicProposal(args: {
 	targets: SkillImproverTarget[];
 	inventory: InventorySnapshot;
@@ -277,6 +292,13 @@ export async function runSkillImprover(
 			quota: noQuota,
 		};
 	}
+	if (req.signal?.aborted) {
+		return {
+			ran: false,
+			reason: 'skill_improver aborted',
+			quota: noQuota,
+		};
+	}
 
 	// Resolve the delegate BEFORE touching quota. Pre-flight refusal when
 	// no delegate is available and fallback is disabled.
@@ -310,10 +332,47 @@ export async function runSkillImprover(
 		};
 	}
 
+	let networkStarted = false;
+	let sideEffectsStarted = false;
+	const reservationQuota = {
+		date: reservation.state.date,
+		calls_used: reservation.state.calls_used,
+		max_calls: reservation.state.max_calls,
+	};
+	const releaseReservedQuota = async () => {
+		const released = await releaseQuota(req.directory, {
+			nCalls: maxCalls,
+			maxCalls: cfg.max_calls_per_day,
+			window: cfg.quota_window,
+			now,
+		}).catch(() => ({
+			...reservation.state,
+			calls_used: Math.max(0, reservation.state.calls_used - maxCalls),
+		}));
+		return {
+			date: released.date,
+			calls_used: released.calls_used,
+			max_calls: released.max_calls,
+		};
+	};
+	const abortResult = async (): Promise<SkillImproveResult> => ({
+		ran: false,
+		reason: 'skill_improver aborted',
+		quota:
+			networkStarted || sideEffectsStarted
+				? reservationQuota
+				: await releaseReservedQuota(),
+	});
+
 	let inventory: InventorySnapshot;
 	try {
+		throwIfAborted(req.signal);
 		inventory = await gatherInventory(req.directory);
+		throwIfAborted(req.signal);
 	} catch (err) {
+		if (isAbortError(err)) {
+			return await abortResult();
+		}
 		// Pre-network failure → release the reservation.
 		await releaseQuota(req.directory, {
 			nCalls: maxCalls,
@@ -336,15 +395,22 @@ export async function runSkillImprover(
 	let source: 'llm' | 'deterministic_fallback';
 	if (delegate) {
 		try {
+			throwIfAborted(req.signal);
+			networkStarted = true;
 			body = await delegate(
-				buildSystemPrompt(targets, cfg),
+				buildSystemPrompt(targets, { ...cfg, write_mode: writeMode }),
 				buildUserPrompt(inventory),
+				req.signal,
 			);
+			throwIfAborted(req.signal);
 			if (!body || body.trim().length === 0) {
 				throw new Error('empty LLM response');
 			}
 			source = 'llm';
 		} catch (err) {
+			if (isAbortError(err)) {
+				return await abortResult();
+			}
 			// Network I/O began — slot stays consumed (anti-flake policy).
 			return {
 				ran: false,
@@ -358,12 +424,29 @@ export async function runSkillImprover(
 		}
 	} else {
 		// allow_deterministic_fallback === true and no client wired.
+		try {
+			throwIfAborted(req.signal);
+		} catch (err) {
+			if (isAbortError(err)) {
+				return await abortResult();
+			}
+			throw err;
+		}
 		body = '';
 		source = 'deterministic_fallback';
 	}
 
 	let draftSkillsWritten: SkillImproveResult['draftSkillsWritten'];
 	if (writeMode === 'draft_skills' && inventory.matureCandidates.length > 0) {
+		try {
+			throwIfAborted(req.signal);
+		} catch (err) {
+			if (isAbortError(err)) {
+				return await abortResult();
+			}
+			throw err;
+		}
+		sideEffectsStarted = true;
 		const gen = await generateSkills({
 			directory: req.directory,
 			mode: 'draft',
@@ -375,6 +458,14 @@ export async function runSkillImprover(
 			path: w.path,
 			sourceKnowledgeIds: w.sourceKnowledgeIds,
 		}));
+	}
+	try {
+		throwIfAborted(req.signal);
+	} catch (err) {
+		if (isAbortError(err)) {
+			return await abortResult();
+		}
+		throw err;
 	}
 
 	const proposalDir = path.join(
@@ -398,6 +489,7 @@ export async function runSkillImprover(
 					model: cfg.model,
 					now,
 				});
+	sideEffectsStarted = true;
 	await atomicWrite(proposalFile, finalBody);
 
 	return {
