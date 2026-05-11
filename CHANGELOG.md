@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.17.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.16.0...v7.17.0) (2026-05-11)
+
+
+### Features
+
+* **lang:** language-agnostic plugin via LanguageBackend dispatch ([#825](https://github.com/zaxbysauce/opencode-swarm/issues/825)) ([95c8861](https://github.com/zaxbysauce/opencode-swarm/commit/95c886143a14184c7b9d6980cc0f0edb40b52f84))
+
 ## [7.16.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.15.0...v7.16.0) (2026-05-11)
 
 
