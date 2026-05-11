@@ -36908,6 +36908,16 @@ TOP MATURE CANDIDATES (first 25):
 ${matureRows || "(none)"}
 `;
 }
+function isAbortError(err) {
+  return err instanceof Error && (err.name === "AbortError" || err.message === "skill_improver_aborted");
+}
+function throwIfAborted(signal) {
+  if (!signal?.aborted)
+    return;
+  const err = new Error("skill_improver_aborted");
+  err.name = "AbortError";
+  throw err;
+}
 function buildDeterministicProposal(args) {
   const lines = [];
   lines.push("---");
@@ -36976,6 +36986,13 @@ async function runSkillImprover(req) {
       quota: noQuota
     };
   }
+  if (req.signal?.aborted) {
+    return {
+      ran: false,
+      reason: "skill_improver aborted",
+      quota: noQuota
+    };
+  }
   const delegate = req.delegate ?? createSkillImproverLLMDelegate(req.directory, req.sessionId);
   if (!delegate && !cfg.allow_deterministic_fallback) {
     return {
@@ -37001,10 +37018,43 @@ async function runSkillImprover(req) {
       }
     };
   }
+  let networkStarted = false;
+  let sideEffectsStarted = false;
+  const reservationQuota = {
+    date: reservation.state.date,
+    calls_used: reservation.state.calls_used,
+    max_calls: reservation.state.max_calls
+  };
+  const releaseReservedQuota = async () => {
+    const released = await releaseQuota(req.directory, {
+      nCalls: maxCalls,
+      maxCalls: cfg.max_calls_per_day,
+      window: cfg.quota_window,
+      now
+    }).catch(() => ({
+      ...reservation.state,
+      calls_used: Math.max(0, reservation.state.calls_used - maxCalls)
+    }));
+    return {
+      date: released.date,
+      calls_used: released.calls_used,
+      max_calls: released.max_calls
+    };
+  };
+  const abortResult = async () => ({
+    ran: false,
+    reason: "skill_improver aborted",
+    quota: networkStarted || sideEffectsStarted ? reservationQuota : await releaseReservedQuota()
+  });
   let inventory;
   try {
+    throwIfAborted(req.signal);
     inventory = await gatherInventory(req.directory);
+    throwIfAborted(req.signal);
   } catch (err) {
+    if (isAbortError(err)) {
+      return await abortResult();
+    }
     await releaseQuota(req.directory, {
       nCalls: maxCalls,
       maxCalls: cfg.max_calls_per_day,
@@ -37025,12 +37075,18 @@ async function runSkillImprover(req) {
   let source;
   if (delegate) {
     try {
-      body = await delegate(buildSystemPrompt(targets, cfg), buildUserPrompt(inventory), req.signal);
+      throwIfAborted(req.signal);
+      networkStarted = true;
+      body = await delegate(buildSystemPrompt(targets, { ...cfg, write_mode: writeMode }), buildUserPrompt(inventory), req.signal);
+      throwIfAborted(req.signal);
       if (!body || body.trim().length === 0) {
         throw new Error("empty LLM response");
       }
       source = "llm";
     } catch (err) {
+      if (isAbortError(err)) {
+        return await abortResult();
+      }
       return {
         ran: false,
         reason: `llm_call_failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -37042,11 +37098,28 @@ async function runSkillImprover(req) {
       };
     }
   } else {
+    try {
+      throwIfAborted(req.signal);
+    } catch (err) {
+      if (isAbortError(err)) {
+        return await abortResult();
+      }
+      throw err;
+    }
     body = "";
     source = "deterministic_fallback";
   }
   let draftSkillsWritten;
   if (writeMode === "draft_skills" && inventory.matureCandidates.length > 0) {
+    try {
+      throwIfAborted(req.signal);
+    } catch (err) {
+      if (isAbortError(err)) {
+        return await abortResult();
+      }
+      throw err;
+    }
+    sideEffectsStarted = true;
     const gen = await generateSkills({
       directory: req.directory,
       mode: "draft",
@@ -37058,6 +37131,14 @@ async function runSkillImprover(req) {
       path: w.path,
       sourceKnowledgeIds: w.sourceKnowledgeIds
     }));
+  }
+  try {
+    throwIfAborted(req.signal);
+  } catch (err) {
+    if (isAbortError(err)) {
+      return await abortResult();
+    }
+    throw err;
   }
   const proposalDir = path16.join(req.directory, ".swarm", "skill-improver", "proposals");
   const proposalFile = path16.join(proposalDir, `${timestampSlug(now)}.md`);
@@ -37072,6 +37153,7 @@ async function runSkillImprover(req) {
     model: cfg.model,
     now
   });
+  sideEffectsStarted = true;
   await atomicWrite2(proposalFile, finalBody);
   return {
     ran: true,
