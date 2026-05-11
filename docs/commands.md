@@ -220,10 +220,17 @@ Run preflight automation checks before starting a phase. Validates plan complete
 Toggle Turbo Mode for the current session. Skips non-critical QA gates for faster iteration. Session-scoped; resets on new session.
 
 ```text
-/swarm turbo         # toggle
-/swarm turbo on      # enable
-/swarm turbo off     # disable
+/swarm turbo              # toggle standard turbo
+/swarm turbo on           # enable turbo (uses lean when config strategy is lean, otherwise standard)
+/swarm turbo off          # disable turbo
+/swarm turbo lean on      # enable Lean Turbo explicitly
+/swarm turbo lean off     # disable Lean Turbo
+/swarm turbo lean         # toggle Lean Turbo explicitly
+/swarm turbo standard on  # force standard turbo
+/swarm turbo status       # show detailed status
 ```
+
+Note: `/swarm turbo lean [on|off]` explicitly controls Lean Turbo regardless of the config `turbo.strategy`. Only `/swarm turbo on` consults the config strategy default.
 
 See [Modes Guide](modes.md) for tradeoffs.
 

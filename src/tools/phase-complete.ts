@@ -52,8 +52,14 @@ import {
 import { loadPlan, savePlan } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
-import { ensureAgentSession, hasActiveTurboMode, swarmState } from '../state';
+import {
+	ensureAgentSession,
+	hasActiveLeanTurbo,
+	hasActiveTurboMode,
+	swarmState,
+} from '../state';
 import { telemetry } from '../telemetry';
+import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
 import { executeCompletionVerify } from './completion-verify';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -1511,6 +1517,41 @@ export async function executePhaseComplete(
 					warnings: [
 						`Full-Auto v2 active. Re-run critic_oversight with trigger_source=phase_boundary so an APPROVED record is written to .swarm/evidence/${phase}/full-auto-*.json before calling phase_complete again.`,
 					],
+				},
+				null,
+				2,
+			);
+		}
+	}
+
+	// Lean Turbo phase readiness gate (outside standard Turbo bypass)
+	if (hasActiveLeanTurbo(sessionID)) {
+		// Extract lean config for phase readiness checks (phase_reviewer, phase_critic, etc.)
+		const leanConfig = config?.turbo?.lean;
+		const leanPhaseReadyConfig = leanConfig
+			? {
+					phase_reviewer: leanConfig.phase_reviewer,
+					phase_critic: leanConfig.phase_critic,
+					integrated_diff_required: leanConfig.integrated_diff_required,
+				}
+			: undefined;
+		const leanCheck = leanPhaseInternals.verifyLeanTurboPhaseReady(
+			dir,
+			phase,
+			sessionID,
+			leanPhaseReadyConfig,
+		);
+		if (!leanCheck.ok) {
+			return JSON.stringify(
+				{
+					success: false,
+					phase,
+					status: 'blocked' as const,
+					reason: 'LEAN_TURBO_PHASE_NOT_READY',
+					message: `Phase ${phase} cannot be completed: ${leanCheck.reason}`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [`Lean Turbo phase readiness: ${leanCheck.reason}`],
 				},
 				null,
 				2,

@@ -2,7 +2,7 @@
  * Update task status tool for changing the status of individual tasks in a plan.
  * Allows agents to mark tasks as pending, in_progress, completed, or blocked.
  */
-import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the update_task_status tool
  */
@@ -50,18 +50,20 @@ export interface ReviewerGateResult {
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param stageBParallelEnabled - When true, also accept both-markers-present as passing (PR 2 barrier)
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
-export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean): ReviewerGateResult;
+export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean, sessionID?: string): ReviewerGateResult;
 /**
  * Wrapper around checkReviewerGate that appends a diff-scope advisory warning.
  * Keeps checkReviewerGate synchronous for backward compatibility.
  * Stage B parallel is hardcoded (not config-driven).
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult with optional scope warning appended to reason
  */
-export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string): Promise<ReviewerGateResult>;
+export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string, sessionID?: string): Promise<ReviewerGateResult>;
 /**
  * Recovery mechanism: reconcile task state with delegation history.
  * When reviewer/test_engineer delegations occurred but the state machine
@@ -105,9 +107,10 @@ export declare function checkCouncilGate(workingDirectory: string, taskId: strin
  * Only one concurrent call wins the lock; others return success: false with recovery_guidance: "retry".
  * @param args - The update task status arguments
  * @param fallbackDir - Fallback working directory if args.working_directory is not provided
+ * @param ctx - Optional ToolContext providing sessionID for Lean Turbo cross-session bypass prevention
  * @returns UpdateTaskStatusResult with success status and details
  */
-export declare function executeUpdateTaskStatus(args: UpdateTaskStatusArgs, fallbackDir?: string): Promise<UpdateTaskStatusResult>;
+export declare function executeUpdateTaskStatus(args: UpdateTaskStatusArgs, fallbackDir?: string, ctx?: ToolContext): Promise<UpdateTaskStatusResult>;
 /**
  * Tool definition for update_task_status
  */

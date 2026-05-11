@@ -344,8 +344,8 @@ describe('StatusService - Turbo Mode Indicator', () => {
 
 				// Turbo mode should be active
 				expect(status.turboMode).toBe(true);
-				expect(markdown).toContain('TURBO MODE');
-				expect(markdown).toContain('active');
+				expect(markdown).toContain('Turbo');
+				expect(markdown).toContain('standard');
 			} finally {
 				cleanupDir(dir);
 			}

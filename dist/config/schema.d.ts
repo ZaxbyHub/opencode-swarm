@@ -735,6 +735,89 @@ export declare const ParallelizationConfigSchema: z.ZodObject<{
     max_reviewers: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
+export declare const LeanTurboConfigSchema: z.ZodObject<{
+    max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+    require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+    conflict_policy: z.ZodDefault<z.ZodEnum<{
+        serialize: "serialize";
+        degrade: "degrade";
+    }>>;
+    degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+    phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+    phase_critic: z.ZodDefault<z.ZodBoolean>;
+    integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+    allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+    worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
+export declare const StandardTurboConfigSchema: z.ZodObject<{
+    strategy: z.ZodLiteral<"standard">;
+    lean: z.ZodOptional<z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const LeanTurboStrategyConfigSchema: z.ZodObject<{
+    strategy: z.ZodLiteral<"lean">;
+    lean: z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const TurboConfigSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
+    strategy: z.ZodLiteral<"standard">;
+    lean: z.ZodOptional<z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+}, z.core.$strip>, z.ZodObject<{
+    strategy: z.ZodLiteral<"lean">;
+    lean: z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>;
+}, z.core.$strip>], "strategy">;
+export type TurboConfig = z.infer<typeof TurboConfigSchema>;
 export declare const PluginConfigSchema: z.ZodObject<{
     agents: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
         model: z.ZodOptional<z.ZodString>;
@@ -1206,6 +1289,39 @@ export declare const PluginConfigSchema: z.ZodObject<{
         max_coders: z.ZodDefault<z.ZodNumber>;
         max_reviewers: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strip>>;
+    turbo: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        strategy: z.ZodLiteral<"standard">;
+        lean: z.ZodOptional<z.ZodObject<{
+            max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+            require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+            conflict_policy: z.ZodDefault<z.ZodEnum<{
+                serialize: "serialize";
+                degrade: "degrade";
+            }>>;
+            degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+            phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+            phase_critic: z.ZodDefault<z.ZodBoolean>;
+            integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+            allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+            worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>, z.ZodObject<{
+        strategy: z.ZodLiteral<"lean">;
+        lean: z.ZodObject<{
+            max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+            require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+            conflict_policy: z.ZodDefault<z.ZodEnum<{
+                serialize: "serialize";
+                degrade: "degrade";
+            }>>;
+            degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+            phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+            phase_critic: z.ZodDefault<z.ZodBoolean>;
+            integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+            allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+            worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>;
+    }, z.core.$strip>], "strategy">>;
     turbo_mode: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;
     quiet: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;
     version_check: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;

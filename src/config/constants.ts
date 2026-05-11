@@ -279,6 +279,12 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'skill_inspect',
 		'skill_improve',
 		'knowledge_ack',
+		'lean_turbo_plan_lanes',
+		'lean_turbo_acquire_locks',
+		'lean_turbo_runner_status',
+		'lean_turbo_review',
+		'lean_turbo_run_phase',
+		'lean_turbo_status',
 	],
 	explorer: [
 		'complexity_hotspots',
@@ -607,6 +613,20 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	spec_write: 'author or update .swarm/spec.md for the current project',
 	knowledge_ack:
 		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
+	lean_turbo_plan_lanes:
+		'partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution',
+	lean_turbo_acquire_locks:
+		'acquire file locks for all files in a lane (all-or-nothing) before lane execution',
+	lean_turbo_runner_status:
+		'read Lean Turbo run state from .swarm/turbo-state.json',
+	lean_turbo_review:
+		'dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase',
+	lean_turbo_run_phase:
+		'Execute a phase using Lean Turbo parallel lane execution. ' +
+		'Plans lanes, acquires file locks, and dispatches coder agents concurrently. ' +
+		'Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.',
+	lean_turbo_status:
+		'returns Lean Turbo configuration and active status for the current session',
 };
 
 // Runtime validation: ensure all tool names in AGENT_TOOL_MAP are registered
@@ -745,7 +765,7 @@ export function isSubagent(name: string): boolean {
 }
 
 import { deepMerge } from '../utils/merge';
-import type { ScoringConfig } from './schema';
+import type { LeanTurboConfig, ScoringConfig } from './schema';
 
 // Default scoring configuration
 export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
@@ -867,4 +887,41 @@ Behavioral changes:
 - The critic defaults to REJECT. Do not attempt to pressure, negotiate, or shortcut. Complete the evidence trail.
 - If the critic returns ESCALATE_TO_HUMAN, the session will pause or terminate. Only the critic can trigger this.
 - Do NOT ask "Ready for Phase N+1?" — call phase_complete directly. The critic reviews automatically.
+`;
+
+/**
+ * Canonical default Lean Turbo configuration.
+ *
+ * This is the single source of truth for all 9 LeanTurboConfig fields.
+ * Consumers MUST reference this constant instead of hardcoding their own
+ * defaults — see v7.4.x config-drift fix (3 of 9 fields disagreed across
+ * runner.ts, lean-turbo-plan-lanes.ts, lean-turbo-status.ts, and the
+ * Zod schema in schema.ts).
+ */
+export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
+	max_parallel_coders: 4,
+	require_declared_scope: true,
+	conflict_policy: 'serialize',
+	degrade_on_risk: true,
+	phase_reviewer: true,
+	phase_critic: true,
+	integrated_diff_required: true,
+	allow_docs_only_without_reviewer: false,
+	worktree_isolation: false,
+};
+
+export const LEAN_TURBO_BANNER = `## 🛤️ LEAN TURBO ACTIVE
+
+Lane-based parallel execution is enabled for this phase.
+
+Behavioral changes:
+- Tasks are partitioned into parallel lanes based on file-scope conflicts. Tasks in the same lane run sequentially; tasks in different lanes run concurrently (up to max_parallel_coders).
+- **Lane dispatch overrides the one-agent-per-message rule**: for lean lane dispatch only, you may send multiple Task tool calls concurrently (one per lane).
+- **Lane tasks skip per-task Stage B** (reviewer + test_engineer). Quality is enforced at phase-end via phase reviewer and critic gates instead.
+- **Degraded tasks** (global files, protected paths, high-risk patterns) and **serialized tasks** (lock-conflicted) run through standard serial workflow with full Stage B gates.
+- **Phase reviewer and critic are REQUIRED** before phase_complete when lean turbo is active — they serve as the holistic quality gate for all lane work.
+- **Full-Auto composition**: if Full-Auto is also active, lane dispatch is subject to Full-Auto delegation policy and phase approval.
+- Use the lean_turbo_run_phase tool to execute a phase with parallel lanes
+
+Do NOT skip phase reviewer/critic when configured. Degraded and serialized tasks MUST still go through full Stage B.
 `;

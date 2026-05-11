@@ -297,6 +297,52 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 
 > ⚠️ **Strict-validation warning.** `CouncilConfigSchema` is `.strict()`. A typo in any `council.general.*` key (e.g. `searchProvder`) causes the *entire* user config to fail Zod validation. The loader (`src/config/loader.ts`) then falls back to **guardrail-only defaults** — silently losing every setting in `opencode-swarm.json`, not just the misspelled field. Validate with `/swarm config` after editing, and watch for the `[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults` warning in the console.
 
+## Turbo Configuration
+
+Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | `"standard" \| "lean"` | `"standard"` | Execution strategy. `"lean"` enables Lean Turbo lane planning; `"standard"` uses single-coder Turbo. |
+| `lean` | object | _(see below)_ | Lean-mode configuration. Only used when `strategy` is `"lean"`. |
+
+### `turbo.lean` — Lean Turbo settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_parallel_coders` | number | `4` | Maximum number of parallel coders in lean mode (1–6). Set to `1` for serial execution. |
+| `require_declared_scope` | boolean | `true` | When `true`, all tasks must have a declared file scope to be eligible for parallel lanes. Tasks without scope are serialized. |
+| `conflict_policy` | `"serialize" \| "degrade"` | `"serialize"` | How to handle file-scope conflicts between parallel tasks. `"serialize"` queues conflicting tasks; `"degrade"` falls back to standard serial flow. |
+| `degrade_on_risk` | boolean | `true` | When `true`, Lean Turbo degrades to serial execution if risk conditions are detected (e.g., protected paths, cross-lane dependencies). |
+| `phase_reviewer` | boolean | `true` | Dispatch an additive phase-level reviewer gate at `phase_complete`. This is in addition to per-task Stage B review — it does NOT skip Stage B. |
+| `phase_critic` | boolean | `true` | Dispatch an additive phase-level critic gate at `phase_complete`. This is in addition to per-task Stage B review — it does NOT skip Stage B. |
+| `integrated_diff_required` | boolean | `true` | Require an integrated diff before accepting changes from a lane. Ensures cross-lane file changes are coherent. |
+| `allow_docs_only_without_reviewer` | boolean | `false` | Allow docs-only phases to complete when the reviewer agent is not available. |
+| `worktree_isolation` | boolean | `false` | Use git worktree isolation for parallel coders to enable true file-system-level parallelism. |
+
+**Example** — Enable Lean Turbo with defaults:
+
+```json
+{
+  "turbo": {
+    "strategy": "lean",
+    "lean": {
+      "max_parallel_coders": 4,
+      "require_declared_scope": true,
+      "conflict_policy": "serialize",
+      "degrade_on_risk": true,
+      "phase_reviewer": true,
+      "phase_critic": true,
+      "integrated_diff_required": true,
+      "allow_docs_only_without_reviewer": false,
+      "worktree_isolation": false
+    }
+  }
+}
+```
+
+See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Turbo lane planning algorithm and conflict resolution rules.
+
 ## QA gates reference
 
 The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path. Programmatic configuration via `set_qa_gates` (architect-only) or `/swarm qa-gates enable <gate>...`.

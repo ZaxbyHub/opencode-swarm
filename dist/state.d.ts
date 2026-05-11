@@ -157,6 +157,14 @@ export interface AgentSessionState {
     modelFallbackExhausted: boolean;
     /** Session-scoped Turbo Mode flag for controlling LLM inference speed */
     turboMode: boolean;
+    /** Session-scoped turbo strategy selection — standard or lean. When undefined,
+     *  falls back to standard (current behavior). */
+    turboStrategy?: 'standard' | 'lean';
+    /** Whether Lean Turbo is actively running in this session. Requires
+     *  turboStrategy === 'lean'. */
+    leanTurboActive?: boolean;
+    /** Current phase number when Lean Turbo is active (for durable state sync). */
+    leanTurboCurrentPhase?: number;
     /** Session-level QA gate overrides layered on top of the spec-level profile.
      *  Overrides can only enable gates (true); false values are ignored by
      *  getEffectiveGates. Cleared on session reset. Optional for backwards
@@ -533,6 +541,14 @@ export declare function hasActiveTurboMode(sessionID?: string): boolean;
  * @returns true if the specified session has fullAutoMode: true (model validation is advisory-only).
  */
 export declare function hasActiveFullAuto(sessionID?: string): boolean;
+/**
+ * Check if Lean Turbo Mode is active for a specific session or ANY session.
+ * @param sessionID - Optional session ID to check. If provided, checks only that session.
+ *                    If omitted, checks all sessions.
+ * @returns true if the specified session has turboStrategy: 'lean' AND leanTurboActive: true,
+ *          or if any session has that combination when no sessionID provided.
+ */
+export declare function hasActiveLeanTurbo(sessionID?: string): boolean;
 export declare function setSessionEnvironment(sessionId: string, profile: EnvironmentProfile): void;
 export declare function getSessionEnvironment(sessionId: string): EnvironmentProfile | undefined;
 export declare function ensureSessionEnvironment(sessionId: string): EnvironmentProfile;
@@ -574,6 +590,7 @@ export declare const _internals: {
     getTaskState: typeof getTaskState;
     hasActiveFullAuto: typeof hasActiveFullAuto;
     hasActiveTurboMode: typeof hasActiveTurboMode;
+    hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
     buildRehydrationCache: typeof buildRehydrationCache;
     applyRehydrationCache: typeof applyRehydrationCache;
     rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;

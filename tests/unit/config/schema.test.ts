@@ -10,6 +10,7 @@ import {
 	DecisionDecaySchema,
 	GeneralCouncilConfigSchema,
 	GuardrailsConfigSchema,
+	LeanTurboConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
 	ScoringConfigSchema,
@@ -1381,6 +1382,92 @@ describe('CouncilConfigSchema with general council', () => {
 	it('rejects unknown key directly under council (.strict)', () => {
 		const result = PluginConfigSchema.safeParse({
 			council: { enabled: true, generel: {} },
+		});
+		expect(result.success).toBe(false);
+	});
+});
+
+describe('LeanTurboConfigSchema', () => {
+	it('accepts defaults when empty object provided', () => {
+		const result = LeanTurboConfigSchema.safeParse({});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.max_parallel_coders).toBe(4);
+			expect(result.data.worktree_isolation).toBe(false);
+			expect(result.data.integrated_diff_required).toBe(true);
+			expect(result.data.phase_reviewer).toBe(true);
+			expect(result.data.phase_critic).toBe(true);
+		}
+	});
+
+	it('accepts valid lean turbo config', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 2,
+			require_declared_scope: true,
+			conflict_policy: 'serialize',
+			phase_reviewer: true,
+			phase_critic: false,
+			worktree_isolation: false,
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.max_parallel_coders).toBe(2);
+			expect(result.data.phase_critic).toBe(false);
+		}
+	});
+
+	it('rejects max_parallel_coders below 1', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 0,
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects max_parallel_coders above 6', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 7,
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts max_parallel_coders at boundary values (1 and 6)', () => {
+		expect(
+			LeanTurboConfigSchema.safeParse({ max_parallel_coders: 1 }).success,
+		).toBe(true);
+		expect(
+			LeanTurboConfigSchema.safeParse({ max_parallel_coders: 6 }).success,
+		).toBe(true);
+	});
+
+	it('rejects worktree_isolation: true (not yet implemented)', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			worktree_isolation: true,
+		});
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			const msg = JSON.stringify(result.error.issues);
+			expect(msg).toContain('worktree_isolation');
+			expect(msg).toContain('not yet implemented');
+		}
+	});
+
+	it('accepts worktree_isolation: false', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			worktree_isolation: false,
+		});
+		expect(result.success).toBe(true);
+	});
+
+	it('rejects invalid conflict_policy', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			conflict_policy: 'invalid',
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects non-integer max_parallel_coders', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 3.5,
 		});
 		expect(result.success).toBe(false);
 	});

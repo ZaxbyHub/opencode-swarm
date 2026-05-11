@@ -87,20 +87,24 @@ export type {
 	AutomationCapabilities,
 	AutomationConfig,
 	AutomationMode,
+	LeanTurboConfig,
 	PhaseCompleteConfig,
 	PipelineConfig,
 	PluginConfig,
 	SwarmConfig,
+	TurboConfig,
 } from './schema';
 export {
 	AgentOverrideConfigSchema,
 	AutomationCapabilitiesSchema,
 	AutomationConfigSchema,
 	AutomationModeSchema,
+	LeanTurboConfigSchema,
 	PhaseCompleteConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
 	SwarmConfigSchema,
+	TurboConfigSchema,
 } from './schema';
 export type {
 	DeltaSpec,

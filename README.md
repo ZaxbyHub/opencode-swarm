@@ -98,6 +98,7 @@ Swarm has two independent mode systems:
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
 | **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
+| **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
 
 Full-Auto reduces approval friction by deterministically allowing safe operations (read-only tools, in-scope writes, safe shell) and routing every ambiguous or high-risk action (writes to plugin/build/guardrail paths, network, dependency changes, plan/phase mutations, subagent delegation) through the read-only `critic_oversight` agent before it executes. Denials are returned to the agent as structured signals so it can choose a safer path; repeated denials pause the run; phase completion requires an APPROVED oversight record. See [docs/modes.md](docs/modes.md#full-auto) for `mode`, `permission_policy`, `denials`, and `oversight` config keys, fail-closed semantics, and recovery from a paused run.
@@ -110,7 +111,7 @@ Full-Auto reduces approval friction by deterministically allowing safe operation
 | `balanced` (default) | Standard hooks |
 | `fast` | Skips compaction service — for short sessions under context pressure |
 
-Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Set project mode in config. The two systems compose independently — see [docs/modes.md](docs/modes.md).
+Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
 
 ---
 

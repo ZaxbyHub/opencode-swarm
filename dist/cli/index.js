@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.13.2",
+    version: "7.14.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16079,7 +16079,13 @@ var init_tool_names = __esm(() => {
     "skill_inspect",
     "skill_improve",
     "spec_write",
-    "knowledge_ack"
+    "knowledge_ack",
+    "lean_turbo_plan_lanes",
+    "lean_turbo_acquire_locks",
+    "lean_turbo_runner_status",
+    "lean_turbo_review",
+    "lean_turbo_run_phase",
+    "lean_turbo_status"
   ];
   TOOL_NAME_SET = new Set(TOOL_NAMES);
 });
@@ -16118,7 +16124,7 @@ function freezeSet(items) {
   });
   return proxy;
 }
-var QA_AGENTS, PIPELINE_AGENTS, ORCHESTRATOR_NAME = "architect", ALL_SUBAGENT_NAMES, ALL_AGENT_NAMES, OPENCODE_NATIVE_AGENTS, CLAUDE_CODE_NATIVE_COMMANDS, AGENT_TOOL_MAP, DEFAULT_AGENT_CONFIGS;
+var QA_AGENTS, PIPELINE_AGENTS, ORCHESTRATOR_NAME = "architect", ALL_SUBAGENT_NAMES, ALL_AGENT_NAMES, OPENCODE_NATIVE_AGENTS, CLAUDE_CODE_NATIVE_COMMANDS, AGENT_TOOL_MAP, TOOL_DESCRIPTIONS, DEFAULT_AGENT_CONFIGS;
 var init_constants = __esm(() => {
   init_tool_names();
   QA_AGENTS = ["reviewer", "critic", "critic_oversight"];
@@ -16325,7 +16331,13 @@ var init_constants = __esm(() => {
       "skill_apply",
       "skill_inspect",
       "skill_improve",
-      "knowledge_ack"
+      "knowledge_ack",
+      "lean_turbo_plan_lanes",
+      "lean_turbo_acquire_locks",
+      "lean_turbo_runner_status",
+      "lean_turbo_review",
+      "lean_turbo_run_phase",
+      "lean_turbo_status"
     ],
     explorer: [
       "complexity_hotspots",
@@ -16522,6 +16534,81 @@ var init_constants = __esm(() => {
       "spec_write"
     ]
   };
+  TOOL_DESCRIPTIONS = {
+    symbols: "code symbol search",
+    checkpoint: "state snapshots",
+    diff: "structured git diff with contract change detection",
+    diff_summary: "filter classified AST changes by category, risk level, or file for reviewer drill-down",
+    imports: "dependency audit",
+    lint: "code quality",
+    placeholder_scan: "todo and FIXME comment detection",
+    secretscan: "secret detection",
+    sast_scan: "static analysis security scan",
+    syntax_check: "syntax validation",
+    test_runner: "auto-detect and run tests",
+    test_impact: "identify test files impacted by changed source files via import analysis",
+    mutation_test: "executes pre-generated mutation patches against tests, evaluates kill rate against quality gate thresholds",
+    generate_mutants: "generate LLM-based mutation testing patches for source files; returns MutationPatch[] for direct consumption by the mutation_test tool",
+    write_mutation_evidence: "write mutation gate evidence for a completed phase; normalizes PASS/WARN/FAIL/SKIP verdicts and writes .swarm/evidence/{phase}/mutation-gate.json",
+    pkg_audit: "dependency vulnerability scan \u2014 npm/pip/cargo",
+    complexity_hotspots: "git churn \xD7 complexity risk map",
+    schema_drift: "OpenAPI spec vs route drift",
+    todo_extract: "structured TODO/FIXME extraction",
+    evidence_check: "verify task evidence completeness",
+    sbom_generate: "SBOM generation for dependency inventory",
+    build_check: "build verification",
+    quality_budget: "code quality budget check",
+    pre_check_batch: "parallel verification: lint:check + secretscan + sast_scan + quality_budget",
+    update_task_status: "mark tasks complete, track phase progress",
+    write_retro: "document phase retrospectives via phase_complete workflow, capture lessons learned",
+    write_drift_evidence: "write drift verification evidence for a completed phase",
+    write_hallucination_evidence: "write hallucination verification evidence for a completed phase",
+    write_final_council_evidence: "write final council evidence for project completion",
+    declare_scope: "declare file scope for next coder delegation",
+    phase_complete: "mark a phase as complete and track dispatched agents",
+    save_plan: "save a structured implementation plan",
+    doc_scan: "scan project documentation files and build an index manifest",
+    doc_extract: "extract actionable constraints from project documentation",
+    curator_analyze: "run curator phase analysis and optionally apply knowledge recommendations",
+    knowledge_add: "store a new lesson in the knowledge base",
+    knowledge_recall: "search the knowledge base for relevant past decisions",
+    knowledge_remove: "delete an outdated swarm knowledge entry by ID (swarm tier only)",
+    knowledge_query: "query swarm or hive knowledge with optional filters",
+    co_change_analyzer: "detect hidden couplings by analyzing git history",
+    check_gate_status: "check the gate status of a specific task",
+    completion_verify: "verify completed tasks have required evidence",
+    submit_council_verdicts: "submit pre-collected council member verdicts for synthesis (architect MUST dispatch critic/reviewer/sme/test_engineer/explorer as Agent tasks first; this tool synthesizes only, it does not contact members)",
+    submit_phase_council_verdicts: "submit pre-collected phase-level council member verdicts for holistic phase synthesis (architect MUST dispatch all 5 council members with phase-scoped context first; this tool synthesizes only, it does not contact members)",
+    declare_council_criteria: "pre-declare acceptance criteria for a task before the coder starts work; criteria are read back during council evaluation",
+    detect_domains: "detect which SME domains are relevant for a given text",
+    extract_code_blocks: "extract code blocks from text content and save them to files",
+    gitingest: "fetch a GitHub repository full content via gitingest.com",
+    retrieve_summary: "retrieve the full content of a stored tool output summary",
+    search: "Workspace-scoped ripgrep-style text search with structured JSON output. Supports literal and regex modes, glob filtering, and result limits. NOTE: This is text search, not structural AST search \u2014 use symbols and imports tools for structural queries.",
+    web_search: "External web search (Tavily or Brave) for architect-driven council research. Returns titled results with snippets and URLs. Config-gated on council.general.enabled; requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents.",
+    convene_general_council: "Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled.",
+    batch_symbols: "Batched symbol extraction across multiple files. Returns per-file symbol summaries with isolated error handling.",
+    suggest_patch: "Reviewer-safe structured patch suggestion tool. Produces context-anchored patch artifacts without file modification. Returns structured diagnostics on context mismatch.",
+    lint_spec: "validate .swarm/spec.md format and required fields",
+    get_approved_plan: "retrieve the last critic-approved immutable plan snapshot for baseline drift comparison",
+    repo_map: "query the repo code graph: importers, dependencies, blast radius, and localization context for structural awareness before refactoring",
+    get_qa_gate_profile: "retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council), lock state, and profile hash. Read-only.",
+    set_qa_gates: "configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only \u2014 rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council.",
+    req_coverage: "query requirement coverage status for tracked functional requirements",
+    skill_generate: "compile knowledge entries into a structured SKILL.md draft",
+    skill_list: "list generated skill files and their status",
+    skill_apply: "activate a draft skill proposal",
+    skill_inspect: "inspect the content and source entries of a skill file",
+    skill_improve: "run the skill_improver agent to review and refine skills",
+    spec_write: "author or update .swarm/spec.md for the current project",
+    knowledge_ack: "record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment",
+    lean_turbo_plan_lanes: "partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution",
+    lean_turbo_acquire_locks: "acquire file locks for all files in a lane (all-or-nothing) before lane execution",
+    lean_turbo_runner_status: "read Lean Turbo run state from .swarm/turbo-state.json",
+    lean_turbo_review: "dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase",
+    lean_turbo_run_phase: "Execute a phase using Lean Turbo parallel lane execution. " + "Plans lanes, acquires file locks, and dispatches coder agents concurrently. " + "Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.",
+    lean_turbo_status: "returns Lean Turbo configuration and active status for the current session"
+  };
   for (const [agentName, tools] of Object.entries(AGENT_TOOL_MAP)) {
     const invalidTools = tools.filter((tool) => !TOOL_NAME_SET.has(tool));
     if (invalidTools.length > 0) {
@@ -16625,7 +16712,7 @@ function getCanonicalAgentRole(agentName, generatedAgentNames) {
 function stripKnownSwarmPrefix(agentName) {
   return getCanonicalAgentRole(agentName);
 }
-var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, PluginConfigSchema;
+var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
 var init_schema = __esm(() => {
   init_zod();
   init_constants();
@@ -17212,6 +17299,31 @@ var init_schema = __esm(() => {
     max_coders: exports_external.number().int().min(1).max(16).default(3),
     max_reviewers: exports_external.number().int().min(1).max(16).default(2)
   });
+  LeanTurboConfigSchema = exports_external.object({
+    max_parallel_coders: exports_external.number().int().min(1).max(6).default(4),
+    require_declared_scope: exports_external.boolean().default(true),
+    conflict_policy: exports_external.enum(["serialize", "degrade"]).default("serialize"),
+    degrade_on_risk: exports_external.boolean().default(true),
+    phase_reviewer: exports_external.boolean().default(true),
+    phase_critic: exports_external.boolean().default(true),
+    integrated_diff_required: exports_external.boolean().default(true),
+    allow_docs_only_without_reviewer: exports_external.boolean().default(false),
+    worktree_isolation: exports_external.boolean().default(false).refine((val) => val === false, {
+      message: "worktree_isolation: true is not yet implemented. Use false (the default) for in-repo parallel execution. Full worktree isolation will be available in a future release."
+    })
+  });
+  StandardTurboConfigSchema = exports_external.object({
+    strategy: exports_external.literal("standard"),
+    lean: LeanTurboConfigSchema.optional()
+  });
+  LeanTurboStrategyConfigSchema = exports_external.object({
+    strategy: exports_external.literal("lean"),
+    lean: LeanTurboConfigSchema
+  });
+  TurboConfigSchema = exports_external.discriminatedUnion("strategy", [
+    StandardTurboConfigSchema,
+    LeanTurboStrategyConfigSchema
+  ]);
   PluginConfigSchema = exports_external.object({
     agents: exports_external.record(exports_external.string(), AgentOverrideConfigSchema).optional(),
     default_agent: exports_external.string().optional().transform((v) => {
@@ -17271,6 +17383,7 @@ var init_schema = __esm(() => {
     prm: PrmConfigSchema.optional(),
     council: CouncilConfigSchema.optional(),
     parallelization: ParallelizationConfigSchema.optional(),
+    turbo: TurboConfigSchema.optional(),
     turbo_mode: exports_external.boolean().default(false).optional(),
     quiet: exports_external.boolean().default(true).optional(),
     version_check: exports_external.boolean().default(true).optional(),
@@ -19390,8 +19503,17 @@ function getLockFilePath(directory, filePath) {
   if (!pathOk) {
     throw new Error("Invalid file path: path traversal not allowed");
   }
-  const hash2 = Buffer.from(normalized).toString("base64").replace(/[/+=]/g, "_");
-  return path6.join(directory, LOCKS_DIR, `${hash2}.lock`);
+  const pathForHash = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  const hash2 = Buffer.from(pathForHash).toString("base64").replace(/[/+=]/g, "_");
+  const lockPath = path6.join(directory, LOCKS_DIR, `${hash2}.lock`);
+  if (process.platform === "win32") {
+    const oldHash = Buffer.from(normalized).toString("base64").replace(/[/+=]/g, "_");
+    const oldLockPath = path6.join(directory, LOCKS_DIR, `${oldHash}.lock`);
+    if (fs3.existsSync(oldLockPath)) {
+      return oldLockPath;
+    }
+  }
+  return lockPath;
 }
 async function tryAcquireLock(directory, filePath, agent, taskId) {
   const lockPath = getLockFilePath(directory, filePath);
@@ -19426,10 +19548,14 @@ async function tryAcquireLock(directory, filePath, agent, taskId) {
   };
   return { acquired: true, lock };
 }
-var import_proper_lockfile, LOCKS_DIR = ".swarm/locks", LOCK_TIMEOUT_MS;
+var import_proper_lockfile, LOCKS_DIR = ".swarm/locks", LOCK_TIMEOUT_MS, _internals4;
 var init_file_locks = __esm(() => {
   import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
   LOCK_TIMEOUT_MS = 5 * 60 * 1000;
+  _internals4 = {
+    tryAcquireLock,
+    writeFile: fs3.promises.writeFile
+  };
 });
 
 // src/evidence/lock.ts
@@ -19652,7 +19778,7 @@ async function loadEvidence(directory, taskId) {
     return { status: "invalid_schema", errors: ["Invalid JSON"] };
   }
   if (isFlatRetrospective(parsed)) {
-    const wrappedBundle = _internals4.wrapFlatRetrospective(parsed, sanitizedTaskId);
+    const wrappedBundle = _internals5.wrapFlatRetrospective(parsed, sanitizedTaskId);
     try {
       const validated = EvidenceBundleSchema.parse(wrappedBundle);
       try {
@@ -19748,14 +19874,14 @@ async function checkRequirementCoverage(phase, directory) {
   }
 }
 async function archiveEvidence(directory, maxAgeDays, maxBundles) {
-  const taskIds = await _internals4.listEvidenceTaskIds(directory);
+  const taskIds = await _internals5.listEvidenceTaskIds(directory);
   const cutoffDate = new Date;
   cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
   const cutoffIso = cutoffDate.toISOString();
   const archived = [];
   const remainingBundles = [];
   for (const taskId of taskIds) {
-    const result = await _internals4.loadEvidence(directory, taskId);
+    const result = await _internals5.loadEvidence(directory, taskId);
     if (result.status !== "found") {
       continue;
     }
@@ -19783,7 +19909,7 @@ async function archiveEvidence(directory, maxAgeDays, maxBundles) {
   }
   return archived;
 }
-var VALID_EVIDENCE_TYPES, sanitizeTaskId2, LEGACY_TASK_COMPLEXITY_MAP, _internals4;
+var VALID_EVIDENCE_TYPES, sanitizeTaskId2, LEGACY_TASK_COMPLEXITY_MAP, _internals5;
 var init_manager2 = __esm(() => {
   init_zod();
   init_evidence_schema();
@@ -19813,7 +19939,7 @@ var init_manager2 = __esm(() => {
     medium: "moderate",
     high: "complex"
   };
-  _internals4 = {
+  _internals5 = {
     wrapFlatRetrospective,
     loadEvidence,
     listEvidenceTaskIds
@@ -20024,7 +20150,7 @@ function getProfile(directory, planId) {
   return row ? rowToProfile(row) : null;
 }
 function getOrCreateProfile(directory, planId, projectType) {
-  const existing = _internals5.getProfile(directory, planId);
+  const existing = _internals6.getProfile(directory, planId);
   if (existing)
     return existing;
   const db = getProjectDb(directory);
@@ -20040,14 +20166,14 @@ function getOrCreateProfile(directory, planId, projectType) {
       throw err;
     }
   }
-  const after = _internals5.getProfile(directory, planId);
+  const after = _internals6.getProfile(directory, planId);
   if (!after) {
     throw new Error(`Failed to create or load QA gate profile for plan_id=${planId}`);
   }
   return after;
 }
 function setGates(directory, planId, gates) {
-  const current = _internals5.getProfile(directory, planId);
+  const current = _internals6.getProfile(directory, planId);
   if (!current) {
     throw new Error(`No QA gate profile found for plan_id=${planId} \u2014 call getOrCreateProfile first`);
   }
@@ -20071,7 +20197,7 @@ function setGates(directory, planId, gates) {
     JSON.stringify(merged),
     planId
   ]);
-  const updated = _internals5.getProfile(directory, planId);
+  const updated = _internals6.getProfile(directory, planId);
   if (!updated) {
     throw new Error(`Failed to re-read QA gate profile after update for plan_id=${planId}`);
   }
@@ -20093,10 +20219,10 @@ function getEffectiveGates(profile, sessionOverrides) {
   }
   return merged;
 }
-var _internals5, DEFAULT_QA_GATES;
+var _internals6, DEFAULT_QA_GATES;
 var init_qa_gate_profile = __esm(() => {
   init_project_db();
-  _internals5 = {
+  _internals6 = {
     getProfile,
     getOrCreateProfile,
     setGates,
@@ -20831,6 +20957,30 @@ function hasActiveTurboMode(sessionID) {
   }
   return false;
 }
+function hasActiveFullAuto(sessionID) {
+  if (sessionID) {
+    const session = swarmState.agentSessions.get(sessionID);
+    return session?.fullAutoMode === true;
+  }
+  for (const [_sessionId, session] of swarmState.agentSessions) {
+    if (session.fullAutoMode === true) {
+      return true;
+    }
+  }
+  return false;
+}
+function hasActiveLeanTurbo(sessionID) {
+  if (sessionID) {
+    const session = swarmState.agentSessions.get(sessionID);
+    return session?.turboMode === true && session?.turboStrategy === "lean" && session?.leanTurboActive === true;
+  }
+  for (const [_sessionId, session] of swarmState.agentSessions) {
+    if (session.turboMode === true && session.turboStrategy === "lean" && session.leanTurboActive === true) {
+      return true;
+    }
+  }
+  return false;
+}
 var _rehydrationCache = null, _councilDisagreementWarned, _toolAggregates, defaultRunContext, _runContexts, swarmState;
 var init_state = __esm(() => {
   init_constants();
@@ -21458,8 +21608,8 @@ function getElementAtPath2(obj, path9) {
 }
 function promiseAllObject2(promisesObj) {
   const keys = Object.keys(promisesObj);
-  const promises = keys.map((key) => promisesObj[key]);
-  return Promise.all(promises).then((results) => {
+  const promises2 = keys.map((key) => promisesObj[key]);
+  return Promise.all(promises2).then((results) => {
     const resolvedObj = {};
     for (let i = 0;i < keys.length; i++) {
       resolvedObj[keys[i]] = results[i];
@@ -34419,7 +34569,7 @@ function resetToRemoteBranch(cwd, options) {
   const prunedBranches = [];
   try {
     const currentBranch = getCurrentBranch(cwd);
-    const defaultRemoteBranch = _internals6.detectDefaultRemoteBranch(cwd);
+    const defaultRemoteBranch = _internals7.detectDefaultRemoteBranch(cwd);
     if (!defaultRemoteBranch) {
       return {
         success: false,
@@ -34601,7 +34751,7 @@ function resetToRemoteBranch(cwd, options) {
 function resetToMainAfterMerge(cwd, options) {
   const warnings = [];
   try {
-    const defaultBranch = _internals6.detectDefaultRemoteBranch(cwd);
+    const defaultBranch = _internals7.detectDefaultRemoteBranch(cwd);
     if (!defaultBranch) {
       return {
         success: false,
@@ -34628,7 +34778,7 @@ function resetToMainAfterMerge(cwd, options) {
     }
     if (currentBranch === defaultBranch) {
       try {
-        const logOutput = _internals6.gitExec(["log", `${targetBranch}..HEAD`, "--oneline"], cwd);
+        const logOutput = _internals7.gitExec(["log", `${targetBranch}..HEAD`, "--oneline"], cwd);
         if (logOutput.trim().length > 0) {
           return {
             success: false,
@@ -34643,11 +34793,11 @@ function resetToMainAfterMerge(cwd, options) {
       } catch {}
     } else {
       try {
-        _internals6.gitExec(["rev-parse", "--abbrev-ref", `${currentBranch}@{upstream}`], cwd);
+        _internals7.gitExec(["rev-parse", "--abbrev-ref", `${currentBranch}@{upstream}`], cwd);
       } catch {
         try {
-          const localSha = _internals6.gitExec(["rev-parse", "HEAD"], cwd).trim();
-          const remoteSha = _internals6.gitExec(["rev-parse", targetBranch], cwd).trim();
+          const localSha = _internals7.gitExec(["rev-parse", "HEAD"], cwd).trim();
+          const remoteSha = _internals7.gitExec(["rev-parse", targetBranch], cwd).trim();
           if (localSha !== remoteSha) {
             return {
               success: false,
@@ -34673,7 +34823,7 @@ function resetToMainAfterMerge(cwd, options) {
       }
     }
     try {
-      _internals6.gitExec(["fetch", "--prune", "origin"], cwd);
+      _internals7.gitExec(["fetch", "--prune", "origin"], cwd);
     } catch (err) {
       return {
         success: false,
@@ -34689,7 +34839,7 @@ function resetToMainAfterMerge(cwd, options) {
     let switchedBranch = false;
     if (currentBranch !== defaultBranch) {
       try {
-        _internals6.gitExec(["checkout", defaultBranch], cwd);
+        _internals7.gitExec(["checkout", defaultBranch], cwd);
         switchedBranch = true;
       } catch (err) {
         return {
@@ -34704,7 +34854,7 @@ function resetToMainAfterMerge(cwd, options) {
       }
     }
     try {
-      _internals6.gitExec(["reset", "--hard", targetBranch], cwd);
+      _internals7.gitExec(["reset", "--hard", targetBranch], cwd);
     } catch (err) {
       return {
         success: false,
@@ -34725,7 +34875,7 @@ function resetToMainAfterMerge(cwd, options) {
           while (Date.now() < endTime) {}
         }
         try {
-          _internals6.gitExec(["checkout", "--", "."], cwd);
+          _internals7.gitExec(["checkout", "--", "."], cwd);
           discardSucceeded = true;
           break;
         } catch {}
@@ -34736,18 +34886,18 @@ function resetToMainAfterMerge(cwd, options) {
       changesDiscarded = discardSucceeded;
     }
     try {
-      _internals6.gitExec(["clean", "-fd"], cwd);
+      _internals7.gitExec(["clean", "-fd"], cwd);
     } catch {
       warnings.push("Could not clean untracked files");
     }
     let branchDeleted = false;
     if (switchedBranch && previousBranch !== defaultBranch) {
       try {
-        const mergedOutput = _internals6.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const mergedOutput = _internals7.gitExec(["branch", "--merged", defaultBranch], cwd);
         const isMerged = mergedOutput.split(`
 `).some((line) => line.trim() === previousBranch || line.trim() === `* ${previousBranch}`);
         if (isMerged) {
-          _internals6.gitExec(["branch", "-d", previousBranch], cwd);
+          _internals7.gitExec(["branch", "-d", previousBranch], cwd);
           branchDeleted = true;
         } else {
           warnings.push(`Branch ${previousBranch} is not merged into ${defaultBranch} \u2014 keeping it`);
@@ -34758,7 +34908,7 @@ function resetToMainAfterMerge(cwd, options) {
     }
     if (options?.pruneBranches) {
       try {
-        const mergedOutput = _internals6.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const mergedOutput = _internals7.gitExec(["branch", "--merged", defaultBranch], cwd);
         const mergedLines = mergedOutput.split(`
 `);
         for (const line of mergedLines) {
@@ -34767,7 +34917,7 @@ function resetToMainAfterMerge(cwd, options) {
             continue;
           }
           try {
-            _internals6.gitExec(["branch", "-d", trimmedLine], cwd);
+            _internals7.gitExec(["branch", "-d", trimmedLine], cwd);
           } catch {
             warnings.push(`Could not prune branch: ${trimmedLine}`);
           }
@@ -34797,10 +34947,10 @@ function resetToMainAfterMerge(cwd, options) {
     };
   }
 }
-var GIT_TIMEOUT_MS2 = 30000, _internals6;
+var GIT_TIMEOUT_MS2 = 30000, _internals7;
 var init_branch = __esm(() => {
   init_logger();
-  _internals6 = {
+  _internals7 = {
     gitExec: gitExec2,
     detectDefaultRemoteBranch,
     getDefaultBaseBranch,
@@ -35985,7 +36135,7 @@ async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, c
     existingEntries.push(entry);
   }
   await enforceKnowledgeCap(knowledgePath, config3.swarm_max_entries);
-  await _internals7.runAutoPromotion(directory, config3);
+  await _internals8.runAutoPromotion(directory, config3);
   return { stored, skipped, rejected };
 }
 async function runAutoPromotion(directory, config3) {
@@ -36066,7 +36216,7 @@ function createKnowledgeCuratorHook(directory, config3) {
       });
       const projectName2 = evidenceData.project_name ?? "unknown";
       const phaseNumber2 = typeof evidenceData.phase_number === "number" ? evidenceData.phase_number : 1;
-      await _internals7.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
+      await _internals8.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
       await updateRetrievalOutcome(directory, `Phase ${phaseNumber2}`, true);
       return;
     }
@@ -36089,19 +36239,19 @@ function createKnowledgeCuratorHook(directory, config3) {
     const projectName = projectNameMatch ? projectNameMatch[1].trim() : "unknown";
     const phaseMatch = /^Phase:\s*(\d+)/m.exec(planContent);
     const phaseNumber = phaseMatch ? parseInt(phaseMatch[1], 10) : 1;
-    await _internals7.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
+    await _internals8.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
     await updateRetrievalOutcome(directory, `Phase ${phaseNumber}`, true);
   };
   return safeHook(handler);
 }
-var seenRetroSections, _internals7;
+var seenRetroSections, _internals8;
 var init_knowledge_curator = __esm(() => {
   init_knowledge_reader();
   init_knowledge_store();
   init_knowledge_validator();
   init_utils2();
   seenRetroSections = new Map;
-  _internals7 = {
+  _internals8 = {
     isWriteToEvidenceFile,
     curateAndStoreSwarm,
     runAutoPromotion,
@@ -36410,7 +36560,7 @@ async function executeWriteRetro(args, directory) {
     }, null, 2);
   }
 }
-var write_retro, _internals8;
+var write_retro, _internals9;
 var init_write_retro = __esm(() => {
   init_zod();
   init_evidence_schema();
@@ -36457,13 +36607,13 @@ var init_write_retro = __esm(() => {
           task_id: args.task_id !== undefined ? String(args.task_id) : undefined,
           metadata: args.metadata
         };
-        return await _internals8.executeWriteRetro(writeRetroArgs, directory);
+        return await _internals9.executeWriteRetro(writeRetroArgs, directory);
       } catch {
         return JSON.stringify({ success: false, phase: rawPhase, message: "Invalid arguments" }, null, 2);
       }
     }
   });
-  _internals8 = {
+  _internals9 = {
     executeWriteRetro,
     write_retro
   };
@@ -37365,9 +37515,9 @@ async function detectDarkMatter(directory, options) {
   } catch {
     return [];
   }
-  const commitMap = await _internals9.parseGitLog(directory, maxCommitsToAnalyze);
-  const matrix = _internals9.buildCoChangeMatrix(commitMap);
-  const staticEdges = await _internals9.getStaticEdges(directory);
+  const commitMap = await _internals10.parseGitLog(directory, maxCommitsToAnalyze);
+  const matrix = _internals10.buildCoChangeMatrix(commitMap);
+  const staticEdges = await _internals10.getStaticEdges(directory);
   const results = [];
   for (const entry of matrix.values()) {
     const key = `${entry.fileA}::${entry.fileB}`;
@@ -37447,7 +37597,7 @@ ${rows}
 These pairs likely share an architectural concern invisible to static analysis.
 Consider adding explicit documentation or extracting the shared concern.`;
 }
-var co_change_analyzer, _internals9;
+var co_change_analyzer, _internals10;
 var init_co_change_analyzer = __esm(() => {
   init_zod();
   init_create_tool();
@@ -37479,11 +37629,11 @@ var init_co_change_analyzer = __esm(() => {
         npmiThreshold,
         maxCommitsToAnalyze
       };
-      const pairs = await _internals9.detectDarkMatter(directory, options);
-      return _internals9.formatDarkMatterOutput(pairs);
+      const pairs = await _internals10.detectDarkMatter(directory, options);
+      return _internals10.formatDarkMatterOutput(pairs);
     }
   });
-  _internals9 = {
+  _internals10 = {
     parseGitLog,
     buildCoChangeMatrix,
     getStaticEdges,
@@ -37514,7 +37664,7 @@ async function handleDarkMatterCommand(directory, args) {
   }
   let pairs;
   try {
-    pairs = await _internals9.detectDarkMatter(directory, options);
+    pairs = await _internals10.detectDarkMatter(directory, options);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     return `## Dark Matter Analysis Failed
@@ -37707,7 +37857,7 @@ function getPluginLockFilePaths() {
 var init_cache_paths = () => {};
 
 // src/services/version-check.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync6, writeFileSync as writeFileSync4 } from "fs";
 import { homedir as homedir5 } from "os";
 import { join as join17 } from "path";
 function cacheDir() {
@@ -37723,7 +37873,7 @@ function readVersionCache() {
     const path19 = cacheFile();
     if (!existsSync9(path19))
       return null;
-    const raw = readFileSync5(path19, "utf-8");
+    const raw = readFileSync6(path19, "utf-8");
     const parsed = JSON.parse(raw);
     if (typeof parsed?.checkedAt !== "number")
       return null;
@@ -37762,7 +37912,7 @@ var init_version_check = __esm(() => {
 
 // src/services/diagnose-service.ts
 import * as child_process4 from "child_process";
-import { existsSync as existsSync10, readdirSync as readdirSync4, readFileSync as readFileSync6, statSync as statSync6 } from "fs";
+import { existsSync as existsSync10, readdirSync as readdirSync4, readFileSync as readFileSync7, statSync as statSync6 } from "fs";
 import path19 from "path";
 import { fileURLToPath } from "url";
 function validateTaskDag(plan) {
@@ -38069,7 +38219,7 @@ async function checkConfigParseability(directory) {
     };
   }
   try {
-    const content = readFileSync6(configPath, "utf-8");
+    const content = readFileSync7(configPath, "utf-8");
     JSON.parse(content);
     return {
       name: "Config Parseability",
@@ -38147,7 +38297,7 @@ async function checkCheckpointManifest(directory) {
     };
   }
   try {
-    const content = readFileSync6(manifestPath, "utf-8");
+    const content = readFileSync7(manifestPath, "utf-8");
     const parsed = JSON.parse(content);
     if (!parsed.checkpoints || !Array.isArray(parsed.checkpoints)) {
       return {
@@ -38199,7 +38349,7 @@ async function checkEventStreamIntegrity(directory) {
     };
   }
   try {
-    const content = readFileSync6(eventsPath, "utf-8");
+    const content = readFileSync7(eventsPath, "utf-8");
     const lines = content.split(`
 `).filter((line) => line.trim() !== "");
     let malformedCount = 0;
@@ -38240,7 +38390,7 @@ async function checkSteeringDirectives(directory) {
     };
   }
   try {
-    const content = readFileSync6(eventsPath, "utf-8");
+    const content = readFileSync7(eventsPath, "utf-8");
     const lines = content.split(`
 `).filter((line) => line.trim() !== "");
     const directivesIssued = [];
@@ -38296,7 +38446,7 @@ async function checkCurator(directory) {
       };
     }
     try {
-      const content = readFileSync6(summaryPath, "utf-8");
+      const content = readFileSync7(summaryPath, "utf-8");
       const parsed = JSON.parse(content);
       if (typeof parsed.schema_version !== "number" || parsed.schema_version !== 1) {
         return {
@@ -38493,7 +38643,7 @@ async function getDiagnoseData(directory) {
       }
       const pkgJsonPath = path19.join(cachePath, "package.json");
       try {
-        const raw = readFileSync6(pkgJsonPath, "utf-8");
+        const raw = readFileSync7(pkgJsonPath, "utf-8");
         const parsed = JSON.parse(raw);
         const installedVersion = typeof parsed.version === "string" ? parsed.version : "?";
         cacheRows.push(`\u2705 ${cachePath} \u2014 v${installedVersion}`);
@@ -40380,7 +40530,7 @@ async function discoverBuildCommands(workingDir, options) {
   const scope = options?.scope ?? "all";
   const changedFiles = options?.changedFiles ?? [];
   const _filesToCheck = filterByScope(workingDir, scope, changedFiles);
-  const profileResult = await _internals10.discoverBuildCommandsFromProfiles(workingDir);
+  const profileResult = await _internals11.discoverBuildCommandsFromProfiles(workingDir);
   const profileCommands = profileResult.commands;
   const profileSkipped = profileResult.skipped;
   const coveredEcosystems = new Set;
@@ -40443,7 +40593,7 @@ function clearToolchainCache() {
 function getEcosystems() {
   return ECOSYSTEMS.map((e) => e.ecosystem);
 }
-var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, _internals10, build_discovery;
+var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, _internals11, build_discovery;
 var init_discovery = __esm(() => {
   init_dist();
   init_detector();
@@ -40561,7 +40711,7 @@ var init_discovery = __esm(() => {
     php: ["php-composer"]
   };
   toolchainCache = new Map;
-  _internals10 = {
+  _internals11 = {
     isCommandAvailable,
     discoverBuildCommandsFromProfiles,
     discoverBuildCommands,
@@ -40813,7 +40963,7 @@ var exports_evidence_summary_service = {};
 __export(exports_evidence_summary_service, {
   isAutoSummaryEnabled: () => isAutoSummaryEnabled,
   buildEvidenceSummary: () => buildEvidenceSummary,
-  _internals: () => _internals11,
+  _internals: () => _internals12,
   REQUIRED_EVIDENCE_TYPES: () => REQUIRED_EVIDENCE_TYPES,
   EVIDENCE_SUMMARY_VERSION: () => EVIDENCE_SUMMARY_VERSION
 });
@@ -40851,14 +41001,14 @@ function getTaskStatus(task, bundle) {
   if (task?.status) {
     return task.status;
   }
-  const entries = _internals11.normalizeBundleEntries(bundle);
+  const entries = _internals12.normalizeBundleEntries(bundle);
   if (entries.length > 0) {
     return "completed";
   }
   return "pending";
 }
 function isEvidenceComplete(bundle) {
-  const entries = _internals11.normalizeBundleEntries(bundle);
+  const entries = _internals12.normalizeBundleEntries(bundle);
   if (entries.length === 0) {
     return {
       isComplete: false,
@@ -40894,10 +41044,10 @@ async function buildTaskSummary(directory, task, taskId) {
   const result = await loadEvidence(directory, taskId);
   const bundle = result.status === "found" ? result.bundle : null;
   const phase = task?.phase ?? 0;
-  const status = _internals11.getTaskStatus(task, bundle);
-  const evidenceCheck = _internals11.isEvidenceComplete(bundle);
-  const blockers = _internals11.getTaskBlockers(task, evidenceCheck, status);
-  const entries = _internals11.normalizeBundleEntries(bundle);
+  const status = _internals12.getTaskStatus(task, bundle);
+  const evidenceCheck = _internals12.isEvidenceComplete(bundle);
+  const blockers = _internals12.getTaskBlockers(task, evidenceCheck, status);
+  const entries = _internals12.normalizeBundleEntries(bundle);
   const hasReview = entries.some((e) => e.type === "review");
   const hasTest = entries.some((e) => e.type === "test");
   const hasApproval = entries.some((e) => e.type === "approval");
@@ -40926,12 +41076,12 @@ async function buildPhaseSummary(directory, phase) {
   const taskSummaries = [];
   const _taskMap = new Map(phase.tasks.map((t) => [t.id, t]));
   for (const task of phase.tasks) {
-    const summary = await _internals11.buildTaskSummary(directory, task, task.id);
+    const summary = await _internals12.buildTaskSummary(directory, task, task.id);
     taskSummaries.push(summary);
   }
   const extraTaskIds = taskIds.filter((id) => !phaseTaskIds.has(id));
   for (const taskId of extraTaskIds) {
-    const summary = await _internals11.buildTaskSummary(directory, undefined, taskId);
+    const summary = await _internals12.buildTaskSummary(directory, undefined, taskId);
     if (summary.phase === phase.id) {
       taskSummaries.push(summary);
     }
@@ -41032,7 +41182,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
   let totalTasks = 0;
   let completedTasks = 0;
   for (const phase of phasesToProcess) {
-    const summary = await _internals11.buildPhaseSummary(directory, phase);
+    const summary = await _internals12.buildPhaseSummary(directory, phase);
     phaseSummaries.push(summary);
     totalTasks += summary.totalTasks;
     completedTasks += summary.completedTasks;
@@ -41054,7 +41204,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
     overallBlockers,
     summaryText: ""
   };
-  artifact.summaryText = _internals11.generateSummaryText(artifact);
+  artifact.summaryText = _internals12.generateSummaryText(artifact);
   log("[EvidenceSummary] Summary built", {
     phases: phaseSummaries.length,
     totalTasks,
@@ -41073,7 +41223,7 @@ function isAutoSummaryEnabled(automationConfig) {
   }
   return automationConfig.capabilities?.evidence_auto_summaries === true;
 }
-var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals11;
+var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals12;
 var init_evidence_summary_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -41087,7 +41237,7 @@ var init_evidence_summary_service = __esm(() => {
     "retrospective"
   ]);
   REQUIRED_EVIDENCE_TYPES = ["review", "test"];
-  _internals11 = {
+  _internals12 = {
     buildEvidenceSummary,
     isAutoSummaryEnabled,
     normalizeBundleEntries,
@@ -41690,7 +41840,7 @@ function extractCurrentPhaseFromPlan2(plan) {
   if (!plan) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
-  if (!_internals12.validatePlanPhases(plan)) {
+  if (!_internals13.validatePlanPhases(plan)) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
   let currentPhase = null;
@@ -41832,9 +41982,9 @@ function extractPhaseMetrics(content) {
 async function getHandoffData(directory) {
   const now = new Date().toISOString();
   const sessionContent = await readSwarmFileAsync(directory, "session/state.json");
-  const sessionState = _internals12.parseSessionState(sessionContent);
+  const sessionState = _internals13.parseSessionState(sessionContent);
   const plan = await loadPlanJsonOnly(directory);
-  const planInfo = _internals12.extractCurrentPhaseFromPlan(plan);
+  const planInfo = _internals13.extractCurrentPhaseFromPlan(plan);
   if (!plan) {
     const planMdContent = await readSwarmFileAsync(directory, "plan.md");
     if (planMdContent) {
@@ -41853,8 +42003,8 @@ async function getHandoffData(directory) {
     }
   }
   const contextContent = await readSwarmFileAsync(directory, "context.md");
-  const recentDecisions = _internals12.extractDecisions(contextContent);
-  const rawPhaseMetrics = _internals12.extractPhaseMetrics(contextContent);
+  const recentDecisions = _internals13.extractDecisions(contextContent);
+  const rawPhaseMetrics = _internals13.extractPhaseMetrics(contextContent);
   const phaseMetrics = sanitizeString(rawPhaseMetrics, 1000);
   let delegationState = null;
   if (sessionState?.delegationState) {
@@ -42018,13 +42168,13 @@ ${lines.join(`
 `)}
 \`\`\``;
 }
-var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals12;
+var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals13;
 var init_handoff_service = __esm(() => {
   init_utils2();
   init_manager();
   init_utils();
   RTL_OVERRIDE_PATTERN = /[\u202e\u202d\u202c\u200f]/g;
-  _internals12 = {
+  _internals13 = {
     getHandoffData,
     formatHandoffMarkdown,
     formatContinuationPrompt,
@@ -42143,22 +42293,22 @@ async function writeSnapshot(directory, state) {
 }
 function createSnapshotWriterHook(directory) {
   return (_input, _output) => {
-    _writeInFlight = _writeInFlight.then(() => _internals13.writeSnapshot(directory, swarmState), () => _internals13.writeSnapshot(directory, swarmState));
+    _writeInFlight = _writeInFlight.then(() => _internals14.writeSnapshot(directory, swarmState), () => _internals14.writeSnapshot(directory, swarmState));
     return _writeInFlight;
   };
 }
 async function flushPendingSnapshot(directory) {
-  _writeInFlight = _writeInFlight.then(() => _internals13.writeSnapshot(directory, swarmState), () => _internals13.writeSnapshot(directory, swarmState));
+  _writeInFlight = _writeInFlight.then(() => _internals14.writeSnapshot(directory, swarmState), () => _internals14.writeSnapshot(directory, swarmState));
   await _writeInFlight;
 }
-var _writeInFlight, _internals13;
+var _writeInFlight, _internals14;
 var init_snapshot_writer = __esm(() => {
   init_utils2();
   init_state();
   init_utils();
   init_bun_compat();
   _writeInFlight = Promise.resolve();
-  _internals13 = {
+  _internals14 = {
     writeSnapshot,
     createSnapshotWriterHook,
     flushPendingSnapshot
@@ -42579,7 +42729,7 @@ var init_issue = __esm(() => {
 
 // src/hooks/knowledge-migrator.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { existsSync as existsSync15, readFileSync as readFileSync11 } from "fs";
+import { existsSync as existsSync15, readFileSync as readFileSync12 } from "fs";
 import { mkdir as mkdir5, readFile as readFile6, writeFile as writeFile6 } from "fs/promises";
 import * as path25 from "path";
 async function migrateKnowledgeToExternal(_directory, _config) {
@@ -42623,9 +42773,9 @@ async function migrateContextToKnowledge(directory, config3) {
       skippedReason: "empty-context"
     };
   }
-  const rawEntries = _internals14.parseContextMd(contextContent);
+  const rawEntries = _internals15.parseContextMd(contextContent);
   if (rawEntries.length === 0) {
-    await _internals14.writeSentinel(sentinelPath, 0, 0);
+    await _internals15.writeSentinel(sentinelPath, 0, 0);
     return {
       migrated: true,
       entriesMigrated: 0,
@@ -42636,10 +42786,10 @@ async function migrateContextToKnowledge(directory, config3) {
   const existing = await readKnowledge(knowledgePath);
   let migrated = 0;
   let dropped = 0;
-  const projectName = _internals14.inferProjectName(directory);
+  const projectName = _internals15.inferProjectName(directory);
   for (const raw of rawEntries) {
     if (config3.validation_enabled !== false) {
-      const category = raw.categoryHint ?? _internals14.inferCategoryFromText(raw.text);
+      const category = raw.categoryHint ?? _internals15.inferCategoryFromText(raw.text);
       const result = validateLesson(raw.text, existing.map((e) => e.lesson), {
         category,
         scope: "global",
@@ -42659,8 +42809,8 @@ async function migrateContextToKnowledge(directory, config3) {
     const entry = {
       id: randomUUID2(),
       tier: "swarm",
-      lesson: _internals14.truncateLesson(raw.text),
-      category: raw.categoryHint ?? _internals14.inferCategoryFromText(raw.text),
+      lesson: _internals15.truncateLesson(raw.text),
+      category: raw.categoryHint ?? _internals15.inferCategoryFromText(raw.text),
       tags: [...inferredTags, `migration:${raw.sourceSection}`],
       scope: "global",
       confidence: 0.3,
@@ -42683,7 +42833,7 @@ async function migrateContextToKnowledge(directory, config3) {
   if (migrated > 0) {
     await rewriteKnowledge(knowledgePath, existing);
   }
-  await _internals14.writeSentinel(sentinelPath, migrated, dropped);
+  await _internals15.writeSentinel(sentinelPath, migrated, dropped);
   log(`[knowledge-migrator] Migrated ${migrated} entries, dropped ${dropped}`);
   return {
     migrated: true,
@@ -42693,7 +42843,7 @@ async function migrateContextToKnowledge(directory, config3) {
   };
 }
 function parseContextMd(content) {
-  const sections = _internals14.splitIntoSections(content);
+  const sections = _internals15.splitIntoSections(content);
   const entries = [];
   const seen = new Set;
   const sectionPatterns = [
@@ -42709,7 +42859,7 @@ function parseContextMd(content) {
     const match = sectionPatterns.find((sp) => sp.pattern.test(section.heading));
     if (!match)
       continue;
-    const bullets = _internals14.extractBullets(section.body);
+    const bullets = _internals15.extractBullets(section.body);
     for (const bullet of bullets) {
       if (bullet.length < 15)
         continue;
@@ -42718,9 +42868,9 @@ function parseContextMd(content) {
         continue;
       seen.add(normalized);
       entries.push({
-        text: _internals14.truncateLesson(bullet),
+        text: _internals15.truncateLesson(bullet),
         sourceSection: match.sourceSection,
-        categoryHint: _internals14.inferCategoryFromText(bullet)
+        categoryHint: _internals15.inferCategoryFromText(bullet)
       });
     }
   }
@@ -42792,7 +42942,7 @@ function inferProjectName(directory) {
   const packageJsonPath = path25.join(directory, "package.json");
   if (existsSync15(packageJsonPath)) {
     try {
-      const pkg = JSON.parse(readFileSync11(packageJsonPath, "utf-8"));
+      const pkg = JSON.parse(readFileSync12(packageJsonPath, "utf-8"));
       if (pkg.name && typeof pkg.name === "string") {
         return pkg.name;
       }
@@ -42813,12 +42963,12 @@ async function writeSentinel(sentinelPath, migrated, dropped) {
   await mkdir5(path25.dirname(sentinelPath), { recursive: true });
   await writeFile6(sentinelPath, JSON.stringify(sentinel, null, 2), "utf-8");
 }
-var _internals14;
+var _internals15;
 var init_knowledge_migrator = __esm(() => {
   init_logger();
   init_knowledge_store();
   init_knowledge_validator();
-  _internals14 = {
+  _internals15 = {
     migrateContextToKnowledge,
     migrateKnowledgeToExternal,
     parseContextMd,
@@ -43684,7 +43834,7 @@ async function runAdditionalLint(linter, mode, cwd) {
     };
   }
 }
-var MAX_OUTPUT_BYTES = 512000, MAX_COMMAND_LENGTH = 500, lint, _internals15;
+var MAX_OUTPUT_BYTES = 512000, MAX_COMMAND_LENGTH = 500, lint, _internals16;
 var init_lint = __esm(() => {
   init_zod();
   init_discovery();
@@ -43716,15 +43866,15 @@ var init_lint = __esm(() => {
       }
       const { mode } = args;
       const cwd = directory;
-      const linter = await _internals15.detectAvailableLinter(directory);
+      const linter = await _internals16.detectAvailableLinter(directory);
       if (linter) {
-        const result = await _internals15.runLint(linter, mode, directory);
+        const result = await _internals16.runLint(linter, mode, directory);
         return JSON.stringify(result, null, 2);
       }
-      const additionalLinter = _internals15.detectAdditionalLinter(cwd);
+      const additionalLinter = _internals16.detectAdditionalLinter(cwd);
       if (additionalLinter) {
         warn(`[lint] Using ${additionalLinter} linter for this project`);
-        const result = await _internals15.runAdditionalLint(additionalLinter, mode, cwd);
+        const result = await _internals16.runAdditionalLint(additionalLinter, mode, cwd);
         return JSON.stringify(result, null, 2);
       }
       const errorResult = {
@@ -43738,7 +43888,7 @@ For Rust: rustup component add clippy`
       return JSON.stringify(errorResult, null, 2);
     }
   });
-  _internals15 = {
+  _internals16 = {
     detectAvailableLinter,
     runLint,
     detectAdditionalLinter,
@@ -44052,7 +44202,7 @@ function findScannableFiles(dir, excludeExact, excludeGlobs, scanDir, visited, s
 }
 async function runSecretscan(directory) {
   try {
-    const result = await _internals16.secretscan.execute({ directory }, {});
+    const result = await _internals17.secretscan.execute({ directory }, {});
     const jsonStr = typeof result === "string" ? result : result.output;
     return JSON.parse(jsonStr);
   } catch (e) {
@@ -44067,7 +44217,7 @@ async function runSecretscan(directory) {
     return errorResult;
   }
 }
-var MAX_FILE_PATH_LENGTH = 500, MAX_FILE_SIZE_BYTES, MAX_FILES_SCANNED = 1000, MAX_FINDINGS = 100, MAX_OUTPUT_BYTES2 = 512000, MAX_LINE_LENGTH = 1e4, MAX_CONTENT_BYTES, BINARY_SIGNATURES, BINARY_PREFIX_BYTES = 4, BINARY_NULL_CHECK_BYTES = 8192, BINARY_NULL_THRESHOLD = 0.1, DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_EXTENSIONS, SECRET_PATTERNS, O_NOFOLLOW, secretscan, _internals16;
+var MAX_FILE_PATH_LENGTH = 500, MAX_FILE_SIZE_BYTES, MAX_FILES_SCANNED = 1000, MAX_FINDINGS = 100, MAX_OUTPUT_BYTES2 = 512000, MAX_LINE_LENGTH = 1e4, MAX_CONTENT_BYTES, BINARY_SIGNATURES, BINARY_PREFIX_BYTES = 4, BINARY_NULL_CHECK_BYTES = 8192, BINARY_NULL_THRESHOLD = 0.1, DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_EXTENSIONS, SECRET_PATTERNS, O_NOFOLLOW, secretscan, _internals17;
 var init_secretscan = __esm(() => {
   init_zod();
   init_path_security();
@@ -44439,7 +44589,7 @@ var init_secretscan = __esm(() => {
       }
     }
   });
-  _internals16 = {
+  _internals17 = {
     secretscan,
     runSecretscan
   };
@@ -44574,8 +44724,8 @@ async function buildImpactMapInternal(cwd) {
   return impactMap;
 }
 async function buildImpactMap(cwd) {
-  const impactMap = await _internals17.buildImpactMapInternal(cwd);
-  await _internals17.saveImpactMap(cwd, impactMap);
+  const impactMap = await _internals18.buildImpactMapInternal(cwd);
+  await _internals18.saveImpactMap(cwd, impactMap);
   return impactMap;
 }
 async function loadImpactMap(cwd) {
@@ -44586,12 +44736,12 @@ async function loadImpactMap(cwd) {
       const data = JSON.parse(content);
       const map3 = data.map;
       const generatedAt = new Date(data.generatedAt).getTime();
-      if (!_internals17.isCacheStale(map3, generatedAt)) {
+      if (!_internals18.isCacheStale(map3, generatedAt)) {
         return map3;
       }
     } catch {}
   }
-  return _internals17.buildImpactMap(cwd);
+  return _internals18.buildImpactMap(cwd);
 }
 async function saveImpactMap(cwd, impactMap) {
   const cacheDir2 = path28.join(cwd, ".swarm", "cache");
@@ -44617,7 +44767,7 @@ async function analyzeImpact(changedFiles, cwd) {
     };
   }
   const validFiles = changedFiles.filter((f) => typeof f === "string" && f.length > 0 && !f.includes("\x00"));
-  const impactMap = await _internals17.loadImpactMap(cwd);
+  const impactMap = await _internals18.loadImpactMap(cwd);
   const impactedTestsSet = new Set;
   const untestedFiles = [];
   for (const changedFile of validFiles) {
@@ -44658,13 +44808,13 @@ async function analyzeImpact(changedFiles, cwd) {
     impactMap
   };
 }
-var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, EXTENSIONS_TO_TRY, _internals17;
+var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, EXTENSIONS_TO_TRY, _internals18;
 var init_analyzer = __esm(() => {
   IMPORT_REGEX_ES = /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g;
   IMPORT_REGEX_REQUIRE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_REEXPORT = /export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/g;
   EXTENSIONS_TO_TRY = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-  _internals17 = {
+  _internals18 = {
     normalizePath,
     isCacheStale,
     resolveRelativeImport,
@@ -46511,9 +46661,9 @@ function getVersionFileVersion(dir) {
 async function runVersionCheck(dir, _timeoutMs) {
   const startTime = Date.now();
   try {
-    const packageVersion = _internals18.getPackageVersion(dir);
-    const changelogVersion = _internals18.getChangelogVersion(dir);
-    const versionFileVersion = _internals18.getVersionFileVersion(dir);
+    const packageVersion = _internals19.getPackageVersion(dir);
+    const changelogVersion = _internals19.getChangelogVersion(dir);
+    const versionFileVersion = _internals19.getVersionFileVersion(dir);
     const versions3 = [];
     if (packageVersion)
       versions3.push(`package.json: ${packageVersion}`);
@@ -46863,7 +47013,7 @@ async function runPreflight(dir, phase, config3) {
   const reportId = `preflight-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let validatedDir;
   try {
-    validatedDir = _internals18.validateDirectoryPath(dir);
+    validatedDir = _internals19.validateDirectoryPath(dir);
   } catch (error93) {
     return {
       id: reportId,
@@ -46883,7 +47033,7 @@ async function runPreflight(dir, phase, config3) {
   }
   let validatedTimeout;
   try {
-    validatedTimeout = _internals18.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
+    validatedTimeout = _internals19.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
   } catch (error93) {
     return {
       id: reportId,
@@ -46924,12 +47074,12 @@ async function runPreflight(dir, phase, config3) {
   });
   const checks5 = [];
   log("[Preflight] Running lint check...");
-  const lintResult = await _internals18.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
+  const lintResult = await _internals19.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
   checks5.push(lintResult);
   log(`[Preflight] Lint check: ${lintResult.status} ${lintResult.message}`);
   if (!cfg.skipTests) {
     log("[Preflight] Running tests check...");
-    const testsResult = await _internals18.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
+    const testsResult = await _internals19.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
     checks5.push(testsResult);
     log(`[Preflight] Tests check: ${testsResult.status} ${testsResult.message}`);
   } else {
@@ -46941,7 +47091,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipSecrets) {
     log("[Preflight] Running secrets check...");
-    const secretsResult = await _internals18.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
+    const secretsResult = await _internals19.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(secretsResult);
     log(`[Preflight] Secrets check: ${secretsResult.status} ${secretsResult.message}`);
   } else {
@@ -46953,7 +47103,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipEvidence) {
     log("[Preflight] Running evidence check...");
-    const evidenceResult = await _internals18.runEvidenceCheck(validatedDir);
+    const evidenceResult = await _internals19.runEvidenceCheck(validatedDir);
     checks5.push(evidenceResult);
     log(`[Preflight] Evidence check: ${evidenceResult.status} ${evidenceResult.message}`);
   } else {
@@ -46964,12 +47114,12 @@ async function runPreflight(dir, phase, config3) {
     });
   }
   log("[Preflight] Running requirement coverage check...");
-  const reqCoverageResult = await _internals18.runRequirementCoverageCheck(validatedDir, phase);
+  const reqCoverageResult = await _internals19.runRequirementCoverageCheck(validatedDir, phase);
   checks5.push(reqCoverageResult);
   log(`[Preflight] Requirement coverage check: ${reqCoverageResult.status} ${reqCoverageResult.message}`);
   if (!cfg.skipVersion) {
     log("[Preflight] Running version check...");
-    const versionResult = await _internals18.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
+    const versionResult = await _internals19.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(versionResult);
     log(`[Preflight] Version check: ${versionResult.status} ${versionResult.message}`);
   } else {
@@ -47032,10 +47182,10 @@ function formatPreflightMarkdown(report) {
 async function handlePreflightCommand(directory, _args) {
   const plan = await loadPlan(directory);
   const phase = plan?.current_phase ?? 1;
-  const report = await _internals18.runPreflight(directory, phase);
-  return _internals18.formatPreflightMarkdown(report);
+  const report = await _internals19.runPreflight(directory, phase);
+  return _internals19.formatPreflightMarkdown(report);
 }
-var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals18;
+var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals19;
 var init_preflight_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -47052,7 +47202,7 @@ var init_preflight_service = __esm(() => {
     testScope: "convention",
     linter: "biome"
   };
-  _internals18 = {
+  _internals19 = {
     runPreflight,
     formatPreflightMarkdown,
     handlePreflightCommand,
@@ -48309,7 +48459,7 @@ async function handleSimulateCommand(directory, args) {
   }
   let darkMatterPairs;
   try {
-    darkMatterPairs = await _internals9.detectDarkMatter(directory, options);
+    darkMatterPairs = await _internals10.detectDarkMatter(directory, options);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     return `## Simulate Report
@@ -48362,6 +48512,158 @@ async function handleSpecifyCommand(_directory, args) {
   }
   return "[MODE: SPECIFY] Please enter MODE: SPECIFY and generate a spec for this project.";
 }
+
+// src/turbo/lean/state.ts
+import * as fs22 from "fs";
+import * as path37 from "path";
+function nowISO2() {
+  return new Date().toISOString();
+}
+function ensureSwarmDir2(directory) {
+  const swarmDir = path37.resolve(directory, ".swarm");
+  if (!fs22.existsSync(swarmDir)) {
+    fs22.mkdirSync(swarmDir, { recursive: true });
+  }
+  return swarmDir;
+}
+function emptyCounters2() {
+  return {
+    lanesPlanned: 0,
+    lanesStarted: 0,
+    lanesCompleted: 0,
+    lanesFailed: 0,
+    tasksSerialized: 0,
+    tasksDegraded: 0
+  };
+}
+function emptyRunState(sessionID, maxParallelCoders) {
+  return {
+    status: "idle",
+    sessionID,
+    strategy: "lean",
+    maxParallelCoders,
+    lanes: [],
+    degradedTasks: [],
+    serializedTasks: [],
+    counters: emptyCounters2()
+  };
+}
+function emptyPersisted2() {
+  return {
+    version: 1,
+    updatedAt: nowISO2(),
+    sessions: {}
+  };
+}
+function isStateUnreadable(directory) {
+  return stateUnreadableMap.get(directory) ?? false;
+}
+function markStateUnreadable2(directory, reason) {
+  stateUnreadableMap.set(directory, true);
+  error(`[turbo/lean/state] state file unreadable for ${directory}: ${reason} \u2014 failing closed`);
+}
+function readPersisted2(directory) {
+  try {
+    const filePath = path37.join(directory, ".swarm", STATE_FILE2);
+    if (!fs22.existsSync(filePath)) {
+      const seed = emptyPersisted2();
+      try {
+        ensureSwarmDir2(directory);
+        fs22.writeFileSync(filePath, `${JSON.stringify(seed, null, 2)}
+`, "utf-8");
+      } catch {}
+      return seed;
+    }
+    const raw = fs22.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.version !== 1 || !parsed.sessions || typeof parsed.sessions !== "object" || Array.isArray(parsed.sessions)) {
+      markStateUnreadable2(directory, `malformed shape (version=${parsed?.version}, sessions type=${Array.isArray(parsed?.sessions) ? "array" : typeof parsed?.sessions})`);
+      return null;
+    }
+    return {
+      version: 1,
+      updatedAt: parsed.updatedAt ?? nowISO2(),
+      sessions: parsed.sessions
+    };
+  } catch (error93) {
+    const reason = error93 instanceof Error ? error93.message : String(error93);
+    markStateUnreadable2(directory, reason);
+    return null;
+  }
+}
+function writePersisted2(directory, persisted) {
+  if (stateUnreadableMap.get(directory)) {
+    throw new Error(`Lean Turbo state is unreadable. Please repair .swarm/${STATE_FILE2} before continuing.`);
+  }
+  let filePath;
+  let tmpPath;
+  let payload;
+  try {
+    ensureSwarmDir2(directory);
+    filePath = path37.join(directory, ".swarm", STATE_FILE2);
+    tmpPath = `${filePath}.tmp.${Date.now()}`;
+    persisted.updatedAt = nowISO2();
+    payload = `${JSON.stringify(persisted, null, 2)}
+`;
+  } catch (error93) {
+    const msg = error93 instanceof Error ? error93.message : String(error93);
+    error(`[turbo/lean/state] Failed to prepare ${STATE_FILE2} write: ${msg}`);
+    throw new Error(`Lean Turbo state persistence prepare failed: ${msg}`);
+  }
+  try {
+    fs22.writeFileSync(tmpPath, payload, "utf-8");
+    fs22.renameSync(tmpPath, filePath);
+  } catch (error93) {
+    const msg = error93 instanceof Error ? error93.message : String(error93);
+    error(`[turbo/lean/state] Failed to persist ${STATE_FILE2} atomically: ${msg}`);
+    try {
+      if (fs22.existsSync(tmpPath)) {
+        fs22.unlinkSync(tmpPath);
+      }
+    } catch {}
+    throw new Error(`Lean Turbo state persistence failed: ${msg}`);
+  }
+}
+function loadLeanTurboRunState(directory, sessionID) {
+  if (stateUnreadableMap.get(directory))
+    return null;
+  const persisted = readPersisted2(directory);
+  if (!persisted)
+    return null;
+  return persisted.sessions[sessionID] ?? null;
+}
+function saveLeanTurboRunState(directory, runState) {
+  if (stateUnreadableMap.get(directory)) {
+    throw new Error(`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE2} before continuing.`);
+  }
+  const persisted = readPersisted2(directory);
+  if (!persisted) {
+    throw new Error(`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE2} before continuing.`);
+  }
+  persisted.sessions[runState.sessionID] = runState;
+  writePersisted2(directory, persisted);
+}
+function pauseLeanTurboRun(directory, sessionID, reason) {
+  if (stateUnreadableMap.get(directory)) {
+    throw new Error(`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE2} before continuing.`);
+  }
+  const persisted = readPersisted2(directory);
+  if (!persisted) {
+    throw new Error(`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE2} before continuing.`);
+  }
+  const state = persisted.sessions[sessionID];
+  if (!state)
+    return;
+  state.status = "paused";
+  state.pauseReason = reason;
+  persisted.sessions[sessionID] = state;
+  writePersisted2(directory, persisted);
+}
+var STATE_FILE2 = "turbo-state.json", stateUnreadableMap;
+var init_state3 = __esm(() => {
+  init_logger();
+  stateUnreadableMap = new Map;
+});
 
 // src/services/compaction-service.ts
 function makeInitialState() {
@@ -48426,66 +48728,126 @@ var init_context_budget_service = __esm(() => {
 // src/services/status-service.ts
 async function getStatusData(directory, agents) {
   const plan = await loadPlan(directory);
+  let status;
   if (plan && plan.migration_status !== "migration_failed") {
-    const currentPhase2 = extractCurrentPhaseFromPlan(plan) || "Unknown";
-    let completedTasks2 = 0;
-    let totalTasks2 = 0;
+    const currentPhase = extractCurrentPhaseFromPlan(plan) || "Unknown";
+    let completedTasks = 0;
+    let totalTasks = 0;
     for (const phase of plan.phases) {
       for (const task of phase.tasks) {
-        totalTasks2++;
+        totalTasks++;
         if (task.status === "completed")
-          completedTasks2++;
+          completedTasks++;
       }
     }
-    const agentCount2 = Object.keys(agents).length;
-    const metrics2 = getCompactionMetrics();
-    return {
+    const agentCount = Object.keys(agents).length;
+    const metrics = getCompactionMetrics();
+    status = {
       hasPlan: true,
-      currentPhase: currentPhase2,
-      completedTasks: completedTasks2,
-      totalTasks: totalTasks2,
-      agentCount: agentCount2,
+      currentPhase,
+      completedTasks,
+      totalTasks,
+      agentCount,
       isLegacy: false,
       turboMode: hasActiveTurboMode(),
       contextBudgetPct: swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-      compactionCount: metrics2.compactionCount,
-      lastSnapshotAt: metrics2.lastSnapshotAt
+      compactionCount: metrics.compactionCount,
+      lastSnapshotAt: metrics.lastSnapshotAt
     };
+  } else {
+    const planContent = await readSwarmFileAsync(directory, "plan.md");
+    if (!planContent) {
+      const metrics = getCompactionMetrics();
+      status = {
+        hasPlan: false,
+        currentPhase: "Unknown",
+        completedTasks: 0,
+        totalTasks: 0,
+        agentCount: Object.keys(agents).length,
+        isLegacy: true,
+        turboMode: hasActiveTurboMode(),
+        contextBudgetPct: swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
+        compactionCount: metrics.compactionCount,
+        lastSnapshotAt: metrics.lastSnapshotAt
+      };
+    } else {
+      const currentPhase = extractCurrentPhase(planContent) || "Unknown";
+      const completedTasks = (planContent.match(/^- \[x\]/gm) || []).length;
+      const incompleteTasks = (planContent.match(/^- \[ \]/gm) || []).length;
+      const totalTasks = completedTasks + incompleteTasks;
+      const agentCount = Object.keys(agents).length;
+      const metrics = getCompactionMetrics();
+      status = {
+        hasPlan: true,
+        currentPhase,
+        completedTasks,
+        totalTasks,
+        agentCount,
+        isLegacy: true,
+        turboMode: hasActiveTurboMode(),
+        contextBudgetPct: swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
+        compactionCount: metrics.compactionCount,
+        lastSnapshotAt: metrics.lastSnapshotAt
+      };
+    }
   }
-  const planContent = await readSwarmFileAsync(directory, "plan.md");
-  if (!planContent) {
-    const metrics2 = getCompactionMetrics();
-    return {
-      hasPlan: false,
-      currentPhase: "Unknown",
-      completedTasks: 0,
-      totalTasks: 0,
-      agentCount: Object.keys(agents).length,
-      isLegacy: true,
-      turboMode: hasActiveTurboMode(),
-      contextBudgetPct: swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-      compactionCount: metrics2.compactionCount,
-      lastSnapshotAt: metrics2.lastSnapshotAt
-    };
+  return enrichWithLeanTurbo(status, directory);
+}
+function enrichWithLeanTurbo(status, directory) {
+  const turboMode = hasActiveTurboMode();
+  const leanActive = _internals20.hasActiveLeanTurbo();
+  let turboStrategy = "off";
+  if (leanActive) {
+    turboStrategy = "lean";
+  } else if (turboMode) {
+    turboStrategy = "standard";
   }
-  const currentPhase = extractCurrentPhase(planContent) || "Unknown";
-  const completedTasks = (planContent.match(/^- \[x\]/gm) || []).length;
-  const incompleteTasks = (planContent.match(/^- \[ \]/gm) || []).length;
-  const totalTasks = completedTasks + incompleteTasks;
-  const agentCount = Object.keys(agents).length;
-  const metrics = getCompactionMetrics();
-  return {
-    hasPlan: true,
-    currentPhase,
-    completedTasks,
-    totalTasks,
-    agentCount,
-    isLegacy: true,
-    turboMode: hasActiveTurboMode(),
-    contextBudgetPct: swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-    compactionCount: metrics.compactionCount,
-    lastSnapshotAt: metrics.lastSnapshotAt
-  };
+  status.turboStrategy = turboStrategy;
+  if (!leanActive) {
+    return status;
+  }
+  let leanSessionID = null;
+  for (const [sessionId, session] of swarmState.agentSessions) {
+    if (session.turboStrategy === "lean" && session.leanTurboActive === true) {
+      leanSessionID = sessionId;
+      break;
+    }
+  }
+  if (leanSessionID) {
+    const runState = _internals20.loadLeanTurboRunState(directory, leanSessionID);
+    if (runState) {
+      status.leanTurboPhase = runState.phase;
+      status.leanMaxParallelCoders = runState.maxParallelCoders;
+      status.leanPauseReason = runState.pauseReason;
+      if (!Array.isArray(runState.lanes)) {
+        runState.lanes = [];
+      }
+      let activeLanes = 0;
+      let completedLanes = 0;
+      for (const lane of runState.lanes) {
+        if (lane.status === "running")
+          activeLanes++;
+        if (lane.status === "completed")
+          completedLanes++;
+      }
+      status.leanActiveLaneCount = activeLanes;
+      status.leanCompletedLanes = completedLanes;
+      if (!Array.isArray(runState.degradedTasks)) {
+        runState.degradedTasks = [];
+        status.leanDegradedTasks = 0;
+      }
+      if (runState.degradedTasks.length > 0) {
+        status.leanDegradedTasks = runState.degradedTasks.length;
+        const summaryParts = [];
+        for (const dt of runState.degradedTasks) {
+          summaryParts.push(`${dt.taskId} (${dt.reason})`);
+        }
+        status.leanDegradationSummary = summaryParts.join("; ");
+      }
+    }
+  }
+  status.fullAutoActive = _internals20.hasActiveFullAuto();
+  return status;
 }
 function formatStatusMarkdown(status) {
   const lines = [
@@ -48495,8 +48857,36 @@ function formatStatusMarkdown(status) {
     `**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
     `**Agents**: ${status.agentCount} registered`
   ];
-  if (status.turboMode) {
-    lines.push("", `**TURBO MODE**: active`);
+  if (status.turboStrategy && status.turboStrategy !== "off") {
+    lines.push("");
+    if (status.turboStrategy === "lean") {
+      const parts = ["lean"];
+      if (status.leanTurboPhase !== undefined) {
+        parts.push(`Phase ${status.leanTurboPhase}`);
+      }
+      if (status.leanActiveLaneCount !== undefined) {
+        const totalLanes = (status.leanActiveLaneCount ?? 0) + (status.leanCompletedLanes ?? 0);
+        parts.push(`${status.leanActiveLaneCount}/${totalLanes} lanes active`);
+      }
+      if (status.leanDegradedTasks !== undefined && status.leanDegradedTasks > 0) {
+        parts.push(`${status.leanDegradedTasks} degraded`);
+      }
+      lines.push(`**Turbo**: ${parts.join(", ")}`);
+      if (status.leanDegradationSummary) {
+        lines.push(`  - ${status.leanDegradationSummary}`);
+      }
+      if (status.leanPauseReason) {
+        lines.push(`**Lean paused**: ${status.leanPauseReason}`);
+      }
+    } else {
+      lines.push(`**Turbo**: standard`);
+    }
+    if (status.fullAutoActive) {
+      lines.push(`**Full-Auto**: active`);
+    }
+  } else if (status.turboStrategy === undefined && status.turboMode === true) {
+    lines.push("");
+    lines.push("**TURBO MODE**: active");
   }
   if (status.contextBudgetPct !== null && status.contextBudgetPct > 0) {
     const pct = status.contextBudgetPct.toFixed(1);
@@ -48520,13 +48910,20 @@ async function handleStatusCommand(directory, agents) {
   }
   return formatStatusMarkdown(statusData);
 }
+var _internals20;
 var init_status_service = __esm(() => {
   init_extractors();
   init_utils2();
   init_manager();
   init_state();
+  init_state3();
   init_compaction_service();
   init_context_budget_service();
+  _internals20 = {
+    loadLeanTurboRunState,
+    hasActiveLeanTurbo,
+    hasActiveFullAuto
+  };
 });
 
 // src/commands/status.ts
@@ -48562,7 +48959,7 @@ var init_sync_plan = __esm(() => {
 });
 
 // src/commands/turbo.ts
-async function handleTurboCommand(_directory, args, sessionID) {
+async function handleTurboCommand(directory, args, sessionID) {
   if (!sessionID || sessionID.trim() === "") {
     return "Error: No active session context. Turbo Mode requires an active session. Use /swarm turbo from within an OpenCode session, or start a session first.";
   }
@@ -48570,24 +48967,179 @@ async function handleTurboCommand(_directory, args, sessionID) {
   if (!session) {
     return "Error: No active session. Turbo Mode requires an active session to operate.";
   }
-  const arg = args[0]?.toLowerCase();
-  let newTurboMode;
-  let feedback;
-  if (arg === "on") {
-    newTurboMode = true;
-    feedback = "Turbo Mode enabled";
-  } else if (arg === "off") {
-    newTurboMode = false;
-    feedback = "Turbo Mode disabled";
-  } else {
-    newTurboMode = !session.turboMode;
-    feedback = newTurboMode ? "Turbo Mode enabled" : "Turbo Mode disabled";
+  const arg0 = args[0]?.toLowerCase();
+  const arg1 = args[1]?.toLowerCase();
+  if (arg0 === "status") {
+    return buildStatusMessage(session, directory, sessionID);
   }
-  session.turboMode = newTurboMode;
-  return feedback;
+  const isTurboOn = session.turboMode;
+  const isLeanActive = session.leanTurboActive === true;
+  const disableTurbo = (reason) => {
+    if (isLeanActive) {
+      try {
+        pauseLeanTurboRun(directory, sessionID, reason);
+      } catch (error93) {
+        error(`[turbo] pauseLeanTurboRun failed: ${error93 instanceof Error ? error93.message : String(error93)}`);
+      }
+    }
+    session.turboMode = false;
+    session.turboStrategy = undefined;
+    session.leanTurboActive = false;
+    session.leanTurboCurrentPhase = undefined;
+  };
+  if (arg0 === "off" || arg0 === "lean" && arg1 === "off") {
+    disableTurbo("/swarm turbo off");
+    return "Turbo Mode disabled";
+  }
+  if (arg0 === "standard" && arg1 === "off") {
+    disableTurbo("/swarm turbo standard off");
+    return "Turbo Mode disabled";
+  }
+  if (arg0 === undefined) {
+    if (isTurboOn) {
+      disableTurbo("/swarm turbo (toggle off)");
+      return "Turbo Mode disabled";
+    } else {
+      session.turboMode = true;
+      session.turboStrategy = "standard";
+      session.leanTurboActive = false;
+      session.leanTurboCurrentPhase = undefined;
+      return "Turbo Mode enabled";
+    }
+  }
+  if (arg0 === "on") {
+    let strategy = "standard";
+    try {
+      const { config: config3 } = loadPluginConfigWithMeta(directory);
+      if (config3.turbo?.strategy === "lean") {
+        strategy = "lean";
+      }
+    } catch (error93) {
+      warn(`[turbo] could not read config for strategy default: ${error93 instanceof Error ? error93.message : String(error93)}`);
+    }
+    if (strategy === "lean") {
+      return enableLeanTurbo(session, directory, sessionID);
+    }
+    if (isLeanActive) {
+      disableTurbo("/swarm turbo on (switching from lean)");
+    }
+    session.turboMode = true;
+    session.turboStrategy = "standard";
+    session.leanTurboActive = false;
+    session.leanTurboCurrentPhase = undefined;
+    return "Turbo Mode enabled";
+  }
+  if (arg0 === "standard" && arg1 === "on") {
+    if (isLeanActive) {
+      disableTurbo("/swarm turbo standard on (switching from lean)");
+    }
+    session.turboMode = true;
+    session.turboStrategy = "standard";
+    session.leanTurboActive = false;
+    session.leanTurboCurrentPhase = undefined;
+    return "Turbo Mode enabled (standard)";
+  }
+  if (arg0 === "lean" && arg1 === "on") {
+    return enableLeanTurbo(session, directory, sessionID);
+  }
+  if (arg0 === "lean" && arg1 === undefined) {
+    if (isLeanActive) {
+      disableTurbo("/swarm turbo lean (toggle off)");
+      return "Turbo Mode disabled";
+    } else {
+      return enableLeanTurbo(session, directory, sessionID);
+    }
+  }
+  if (isTurboOn) {
+    disableTurbo("/swarm turbo (toggle off via unknown arg)");
+    return "Turbo Mode disabled";
+  } else {
+    session.turboMode = true;
+    session.turboStrategy = "standard";
+    session.leanTurboActive = false;
+    session.leanTurboCurrentPhase = undefined;
+    return "Turbo Mode enabled";
+  }
+}
+function enableLeanTurbo(session, directory, sessionID) {
+  let maxParallelCoders = 4;
+  let conflictPolicy = "serialize";
+  try {
+    const { config: config3 } = loadPluginConfigWithMeta(directory);
+    const leanConfig = config3.turbo?.lean;
+    if (leanConfig) {
+      maxParallelCoders = leanConfig.max_parallel_coders ?? 4;
+      conflictPolicy = leanConfig.conflict_policy ?? "serialize";
+    }
+  } catch (error93) {
+    warn(`[turbo] could not read lean config: ${error93 instanceof Error ? error93.message : String(error93)}`);
+  }
+  let durableError;
+  try {
+    const state = emptyRunState(sessionID, maxParallelCoders);
+    state.status = "running";
+    saveLeanTurboRunState(directory, state);
+  } catch (error93) {
+    durableError = error93 instanceof Error ? error93.message : String(error93);
+    error(`[turbo] durable run-state write failed: ${durableError}`);
+  }
+  if (durableError) {
+    return [
+      "Error: Lean Turbo could NOT be enabled \u2014 durable run-state write failed.",
+      `Reason: ${durableError}.`,
+      "Inspect .swarm/ permissions and disk space, then retry."
+    ].join(" ");
+  }
+  const fullAutoActive = session.fullAutoMode;
+  session.turboMode = true;
+  session.turboStrategy = "lean";
+  session.leanTurboActive = true;
+  session.leanTurboCurrentPhase = undefined;
+  return [
+    "Lean Turbo enabled",
+    `(maxParallelCoders=${maxParallelCoders}, conflict_policy=${conflictPolicy},`,
+    `Full-Auto: ${fullAutoActive ? "active" : "inactive"})`
+  ].join(" ");
+}
+function buildStatusMessage(session, directory, sessionID) {
+  if (!session.turboMode) {
+    return "Turbo: off";
+  }
+  if (session.turboStrategy === "standard" || !session.leanTurboActive) {
+    return "Turbo: standard (turboMode=true)";
+  }
+  if (isStateUnreadable(directory)) {
+    return [
+      "Turbo: lean (turboMode=true, leanTurboActive=true)",
+      "WARNING: Durable state is unreadable \u2014 cannot report full status."
+    ].join(`
+`);
+  }
+  const state = loadLeanTurboRunState(directory, sessionID);
+  if (!state) {
+    return [
+      "Turbo: lean (turboMode=true, leanTurboActive=true)",
+      "WARNING: Durable state not found."
+    ].join(`
+`);
+  }
+  const phase = state.phase !== undefined ? `phase=${state.phase}` : "phase=unset";
+  const laneCount = state.lanes.length;
+  const degradedCount = state.degradedTasks.length;
+  const maxParallel = state.maxParallelCoders;
+  const fullAutoActive = session.fullAutoMode;
+  return [
+    `Turbo: lean (turboMode=true, leanTurboActive=true)`,
+    `Status: ${state.status}, ${phase}, lanes=${laneCount}, degraded=${degradedCount}`,
+    `maxParallelCoders=${maxParallel}, Full-Auto: ${fullAutoActive ? "active" : "inactive"}`
+  ].join(`
+`);
 }
 var init_turbo = __esm(() => {
+  init_config();
   init_state();
+  init_state3();
+  init_logger();
 });
 
 // src/commands/write-retro.ts
@@ -48711,8 +49263,8 @@ __export(exports_commands, {
   COMMAND_NAME_SET: () => COMMAND_NAME_SET,
   COMMAND_NAMES: () => COMMAND_NAMES
 });
-import fs22 from "fs";
-import path37 from "path";
+import fs23 from "fs";
+import path38 from "path";
 function buildHelpText() {
   const lines = ["## Swarm Commands", ""];
   const CATEGORIES = [
@@ -48815,11 +49367,11 @@ function createSwarmCommandHandler(directory, agents) {
       return;
     }
     let isFirstRun = false;
-    const sentinelPath = path37.join(directory, ".swarm", ".first-run-complete");
+    const sentinelPath = path38.join(directory, ".swarm", ".first-run-complete");
     try {
-      const swarmDir = path37.join(directory, ".swarm");
-      fs22.mkdirSync(swarmDir, { recursive: true });
-      fs22.writeFileSync(sentinelPath, `first-run-complete: ${new Date().toISOString()}
+      const swarmDir = path38.join(directory, ".swarm");
+      fs23.mkdirSync(swarmDir, { recursive: true });
+      fs23.writeFileSync(sentinelPath, `first-run-complete: ${new Date().toISOString()}
 `, { flag: "wx" });
       isFirstRun = true;
     } catch (_err) {}
@@ -48840,7 +49392,7 @@ function createSwarmCommandHandler(directory, agents) {
         const attemptedCommand = tokens[0] || "";
         const MAX_DISPLAY = 100;
         const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-        const similar = _internals19.findSimilarCommands(attemptedCommand);
+        const similar = _internals21.findSimilarCommands(attemptedCommand);
         const header = `Command \`/swarm ${displayCommand}\` not found.`;
         const suggestions = similar.length > 0 ? `Did you mean:
 ${similar.map((cmd) => `  \u2022 /swarm ${cmd}`).join(`
@@ -48947,7 +49499,7 @@ function findSimilarCommands(query) {
   }
   const scored = VALID_COMMANDS.map((cmd) => {
     const cmdLower = cmd.toLowerCase();
-    const fullScore = _internals19.levenshteinDistance(q, cmdLower);
+    const fullScore = _internals21.levenshteinDistance(q, cmdLower);
     let tokenScore = Infinity;
     if (cmd.includes(" ") || cmd.includes("-")) {
       const qTokens = q.split(/[\s-]+/);
@@ -48960,7 +49512,7 @@ function findSimilarCommands(query) {
         for (const ct of cmdTokens) {
           if (ct.length === 0)
             continue;
-          const dist = _internals19.levenshteinDistance(qt, ct);
+          const dist = _internals21.levenshteinDistance(qt, ct);
           if (dist < minDist)
             minDist = dist;
         }
@@ -48970,7 +49522,7 @@ function findSimilarCommands(query) {
     }
     const dashStrippedQ = q.replace(/-/g, "");
     const dashStrippedCmd = cmdLower.replace(/-/g, "");
-    const dashScore = _internals19.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const dashScore = _internals21.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
     const score = Math.min(fullScore, tokenScore, dashScore);
     return { cmd, score };
   });
@@ -49002,11 +49554,11 @@ async function handleHelpCommand(ctx) {
     return buildHelpText2();
   }
   const tokens = targetCommand.split(/\s+/);
-  const resolved = _internals19.resolveCommand(tokens);
+  const resolved = _internals21.resolveCommand(tokens);
   if (resolved) {
-    return _internals19.buildDetailedHelp(resolved.key, resolved.entry);
+    return _internals21.buildDetailedHelp(resolved.key, resolved.entry);
   }
-  const similar = _internals19.findSimilarCommands(targetCommand);
+  const similar = _internals21.findSimilarCommands(targetCommand);
   const { buildHelpText: fullHelp } = await Promise.resolve().then(() => (init_commands(), exports_commands));
   if (similar.length > 0) {
     return `Command '/swarm ${targetCommand}' not found.
@@ -49042,24 +49594,24 @@ function validateAliases() {
       }
       aliasTargets.get(target).push(name);
       const visited = new Set;
-      const path38 = [];
+      const path39 = [];
       let current = target;
       while (current) {
         const currentEntry = COMMAND_REGISTRY[current];
         if (!currentEntry)
           break;
         if (visited.has(current)) {
-          const cycleStart = path38.indexOf(current);
+          const cycleStart = path39.indexOf(current);
           const fullChain = [
             name,
-            ...path38.slice(0, cycleStart > 0 ? cycleStart : path38.length),
+            ...path39.slice(0, cycleStart > 0 ? cycleStart : path39.length),
             current
           ].join(" \u2192 ");
           errors5.push(`Circular alias detected: ${fullChain}`);
           break;
         }
         visited.add(current);
-        path38.push(current);
+        path39.push(current);
         current = currentEntry.aliasOf || "";
       }
     }
@@ -49100,7 +49652,7 @@ function resolveCommand(tokens) {
   }
   return null;
 }
-var COMMAND_REGISTRY, VALID_COMMANDS, _internals19, validation;
+var COMMAND_REGISTRY, VALID_COMMANDS, _internals21, validation;
 var init_registry = __esm(() => {
   init_acknowledge_spec_drift();
   init_agents();
@@ -49170,7 +49722,7 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/agents"
     },
     help: {
-      handler: (ctx) => _internals19.handleHelpCommand(ctx),
+      handler: (ctx) => _internals21.handleHelpCommand(ctx),
       description: "Show help for swarm commands",
       category: "core",
       args: "[command]",
@@ -49523,7 +50075,7 @@ var init_registry = __esm(() => {
     }
   };
   VALID_COMMANDS = Object.keys(COMMAND_REGISTRY);
-  _internals19 = {
+  _internals21 = {
     handleHelpCommand,
     validateAliases,
     resolveCommand,
@@ -49531,7 +50083,7 @@ var init_registry = __esm(() => {
     findSimilarCommands,
     buildDetailedHelp
   };
-  validation = _internals19.validateAliases();
+  validation = _internals21.validateAliases();
   if (!validation.valid) {
     throw new Error(`COMMAND_REGISTRY alias validation failed:
 ${validation.errors.join(`
@@ -49549,68 +50101,68 @@ init_package();
 init_registry();
 init_cache_paths();
 init_constants();
-import * as fs23 from "fs";
+import * as fs24 from "fs";
 import * as os7 from "os";
-import * as path38 from "path";
+import * as path39 from "path";
 var { version: version4 } = package_default;
 var CONFIG_DIR = getPluginConfigDir();
-var OPENCODE_CONFIG_PATH = path38.join(CONFIG_DIR, "opencode.json");
-var PLUGIN_CONFIG_PATH = path38.join(CONFIG_DIR, "opencode-swarm.json");
-var PROMPTS_DIR = path38.join(CONFIG_DIR, "opencode-swarm");
+var OPENCODE_CONFIG_PATH = path39.join(CONFIG_DIR, "opencode.json");
+var PLUGIN_CONFIG_PATH = path39.join(CONFIG_DIR, "opencode-swarm.json");
+var PROMPTS_DIR = path39.join(CONFIG_DIR, "opencode-swarm");
 var OPENCODE_PLUGIN_CACHE_PATHS = getPluginCachePaths();
 var OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
 function isSafeCachePath(p) {
-  const resolved = path38.resolve(p);
-  const home = path38.resolve(os7.homedir());
+  const resolved = path39.resolve(p);
+  const home = path39.resolve(os7.homedir());
   if (resolved === "/" || resolved === home || resolved.length <= home.length) {
     return false;
   }
-  const segments = resolved.split(path38.sep).filter((s) => s.length > 0);
+  const segments = resolved.split(path39.sep).filter((s) => s.length > 0);
   if (segments.length < 4) {
     return false;
   }
-  const leaf = path38.basename(resolved);
+  const leaf = path39.basename(resolved);
   if (leaf !== "opencode-swarm@latest" && leaf !== "opencode-swarm") {
     return false;
   }
-  const parent = path38.basename(path38.dirname(resolved));
+  const parent = path39.basename(path39.dirname(resolved));
   if (parent !== "packages" && parent !== "node_modules") {
     return false;
   }
-  const grandparent = path38.basename(path38.dirname(path38.dirname(resolved)));
+  const grandparent = path39.basename(path39.dirname(path39.dirname(resolved)));
   if (grandparent !== "opencode") {
     return false;
   }
   return true;
 }
 function isSafeLockFilePath(p) {
-  const resolved = path38.resolve(p);
-  const home = path38.resolve(os7.homedir());
+  const resolved = path39.resolve(p);
+  const home = path39.resolve(os7.homedir());
   if (resolved === "/" || resolved === home || resolved.length <= home.length) {
     return false;
   }
-  const segments = resolved.split(path38.sep).filter((s) => s.length > 0);
+  const segments = resolved.split(path39.sep).filter((s) => s.length > 0);
   if (segments.length < 4) {
     return false;
   }
-  const leaf = path38.basename(resolved);
+  const leaf = path39.basename(resolved);
   if (leaf !== "bun.lock" && leaf !== "bun.lockb" && leaf !== "package-lock.json") {
     return false;
   }
-  const parent = path38.basename(path38.dirname(resolved));
+  const parent = path39.basename(path39.dirname(resolved));
   if (parent !== "opencode") {
     return false;
   }
   return true;
 }
 function ensureDir(dir) {
-  if (!fs23.existsSync(dir)) {
-    fs23.mkdirSync(dir, { recursive: true });
+  if (!fs24.existsSync(dir)) {
+    fs24.mkdirSync(dir, { recursive: true });
   }
 }
 function loadJson(filepath) {
   try {
-    const content = fs23.readFileSync(filepath, "utf-8");
+    const content = fs24.readFileSync(filepath, "utf-8");
     const stripped = content.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (match, comment) => comment ? "" : match).replace(/,(\s*[}\]])/g, "$1");
     return JSON.parse(stripped);
   } catch {
@@ -49618,14 +50170,14 @@ function loadJson(filepath) {
   }
 }
 function saveJson(filepath, data) {
-  fs23.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}
+  fs24.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}
 `, "utf-8");
 }
 function writeProjectConfigIfMissing(cwd) {
   try {
-    const opencodeDir = path38.join(cwd, ".opencode");
-    const projectConfigPath = path38.join(opencodeDir, "opencode-swarm.json");
-    if (fs23.existsSync(projectConfigPath)) {
+    const opencodeDir = path39.join(cwd, ".opencode");
+    const projectConfigPath = path39.join(opencodeDir, "opencode-swarm.json");
+    if (fs24.existsSync(projectConfigPath)) {
       return;
     }
     ensureDir(opencodeDir);
@@ -49641,7 +50193,7 @@ async function install() {
 `);
   ensureDir(CONFIG_DIR);
   ensureDir(PROMPTS_DIR);
-  const LEGACY_CONFIG_PATH = path38.join(CONFIG_DIR, "config.json");
+  const LEGACY_CONFIG_PATH = path39.join(CONFIG_DIR, "config.json");
   let opencodeConfig = loadJson(OPENCODE_CONFIG_PATH);
   if (!opencodeConfig) {
     const legacyConfig = loadJson(LEGACY_CONFIG_PATH);
@@ -49688,7 +50240,7 @@ async function install() {
     console.warn(`\u26A0 Could not clear opencode lock file \u2014 you may need to delete it manually:
   ${failed}`);
   }
-  if (!fs23.existsSync(PLUGIN_CONFIG_PATH)) {
+  if (!fs24.existsSync(PLUGIN_CONFIG_PATH)) {
     const defaultConfig = {
       agents: { ...DEFAULT_AGENT_CONFIGS },
       max_iterations: 5
@@ -49767,14 +50319,14 @@ function evictPluginCaches() {
   const cleared = [];
   const failed = [];
   for (const cachePath of OPENCODE_PLUGIN_CACHE_PATHS) {
-    if (!fs23.existsSync(cachePath))
+    if (!fs24.existsSync(cachePath))
       continue;
     if (!isSafeCachePath(cachePath)) {
       failed.push(`${cachePath} (refused: failed safety check)`);
       continue;
     }
     try {
-      fs23.rmSync(cachePath, { recursive: true, force: true });
+      fs24.rmSync(cachePath, { recursive: true, force: true });
       cleared.push(cachePath);
     } catch (err) {
       failed.push(`${cachePath} (${err instanceof Error ? err.message : String(err)})`);
@@ -49786,14 +50338,14 @@ function evictLockFiles() {
   const cleared = [];
   const failed = [];
   for (const lockPath of OPENCODE_PLUGIN_LOCK_FILE_PATHS) {
-    if (!fs23.existsSync(lockPath))
+    if (!fs24.existsSync(lockPath))
       continue;
     if (!isSafeLockFilePath(lockPath)) {
       failed.push(`${lockPath} (refused: failed safety check)`);
       continue;
     }
     try {
-      fs23.unlinkSync(lockPath);
+      fs24.unlinkSync(lockPath);
       cleared.push(lockPath);
     } catch (err) {
       const code = err?.code;
@@ -49812,7 +50364,7 @@ async function uninstall() {
 `);
     const opencodeConfig = loadJson(OPENCODE_CONFIG_PATH);
     if (!opencodeConfig) {
-      if (fs23.existsSync(OPENCODE_CONFIG_PATH)) {
+      if (fs24.existsSync(OPENCODE_CONFIG_PATH)) {
         console.log(`\u2717 Could not parse opencode config at: ${OPENCODE_CONFIG_PATH}`);
         return 1;
       } else {
@@ -49844,13 +50396,13 @@ async function uninstall() {
     console.log("\u2713 Re-enabled default OpenCode agents (explore, general)");
     if (process.argv.includes("--clean")) {
       let cleaned = false;
-      if (fs23.existsSync(PLUGIN_CONFIG_PATH)) {
-        fs23.unlinkSync(PLUGIN_CONFIG_PATH);
+      if (fs24.existsSync(PLUGIN_CONFIG_PATH)) {
+        fs24.unlinkSync(PLUGIN_CONFIG_PATH);
         console.log(`\u2713 Removed plugin config: ${PLUGIN_CONFIG_PATH}`);
         cleaned = true;
       }
-      if (fs23.existsSync(PROMPTS_DIR)) {
-        fs23.rmSync(PROMPTS_DIR, { recursive: true });
+      if (fs24.existsSync(PROMPTS_DIR)) {
+        fs24.rmSync(PROMPTS_DIR, { recursive: true });
         console.log(`\u2713 Removed custom prompts: ${PROMPTS_DIR}`);
         cleaned = true;
       }

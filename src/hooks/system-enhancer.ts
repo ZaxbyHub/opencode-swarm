@@ -12,6 +12,7 @@ import type { PluginConfig } from '../config';
 import {
 	DEFAULT_SCORING_CONFIG,
 	FULL_AUTO_BANNER,
+	LEAN_TURBO_BANNER,
 	OPENCODE_NATIVE_AGENTS,
 	TURBO_MODE_BANNER,
 } from '../config/constants';
@@ -26,7 +27,12 @@ import {
 	formatDriftForContext,
 	getContextBudgetReport,
 } from '../services';
-import { hasActiveFullAuto, hasActiveTurboMode, swarmState } from '../state';
+import {
+	hasActiveFullAuto,
+	hasActiveLeanTurbo,
+	hasActiveTurboMode,
+	swarmState,
+} from '../state';
 import { telemetry } from '../telemetry';
 import { warn } from '../utils';
 import {
@@ -1077,17 +1083,21 @@ ${handoffContent}`;
 							stripKnownSwarmPrefix(activeAgent_retro) === 'architect';
 
 						if (isArchitect) {
-							// v6.x: Turbo/Full-Auto banner injection for architect
+							// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect
 							const sessionIdBanner = _input.sessionID;
 							if (
 								hasActiveTurboMode(sessionIdBanner) ||
-								hasActiveFullAuto(sessionIdBanner)
+								hasActiveFullAuto(sessionIdBanner) ||
+								hasActiveLeanTurbo(sessionIdBanner)
 							) {
 								if (hasActiveTurboMode(sessionIdBanner)) {
 									tryInject(TURBO_MODE_BANNER);
 								}
 								if (hasActiveFullAuto(sessionIdBanner)) {
 									tryInject(FULL_AUTO_BANNER);
+								}
+								if (hasActiveLeanTurbo(sessionIdBanner)) {
+									tryInject(LEAN_TURBO_BANNER);
 								}
 							}
 
@@ -1629,11 +1639,12 @@ ${handoffContent}`;
 						stripKnownSwarmPrefix(activeAgent_retro_b) === 'architect';
 
 					if (isArchitect_b) {
-						// v6.x: Turbo/Full-Auto banner injection for architect (Path B)
+						// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect (Path B)
 						const sessionIdBanner_b = _input.sessionID;
 						if (
 							hasActiveTurboMode(sessionIdBanner_b) ||
-							hasActiveFullAuto(sessionIdBanner_b)
+							hasActiveFullAuto(sessionIdBanner_b) ||
+							hasActiveLeanTurbo(sessionIdBanner_b)
 						) {
 							if (hasActiveTurboMode(sessionIdBanner_b)) {
 								candidates.push({
@@ -1651,6 +1662,16 @@ ${handoffContent}`;
 									kind: 'agent_context' as ContextCandidate['kind'],
 									text: FULL_AUTO_BANNER,
 									tokens: estimateTokens(FULL_AUTO_BANNER),
+									priority: 1,
+									metadata: { contentType: 'prose' as ContentType },
+								});
+							}
+							if (hasActiveLeanTurbo(sessionIdBanner_b)) {
+								candidates.push({
+									id: `candidate-${idCounter++}`,
+									kind: 'agent_context' as ContextCandidate['kind'],
+									text: LEAN_TURBO_BANNER,
+									tokens: estimateTokens(LEAN_TURBO_BANNER),
 									priority: 1,
 									metadata: { contentType: 'prose' as ContentType },
 								});

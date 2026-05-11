@@ -71,7 +71,13 @@ export type ToolName =
 	| 'skill_inspect'
 	| 'skill_improve'
 	| 'spec_write'
-	| 'knowledge_ack';
+	| 'knowledge_ack'
+	| 'lean_turbo_plan_lanes'
+	| 'lean_turbo_acquire_locks'
+	| 'lean_turbo_runner_status'
+	| 'lean_turbo_review'
+	| 'lean_turbo_run_phase'
+	| 'lean_turbo_status';
 
 /** Readonly array of all tool names */
 export const TOOL_NAMES: readonly ToolName[] = [
@@ -142,6 +148,12 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'skill_improve',
 	'spec_write',
 	'knowledge_ack',
+	'lean_turbo_plan_lanes',
+	'lean_turbo_acquire_locks',
+	'lean_turbo_runner_status',
+	'lean_turbo_review',
+	'lean_turbo_run_phase',
+	'lean_turbo_status',
 ] as const;
 
 /** Set for O(1) tool name validation */

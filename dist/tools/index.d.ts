@@ -59,6 +59,12 @@ export { classifyAndCluster, classifyFailure, clusterFailures, } from '../test-i
 export type { FlakyTestEntry } from '../test-impact/flaky-detector.js';
 export { computeFlakyScore, detectFlakyTests, isTestQuarantined, } from '../test-impact/flaky-detector.js';
 export { generate_mutants } from './generate-mutants';
+export { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
+export { lean_turbo_plan_lanes } from './lean-turbo-plan-lanes';
+export { lean_turbo_review } from './lean-turbo-review';
+export { lean_turbo_run_phase } from './lean-turbo-run-phase';
+export { lean_turbo_runner_status } from './lean-turbo-runner-status';
+export { lean_turbo_status } from './lean-turbo-status';
 export { lint_spec } from './lint-spec';
 export { mutation_test } from './mutation-test';
 export { symbols } from './symbols';

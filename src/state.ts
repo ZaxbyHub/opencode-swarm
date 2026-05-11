@@ -225,6 +225,16 @@ export interface AgentSessionState {
 	/** Session-scoped Turbo Mode flag for controlling LLM inference speed */
 	turboMode: boolean;
 
+	// Lean Turbo Mode (Phase 2)
+	/** Session-scoped turbo strategy selection — standard or lean. When undefined,
+	 *  falls back to standard (current behavior). */
+	turboStrategy?: 'standard' | 'lean';
+	/** Whether Lean Turbo is actively running in this session. Requires
+	 *  turboStrategy === 'lean'. */
+	leanTurboActive?: boolean;
+	/** Current phase number when Lean Turbo is active (for durable state sync). */
+	leanTurboCurrentPhase?: number;
+
 	// QA Gate Profile session overrides (ratchet-tighter only)
 	/** Session-level QA gate overrides layered on top of the spec-level profile.
 	 *  Overrides can only enable gates (true); false values are ignored by
@@ -514,6 +524,10 @@ export function startAgentSession(
 		modifiedFilesThisCoderTask: [],
 		// Turbo Mode (v6.26)
 		turboMode: false,
+		// Lean Turbo Mode (Phase 2)
+		turboStrategy: undefined,
+		leanTurboActive: false,
+		leanTurboCurrentPhase: undefined,
 		// QA Gate Profile session overrides
 		qaGateSessionOverrides: {},
 		// Full Auto Mode (Phase 2)
@@ -718,6 +732,16 @@ export function ensureAgentSession(
 		// Turbo Mode migration safety (v6.26)
 		if (session.turboMode === undefined) {
 			session.turboMode = false;
+		}
+		// Lean Turbo Mode migration safety (Phase 2)
+		if (session.turboStrategy === undefined) {
+			session.turboStrategy = undefined;
+		}
+		if (session.leanTurboActive === undefined) {
+			session.leanTurboActive = false;
+		}
+		if (session.leanTurboCurrentPhase === undefined) {
+			session.leanTurboCurrentPhase = undefined;
 		}
 		// QA Gate Profile session overrides migration safety
 		if (session.qaGateSessionOverrides === undefined) {
@@ -1563,6 +1587,35 @@ export function hasActiveFullAuto(sessionID?: string): boolean {
 	return false;
 }
 
+/**
+ * Check if Lean Turbo Mode is active for a specific session or ANY session.
+ * @param sessionID - Optional session ID to check. If provided, checks only that session.
+ *                    If omitted, checks all sessions.
+ * @returns true if the specified session has turboStrategy: 'lean' AND leanTurboActive: true,
+ *          or if any session has that combination when no sessionID provided.
+ */
+export function hasActiveLeanTurbo(sessionID?: string): boolean {
+	if (sessionID) {
+		const session = swarmState.agentSessions.get(sessionID);
+		return (
+			session?.turboMode === true &&
+			session?.turboStrategy === 'lean' &&
+			session?.leanTurboActive === true
+		);
+	}
+	// Global fallback
+	for (const [_sessionId, session] of swarmState.agentSessions) {
+		if (
+			session.turboMode === true &&
+			session.turboStrategy === 'lean' &&
+			session.leanTurboActive === true
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // ============================================================================
 // Environment Profile Helpers
 // ============================================================================
@@ -1671,6 +1724,7 @@ export const _internals: {
 	getTaskState: typeof getTaskState;
 	hasActiveFullAuto: typeof hasActiveFullAuto;
 	hasActiveTurboMode: typeof hasActiveTurboMode;
+	hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
 	buildRehydrationCache: typeof buildRehydrationCache;
 	applyRehydrationCache: typeof applyRehydrationCache;
 	rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
@@ -1688,6 +1742,7 @@ export const _internals: {
 	getTaskState,
 	hasActiveFullAuto,
 	hasActiveTurboMode,
+	hasActiveLeanTurbo,
 	buildRehydrationCache,
 	applyRehydrationCache,
 	rehydrateSessionFromDisk,

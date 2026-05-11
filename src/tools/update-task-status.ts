@@ -5,7 +5,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import type { TaskStatus } from '../config/plan-schema';
@@ -19,11 +19,13 @@ import { derivePlanId } from '../plan/utils.js';
 import {
 	advanceTaskState,
 	getTaskState,
+	hasActiveLeanTurbo,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
 	swarmState,
 } from '../state';
 import { telemetry } from '../telemetry.js';
+import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 
@@ -135,17 +137,47 @@ function matchesTier3Pattern(files: string[]): boolean {
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param stageBParallelEnabled - When true, also accept both-markers-present as passing (PR 2 barrier)
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
 export function checkReviewerGate(
 	taskId: string,
 	workingDirectory?: string,
 	stageBParallelEnabled = false,
+	sessionID?: string,
 ): ReviewerGateResult {
 	try {
-		// === Turbo Mode bypass check ===
-		// If Turbo Mode is active AND task does not touch Tier 3 patterns, bypass Stage B
-		if (hasActiveTurboMode()) {
+		// === Lean Turbo bypass check ===
+		// If Lean Turbo is active and task is in a completed lane, bypass Stage B
+		let skipStandardTurboBypass = false;
+		if (hasActiveLeanTurbo()) {
+			const resolvedDir = workingDirectory!;
+			try {
+				const leanCheck = verifyLeanTurboTaskCompletion(
+					resolvedDir,
+					taskId,
+					sessionID,
+				);
+				if (leanCheck.ok) {
+					return {
+						blocked: false,
+						reason: `Lean Turbo bypass: ${leanCheck.reason}`,
+					};
+				}
+				// Only allow standard Turbo bypass if we CONFIRMED the task is NOT in any lane
+				if (leanCheck.laneFound !== false) {
+					// laneFound is true (in lane but not eligible) or undefined (state missing/unreadable)
+					// Be conservative: skip standard Turbo bypass
+					skipStandardTurboBypass = true;
+				}
+			} catch {
+				// Lean Turbo check failed — be conservative and skip standard bypass
+				skipStandardTurboBypass = true;
+			}
+		}
+		if (!skipStandardTurboBypass && hasActiveTurboMode()) {
+			// === Standard Turbo Mode bypass check ===
+			// If Turbo Mode is active AND task does not touch Tier 3 patterns, bypass Stage B
 			const resolvedDir = workingDirectory!;
 			try {
 				const planPath = path.join(resolvedDir, '.swarm', 'plan.json');
@@ -389,11 +421,13 @@ export function checkReviewerGate(
  * Stage B parallel is hardcoded (not config-driven).
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult with optional scope warning appended to reason
  */
 export async function checkReviewerGateWithScope(
 	taskId: string,
 	workingDirectory?: string,
+	sessionID?: string,
 ): Promise<ReviewerGateResult> {
 	// Stage B is always parallel — hardcoded, not config-driven.
 	const stageBParallelEnabled = true;
@@ -401,6 +435,7 @@ export async function checkReviewerGateWithScope(
 		taskId,
 		workingDirectory,
 		stageBParallelEnabled,
+		sessionID,
 	);
 	const scopeWarning = await validateDiffScope(taskId, workingDirectory!).catch(
 		() => null,
@@ -647,11 +682,13 @@ export function checkCouncilGate(
  * Only one concurrent call wins the lock; others return success: false with recovery_guidance: "retry".
  * @param args - The update task status arguments
  * @param fallbackDir - Fallback working directory if args.working_directory is not provided
+ * @param ctx - Optional ToolContext providing sessionID for Lean Turbo cross-session bypass prevention
  * @returns UpdateTaskStatusResult with success status and details
  */
 export async function executeUpdateTaskStatus(
 	args: UpdateTaskStatusArgs,
 	fallbackDir?: string,
+	ctx?: ToolContext,
 ): Promise<UpdateTaskStatusResult> {
 	// Step 1: Validate status
 	const statusError = validateStatus(args.status);
@@ -857,6 +894,7 @@ export async function executeUpdateTaskStatus(
 			const reviewerCheck = await checkReviewerGateWithScope(
 				args.task_id,
 				directory,
+				ctx?.sessionID,
 			);
 			if (reviewerCheck.blocked) {
 				return {
@@ -980,9 +1018,13 @@ export const update_task_status: ToolDefinition = createSwarmTool({
 			.optional()
 			.describe('Working directory where the plan is located'),
 	},
-	execute: async (args: unknown, _directory: string) => {
+	execute: async (args: unknown, _directory: string, _ctx?: ToolContext) => {
 		return JSON.stringify(
-			await executeUpdateTaskStatus(args as UpdateTaskStatusArgs, _directory),
+			await executeUpdateTaskStatus(
+				args as UpdateTaskStatusArgs,
+				_directory,
+				_ctx,
+			),
 			null,
 			2,
 		);

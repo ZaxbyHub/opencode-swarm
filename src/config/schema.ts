@@ -1261,6 +1261,57 @@ export const ParallelizationConfigSchema = z.object({
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
 
+// Turbo configuration schema (Phase 1 Task 1.1)
+export const LeanTurboConfigSchema = z.object({
+	/** Maximum parallel coders in lean mode. 1 = serial. */
+	max_parallel_coders: z.number().int().min(1).max(6).default(4),
+	/** Require declared scope for all tasks in lean mode. */
+	require_declared_scope: z.boolean().default(true),
+	/** Conflict resolution policy when parallel coders access same files. */
+	conflict_policy: z.enum(['serialize', 'degrade']).default('serialize'),
+	/** Degrade to serial if risk conditions detected. */
+	degrade_on_risk: z.boolean().default(true),
+	/** Run reviewer phase between lean coder turns. */
+	phase_reviewer: z.boolean().default(true),
+	/** Run critic phase between lean coder turns. */
+	phase_critic: z.boolean().default(true),
+	/** Require integrated diff before accepting changes. */
+	integrated_diff_required: z.boolean().default(true),
+	/** Allow docs-only phases when reviewer is not available. */
+	allow_docs_only_without_reviewer: z.boolean().default(false),
+	/** Use worktree isolation for parallel coders. NOT YET IMPLEMENTED — must be false. */
+	worktree_isolation: z
+		.boolean()
+		.default(false)
+		.refine((val) => val === false, {
+			message:
+				'worktree_isolation: true is not yet implemented. Use false (the default) for in-repo parallel execution. Full worktree isolation will be available in a future release.',
+		}),
+});
+
+export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
+
+export const StandardTurboConfigSchema = z.object({
+	/** Turbo execution strategy. standard = current behavior, lean = constrained parallel. */
+	strategy: z.literal('standard'),
+	/** Lean-mode configuration. Only used when strategy is 'lean'. */
+	lean: LeanTurboConfigSchema.optional(),
+});
+
+export const LeanTurboStrategyConfigSchema = z.object({
+	/** Turbo execution strategy. standard = current behavior, lean = constrained parallel. */
+	strategy: z.literal('lean'),
+	/** Lean-mode configuration. Only used when strategy is 'lean'. */
+	lean: LeanTurboConfigSchema,
+});
+
+export const TurboConfigSchema = z.discriminatedUnion('strategy', [
+	StandardTurboConfigSchema,
+	LeanTurboStrategyConfigSchema,
+]);
+
+export type TurboConfig = z.infer<typeof TurboConfigSchema>;
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	// Legacy: Per-agent overrides (default swarm)
@@ -1454,6 +1505,10 @@ export const PluginConfigSchema = z.object({
 	// Parallelization configuration (PR 1 dark foundation — disabled by default)
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
+
+	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
+	// Backward compatible: no turbo key means current behavior unchanged.
+	turbo: TurboConfigSchema.optional(),
 
 	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40)
 	turbo_mode: z.boolean().default(false).optional(),
