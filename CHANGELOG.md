@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.16.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.15.0...v7.16.0) (2026-05-11)
+
+
+### Features
+
+* **close:** add skill review on finalize ([#821](https://github.com/zaxbysauce/opencode-swarm/issues/821)) ([1aa0eba](https://github.com/zaxbysauce/opencode-swarm/commit/1aa0eba71d77e930f30d58a319250527e4947939))
+
 ## [7.15.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.14.0...v7.15.0) (2026-05-11)
 
 
