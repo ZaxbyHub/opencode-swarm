@@ -881,7 +881,7 @@ export class LeanTurboRunner {
 		const timeoutMs = 10_000;
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-		const withTimeout = new Promise<T>((resolve, reject) => {
+		const withTimeout = new Promise<T>((_resolve, reject) => {
 			timeoutId = setTimeout(() => {
 				reject(
 					new Error(

@@ -141,10 +141,10 @@ async function bumpCountersBatch(
 			for (const field of fields) {
 				ro[field] = ((ro[field] as number) ?? 0) + 1;
 				if (field === 'applied_explicit_count') {
-					(e as { last_applied_at?: string }).last_applied_at = now;
+					(e as unknown as Record<string, unknown>).last_applied_at = now;
 				}
 				if (field === 'acknowledged_count') {
-					(e as { last_acknowledged_at?: string }).last_acknowledged_at = now;
+					(e as unknown as Record<string, unknown>).last_acknowledged_at = now;
 				}
 				updated = true;
 			}

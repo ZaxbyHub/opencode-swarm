@@ -289,7 +289,7 @@ describe('restoreEntry', () => {
 		await mkdir(path.join(tempDir, '.swarm'), { recursive: true });
 		const entry1 = createMockEntry({
 			id: 'entry-001',
-			lesson: 'Test lesson 1',
+			lesson: 'First test lesson for knowledge store',
 		});
 		const knowledgeContent = JSON.stringify(entry1) + '\n';
 		await writeFile(
@@ -298,7 +298,10 @@ describe('restoreEntry', () => {
 			'utf-8',
 		);
 		const quarantinedEntry = {
-			...createMockEntry({ id: 'entry-002', lesson: 'Test lesson 2' }),
+			...createMockEntry({
+				id: 'entry-002',
+				lesson: 'Second test lesson for quarantine restore',
+			}),
 			quarantine_reason: 'Test quarantine',
 			quarantined_at: new Date().toISOString(),
 			reported_by: 'architect',
@@ -311,7 +314,7 @@ describe('restoreEntry', () => {
 		);
 		const rejectedEntry = {
 			id: 'entry-002',
-			lesson: 'Test lesson 2',
+			lesson: 'Second test lesson for quarantine restore',
 			rejection_reason: 'Test quarantine',
 			rejected_at: new Date().toISOString(),
 			rejection_layer: 3,
@@ -367,6 +370,8 @@ describe('restoreEntry', () => {
 			.map((l) => JSON.parse(l))
 			.find((e) => e.id === 'entry-002');
 		expect(restored).toBeDefined();
+		expect(restored.status).toBe('candidate'); // original status restored
+		expect(restored.original_status).toBeUndefined(); // spurious field stripped
 		expect(restored.quarantine_reason).toBeUndefined();
 		expect(restored.quarantined_at).toBeUndefined();
 		expect(restored.reported_by).toBeUndefined();

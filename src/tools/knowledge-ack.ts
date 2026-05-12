@@ -9,6 +9,7 @@
  * on chat-text scanning.
  */
 
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
 	buildAckDedupKey,
@@ -16,6 +17,7 @@ import {
 	recordAcknowledgment,
 } from '../hooks/knowledge-application.js';
 import { addKnowledgeAckDedup, swarmState } from '../state.js';
+import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 export const knowledge_ack: ReturnType<typeof createSwarmTool> =
@@ -62,7 +64,13 @@ export const knowledge_ack: ReturnType<typeof createSwarmTool> =
 				result: a.result,
 				reason: a.reason,
 			};
-			const sessionId = ctx?.sessionID ?? 'unknown';
+			let sessionId = ctx?.sessionID;
+			if (!sessionId) {
+				warn(
+					'[knowledge-ack] No sessionID in tool context — dedup disabled for this acknowledgment',
+				);
+				sessionId = randomUUID();
+			}
 			const dedupKey = buildAckDedupKey(sessionId, a.id, a.result);
 			if (swarmState.knowledgeAckDedup.has(dedupKey)) {
 				return JSON.stringify(

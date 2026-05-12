@@ -516,6 +516,7 @@ export type { ActionableDirectiveFields, DirectivePriority };
 // ============================================================================
 
 export interface QuarantinedEntry extends KnowledgeEntryBase {
+	original_status: string;
 	quarantine_reason: string;
 	quarantined_at: string; // ISO 8601
 	reported_by: 'architect' | 'user' | 'auto';
@@ -634,6 +635,8 @@ export async function quarantineEntry(
 		// Build quarantine record
 		const quarantined: QuarantinedEntry = {
 			...entry,
+			status: 'quarantined',
+			original_status: entry.status,
 			quarantine_reason: sanitizedReason,
 			quarantined_at: new Date().toISOString(),
 			reported_by: reportedBy,
@@ -743,9 +746,33 @@ export async function restoreEntry(
 		// Separate: remaining quarantined entries
 		const remaining = quarantinedEntries.filter((e) => e.id !== entryId);
 
-		// Strip quarantine fields to recover original entry
-		const { quarantine_reason, quarantined_at, reported_by, ...original } =
-			entryToRestore;
+		// Strip quarantine fields to recover original entry.
+		// Also strip the 'quarantined' status and spurious original_status,
+		// restoring the status the entry had before quarantine.
+		const {
+			quarantine_reason,
+			quarantined_at,
+			reported_by,
+			original_status,
+			status: _quarantineStatus,
+			...rest
+		} = entryToRestore;
+		const original = { ...rest, status: original_status ?? 'candidate' };
+
+		// Re-validate before restoring — a quarantined entry may have been blocked
+		// for safety reasons (e.g., dangerous commands) and must pass content checks
+		// before being reintroduced to knowledge.jsonl
+		const validation = validateLesson(original.lesson, [], {
+			category: original.category,
+			scope: original.scope,
+			confidence: original.confidence,
+		});
+		if (!validation.valid) {
+			warn(
+				`[knowledge-validator] restoreEntry: entry ${entryId} failed re-validation: ${validation.reason}`,
+			);
+			return; // Skip restore — entry remains in quarantine
+		}
 
 		// Write remaining quarantined entries back INSIDE lock
 		// Fix empty file case: write '' not '\n'

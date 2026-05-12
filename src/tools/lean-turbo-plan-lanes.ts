@@ -9,7 +9,6 @@ import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../config/constants';
-import type { LeanTurboConfig } from '../config/schema';
 import type { LeanTurboLanePlan } from '../turbo/lean/planner';
 import { type PlanPhase, planLeanTurboLanes } from '../turbo/lean/planner';
 import { createSwarmTool } from './create-tool';

@@ -454,13 +454,15 @@ export async function readMergedKnowledge(
 	const topN = ranked.slice(0, maxInject);
 
 	// Step 7: Record lessons shown (fire-and-forget, non-critical)
+	// Note: recordLessonsShown has its own internal catch that logs via warn(),
+	// so this outer .catch() is defensive only (handles unexpected rejections).
 	if (topN.length > 0 && context?.currentPhase) {
 		recordLessonsShown(
 			directory,
 			topN.map((e) => e.id),
 			context.currentPhase,
-		).catch(() => {
-			// Swallow errors - this is fire-and-forget
+		).catch((err) => {
+			warn('[knowledge-reader] recordLessonsShown unexpected rejection:', err);
 		});
 	}
 

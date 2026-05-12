@@ -232,6 +232,7 @@ describe('Cache re-inject', () => {
 	});
 
 	it('Test 3: second call same phase reuses cachedInjectionText from first call', async () => {
+		// Set up entries BEFORE first call (first call will inject and cache)
 		const entries = [
 			makeSwarmEntry('Use dependency injection for testability', 0.85),
 		];
@@ -241,15 +242,16 @@ describe('Cache re-inject', () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 
-		// First call - injects immediately
+		// First call - injects and caches
 		await hook({}, output);
 
-		// Second call - should reuse cached text (not re-read)
-		await hook({}, output);
+		// Second call with fresh output - should reuse cache (not re-read)
+		const output2 = makeOutput('architect');
+		await hook({}, output2);
 
-		// readContextualKnowledge was called on first call; second call should use cache
+		// readContextualKnowledge was called on first call only
 		expect(readContextualKnowledge).toHaveBeenCalledTimes(1);
-		const hasKnowledgeInjection = output.messages.some((m) =>
+		const hasKnowledgeInjection = output2.messages.some((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
 		);
 		expect(hasKnowledgeInjection).toBe(true);
@@ -325,29 +327,28 @@ describe('Cache re-inject', () => {
 	});
 
 	it('Test 3: third call same phase reuses cachedInjectionText, does not call readContextualKnowledge again', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('architect');
-
-		// First call - init
-		await hook({}, output);
-
-		// Set up knowledge entries for second call
+		// Set up entries BEFORE first call (first call injects and caches)
 		const entries = [makeSwarmEntry('Cached lesson for re-inject', 0.85)];
 		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue(
 			entries,
 		);
 
-		// Second call - fetches and caches
+		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		const output = makeOutput('architect');
+
+		// First call - injects and caches
 		await hook({}, output);
 
-		// Reset mock to verify it's NOT called on third call
-		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockClear();
+		// Second call with fresh output - should use cache
+		const output2 = makeOutput('architect');
+		await hook({}, output2);
 
-		// Third call - should use cache
-		await hook({}, output);
+		// Third call with fresh output - should also use cache
+		const output3 = makeOutput('architect');
+		await hook({}, output3);
 
-		expect(readContextualKnowledge).not.toHaveBeenCalled();
-		const knowledgeMsg = output.messages.find((m) =>
+		expect(readContextualKnowledge).toHaveBeenCalledTimes(1); // called once on first call only
+		const knowledgeMsg = output3.messages.find((m) =>
 			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
 		);
 		expect(knowledgeMsg?.parts[0].text).toContain(

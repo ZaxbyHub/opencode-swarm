@@ -95,7 +95,7 @@ const MANIFEST_FILES = [
  * layouts). On Windows, fs.statSync returns a synthesized ino that is
  * stable per-handle within a process — sufficient for cache invalidation.
  */
-const MANIFEST_SET: Set<string> = new Set(MANIFEST_FILES);
+const _MANIFEST_SET: Set<string> = new Set(MANIFEST_FILES);
 
 /**
  * List a directory's entries safely, returning an empty Set on error

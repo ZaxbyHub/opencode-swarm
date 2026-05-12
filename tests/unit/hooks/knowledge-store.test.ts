@@ -292,4 +292,139 @@ describe('knowledge-store', () => {
 			expect(rejectedPath).toMatch(/shared-learnings-rejected.jsonl/);
 		});
 	});
+
+	describe('Malformed entry handling (FR-F2)', () => {
+		it('Entry with missing id field — graceful degradation, entry is returned', async () => {
+			const tempPath = path.join(
+				os.tmpdir(),
+				`test-missing-id-${Date.now()}.jsonl`,
+			);
+			// normalizeEntry is a pass-through normalizer; it does NOT validate id
+			const content =
+				JSON.stringify({
+					lesson: 'this lesson has no id field',
+					retrieval_outcomes: {},
+				}) + '\n';
+			await fs.promises.writeFile(tempPath, content, 'utf-8');
+
+			const result = await readKnowledge<{ id: string; lesson: string }>(
+				tempPath,
+			);
+			// Entry is returned as-is (graceful degradation); id validation is not performed by readKnowledge
+			expect(result).toHaveLength(1);
+			expect(result[0]).toHaveProperty('lesson', 'this lesson has no id field');
+
+			await fs.promises.unlink(tempPath);
+		});
+
+		it('Entry with missing lesson field — graceful degradation, entry is returned', async () => {
+			const tempPath = path.join(
+				os.tmpdir(),
+				`test-missing-lesson-${Date.now()}.jsonl`,
+			);
+			// normalizeEntry is a pass-through normalizer; it does NOT validate lesson
+			const content =
+				JSON.stringify({
+					id: 'test-id-123',
+					category: 'testing',
+					retrieval_outcomes: {},
+				}) + '\n';
+			await fs.promises.writeFile(tempPath, content, 'utf-8');
+
+			const result = await readKnowledge<{ id: string; lesson: string }>(
+				tempPath,
+			);
+			// Entry is returned as-is (graceful degradation); lesson validation is not performed by readKnowledge
+			expect(result).toHaveLength(1);
+			expect(result[0]).toHaveProperty('id', 'test-id-123');
+
+			await fs.promises.unlink(tempPath);
+		});
+
+		it('Entry with lesson too short (under 15 chars) — graceful degradation, entry is returned', async () => {
+			const tempPath = path.join(
+				os.tmpdir(),
+				`test-short-lesson-${Date.now()}.jsonl`,
+			);
+			const shortLesson = 'too short'; // 11 chars
+			// normalizeEntry does NOT check lesson length
+			const content =
+				JSON.stringify({
+					id: 'test-id-456',
+					lesson: shortLesson,
+					retrieval_outcomes: {},
+				}) + '\n';
+			await fs.promises.writeFile(tempPath, content, 'utf-8');
+
+			const result = await readKnowledge<{ id: string; lesson: string }>(
+				tempPath,
+			);
+			// Entry is returned as-is (graceful degradation); lesson length is not validated by readKnowledge
+			expect(result).toHaveLength(1);
+			expect(result[0]).toHaveProperty('lesson', shortLesson);
+
+			await fs.promises.unlink(tempPath);
+		});
+
+		it('Entry with wrong confidence type (string instead of number) — graceful degradation, entry is returned', async () => {
+			const tempPath = path.join(
+				os.tmpdir(),
+				`test-bad-confidence-${Date.now()}.jsonl`,
+			);
+			// normalizeEntry does NOT check confidence type
+			const content =
+				JSON.stringify({
+					id: 'test-id-789',
+					lesson: 'a valid lesson that is long enough for validation',
+					confidence: 'high',
+					retrieval_outcomes: {},
+				}) + '\n';
+			await fs.promises.writeFile(tempPath, content, 'utf-8');
+
+			const result = await readKnowledge<{
+				id: string;
+				lesson: string;
+				confidence: number;
+			}>(tempPath);
+			// Entry is returned as-is (graceful degradation); confidence type is not validated by readKnowledge
+			expect(result).toHaveLength(1);
+			expect(result[0]).toHaveProperty('confidence', 'high');
+
+			await fs.promises.unlink(tempPath);
+		});
+
+		it('Entry with extra unknown field — should be preserved (JSONL is schema-flexible)', async () => {
+			const tempPath = path.join(
+				os.tmpdir(),
+				`test-extra-field-${Date.now()}.jsonl`,
+			);
+			const content =
+				JSON.stringify({
+					id: 'test-id-extra',
+					lesson: 'a valid lesson with an extra unknown field for testing',
+					category: 'testing',
+					tags: ['test'],
+					scope: 'global',
+					confidence: 0.8,
+					status: 'established',
+					confirmed_by: [],
+					retrieval_outcomes: {},
+					schema_version: 2,
+					created_at: '2024-01-01T00:00:00.000Z',
+					updated_at: '2024-01-01T00:00:00.000Z',
+					tier: 'swarm',
+					project_name: 'test-project',
+					unknown_extra_field: 'this should be preserved',
+				}) + '\n';
+			await fs.promises.writeFile(tempPath, content, 'utf-8');
+
+			const result = await readKnowledge<Record<string, unknown>>(tempPath);
+			expect(result).toHaveLength(1);
+			// Unknown fields should be preserved since JSONL is schema-flexible
+			expect(result[0]).toHaveProperty('unknown_extra_field');
+			expect(result[0]['unknown_extra_field']).toBe('this should be preserved');
+
+			await fs.promises.unlink(tempPath);
+		});
+	});
 });

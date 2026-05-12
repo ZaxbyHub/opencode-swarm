@@ -253,7 +253,7 @@ function decisionFromVerdict(
 	if (escalationNeeded || verdict === 'ESCALATE_TO_HUMAN')
 		return 'escalate_human';
 	if (verdict === 'APPROVED' || verdict === 'ANSWER') return 'allow';
-	if (verdict === 'BLOCKED') return 'pause';
+	if (verdict === 'BLOCKED') return 'deny';
 	if (verdict === 'PENDING') return 'pending';
 	return 'deny';
 }

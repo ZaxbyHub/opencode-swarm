@@ -31,6 +31,7 @@ export declare function validateSkillPath(p: unknown): boolean;
 export declare function validateActionableFields(fields: ActionableDirectiveFields | undefined): ActionableValidationResult;
 export type { ActionableDirectiveFields, DirectivePriority };
 export interface QuarantinedEntry extends KnowledgeEntryBase {
+    original_status: string;
     quarantine_reason: string;
     quarantined_at: string;
     reported_by: 'architect' | 'user' | 'auto';

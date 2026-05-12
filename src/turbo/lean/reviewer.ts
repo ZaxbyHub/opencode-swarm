@@ -17,7 +17,6 @@ import { swarmState } from '../../state';
 import {
 	type LaneEvidence,
 	listLaneEvidence,
-	type PhaseEvidence,
 	readPhaseEvidence,
 } from './evidence';
 import type { LeanTurboRunState } from './state';

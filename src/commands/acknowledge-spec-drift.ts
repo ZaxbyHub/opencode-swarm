@@ -44,9 +44,6 @@ export async function handleAcknowledgeSpecDriftCommand(
 
 	const { planTitle, phase } = stalenessData;
 
-	// Delete the spec-staleness.json file
-	await fsPromises.unlink(specStalenessPath);
-
 	// Update plan.specHash to current spec hash after acknowledgment
 	let currentHash: string | null = null;
 	let planUpdateSkipped = false;
@@ -65,6 +62,11 @@ export async function handleAcknowledgeSpecDriftCommand(
 			planError instanceof Error ? planError.message : String(planError),
 		);
 		planUpdateSkipped = true;
+	}
+
+	// Only delete spec-staleness.json after plan.specHash update succeeds
+	if (!planUpdateSkipped) {
+		await fsPromises.unlink(specStalenessPath);
 	}
 
 	// Append acknowledgment event to events.jsonl

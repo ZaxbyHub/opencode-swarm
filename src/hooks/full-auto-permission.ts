@@ -311,7 +311,9 @@ export function createFullAutoPermissionHook(
 					phase: effectivePhase,
 					taskID: taskId ?? undefined,
 					planID: runState.planID,
-					architectOutput: undefined,
+					architectOutput: output.args
+						? JSON.stringify(output.args)
+						: undefined,
 					actionContext: {
 						tool: toolName,
 						...(decision.context ?? {}),

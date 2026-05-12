@@ -131,7 +131,7 @@ export function isStateUnreadable(directory: string): boolean {
 	return stateUnreadableMap.get(directory) ?? false;
 }
 
-function clearStateUnreadable(directory: string): void {
+function _clearStateUnreadable(directory: string): void {
 	stateUnreadableMap.delete(directory);
 }
 

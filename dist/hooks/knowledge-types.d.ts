@@ -81,7 +81,7 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
     tags: string[];
     scope: string;
     confidence: number;
-    status: 'candidate' | 'established' | 'promoted' | 'archived';
+    status: 'candidate' | 'established' | 'promoted' | 'archived' | 'quarantined';
     confirmed_by: PhaseConfirmationRecord[] | ProjectConfirmationRecord[];
     retrieval_outcomes: RetrievalOutcome;
     schema_version: number;

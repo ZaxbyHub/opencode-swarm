@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.16.0",
+    version: "7.17.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -15953,7 +15953,6 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
     return "Spec staleness file was corrupted. It has been removed.";
   }
   const { planTitle, phase } = stalenessData;
-  await fsPromises3.unlink(specStalenessPath);
   let currentHash = null;
   let planUpdateSkipped = false;
   try {
@@ -15966,6 +15965,9 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
   } catch (planError) {
     console.error("[acknowledge-spec-drift] Failed to update plan specHash:", planError instanceof Error ? planError.message : String(planError));
     planUpdateSkipped = true;
+  }
+  if (!planUpdateSkipped) {
+    await fsPromises3.unlink(specStalenessPath);
   }
   const eventsPath = validateSwarmPath(directory, "events.jsonl");
   const acknowledgmentEvent = {
@@ -35430,6 +35432,8 @@ async function quarantineEntry(directory, entryId, reason, reportedBy) {
     const remaining = entries.filter((e) => e.id !== entryId);
     const quarantined = {
       ...entry,
+      status: "quarantined",
+      original_status: entry.status,
       quarantine_reason: sanitizedReason,
       quarantined_at: new Date().toISOString(),
       reported_by: reportedBy
@@ -35488,7 +35492,24 @@ async function restoreEntry(directory, entryId) {
       return;
     }
     const remaining = quarantinedEntries.filter((e) => e.id !== entryId);
-    const { quarantine_reason, quarantined_at, reported_by, ...original } = entryToRestore;
+    const {
+      quarantine_reason,
+      quarantined_at,
+      reported_by,
+      original_status,
+      status: _quarantineStatus,
+      ...rest
+    } = entryToRestore;
+    const original = { ...rest, status: original_status ?? "candidate" };
+    const validation = validateLesson(original.lesson, [], {
+      category: original.category,
+      scope: original.scope,
+      confidence: original.confidence
+    });
+    if (!validation.valid) {
+      warn(`[knowledge-validator] restoreEntry: entry ${entryId} failed re-validation: ${validation.reason}`);
+      return;
+    }
     const jsonlContent = remaining.length > 0 ? `${remaining.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
@@ -46343,7 +46364,7 @@ async function selectEntryPoints2(dir) {
 `)) {
         const m = line.match(/=\s*['"]([^'":]+)/);
         if (m) {
-          const modPath = m[1].replace(/\./g, "/") + ".py";
+          const modPath = `${m[1].replace(/\./g, "/")}.py`;
           points.add(modPath);
         }
       }
@@ -47526,7 +47547,7 @@ function clearDispatchCache() {
   manifestRootCache.clear();
   insertCounter = 0;
 }
-var _internals22, cache, insertCounter = 0, MANIFEST_FILES, MANIFEST_SET, manifestRootCache;
+var _internals22, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
 var init_dispatch = __esm(() => {
   init_backends();
   init_detector();
@@ -47558,7 +47579,7 @@ var init_dispatch = __esm(() => {
     "Gemfile",
     "composer.json"
   ];
-  MANIFEST_SET = new Set(MANIFEST_FILES);
+  _MANIFEST_SET = new Set(MANIFEST_FILES);
   manifestRootCache = new Map;
 });
 

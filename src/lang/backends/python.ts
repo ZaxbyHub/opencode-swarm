@@ -173,7 +173,7 @@ async function selectEntryPoints(dir: string): Promise<string[]> {
 				const m = line.match(/=\s*['"]([^'":]+)/);
 				if (m) {
 					// `mypkg.cli:main` → mypkg/cli.py
-					const modPath = m[1].replace(/\./g, '/') + '.py';
+					const modPath = `${m[1].replace(/\./g, '/')}.py`;
 					points.add(modPath);
 				}
 			}

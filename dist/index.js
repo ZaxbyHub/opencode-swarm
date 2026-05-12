@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.16.0",
+    version: "7.17.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -18463,7 +18463,6 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
     return "Spec staleness file was corrupted. It has been removed.";
   }
   const { planTitle, phase } = stalenessData;
-  await fsPromises4.unlink(specStalenessPath);
   let currentHash = null;
   let planUpdateSkipped = false;
   try {
@@ -18476,6 +18475,9 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
   } catch (planError) {
     console.error("[acknowledge-spec-drift] Failed to update plan specHash:", planError instanceof Error ? planError.message : String(planError));
     planUpdateSkipped = true;
+  }
+  if (!planUpdateSkipped) {
+    await fsPromises4.unlink(specStalenessPath);
   }
   const eventsPath = validateSwarmPath(directory, "events.jsonl");
   const acknowledgmentEvent = {
@@ -42488,6 +42490,8 @@ async function quarantineEntry(directory, entryId, reason, reportedBy) {
     const remaining = entries.filter((e) => e.id !== entryId);
     const quarantined = {
       ...entry,
+      status: "quarantined",
+      original_status: entry.status,
       quarantine_reason: sanitizedReason,
       quarantined_at: new Date().toISOString(),
       reported_by: reportedBy
@@ -42546,7 +42550,24 @@ async function restoreEntry(directory, entryId) {
       return;
     }
     const remaining = quarantinedEntries.filter((e) => e.id !== entryId);
-    const { quarantine_reason, quarantined_at, reported_by, ...original } = entryToRestore;
+    const {
+      quarantine_reason,
+      quarantined_at,
+      reported_by,
+      original_status,
+      status: _quarantineStatus,
+      ...rest
+    } = entryToRestore;
+    const original = { ...rest, status: original_status ?? "candidate" };
+    const validation = validateLesson(original.lesson, [], {
+      category: original.category,
+      scope: original.scope,
+      confidence: original.confidence
+    });
+    if (!validation.valid) {
+      warn(`[knowledge-validator] restoreEntry: entry ${entryId} failed re-validation: ${validation.reason}`);
+      return;
+    }
     const jsonlContent = remaining.length > 0 ? `${remaining.map((e) => JSON.stringify(e)).join(`
 `)}
 ` : "";
@@ -44377,7 +44398,9 @@ async function readMergedKnowledge(directory, config3, context) {
   const maxInject = config3.max_inject_count ?? 5;
   const topN = ranked.slice(0, maxInject);
   if (topN.length > 0 && context?.currentPhase) {
-    recordLessonsShown(directory, topN.map((e) => e.id), context.currentPhase).catch(() => {});
+    recordLessonsShown(directory, topN.map((e) => e.id), context.currentPhase).catch((err2) => {
+      warn("[knowledge-reader] recordLessonsShown unexpected rejection:", err2);
+    });
   }
   return topN;
 }
@@ -54866,7 +54889,7 @@ async function selectEntryPoints2(dir) {
 `)) {
         const m = line.match(/=\s*['"]([^'":]+)/);
         if (m) {
-          const modPath = m[1].replace(/\./g, "/") + ".py";
+          const modPath = `${m[1].replace(/\./g, "/")}.py`;
           points.add(modPath);
         }
       }
@@ -56049,7 +56072,7 @@ function clearDispatchCache() {
   manifestRootCache.clear();
   insertCounter = 0;
 }
-var _internals28, cache, insertCounter = 0, MANIFEST_FILES, MANIFEST_SET, manifestRootCache;
+var _internals28, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
 var init_dispatch = __esm(() => {
   init_backends();
   init_detector();
@@ -56081,7 +56104,7 @@ var init_dispatch = __esm(() => {
     "Gemfile",
     "composer.json"
   ];
-  MANIFEST_SET = new Set(MANIFEST_FILES);
+  _MANIFEST_SET = new Set(MANIFEST_FILES);
   manifestRootCache = new Map;
 });
 
@@ -71438,7 +71461,7 @@ function decisionFromVerdict(verdict, escalationNeeded) {
   if (verdict === "APPROVED" || verdict === "ANSWER")
     return "allow";
   if (verdict === "BLOCKED")
-    return "pause";
+    return "deny";
   if (verdict === "PENDING")
     return "pending";
   return "deny";
@@ -80664,7 +80687,7 @@ function createFullAutoPermissionHook(options) {
           phase: effectivePhase,
           taskID: taskId ?? undefined,
           planID: runState.planID,
-          architectOutput: undefined,
+          architectOutput: output.args ? JSON.stringify(output.args) : undefined,
           actionContext: {
             tool: toolName,
             ...decision.context ?? {}
@@ -81370,6 +81393,7 @@ init_extractors();
 init_knowledge_reader();
 init_knowledge_store();
 init_utils2();
+var INJECTION_SENTINEL = "‌[[KNOWLEDGE-INJECTED]]";
 function buildKnowledgeBlock(entries, charBudget, cfg, currentProject) {
   if (entries.length === 0)
     return null;
@@ -81462,7 +81486,7 @@ function isOrchestratorAgent(agentName) {
 function injectKnowledgeMessage(output, text) {
   if (!output.messages)
     return;
-  const alreadyInjected = output.messages.some((m) => m.parts?.some((p) => p.text?.includes("\uD83D\uDCDA Lessons:") || p.text?.includes("<drift_report>") || p.text?.includes("<curator_briefing>")));
+  const alreadyInjected = output.messages.some((m) => m.parts?.some((p) => p.text?.includes(INJECTION_SENTINEL)));
   if (alreadyInjected)
     return;
   let insertIdx = output.messages.length - 1;
@@ -81474,14 +81498,11 @@ function injectKnowledgeMessage(output, text) {
   }
   const knowledgeMessage = {
     info: { role: "system" },
-    parts: [{ type: "text", text }]
+    parts: [{ type: "text", text: `${INJECTION_SENTINEL}${text}` }]
   };
   output.messages.splice(insertIdx, 0, knowledgeMessage);
 }
 function createKnowledgeInjectorHook(directory, config3) {
-  let lastSeenCacheKey = null;
-  let cachedInjectionText = null;
-  let cachedShownIds = [];
   function buildContextCacheKey(phase, ctx) {
     const parts2 = [
       String(phase),
@@ -81493,6 +81514,9 @@ function createKnowledgeInjectorHook(directory, config3) {
     ].join("|");
     return createHash7("sha1").update(parts2).digest("hex").slice(0, 16);
   }
+  let lastSeenCacheKey = null;
+  let cachedInjectionText = null;
+  let cachedShownIds = [];
   return safeHook(async (_input, output) => {
     if (!output.messages || output.messages.length === 0)
       return;
@@ -87880,7 +87904,9 @@ var imports = createSwarmTool({
 });
 // src/tools/knowledge-ack.ts
 init_zod();
+import { randomUUID as randomUUID7 } from "node:crypto";
 init_state();
+init_logger();
 init_create_tool();
 var knowledge_ack = createSwarmTool({
   description: "Record an acknowledgment outcome (applied/ignored/violated) for a previously-injected knowledge directive. Updates retrieval-outcome counters and appends a record to .swarm/knowledge-application.jsonl.",
@@ -87908,7 +87934,11 @@ var knowledge_ack = createSwarmTool({
       result: a.result,
       reason: a.reason
     };
-    const sessionId = ctx?.sessionID ?? "unknown";
+    let sessionId = ctx?.sessionID;
+    if (!sessionId) {
+      warn("[knowledge-ack] No sessionID in tool context — dedup disabled for this acknowledgment");
+      sessionId = randomUUID7();
+    }
     const dedupKey = buildAckDedupKey(sessionId, a.id, a.result);
     if (swarmState.knowledgeAckDedup.has(dedupKey)) {
       return JSON.stringify({
@@ -87937,7 +87967,7 @@ init_knowledge_store();
 init_knowledge_validator();
 init_manager();
 init_create_tool();
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 var VALID_CATEGORIES2 = [
   "process",
   "architecture",
@@ -88011,7 +88041,7 @@ var knowledge_add = createSwarmTool({
       project_name = plan?.title ?? "";
     } catch {}
     const entry = {
-      id: randomUUID7(),
+      id: randomUUID8(),
       tier: "swarm",
       lesson,
       category,
@@ -99579,7 +99609,7 @@ ${fileList}
   async _withStateLock(fn) {
     const timeoutMs = 1e4;
     let timeoutId;
-    const withTimeout2 = new Promise((resolve47, reject) => {
+    const withTimeout2 = new Promise((_resolve, reject) => {
       timeoutId = setTimeout(() => {
         reject(new Error(`_withStateLock timed out after ${timeoutMs}ms — state update will not block subsequent operations`));
       }, timeoutMs);
