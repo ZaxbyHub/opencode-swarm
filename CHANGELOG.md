@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.17.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.2...v7.17.3) (2026-05-12)
+
+
+### Bug Fixes
+
+* **turbo:** update registry metadata and fix 5 pre-existing test failures via _internals DI seam ([#830](https://github.com/zaxbysauce/opencode-swarm/issues/830)) ([4aa6540](https://github.com/zaxbysauce/opencode-swarm/commit/4aa6540f60322f0033a765771d8b29a2ac7ccd1c))
+
 ## [7.17.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.1...v7.17.2) (2026-05-12)
 
 
