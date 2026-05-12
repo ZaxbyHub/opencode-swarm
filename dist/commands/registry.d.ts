@@ -366,9 +366,9 @@ export declare const COMMAND_REGISTRY: {
     };
     readonly turbo: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
-        readonly description: "Toggle Turbo Mode for the active session [on|off]";
-        readonly args: "on, off";
-        readonly details: "Toggles Turbo Mode which skips non-critical QA gates for faster iteration. When enabled, the architect can proceed without waiting for all automated checks. Session-scoped — resets on new session. Use \"on\" or \"off\" to set explicitly, or toggle with no argument.";
+        readonly description: "Toggle Turbo Mode strategy for the active session [on|off|lean|standard|status]";
+        readonly args: "on, off, lean, standard, status";
+        readonly details: string;
         readonly category: "utility";
     };
     readonly 'full-auto': {

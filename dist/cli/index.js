@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.17.1",
+    version: "7.17.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -51438,7 +51438,7 @@ async function handleTurboCommand(directory, args, sessionID) {
   if (arg0 === "on") {
     let strategy = "standard";
     try {
-      const { config: config3 } = loadPluginConfigWithMeta(directory);
+      const { config: config3 } = _internals25.loadPluginConfigWithMeta(directory);
       if (config3.turbo?.strategy === "lean") {
         strategy = "lean";
       }
@@ -51493,7 +51493,7 @@ function enableLeanTurbo(session, directory, sessionID) {
   let maxParallelCoders = 4;
   let conflictPolicy = "serialize";
   try {
-    const { config: config3 } = loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals25.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.lean;
     if (leanConfig) {
       maxParallelCoders = leanConfig.max_parallel_coders ?? 4;
@@ -51563,11 +51563,15 @@ function buildStatusMessage(session, directory, sessionID) {
   ].join(`
 `);
 }
+var _internals25;
 var init_turbo = __esm(() => {
   init_config();
   init_state();
   init_state3();
   init_logger();
+  _internals25 = {
+    loadPluginConfigWithMeta
+  };
 });
 
 // src/commands/write-retro.ts
@@ -51820,7 +51824,7 @@ function createSwarmCommandHandler(directory, agents) {
         const attemptedCommand = tokens[0] || "";
         const MAX_DISPLAY = 100;
         const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-        const similar = _internals25.findSimilarCommands(attemptedCommand);
+        const similar = _internals26.findSimilarCommands(attemptedCommand);
         const header = `Command \`/swarm ${displayCommand}\` not found.`;
         const suggestions = similar.length > 0 ? `Did you mean:
 ${similar.map((cmd) => `  \u2022 /swarm ${cmd}`).join(`
@@ -51927,7 +51931,7 @@ function findSimilarCommands(query) {
   }
   const scored = VALID_COMMANDS.map((cmd) => {
     const cmdLower = cmd.toLowerCase();
-    const fullScore = _internals25.levenshteinDistance(q, cmdLower);
+    const fullScore = _internals26.levenshteinDistance(q, cmdLower);
     let tokenScore = Infinity;
     if (cmd.includes(" ") || cmd.includes("-")) {
       const qTokens = q.split(/[\s-]+/);
@@ -51940,7 +51944,7 @@ function findSimilarCommands(query) {
         for (const ct of cmdTokens) {
           if (ct.length === 0)
             continue;
-          const dist = _internals25.levenshteinDistance(qt, ct);
+          const dist = _internals26.levenshteinDistance(qt, ct);
           if (dist < minDist)
             minDist = dist;
         }
@@ -51950,7 +51954,7 @@ function findSimilarCommands(query) {
     }
     const dashStrippedQ = q.replace(/-/g, "");
     const dashStrippedCmd = cmdLower.replace(/-/g, "");
-    const dashScore = _internals25.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const dashScore = _internals26.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
     const score = Math.min(fullScore, tokenScore, dashScore);
     return { cmd, score };
   });
@@ -51982,11 +51986,11 @@ async function handleHelpCommand(ctx) {
     return buildHelpText2();
   }
   const tokens = targetCommand.split(/\s+/);
-  const resolved = _internals25.resolveCommand(tokens);
+  const resolved = _internals26.resolveCommand(tokens);
   if (resolved) {
-    return _internals25.buildDetailedHelp(resolved.key, resolved.entry);
+    return _internals26.buildDetailedHelp(resolved.key, resolved.entry);
   }
-  const similar = _internals25.findSimilarCommands(targetCommand);
+  const similar = _internals26.findSimilarCommands(targetCommand);
   const { buildHelpText: fullHelp } = await Promise.resolve().then(() => (init_commands(), exports_commands));
   if (similar.length > 0) {
     return `Command '/swarm ${targetCommand}' not found.
@@ -52080,7 +52084,7 @@ function resolveCommand(tokens) {
   }
   return null;
 }
-var COMMAND_REGISTRY, VALID_COMMANDS, _internals25, validation;
+var COMMAND_REGISTRY, VALID_COMMANDS, _internals26, validation;
 var init_registry = __esm(() => {
   init_acknowledge_spec_drift();
   init_agents();
@@ -52150,7 +52154,7 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/agents"
     },
     help: {
-      handler: (ctx) => _internals25.handleHelpCommand(ctx),
+      handler: (ctx) => _internals26.handleHelpCommand(ctx),
       description: "Show help for swarm commands",
       category: "core",
       args: "[command]",
@@ -52449,9 +52453,24 @@ var init_registry = __esm(() => {
     },
     turbo: {
       handler: (ctx) => handleTurboCommand(ctx.directory, ctx.args, ctx.sessionID),
-      description: "Toggle Turbo Mode for the active session [on|off]",
-      args: "on, off",
-      details: 'Toggles Turbo Mode which skips non-critical QA gates for faster iteration. When enabled, the architect can proceed without waiting for all automated checks. Session-scoped \u2014 resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
+      description: "Toggle Turbo Mode strategy for the active session [on|off|lean|standard|status]",
+      args: "on, off, lean, standard, status",
+      details: `Toggles Turbo Mode for the current session. Supports two strategies:
+
+` + `**Standard turbo** \u2014 skips non-critical QA gates for faster iteration.
+` + `**Lean turbo** \u2014 parallel lane execution with per-lane reviewer gates and file-lock conflict detection.
+` + `
+Subcommands:
+` + `  turbo on           \u2014 enable turbo (uses lean when config turbo.strategy is "lean", otherwise standard)
+` + `  turbo off          \u2014 disable all turbo modes
+` + `  turbo lean on      \u2014 enable Lean Turbo explicitly
+` + `  turbo lean off     \u2014 disable Lean Turbo
+` + `  turbo lean         \u2014 toggle Lean Turbo on/off
+` + `  turbo standard on  \u2014 force standard turbo (disables lean even if config says lean)
+` + `  turbo standard off \u2014 disable standard turbo (falls back to lean if config strategy is lean)
+` + `  turbo status       \u2014 show detailed status including active strategy and lanes
+` + `
+` + "Session-scoped \u2014 resets on new session.",
       category: "utility"
     },
     "full-auto": {
@@ -52507,7 +52526,7 @@ var init_registry = __esm(() => {
     }
   };
   VALID_COMMANDS = Object.keys(COMMAND_REGISTRY);
-  _internals25 = {
+  _internals26 = {
     handleHelpCommand,
     validateAliases,
     resolveCommand,
@@ -52515,7 +52534,7 @@ var init_registry = __esm(() => {
     findSimilarCommands,
     buildDetailedHelp
   };
-  validation = _internals25.validateAliases();
+  validation = _internals26.validateAliases();
   if (!validation.valid) {
     throw new Error(`COMMAND_REGISTRY alias validation failed:
 ${validation.errors.join(`

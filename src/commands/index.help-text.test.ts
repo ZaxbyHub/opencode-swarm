@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { buildHelpText } from './index';
 import type { CommandEntry, RegisteredCommand } from './registry';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from './registry';
@@ -202,5 +202,20 @@ describe('buildHelpText()', () => {
 			expect(positions[2]).toBeLessThan(positions[3]); // evidence < summary
 			expect(positions[4]).toBeLessThan(positions[5]); // config < doctor
 		});
+	});
+});
+
+describe('turbo command registry', () => {
+	it('description mentions lean turbo', () => {
+		expect(COMMAND_REGISTRY.turbo.description).toMatch(/lean/i);
+	});
+
+	it('args include lean and status subcommands', () => {
+		expect(COMMAND_REGISTRY.turbo.args).toContain('lean');
+		expect(COMMAND_REGISTRY.turbo.args).toContain('status');
+	});
+
+	it('details document lean turbo subcommands', () => {
+		expect(COMMAND_REGISTRY.turbo.details).toMatch(/lean/i);
 	});
 });

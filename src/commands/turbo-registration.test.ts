@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as commandsIndex from '../commands/index';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from '../commands/registry';
-import { handleTurboCommand } from '../commands/turbo';
+import { _internals, handleTurboCommand } from '../commands/turbo';
 import { getAgentSession, swarmState } from '../state';
 
 // Test the switch case routing by creating a mock handler
@@ -75,8 +75,17 @@ describe('Task 3.12: Turbo Command Registration', () => {
 
 	describe('Switch Case Routing', () => {
 		let testSessionId: string;
+		const originalLoad = _internals.loadPluginConfigWithMeta;
 
 		beforeEach(() => {
+			// Stub config loading so tests don't read the real project config
+			_internals.loadPluginConfigWithMeta = () => ({
+				config: {
+					turbo: { strategy: 'standard' },
+				} as unknown as import('../config').PluginConfig,
+				loadedFromFile: false,
+			});
+
 			// Create a test session with turboMode = false
 			testSessionId = `switch-test-${Date.now()}`;
 			swarmState.agentSessions.set(testSessionId, {
@@ -129,6 +138,7 @@ describe('Task 3.12: Turbo Command Registration', () => {
 
 		afterEach(() => {
 			swarmState.agentSessions.delete(testSessionId);
+			_internals.loadPluginConfigWithMeta = originalLoad;
 		});
 
 		it('switch case should route "turbo" subcommand to handleTurboCommand', async () => {

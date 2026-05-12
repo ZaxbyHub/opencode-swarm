@@ -215,9 +215,14 @@ Run preflight automation checks before starting a phase. Validates plan complete
 
 ## Execution Modes
 
-### `/swarm turbo [on|off]`
+### `/swarm turbo [on|off|lean|standard|status]`
 
-Toggle Turbo Mode for the current session. Skips non-critical QA gates for faster iteration. Session-scoped; resets on new session.
+Toggle Turbo Mode for the current session. Supports two strategies:
+
+- **Standard** — skips non-critical QA gates for faster iteration
+- **Lean** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection
+
+Session-scoped; resets on new session.
 
 ```text
 /swarm turbo              # toggle standard turbo
@@ -227,6 +232,7 @@ Toggle Turbo Mode for the current session. Skips non-critical QA gates for faste
 /swarm turbo lean off     # disable Lean Turbo
 /swarm turbo lean         # toggle Lean Turbo explicitly
 /swarm turbo standard on  # force standard turbo
+/swarm turbo standard off # disable standard turbo
 /swarm turbo status       # show detailed status
 ```
 

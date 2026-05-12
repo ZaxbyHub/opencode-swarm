@@ -10,6 +10,19 @@ import {
 import * as logger from '../utils/logger';
 
 /**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.loadPluginConfigWithMeta(...)` so tests can replace the function
+ * on this object without using `mock.module` from `bun:test`, which leaks
+ * across files in Bun's shared test-runner process (AGENTS.md §7).
+ * Mutating this local object is file-scoped and trivially restorable via afterEach.
+ */
+export const _internals: {
+	loadPluginConfigWithMeta: typeof loadPluginConfigWithMeta;
+} = {
+	loadPluginConfigWithMeta,
+};
+
+/**
  * Handles the /swarm turbo command.
  * Supports standard turbo toggle, lean turbo mode, and status reporting.
  *
@@ -98,7 +111,7 @@ export async function handleTurboCommand(
 		// turbo on → enable standard UNLESS config says lean
 		let strategy: 'standard' | 'lean' = 'standard';
 		try {
-			const { config } = loadPluginConfigWithMeta(directory);
+			const { config } = _internals.loadPluginConfigWithMeta(directory);
 			if (config.turbo?.strategy === 'lean') {
 				strategy = 'lean';
 			}
@@ -180,7 +193,7 @@ function enableLeanTurbo(
 
 	// Read config for lean settings
 	try {
-		const { config } = loadPluginConfigWithMeta(directory);
+		const { config } = _internals.loadPluginConfigWithMeta(directory);
 		const leanConfig = config.turbo?.lean;
 		if (leanConfig) {
 			maxParallelCoders = leanConfig.max_parallel_coders ?? 4;

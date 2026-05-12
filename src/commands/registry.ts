@@ -619,10 +619,26 @@ export const COMMAND_REGISTRY = {
 	turbo: {
 		handler: (ctx) =>
 			handleTurboCommand(ctx.directory, ctx.args, ctx.sessionID),
-		description: 'Toggle Turbo Mode for the active session [on|off]',
-		args: 'on, off',
+		description:
+			'Toggle Turbo Mode strategy for the active session [on|off|lean|standard|status]',
+		args: 'on, off, lean, standard, status',
 		details:
-			'Toggles Turbo Mode which skips non-critical QA gates for faster iteration. When enabled, the architect can proceed without waiting for all automated checks. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
+			'Toggles Turbo Mode for the current session. Supports two strategies:\n' +
+			'\n' +
+			'**Standard turbo** — skips non-critical QA gates for faster iteration.\n' +
+			'**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection.\n' +
+			'\n' +
+			'Subcommands:\n' +
+			'  turbo on           — enable turbo (uses lean when config turbo.strategy is "lean", otherwise standard)\n' +
+			'  turbo off          — disable all turbo modes\n' +
+			'  turbo lean on      — enable Lean Turbo explicitly\n' +
+			'  turbo lean off     — disable Lean Turbo\n' +
+			'  turbo lean         — toggle Lean Turbo on/off\n' +
+			'  turbo standard on  — force standard turbo (disables lean even if config says lean)\n' +
+			'  turbo standard off — disable standard turbo (falls back to lean if config strategy is lean)\n' +
+			'  turbo status       — show detailed status including active strategy and lanes\n' +
+			'\n' +
+			'Session-scoped — resets on new session.',
 		category: 'utility',
 	},
 	'full-auto': {
