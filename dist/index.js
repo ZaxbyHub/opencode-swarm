@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.17.2",
+    version: "7.17.3",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -70839,7 +70839,7 @@ var init_curator_drift = __esm(() => {
 var exports_project_context = {};
 __export(exports_project_context, {
   buildProjectContext: () => buildProjectContext,
-  _internals: () => _internals49,
+  _internals: () => _internals50,
   LANG_BACKEND_DETECTION_TIMEOUT_MS: () => LANG_BACKEND_DETECTION_TIMEOUT_MS
 });
 import * as fs110 from "node:fs";
@@ -70923,7 +70923,7 @@ function selectLintCommand(backend, directory) {
   return null;
 }
 async function buildProjectContext(directory) {
-  const backend = await _internals49.pickBackend(directory);
+  const backend = await _internals50.pickBackend(directory);
   if (!backend)
     return null;
   const ctx = emptyProjectContext();
@@ -70954,16 +70954,16 @@ async function buildProjectContext(directory) {
   if (backend.prompts.reviewerChecklist.length > 0) {
     ctx.REVIEWER_CHECKLIST = bulletList(backend.prompts.reviewerChecklist);
   }
-  const profiles = _internals49.pickedProfiles(directory);
+  const profiles = _internals50.pickedProfiles(directory);
   if (profiles.length > 1) {
     ctx.PROJECT_CONTEXT_SECONDARY_LANGUAGES = profiles.slice(1).map((p) => p.id).join(", ");
   }
   return ctx;
 }
-var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals49;
+var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals50;
 var init_project_context = __esm(() => {
   init_dispatch();
-  _internals49 = {
+  _internals50 = {
     pickBackend,
     pickedProfiles
   };
@@ -102463,6 +102463,7 @@ var write_drift_evidence = createSwarmTool({
 // src/tools/write-final-council-evidence.ts
 init_zod();
 init_loader();
+import { randomUUID as randomUUID9 } from "node:crypto";
 import fs107 from "node:fs";
 import path135 from "node:path";
 init_utils2();
@@ -102499,6 +102500,90 @@ var ArgsSchema6 = exports_external.object({
 function normalizeFinalVerdict(verdict) {
   return verdict === "APPROVE" ? "approved" : "rejected";
 }
+var replacementLocks = new Map;
+var _internals49 = {
+  loadPluginConfig,
+  synthesizeFinalCouncilAdvisory,
+  loadPlan,
+  derivePlanId,
+  validateSwarmPath
+};
+function getErrnoCode(error93) {
+  return error93 && typeof error93 === "object" ? error93.code : undefined;
+}
+async function replaceEvidenceFile(tempPath, finalPath) {
+  const previous = replacementLocks.get(finalPath)?.catch(() => {});
+  let release;
+  const current = new Promise((resolve51) => {
+    release = resolve51;
+  });
+  replacementLocks.set(finalPath, current);
+  if (previous) {
+    await previous;
+  }
+  try {
+    await replaceEvidenceFileLocked(tempPath, finalPath);
+  } finally {
+    release();
+    if (replacementLocks.get(finalPath) === current) {
+      replacementLocks.delete(finalPath);
+    }
+  }
+}
+async function replaceEvidenceFileLocked(tempPath, finalPath) {
+  try {
+    await fs107.promises.rename(tempPath, finalPath);
+    return;
+  } catch (error93) {
+    const code = getErrnoCode(error93);
+    if (!["EEXIST", "EPERM", "EACCES"].includes(code ?? "")) {
+      throw error93;
+    }
+  }
+  const backupPath = `${finalPath}.${randomUUID9()}.bak`;
+  let backupCreated = false;
+  try {
+    try {
+      await fs107.promises.rename(finalPath, backupPath);
+      backupCreated = true;
+    } catch (error93) {
+      if (getErrnoCode(error93) !== "ENOENT") {
+        throw error93;
+      }
+    }
+    try {
+      await fs107.promises.rename(tempPath, finalPath);
+    } catch (error93) {
+      if (backupCreated) {
+        if (!await restoreEvidenceBackup(backupPath, finalPath)) {
+          await fs107.promises.rm(backupPath, { force: true }).catch(() => {});
+        }
+        backupCreated = false;
+      }
+      throw error93;
+    }
+    if (backupCreated) {
+      await fs107.promises.rm(backupPath, { force: true }).catch(() => {});
+      backupCreated = false;
+    }
+  } finally {
+    await fs107.promises.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+async function restoreEvidenceBackup(backupPath, finalPath) {
+  try {
+    await fs107.promises.rename(backupPath, finalPath);
+    return true;
+  } catch {
+    try {
+      await fs107.promises.copyFile(backupPath, finalPath);
+      await fs107.promises.rm(backupPath, { force: true }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
 async function executeWriteFinalCouncilEvidence(args2, directory) {
   const parsed = ArgsSchema6.safeParse(args2);
   if (!parsed.success) {
@@ -102512,7 +102597,7 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
     }, null, 2);
   }
   const input = parsed.data;
-  const config3 = loadPluginConfig(directory);
+  const config3 = _internals49.loadPluginConfig(directory);
   const requiredMembers = FINAL_COUNCIL_MEMBERS.length;
   const distinctMembers = new Set(input.verdicts.map((v) => v.agent));
   const membersVoted = [...distinctMembers];
@@ -102527,9 +102612,27 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
       quorumRequired: requiredMembers
     }, null, 2);
   }
-  const synthesis = synthesizeFinalCouncilAdvisory(input.projectSummary.trim(), input.verdicts, input.roundNumber ?? 1, config3.council);
-  const plan = await loadPlan(directory);
-  const planId = plan ? derivePlanId(plan) : "unknown";
+  let synthesis;
+  try {
+    synthesis = _internals49.synthesizeFinalCouncilAdvisory(input.projectSummary.trim(), input.verdicts, input.roundNumber ?? 1, config3.council);
+  } catch (error93) {
+    return JSON.stringify({
+      success: false,
+      phase: input.phase,
+      message: error93 instanceof Error ? error93.message : "Failed to synthesize final council evidence"
+    }, null, 2);
+  }
+  let planId = "unknown";
+  try {
+    const plan = await _internals49.loadPlan(directory);
+    planId = plan ? _internals49.derivePlanId(plan) : "unknown";
+  } catch (error93) {
+    return JSON.stringify({
+      success: false,
+      phase: input.phase,
+      message: error93 instanceof Error ? error93.message : "Failed to load project plan"
+    }, null, 2);
+  }
   const normalizedVerdict = normalizeFinalVerdict(synthesis.overallVerdict);
   const evidenceEntry = {
     type: "final-council",
@@ -102555,7 +102658,7 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
   const relativePath = path135.join("evidence", filename);
   let validatedPath;
   try {
-    validatedPath = validateSwarmPath(directory, relativePath);
+    validatedPath = _internals49.validateSwarmPath(directory, relativePath);
   } catch (error93) {
     return JSON.stringify({
       success: false,
@@ -102569,9 +102672,9 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
   const evidenceDir = path135.dirname(validatedPath);
   try {
     await fs107.promises.mkdir(evidenceDir, { recursive: true });
-    const tempPath = path135.join(evidenceDir, `.${filename}.tmp`);
+    const tempPath = path135.join(evidenceDir, `.${filename}.${randomUUID9()}.tmp`);
     await fs107.promises.writeFile(tempPath, JSON.stringify(evidenceContent, null, 2), "utf-8");
-    await fs107.promises.rename(tempPath, validatedPath);
+    await replaceEvidenceFile(tempPath, validatedPath);
     return JSON.stringify({
       success: true,
       phase: input.phase,
