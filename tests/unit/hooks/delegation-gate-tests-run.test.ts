@@ -622,7 +622,7 @@ describe('delegation-gate: tests_run state transition (v6.22 Task 2.3)', () => {
 			expect(getTaskState(architectSession, '6.2')).toBe('complete');
 		});
 
-		it('should handle multiple sessions with taskWorkflowStates correctly', async () => {
+		it('should only advance the originating task across sessions', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config);
 
@@ -649,9 +649,10 @@ describe('delegation-gate: tests_run state transition (v6.22 Task 2.3)', () => {
 			// Trigger toolAfter in session C (has the delegation chain)
 			await triggerToolAfter(hook, 'session-c');
 
-			// Both session A and B should advance to reviewer_run
+			// Only the originating task should advance; unrelated session-local
+			// task IDs must not be pulled forward by the fallback path.
 			expect(getTaskState(sessionA, '7.1')).toBe('reviewer_run');
-			expect(getTaskState(sessionB, '7.2')).toBe('reviewer_run');
+			expect(getTaskState(sessionB, '7.2')).toBe('pre_check_passed');
 		});
 
 		it('should not advance current session twice (already handled in Pass 1)', async () => {

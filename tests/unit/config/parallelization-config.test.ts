@@ -20,7 +20,7 @@ describe('ParallelizationConfigSchema', () => {
 		expect(result.evidenceLockTimeoutMs).toBe(60000);
 	});
 
-	test('accepts explicit enabled: true (for future use)', () => {
+	test('accepts explicit enabled: true', () => {
 		const result = ParallelizationConfigSchema.parse({ enabled: true });
 		expect(result.enabled).toBe(true);
 	});
@@ -65,13 +65,9 @@ describe('PluginConfigSchema — parallelization field', () => {
 		expect(result.parallelization?.evidenceLockTimeoutMs).toBe(60000);
 	});
 
-	test('no production branching: default-absent parallelization is falsy', () => {
+	test('default-absent parallelization is falsy', () => {
 		const result = PluginConfigSchema.parse({});
-		// Prove that no code can accidentally activate parallel execution
-		// via the default-parsed config.
 		expect(result.parallelization?.enabled).toBeUndefined();
-		// Defensive check: if someone reads .enabled on the absent field,
-		// they get undefined (falsy), not true.
 		const enabled = result.parallelization?.enabled;
 		expect(enabled).toBeFalsy();
 	});

@@ -100,7 +100,7 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).not.toContain('supplements — does NOT replace');
 		});
 
-		it.skip('contains the ADDITIONAL verification layer wording inside the council block (TODO: implement in buildCouncilWorkflow)', () => {
+		it('contains the ADDITIONAL verification layer wording inside the council block', () => {
 			// Council is "ADDITIONAL" verification layer, NOT a replacement for Stage B
 			expect(prompt).toContain('ADDITIONAL verification layer');
 			expect(prompt).toContain('Stage B');
@@ -108,7 +108,7 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).toContain('pre_check_batch');
 		});
 
-		it.skip('does NOT contain REPLACES Stage B wording anywhere in the prompt (TODO: implement in buildCouncilWorkflow)', () => {
+		it('does NOT contain REPLACES Stage B wording anywhere in the prompt', () => {
 			// "council REPLACES Stage B" is wrong - but "council never replaces Stage B" is correct
 			// So we check for the specific pattern "council REPLACES Stage B" (with REPLACES as a verb)
 			expect(prompt).not.toMatch(/council\s+REPLACES\s+Stage\s+B/i);
@@ -284,72 +284,9 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 		// These tests verify the council_mode prompt rewrite:
 		// 1. Council is "ADDITIONAL" gate at PHASE LEVEL, not a replacement for Stage B
 		// 2. PHASE COUNCIL section added for phase-level holistic review
-		// Note: Stage B parallel dispatch notation tests (DISPATCH/PARALLEL/Never run them sequentially)
-		// require ARCHITECT_PROMPT Stage B section changes and remain skipped for a follow-up PR.
-
-		describe.skip('Stage B DISPATCH in PARALLEL (council.enabled === true)', () => {
-			const agent = createArchitectAgent(
-				'test-model',
-				undefined,
-				undefined,
-				undefined,
-				{ enabled: true },
-			);
-			const prompt = agent.config.prompt!;
-
-			it('contains DISPATCH instruction for Stage B', () => {
-				expect(prompt).toContain('DISPATCH');
-			});
-
-			it('contains PARALLEL instruction for Stage B', () => {
-				expect(prompt).toContain('PARALLEL');
-			});
-
-			it('Stage B mentions reviewer AND test_engineer together', () => {
-				// Stage B should mention both agents in the same context
-				const stageBMatch = prompt.match(/STAGE B:[\s\S]{0,500}/i);
-				expect(stageBMatch).not.toBeNull();
-				const stageBText = stageBMatch![0];
-				expect(stageBText).toContain('reviewer');
-				expect(stageBText).toContain('test_engineer');
-			});
-
-			it('explicitly says "Never run them sequentially"', () => {
-				// The new parallel dispatch instruction explicitly forbids sequential execution
-				expect(prompt).toContain('Never run them sequentially');
-			});
-
-			it('shows correct pattern: reviewer AND test_engineer in single message', () => {
-				// "WRONG: I'll run reviewer first, then test_engineer."
-				// "RIGHT: Launch reviewer and test_engineer in the same message."
-				expect(prompt).toMatch(
-					/RIGHT.*Launch.*reviewer.*test_engineer.*same message/i,
-				);
-			});
-		});
-
-		describe.skip('Stage B DISPATCH in PARALLEL (council.enabled === false)', () => {
-			const agent = createArchitectAgent(
-				'test-model',
-				undefined,
-				undefined,
-				undefined,
-				{ enabled: false },
-			);
-			const prompt = agent.config.prompt!;
-
-			it('still contains DISPATCH instruction for Stage B', () => {
-				expect(prompt).toContain('DISPATCH');
-			});
-
-			it('still contains PARALLEL instruction for Stage B', () => {
-				expect(prompt).toContain('PARALLEL');
-			});
-
-			it('still explicitly says "Never run them sequentially"', () => {
-				expect(prompt).toContain('Never run them sequentially');
-			});
-		});
+		// Stage B parallel dispatch is covered through createAgents() in
+		// architect-parallelization-config.test.ts, where the PARALLELIZATION
+		// CONFIG placeholder is actually expanded.
 
 		describe('Council is ADDITIONAL gate at PHASE LEVEL (not replacement)', () => {
 			const agent = createArchitectAgent(

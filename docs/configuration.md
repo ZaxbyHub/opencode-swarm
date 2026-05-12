@@ -10,6 +10,8 @@ Global config:
 ~/.config/opencode/opencode-swarm.json
 ```
 
+The loader uses the XDG config directory on every supported OS: `$XDG_CONFIG_HOME/opencode/opencode-swarm.json` when `XDG_CONFIG_HOME` is set, otherwise `<home>/.config/opencode/opencode-swarm.json`. On native Windows this resolves to `C:\Users\<you>\.config\opencode\opencode-swarm.json`; it does not read `%APPDATA%` for plugin configuration.
+
 Project config:
 
 ```text
@@ -296,6 +298,34 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 ```
 
 > ⚠️ **Strict-validation warning.** `CouncilConfigSchema` is `.strict()`. A typo in any `council.general.*` key (e.g. `searchProvder`) causes the *entire* user config to fail Zod validation. The loader (`src/config/loader.ts`) then falls back to **guardrail-only defaults** — silently losing every setting in `opencode-swarm.json`, not just the misspelled field. Validate with `/swarm config` after editing, and watch for the `[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults` warning in the console.
+
+## Standard Parallelization Configuration
+
+The `parallelization` block controls standard non-Lean orchestration. It does not require `/swarm turbo lean` and does not use Lean Turbo tools. When enabled, the architect prompt receives bounded fan-out rules for independent coder tasks and all applicable Stage B gate groups. A Stage B gate group includes reviewer, verification test_engineer, and the conditional adversarial test_engineer pass when the QA ladder requires adversarial testing.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables standard non-Lean parallel orchestration guidance. |
+| `maxConcurrentTasks` | number | `1` | Global cap used to clamp coder and review fan-out. |
+| `evidenceLockTimeoutMs` | number | `60000` | Timeout budget for evidence lock operations. |
+| `max_coders` | number | `3` | Max coder agents the architect may dispatch concurrently, also capped by `maxConcurrentTasks`. |
+| `max_reviewers` | number | `2` | Max independent Stage B gate groups, also capped by `maxConcurrentTasks`. |
+
+**Example** - Enable standard parallelization without Lean Turbo:
+
+```json
+{
+  "parallelization": {
+    "enabled": true,
+    "maxConcurrentTasks": 4,
+    "evidenceLockTimeoutMs": 60000,
+    "max_coders": 3,
+    "max_reviewers": 2
+  }
+}
+```
+
+When `execution_profile` is present and locked on a plan, the architect must use the stricter limit between the global `parallelization` config and the locked plan profile. If the locked profile has `parallelization_enabled: false`, coder task fan-out stays disabled for that plan. If global `parallelization.enabled` is explicitly `false`, standard parallelization remains disabled even when a locked profile enables it.
 
 ## Turbo Configuration
 

@@ -82,6 +82,8 @@ export function deriveRequiredGates(agentType: string): string[] {
 			return ['reviewer'];
 		case 'test_engineer':
 			return ['test_engineer'];
+		case 'adversarial_test_engineer':
+			return ['reviewer', 'test_engineer', 'adversarial_test_engineer'];
 		case 'critic':
 			return ['critic'];
 		default:
@@ -146,35 +148,43 @@ export async function recordGateEvidence(
 	gate: string,
 	sessionId: string,
 	turbo?: boolean,
+	evidenceLockTimeoutMs?: number,
 ): Promise<void> {
 	assertValidTaskId(taskId);
 	const evidenceDir = getEvidenceDir(directory);
 	mkdirSync(evidenceDir, { recursive: true });
 
 	const lockRelPath = path.join('evidence', `${taskId}.json`);
-	await withEvidenceLock(directory, lockRelPath, gate, taskId, async () => {
-		const evidencePath = getEvidencePath(directory, taskId);
-		const existing = readExisting(evidencePath);
-		const requiredGates = existing
-			? expandRequiredGates(existing.required_gates, gate)
-			: deriveRequiredGates(gate);
+	await withEvidenceLock(
+		directory,
+		lockRelPath,
+		gate,
+		taskId,
+		async () => {
+			const evidencePath = getEvidencePath(directory, taskId);
+			const existing = readExisting(evidencePath);
+			const requiredGates = existing
+				? expandRequiredGates(existing.required_gates, gate)
+				: deriveRequiredGates(gate);
 
-		const updated: TaskEvidence = {
-			taskId,
-			required_gates: requiredGates,
-			turbo: turbo === true ? true : existing?.turbo,
-			gates: {
-				...(existing?.gates ?? {}),
-				[gate]: {
-					sessionId,
-					timestamp: new Date().toISOString(),
-					agent: gate,
+			const updated: TaskEvidence = {
+				taskId,
+				required_gates: requiredGates,
+				turbo: turbo === true ? true : existing?.turbo,
+				gates: {
+					...(existing?.gates ?? {}),
+					[gate]: {
+						sessionId,
+						timestamp: new Date().toISOString(),
+						agent: gate,
+					},
 				},
-			},
-		};
+			};
 
-		await atomicWrite(evidencePath, JSON.stringify(updated, null, 2));
-	});
+			await atomicWrite(evidencePath, JSON.stringify(updated, null, 2));
+		},
+		evidenceLockTimeoutMs,
+	);
 	telemetry.gatePassed(sessionId, gate, taskId);
 }
 
@@ -188,6 +198,7 @@ export async function recordAgentDispatch(
 	taskId: string,
 	agentType: string,
 	turbo?: boolean,
+	evidenceLockTimeoutMs?: number,
 ): Promise<void> {
 	assertValidTaskId(taskId);
 	const evidenceDir = getEvidenceDir(directory);
@@ -215,6 +226,7 @@ export async function recordAgentDispatch(
 
 			await atomicWrite(evidencePath, JSON.stringify(updated, null, 2));
 		},
+		evidenceLockTimeoutMs,
 	);
 }
 

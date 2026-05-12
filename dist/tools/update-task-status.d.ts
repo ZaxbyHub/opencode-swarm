@@ -57,7 +57,7 @@ export declare function checkReviewerGate(taskId: string, workingDirectory?: str
 /**
  * Wrapper around checkReviewerGate that appends a diff-scope advisory warning.
  * Keeps checkReviewerGate synchronous for backward compatibility.
- * Stage B parallel is hardcoded (not config-driven).
+ * Stage B parallel is resolved from standard parallelization config.
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context

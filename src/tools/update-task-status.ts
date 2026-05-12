@@ -14,6 +14,7 @@ import { getProfile } from '../db/qa-gate-profile.js';
 import { readTaskEvidenceRaw } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { resolveStandardParallelizationConfig } from '../parallel/runtime-config.js';
 import { updateTaskStatus } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import {
@@ -113,6 +114,9 @@ const TIER_3_PATTERNS = [
 	/^security.*\.ts$/i,
 ];
 
+const SECURITY_KEYWORDS =
+	/\b(password|secret|token|credential|auth|login|encryption|hash|key|certificate|ssl|tls|jwt|oauth|session|csrf|xss|injection|sanitization|permission|access|vulnerable|exploit|privilege|authorization|roles|authentication|mfa|2fa|totp|otp|salt|iv|nonce|hmac|aes|rsa|sha256|bcrypt|scrypt|argon2|api_key|apikey|private_key|public_key|rbac|admin|superuser|sqli|rce|ssrf|xxe|nosql|command_injection)\b/i;
+
 /**
  * Check if any file in the list matches a Tier 3 pattern.
  * @param files - Array of file paths/names to check
@@ -126,6 +130,40 @@ function matchesTier3Pattern(files: string[]): boolean {
 				return true;
 			}
 		}
+	}
+	return false;
+}
+
+function taskRequiresAdversarialFromPlan(
+	workingDirectory: string | undefined,
+	taskId: string,
+): boolean {
+	if (!workingDirectory) return false;
+	try {
+		const planPath = path.join(workingDirectory, '.swarm', 'plan.json');
+		const planRaw = fs.readFileSync(planPath, 'utf-8');
+		const plan = JSON.parse(planRaw) as {
+			phases?: Array<{
+				tasks?: Array<{
+					id?: string;
+					description?: string;
+					acceptance?: string;
+					files_touched?: string[];
+				}>;
+			}>;
+		};
+		for (const planPhase of plan.phases ?? []) {
+			for (const task of planPhase.tasks ?? []) {
+				if (task.id !== taskId) continue;
+				const files = Array.isArray(task.files_touched)
+					? task.files_touched
+					: [];
+				const text = `${task.description ?? ''}\n${task.acceptance ?? ''}`;
+				return matchesTier3Pattern(files) || SECURITY_KEYWORDS.test(text);
+			}
+		}
+	} catch {
+		return false;
 	}
 	return false;
 }
@@ -232,9 +270,11 @@ export function checkReviewerGate(
 				Array.isArray(evidence.required_gates) &&
 				evidence.gates
 			) {
-				const allGatesMet = evidence.required_gates.every(
-					(gate: string) => evidence.gates![gate] != null,
-				);
+				const allGatesMet =
+					evidence.required_gates.length > 0 &&
+					evidence.required_gates.every(
+						(gate: string) => evidence.gates![gate] != null,
+					);
 				if (allGatesMet) {
 					return { blocked: false, reason: '' };
 				}
@@ -250,6 +290,12 @@ export function checkReviewerGate(
 					`Required: [${evidence.required_gates.join(', ')}]. ` +
 					`Completed: [${Object.keys(evidence.gates).join(', ')}]. ` +
 					`Delegate the missing gate agents before marking task as completed.`;
+				if (missingGates.includes('adversarial_test_engineer')) {
+					return {
+						blocked: true,
+						reason: evidenceIncompleteReason,
+					};
+				}
 			}
 		} catch (error) {
 			// Malformed JSON, permission error, or other non-ENOENT issue — BLOCK
@@ -282,22 +328,52 @@ export function checkReviewerGate(
 		// Skip sessions with corrupt/missing taskWorkflowStates — they cannot
 		// make authoritative assertions about whether a task passed QA gates.
 		let validSessionCount = 0;
+		const requiresAdversarialStageBFromPlan = taskRequiresAdversarialFromPlan(
+			workingDirectory,
+			taskId,
+		);
+		let requiresAdversarialStageB = requiresAdversarialStageBFromPlan;
+		for (const [, session] of swarmState.agentSessions) {
+			if (
+				session.requiredStageBGates
+					?.get(taskId)
+					?.has('adversarial_test_engineer')
+			) {
+				requiresAdversarialStageB = true;
+				break;
+			}
+		}
+
 		for (const [_sessionId, session] of swarmState.agentSessions) {
 			if (!(session.taskWorkflowStates instanceof Map)) {
 				continue; // Skip corrupt sessions
 			}
 			validSessionCount++;
+			const requiredStageBGates = session.requiredStageBGates?.get(taskId);
 			const state = getTaskState(session, taskId);
 
-			// If task has reached tests_run or complete state, allow through
-			if (state === 'tests_run' || state === 'complete') {
+			const requiredStageBComplete = requiresAdversarialStageB
+				? requiredStageBGates?.has('adversarial_test_engineer') === true &&
+					hasBothStageBCompletions(session, taskId)
+				: true;
+
+			// If task has reached tests_run or complete state, allow through only
+			// when any required optional Stage B gates also completed.
+			if (
+				(state === 'tests_run' || state === 'complete') &&
+				requiredStageBComplete
+			) {
 				return { blocked: false, reason: '' };
 			}
 
 			// PR 2 Stage B parallel barrier: both completion markers present is sufficient
 			// even if state machine advancement was delayed (e.g., non-fatal exception
 			// in toolAfter). Only active when flag is on.
-			if (stageBParallelEnabled && hasBothStageBCompletions(session, taskId)) {
+			if (
+				stageBParallelEnabled &&
+				requiredStageBComplete &&
+				hasBothStageBCompletions(session, taskId)
+			) {
 				return { blocked: false, reason: '' };
 			}
 		}
@@ -385,7 +461,7 @@ export function checkReviewerGate(
 			}
 
 			// If both reviewer and test_engineer are confirmed in delegation chains, allow through
-			if (hasReviewer && hasTestEngineer) {
+			if (hasReviewer && hasTestEngineer && !requiresAdversarialStageB) {
 				return { blocked: false, reason: '' };
 			}
 		}
@@ -418,7 +494,7 @@ export function checkReviewerGate(
 /**
  * Wrapper around checkReviewerGate that appends a diff-scope advisory warning.
  * Keeps checkReviewerGate synchronous for backward compatibility.
- * Stage B parallel is hardcoded (not config-driven).
+ * Stage B parallel is resolved from standard parallelization config.
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
@@ -429,8 +505,13 @@ export async function checkReviewerGateWithScope(
 	workingDirectory?: string,
 	sessionID?: string,
 ): Promise<ReviewerGateResult> {
-	// Stage B is always parallel — hardcoded, not config-driven.
-	const stageBParallelEnabled = true;
+	const pluginConfig = workingDirectory
+		? loadPluginConfig(workingDirectory)
+		: undefined;
+	const stageBParallelEnabled = resolveStandardParallelizationConfig(
+		pluginConfig,
+		workingDirectory ?? process.cwd(),
+	).stageBParallelEnabled;
 	const result = checkReviewerGate(
 		taskId,
 		workingDirectory,

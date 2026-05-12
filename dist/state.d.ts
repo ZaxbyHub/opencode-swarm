@@ -50,6 +50,7 @@ export type DelegationReason = 'normal_delegation' | 'review_rejected' | 'critic
  * Transitions must be forward-only: idle → coder_delegated → pre_check_passed → reviewer_run → tests_run → complete
  */
 export type TaskWorkflowState = 'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'complete';
+export type StageBGate = 'reviewer' | 'test_engineer' | 'adversarial_test_engineer';
 /**
  * Represents per-session state for guardrail tracking.
  * Budget fields (toolCallCount, consecutiveErrors, etc.) have moved to InvocationWindow.
@@ -111,7 +112,9 @@ export interface AgentSessionState {
      * When both are present, the task may advance to tests_run regardless of order.
      * Always populated — Stage B is unconditionally parallel.
      */
-    stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
+    stageBCompletion?: Map<string, Set<StageBGate>>;
+    /** Per-task required Stage B gates. Optional gates are added when dispatched. */
+    requiredStageBGates?: Map<string, Set<StageBGate>>;
     /** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
     taskCouncilApproved?: Map<string, {
         verdict: 'APPROVE' | 'REJECT' | 'CONCERNS';
@@ -448,19 +451,11 @@ export declare function advanceTaskStateAndPersist(session: AgentSessionState, t
  * @returns Current task workflow state
  */
 export declare function getTaskState(session: AgentSessionState, taskId: string): TaskWorkflowState;
+export declare function requireStageBGate(session: AgentSessionState, taskId: string, gate: StageBGate): void;
+export declare function recordStageBCompletion(session: AgentSessionState, taskId: string, agent: StageBGate): void;
 /**
- * PR 2 Stage B barrier: record that a Stage B agent has completed for a task.
- * Order-independent — either 'reviewer' or 'test_engineer' may complete first.
- * Initializes the per-task set on first write.
- *
- * @param session - The agent session state
- * @param taskId - The task identifier
- * @param agent - Which Stage B agent completed ('reviewer' or 'test_engineer')
- */
-export declare function recordStageBCompletion(session: AgentSessionState, taskId: string, agent: 'reviewer' | 'test_engineer'): void;
-/**
- * PR 2 Stage B barrier: returns true iff both 'reviewer' and 'test_engineer' have
- * been recorded for the given task in this session.
+ * PR 2 Stage B barrier: returns true iff every required Stage B gate has been
+ * recorded for the given task in this session.
  *
  * @param session - The agent session state
  * @param taskId - The task identifier

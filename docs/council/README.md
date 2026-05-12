@@ -383,7 +383,7 @@ Council's evidence path so the two systems never collide.
 
 When `council_mode` is enabled in the QA gate profile, the Work Complete Council operates at the **phase level** rather than per-task. This means:
 
-1. **Stage B always runs per-task.** `reviewer` and `test_engineer` are dispatched in parallel for every Tier 1-3 task, regardless of `council_mode`. Council never replaces Stage B.
+1. **Stage B always runs per-task.** `council_mode` never replaces Stage B. When standard `parallelization` is enabled, all applicable Stage B gates are dispatched together for each Tier 1-3 task, including `reviewer`, verification `test_engineer`, and conditional adversarial `test_engineer`.
 
 2. **Council convenes at phase completion.** After all tasks in a phase have passed their individual Stage A + Stage B gates, the architect assembles a Phase Dossier (executive summary, task matrix, diff summary, retro evidence, dependency map) and dispatches the same 5 council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) with phase-scoped prompts.
 

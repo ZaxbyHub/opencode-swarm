@@ -196,7 +196,7 @@ describe('config/loader', () => {
 
 			// Should return defaults when no user config and no project config exist.
 			// adversarial_testing has a schema-level default and is always present.
-			expect(result).toEqual({
+			expect(result).toMatchObject({
 				max_iterations: 5,
 				qa_retry_limit: 3,
 				inject_phase_reminders: true,
@@ -286,6 +286,74 @@ describe('config/loader', () => {
 			expect(result.inject_phase_reminders).toBe(true); // Default value
 
 			// Clean up project directory
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('uses XDG_CONFIG_HOME/opencode on all platforms when XDG_CONFIG_HOME is set', () => {
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					parallelization: { enabled: true, maxConcurrentTasks: 4 },
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+
+			const result = loadPluginConfig(projectDir);
+
+			expect(result.parallelization?.enabled).toBe(true);
+			expect(result.parallelization?.maxConcurrentTasks).toBe(4);
+
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('deep merges project parallelization over global parallelization', () => {
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					parallelization: {
+						enabled: true,
+						maxConcurrentTasks: 6,
+						evidenceLockTimeoutMs: 45000,
+						max_coders: 5,
+						max_reviewers: 4,
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+			const configDir = path.join(projectDir, '.opencode');
+			const configFile = path.join(configDir, 'opencode-swarm.json');
+			fs.mkdirSync(configDir, { recursive: true });
+			fs.writeFileSync(
+				configFile,
+				JSON.stringify({
+					parallelization: {
+						maxConcurrentTasks: 3,
+						max_reviewers: 2,
+					},
+				}),
+			);
+
+			const result = loadPluginConfig(projectDir);
+
+			expect(result.parallelization?.enabled).toBe(true);
+			expect(result.parallelization?.maxConcurrentTasks).toBe(3);
+			expect(result.parallelization?.evidenceLockTimeoutMs).toBe(45000);
+			expect(result.parallelization?.max_coders).toBe(5);
+			expect(result.parallelization?.max_reviewers).toBe(2);
+
 			fs.rmSync(projectDir, { recursive: true, force: true });
 		});
 

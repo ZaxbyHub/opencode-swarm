@@ -275,7 +275,7 @@ Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic
 
 **Gate descriptions:**
 
-- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
+- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B always runs per-task regardless of council mode; when standard `parallelization` is enabled, all applicable Stage B gates are dispatched together, including conditional adversarial `test_engineer`. Council is additive — never replaces Stage B.
 
 
 - `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.

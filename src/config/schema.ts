@@ -1243,11 +1243,11 @@ export const CouncilConfigSchema = z
 
 export type CouncilConfig = z.infer<typeof CouncilConfigSchema>;
 
-// Parallelization configuration (PR 1 — dark foundation, disabled by default)
-// All fields default to single-run-equivalent values so no production path
-// activates parallel execution while this config exists.
+// Parallelization configuration for standard (non-Lean Turbo) orchestration.
+// Disabled by default; when enabled, architect prompt wiring authorizes bounded
+// fan-out for independent coder tasks and applicable Stage B gate groups.
 export const ParallelizationConfigSchema = z.object({
-	/** Master switch. Defaults to false — no parallel execution in current code. */
+	/** Master switch. Defaults to false — standard orchestration stays serial. */
 	enabled: z.boolean().default(false),
 	/** Maximum concurrent tasks. 1 = serial (current behavior). */
 	maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
@@ -1502,8 +1502,8 @@ export const PluginConfigSchema = z.object({
 	// Work Complete Council configuration — parallel four-member verification gate (off by default)
 	council: CouncilConfigSchema.optional(),
 
-	// Parallelization configuration (PR 1 dark foundation — disabled by default)
-	// Exists structurally; no production code path branches on enabled===true yet.
+	// Parallelization configuration — standard non-Lean orchestration.
+	// Disabled by default; when enabled, agent prompt wiring uses these bounds.
 	parallelization: ParallelizationConfigSchema.optional(),
 
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)

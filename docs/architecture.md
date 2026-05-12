@@ -2015,10 +2015,11 @@ Key principles:
 
 ---
 
-## Parallelization Foundation (PR 1 — Dark)
+## Standard Parallelization Foundation
 
-PR 1 of the stacked parallelization release lands dark infrastructure with zero behavior change.
-See [docs/archive/dev/pr1-foundation.md](archive/dev/pr1-foundation.md) for the full design note covering:
-- What is dark now vs. deferred to PR 2 and PR 3
+The original PR 1 stacked-parallelization work landed as dark infrastructure. The current standard non-Lean `parallelization` config is wired into architect dispatch guidance: enabling it authorizes bounded fan-out for independent coder tasks and all applicable Stage B gate groups, including conditional adversarial test_engineer gates, without requiring Lean Turbo.
+
+See [docs/archive/dev/pr1-foundation.md](archive/dev/pr1-foundation.md) for the historical dark-foundation design note covering:
+- What was dark in PR 1 vs. deferred to PR 2 and PR 3
 - Process-global variable audit and isolation classification
-- Invariants that prove runtime behavior is unchanged
+- The original invariants that proved runtime behavior was unchanged at that point

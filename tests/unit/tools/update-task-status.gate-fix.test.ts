@@ -289,7 +289,7 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 		expect(result.reason).toBe('');
 	});
 
-	test('2. evidence file with missing gate -> blocked: true with specific message', () => {
+	test('2. evidence file with missing gate and no passing session -> blocked: true with specific message', () => {
 		// Create evidence file with only one gate satisfied
 		const evidence: TaskEvidence = {
 			taskId: '1.1',
@@ -307,6 +307,8 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
 			JSON.stringify(evidence),
 		);
+		const session = createWorkflowTestSession();
+		swarmState.agentSessions.set('session-1', session);
 
 		const result = checkReviewerGate('1.1', tempDir);
 
@@ -394,7 +396,7 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 		expect(result.blocked).toBe(false);
 	});
 
-	test('7. evidence with empty required_gates -> blocked: false', () => {
+	test('7. evidence with empty required_gates -> remains blocked', () => {
 		const evidence: TaskEvidence = {
 			taskId: '1.1',
 			required_gates: [],
@@ -411,8 +413,9 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 
 		const result = checkReviewerGate('1.1', tempDir);
 
-		// Empty required_gates means no gates needed -> passes
-		expect(result.blocked).toBe(false);
+		// Empty required_gates is not evidence that QA gates passed.
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('missing required gates');
 	});
 
 	test('8. evidence with extra gates beyond required -> blocked: false', () => {
@@ -480,7 +483,7 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 		expect(result.reason).toContain('corrupt or unreadable');
 	});
 
-	test('11. evidence missing one of multiple required gates', () => {
+	test('11. evidence missing one of multiple required gates and no passing session remains blocked', () => {
 		const evidence: TaskEvidence = {
 			taskId: '1.1',
 			required_gates: ['reviewer', 'test_engineer', 'diff'],
@@ -502,6 +505,8 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
 			JSON.stringify(evidence),
 		);
+		const session = createWorkflowTestSession();
+		swarmState.agentSessions.set('session-1', session);
 
 		const result = checkReviewerGate('1.1', tempDir);
 
@@ -612,6 +617,8 @@ describe('checkReviewerGate — evidence-first edge cases', () => {
 			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
 			JSON.stringify(evidence),
 		);
+		const session = createWorkflowTestSession();
+		swarmState.agentSessions.set('session-1', session);
 
 		const result = checkReviewerGate('1.1', tempDir);
 
@@ -830,7 +837,7 @@ describe('checkReviewerGate — evidence directory fallback removed (v6.35.1 Cod
 		expect(result.blocked).toBe(false);
 	});
 
-	test('7. evidence.json exists with missing gates -> returns blocked (regression check)', () => {
+	test('7. evidence.json exists with missing gates and no passing session -> returns blocked (regression check)', () => {
 		// Create evidence file with missing gates
 		const evidence: TaskEvidence = {
 			taskId: '1.1',
@@ -856,6 +863,8 @@ describe('checkReviewerGate — evidence directory fallback removed (v6.35.1 Cod
 			path.join(evidenceDir, 'extra-file.txt'),
 			'should be ignored',
 		);
+		const session = createWorkflowTestSession();
+		swarmState.agentSessions.set('session-1', session);
 
 		const result = checkReviewerGate('1.1', tempDir);
 

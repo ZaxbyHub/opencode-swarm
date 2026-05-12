@@ -1,13 +1,13 @@
 /**
  * AgentRunContext — typed per-run state container.
  *
- * Holds the subset of swarmState needed for future per-run isolation:
+ * Holds the subset of swarmState used by run-scoped orchestration:
  *   activeToolCalls, activeAgent, delegationChains, agentSessions,
  *   environmentProfiles, and a shared reference to process-global toolAggregates.
  *
- * PR 1 (dark foundation): the class exists and is instantiated for the default
- * single-run path only.  No runtime behavior is changed.
- * PR 2 will wire distinct contexts to parallel dispatcher slots.
+ * The default context preserves existing single-run behavior. Distinct contexts
+ * remain available for dispatcher-slot isolation as the standard parallel path
+ * grows beyond current task and Stage B gate coordination.
  *
  * Generic type parameters let state.ts bind concrete internal types without
  * creating a circular import.

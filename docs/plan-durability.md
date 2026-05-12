@@ -120,7 +120,7 @@ once pre-check succeeds.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `parallelization_enabled` | boolean | `false` | Enables parallel task dispatch for this plan |
+| `parallelization_enabled` | boolean | `false` | Enables plan-scoped standard task fan-out for this plan |
 | `max_concurrent_tasks` | integer 1–64 | `1` | Max simultaneous tasks when parallel is enabled |
 | `council_parallel` | boolean | `false` | Allows council review phases to parallelise |
 | `locked` | boolean | `false` | When true, profile is immutable (fail-closed enforcement) |
@@ -128,7 +128,7 @@ once pre-check succeeds.
 ### Invariants
 
 - **Locked profile is immutable**: any `save_plan` call that includes `execution_profile` while the current plan has a locked profile will be rejected.
-- **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
+- **Fail-closed orchestration**: a locked profile is authoritative for architect dispatch guidance. `parallelization_enabled: false` disables coder task fan-out for that plan even when global `parallelization.enabled` is true.
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
 - **Hash coverage**: `execution_profile` is included in `computePlanHash`, so profile changes are always reflected in the ledger's `plan_hash_after` chain.
 - **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
@@ -139,7 +139,7 @@ once pre-check succeeds.
 1. Architect calls save_plan with execution_profile to set concurrency intent.
 2. Architect calls save_plan again with locked: true to lock it (or sets locked in step 1).
 3. Ledger records execution_profile_set and execution_profile_locked events.
-4. Delegation gate enforces the locked profile on every Stage B dispatch.
+4. Architect dispatch guidance applies the locked profile and the global `parallelization` config, using the stricter bound.
 5. Critic drift verifier checks for profile drift via get_approved_plan.
 6. To change a locked profile: use save_plan with reset_statuses: true to start fresh.
 ```

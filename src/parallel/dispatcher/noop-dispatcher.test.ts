@@ -1,5 +1,5 @@
 /**
- * Tests for the no-op dispatcher (Phase 5 dark foundation).
+ * Tests for the no-op dispatcher used when task fan-out is disabled.
  *
  * Proves:
  *   - disabled config → reject with 'parallelization_disabled'
