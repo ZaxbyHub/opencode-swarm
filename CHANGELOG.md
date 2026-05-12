@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.18.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.4...v7.18.0) (2026-05-12)
+
+
+### Features
+
+* **parallelization:** wire standard stage b gate groups ([#837](https://github.com/zaxbysauce/opencode-swarm/issues/837)) ([c5c706b](https://github.com/zaxbysauce/opencode-swarm/commit/c5c706b8fc3faa87ffe8a9306eb0f24941e2aa83))
+
 ## [7.17.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.3...v7.17.4) (2026-05-12)
 
 
