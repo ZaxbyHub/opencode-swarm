@@ -1395,6 +1395,71 @@ export async function executePhaseComplete(
 										}
 
 										if (
+											typeof entry.quorumSize !== 'number' ||
+											!Number.isFinite(entry.quorumSize) ||
+											entry.quorumSize < 5
+										) {
+											return JSON.stringify(
+												{
+													success: false,
+													phase,
+													status: 'blocked' as const,
+													reason: 'FINAL_COUNCIL_MISSING_QUORUM',
+													message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing valid quorum metadata. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate quorumed evidence.`,
+													agentsDispatched,
+													agentsMissing: [],
+													warnings: [],
+												},
+												null,
+												2,
+											);
+										}
+
+										const requiredFinalCouncilMembers = [
+											'critic',
+											'reviewer',
+											'sme',
+											'test_engineer',
+											'explorer',
+										];
+										const membersVoted = Array.isArray(entry.membersVoted)
+											? entry.membersVoted.filter(
+													(member: unknown): member is string =>
+														typeof member === 'string',
+												)
+											: [];
+										const membersAbsent = Array.isArray(entry.membersAbsent)
+											? entry.membersAbsent.filter(
+													(member: unknown): member is string =>
+														typeof member === 'string',
+												)
+											: [];
+										const distinctMembersVoted = new Set(membersVoted);
+										const hasAllRequiredMembers =
+											requiredFinalCouncilMembers.every((member) =>
+												distinctMembersVoted.has(member),
+											) &&
+											distinctMembersVoted.size ===
+												requiredFinalCouncilMembers.length &&
+											membersAbsent.length === 0;
+										if (!hasAllRequiredMembers) {
+											return JSON.stringify(
+												{
+													success: false,
+													phase,
+													status: 'blocked' as const,
+													reason: 'FINAL_COUNCIL_MISSING_QUORUM',
+													message: `Phase ${phase} (last phase) cannot be completed: final council evidence does not prove all five required members voted. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate complete evidence.`,
+													agentsDispatched,
+													agentsMissing: [],
+													warnings: [],
+												},
+												null,
+												2,
+											);
+										}
+
+										if (
 											entry.verdict === 'rejected' ||
 											entry.verdict === 'REJECTED'
 										) {
@@ -1453,11 +1518,11 @@ export async function executePhaseComplete(
 										status: 'blocked' as const,
 										reason: 'FINAL_COUNCIL_REQUIRED',
 										final_council_required: true,
-										message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled and final council evidence not found at .swarm/evidence/final-council.json. Convene a final holistic council (use convene_general_council with mode 'general') and call write_final_council_evidence to persist the verdict before completing the project.`,
+										message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled and final council evidence not found at .swarm/evidence/final-council.json. Dispatch critic, reviewer, sme, test_engineer, and explorer with project-scoped context, collect their CouncilMemberVerdict JSON, and call write_final_council_evidence before completing the project. Do not use convene_general_council for this gate.`,
 										agentsDispatched,
 										agentsMissing: [],
 										warnings: [
-											`Final council required — convene a holistic project review using convene_general_council, then call write_final_council_evidence to persist the verdict.`,
+											`Final council required - dispatch the five project-scoped council members, then call write_final_council_evidence to persist quorumed evidence.`,
 										],
 									},
 									null,

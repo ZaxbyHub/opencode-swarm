@@ -17,6 +17,7 @@ import type {
 	CouncilMemberVerdict,
 	CouncilSynthesis,
 	CouncilVerdict,
+	FinalCouncilSynthesis,
 	PhaseCouncilSynthesis,
 } from './types';
 import { COUNCIL_DEFAULTS } from './types';
@@ -412,6 +413,165 @@ function buildPhaseCouncilFeedback(
 	} else if (roundNumber >= maxRounds) {
 		lines.push(
 			`> ⚠️ **Max rounds (${maxRounds}) reached.** Escalate to user — do not auto-advance.`,
+		);
+	}
+
+	return lines.join('\n');
+}
+
+/**
+ * Synthesize project-level final council verdicts into a FinalCouncilSynthesis.
+ * This uses the same five-member verdict semantics as phase council, but the
+ * output is scoped to completed-project review and the final_council gate.
+ */
+export function synthesizeFinalCouncilAdvisory(
+	projectSummary: string,
+	verdicts: CouncilMemberVerdict[],
+	roundNumber: number,
+	config: Partial<CouncilConfig> = {},
+): FinalCouncilSynthesis {
+	const cfg: CouncilConfig = { ...COUNCIL_DEFAULTS, ...config };
+	const timestamp = new Date().toISOString();
+	const quorumSize = new Set(verdicts.map((v) => v.agent)).size;
+
+	const rejectingMembers: CouncilAgent[] = verdicts
+		.filter((v) => v.verdict === 'REJECT')
+		.map((v) => v.agent);
+
+	let overallVerdict: CouncilVerdict;
+	if (cfg.vetoPriority && rejectingMembers.length > 0) {
+		overallVerdict = 'REJECT';
+	} else if (
+		verdicts.some((v) => v.verdict === 'CONCERNS') ||
+		(!cfg.vetoPriority && rejectingMembers.length > 0)
+	) {
+		overallVerdict = 'CONCERNS';
+	} else {
+		overallVerdict = 'APPROVE';
+	}
+
+	const unresolvedConflicts = detectConflicts(verdicts);
+
+	const rejectingSet = new Set<CouncilAgent>(rejectingMembers);
+	const vetoFindings = verdicts
+		.filter((v) => rejectingSet.has(v.agent))
+		.flatMap((v) => v.findings);
+	const requiredFixes = vetoFindings.filter(
+		(f) => f.severity === 'HIGH' || f.severity === 'MEDIUM',
+	);
+	const advisoryFindings: CouncilFinding[] = [
+		...vetoFindings.filter((f) => f.severity === 'LOW'),
+		...verdicts
+			.filter((v) => !rejectingSet.has(v.agent))
+			.flatMap((v) => v.findings),
+	];
+
+	const advisoryNotes: string[] = [];
+	if (advisoryFindings.length > 0) {
+		advisoryNotes.push(
+			`Final council found ${advisoryFindings.length} advisory finding(s). Review before project close.`,
+		);
+	}
+	if (quorumSize < 3) {
+		advisoryNotes.push(
+			`Final council quorum is ${quorumSize} members - dispatch additional project-scoped council members before closing the project.`,
+		);
+	}
+
+	const allUnmetIds = new Set(verdicts.flatMap((v) => v.criteriaUnmet));
+	const allCriteriaMet = allUnmetIds.size === 0 && verdicts.length > 0;
+
+	const unifiedFeedbackMd = buildFinalCouncilFeedback(
+		projectSummary,
+		overallVerdict,
+		rejectingMembers,
+		requiredFixes,
+		advisoryFindings,
+		unresolvedConflicts,
+		roundNumber,
+		cfg.maxRounds,
+	);
+
+	return {
+		scope: 'project',
+		timestamp,
+		overallVerdict,
+		vetoedBy: rejectingMembers.length > 0 ? rejectingMembers : null,
+		memberVerdicts: verdicts,
+		unresolvedConflicts,
+		requiredFixes,
+		advisoryFindings,
+		advisoryNotes,
+		unifiedFeedbackMd,
+		roundNumber,
+		allCriteriaMet,
+		quorumSize,
+		evidencePath: '.swarm/evidence/final-council.json',
+		projectSummary,
+	};
+}
+
+function buildFinalCouncilFeedback(
+	projectSummary: string,
+	verdict: CouncilVerdict,
+	vetoedBy: CouncilAgent[],
+	requiredFixes: CouncilFinding[],
+	advisoryFindings: CouncilFinding[],
+	conflicts: string[],
+	roundNumber: number,
+	maxRounds: number,
+): string {
+	const lines: string[] = [
+		`## Final Council Review - Round ${roundNumber}/${maxRounds}`,
+		`**Scope:** completed project  **Overall verdict:** ${verdict}`,
+		'',
+	];
+
+	if (projectSummary) {
+		lines.push(`**Project Summary:** ${projectSummary}`);
+		lines.push('');
+	}
+
+	if (vetoedBy.length > 0) {
+		lines.push(`> BLOCKED: project close is blocked by ${vetoedBy.join(', ')}`);
+		lines.push('');
+	}
+
+	if (requiredFixes.length > 0) {
+		lines.push('### Required Fixes (must resolve before project close)');
+		for (const f of requiredFixes) {
+			lines.push(
+				`- **[${f.severity}]** \`${f.location}\` - ${f.detail}`,
+				`  _Evidence:_ ${f.evidence}`,
+			);
+		}
+		lines.push('');
+	}
+
+	if (conflicts.length > 0) {
+		lines.push('### Conflicts to Resolve');
+		lines.push(
+			'_The following council members gave contradictory project-close instructions. Architect must resolve before closing the project._',
+		);
+		for (const c of conflicts) {
+			lines.push(`- ${c}`);
+		}
+		lines.push('');
+	}
+
+	if (advisoryFindings.length > 0) {
+		lines.push('### Advisory Findings (non-blocking)');
+		for (const f of advisoryFindings) {
+			lines.push(`- **[${f.severity}]** \`${f.location}\` - ${f.detail}`);
+		}
+		lines.push('');
+	}
+
+	if (verdict === 'APPROVE') {
+		lines.push('> Final council approved. Project may proceed to close.');
+	} else if (roundNumber >= maxRounds) {
+		lines.push(
+			`> Max rounds (${maxRounds}) reached. Escalate to user - do not close the project automatically.`,
 		);
 	}
 

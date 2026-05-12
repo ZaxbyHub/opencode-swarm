@@ -119,6 +119,39 @@ export interface PhaseCouncilSynthesis {
 	phaseSummary?: string;
 }
 
+/**
+ * Project-level final council synthesis result.
+ * Distinct from task-level and phase-level council results: this is the
+ * final project close gate and writes to .swarm/evidence/final-council.json.
+ */
+export interface FinalCouncilSynthesis {
+	/** Always 'project' - distinguishes final council from task/phase councils */
+	scope: 'project';
+	/** ISO 8601 */
+	timestamp: string;
+	overallVerdict: CouncilVerdict;
+	vetoedBy: CouncilAgent[] | null;
+	memberVerdicts: CouncilMemberVerdict[];
+	unresolvedConflicts: string[];
+	/** Severity HIGH + MEDIUM from veto members */
+	requiredFixes: CouncilFinding[];
+	/** Severity LOW or from non-veto members */
+	advisoryFindings: CouncilFinding[];
+	/** Project-level advisory notes for the architect */
+	advisoryNotes: string[];
+	/** Single markdown document for final project review */
+	unifiedFeedbackMd: string;
+	/** 1-indexed */
+	roundNumber: number;
+	allCriteriaMet: boolean;
+	/** Distinct council members that produced verdicts */
+	quorumSize: number;
+	/** Path where evidence was written */
+	evidencePath: '.swarm/evidence/final-council.json';
+	/** Summary of the completed project being reviewed */
+	projectSummary: string;
+}
+
 export interface CouncilCriteriaItem {
 	id: string;
 	description: string;

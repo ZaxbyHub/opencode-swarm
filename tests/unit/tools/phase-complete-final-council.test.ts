@@ -108,6 +108,10 @@ function enableFinalCouncil() {
 function writeFinalCouncilEvidence(options: {
 	verdict: string;
 	summary?: string;
+	quorumSize?: number;
+	omitQuorum?: boolean;
+	membersVoted?: string[];
+	membersAbsent?: string[];
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence');
 	mkdirSync(evidencePath, { recursive: true });
@@ -126,6 +130,19 @@ function writeFinalCouncilEvidence(options: {
 					plan_id: PLAN_ID,
 					verdict: options.verdict,
 					summary: options.summary ?? 'Final council verdict',
+					...(options.omitQuorum
+						? {}
+						: {
+								quorumSize: options.quorumSize ?? 5,
+								membersVoted: options.membersVoted ?? [
+									'critic',
+									'reviewer',
+									'sme',
+									'test_engineer',
+									'explorer',
+								],
+								membersAbsent: options.membersAbsent ?? [],
+							}),
 				},
 			],
 		}),
@@ -203,7 +220,16 @@ beforeEach(() => {
 
 afterEach(() => {
 	closeProjectDb(tempDir);
-	rmSync(tempDir, { recursive: true, force: true });
+	try {
+		rmSync(tempDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
+	} catch {
+		// Windows can briefly retain SQLite handles after closeProjectDb.
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -309,6 +335,65 @@ describe('final_council gate (Gate 6)', () => {
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('success');
+		});
+
+		test('blocks approved evidence without quorum metadata', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Old minimal final council evidence',
+				omitQuorum: true,
+			});
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
+			expect(parsed.message).toContain('quorum metadata');
+		});
+
+		test('blocks approved evidence with fewer than five council members', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Partial final council evidence',
+				quorumSize: 3,
+			});
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
+			expect(parsed.message).toContain('five-member final council');
+		});
+
+		test('blocks approved evidence with quorumSize 5 but malformed member metadata', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'approved',
+				summary: 'Forged final council evidence',
+				quorumSize: 5,
+				membersVoted: ['critic'],
+				membersAbsent: ['reviewer', 'sme', 'test_engineer', 'explorer'],
+			});
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
+			expect(parsed.message).toContain('all five required members voted');
 		});
 
 		test('blocks with FINAL_COUNCIL_INVALID_VERDICT when evidence has unrecognized verdict', async () => {

@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.17.0",
+    version: "7.17.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -61457,7 +61457,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user
 - mutation_test (default: OFF) — when enabled, runs mutation testing on source files touched this phase via generate_mutants + mutation_test + write_mutation_evidence at PHASE-WRAP; FAIL verdict blocks phase_complete; WARN is non-blocking (recommended for projects with coverage gaps or safety-critical code)
 - council_general_review (default: OFF) — when enabled, MODE: SPECIFY runs convene_general_council on the draft spec before the critic-gate; the architect runs a curated web_search pass, dispatches council_generalist / council_skeptic / council_domain_expert in parallel with a shared RESEARCH CONTEXT block, deliberates on disagreements, and synthesizes the result directly into the spec (recommended for novel architecture, unclear best practices, or high-risk design decisions). Requires council.general.enabled: true and a configured search API key.
 - drift_check (default: ON) — when enabled, mandatory per-phase drift verification via critic_drift_verifier at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks phase_complete when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists (recommended for all projects with a specification)
-- final_council (default: OFF) — when enabled, after all phases complete the architect convenes a holistic general council review of the entire body of work before project close. Requires council.general.enabled: true in plugin config. Recommended for multi-phase projects with high architectural complexity.
+- final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the same five phase-council members (\`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, \`explorer\`) at project scope, collects \`CouncilMemberVerdict\` objects, and calls \`write_final_council_evidence\`. This is not General Council mode and does not require \`council.general.enabled\`.
 
 One question, one message, defaults pre-stated. Wait for the user's answer.
 
@@ -63297,19 +63297,15 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    - \`.swarm/evidence/{phase}/mutation-gate.json\` exists with verdict 'pass' or 'warn' (written by YOU via the \`write_mutation_evidence\` tool after step 5.56) — ONLY required when \`mutation_test\` is enabled in the QA gate profile
    If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
    NOTE: Steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If \`hallucination_guard\` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call \`write_hallucination_evidence\`), phase_complete will be BLOCKED by the plugin. Similarly, if \`mutation_test\` is enabled and you skip step 5.56 (or fail to call \`write_mutation_evidence\`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
-5.7. **Final Council (conditional on QA gate — last phase only)**: Check whether \`final_council\` is enabled in the effective QA gate profile (visible via \`get_qa_gate_profile\`). If disabled, skip silently and proceed to step 6.
+5.7. **Final Council (conditional on QA gate - last phase only)**: Check whether \`final_council\` is enabled in the effective QA gate profile (visible via \`get_qa_gate_profile\`). If disabled, skip silently and proceed to step 6.
    If enabled AND this is the LAST phase in the plan (all other phases have status 'complete' and no more phases remain):
-    1. Verify \`council.general.enabled: true\` in plugin config. If not enabled, warn the user: "final_council gate is enabled but General Council is not configured. Skipping final council." Then proceed to step 6. Check that \`convene_general_council\` is available in your tool list. If the tool is unavailable (filtered by config), warn the user and skip.
-   2. Run 1-3 targeted \`web_search\` queries relevant to the project domain.
-   3. Compile a RESEARCH CONTEXT block from search results.
-   4. Dispatch \`{{AGENT_PREFIX}}council_generalist\`, \`{{AGENT_PREFIX}}council_skeptic\`, and \`{{AGENT_PREFIX}}council_domain_expert\` in PARALLEL. Pass: the full body of work (all phase summaries, all evidence artifacts), the RESEARCH CONTEXT block, round number 1. Instruction: "Review the entire body of work holistically. Identify cross-cutting issues, architectural coherence, and overall quality."
-   5. Collect all three JSON responses.
-   6. Call \`convene_general_council\` with mode: 'general', the project summary as question, and the collected round1Responses.
-   7. If disagreements exist, re-dispute as in MODE: COUNCIL step 5-6.
-   8. Present the final synthesis to the user as a project-close summary.
-   9. Write the final council result to \`.swarm/evidence/final-council.json\`.
-   10. Do NOT call \`/swarm close\` until the final council completes (if enabled). The evidence file \`.swarm/evidence/final-council.json\` must exist with an APPROVED verdict before \`/swarm close\` is permitted when final_council is enabled.
-   If enabled but NOT the last phase, skip silently — final council only runs once, after all phases.
+   1. Build a PROJECT DOSSIER from the completed plan, all phase summaries, changed-file summaries, and all relevant evidence artifacts. This is a completed-project review, not General Council mode.
+   2. Dispatch \`{{AGENT_PREFIX}}critic\`, \`{{AGENT_PREFIX}}reviewer\`, \`{{AGENT_PREFIX}}sme\`, \`{{AGENT_PREFIX}}test_engineer\`, and \`{{AGENT_PREFIX}}explorer\` in PARALLEL with project-scoped context. Each member must review the entire completed body of work and return a \`CouncilMemberVerdict\` JSON object using \`agent\`, \`verdict\` (APPROVE|CONCERNS|REJECT), \`confidence\`, \`findings[]\`, \`criteriaAssessed[]\`, \`criteriaUnmet[]\`, and \`durationMs\`.
+   3. Collect the five returned verdict objects. Do NOT fabricate, infer, or substitute verdicts. If a member does not return valid JSON, re-dispatch that member.
+   4. Call \`write_final_council_evidence\` with \`phase\`, \`projectSummary\`, \`roundNumber\`, and the collected \`verdicts\` array. This writes \`.swarm/evidence/final-council.json\` with plan binding, member verdicts, and quorum metadata.
+   5. Do NOT call \`convene_general_council\`, do NOT dispatch \`council_generalist\`, \`council_skeptic\`, or \`council_domain_expert\`, and do NOT require \`council.general.enabled\` for this gate. \`final_council\` is the same five-member phase council rerun at project scope.
+   6. Do NOT call \`phase_complete\` or \`/swarm close\` until \`.swarm/evidence/final-council.json\` exists with an approved, plan-bound, quorumed final-council verdict. When \`final_council\` is enabled, \`phase_complete\` will block until that evidence exists.
+   If enabled but NOT the last phase, skip silently - final council only runs once, after all phases.
 6. Summarize to user
 7. Ask: "Ready for Phase [N+1]?"
 
@@ -85374,6 +85370,99 @@ function buildPhaseCouncilFeedback(phaseNumber, phaseSummary, verdict, vetoedBy,
   return lines.join(`
 `);
 }
+function synthesizeFinalCouncilAdvisory(projectSummary, verdicts, roundNumber, config3 = {}) {
+  const cfg = { ...COUNCIL_DEFAULTS, ...config3 };
+  const timestamp = new Date().toISOString();
+  const quorumSize = new Set(verdicts.map((v) => v.agent)).size;
+  const rejectingMembers = verdicts.filter((v) => v.verdict === "REJECT").map((v) => v.agent);
+  let overallVerdict;
+  if (cfg.vetoPriority && rejectingMembers.length > 0) {
+    overallVerdict = "REJECT";
+  } else if (verdicts.some((v) => v.verdict === "CONCERNS") || !cfg.vetoPriority && rejectingMembers.length > 0) {
+    overallVerdict = "CONCERNS";
+  } else {
+    overallVerdict = "APPROVE";
+  }
+  const unresolvedConflicts = detectConflicts(verdicts);
+  const rejectingSet = new Set(rejectingMembers);
+  const vetoFindings = verdicts.filter((v) => rejectingSet.has(v.agent)).flatMap((v) => v.findings);
+  const requiredFixes = vetoFindings.filter((f) => f.severity === "HIGH" || f.severity === "MEDIUM");
+  const advisoryFindings = [
+    ...vetoFindings.filter((f) => f.severity === "LOW"),
+    ...verdicts.filter((v) => !rejectingSet.has(v.agent)).flatMap((v) => v.findings)
+  ];
+  const advisoryNotes = [];
+  if (advisoryFindings.length > 0) {
+    advisoryNotes.push(`Final council found ${advisoryFindings.length} advisory finding(s). Review before project close.`);
+  }
+  if (quorumSize < 3) {
+    advisoryNotes.push(`Final council quorum is ${quorumSize} members - dispatch additional project-scoped council members before closing the project.`);
+  }
+  const allUnmetIds = new Set(verdicts.flatMap((v) => v.criteriaUnmet));
+  const allCriteriaMet = allUnmetIds.size === 0 && verdicts.length > 0;
+  const unifiedFeedbackMd = buildFinalCouncilFeedback(projectSummary, overallVerdict, rejectingMembers, requiredFixes, advisoryFindings, unresolvedConflicts, roundNumber, cfg.maxRounds);
+  return {
+    scope: "project",
+    timestamp,
+    overallVerdict,
+    vetoedBy: rejectingMembers.length > 0 ? rejectingMembers : null,
+    memberVerdicts: verdicts,
+    unresolvedConflicts,
+    requiredFixes,
+    advisoryFindings,
+    advisoryNotes,
+    unifiedFeedbackMd,
+    roundNumber,
+    allCriteriaMet,
+    quorumSize,
+    evidencePath: ".swarm/evidence/final-council.json",
+    projectSummary
+  };
+}
+function buildFinalCouncilFeedback(projectSummary, verdict, vetoedBy, requiredFixes, advisoryFindings, conflicts, roundNumber, maxRounds) {
+  const lines = [
+    `## Final Council Review - Round ${roundNumber}/${maxRounds}`,
+    `**Scope:** completed project  **Overall verdict:** ${verdict}`,
+    ""
+  ];
+  if (projectSummary) {
+    lines.push(`**Project Summary:** ${projectSummary}`);
+    lines.push("");
+  }
+  if (vetoedBy.length > 0) {
+    lines.push(`> BLOCKED: project close is blocked by ${vetoedBy.join(", ")}`);
+    lines.push("");
+  }
+  if (requiredFixes.length > 0) {
+    lines.push("### Required Fixes (must resolve before project close)");
+    for (const f of requiredFixes) {
+      lines.push(`- **[${f.severity}]** \`${f.location}\` - ${f.detail}`, `  _Evidence:_ ${f.evidence}`);
+    }
+    lines.push("");
+  }
+  if (conflicts.length > 0) {
+    lines.push("### Conflicts to Resolve");
+    lines.push("_The following council members gave contradictory project-close instructions. Architect must resolve before closing the project._");
+    for (const c of conflicts) {
+      lines.push(`- ${c}`);
+    }
+    lines.push("");
+  }
+  if (advisoryFindings.length > 0) {
+    lines.push("### Advisory Findings (non-blocking)");
+    for (const f of advisoryFindings) {
+      lines.push(`- **[${f.severity}]** \`${f.location}\` - ${f.detail}`);
+    }
+    lines.push("");
+  }
+  if (verdict === "APPROVE") {
+    lines.push("> Final council approved. Project may proceed to close.");
+  } else if (roundNumber >= maxRounds) {
+    lines.push(`> Max rounds (${maxRounds}) reached. Escalate to user - do not close the project automatically.`);
+  }
+  return lines.join(`
+`);
+}
 
 // src/council/criteria-store.ts
 import { existsSync as existsSync50, mkdirSync as mkdirSync23, readFileSync as readFileSync42, writeFileSync as writeFileSync16 } from "node:fs";
@@ -89841,6 +89930,41 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
                         }, null, 2);
                       }
                     }
+                    if (typeof entry.quorumSize !== "number" || !Number.isFinite(entry.quorumSize) || entry.quorumSize < 5) {
+                      return JSON.stringify({
+                        success: false,
+                        phase,
+                        status: "blocked",
+                        reason: "FINAL_COUNCIL_MISSING_QUORUM",
+                        message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing valid quorum metadata. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate quorumed evidence.`,
+                        agentsDispatched,
+                        agentsMissing: [],
+                        warnings: []
+                      }, null, 2);
+                    }
+                    const requiredFinalCouncilMembers = [
+                      "critic",
+                      "reviewer",
+                      "sme",
+                      "test_engineer",
+                      "explorer"
+                    ];
+                    const membersVoted = Array.isArray(entry.membersVoted) ? entry.membersVoted.filter((member) => typeof member === "string") : [];
+                    const membersAbsent = Array.isArray(entry.membersAbsent) ? entry.membersAbsent.filter((member) => typeof member === "string") : [];
+                    const distinctMembersVoted = new Set(membersVoted);
+                    const hasAllRequiredMembers = requiredFinalCouncilMembers.every((member) => distinctMembersVoted.has(member)) && distinctMembersVoted.size === requiredFinalCouncilMembers.length && membersAbsent.length === 0;
+                    if (!hasAllRequiredMembers) {
+                      return JSON.stringify({
+                        success: false,
+                        phase,
+                        status: "blocked",
+                        reason: "FINAL_COUNCIL_MISSING_QUORUM",
+                        message: `Phase ${phase} (last phase) cannot be completed: final council evidence does not prove all five required members voted. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate complete evidence.`,
+                        agentsDispatched,
+                        agentsMissing: [],
+                        warnings: []
+                      }, null, 2);
+                    }
                     if (entry.verdict === "rejected" || entry.verdict === "REJECTED") {
                       return JSON.stringify({
                         success: false,
@@ -89880,11 +90004,11 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
                   status: "blocked",
                   reason: "FINAL_COUNCIL_REQUIRED",
                   final_council_required: true,
-                  message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled and final council evidence not found at .swarm/evidence/final-council.json. Convene a final holistic council (use convene_general_council with mode 'general') and call write_final_council_evidence to persist the verdict before completing the project.`,
+                  message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled and final council evidence not found at .swarm/evidence/final-council.json. Dispatch critic, reviewer, sme, test_engineer, and explorer with project-scoped context, collect their CouncilMemberVerdict JSON, and call write_final_council_evidence before completing the project. Do not use convene_general_council for this gate.`,
                   agentsDispatched,
                   agentsMissing: [],
                   warnings: [
-                    `Final council required — convene a holistic project review using convene_general_council, then call write_final_council_evidence to persist the verdict.`
+                    `Final council required - dispatch the five project-scoped council members, then call write_final_council_evidence to persist quorumed evidence.`
                   ]
                 }, null, 2);
               }
@@ -97361,7 +97485,7 @@ var set_qa_gates = createSwarmTool({
     mutation_test: exports_external.boolean().optional().describe("Enable the mutation-testing gate (default: off). Requires mutation " + "tests to achieve a passing kill rate before phase completion; " + "WARN verdict allows advancement, FAIL blocks."),
     council_general_review: exports_external.boolean().optional().describe("Enable the council_general_review gate (default: off). When on, " + "MODE: SPECIFY runs convene_general_council on the draft spec " + "before the critic-gate, folding multi-model deliberation into " + "the spec. Requires council.general.enabled and a search API key."),
     drift_check: exports_external.boolean().optional().describe("Enable drift verification gate (default: on). Blocks phase_complete " + "until drift-verifier.json has an approved verdict. When disabled, " + "drift verification is skipped entirely."),
-    final_council: exports_external.boolean().optional().describe("Enable the final_council gate (default: off). When on, " + "after all phases complete the architect runs a holistic " + "general council review against the entire body of work. " + "Requires council.general.enabled: true in plugin config."),
+    final_council: exports_external.boolean().optional().describe("Enable the final_council gate (default: off). When on, " + "after all phases complete the architect dispatches critic, reviewer, " + "sme, test_engineer, and explorer with project-scoped context, " + "collects their CouncilMemberVerdict objects, and calls " + "write_final_council_evidence. This is not General Council mode " + "and does not require council.general.enabled."),
     project_type: exports_external.string().optional().describe('Project type label (e.g. "ts", "python"). Only applied when the profile is being created for the first time.')
   },
   execute: async (args2, directory) => {
@@ -102319,59 +102443,94 @@ var write_drift_evidence = createSwarmTool({
 });
 // src/tools/write-final-council-evidence.ts
 init_zod();
+init_loader();
+import fs107 from "node:fs";
+import path135 from "node:path";
 init_utils2();
 init_manager();
 init_create_tool();
-import fs107 from "node:fs";
-import path135 from "node:path";
-function normalizeVerdict2(verdict) {
-  switch (verdict) {
-    case "APPROVED":
-      return "approved";
-    case "NEEDS_REVISION":
-      return "rejected";
-    default:
-      throw new Error(`Invalid verdict: must be 'APPROVED' or 'NEEDS_REVISION', got '${verdict}'`);
-  }
+var FINAL_COUNCIL_MEMBERS = [
+  "critic",
+  "reviewer",
+  "sme",
+  "test_engineer",
+  "explorer"
+];
+var VerdictSchema3 = exports_external.object({
+  agent: exports_external.enum(FINAL_COUNCIL_MEMBERS),
+  verdict: exports_external.enum(["APPROVE", "CONCERNS", "REJECT"]),
+  confidence: exports_external.number().min(0).max(1),
+  findings: exports_external.array(exports_external.object({
+    severity: exports_external.enum(["HIGH", "MEDIUM", "LOW"]),
+    category: exports_external.string().min(1),
+    location: exports_external.string(),
+    detail: exports_external.string(),
+    evidence: exports_external.string()
+  })),
+  criteriaAssessed: exports_external.array(exports_external.string()),
+  criteriaUnmet: exports_external.array(exports_external.string()),
+  durationMs: exports_external.number().nonnegative()
+});
+var ArgsSchema6 = exports_external.object({
+  phase: exports_external.number().int().min(1),
+  projectSummary: exports_external.string().min(1),
+  roundNumber: exports_external.number().int().min(1).max(10).optional(),
+  verdicts: exports_external.array(VerdictSchema3).min(1).max(5)
+});
+function normalizeFinalVerdict(verdict) {
+  return verdict === "APPROVE" ? "approved" : "rejected";
 }
 async function executeWriteFinalCouncilEvidence(args2, directory) {
-  const phase = args2.phase;
-  if (!Number.isInteger(phase) || phase < 1) {
+  const parsed = ArgsSchema6.safeParse(args2);
+  if (!parsed.success) {
     return JSON.stringify({
       success: false,
-      phase,
-      message: "Invalid phase: must be a positive integer"
+      reason: "invalid arguments",
+      errors: parsed.error.issues.map((i2) => ({
+        path: i2.path.join("."),
+        message: i2.message
+      }))
     }, null, 2);
   }
-  const validVerdicts = ["APPROVED", "NEEDS_REVISION"];
-  if (!validVerdicts.includes(args2.verdict)) {
+  const input = parsed.data;
+  const config3 = loadPluginConfig(directory);
+  const requiredMembers = FINAL_COUNCIL_MEMBERS.length;
+  const distinctMembers = new Set(input.verdicts.map((v) => v.agent));
+  const membersVoted = [...distinctMembers];
+  const membersAbsent = FINAL_COUNCIL_MEMBERS.filter((m) => !distinctMembers.has(m));
+  if (membersVoted.length < requiredMembers) {
     return JSON.stringify({
       success: false,
-      phase,
-      message: "Invalid verdict: must be 'APPROVED' or 'NEEDS_REVISION'"
+      reason: "insufficient_quorum",
+      message: `Final council quorum not met: ${membersVoted.length} of ${requiredMembers} required members provided verdicts. ` + `Members voted: [${membersVoted.join(", ")}]. ` + `Members absent: [${membersAbsent.join(", ")}]. ` + `Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.`,
+      membersVoted,
+      membersAbsent,
+      quorumRequired: requiredMembers
     }, null, 2);
   }
-  const summary = args2.summary;
-  if (typeof summary !== "string" || summary.trim().length === 0) {
-    return JSON.stringify({
-      success: false,
-      phase,
-      message: "Invalid summary: must be a non-empty string"
-    }, null, 2);
-  }
-  const normalizedVerdict = normalizeVerdict2(args2.verdict);
+  const synthesis = synthesizeFinalCouncilAdvisory(input.projectSummary.trim(), input.verdicts, input.roundNumber ?? 1, config3.council);
   const plan = await loadPlan(directory);
   const planId = plan ? derivePlanId(plan) : "unknown";
+  const normalizedVerdict = normalizeFinalVerdict(synthesis.overallVerdict);
   const evidenceEntry = {
     type: "final-council",
-    phase,
+    phase: input.phase,
     plan_id: planId,
     verdict: normalizedVerdict,
-    summary: summary.trim(),
-    timestamp: new Date().toISOString()
-  };
-  const evidenceContent = {
-    entries: [evidenceEntry]
+    rawCouncilVerdict: synthesis.overallVerdict,
+    quorumSize: synthesis.quorumSize,
+    membersVoted,
+    membersAbsent,
+    requiredFixes: synthesis.requiredFixes,
+    advisoryFindings: synthesis.advisoryFindings,
+    advisoryNotes: synthesis.advisoryNotes,
+    unresolvedConflicts: synthesis.unresolvedConflicts,
+    roundNumber: synthesis.roundNumber,
+    allCriteriaMet: synthesis.allCriteriaMet,
+    memberVerdicts: synthesis.memberVerdicts,
+    unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+    projectSummary: synthesis.projectSummary,
+    timestamp: synthesis.timestamp
   };
   const filename = "final-council.json";
   const relativePath = path135.join("evidence", filename);
@@ -102381,10 +102540,13 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
   } catch (error93) {
     return JSON.stringify({
       success: false,
-      phase,
+      phase: input.phase,
       message: error93 instanceof Error ? error93.message : "Failed to validate path"
     }, null, 2);
   }
+  const evidenceContent = {
+    entries: [evidenceEntry]
+  };
   const evidenceDir = path135.dirname(validatedPath);
   try {
     await fs107.promises.mkdir(evidenceDir, { recursive: true });
@@ -102393,41 +102555,53 @@ async function executeWriteFinalCouncilEvidence(args2, directory) {
     await fs107.promises.rename(tempPath, validatedPath);
     return JSON.stringify({
       success: true,
-      phase,
+      phase: input.phase,
+      overallVerdict: synthesis.overallVerdict,
       verdict: normalizedVerdict,
-      message: `Final council evidence written to .swarm/evidence/final-council.json`
+      vetoedBy: synthesis.vetoedBy,
+      roundNumber: synthesis.roundNumber,
+      allCriteriaMet: synthesis.allCriteriaMet,
+      requiredFixesCount: synthesis.requiredFixes.length,
+      advisoryFindingsCount: synthesis.advisoryFindings.length,
+      unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
+      advisoryNotes: synthesis.advisoryNotes,
+      membersVoted,
+      membersAbsent,
+      quorumSize: synthesis.quorumSize,
+      quorumMet: true,
+      evidencePath: synthesis.evidencePath,
+      unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+      message: "Final council evidence written to .swarm/evidence/final-council.json"
     }, null, 2);
   } catch (error93) {
     return JSON.stringify({
       success: false,
-      phase,
+      phase: input.phase,
       message: error93 instanceof Error ? error93.message : String(error93)
     }, null, 2);
   }
 }
 var write_final_council_evidence = createSwarmTool({
-  description: "Write final council evidence for a completed project. Accepts phase, verdict (APPROVED/NEEDS_REVISION), summary, and writes structured evidence to .swarm/evidence/final-council.json. Normalizes verdict to lowercase. Use this after convening a final holistic council to persist the verdict.",
+  description: "Write final council evidence for a completed project. This is not General Council mode and does not use convene_general_council. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks, collect their CouncilMemberVerdict JSON, then call this tool to synthesize and persist .swarm/evidence/final-council.json.",
   args: {
-    phase: exports_external.number().int().min(1).describe("The phase number for the final council verdict (e.g., 1, 2, 3)"),
-    verdict: exports_external.enum(["APPROVED", "NEEDS_REVISION"]).describe("Verdict of the final council: 'APPROVED' or 'NEEDS_REVISION'"),
-    summary: exports_external.string().describe("Human-readable summary of the final council verdict")
+    phase: exports_external.number().int().min(1).describe("The final phase number for the project being reviewed"),
+    projectSummary: exports_external.string().min(1).describe("Summary of the completed project and total work reviewed"),
+    roundNumber: exports_external.number().int().min(1).max(10).optional().describe("1-indexed final council round number. Defaults to 1."),
+    verdicts: exports_external.array(VerdictSchema3).min(1).max(5).describe("Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer.")
   },
   execute: async (args2, directory) => {
-    const rawPhase = args2.phase !== undefined ? Number(args2.phase) : 0;
-    try {
-      const writeFinalCouncilEvidenceArgs = {
-        phase: Number(args2.phase),
-        verdict: String(args2.verdict),
-        summary: String(args2.summary ?? "")
-      };
-      return await executeWriteFinalCouncilEvidence(writeFinalCouncilEvidenceArgs, directory);
-    } catch (error93) {
+    const parsed = ArgsSchema6.safeParse(args2);
+    if (!parsed.success) {
       return JSON.stringify({
         success: false,
-        phase: rawPhase,
-        message: error93 instanceof Error ? error93.message : "Unknown error"
+        reason: "invalid arguments",
+        errors: parsed.error.issues.map((i2) => ({
+          path: i2.path.join("."),
+          message: i2.message
+        }))
       }, null, 2);
     }
+    return await executeWriteFinalCouncilEvidence(parsed.data, directory);
   }
 });
 // src/tools/write-hallucination-evidence.ts
@@ -102436,7 +102610,7 @@ init_utils2();
 init_create_tool();
 import fs108 from "node:fs";
 import path136 from "node:path";
-function normalizeVerdict3(verdict) {
+function normalizeVerdict2(verdict) {
   switch (verdict) {
     case "APPROVED":
       return "approved";
@@ -102471,7 +102645,7 @@ async function executeWriteHallucinationEvidence(args2, directory) {
       message: "Invalid summary: must be a non-empty string"
     }, null, 2);
   }
-  const normalizedVerdict = normalizeVerdict3(args2.verdict);
+  const normalizedVerdict = normalizeVerdict2(args2.verdict);
   const evidenceEntry = {
     type: "hallucination-verification",
     verdict: normalizedVerdict,
@@ -102547,7 +102721,7 @@ init_utils2();
 init_create_tool();
 import fs109 from "node:fs";
 import path137 from "node:path";
-function normalizeVerdict4(verdict) {
+function normalizeVerdict3(verdict) {
   switch (verdict) {
     case "PASS":
       return "pass";
@@ -102604,7 +102778,7 @@ async function executeWriteMutationEvidence(args2, directory) {
       message: "Invalid summary: must be a non-empty string"
     }, null, 2);
   }
-  const normalizedVerdict = normalizeVerdict4(args2.verdict);
+  const normalizedVerdict = normalizeVerdict3(args2.verdict);
   const evidenceEntry = {
     type: "mutation-gate",
     verdict: normalizedVerdict,

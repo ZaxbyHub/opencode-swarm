@@ -1,125 +1,160 @@
 /**
- * Write final council evidence tool for persisting final holistic council verdicts.
- * Accepts phase, verdict, and summary from the Architect and writes
- * a structured evidence file to the flat evidence root (not per-phase).
+ * Write final council evidence for the project-scoped final council gate.
+ *
+ * The final council is not General Council mode. It accepts the same
+ * five-member CouncilMemberVerdict objects used by phase council, synthesized
+ * at completed-project scope.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { loadPluginConfig } from '../config/loader';
+import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
+import type { CouncilAgent, CouncilMemberVerdict } from '../council/types';
 import { validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
 import { createSwarmTool } from './create-tool';
 
+const FINAL_COUNCIL_MEMBERS = [
+	'critic',
+	'reviewer',
+	'sme',
+	'test_engineer',
+	'explorer',
+] as const;
+
+const VerdictSchema = z.object({
+	agent: z.enum(FINAL_COUNCIL_MEMBERS),
+	verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
+	confidence: z.number().min(0).max(1),
+	findings: z.array(
+		z.object({
+			severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+			category: z.string().min(1),
+			location: z.string(),
+			detail: z.string(),
+			evidence: z.string(),
+		}),
+	),
+	criteriaAssessed: z.array(z.string()),
+	criteriaUnmet: z.array(z.string()),
+	durationMs: z.number().nonnegative(),
+});
+
+export const ArgsSchema = z.object({
+	phase: z.number().int().min(1),
+	projectSummary: z.string().min(1),
+	roundNumber: z.number().int().min(1).max(10).optional(),
+	verdicts: z.array(VerdictSchema).min(1).max(5),
+});
+
 /**
- * Arguments for the write_final_council_evidence tool
+ * Arguments for the write_final_council_evidence tool.
  */
 export interface WriteFinalCouncilEvidenceArgs {
 	/** The phase number for the final council verdict */
 	phase: number;
-	/** Verdict of the final council: 'APPROVED' or 'NEEDS_REVISION' */
-	verdict: 'APPROVED' | 'NEEDS_REVISION';
-	/** Human-readable summary of the final council verdict */
-	summary: string;
+	/** Summary of the completed project being reviewed */
+	projectSummary: string;
+	/** 1-indexed final council round number */
+	roundNumber?: number;
+	/** Collected verdicts from critic, reviewer, sme, test_engineer, explorer */
+	verdicts: CouncilMemberVerdict[];
 }
 
-/**
- * Normalize verdict string to lowercase format
- * @param verdict - Raw verdict from caller
- * @returns Normalized verdict: 'approved' | 'rejected'
- */
-function normalizeVerdict(verdict: string): 'approved' | 'rejected' {
-	switch (verdict) {
-		case 'APPROVED':
-			return 'approved';
-		case 'NEEDS_REVISION':
-			return 'rejected';
-		default:
-			throw new Error(
-				`Invalid verdict: must be 'APPROVED' or 'NEEDS_REVISION', got '${verdict}'`,
-			);
-	}
+function normalizeFinalVerdict(verdict: 'APPROVE' | 'CONCERNS' | 'REJECT') {
+	return verdict === 'APPROVE' ? 'approved' : 'rejected';
 }
 
 /**
  * Execute the write_final_council_evidence tool.
- * Validates input, builds an evidence entry, and writes to disk.
- * @param args - The write final council evidence arguments
- * @param directory - Working directory
- * @returns JSON string with success status and details
+ * Validates input, synthesizes project-scoped council evidence, and writes it.
  */
 export async function executeWriteFinalCouncilEvidence(
-	args: WriteFinalCouncilEvidenceArgs,
+	args: unknown,
 	directory: string,
 ): Promise<string> {
-	// Validate phase is a positive integer
-	const phase = args.phase;
-	if (!Number.isInteger(phase) || phase < 1) {
+	const parsed = ArgsSchema.safeParse(args);
+	if (!parsed.success) {
 		return JSON.stringify(
 			{
 				success: false,
-				phase: phase,
-				message: 'Invalid phase: must be a positive integer',
+				reason: 'invalid arguments',
+				errors: parsed.error.issues.map((i) => ({
+					path: i.path.join('.'),
+					message: i.message,
+				})),
+			},
+			null,
+			2,
+		);
+	}
+	const input = parsed.data;
+
+	const config = loadPluginConfig(directory);
+	const requiredMembers = FINAL_COUNCIL_MEMBERS.length;
+	const distinctMembers = new Set<CouncilAgent>(
+		input.verdicts.map((v) => v.agent),
+	);
+	const membersVoted = [...distinctMembers];
+	const membersAbsent = FINAL_COUNCIL_MEMBERS.filter(
+		(m) => !distinctMembers.has(m),
+	);
+
+	if (membersVoted.length < requiredMembers) {
+		return JSON.stringify(
+			{
+				success: false,
+				reason: 'insufficient_quorum',
+				message:
+					`Final council quorum not met: ${membersVoted.length} of ${requiredMembers} required members provided verdicts. ` +
+					`Members voted: [${membersVoted.join(', ')}]. ` +
+					`Members absent: [${membersAbsent.join(', ')}]. ` +
+					`Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.`,
+				membersVoted,
+				membersAbsent,
+				quorumRequired: requiredMembers,
 			},
 			null,
 			2,
 		);
 	}
 
-	// Validate verdict is one of the allowed values
-	const validVerdicts = ['APPROVED', 'NEEDS_REVISION'] as const;
-	if (!validVerdicts.includes(args.verdict)) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: phase,
-				message: "Invalid verdict: must be 'APPROVED' or 'NEEDS_REVISION'",
-			},
-			null,
-			2,
-		);
-	}
+	const synthesis = synthesizeFinalCouncilAdvisory(
+		input.projectSummary.trim(),
+		input.verdicts as CouncilMemberVerdict[],
+		input.roundNumber ?? 1,
+		config.council,
+	);
 
-	// Validate summary is non-empty string
-	const summary = args.summary;
-	if (typeof summary !== 'string' || summary.trim().length === 0) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: phase,
-				message: 'Invalid summary: must be a non-empty string',
-			},
-			null,
-			2,
-		);
-	}
-
-	// Normalize verdict
-	const normalizedVerdict = normalizeVerdict(args.verdict);
-
-	// Compute plan_id for evidence binding
 	const plan = await loadPlan(directory);
 	const planId = plan ? derivePlanId(plan) : 'unknown';
+	const normalizedVerdict = normalizeFinalVerdict(synthesis.overallVerdict);
 
-	// Build the evidence entry
 	const evidenceEntry = {
 		type: 'final-council',
-		phase,
+		phase: input.phase,
 		plan_id: planId,
 		verdict: normalizedVerdict,
-		summary: summary.trim(),
-		timestamp: new Date().toISOString(),
+		rawCouncilVerdict: synthesis.overallVerdict,
+		quorumSize: synthesis.quorumSize,
+		membersVoted,
+		membersAbsent,
+		requiredFixes: synthesis.requiredFixes,
+		advisoryFindings: synthesis.advisoryFindings,
+		advisoryNotes: synthesis.advisoryNotes,
+		unresolvedConflicts: synthesis.unresolvedConflicts,
+		roundNumber: synthesis.roundNumber,
+		allCriteriaMet: synthesis.allCriteriaMet,
+		memberVerdicts: synthesis.memberVerdicts,
+		unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+		projectSummary: synthesis.projectSummary,
+		timestamp: synthesis.timestamp,
 	};
 
-	// Build the gate-contract format
-	const evidenceContent = {
-		entries: [evidenceEntry],
-	};
-
-	// Validate and construct the file path using validateSwarmPath
-	// Final council evidence goes to flat evidence root, not per-phase directory
 	const filename = 'final-council.json';
 	const relativePath = path.join('evidence', filename);
 	let validatedPath: string;
@@ -129,7 +164,7 @@ export async function executeWriteFinalCouncilEvidence(
 		return JSON.stringify(
 			{
 				success: false,
-				phase: phase,
+				phase: input.phase,
 				message:
 					error instanceof Error ? error.message : 'Failed to validate path',
 			},
@@ -138,14 +173,13 @@ export async function executeWriteFinalCouncilEvidence(
 		);
 	}
 
+	const evidenceContent = {
+		entries: [evidenceEntry],
+	};
 	const evidenceDir = path.dirname(validatedPath);
 
-	// Write the evidence file
 	try {
-		// Ensure the directory exists
 		await fs.promises.mkdir(evidenceDir, { recursive: true });
-
-		// Write the file atomically by writing to a temp file then renaming
 		const tempPath = path.join(evidenceDir, `.${filename}.tmp`);
 		await fs.promises.writeFile(
 			tempPath,
@@ -157,9 +191,24 @@ export async function executeWriteFinalCouncilEvidence(
 		return JSON.stringify(
 			{
 				success: true,
-				phase: phase,
+				phase: input.phase,
+				overallVerdict: synthesis.overallVerdict,
 				verdict: normalizedVerdict,
-				message: `Final council evidence written to .swarm/evidence/final-council.json`,
+				vetoedBy: synthesis.vetoedBy,
+				roundNumber: synthesis.roundNumber,
+				allCriteriaMet: synthesis.allCriteriaMet,
+				requiredFixesCount: synthesis.requiredFixes.length,
+				advisoryFindingsCount: synthesis.advisoryFindings.length,
+				unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
+				advisoryNotes: synthesis.advisoryNotes,
+				membersVoted,
+				membersAbsent,
+				quorumSize: synthesis.quorumSize,
+				quorumMet: true,
+				evidencePath: synthesis.evidencePath,
+				unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+				message:
+					'Final council evidence written to .swarm/evidence/final-council.json',
 			},
 			null,
 			2,
@@ -168,7 +217,7 @@ export async function executeWriteFinalCouncilEvidence(
 		return JSON.stringify(
 			{
 				success: false,
-				phase: phase,
+				phase: input.phase,
 				message: error instanceof Error ? error.message : String(error),
 			},
 			null,
@@ -178,48 +227,55 @@ export async function executeWriteFinalCouncilEvidence(
 }
 
 /**
- * Tool definition for write_final_council_evidence
+ * Tool definition for write_final_council_evidence.
  */
 export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 	description:
-		'Write final council evidence for a completed project. Accepts phase, verdict (APPROVED/NEEDS_REVISION), summary, and writes structured evidence to .swarm/evidence/final-council.json. Normalizes verdict to lowercase. Use this after convening a final holistic council to persist the verdict.',
+		'Write final council evidence for a completed project. This is not General Council mode and does not use convene_general_council. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks, collect their CouncilMemberVerdict JSON, then call this tool to synthesize and persist .swarm/evidence/final-council.json.',
 	args: {
 		phase: z
 			.number()
 			.int()
 			.min(1)
-			.describe(
-				'The phase number for the final council verdict (e.g., 1, 2, 3)',
-			),
-		verdict: z
-			.enum(['APPROVED', 'NEEDS_REVISION'])
-			.describe("Verdict of the final council: 'APPROVED' or 'NEEDS_REVISION'"),
-		summary: z
+			.describe('The final phase number for the project being reviewed'),
+		projectSummary: z
 			.string()
-			.describe('Human-readable summary of the final council verdict'),
+			.min(1)
+			.describe('Summary of the completed project and total work reviewed'),
+		roundNumber: z
+			.number()
+			.int()
+			.min(1)
+			.max(10)
+			.optional()
+			.describe('1-indexed final council round number. Defaults to 1.'),
+		verdicts: z
+			.array(VerdictSchema)
+			.min(1)
+			.max(5)
+			.describe(
+				'Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer.',
+			),
 	},
 	execute: async (args, directory) => {
-		const rawPhase = args.phase !== undefined ? Number(args.phase) : 0;
-		try {
-			const writeFinalCouncilEvidenceArgs: WriteFinalCouncilEvidenceArgs = {
-				phase: Number(args.phase),
-				verdict: String(args.verdict) as 'APPROVED' | 'NEEDS_REVISION',
-				summary: String(args.summary ?? ''),
-			};
-			return await executeWriteFinalCouncilEvidence(
-				writeFinalCouncilEvidenceArgs,
-				directory,
-			);
-		} catch (error) {
+		const parsed = ArgsSchema.safeParse(args);
+		if (!parsed.success) {
 			return JSON.stringify(
 				{
 					success: false,
-					phase: rawPhase,
-					message: error instanceof Error ? error.message : 'Unknown error',
+					reason: 'invalid arguments',
+					errors: parsed.error.issues.map((i) => ({
+						path: i.path.join('.'),
+						message: i.message,
+					})),
 				},
 				null,
 				2,
 			);
 		}
+		return await executeWriteFinalCouncilEvidence(
+			parsed.data as WriteFinalCouncilEvidenceArgs,
+			directory,
+		);
 	},
 });

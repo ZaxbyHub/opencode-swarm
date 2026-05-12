@@ -8,7 +8,7 @@
  * No I/O — fully unit-testable with mock inputs. All file reads/writes happen in
  * sibling modules (criteria-store, council-evidence-writer).
  */
-import type { CouncilConfig, CouncilCriteria, CouncilMemberVerdict, CouncilSynthesis, PhaseCouncilSynthesis } from './types';
+import type { CouncilConfig, CouncilCriteria, CouncilMemberVerdict, CouncilSynthesis, FinalCouncilSynthesis, PhaseCouncilSynthesis } from './types';
 export declare function synthesizeCouncilVerdicts(taskId: string, swarmId: string, verdicts: CouncilMemberVerdict[], criteria: CouncilCriteria | null, roundNumber: number, config?: Partial<CouncilConfig>): CouncilSynthesis;
 /**
  * Synthesize phase-level council verdicts into a PhaseCouncilSynthesis.
@@ -19,3 +19,9 @@ export declare function synthesizeCouncilVerdicts(taskId: string, swarmId: strin
  * (see writePhaseCouncilEvidence in submit-phase-council-verdicts.ts).
  */
 export declare function synthesizePhaseCouncilAdvisory(phaseNumber: number, phaseSummary: string, verdicts: CouncilMemberVerdict[], roundNumber: number, config?: Partial<CouncilConfig>, _workingDir?: string): PhaseCouncilSynthesis;
+/**
+ * Synthesize project-level final council verdicts into a FinalCouncilSynthesis.
+ * This uses the same five-member verdict semantics as phase council, but the
+ * output is scoped to completed-project review and the final_council gate.
+ */
+export declare function synthesizeFinalCouncilAdvisory(projectSummary: string, verdicts: CouncilMemberVerdict[], roundNumber: number, config?: Partial<CouncilConfig>): FinalCouncilSynthesis;

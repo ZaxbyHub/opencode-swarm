@@ -239,6 +239,9 @@ Skips the compaction service. Use when you're hitting context pressure on short 
 
 When enabled, a phase-level council of 5 members (critic, reviewer, sme, test_engineer, explorer) reviews the entire phase's work holistically at `phase_complete` time. Stage B gates (reviewer + test_engineer in parallel) always run per-task — council is additive, never a replacement. Evidence is written to `.swarm/evidence/{phase}/phase-council.json` and validated for verdict, quorum, timestamp, and phase number.
 
+### `final_council` (Project-Level Final Council)
+
+When enabled, the final phase cannot complete until the architect dispatches the same 5 council members used by phase council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) with completed-project context and calls `write_final_council_evidence` with their collected `CouncilMemberVerdict` objects. Evidence is written to `.swarm/evidence/final-council.json` and validated for approved verdict, plan binding, and quorum metadata. This is not General Council mode and does not use `convene_general_council`.
 ---
 
 ## Lean Turbo Lane Planning Engine

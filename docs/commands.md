@@ -265,12 +265,14 @@ View or modify QA gate profile for the current plan.
 - `enable`: persist gate(s) into the locked profile. Architect-only. Rejected after critic approval lock.
 - `override`: session-only ratchet-tighter enable.
 
-Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `council_general_review`.
+Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `council_general_review`, `final_council`.
 
 **Gate descriptions:**
 
 - `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
 
+
+- `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry

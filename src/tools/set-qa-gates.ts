@@ -184,9 +184,11 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 			.optional()
 			.describe(
 				'Enable the final_council gate (default: off). When on, ' +
-					'after all phases complete the architect runs a holistic ' +
-					'general council review against the entire body of work. ' +
-					'Requires council.general.enabled: true in plugin config.',
+					'after all phases complete the architect dispatches critic, reviewer, ' +
+					'sme, test_engineer, and explorer with project-scoped context, ' +
+					'collects their CouncilMemberVerdict objects, and calls ' +
+					'write_final_council_evidence. This is not General Council mode ' +
+					'and does not require council.general.enabled.',
 			),
 		project_type: z
 			.string()

@@ -1,29 +1,66 @@
 /**
- * Write final council evidence tool for persisting final holistic council verdicts.
- * Accepts phase, verdict, and summary from the Architect and writes
- * a structured evidence file to the flat evidence root (not per-phase).
+ * Write final council evidence for the project-scoped final council gate.
+ *
+ * The final council is not General Council mode. It accepts the same
+ * five-member CouncilMemberVerdict objects used by phase council, synthesized
+ * at completed-project scope.
  */
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
+import type { CouncilMemberVerdict } from '../council/types';
+export declare const ArgsSchema: z.ZodObject<{
+    phase: z.ZodNumber;
+    projectSummary: z.ZodString;
+    roundNumber: z.ZodOptional<z.ZodNumber>;
+    verdicts: z.ZodArray<z.ZodObject<{
+        agent: z.ZodEnum<{
+            reviewer: "reviewer";
+            test_engineer: "test_engineer";
+            explorer: "explorer";
+            sme: "sme";
+            critic: "critic";
+        }>;
+        verdict: z.ZodEnum<{
+            APPROVE: "APPROVE";
+            REJECT: "REJECT";
+            CONCERNS: "CONCERNS";
+        }>;
+        confidence: z.ZodNumber;
+        findings: z.ZodArray<z.ZodObject<{
+            severity: z.ZodEnum<{
+                HIGH: "HIGH";
+                MEDIUM: "MEDIUM";
+                LOW: "LOW";
+            }>;
+            category: z.ZodString;
+            location: z.ZodString;
+            detail: z.ZodString;
+            evidence: z.ZodString;
+        }, z.core.$strip>>;
+        criteriaAssessed: z.ZodArray<z.ZodString>;
+        criteriaUnmet: z.ZodArray<z.ZodString>;
+        durationMs: z.ZodNumber;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 /**
- * Arguments for the write_final_council_evidence tool
+ * Arguments for the write_final_council_evidence tool.
  */
 export interface WriteFinalCouncilEvidenceArgs {
     /** The phase number for the final council verdict */
     phase: number;
-    /** Verdict of the final council: 'APPROVED' or 'NEEDS_REVISION' */
-    verdict: 'APPROVED' | 'NEEDS_REVISION';
-    /** Human-readable summary of the final council verdict */
-    summary: string;
+    /** Summary of the completed project being reviewed */
+    projectSummary: string;
+    /** 1-indexed final council round number */
+    roundNumber?: number;
+    /** Collected verdicts from critic, reviewer, sme, test_engineer, explorer */
+    verdicts: CouncilMemberVerdict[];
 }
 /**
  * Execute the write_final_council_evidence tool.
- * Validates input, builds an evidence entry, and writes to disk.
- * @param args - The write final council evidence arguments
- * @param directory - Working directory
- * @returns JSON string with success status and details
+ * Validates input, synthesizes project-scoped council evidence, and writes it.
  */
-export declare function executeWriteFinalCouncilEvidence(args: WriteFinalCouncilEvidenceArgs, directory: string): Promise<string>;
+export declare function executeWriteFinalCouncilEvidence(args: unknown, directory: string): Promise<string>;
 /**
- * Tool definition for write_final_council_evidence
+ * Tool definition for write_final_council_evidence.
  */
 export declare const write_final_council_evidence: ToolDefinition;

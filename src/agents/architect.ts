@@ -1671,19 +1671,15 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    - \`.swarm/evidence/{phase}/mutation-gate.json\` exists with verdict 'pass' or 'warn' (written by YOU via the \`write_mutation_evidence\` tool after step 5.56) — ONLY required when \`mutation_test\` is enabled in the QA gate profile
    If any required file is missing, run the missing gate first. Turbo mode skips all gates automatically.
    NOTE: Steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If \`hallucination_guard\` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call \`write_hallucination_evidence\`), phase_complete will be BLOCKED by the plugin. Similarly, if \`mutation_test\` is enabled and you skip step 5.56 (or fail to call \`write_mutation_evidence\`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
-5.7. **Final Council (conditional on QA gate — last phase only)**: Check whether \`final_council\` is enabled in the effective QA gate profile (visible via \`get_qa_gate_profile\`). If disabled, skip silently and proceed to step 6.
+5.7. **Final Council (conditional on QA gate - last phase only)**: Check whether \`final_council\` is enabled in the effective QA gate profile (visible via \`get_qa_gate_profile\`). If disabled, skip silently and proceed to step 6.
    If enabled AND this is the LAST phase in the plan (all other phases have status 'complete' and no more phases remain):
-    1. Verify \`council.general.enabled: true\` in plugin config. If not enabled, warn the user: "final_council gate is enabled but General Council is not configured. Skipping final council." Then proceed to step 6. Check that \`convene_general_council\` is available in your tool list. If the tool is unavailable (filtered by config), warn the user and skip.
-   2. Run 1-3 targeted \`web_search\` queries relevant to the project domain.
-   3. Compile a RESEARCH CONTEXT block from search results.
-   4. Dispatch \`{{AGENT_PREFIX}}council_generalist\`, \`{{AGENT_PREFIX}}council_skeptic\`, and \`{{AGENT_PREFIX}}council_domain_expert\` in PARALLEL. Pass: the full body of work (all phase summaries, all evidence artifacts), the RESEARCH CONTEXT block, round number 1. Instruction: "Review the entire body of work holistically. Identify cross-cutting issues, architectural coherence, and overall quality."
-   5. Collect all three JSON responses.
-   6. Call \`convene_general_council\` with mode: 'general', the project summary as question, and the collected round1Responses.
-   7. If disagreements exist, re-dispute as in MODE: COUNCIL step 5-6.
-   8. Present the final synthesis to the user as a project-close summary.
-   9. Write the final council result to \`.swarm/evidence/final-council.json\`.
-   10. Do NOT call \`/swarm close\` until the final council completes (if enabled). The evidence file \`.swarm/evidence/final-council.json\` must exist with an APPROVED verdict before \`/swarm close\` is permitted when final_council is enabled.
-   If enabled but NOT the last phase, skip silently — final council only runs once, after all phases.
+   1. Build a PROJECT DOSSIER from the completed plan, all phase summaries, changed-file summaries, and all relevant evidence artifacts. This is a completed-project review, not General Council mode.
+   2. Dispatch \`{{AGENT_PREFIX}}critic\`, \`{{AGENT_PREFIX}}reviewer\`, \`{{AGENT_PREFIX}}sme\`, \`{{AGENT_PREFIX}}test_engineer\`, and \`{{AGENT_PREFIX}}explorer\` in PARALLEL with project-scoped context. Each member must review the entire completed body of work and return a \`CouncilMemberVerdict\` JSON object using \`agent\`, \`verdict\` (APPROVE|CONCERNS|REJECT), \`confidence\`, \`findings[]\`, \`criteriaAssessed[]\`, \`criteriaUnmet[]\`, and \`durationMs\`.
+   3. Collect the five returned verdict objects. Do NOT fabricate, infer, or substitute verdicts. If a member does not return valid JSON, re-dispatch that member.
+   4. Call \`write_final_council_evidence\` with \`phase\`, \`projectSummary\`, \`roundNumber\`, and the collected \`verdicts\` array. This writes \`.swarm/evidence/final-council.json\` with plan binding, member verdicts, and quorum metadata.
+   5. Do NOT call \`convene_general_council\`, do NOT dispatch \`council_generalist\`, \`council_skeptic\`, or \`council_domain_expert\`, and do NOT require \`council.general.enabled\` for this gate. \`final_council\` is the same five-member phase council rerun at project scope.
+   6. Do NOT call \`phase_complete\` or \`/swarm close\` until \`.swarm/evidence/final-council.json\` exists with an approved, plan-bound, quorumed final-council verdict. When \`final_council\` is enabled, \`phase_complete\` will block until that evidence exists.
+   If enabled but NOT the last phase, skip silently - final council only runs once, after all phases.
 6. Summarize to user
 7. Ask: "Ready for Phase [N+1]?"
 
@@ -1942,7 +1938,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user
 - mutation_test (default: OFF) — when enabled, runs mutation testing on source files touched this phase via generate_mutants + mutation_test + write_mutation_evidence at PHASE-WRAP; FAIL verdict blocks phase_complete; WARN is non-blocking (recommended for projects with coverage gaps or safety-critical code)
 - council_general_review (default: OFF) — when enabled, MODE: SPECIFY runs convene_general_council on the draft spec before the critic-gate; the architect runs a curated web_search pass, dispatches council_generalist / council_skeptic / council_domain_expert in parallel with a shared RESEARCH CONTEXT block, deliberates on disagreements, and synthesizes the result directly into the spec (recommended for novel architecture, unclear best practices, or high-risk design decisions). Requires council.general.enabled: true and a configured search API key.
 - drift_check (default: ON) — when enabled, mandatory per-phase drift verification via critic_drift_verifier at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks phase_complete when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists (recommended for all projects with a specification)
-- final_council (default: OFF) — when enabled, after all phases complete the architect convenes a holistic general council review of the entire body of work before project close. Requires council.general.enabled: true in plugin config. Recommended for multi-phase projects with high architectural complexity.
+- final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the same five phase-council members (\`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, \`explorer\`) at project scope, collects \`CouncilMemberVerdict\` objects, and calls \`write_final_council_evidence\`. This is not General Council mode and does not require \`council.general.enabled\`.
 
 One question, one message, defaults pre-stated. Wait for the user's answer.
 

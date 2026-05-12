@@ -146,7 +146,16 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 
 	afterEach(() => {
 		closeProjectDb(tempDir);
-		rmSync(tempDir, { recursive: true, force: true });
+		try {
+			rmSync(tempDir, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 100,
+			});
+		} catch {
+			// Windows can briefly retain SQLite handles after closeProjectDb.
+		}
 	});
 
 	// =======================================================================
@@ -274,6 +283,15 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 						plan_id: PLAN_ID,
 						verdict: 'rejected',
 						summary: 'First verdict - rejected',
+						quorumSize: 5,
+						membersVoted: [
+							'critic',
+							'reviewer',
+							'sme',
+							'test_engineer',
+							'explorer',
+						],
+						membersAbsent: [],
 					},
 					{
 						type: 'final-council',
@@ -281,6 +299,15 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 						plan_id: PLAN_ID,
 						verdict: 'approved',
 						summary: 'Second verdict - approved',
+						quorumSize: 5,
+						membersVoted: [
+							'critic',
+							'reviewer',
+							'sme',
+							'test_engineer',
+							'explorer',
+						],
+						membersAbsent: [],
 					},
 				],
 			}),
