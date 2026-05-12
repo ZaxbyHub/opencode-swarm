@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.17.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.0...v7.17.1) (2026-05-12)
+
+
+### Bug Fixes
+
+* **knowledge:** harden knowledge system and resolve full-auto deadlock ([#827](https://github.com/zaxbysauce/opencode-swarm/issues/827)) ([a986e3a](https://github.com/zaxbysauce/opencode-swarm/commit/a986e3afda8da3767af9cb7a27d847773858e122))
+
 ## [7.17.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.16.0...v7.17.0) (2026-05-11)
 
 
