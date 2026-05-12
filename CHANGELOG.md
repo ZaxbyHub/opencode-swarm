@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.17.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.1...v7.17.2) (2026-05-12)
+
+
+### Bug Fixes
+
+* **qa-gate:** run final council as project-scoped 5-member council ([#831](https://github.com/zaxbysauce/opencode-swarm/issues/831)) ([713f22c](https://github.com/zaxbysauce/opencode-swarm/commit/713f22c3cf355797ec8352eaf22a8d2da95a3bda))
+
 ## [7.17.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.0...v7.17.1) (2026-05-12)
 
 
