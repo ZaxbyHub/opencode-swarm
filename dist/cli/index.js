@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.18.1",
+    version: "7.18.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -51927,6 +51927,7 @@ __export(exports_commands, {
   createSwarmCommandHandler: () => createSwarmCommandHandler,
   buildHelpText: () => buildHelpText,
   VALID_COMMANDS: () => VALID_COMMANDS,
+  LLM_MEDIATION_WARNING: () => LLM_MEDIATION_WARNING,
   COMMAND_REGISTRY: () => COMMAND_REGISTRY,
   COMMAND_NAME_SET: () => COMMAND_NAME_SET,
   COMMAND_NAMES: () => COMMAND_NAMES
@@ -51934,7 +51935,7 @@ __export(exports_commands, {
 import fs28 from "fs";
 import path46 from "path";
 function buildHelpText() {
-  const lines = ["## Swarm Commands", ""];
+  const lines = ["## Swarm Commands", "", LLM_MEDIATION_WARNING, ""];
   const CATEGORIES = [
     "core",
     "agent",
@@ -52100,11 +52101,13 @@ ${text}`;
 `;
       text = welcomeMessage + text;
     }
-    output.parts = [
-      { type: "text", text }
-    ];
+    output.parts.splice(0, output.parts.length, {
+      type: "text",
+      text
+    });
   };
 }
+var LLM_MEDIATION_WARNING;
 var init_commands = __esm(() => {
   init_registry();
   init_acknowledge_spec_drift();
@@ -52142,6 +52145,8 @@ var init_commands = __esm(() => {
   init_sync_plan();
   init_turbo();
   init_write_retro2();
+  LLM_MEDIATION_WARNING = "> \u26A0\uFE0F Chat-typed `/swarm` is LLM-mediated in current OpenCode (see anomalyco/opencode#9306).\n" + `> The text below is the canonical handler output, but the model may rephrase it before display.
+` + "> For deterministic output, run `bunx opencode-swarm run <subcommand>` from a terminal.";
 });
 
 // src/commands/registry.ts

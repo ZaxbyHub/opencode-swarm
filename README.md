@@ -231,6 +231,14 @@ Core subcommands at a glance:
 
 Use `/swarm help` to see all available commands categorized by function. Use `/swarm help <command>` for detailed usage information on a specific command.
 
+> ⚠️ **Chat-typed `/swarm` is currently LLM-mediated.** The OpenCode runtime invokes the model unconditionally after the plugin handles a `command.execute.before` slash command (upstream issue [anomalyco/opencode#9306](https://github.com/anomalyco/opencode/issues/9306)). What you see in chat is the model's reformulation of the canonical handler output, which can drift on weak models or in long sessions. For deterministic, scriptable output, run the underlying command directly:
+>
+> ```bash
+> bunx opencode-swarm run <subcommand>   # e.g. bunx opencode-swarm run agents
+> ```
+>
+> This is a temporary mitigation. A deterministic in-chat path (either a `swarm` MCP tool or upstream `noReply` support) is tracked separately.
+
 Nine commands display a ⚠️ warning in help output because they share names with Claude Code built-in slash commands (e.g., `/plan`, `/reset`, `/status`). The warning reminds you to always use `/swarm <command>` — the bare CC command does something different and sometimes destructive. See [docs/commands.md#claude-code-command-conflicts](docs/commands.md#claude-code-command-conflicts) for the full conflict registry.
 
 See [docs/commands.md](docs/commands.md) for the full command reference.

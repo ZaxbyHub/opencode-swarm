@@ -40,6 +40,7 @@ export { handleStatusCommand } from './status';
 export { handleSyncPlanCommand } from './sync-plan';
 export { handleTurboCommand } from './turbo';
 export { handleWriteRetroCommand } from './write-retro';
+export declare const LLM_MEDIATION_WARNING: string;
 export declare function buildHelpText(): string;
 /**
  * Creates a command.execute.before handler for /swarm commands.
