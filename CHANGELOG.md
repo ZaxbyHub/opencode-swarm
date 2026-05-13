@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.18.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.1...v7.18.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* **onboarding:** validate configured swarm models ([#841](https://github.com/zaxbysauce/opencode-swarm/issues/841)) ([bf6afe9](https://github.com/zaxbysauce/opencode-swarm/commit/bf6afe93977ccfae73c7b25d8c092e8700a74e86))
+
 ## [7.18.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.0...v7.18.1) (2026-05-13)
 
 
