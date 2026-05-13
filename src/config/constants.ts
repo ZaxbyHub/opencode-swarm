@@ -475,7 +475,6 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'search',
 		'doc_scan',
 		'doc_extract',
-		'web_search',
 	],
 	// v2: spec_writer — independent agent for authoring .swarm/spec.md. Has
 	// read tools and the safe spec_write tool only.
@@ -642,9 +641,9 @@ for (const [agentName, tools] of Object.entries(AGENT_TOOL_MAP)) {
 	}
 }
 
-// Default models for each agent/category
-// v6.14: switched to free OpenCode Zen models; architect key intentionally
-// omitted so it inherits the OpenCode UI model selection.
+// Default models for each agent/category.
+// Keep these on the public OpenCode Zen free roster. The architect key is
+// intentionally omitted so it inherits the OpenCode UI model selection.
 export const DEFAULT_MODELS: Record<string, string> = {
 	// Explorer — fast read-heavy analysis
 	explorer: 'opencode/big-pickle',
@@ -652,21 +651,21 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// Pipeline agents — differentiated models for writing vs reviewing
 	coder: 'opencode/minimax-m2.5-free',
 	reviewer: 'opencode/big-pickle',
-	test_engineer: 'opencode/gpt-5-nano',
+	test_engineer: 'opencode/big-pickle',
 
 	// SME, Critic variants, Docs, Designer — reasoning/general tasks
 	sme: 'opencode/big-pickle',
 	critic: 'opencode/big-pickle',
-	critic_sounding_board: 'opencode/gpt-5-nano',
-	critic_drift_verifier: 'opencode/gpt-5-nano',
-	critic_hallucination_verifier: 'opencode/gpt-5-nano',
-	critic_oversight: 'opencode/gpt-5-nano',
+	critic_sounding_board: 'opencode/big-pickle',
+	critic_drift_verifier: 'opencode/big-pickle',
+	critic_hallucination_verifier: 'opencode/big-pickle',
+	critic_oversight: 'opencode/big-pickle',
 	docs: 'opencode/big-pickle',
 	designer: 'opencode/big-pickle',
 
 	// Curator agents — lightweight read-only analysis (same model family as explorer)
-	curator_init: 'opencode/gpt-5-nano',
-	curator_phase: 'opencode/gpt-5-nano',
+	curator_init: 'opencode/big-pickle',
+	curator_phase: 'opencode/big-pickle',
 
 	// v2: Skill improver — defaults to a strong reasoning model, but is gated
 	// behind skill_improver.enabled and a daily quota (issue #629).
@@ -690,67 +689,67 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 > = {
 	coder: {
 		model: 'opencode/minimax-m2.5-free',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/big-pickle'],
 	},
 	reviewer: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	test_engineer: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	explorer: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	sme: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	critic: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	docs: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	designer: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	critic_sounding_board: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	critic_drift_verifier: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	critic_hallucination_verifier: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	critic_oversight: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	curator_init: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	curator_phase: {
-		model: 'opencode/gpt-5-nano',
-		fallback_models: ['opencode/big-pickle'],
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	skill_improver: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 	spec_writer: {
 		model: 'opencode/big-pickle',
-		fallback_models: ['opencode/gpt-5-nano'],
+		fallback_models: ['opencode/minimax-m2.5-free'],
 	},
 };
 

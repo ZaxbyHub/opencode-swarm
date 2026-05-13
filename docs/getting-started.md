@@ -252,7 +252,7 @@ Swarm resumes from `.swarm/plan.md` instead of redoing discovery. This is expect
 /swarm reset --confirm   # Clear swarm state and start over
 ```
 
-See [`docs/commands.md`](commands.md) for all 41 subcommands and their options.
+See [`docs/commands.md`](commands.md) for the full command reference and options.
 
 ### Configure Models (Optional)
 

@@ -459,4 +459,4 @@ The coder receives structured failure feedback from the reviewer and test engine
 /swarm history              Completed phases with status icons
 ```
 
-For all 41 subcommands and their options, see [`docs/commands.md`](../commands.md).
+For the full command reference and options, see [`docs/commands.md`](../commands.md).

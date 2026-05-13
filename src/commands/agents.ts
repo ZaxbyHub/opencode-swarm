@@ -3,6 +3,17 @@ import { ALL_SUBAGENT_NAMES } from '../config/constants.js';
 import type { GuardrailsConfig } from '../config/schema';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 
+const UNREGISTERED_AGENT_HINTS: Record<string, string> = {
+	designer: 'enable ui_review.enabled',
+	council_generalist: 'enable council.general.enabled',
+	council_skeptic: 'enable council.general.enabled',
+	council_domain_expert: 'enable council.general.enabled',
+	skill_improver:
+		'registered by default unless agents.skill_improver.disabled is true',
+	spec_writer:
+		'registered by default unless agents.spec_writer.disabled is true',
+};
+
 export function handleAgentsCommand(
 	agents: Record<string, AgentDefinition>,
 	guardrails?: GuardrailsConfig,
@@ -65,7 +76,8 @@ export function handleAgentsCommand(
 	if (hasUnregistered) {
 		lines.push('', '### Unregistered Subagents');
 		for (const name of unregistered) {
-			lines.push(`- **${name}** (requires configuration)`);
+			const hint = UNREGISTERED_AGENT_HINTS[name] ?? 'requires configuration';
+			lines.push(`- **${name}** (${hint})`);
 		}
 	}
 

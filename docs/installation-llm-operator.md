@@ -97,15 +97,14 @@ Use the user-approved config. If not provided, use this minimum valid config:
     "mega": {
       "name": "Mega",
       "agents": {
-        "architect": { "model": "opencode/gpt-5-nano" },
-        "coder": { "model": "minimax-coding-plan/MiniMax-M2.5" },
-        "explorer": { "model": "minimax-coding-plan/MiniMax-M2.1" },
-        "sme": { "model": "kimi-for-coding/k2p5" },
-        "critic": { "model": "zai-coding-plan/glm-5" },
-        "reviewer": { "model": "zai-coding-plan/glm-5" },
-        "test_engineer": { "model": "minimax-coding-plan/MiniMax-M2.5" },
-        "docs": { "model": "zai-coding-plan/glm-4.7-flash" },
-        "designer": { "model": "kimi-for-coding/k2p5" }
+        "coder": { "model": "opencode/minimax-m2.5-free" },
+        "explorer": { "model": "opencode/big-pickle" },
+        "sme": { "model": "opencode/big-pickle" },
+        "critic": { "model": "opencode/big-pickle" },
+        "reviewer": { "model": "opencode/big-pickle" },
+        "test_engineer": { "model": "opencode/big-pickle" },
+        "docs": { "model": "opencode/big-pickle" },
+        "designer": { "model": "opencode/big-pickle" }
       }
     }
   },

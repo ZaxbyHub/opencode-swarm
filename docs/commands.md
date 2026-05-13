@@ -1,6 +1,6 @@
 # Commands Reference
 
-All `/swarm` subcommands available in OpenCode Swarm v6.81.0. The authoritative source is `src/commands/registry.ts`.
+All `/swarm` subcommands available in the current OpenCode Swarm command registry. The authoritative source is `src/commands/registry.ts`; run `/swarm help` in OpenCode for the live list in your installed version.
 
 Commands are grouped by function. Compound commands (e.g., `/swarm config doctor`) resolve the two-word form first, then fall back to the first token.
 
