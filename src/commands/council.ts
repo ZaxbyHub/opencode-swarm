@@ -15,8 +15,6 @@
  * or control sequences (mirrors brainstorm.ts).
  */
 
-import { loadPluginConfig } from '../config/loader.js';
-
 const MAX_QUESTION_LEN = 2000;
 
 /**
@@ -83,7 +81,7 @@ const USAGE = [
 ].join('\n');
 
 export async function handleCouncilCommand(
-	directory: string,
+	_directory: string,
 	args: string[],
 ): Promise<string> {
 	const parsed = parseArgs(args);
@@ -91,25 +89,6 @@ export async function handleCouncilCommand(
 
 	if (!question) {
 		return USAGE;
-	}
-
-	const config = loadPluginConfig(directory);
-	if (config.council?.general?.enabled !== true) {
-		return [
-			'General Council is not enabled for this project.',
-			'',
-			'Enable it in `.opencode/opencode-swarm.json` or `~/.config/opencode/opencode-swarm.json`:',
-			'',
-			'```json',
-			'{',
-			'  "council": {',
-			'    "general": { "enabled": true }',
-			'  }',
-			'}',
-			'```',
-			'',
-			'Then restart OpenCode and run `/swarm config doctor` before trying `/swarm council` again.',
-		].join('\n');
 	}
 
 	const tokens: string[] = ['MODE: COUNCIL'];

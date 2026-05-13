@@ -101,11 +101,6 @@ export type TaskWorkflowState =
 	| 'tests_run'
 	| 'complete';
 
-export type StageBGate =
-	| 'reviewer'
-	| 'test_engineer'
-	| 'adversarial_test_engineer';
-
 /**
  * Represents per-session state for guardrail tracking.
  * Budget fields (toolCallCount, consecutiveErrors, etc.) have moved to InvocationWindow.
@@ -172,9 +167,7 @@ export interface AgentSessionState {
 	 * When both are present, the task may advance to tests_run regardless of order.
 	 * Always populated — Stage B is unconditionally parallel.
 	 */
-	stageBCompletion?: Map<string, Set<StageBGate>>;
-	/** Per-task required Stage B gates. Optional gates are added when dispatched. */
-	requiredStageBGates?: Map<string, Set<StageBGate>>;
+	stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
 	/** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
 	taskCouncilApproved?: Map<
 		string,
@@ -523,7 +516,6 @@ export function startAgentSession(
 		// v6.21 Per-task state machine
 		taskWorkflowStates: new Map(),
 		stageBCompletion: new Map(),
-		requiredStageBGates: new Map(),
 		taskCouncilApproved: new Map(),
 		lastGateOutcome: null,
 		declaredCoderScope: null,
@@ -717,9 +709,6 @@ export function ensureAgentSession(
 		// PR 2 Stage B barrier migration safety
 		if (!session.stageBCompletion) {
 			session.stageBCompletion = new Map();
-		}
-		if (!session.requiredStageBGates) {
-			session.requiredStageBGates = new Map();
 		}
 		// v6.71+ Council mode migration safety
 		if (!session.taskCouncilApproved) {
@@ -1158,37 +1147,12 @@ export function getTaskState(
  * @param taskId - The task identifier
  * @param agent - Which Stage B agent completed ('reviewer' or 'test_engineer')
  */
-function getRequiredStageBGates(
-	session: AgentSessionState,
-	taskId: string,
-): Set<StageBGate> {
-	const required = session.requiredStageBGates?.get(taskId);
-	return required ?? new Set<StageBGate>(['reviewer', 'test_engineer']);
-}
-
-export function requireStageBGate(
-	session: AgentSessionState,
-	taskId: string,
-	gate: StageBGate,
-): void {
-	if (!isValidTaskId(taskId)) return;
-	if (!session.requiredStageBGates) {
-		session.requiredStageBGates = new Map();
-	}
-	const existing =
-		session.requiredStageBGates.get(taskId) ??
-		new Set<StageBGate>(['reviewer', 'test_engineer']);
-	existing.add(gate);
-	session.requiredStageBGates.set(taskId, existing);
-}
-
 export function recordStageBCompletion(
 	session: AgentSessionState,
 	taskId: string,
-	agent: StageBGate,
+	agent: 'reviewer' | 'test_engineer',
 ): void {
 	if (!isValidTaskId(taskId)) return;
-	requireStageBGate(session, taskId, agent);
 	if (!session.stageBCompletion) {
 		session.stageBCompletion = new Map();
 	}
@@ -1201,8 +1165,8 @@ export function recordStageBCompletion(
 }
 
 /**
- * PR 2 Stage B barrier: returns true iff every required Stage B gate has been
- * recorded for the given task in this session.
+ * PR 2 Stage B barrier: returns true iff both 'reviewer' and 'test_engineer' have
+ * been recorded for the given task in this session.
  *
  * @param session - The agent session state
  * @param taskId - The task identifier
@@ -1215,8 +1179,7 @@ export function hasBothStageBCompletions(
 	if (!isValidTaskId(taskId)) return false;
 	const completions = session.stageBCompletion?.get(taskId);
 	if (!completions) return false;
-	const required = getRequiredStageBGates(session, taskId);
-	return [...required].every((gate) => completions.has(gate));
+	return completions.has('reviewer') && completions.has('test_engineer');
 }
 
 /**
@@ -1471,9 +1434,6 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 	}
 	if (!session.taskCouncilApproved) {
 		session.taskCouncilApproved = new Map();
-	}
-	if (!session.requiredStageBGates) {
-		session.requiredStageBGates = new Map();
 	}
 
 	const { planTaskStates, evidenceMap } = _rehydrationCache;

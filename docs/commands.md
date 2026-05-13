@@ -1,6 +1,6 @@
 # Commands Reference
 
-All `/swarm` subcommands available in the current OpenCode Swarm command registry. The authoritative source is `src/commands/registry.ts`; run `/swarm help` in OpenCode for the live list in your installed version.
+All `/swarm` subcommands available in OpenCode Swarm v6.81.0. The authoritative source is `src/commands/registry.ts`.
 
 Commands are grouped by function. Compound commands (e.g., `/swarm config doctor`) resolve the two-word form first, then fall back to the first token.
 
@@ -275,7 +275,7 @@ Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic
 
 **Gate descriptions:**
 
-- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B always runs per-task regardless of council mode; when standard `parallelization` is enabled, all applicable Stage B gates are dispatched together, including conditional adversarial `test_engineer`. Council is additive — never replaces Stage B.
+- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
 
 
 - `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.

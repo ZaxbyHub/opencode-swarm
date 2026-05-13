@@ -40,13 +40,12 @@ export { handleStatusCommand } from './status';
 export { handleSyncPlanCommand } from './sync-plan';
 export { handleTurboCommand } from './turbo';
 export { handleWriteRetroCommand } from './write-retro';
-export declare const LLM_MEDIATION_WARNING: string;
 export declare function buildHelpText(): string;
 /**
  * Creates a command.execute.before handler for /swarm commands.
  * Uses factory pattern to close over directory and agents.
  */
-export declare function createSwarmCommandHandler(directory: string, agents: Record<string, AgentDefinition>, client?: unknown): (input: {
+export declare function createSwarmCommandHandler(directory: string, agents: Record<string, AgentDefinition>): (input: {
     command: string;
     sessionID: string;
     arguments: string;

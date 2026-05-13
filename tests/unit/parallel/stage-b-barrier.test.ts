@@ -18,7 +18,6 @@ import {
 	getTaskState,
 	hasBothStageBCompletions,
 	recordStageBCompletion,
-	requireStageBGate,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -115,17 +114,6 @@ describe('hasBothStageBCompletions — barrier check', () => {
 		const session = makeSession();
 		recordStageBCompletion(session, '1.1', 'test_engineer');
 		recordStageBCompletion(session, '1.1', 'reviewer');
-		expect(hasBothStageBCompletions(session, '1.1')).toBe(true);
-	});
-
-	test('returns false until required adversarial test_engineer gate completes', () => {
-		const session = makeSession();
-		requireStageBGate(session, '1.1', 'adversarial_test_engineer');
-		recordStageBCompletion(session, '1.1', 'reviewer');
-		recordStageBCompletion(session, '1.1', 'test_engineer');
-		expect(hasBothStageBCompletions(session, '1.1')).toBe(false);
-
-		recordStageBCompletion(session, '1.1', 'adversarial_test_engineer');
 		expect(hasBothStageBCompletions(session, '1.1')).toBe(true);
 	});
 

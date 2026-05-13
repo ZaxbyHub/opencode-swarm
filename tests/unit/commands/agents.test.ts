@@ -7,22 +7,7 @@ import type { GuardrailsConfig } from '../../../src/config/schema';
 /** Generate the unregistered subagents list string for test assertions */
 function unregisteredList(names: readonly string[]): string {
 	return (
-		'\n' +
-		names
-			.map((n) => {
-				const hints: Record<string, string> = {
-					designer: 'enable ui_review.enabled',
-					council_generalist: 'enable council.general.enabled',
-					council_skeptic: 'enable council.general.enabled',
-					council_domain_expert: 'enable council.general.enabled',
-					skill_improver:
-						'registered by default unless agents.skill_improver.disabled is true',
-					spec_writer:
-						'registered by default unless agents.spec_writer.disabled is true',
-				};
-				return `- **${n}** (${hints[n] ?? 'requires configuration'})`;
-			})
-			.join('\n')
+		'\n' + names.map((n) => `- **${n}** (requires configuration)`).join('\n')
 	);
 }
 
@@ -664,7 +649,7 @@ describe('unregistered subagents', () => {
 		expect(result).not.toContain('### Unregistered Subagents');
 	});
 
-	test('When some subagents are missing, they appear in unregistered section with enablement hints', () => {
+	test('When some subagents are missing, they appear in unregistered section with "requires configuration" label', () => {
 		// Only register 'coder' and 'explorer' — rest are missing
 		const partialAgents: Record<string, AgentDefinition> = {
 			coder: {
@@ -688,19 +673,13 @@ describe('unregistered subagents', () => {
 		);
 		// Unregistered section should exist
 		expect(result).toContain('### Unregistered Subagents');
+		// Each unregistered subagent should have "(requires configuration)" label
 		const missingSubagents = ALL_SUBAGENT_NAMES.filter(
 			(n) => n !== 'coder' && n !== 'explorer',
 		);
 		for (const name of missingSubagents) {
-			expect(result).toContain(`**${name}** (`);
+			expect(result).toContain(`**${name}** (requires configuration)`);
 		}
-		expect(result).toContain(
-			'**council_generalist** (enable council.general.enabled)',
-		);
-		expect(result).toContain('**designer** (enable ui_review.enabled)');
-		expect(result).toContain(
-			'**skill_improver** (registered by default unless agents.skill_improver.disabled is true)',
-		);
 	});
 
 	test('Shows read-write for agents without tool restrictions', () => {
@@ -749,7 +728,7 @@ describe('unregistered subagents', () => {
 		expect(result).toContain('### Unregistered Subagents');
 		// All ALL_SUBAGENT_NAMES listed as unregistered
 		for (const name of ALL_SUBAGENT_NAMES) {
-			expect(result).toContain(`**${name}** (`);
+			expect(result).toContain(`**${name}** (requires configuration)`);
 		}
 	});
 });
@@ -766,7 +745,7 @@ describe('prefixed agent name matching', () => {
 
 		const result = handleAgentsCommand(agents);
 
-		expect(result).not.toContain('**coder** (');
+		expect(result).not.toContain('**coder** (requires configuration)');
 	});
 
 	test('local_ prefixed agent counts as its base name being registered', () => {
@@ -780,7 +759,7 @@ describe('prefixed agent name matching', () => {
 
 		const result = handleAgentsCommand(agents);
 
-		expect(result).not.toContain('**reviewer** (');
+		expect(result).not.toContain('**reviewer** (requires configuration)');
 	});
 
 	test('all subagents registered via prefix variants shows "N total" header', () => {

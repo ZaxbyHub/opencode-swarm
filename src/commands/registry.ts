@@ -190,7 +190,6 @@ export type CommandContext = {
 	args: string[];
 	sessionID: string;
 	agents: Record<string, AgentDefinition>;
-	client?: unknown;
 };
 
 export type CommandResult = Promise<string>;
@@ -290,8 +289,7 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/config',
 	},
 	'config doctor': {
-		handler: (ctx) =>
-			handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
+		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		subcommandOf: 'config',
 		category: 'diagnostics',
@@ -299,8 +297,7 @@ export const COMMAND_REGISTRY = {
 	// Alias for TUI shortcut 'swarm-config-doctor' which extracts subcommand as 'config-doctor' (dash).
 	// Without this alias the shortcut resolves to null and shows help text instead of running the command.
 	'config-doctor': {
-		handler: (ctx) =>
-			handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
+		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		subcommandOf: 'config',
 		category: 'diagnostics',
@@ -383,8 +380,7 @@ export const COMMAND_REGISTRY = {
 	},
 	// Deprecation aliases for confusing command names
 	doctor: {
-		handler: (ctx) =>
-			handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
+		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		category: 'diagnostics',
 		aliasOf: 'config doctor',

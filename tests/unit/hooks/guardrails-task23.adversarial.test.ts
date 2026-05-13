@@ -26,15 +26,6 @@ import {
 	startAgentSession,
 } from '../../../src/state';
 
-describe.skip('Task 2.3 — lastGateOutcome and advanceTaskState wiring ADVERSARIAL TESTS', () => {
-	let tempDir: string;
-
-	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-task23-adv-'));
-		process.env.XDG_CONFIG_HOME = tempDir;
-		resetSwarmState();
-	});
-
 	afterEach(() => {
 		delete process.env.XDG_CONFIG_HOME;
 		fs.rmSync(tempDir, { recursive: true, force: true });

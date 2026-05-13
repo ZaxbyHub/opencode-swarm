@@ -47,8 +47,9 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			}
 		});
 
-		// Note: starter defaults should stay on public Zen free models so fresh
-		// installs do not strand users on paid, private, or removed providers.
+		// Note: The same model may appear in both model and fallback_models by design
+		// (e.g. big-pickle as primary and gpt-5-nano with big-pickle as fallback).
+		// This is intentional - big-pickle is a reliable fallback target.
 	});
 
 	describe('coverage', () => {

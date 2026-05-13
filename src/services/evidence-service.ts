@@ -3,7 +3,18 @@ import type {
 	ReviewEvidence,
 	TestEvidence,
 } from '../config/evidence-schema';
-import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
+import {
+	listEvidenceTaskIds as _listEvidenceTaskIds,
+	loadEvidence as _loadEvidence,
+} from '../evidence/manager';
+
+/**
+ * _internals — DI seam for testing async I/O without cross-module mocks.
+ */
+export const _internals = {
+	loadEvidence: _loadEvidence,
+	listEvidenceTaskIds: _listEvidenceTaskIds,
+};
 
 /**
  * Structured evidence entry for a task.
@@ -107,7 +118,7 @@ export async function getTaskEvidenceData(
 	directory: string,
 	taskId: string,
 ): Promise<TaskEvidenceData> {
-	const result = await loadEvidence(directory, taskId);
+	const result = await _internals.loadEvidence(directory, taskId);
 
 	if (result.status !== 'found') {
 		return {
@@ -139,7 +150,7 @@ export async function getTaskEvidenceData(
 export async function getEvidenceListData(
 	directory: string,
 ): Promise<EvidenceListData> {
-	const taskIds = await listEvidenceTaskIds(directory);
+	const taskIds = await _internals.listEvidenceTaskIds(directory);
 
 	if (taskIds.length === 0) {
 		return { hasEvidence: false, tasks: [] };
@@ -148,7 +159,7 @@ export async function getEvidenceListData(
 	const tasks: EvidenceListData['tasks'] = [];
 
 	for (const taskId of taskIds) {
-		const result = await loadEvidence(directory, taskId);
+		const result = await _internals.loadEvidence(directory, taskId);
 		if (result.status === 'found') {
 			tasks.push({
 				taskId,

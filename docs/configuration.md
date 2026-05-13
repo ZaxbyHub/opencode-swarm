@@ -10,8 +10,6 @@ Global config:
 ~/.config/opencode/opencode-swarm.json
 ```
 
-The loader uses the XDG config directory on every supported OS: `$XDG_CONFIG_HOME/opencode/opencode-swarm.json` when `XDG_CONFIG_HOME` is set, otherwise `<home>/.config/opencode/opencode-swarm.json`. On native Windows this resolves to `C:\Users\<you>\.config\opencode\opencode-swarm.json`; it does not read `%APPDATA%` for plugin configuration.
-
 Project config:
 
 ```text
@@ -35,26 +33,6 @@ You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
 
-## Model setup without walls
-
-New users should start with either no model overrides or the free Zen starter models above. Run `/swarm agents` after OpenCode starts; it shows the resolved model for every registered agent. If any model reports `ProviderModelNotFoundError`, replace it with one from OpenCode's live model list (`/models` in the TUI, or `https://opencode.ai/zen/v1/models`) and run `/swarm config doctor`.
-
-Avoid copy-pasting provider IDs from private workspaces, incubators, or screenshots. In particular, do not use `grove-openai/*` unless you personally have access to that provider in OpenCode. For public Zen models, use the `opencode/<model-id>` form shown by `/models`.
-
-`/swarm config doctor` performs a best-effort live check against OpenCode's provider registry. The lookup is capped at 3 seconds so doctor never blocks startup or interactive use; if OpenCode is offline, slow, or returns malformed provider data, doctor reports an informational "model availability check skipped" finding instead of raising model-not-found errors.
-
-Role guidance:
-
-| Role | Good default | Upgrade first when you have paid models |
-|---|---|---|
-| architect | OpenCode UI selection | strongest reasoning model you have |
-| critic / reviewer | `opencode/big-pickle` | a different strong model from the architect/coder |
-| coder | `opencode/minimax-m2.5-free` | fast coding model with reliable tool use |
-| test_engineer | `opencode/big-pickle` | separate model from coder for test blind spots |
-| explorer / docs / curator | `opencode/big-pickle` | cheaper fast reader/writer |
-
-Do not spend your strongest model on `designer` while leaving `critic` weaker. The critic's job is to fight the plan and catch blind spots before implementation starts.
-
 ## Per-agent override fields
 
 Each entry under `agents` accepts the following optional fields:
@@ -69,17 +47,17 @@ Each entry under `agents` accepts the following optional fields:
 
 ### Why `variant` is its own field
 
-OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `opencode/gpt-5.3-codex/medium`) in its model picker — the picker rewrites that input through a variant-aware resolver before applying it to the session. The agent loader, by contrast, uses a basic 2-segment parser, so embedding the variant into `model` resolves to a non-existent model id (`gpt-5.3-codex/medium`) and produces `ProviderModelNotFoundError`. Use the `variant` field instead:
+OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `grove-openai/gpt-5.3-codex/medium`) in its model picker — the picker rewrites that input through a variant-aware resolver before applying it to the session. The agent loader, by contrast, uses a basic 2-segment parser, so embedding the variant into `model` resolves to a non-existent model id (`gpt-5.3-codex/medium`) and produces `ProviderModelNotFoundError`. Use the `variant` field instead:
 
 ```json
 {
   "agents": {
     "test_engineer": {
-      "model": "opencode/gpt-5.3-codex",
+      "model": "grove-openai/gpt-5.3-codex",
       "variant": "medium"
     },
-    "critic": {
-      "model": "opencode/gpt-5.4",
+    "designer": {
+      "model": "grove-openai/gpt-5.4",
       "variant": "high"
     }
   }
@@ -88,7 +66,7 @@ OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `opencode/gp
 
 ### Backward compatibility
 
-If you currently have a config like `{ "model": "opencode/gpt-5.3-codex/medium" }`, it will still work — the variant is automatically extracted and a deprecation warning is logged.
+If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medium" }`, it will still work — the variant is automatically extracted and a deprecation warning is logged.
 
 **Before** (deprecated — produces a warning):
 
@@ -96,7 +74,7 @@ If you currently have a config like `{ "model": "opencode/gpt-5.3-codex/medium" 
 {
   "agents": {
     "coder": {
-      "model": "opencode/gpt-5.3-codex/medium"
+      "model": "grove-openai/gpt-5.3-codex/medium"
     }
   }
 }
@@ -108,7 +86,7 @@ If you currently have a config like `{ "model": "opencode/gpt-5.3-codex/medium" 
 {
   "agents": {
     "coder": {
-      "model": "opencode/gpt-5.3-codex",
+      "model": "grove-openai/gpt-5.3-codex",
       "variant": "medium"
     }
   }
@@ -318,34 +296,6 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 ```
 
 > ⚠️ **Strict-validation warning.** `CouncilConfigSchema` is `.strict()`. A typo in any `council.general.*` key (e.g. `searchProvder`) causes the *entire* user config to fail Zod validation. The loader (`src/config/loader.ts`) then falls back to **guardrail-only defaults** — silently losing every setting in `opencode-swarm.json`, not just the misspelled field. Validate with `/swarm config` after editing, and watch for the `[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults` warning in the console.
-
-## Standard Parallelization Configuration
-
-The `parallelization` block controls standard non-Lean orchestration. It does not require `/swarm turbo lean` and does not use Lean Turbo tools. When enabled, the architect prompt receives bounded fan-out rules for independent coder tasks and all applicable Stage B gate groups. A Stage B gate group includes reviewer, verification test_engineer, and the conditional adversarial test_engineer pass when the QA ladder requires adversarial testing.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enables standard non-Lean parallel orchestration guidance. |
-| `maxConcurrentTasks` | number | `1` | Global cap used to clamp coder and review fan-out. |
-| `evidenceLockTimeoutMs` | number | `60000` | Timeout budget for evidence lock operations. |
-| `max_coders` | number | `3` | Max coder agents the architect may dispatch concurrently, also capped by `maxConcurrentTasks`. |
-| `max_reviewers` | number | `2` | Max independent Stage B gate groups, also capped by `maxConcurrentTasks`. |
-
-**Example** - Enable standard parallelization without Lean Turbo:
-
-```json
-{
-  "parallelization": {
-    "enabled": true,
-    "maxConcurrentTasks": 4,
-    "evidenceLockTimeoutMs": 60000,
-    "max_coders": 3,
-    "max_reviewers": 2
-  }
-}
-```
-
-When `execution_profile` is present and locked on a plan, the architect must use the stricter limit between the global `parallelization` config and the locked plan profile. If the locked profile has `parallelization_enabled: false`, coder task fan-out stays disabled for that plan. If global `parallelization.enabled` is explicitly `false`, standard parallelization remains disabled even when a locked profile enables it.
 
 ## Turbo Configuration
 

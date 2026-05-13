@@ -69,19 +69,8 @@ export { handleSyncPlanCommand } from './sync-plan';
 export { handleTurboCommand } from './turbo';
 export { handleWriteRetroCommand } from './write-retro';
 
-// Banner prepended to `/swarm help`. Chat-typed `/swarm` is currently
-// LLM-mediated: OpenCode invokes the model after `command.execute.before`
-// runs (see upstream issue anomalyco/opencode#9306), so the text the user
-// sees is the model's reformulation of the canonical handler output rather
-// than the handler output itself. For deterministic, scriptable output,
-// users should run `bunx opencode-swarm run <subcommand>` from a terminal.
-export const LLM_MEDIATION_WARNING =
-	'> ⚠️ Chat-typed `/swarm` is LLM-mediated in current OpenCode (see anomalyco/opencode#9306).\n' +
-	'> The text below is the canonical handler output, but the model may rephrase it before display.\n' +
-	'> For deterministic output, run `bunx opencode-swarm run <subcommand>` from a terminal.';
-
 export function buildHelpText(): string {
-	const lines: string[] = ['## Swarm Commands', '', LLM_MEDIATION_WARNING, ''];
+	const lines: string[] = ['## Swarm Commands', ''];
 
 	// Valid categories in display order
 	const CATEGORIES = [
@@ -233,7 +222,6 @@ export function buildHelpText(): string {
 export function createSwarmCommandHandler(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
-	client?: unknown,
 ): (
 	input: { command: string; sessionID: string; arguments: string },
 	output: { parts: unknown[] },
@@ -266,15 +254,8 @@ export function createSwarmCommandHandler(
 			// EEXIST means file already existed — not first run; other errors: proceed silently
 		}
 
-		// input.arguments receives the expanded $ARGUMENTS from the template.
-		// `output.parts` is the user command's `parts` array (shared by reference
-		// with the OpenCode caller). Mutating it in-place propagates to the
-		// outer caller's `parts` variable that is then passed to `prompt()`.
-		// REASSIGNING `output.parts = [...]` would NOT propagate because the
-		// wrapper object is discarded by `Plugin.trigger` — only mutations to
-		// the existing array reference are observable. This call does NOT
-		// suppress the LLM; current OpenCode invokes `prompt()` unconditionally
-		// after the hook returns (upstream issue anomalyco/opencode#9306).
+		// Verified: input.arguments receives the expanded $ARGUMENTS from the template.
+		// The hook output.parts overrides the LLM response in the UI.
 		// Parse arguments
 		let tokens: string[];
 		if (input.command === 'swarm') {
@@ -318,7 +299,6 @@ export function createSwarmCommandHandler(
 					args: resolved.remainingArgs,
 					sessionID: input.sessionID,
 					agents,
-					client,
 				});
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';
@@ -337,21 +317,13 @@ export function createSwarmCommandHandler(
 			const welcomeMessage =
 				`Welcome to OpenCode Swarm! 🐝\n` +
 				`\n` +
-				`Start here: run \`/swarm diagnose\`, then \`/swarm agents\` to confirm the plugin loaded and see the exact models in use.\n` +
-				`If a model is unavailable, edit \`.opencode/opencode-swarm.json\` or \`~/.config/opencode/opencode-swarm.json\` and run \`/swarm config doctor\`.\n` +
-				`Useful next steps: \`/swarm brainstorm <task>\` for guided planning, \`/swarm full-auto on\` for autonomous runs after enabling it in config, and \`/swarm council <question>\` after enabling council.general.\n\n`;
+				`Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.\n`;
 			text = welcomeMessage + text;
 		}
 
-		// Replace output.parts contents in place. Using assignment
-		// (`output.parts = [...]`) would mutate only the wrapper object that
-		// `Plugin.trigger` constructs and then discards — the OpenCode caller's
-		// outer `parts` variable would still reference the original array and
-		// the LLM input would never see this text. `splice` modifies the shared
-		// array reference, which IS observed by the outer caller.
-		output.parts.splice(0, output.parts.length, {
-			type: 'text',
-			text,
-		} as unknown as (typeof output.parts)[number]);
+		// Convert string result to Part[]
+		output.parts = [
+			{ type: 'text', text } as unknown as (typeof output.parts)[number],
+		];
 	};
 }

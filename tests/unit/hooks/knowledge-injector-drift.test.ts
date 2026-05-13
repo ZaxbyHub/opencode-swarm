@@ -545,69 +545,6 @@ describe('Drift injection: multiple reports use last one', () => {
 });
 
 // ============================================================================
-// Test Suite: No drift when no knowledge entries (early return)
-// ============================================================================
-
-describe.skip('Drift injection: no drift when no knowledge entries', () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-			current_phase: 1,
-			title: 'Test Project',
-			phases: [],
-		});
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 1: Setup',
-		);
-		(getRunMemorySummary as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-		// Return reports - but they won't be used since hook returns early
-		(readPriorDriftReports as ReturnType<typeof vi.fn>).mockResolvedValue([
-			{
-				phase: 1,
-				alignment: 'ALIGNED',
-				drift_score: 0.05,
-				injection_summary: 'test',
-			},
-		]);
-	});
-
-	it('Test 6: no drift prepend when there are no knowledge entries (hook returns early)', async () => {
-		// Keep readMergedKnowledge returning empty - this causes early return before drift code
-		(readMergedKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('architect');
-
-		// First call - init with phase 1
-		await hook({}, output);
-
-		// Change phase to 2
-		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
-			current_phase: 2,
-			title: 'Test Project',
-			phases: [],
-		});
-		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
-			'Phase 2: Implementation',
-		);
-
-		// Second call with different phase, but no knowledge entries
-		await hook({}, output);
-
-		// readPriorDriftReports should NOT be called because the hook returns early when entries is empty
-		expect(readPriorDriftReports).not.toHaveBeenCalled();
-
-		// No knowledge message should be injected
-		const hasKnowledgeInjection = output.messages.some((m) =>
-			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
-		);
-		expect(hasKnowledgeInjection).toBe(false);
-	});
-});
-
-// ============================================================================
 // Test Suite: Drift text format verification
 // ============================================================================
 

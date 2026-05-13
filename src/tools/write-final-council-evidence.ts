@@ -6,7 +6,6 @@
  * at completed-project scope.
  */
 
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
@@ -70,105 +69,6 @@ function normalizeFinalVerdict(verdict: 'APPROVE' | 'CONCERNS' | 'REJECT') {
 	return verdict === 'APPROVE' ? 'approved' : 'rejected';
 }
 
-const replacementLocks = new Map<string, Promise<void>>();
-
-export const _internals = {
-	loadPluginConfig,
-	synthesizeFinalCouncilAdvisory,
-	loadPlan,
-	derivePlanId,
-	validateSwarmPath,
-};
-
-function getErrnoCode(error: unknown) {
-	return error && typeof error === 'object'
-		? (error as NodeJS.ErrnoException).code
-		: undefined;
-}
-
-async function replaceEvidenceFile(tempPath: string, finalPath: string) {
-	const previous = replacementLocks.get(finalPath)?.catch(() => {});
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	replacementLocks.set(finalPath, current);
-	if (previous) {
-		await previous;
-	}
-
-	// This lock serializes same-process writes only; filesystem calls are expected
-	// to settle. A hung host filesystem operation may still require process-level
-	// recovery.
-	try {
-		await replaceEvidenceFileLocked(tempPath, finalPath);
-	} finally {
-		release();
-		if (replacementLocks.get(finalPath) === current) {
-			replacementLocks.delete(finalPath);
-		}
-	}
-}
-
-async function replaceEvidenceFileLocked(tempPath: string, finalPath: string) {
-	try {
-		await fs.promises.rename(tempPath, finalPath);
-		return;
-	} catch (error) {
-		const code = getErrnoCode(error);
-		if (!['EEXIST', 'EPERM', 'EACCES'].includes(code ?? '')) {
-			throw error;
-		}
-	}
-
-	const backupPath = `${finalPath}.${randomUUID()}.bak`;
-	let backupCreated = false;
-	try {
-		try {
-			await fs.promises.rename(finalPath, backupPath);
-			backupCreated = true;
-		} catch (error) {
-			if (getErrnoCode(error) !== 'ENOENT') {
-				throw error;
-			}
-		}
-
-		try {
-			await fs.promises.rename(tempPath, finalPath);
-		} catch (error) {
-			if (backupCreated) {
-				if (!(await restoreEvidenceBackup(backupPath, finalPath))) {
-					await fs.promises.rm(backupPath, { force: true }).catch(() => {});
-				}
-				backupCreated = false;
-			}
-			throw error;
-		}
-
-		if (backupCreated) {
-			await fs.promises.rm(backupPath, { force: true }).catch(() => {});
-			backupCreated = false;
-		}
-	} finally {
-		await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-	}
-}
-
-async function restoreEvidenceBackup(backupPath: string, finalPath: string) {
-	try {
-		await fs.promises.rename(backupPath, finalPath);
-		return true;
-	} catch {
-		try {
-			await fs.promises.copyFile(backupPath, finalPath);
-			await fs.promises.rm(backupPath, { force: true }).catch(() => {});
-			return true;
-		} catch {
-			return false;
-		}
-	}
-}
-
 /**
  * Execute the write_final_council_evidence tool.
  * Validates input, synthesizes project-scoped council evidence, and writes it.
@@ -194,7 +94,7 @@ export async function executeWriteFinalCouncilEvidence(
 	}
 	const input = parsed.data;
 
-	const config = _internals.loadPluginConfig(directory);
+	const config = loadPluginConfig(directory);
 	const requiredMembers = FINAL_COUNCIL_MEMBERS.length;
 	const distinctMembers = new Set<CouncilAgent>(
 		input.verdicts.map((v) => v.agent),
@@ -223,47 +123,15 @@ export async function executeWriteFinalCouncilEvidence(
 		);
 	}
 
-	let synthesis: ReturnType<typeof synthesizeFinalCouncilAdvisory>;
-	try {
-		synthesis = _internals.synthesizeFinalCouncilAdvisory(
-			input.projectSummary.trim(),
-			input.verdicts as CouncilMemberVerdict[],
-			input.roundNumber ?? 1,
-			config.council,
-		);
-	} catch (error) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: input.phase,
-				message:
-					error instanceof Error
-						? error.message
-						: 'Failed to synthesize final council evidence',
-			},
-			null,
-			2,
-		);
-	}
+	const synthesis = synthesizeFinalCouncilAdvisory(
+		input.projectSummary.trim(),
+		input.verdicts as CouncilMemberVerdict[],
+		input.roundNumber ?? 1,
+		config.council,
+	);
 
-	let planId = 'unknown';
-	try {
-		const plan = await _internals.loadPlan(directory);
-		planId = plan ? _internals.derivePlanId(plan) : 'unknown';
-	} catch (error) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: input.phase,
-				message:
-					error instanceof Error
-						? error.message
-						: 'Failed to load project plan',
-			},
-			null,
-			2,
-		);
-	}
+	const plan = await loadPlan(directory);
+	const planId = plan ? derivePlanId(plan) : 'unknown';
 	const normalizedVerdict = normalizeFinalVerdict(synthesis.overallVerdict);
 
 	const evidenceEntry = {
@@ -291,7 +159,7 @@ export async function executeWriteFinalCouncilEvidence(
 	const relativePath = path.join('evidence', filename);
 	let validatedPath: string;
 	try {
-		validatedPath = _internals.validateSwarmPath(directory, relativePath);
+		validatedPath = validateSwarmPath(directory, relativePath);
 	} catch (error) {
 		return JSON.stringify(
 			{
@@ -312,13 +180,13 @@ export async function executeWriteFinalCouncilEvidence(
 
 	try {
 		await fs.promises.mkdir(evidenceDir, { recursive: true });
-		const tempPath = path.join(evidenceDir, `.${filename}.${randomUUID()}.tmp`);
+		const tempPath = path.join(evidenceDir, `.${filename}.tmp`);
 		await fs.promises.writeFile(
 			tempPath,
 			JSON.stringify(evidenceContent, null, 2),
 			'utf-8',
 		);
-		await replaceEvidenceFile(tempPath, validatedPath);
+		await fs.promises.rename(tempPath, validatedPath);
 
 		return JSON.stringify(
 			{

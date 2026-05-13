@@ -1,28 +1,9 @@
 import { loadPluginConfig } from '../config/loader';
 import {
 	type ConfigDoctorResult,
-	type ModelAvailability,
 	runConfigDoctor,
 } from '../services/config-doctor';
 import { runToolDoctor } from '../services/tool-doctor';
-import { withTimeout } from '../utils/timeout';
-
-type ProviderModelClient = {
-	config?: {
-		providers?: (parameters?: { directory?: string }) => Promise<{
-			data?: {
-				providers?: Array<{
-					id?: string;
-					models?: Record<string, { id?: string }>;
-				}>;
-			};
-			error?: unknown;
-		}>;
-	};
-};
-
-const MODEL_REGISTRY_TIMEOUT_MS = 3_000;
-const MODEL_REGISTRY_SOURCE = 'OpenCode config.providers';
 
 /**
  * Format tool doctor result as markdown for command output.
@@ -141,89 +122,6 @@ function formatDoctorMarkdown(result: ConfigDoctorResult): string {
 	return lines.join('\n');
 }
 
-function extractAvailableModelIds(
-	response: Awaited<
-		ReturnType<
-			NonNullable<NonNullable<ProviderModelClient['config']>['providers']>
-		>
-	>['data'],
-): Set<string> {
-	const available = new Set<string>();
-	if (response?.providers !== undefined && !Array.isArray(response.providers)) {
-		throw new Error('provider registry returned malformed provider list');
-	}
-	for (const provider of response?.providers ?? []) {
-		if (
-			!provider ||
-			typeof provider !== 'object' ||
-			!provider.id ||
-			!provider.models ||
-			typeof provider.models !== 'object' ||
-			Array.isArray(provider.models)
-		) {
-			continue;
-		}
-		for (const [modelKey, modelInfo] of Object.entries(provider.models)) {
-			available.add(`${provider.id}/${modelKey}`);
-			if (modelInfo && typeof modelInfo === 'object' && modelInfo.id) {
-				available.add(`${provider.id}/${modelInfo.id}`);
-			}
-		}
-	}
-	return available;
-}
-
-export async function loadModelAvailability(
-	directory: string,
-	client: unknown,
-	options: { timeoutMs?: number } = {},
-): Promise<ModelAvailability | undefined> {
-	const providerClient = client as ProviderModelClient | undefined;
-	const providers = providerClient?.config?.providers;
-	if (typeof providers !== 'function') {
-		return undefined;
-	}
-
-	try {
-		const response = await withTimeout(
-			providers({ directory }),
-			options.timeoutMs ?? MODEL_REGISTRY_TIMEOUT_MS,
-			new Error(
-				`OpenCode provider model registry lookup exceeded ${
-					options.timeoutMs ?? MODEL_REGISTRY_TIMEOUT_MS
-				}ms`,
-			),
-		);
-		if (response.error) {
-			return {
-				availableModelIds: new Set<string>(),
-				source: MODEL_REGISTRY_SOURCE,
-				error:
-					typeof response.error === 'string'
-						? response.error
-						: JSON.stringify(response.error),
-			};
-		}
-		if (!response.data) {
-			return {
-				availableModelIds: new Set<string>(),
-				source: MODEL_REGISTRY_SOURCE,
-				error: 'provider registry returned no data',
-			};
-		}
-		return {
-			availableModelIds: extractAvailableModelIds(response.data),
-			source: MODEL_REGISTRY_SOURCE,
-		};
-	} catch (error) {
-		return {
-			availableModelIds: new Set<string>(),
-			source: MODEL_REGISTRY_SOURCE,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
-}
-
 /**
  * Handle /swarm config doctor command.
  * Maps to: config doctor service (runConfigDoctor)
@@ -231,17 +129,11 @@ export async function loadModelAvailability(
 export async function handleDoctorCommand(
 	directory: string,
 	args: string[],
-	options: { client?: unknown } = {},
 ): Promise<string> {
 	const enableAutoFix = args.includes('--fix') || args.includes('-f');
 
 	const config = loadPluginConfig(directory);
-	const modelAvailability = await loadModelAvailability(
-		directory,
-		options.client,
-	);
-	const doctorOptions = { modelAvailability };
-	const result = runConfigDoctor(config, directory, doctorOptions);
+	const result = runConfigDoctor(config, directory);
 
 	// If auto-fix is requested and there are auto-fixable issues
 	if (enableAutoFix && result.hasAutoFixableIssues) {
@@ -249,12 +141,7 @@ export async function handleDoctorCommand(
 		const { runConfigDoctorWithFixes } = await import(
 			'../services/config-doctor'
 		);
-		const fixResult = await runConfigDoctorWithFixes(
-			directory,
-			config,
-			true,
-			doctorOptions,
-		);
+		const fixResult = await runConfigDoctorWithFixes(directory, config, true);
 		return formatDoctorMarkdown(fixResult.result);
 	}
 

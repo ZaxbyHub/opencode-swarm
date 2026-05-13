@@ -14,4 +14,4 @@
  * Sanitizes the question to prevent prompt injection of rival MODE: headers
  * or control sequences (mirrors brainstorm.ts).
  */
-export declare function handleCouncilCommand(directory: string, args: string[]): Promise<string>;
+export declare function handleCouncilCommand(_directory: string, args: string[]): Promise<string>;

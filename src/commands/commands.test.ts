@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleDoctorCommand, loadModelAvailability } from '../commands/doctor';
+import { handleDoctorCommand } from '../commands/doctor';
 import { handlePreflightCommand } from '../commands/preflight';
 import { handleSyncPlanCommand } from '../commands/sync-plan';
 
@@ -34,20 +34,12 @@ function createTestConfig(dir: string, config: object): string {
 
 describe('Command Adapters', () => {
 	let tempDir: string;
-	let originalXdgConfigHome: string | undefined;
 
 	beforeEach(() => {
 		tempDir = createTempDir();
-		originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
-		process.env.XDG_CONFIG_HOME = path.join(tempDir, '.isolated-config');
 	});
 
 	afterEach(() => {
-		if (originalXdgConfigHome === undefined) {
-			delete process.env.XDG_CONFIG_HOME;
-		} else {
-			process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
-		}
 		cleanupDir(tempDir);
 	});
 
@@ -85,120 +77,6 @@ describe('Command Adapters', () => {
 
 			expect(result).toContain('## Config Doctor Report');
 			expect(result).toContain('Summary');
-		});
-
-		it('should validate configured models against the active OpenCode provider registry', async () => {
-			createTestConfig(tempDir, {
-				agents: {
-					coder: { model: 'opencode/minimax-m2.5-free' },
-					critic: { model: 'opencode/removed-model' },
-				},
-			});
-
-			const client = {
-				config: {
-					providers: async () => ({
-						data: {
-							providers: [
-								{
-									id: 'opencode',
-									models: {
-										'minimax-m2.5-free': { id: 'minimax-m2.5-free' },
-									},
-								},
-							],
-						},
-					}),
-				},
-			};
-
-			const result = await handleDoctorCommand(tempDir, [], { client });
-
-			expect(result).toContain('Configured model "opencode/removed-model"');
-			expect(result).toContain('Run `/models`');
-			expect(result).toContain('**Errors**: 1');
-		});
-
-		it('should report when OpenCode provider models cannot be loaded', async () => {
-			createTestConfig(tempDir, {
-				agents: {
-					coder: { model: 'opencode/minimax-m2.5-free' },
-				},
-			});
-
-			const client = {
-				config: {
-					providers: async () => ({
-						error: { name: 'ProviderRegistryError', message: 'unavailable' },
-					}),
-				},
-			};
-
-			const result = await handleDoctorCommand(tempDir, [], { client });
-
-			expect(result).toContain('Could not load OpenCode provider models');
-			expect(result).toContain('ProviderRegistryError');
-			expect(result).toContain('**Info**: 1');
-		});
-
-		it('should load available provider/model IDs from OpenCode config providers', async () => {
-			const availability = await loadModelAvailability(tempDir, {
-				config: {
-					providers: async () => ({
-						data: {
-							providers: [
-								{
-									id: 'opencode',
-									models: {
-										'big-pickle': { id: 'big-pickle' },
-										alias: { id: 'canonical-model' },
-									},
-								},
-							],
-						},
-					}),
-				},
-			});
-
-			expect(availability?.availableModelIds.has('opencode/big-pickle')).toBe(
-				true,
-			);
-			expect(availability?.availableModelIds.has('opencode/alias')).toBe(true);
-			expect(
-				availability?.availableModelIds.has('opencode/canonical-model'),
-			).toBe(true);
-		});
-
-		it('should report a provider lookup timeout as best-effort skipped validation', async () => {
-			const availability = await loadModelAvailability(
-				tempDir,
-				{
-					config: {
-						providers: async () => new Promise(() => {}),
-					},
-				},
-				{ timeoutMs: 5 },
-			);
-
-			expect(availability?.availableModelIds.size).toBe(0);
-			expect(availability?.error).toContain(
-				'OpenCode provider model registry lookup exceeded 5ms',
-			);
-		});
-
-		it('should report malformed provider registry data without throwing', async () => {
-			const availability = await loadModelAvailability(tempDir, {
-				config: {
-					providers: async () => ({
-						data: {
-							providers: { opencode: { models: {} } },
-						},
-					}),
-				},
-			});
-
-			expect(availability?.availableModelIds.size).toBe(0);
-			expect(availability?.error).toContain('malformed provider list');
 		});
 
 		it('should run config doctor with auto-fix flag', async () => {

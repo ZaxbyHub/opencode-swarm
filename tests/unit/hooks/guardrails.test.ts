@@ -1618,27 +1618,6 @@ describe('guardrails circuit breaker', () => {
 		});
 
 		describe('Vector 5: Logic inversion - is the guard condition inverted?', () => {
-			it.skip('defense: verify condition is `if (delegationActive)` not `if (!delegationActive)`', async () => {
-				// DEFENSE TEST: Read the actual code to verify the condition is correct
-				const fs = await import('node:fs');
-				const guardrailsPath =
-					'C:\\opencode\\opencode-swarm\\src\\hooks\\guardrails.ts';
-				const guardrailsCode = fs.readFileSync(guardrailsPath, 'utf-8');
-
-				// Find the delegationActive guard (around line 214)
-				const delegationActiveGuardRegex =
-					/if\s*\(\s*currentSession\?\.delegationActive\s*\)/;
-				const invertedGuardRegex =
-					/if\s*\(\s*!\s*currentSession\?\.delegationActive\s*\)/;
-
-				// Verify the correct condition exists
-				expect(delegationActiveGuardRegex.test(guardrailsCode)).toBe(true);
-				// Verify the inverted condition does NOT exist
-				expect(invertedGuardRegex.test(guardrailsCode)).toBe(false);
-
-				// DEFENSE VERIFIED: Condition is correct
-			});
-
 			it('defense: verify delegationActive=true skips detection, false/undefined runs it', async () => {
 				// DEFENSE TEST: Verify the guard behavior matches the code
 				const config = defaultConfig();

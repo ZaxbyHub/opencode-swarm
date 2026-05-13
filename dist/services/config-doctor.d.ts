@@ -56,18 +56,6 @@ export interface ConfigDoctorResult {
     /** The config that was analyzed */
     configSource: string;
 }
-/** Model availability snapshot from the active OpenCode provider registry. */
-export interface ModelAvailability {
-    /** Fully-qualified model IDs in provider/model form. */
-    availableModelIds: ReadonlySet<string>;
-    /** Human-readable source for diagnostics. */
-    source: string;
-    /** Optional failure message when the registry could not be loaded. */
-    error?: string;
-}
-export interface ConfigDoctorOptions {
-    modelAvailability?: ModelAvailability;
-}
 /** Backup artifact for rollback */
 export interface ConfigBackup {
     /** When the backup was created */
@@ -102,11 +90,10 @@ export declare function writeBackupArtifact(directory: string, backup: ConfigBac
  * @returns the path to the restored config file, or null if restore failed
  */
 export declare function restoreFromBackup(backupPath: string, directory: string): string | null;
-export declare function collectConfiguredModelRefs(config: PluginConfig): Map<string, Set<string>>;
 /**
  * Run the config doctor on a loaded config
  */
-export declare function runConfigDoctor(config: PluginConfig, directory: string, options?: ConfigDoctorOptions): ConfigDoctorResult;
+export declare function runConfigDoctor(config: PluginConfig, directory: string): ConfigDoctorResult;
 /**
  * Apply safe auto-fixes to config
  * Only applies low-risk, non-destructive fixes
@@ -129,7 +116,7 @@ export declare function shouldRunOnStartup(automationConfig: {
 /**
  * Full config doctor run with backup and fix application
  */
-export declare function runConfigDoctorWithFixes(directory: string, config: PluginConfig, autoFix?: boolean, options?: ConfigDoctorOptions): Promise<{
+export declare function runConfigDoctorWithFixes(directory: string, config: PluginConfig, autoFix?: boolean): Promise<{
     result: ConfigDoctorResult;
     backupPath: string | null;
     appliedFixes: ConfigFix[];

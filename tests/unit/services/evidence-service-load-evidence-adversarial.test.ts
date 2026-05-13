@@ -1,31 +1,22 @@
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
 	Evidence,
 	EvidenceBundle,
-} from '../../../src/config/evidence-schema.js';
-import type { LoadEvidenceResult } from '../../../src/evidence/manager.js';
+} from '../../../src/config/evidence-schema';
+import type { LoadEvidenceResult } from '../../../src/evidence/manager';
 import {
+	_internals,
 	getEvidenceListData,
 	getTaskEvidenceData,
-} from '../../../src/services/evidence-service.js';
+} from '../../../src/services/evidence-service';
 
-// Mock the evidence manager using factory functions
-vi.mock('../../../src/evidence/manager.js', () => ({
-	loadEvidence: vi.fn(),
-	listEvidenceTaskIds: vi.fn(),
-}));
-
-import {
-	listEvidenceTaskIds,
-	loadEvidence,
-} from '../../../src/evidence/manager.js';
-
-// Local mock variables (vi.mocked() is not available in Bun/Vitest)
-const mockLoadEvidence = loadEvidence as ReturnType<typeof vi.fn>;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
+let mockLoadEvidence: ReturnType<typeof mock>;
+let mockListEvidenceTaskIds: ReturnType<typeof mock>;
+let originalLoadEvidence: typeof _internals.loadEvidence;
+let originalListEvidenceTaskIds: typeof _internals.listEvidenceTaskIds;
 
 let testDir: string;
 
@@ -55,23 +46,29 @@ function createMockEvidence(overrides: Partial<Evidence> = {}): Evidence {
 }
 
 beforeEach(() => {
+	originalLoadEvidence = _internals.loadEvidence;
+	originalListEvidenceTaskIds = _internals.listEvidenceTaskIds;
+	mockLoadEvidence = mock();
+	mockListEvidenceTaskIds = mock();
+	_internals.loadEvidence = mockLoadEvidence;
+	_internals.listEvidenceTaskIds = mockListEvidenceTaskIds;
+
 	testDir = join(
 		tmpdir(),
 		`evidence-adversarial-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 	);
 	mkdirSync(testDir, { recursive: true });
-
-	// Reset mocks
-	vi.clearAllMocks();
 });
 
 afterEach(() => {
+	_internals.loadEvidence = originalLoadEvidence;
+	_internals.listEvidenceTaskIds = originalListEvidenceTaskIds;
 	rmSync(testDir, { recursive: true, force: true });
 });
 
 describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 	describe('synchronous exceptions', () => {
-		it('should propagate synchronous error from loadEvidence', async () => {
+		test('should propagate synchronous error from loadEvidence', async () => {
 			const syncError = new Error('Synchronous error in loadEvidence');
 			mockLoadEvidence.mockImplementation(() => {
 				throw syncError;
@@ -82,7 +79,7 @@ describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 			);
 		});
 
-		it('should propagate synchronous non-Error exception', async () => {
+		test('should propagate synchronous non-Error exception', async () => {
 			mockLoadEvidence.mockImplementation(() => {
 				throw 'String error thrown';
 			});
@@ -90,7 +87,7 @@ describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 			await expect(getTaskEvidenceData(testDir, 'task-1')).rejects.toThrow();
 		});
 
-		it('should propagate synchronous null throw', async () => {
+		test('should propagate synchronous null throw', async () => {
 			mockLoadEvidence.mockImplementation(() => {
 				throw null;
 			});
@@ -100,7 +97,7 @@ describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 	});
 
 	describe('asynchronous exceptions', () => {
-		it('should propagate async rejection from loadEvidence', async () => {
+		test('should propagate async rejection from loadEvidence', async () => {
 			const asyncError = new Error('Async rejection in loadEvidence');
 			mockLoadEvidence.mockRejectedValue(asyncError);
 
@@ -109,19 +106,19 @@ describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 			);
 		});
 
-		it('should propagate async non-Error rejection', async () => {
+		test('should propagate async non-Error rejection', async () => {
 			mockLoadEvidence.mockRejectedValue('String rejection');
 
 			await expect(getTaskEvidenceData(testDir, 'task-1')).rejects.toThrow();
 		});
 
-		it('should propagate async null rejection', async () => {
+		test('should propagate async null rejection', async () => {
 			mockLoadEvidence.mockRejectedValue(null);
 
 			await expect(getTaskEvidenceData(testDir, 'task-1')).rejects.toThrow();
 		});
 
-		it('should propagate async undefined rejection', async () => {
+		test('should propagate async undefined rejection', async () => {
 			mockLoadEvidence.mockRejectedValue(undefined);
 
 			await expect(getTaskEvidenceData(testDir, 'task-1')).rejects.toThrow();
@@ -130,7 +127,7 @@ describe('getTaskEvidenceData - loadEvidence throwing exceptions', () => {
 });
 
 describe('getTaskEvidenceData - unexpected status in discriminated union', () => {
-	it('should handle unknown status "unknown" gracefully', async () => {
+	test('should handle unknown status "unknown" gracefully', async () => {
 		mockLoadEvidence.mockResolvedValue({
 			status: 'unknown',
 		} as any as LoadEvidenceResult);
@@ -143,7 +140,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 		expect(result.entries).toHaveLength(0);
 	});
 
-	it('should handle unknown status "corrupted" gracefully', async () => {
+	test('should handle unknown status "corrupted" gracefully', async () => {
 		mockLoadEvidence.mockResolvedValue({
 			status: 'corrupted',
 		} as any as LoadEvidenceResult);
@@ -155,7 +152,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 		expect(result.entries).toHaveLength(0);
 	});
 
-	it('should handle empty string status', async () => {
+	test('should handle empty string status', async () => {
 		mockLoadEvidence.mockResolvedValue({
 			status: '',
 		} as any as LoadEvidenceResult);
@@ -167,7 +164,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 		expect(result.entries).toHaveLength(0);
 	});
 
-	it('should handle numeric status cast to string', async () => {
+	test('should handle numeric status cast to string', async () => {
 		mockLoadEvidence.mockResolvedValue({
 			status: 404,
 		} as any as LoadEvidenceResult);
@@ -179,7 +176,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 		expect(result.entries).toHaveLength(0);
 	});
 
-	it('should handle null status', async () => {
+	test('should handle null status', async () => {
 		mockLoadEvidence.mockResolvedValue({
 			status: null,
 		} as any as LoadEvidenceResult);
@@ -191,7 +188,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 		expect(result.entries).toHaveLength(0);
 	});
 
-	it('should handle missing status property', async () => {
+	test('should handle missing status property', async () => {
 		mockLoadEvidence.mockResolvedValue({} as any as LoadEvidenceResult);
 
 		const result = await getTaskEvidenceData(testDir, 'task-6');
@@ -204,7 +201,7 @@ describe('getTaskEvidenceData - unexpected status in discriminated union', () =>
 
 describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 	describe('bundle.entries being null or undefined', () => {
-		it('should handle bundle.entries being null', async () => {
+		test('should handle bundle.entries being null', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -216,7 +213,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 			await expect(getTaskEvidenceData(testDir, 'task-1')).rejects.toThrow();
 		});
 
-		it('should handle bundle.entries being undefined', async () => {
+		test('should handle bundle.entries being undefined', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -230,7 +227,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 	});
 
 	describe('bundle.entries being non-array types', () => {
-		it('should iterate over string as characters (vulnerability)', async () => {
+		test('should iterate over string as characters (vulnerability)', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -246,7 +243,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 			expect(result.entries).toHaveLength(3);
 		});
 
-		it('should handle bundle.entries being a number (vulnerability - silent failure)', async () => {
+		test('should handle bundle.entries being a number (vulnerability - silent failure)', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -261,7 +258,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 			expect(result.entries).toHaveLength(0);
 		});
 
-		it('should handle bundle.entries being an object (vulnerability - silent failure)', async () => {
+		test('should handle bundle.entries being an object (vulnerability - silent failure)', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -276,7 +273,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 			expect(result.entries).toHaveLength(0);
 		});
 
-		it('should handle bundle.entries being a boolean (vulnerability - silent failure)', async () => {
+		test('should handle bundle.entries being a boolean (vulnerability - silent failure)', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -293,7 +290,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 	});
 
 	describe('bundle.entries array-like but not array', () => {
-		it('should handle bundle.entries being an array-like object with length', async () => {
+		test('should handle bundle.entries being an array-like object with length', async () => {
 			const arrayLike = {
 				length: 3,
 				0: { type: 'review', summary: 'first' },
@@ -317,7 +314,7 @@ describe('getTaskEvidenceData - bundle.entries edge cases', () => {
 
 describe('getTaskEvidenceData - timestamp field edge cases', () => {
 	describe('bundle.created_at edge cases', () => {
-		it('should handle bundle.created_at being null', async () => {
+		test('should handle bundle.created_at being null', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -331,7 +328,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.createdAt).toBeNull();
 		});
 
-		it('should handle bundle.created_at being undefined', async () => {
+		test('should handle bundle.created_at being undefined', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -345,7 +342,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.createdAt).toBeUndefined();
 		});
 
-		it('should handle bundle.created_at being empty string', async () => {
+		test('should handle bundle.created_at being empty string', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -359,7 +356,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.createdAt).toBe('');
 		});
 
-		it('should handle bundle.created_at being invalid datetime string', async () => {
+		test('should handle bundle.created_at being invalid datetime string', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -374,7 +371,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.createdAt).toBe('not-a-valid-datetime');
 		});
 
-		it('should handle bundle.created_at being ISO string with only date', async () => {
+		test('should handle bundle.created_at being ISO string with only date', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -388,7 +385,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.createdAt).toBe('2024-01-15');
 		});
 
-		it('should handle bundle.created_at being number', async () => {
+		test('should handle bundle.created_at being number', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -404,7 +401,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 	});
 
 	describe('bundle.updated_at edge cases', () => {
-		it('should handle bundle.updated_at being null', async () => {
+		test('should handle bundle.updated_at being null', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -418,7 +415,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.updatedAt).toBeNull();
 		});
 
-		it('should handle bundle.updated_at being undefined', async () => {
+		test('should handle bundle.updated_at being undefined', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -432,7 +429,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.updatedAt).toBeUndefined();
 		});
 
-		it('should handle bundle.updated_at being empty string', async () => {
+		test('should handle bundle.updated_at being empty string', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -446,7 +443,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.updatedAt).toBe('');
 		});
 
-		it('should handle bundle.updated_at being invalid datetime string', async () => {
+		test('should handle bundle.updated_at being invalid datetime string', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -460,7 +457,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 			expect(result.updatedAt).toBe('not-a-valid-datetime');
 		});
 
-		it('should handle bundle.updated_at being number', async () => {
+		test('should handle bundle.updated_at being number', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
 				bundle: createMockEvidenceBundle({
@@ -478,7 +475,7 @@ describe('getTaskEvidenceData - timestamp field edge cases', () => {
 
 describe('getTaskEvidenceData - taskId edge cases', () => {
 	describe('very long taskId strings', () => {
-		it('should handle 1000 character taskId', async () => {
+		test('should handle 1000 character taskId', async () => {
 			const longTaskId = 'a'.repeat(1000);
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -490,7 +487,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(longTaskId);
 		});
 
-		it('should handle 10000 character taskId', async () => {
+		test('should handle 10000 character taskId', async () => {
 			const longTaskId = 'a'.repeat(10000);
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -502,7 +499,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(longTaskId);
 		});
 
-		it('should handle 100000 character taskId (DoS test)', async () => {
+		test('should handle 100000 character taskId (DoS test)', async () => {
 			const longTaskId = 'a'.repeat(100000);
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -516,7 +513,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 	});
 
 	describe('special characters in taskId', () => {
-		it('should handle taskId with null bytes', async () => {
+		test('should handle taskId with null bytes', async () => {
 			const taskIdWithNull = 'task\0\x00with\x00nulls';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -528,7 +525,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdWithNull);
 		});
 
-		it('should handle taskId with path traversal attempts', async () => {
+		test('should handle taskId with path traversal attempts', async () => {
 			const taskIdTraversal = '../../../etc/passwd';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -540,7 +537,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdTraversal);
 		});
 
-		it('should handle taskId with backslash traversal', async () => {
+		test('should handle taskId with backslash traversal', async () => {
 			const taskIdBackslash = '..\\..\\..\\windows\\system32';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -552,7 +549,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdBackslash);
 		});
 
-		it('should handle taskId with unicode characters', async () => {
+		test('should handle taskId with unicode characters', async () => {
 			const taskIdUnicode = '任务-🚀-日本語-العربية';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -564,7 +561,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdUnicode);
 		});
 
-		it('should handle taskId with emojis', async () => {
+		test('should handle taskId with emojis', async () => {
 			const taskIdEmojis = '😀😁😂🤣😃😄😅😆😉😊';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -576,7 +573,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdEmojis);
 		});
 
-		it('should handle taskId with control characters', async () => {
+		test('should handle taskId with control characters', async () => {
 			const taskIdWithControls = 'task\u0001\u0002\u001fcontrol';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -588,7 +585,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdWithControls);
 		});
 
-		it('should handle taskId with newlines and tabs', async () => {
+		test('should handle taskId with newlines and tabs', async () => {
 			const taskIdWithWhitespace = 'task\nwith\tnewlines\r\nand\ttabs';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -600,7 +597,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdWithWhitespace);
 		});
 
-		it('should handle taskId with SQL injection patterns', async () => {
+		test('should handle taskId with SQL injection patterns', async () => {
 			const taskIdSQL = "1' OR '1'='1'; DROP TABLE users;--";
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -612,7 +609,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe(taskIdSQL);
 		});
 
-		it('should handle taskId with XSS patterns', async () => {
+		test('should handle taskId with XSS patterns', async () => {
 			const taskIdXSS = '<script>alert("XSS")</script>';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -626,7 +623,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 	});
 
 	describe('malformed taskId values', () => {
-		it('should handle empty taskId', async () => {
+		test('should handle empty taskId', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
 			} as LoadEvidenceResult);
@@ -637,7 +634,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 			expect(result.taskId).toBe('');
 		});
 
-		it('should handle taskId with only whitespace', async () => {
+		test('should handle taskId with only whitespace', async () => {
 			const taskIdWhitespace = '   \t\r\n   ';
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
@@ -653,7 +650,7 @@ describe('getTaskEvidenceData - taskId edge cases', () => {
 
 describe('getEvidenceListData - large task ID lists', () => {
 	describe('performance edge cases', () => {
-		it('should handle 100 task IDs', async () => {
+		test('should handle 100 task IDs', async () => {
 			const taskIds = Array.from({ length: 100 }, (_, i) => `task-${i}`);
 			mockListEvidenceTaskIds.mockResolvedValue(taskIds);
 			mockLoadEvidence.mockResolvedValue({
@@ -667,7 +664,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 			expect(mockLoadEvidence).toHaveBeenCalledTimes(100);
 		});
 
-		it('should handle 1000 task IDs', async () => {
+		test('should handle 1000 task IDs', async () => {
 			const taskIds = Array.from({ length: 1000 }, (_, i) => `task-${i}`);
 			mockListEvidenceTaskIds.mockResolvedValue(taskIds);
 			mockLoadEvidence.mockResolvedValue({
@@ -681,7 +678,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 			expect(mockLoadEvidence).toHaveBeenCalledTimes(1000);
 		});
 
-		it('should handle 10000 task IDs (DoS test)', async () => {
+		test('should handle 10000 task IDs (DoS test)', async () => {
 			const taskIds = Array.from({ length: 10000 }, (_, i) => `task-${i}`);
 			mockListEvidenceTaskIds.mockResolvedValue(taskIds);
 			mockLoadEvidence.mockResolvedValue({
@@ -695,7 +692,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 			expect(mockLoadEvidence).toHaveBeenCalledTimes(10000);
 		});
 
-		it('should handle 10000 task IDs with some "found" status', async () => {
+		test('should handle 10000 task IDs with some "found" status', async () => {
 			const taskIds = Array.from({ length: 10000 }, (_, i) => `task-${i}`);
 			mockListEvidenceTaskIds.mockResolvedValue(taskIds);
 
@@ -737,7 +734,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 	});
 
 	describe('getEvidenceListData with loadEvidence throwing during iteration', () => {
-		it('should propagate error when loadEvidence throws mid-iteration', async () => {
+		test('should propagate error when loadEvidence throws mid-iteration', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2', 'task-3']);
 
 			mockLoadEvidence
@@ -754,7 +751,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 			);
 		});
 
-		it('should propagate sync error when loadEvidence throws mid-iteration', async () => {
+		test('should propagate sync error when loadEvidence throws mid-iteration', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2', 'task-3']);
 
 			mockLoadEvidence
@@ -775,9 +772,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 	});
 
 	describe('getEvidenceListData with unexpected bundle properties', () => {
-		it('should handle bundle.entries being null during iteration', async () => {
-			mockLoadEvidence.mockReset();
-			mockListEvidenceTaskIds.mockReset();
+		test('should handle bundle.entries being null during iteration', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2']);
 
 			mockLoadEvidence
@@ -799,9 +794,7 @@ describe('getEvidenceListData - large task ID lists', () => {
 			await expect(getEvidenceListData(testDir)).rejects.toThrow(TypeError);
 		});
 
-		it('should handle bundle.updated_at being null during iteration', async () => {
-			mockLoadEvidence.mockReset();
-			mockListEvidenceTaskIds.mockReset();
+		test('should handle bundle.updated_at being null during iteration', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2']);
 
 			mockLoadEvidence

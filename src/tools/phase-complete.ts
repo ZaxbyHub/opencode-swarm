@@ -60,7 +60,6 @@ import {
 } from '../state';
 import { telemetry } from '../telemetry';
 import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
-import { isStrictTaskId } from '../validation/task-id';
 import { executeCompletionVerify } from './completion-verify';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -111,17 +110,6 @@ function safeWarn(message: string, error: unknown): void {
 	} catch {
 		// Ignore logger failures to keep phase_complete non-blocking
 	}
-}
-
-function taskIdToPhase(taskId: string): number | null {
-	if (typeof taskId !== 'string') return null;
-	// Strict guard: only `N.M(.P)*` plan task ids participate in phase pruning.
-	// Without this, `parseInt('1-debug', 10)` returns 1 and would silently
-	// prune non-plan keys like `'1-debug'` or `'retro-1'` from the workflow maps.
-	if (!isStrictTaskId(taskId)) return null;
-	const head = taskId.split('.')[0];
-	const n = Number.parseInt(head, 10);
-	return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -2038,66 +2026,6 @@ export async function executePhaseComplete(
 				const oldPhase = contributorSession.lastPhaseCompletePhase;
 				contributorSession.lastPhaseCompletePhase = phase;
 				telemetry.phaseChanged(contributorSessionId, oldPhase ?? 0, phase);
-
-				// Phase-boundary cleanup: drop task state from completed phase and
-				// earlier so it cannot leak across into the next phase's gate-evidence
-				// resolution. Conditional clears keep already-staged next-phase ids
-				// intact (otherwise the architect's pre-staged update_task_status for
-				// phase N+1 would be wiped here).
-				const currentTid = contributorSession.currentTaskId;
-				if (currentTid) {
-					const tp = taskIdToPhase(currentTid);
-					if (tp !== null && tp <= phase) {
-						contributorSession.currentTaskId = null;
-					}
-				}
-				const lastCoderTid = contributorSession.lastCoderDelegationTaskId;
-				if (lastCoderTid) {
-					const tp = taskIdToPhase(lastCoderTid);
-					if (tp !== null && tp <= phase) {
-						contributorSession.lastCoderDelegationTaskId = null;
-					}
-				}
-
-				const openStates = new Set([
-					'coder_delegated',
-					'pre_check_passed',
-					'reviewer_run',
-				]);
-				if (contributorSession.taskWorkflowStates instanceof Map) {
-					for (const [taskId, state] of Array.from(
-						contributorSession.taskWorkflowStates.entries(),
-					)) {
-						const tp = taskIdToPhase(taskId);
-						if (tp === null || tp > phase) continue;
-						if (openStates.has(state)) {
-							console.warn(
-								`[phase-complete] dropping open task state at phase boundary: taskId=${taskId} state=${state} phaseCompleted=${phase}`,
-							);
-						}
-						contributorSession.taskWorkflowStates.delete(taskId);
-					}
-				}
-				if (contributorSession.stageBCompletion instanceof Map) {
-					for (const taskId of Array.from(
-						contributorSession.stageBCompletion.keys(),
-					)) {
-						const tp = taskIdToPhase(taskId);
-						if (tp !== null && tp <= phase) {
-							contributorSession.stageBCompletion.delete(taskId);
-						}
-					}
-				}
-				if (contributorSession.requiredStageBGates instanceof Map) {
-					for (const taskId of Array.from(
-						contributorSession.requiredStageBGates.keys(),
-					)) {
-						const tp = taskIdToPhase(taskId);
-						if (tp !== null && tp <= phase) {
-							contributorSession.requiredStageBGates.delete(taskId);
-						}
-					}
-				}
 			}
 		}
 

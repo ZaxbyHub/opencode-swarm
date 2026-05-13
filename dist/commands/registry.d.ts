@@ -8,7 +8,6 @@ export type CommandContext = {
     args: string[];
     sessionID: string;
     agents: Record<string, AgentDefinition>;
-    client?: unknown;
 };
 export type CommandResult = Promise<string>;
 export type CommandCategory = 'core' | 'agent' | 'config' | 'diagnostics' | 'utility';

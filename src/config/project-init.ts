@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { DEFAULT_AGENT_CONFIGS } from './constants';
+import { DEFAULT_MODELS } from './constants';
 
 const STARTER_CONTENT = '{}\n';
 
@@ -68,7 +68,17 @@ export function writeSwarmConfigExampleIfNew(projectDirectory: string): void {
 			fs.mkdirSync(swarmDir, { recursive: true });
 		}
 		const example = {
-			agents: DEFAULT_AGENT_CONFIGS,
+			agents: Object.fromEntries(
+				Object.entries(DEFAULT_MODELS)
+					.filter(([name]) => name !== 'default')
+					.map(([name, model]) => [
+						name,
+						{
+							model,
+							fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+						},
+					]),
+			),
 			max_iterations: 5,
 		};
 		fs.writeFileSync(dest, `${JSON.stringify(example, null, 2)}\n`, 'utf-8');

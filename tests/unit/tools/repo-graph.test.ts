@@ -580,39 +580,6 @@ describe('workspaceRoot matching on save', () => {
 			.catch(() => false);
 		expect(exists).toBe(true);
 	});
-
-	test.skip('saveGraph with createAtomic fails if file exists', async () => {
-		// On Windows, this test fails due to a bug in saveGraph where createAtomic
-		// checks if the TEMP file exists (via wx flag) but not if the TARGET file
-		// exists. On Windows, rename() silently overwrites existing files.
-
-		const resolvedWorkspace = path.resolve(workspaceName);
-		const graph: RepoGraph = {
-			schema_version: '1.0.0',
-			workspaceRoot: resolvedWorkspace,
-			nodes: {},
-			edges: [],
-			metadata: {
-				generatedAt: new Date().toISOString(),
-				generator: 'test',
-				nodeCount: 0,
-				edgeCount: 0,
-			},
-		};
-
-		// Ensure the .swarm directory exists
-		await fs.promises.mkdir(path.join(workspaceName, '.swarm'), {
-			recursive: true,
-		});
-
-		// First save
-		await saveGraph(workspaceName, graph);
-
-		// Second save with createAtomic should fail
-		await expect(
-			saveGraph(workspaceName, graph, { createAtomic: true }),
-		).rejects.toThrow('file already exists');
-	});
 });
 
 describe('atomic create fallback', () => {

@@ -313,14 +313,17 @@ describe('phase_complete - curator pipeline', () => {
 					enabled: true,
 					phase_enabled: true,
 				}),
-				expect.any(Object),
+				expect.objectContaining({}), // _knowledgeConfig: { directory?: string }, passed as {}
 				undefined,
 			);
 
 			expect(mockApplyCuratorKnowledgeUpdates).toHaveBeenCalledWith(
 				tempDir,
 				[], // knowledge_recommendations from mock
-				expect.any(Object),
+				expect.objectContaining({
+					enabled: true,
+					schema_version: 1,
+				}), // knowledgeConfig: KnowledgeConfig
 			);
 		});
 
@@ -517,8 +520,11 @@ describe('phase_complete - curator pipeline', () => {
 				expect.any(String), // directory
 				2, // phase should be 2
 				expect.any(Array),
-				expect.any(Object),
-				expect.any(Object),
+				expect.objectContaining({
+					enabled: true,
+					phase_enabled: true,
+				}), // curatorConfig: CuratorConfig
+				expect.objectContaining({}), // _knowledgeConfig: { directory?: string }, passed as {}
 				undefined,
 			);
 		});
@@ -548,8 +554,11 @@ describe('phase_complete - curator pipeline', () => {
 				expect.any(String),
 				expect.any(Number),
 				expect.arrayContaining(['coder', 'reviewer', 'test_engineer', 'docs']),
-				expect.any(Object),
-				expect.any(Object),
+				expect.objectContaining({
+					enabled: true,
+					phase_enabled: true,
+				}), // curatorConfig: CuratorConfig
+				expect.objectContaining({}), // _knowledgeConfig: { directory?: string }, passed as {}
 				undefined,
 			);
 		});

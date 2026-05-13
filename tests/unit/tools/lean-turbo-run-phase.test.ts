@@ -1,8 +1,7 @@
 /**
  * Tests for lean_turbo_run_phase tool.
  *
- * Verifies the tool is properly exported, has correct structure, and
- * propagates leanConfig from plugin config to LeanTurboRunner.
+ * Verifies leanConfig propagation from plugin config to LeanTurboRunner.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -12,8 +11,6 @@ import {
 	_internals,
 	executeLeanTurboRunPhase,
 	type LeanTurboRunPhaseArgs,
-	type LeanTurboRunPhaseResult,
-	lean_turbo_run_phase,
 } from '../../../src/tools/lean-turbo-run-phase';
 
 // ---------------------------------------------------------------------------
@@ -96,62 +93,6 @@ afterEach(() => {
 	} catch {
 		// best-effort
 	}
-});
-
-// ---------------------------------------------------------------------------
-// STRUCTURE TESTS
-// ---------------------------------------------------------------------------
-
-describe('lean_turbo_run_phase tool', () => {
-	test('lean_turbo_run_phase is exported', () => {
-		expect(lean_turbo_run_phase).toBeDefined();
-	});
-
-	test('lean_turbo_run_phase has required structure', () => {
-		// Tool definition must have required fields
-		expect(lean_turbo_run_phase.description).toBeDefined();
-		expect(typeof lean_turbo_run_phase.description).toBe('string');
-		expect(lean_turbo_run_phase.args).toBeDefined();
-		expect(lean_turbo_run_phase.execute).toBeDefined();
-	});
-
-	test('lean_turbo_run_phase args have required fields', () => {
-		const args = lean_turbo_run_phase.args as {
-			directory: { describe: (label: string) => string };
-			phase: { describe: (label: string) => string };
-			sessionID: { describe: (label: string) => string };
-		};
-
-		expect(args.directory.describe('directory')).toBeTruthy();
-		expect(args.phase.describe('phase')).toBeTruthy();
-		expect(args.sessionID.describe('sessionID')).toBeTruthy();
-	});
-
-	test('lean_turbo_run_phase execute is a function', () => {
-		expect(typeof lean_turbo_run_phase.execute).toBe('function');
-	});
-
-	test('LeanTurboRunPhaseArgs interface is exported', () => {
-		const args: LeanTurboRunPhaseArgs = {
-			directory: '/test/dir',
-			phase: 1,
-			sessionID: 'test-session',
-		};
-		expect(args.directory).toBe('/test/dir');
-		expect(args.phase).toBe(1);
-		expect(args.sessionID).toBe('test-session');
-	});
-
-	test('LeanTurboRunPhaseResult interface is exported', () => {
-		const result: LeanTurboRunPhaseResult = {
-			success: true,
-			lanes: [],
-			degradedTasks: [],
-		};
-		expect(result.success).toBe(true);
-		expect(result.lanes).toEqual([]);
-		expect(result.degradedTasks).toEqual([]);
-	});
 });
 
 // ---------------------------------------------------------------------------

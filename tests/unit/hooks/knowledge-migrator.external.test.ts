@@ -103,31 +103,6 @@ const withOrderTracking = (name: string, fn: (...args: any[]) => any) => {
 	};
 };
 
-describe.skip('migrateKnowledgeToExternal', () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		callOrder.length = 0;
-
-		// Default mock behavior - no files exist
-		mockExistsSync.mockReturnValue(false);
-		mockReadFile.mockResolvedValue('');
-		mockWriteFile.mockImplementation(
-			withOrderTracking('writeFile', async () => undefined),
-		);
-		mockMkdir.mockResolvedValue(undefined);
-		mockUnlink.mockImplementation(
-			withOrderTracking('unlink', async () => undefined),
-		);
-		mockReadKnowledge.mockResolvedValue([]);
-		mockRewriteKnowledge.mockImplementation(
-			withOrderTracking('rewriteKnowledge', async () => undefined),
-		);
-		mockResolveSwarmKnowledgePath.mockReturnValue(
-			'/test/.swarm/knowledge.jsonl',
-		);
-		mockDeriveProjectHash.mockReturnValue('test-project-hash');
-		mockInferProjectName.mockReturnValue('test-project');
-	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();

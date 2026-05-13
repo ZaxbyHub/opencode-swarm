@@ -78,20 +78,6 @@ export interface ConfigDoctorResult {
 	configSource: string;
 }
 
-/** Model availability snapshot from the active OpenCode provider registry. */
-export interface ModelAvailability {
-	/** Fully-qualified model IDs in provider/model form. */
-	availableModelIds: ReadonlySet<string>;
-	/** Human-readable source for diagnostics. */
-	source: string;
-	/** Optional failure message when the registry could not be loaded. */
-	error?: string;
-}
-
-export interface ConfigDoctorOptions {
-	modelAvailability?: ModelAvailability;
-}
-
 /** Backup artifact for rollback */
 export interface ConfigBackup {
 	/** When the backup was created */
@@ -641,214 +627,6 @@ function validateConfigKey(
 	return findings;
 }
 
-function addConfiguredModel(
-	refs: Map<string, Set<string>>,
-	model: unknown,
-	configPath: string,
-): void {
-	if (typeof model !== 'string') return;
-	const trimmed = model.trim();
-	if (!trimmed) return;
-	const paths = refs.get(trimmed) ?? new Set<string>();
-	paths.add(configPath);
-	refs.set(trimmed, paths);
-}
-
-function addConfiguredAgentModels(
-	refs: Map<string, Set<string>>,
-	agents: unknown,
-	prefix: string,
-): void {
-	if (!agents || typeof agents !== 'object' || Array.isArray(agents)) return;
-
-	for (const [agentName, value] of Object.entries(
-		agents as Record<string, unknown>,
-	)) {
-		if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-		const agent = value as Record<string, unknown>;
-		addConfiguredModel(refs, agent.model, `${prefix}.${agentName}.model`);
-		if (Array.isArray(agent.fallback_models)) {
-			agent.fallback_models.forEach((model, index) => {
-				addConfiguredModel(
-					refs,
-					model,
-					`${prefix}.${agentName}.fallback_models[${index}]`,
-				);
-			});
-		}
-	}
-}
-
-export function collectConfiguredModelRefs(
-	config: PluginConfig,
-): Map<string, Set<string>> {
-	const refs = new Map<string, Set<string>>();
-	const rawConfig = config as unknown as Record<string, unknown>;
-
-	addConfiguredAgentModels(refs, rawConfig.agents, 'agents');
-
-	if (
-		rawConfig.swarms &&
-		typeof rawConfig.swarms === 'object' &&
-		!Array.isArray(rawConfig.swarms)
-	) {
-		for (const [swarmId, value] of Object.entries(
-			rawConfig.swarms as Record<string, unknown>,
-		)) {
-			if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-			addConfiguredAgentModels(
-				refs,
-				(value as Record<string, unknown>).agents,
-				`swarms.${swarmId}.agents`,
-			);
-		}
-	}
-
-	if (
-		rawConfig.full_auto &&
-		typeof rawConfig.full_auto === 'object' &&
-		!Array.isArray(rawConfig.full_auto)
-	) {
-		addConfiguredModel(
-			refs,
-			(rawConfig.full_auto as Record<string, unknown>).critic_model,
-			'full_auto.critic_model',
-		);
-	}
-
-	if (
-		rawConfig.skill_improver &&
-		typeof rawConfig.skill_improver === 'object' &&
-		!Array.isArray(rawConfig.skill_improver)
-	) {
-		const skillImprover = rawConfig.skill_improver as Record<string, unknown>;
-		addConfiguredModel(refs, skillImprover.model, 'skill_improver.model');
-		if (Array.isArray(skillImprover.fallback_models)) {
-			skillImprover.fallback_models.forEach((model, index) => {
-				addConfiguredModel(
-					refs,
-					model,
-					`skill_improver.fallback_models[${index}]`,
-				);
-			});
-		}
-	}
-
-	if (
-		rawConfig.spec_writer &&
-		typeof rawConfig.spec_writer === 'object' &&
-		!Array.isArray(rawConfig.spec_writer)
-	) {
-		const specWriter = rawConfig.spec_writer as Record<string, unknown>;
-		addConfiguredModel(refs, specWriter.model, 'spec_writer.model');
-		if (Array.isArray(specWriter.fallback_models)) {
-			specWriter.fallback_models.forEach((model, index) => {
-				addConfiguredModel(
-					refs,
-					model,
-					`spec_writer.fallback_models[${index}]`,
-				);
-			});
-		}
-	}
-
-	const council = rawConfig.council as Record<string, unknown> | undefined;
-	const general =
-		council && typeof council === 'object' && !Array.isArray(council)
-			? (council.general as Record<string, unknown> | undefined)
-			: undefined;
-	if (general && typeof general === 'object' && !Array.isArray(general)) {
-		addConfiguredModel(
-			refs,
-			general.moderatorModel,
-			'council.general.moderatorModel',
-		);
-		if (Array.isArray(general.members)) {
-			general.members.forEach((member, index) => {
-				if (!member || typeof member !== 'object' || Array.isArray(member)) {
-					return;
-				}
-				addConfiguredModel(
-					refs,
-					(member as Record<string, unknown>).model,
-					`council.general.members[${index}].model`,
-				);
-			});
-		}
-		if (
-			general.presets &&
-			typeof general.presets === 'object' &&
-			!Array.isArray(general.presets)
-		) {
-			for (const [presetName, members] of Object.entries(
-				general.presets as Record<string, unknown>,
-			)) {
-				if (!Array.isArray(members)) continue;
-				members.forEach((member, index) => {
-					if (!member || typeof member !== 'object' || Array.isArray(member)) {
-						return;
-					}
-					addConfiguredModel(
-						refs,
-						(member as Record<string, unknown>).model,
-						`council.general.presets.${presetName}[${index}].model`,
-					);
-				});
-			}
-		}
-	}
-
-	return refs;
-}
-
-function validateConfiguredModels(
-	config: PluginConfig,
-	modelAvailability: ModelAvailability,
-): ConfigFinding[] {
-	const refs = collectConfiguredModelRefs(config);
-	const findings: ConfigFinding[] = [];
-
-	if (modelAvailability.error) {
-		findings.push({
-			id: 'model-availability-unchecked',
-			title: 'Model availability check skipped',
-			description:
-				`Could not load OpenCode provider models from ${modelAvailability.source}: ` +
-				modelAvailability.error,
-			severity: 'info',
-			path: 'agents',
-			autoFixable: false,
-		});
-		return findings;
-	}
-
-	if (refs.size === 0) return findings;
-
-	for (const [modelId, paths] of refs.entries()) {
-		if (modelAvailability.availableModelIds.has(modelId)) continue;
-		findings.push({
-			id: 'configured-model-unavailable',
-			title: 'Configured model is unavailable',
-			description:
-				`Configured model ${formatModelIdForDoctor(modelId)} was not found in the active OpenCode provider model registry. ` +
-				'Run `/models` to choose a currently available model, then update opencode-swarm.json.',
-			severity: 'error',
-			path: [...paths].sort().join(', '),
-			currentValue: modelId,
-			autoFixable: false,
-		});
-	}
-
-	return findings;
-}
-
-function formatModelIdForDoctor(modelId: string): string {
-	const json = JSON.stringify(modelId);
-	if (!json) return '"<invalid model id>"';
-	if (json.length <= 160) return json;
-	return `${json.slice(0, 157)}..."`;
-}
-
 /**
  * Recursively walk a config object and validate all keys
  */
@@ -896,17 +674,11 @@ function walkConfigAndValidate(
 export function runConfigDoctor(
 	config: PluginConfig,
 	directory: string,
-	options: ConfigDoctorOptions = {},
 ): ConfigDoctorResult {
 	const findings: ConfigFinding[] = [];
 
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', config, findings);
-	if (options.modelAvailability) {
-		findings.push(
-			...validateConfiguredModels(config, options.modelAvailability),
-		);
-	}
 
 	// Count by severity
 	const summary = {
@@ -1195,7 +967,6 @@ export async function runConfigDoctorWithFixes(
 	directory: string,
 	config: PluginConfig,
 	autoFix: boolean = false,
-	options: ConfigDoctorOptions = {},
 ): Promise<{
 	result: ConfigDoctorResult;
 	backupPath: string | null;
@@ -1204,7 +975,7 @@ export async function runConfigDoctorWithFixes(
 	artifactPath: string | null;
 }> {
 	// Run the doctor
-	const result = runConfigDoctor(config, directory, options);
+	const result = runConfigDoctor(config, directory);
 
 	// Write artifact
 	const artifactPath = writeDoctorArtifact(directory, result);
@@ -1242,7 +1013,6 @@ export async function runConfigDoctorWithFixes(
 			const newResult = runConfigDoctor(
 				freshConfig.config as unknown as PluginConfig,
 				directory,
-				options,
 			);
 			writeDoctorArtifact(directory, newResult);
 		}

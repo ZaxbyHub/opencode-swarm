@@ -110,20 +110,6 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 			const parsed = JSON.parse(result);
 			expect(parsed).toHaveProperty('success');
 		}, 10000); // Increase timeout for test-runner
-
-		it.skip('executes successfully without context (uses cwd)', async () => {
-			// SKIPPED: test-runner actually attempts to run real tests which timeout
-			// The directory injection is verified by the context test above
-			// This is already tested by create-tool.test.ts
-
-			const result = await test_runner.execute(
-				{ scope: 'all' },
-				undefined as unknown as any,
-			);
-
-			const parsed = JSON.parse(result);
-			expect(parsed).toHaveProperty('success');
-		});
 	});
 
 	// ===== LINT =====
@@ -224,30 +210,7 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 	});
 
 	// ===== TODO-EXTRACT =====
-	describe('todo-extract tool', () => {
-		it.skip('executes successfully with provided directory context', async () => {
-			// SKIPPED: todo-extract uses `import * as fs from 'node:fs'` (namespace import).
-			// The mock only intercepts the default export; named fs.statSync is the real
-			// function, which returns a Stats object that behaves unexpectedly on mock paths.
-			const result = await todo_extract.execute({}, {
-				directory: '/test/todo-extract',
-			} as unknown as any);
-
-			const parsed = JSON.parse(result);
-			expect(parsed).toHaveProperty('total');
-		});
-
-		it.skip('executes successfully without context (uses cwd)', async () => {
-			// SKIPPED: same reason as above
-			const result = await todo_extract.execute(
-				{},
-				undefined as unknown as any,
-			);
-
-			const parsed = JSON.parse(result);
-			expect(parsed).toHaveProperty('total');
-		});
-	});
+	describe('todo-extract tool', () => {});
 
 	// ===== SCHEMA-DRIFT =====
 	describe('schema-drift tool', () => {
@@ -345,18 +308,6 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 			const result = await build_check.execute({ scope: 'all' }, {
 				directory: '/test/build-check',
 			} as unknown as any);
-
-			const parsed = JSON.parse(result);
-			expect(parsed).toHaveProperty('verdict');
-		});
-
-		it.skip('executes successfully without context (uses cwd)', async () => {
-			// SKIPPED: build-check with real cwd discovers and runs actual build commands,
-			// causing a timeout. Directory injection is verified by the context test above.
-			const result = await build_check.execute(
-				{ scope: 'all' },
-				undefined as unknown as any,
-			);
 
 			const parsed = JSON.parse(result);
 			expect(parsed).toHaveProperty('verdict');

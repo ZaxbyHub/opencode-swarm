@@ -1023,17 +1023,4 @@ describe('Adversarial: Prefixed agent names', () => {
 		);
 		expect(hasKnowledgeInjection).toBe(false);
 	});
-
-	it.skip('Test 15: mega_architect → stripped to architect → injection allowed', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('mega_architect');
-
-		await hook({}, output); // Init
-		await hook({}, output); // Should inject
-
-		const hasKnowledgeInjection = output.messages.some((m) =>
-			m.parts?.some((p) => p.text?.includes('📚 Lessons:')),
-		);
-		expect(hasKnowledgeInjection).toBe(true);
-	});
 });

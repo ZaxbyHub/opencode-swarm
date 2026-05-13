@@ -1,5 +1,5 @@
 import { describe, expect, it, test } from 'bun:test';
-import { buildHelpText, LLM_MEDIATION_WARNING } from './index';
+import { buildHelpText } from './index';
 import type { CommandEntry, RegisteredCommand } from './registry';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from './registry';
 
@@ -12,21 +12,6 @@ describe('buildHelpText()', () => {
 	describe('header', () => {
 		test('starts with "## Swarm Commands"', () => {
 			expect(helpText.startsWith('## Swarm Commands')).toBe(true);
-		});
-
-		test('includes the LLM-mediation warning banner', () => {
-			expect(helpText).toContain(LLM_MEDIATION_WARNING);
-			// Banner must appear before the first command category so users
-			// see it before scrolling.
-			const bannerIdx = helpText.indexOf(LLM_MEDIATION_WARNING);
-			const firstCategoryIdx = helpText.indexOf('### ');
-			expect(bannerIdx).toBeGreaterThan(-1);
-			expect(firstCategoryIdx).toBeGreaterThan(bannerIdx);
-		});
-
-		test('banner cites the upstream issue', () => {
-			expect(LLM_MEDIATION_WARNING).toContain('anomalyco/opencode#9306');
-			expect(LLM_MEDIATION_WARNING).toContain('bunx opencode-swarm run');
 		});
 	});
 

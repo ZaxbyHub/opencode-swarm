@@ -223,14 +223,9 @@ describe('critic.ts prompt overhaul', () => {
 	// TEST 6: Verify createCriticDriftAgent no longer exists
 	// ============================================================
 	describe('dead code removal verification', () => {
-		test('createCriticDriftAgent is not exported (should not exist)', () => {
-			// This test verifies the dead code was removed
-			// If createCriticDriftAgent still existed, TypeScript compilation would include it
-			// We verify it doesn't exist by checking that importing it throws
-			// @ts-expect-error - intentionally testing that this export does not exist
-			expect(() => import('../../src/agents/critic')).not.toHaveProperty(
-				'createCriticDriftAgent',
-			);
+		test('createCriticDriftAgent is not exported (should not exist)', async () => {
+			const mod = await import('../../../src/agents/critic');
+			expect(Object.keys(mod)).not.toContain('createCriticDriftAgent');
 		});
 	});
 
@@ -502,6 +497,36 @@ describe('critic.ts prompt overhaul', () => {
 		test('PHASE_DRIFT_VERIFIER_PROMPT still contains BASELINE COMPARISON', () => {
 			// Ensure we didn't remove it from phase drift verifier
 			expect(PHASE_DRIFT_VERIFIER_PROMPT).toContain('BASELINE COMPARISON');
+		});
+	});
+
+	// ============================================================
+	// TEST 13: Invalid input and edge case handling
+	// ============================================================
+	describe('invalid input and edge case handling', () => {
+		test('PLAN_CRITIC_PROMPT contains no_approved_snapshot handling for first-plan scenario', () => {
+			expect(PLAN_CRITIC_PROMPT).toContain('no_approved_snapshot');
+		});
+
+		test('PLAN_CRITIC_PROMPT instructs handling of missing plan fields', () => {
+			const hasMissingFieldHandling =
+				PLAN_CRITIC_PROMPT.includes('missing') ||
+				PLAN_CRITIC_PROMPT.includes('incomplete') ||
+				PLAN_CRITIC_PROMPT.includes('empty');
+			expect(hasMissingFieldHandling).toBe(true);
+		});
+
+		test('createCriticAgent with empty model string still returns valid config', () => {
+			const agent = createCriticAgent('');
+			expect(agent.config.model).toBe('');
+			expect(agent.config.prompt).toBe(PLAN_CRITIC_PROMPT);
+			expect(agent.name).toBe('critic');
+		});
+
+		test('createCriticAgent with all undefined optional params uses defaults', () => {
+			const agent = createCriticAgent('test', undefined, undefined, undefined);
+			expect(agent.config.prompt).toBe(PLAN_CRITIC_PROMPT);
+			expect(agent.name).toBe('critic');
 		});
 	});
 });

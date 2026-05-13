@@ -49,38 +49,6 @@ let _swarmAgents:
 	  >
 	| undefined;
 
-function formatParallelizationConfig(
-	config: PluginConfig['parallelization'],
-	agentPrefix: string,
-): string {
-	if (!config?.enabled) {
-		return `## PARALLELIZATION CONFIG
-
-Global non-Lean parallelization is DISABLED.
-- Do not fan out independent coder tasks from global config.
-- Use normal QA routing for each task.`;
-	}
-
-	const maxConcurrentTasks = config.maxConcurrentTasks;
-	const maxCoders = Math.min(maxConcurrentTasks, config.max_coders);
-	const maxReviewPairs = Math.min(maxConcurrentTasks, config.max_reviewers);
-	const coderName = `${agentPrefix}coder`;
-	const reviewerName = `${agentPrefix}reviewer`;
-	const testEngineerName = `${agentPrefix}test_engineer`;
-
-	return `## PARALLELIZATION CONFIG
-
-Global non-Lean parallelization is ENABLED.
-- Max concurrent tasks: ${maxConcurrentTasks}.
-- Max concurrent coder dispatches: ${maxCoders}.
-- Max concurrent Stage B gate groups: ${maxReviewPairs}.
-- This is standard parallelization, not Lean Turbo. Do not require /swarm turbo lean and do not call Lean Turbo tools just because this block is enabled.
-- Rule 2 exception: for independent plan tasks with no depends links and non-overlapping declared scopes, you may dispatch up to ${maxCoders} ${coderName} agents in one message, then STOP until all return.
-- Stage B exception: after coder work completes, dispatch all applicable Stage B gates for each task together, including ${reviewerName}, verification ${testEngineerName}, and conditional adversarial ${testEngineerName} when the QA ladder requires adversarial testing. You may run up to ${maxReviewPairs} independent Stage B gate groups concurrently, then STOP until every gate in each group returns.
-- If a locked plan execution_profile exists, use the stricter limit between this global config and the plan profile. If this global config is explicitly disabled or execution_profile.parallelization_enabled is false, do not fan out coder tasks.
-- Never parallelize tasks with overlapping files, parent/child path overlap, explicit dependencies, global/package files, protected security paths, or unresolved scope.`;
-}
-
 /**
  * Strip the user-defined swarm prefix from an agent name to get the base
  * canonical role.
@@ -387,10 +355,6 @@ function createSwarmAgents(
 			?.replace(/\{\{SWARM_ID\}\}/g, swarmIdentity)
 			.replace(/\{\{AGENT_PREFIX\}\}/g, agentPrefix)
 			.replace(/\{\{QA_RETRY_LIMIT\}\}/g, String(qaRetryLimit))
-			.replace(
-				/\{\{PARALLELIZATION_CONFIG\}\}/g,
-				formatParallelizationConfig(pluginConfig?.parallelization, agentPrefix),
-			)
 			// Phase 4b: project-context placeholders. Defaults to UNRESOLVED
 			// sentinel when no projectContext was passed (architect's existing
 			// DISCOVER mode handles the sentinel). The session-init path in

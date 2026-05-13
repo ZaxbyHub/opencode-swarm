@@ -1,5 +1,5 @@
 /**
- * Evidence write-lock helper for concurrent Stage B evidence writers.
+ * Evidence write-lock helper (PR 1 — dark foundation).
  *
  * Wraps every evidence read-modify-write path with a proper-lockfile-backed
  * exclusive lock so that concurrent writers cannot interleave their

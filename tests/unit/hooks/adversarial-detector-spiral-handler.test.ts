@@ -80,30 +80,6 @@ describe('handleDebuggingSpiral', () => {
 			);
 			expect(event.confidence).toBe('HIGH');
 		});
-
-		test.skip('continues when event logging fails (non-fatal)', async () => {
-			const match: AdversarialPatternMatch = {
-				pattern: 'DEBUGGING_SPIRAL',
-				severity: 'HIGH',
-				matchedText: 'Test spiral',
-				confidence: 'HIGH',
-			};
-
-			// Mock checkpoint to succeed
-			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
-
-			// Call with invalid directory - should not throw
-			const result = await handleDebuggingSpiral(
-				match,
-				'1.1',
-				'/nonexistent/path',
-			);
-
-			// Should still return valid result
-			expect(result.eventLogged).toBe(true);
-			expect(result.checkpointCreated).toBe(true);
-			expect(result.message).toBeDefined();
-		});
 	});
 
 	describe('2. handleDebuggingSpiral creates checkpoint', () => {
@@ -282,28 +258,6 @@ describe('handleDebuggingSpiral', () => {
 			expect(result.checkpointCreated).toBe(false);
 			expect(result.message).toBeDefined();
 			expect(result.eventLogged).toBe(true);
-		});
-
-		test.skip('continues even when both event logging and checkpoint fail', async () => {
-			const match: AdversarialPatternMatch = {
-				pattern: 'DEBUGGING_SPIRAL',
-				severity: 'HIGH',
-				matchedText: 'Test spiral',
-				confidence: 'HIGH',
-			};
-
-			// Both should fail
-			(saveCheckpointRecord as jest.Mock).mockImplementation(() => {
-				throw new Error('Service unavailable');
-			});
-
-			// Should not throw
-			const result = await handleDebuggingSpiral(match, '1.1', '/nonexistent');
-
-			// Should return valid result
-			expect(result.eventLogged).toBe(true); // Returns true even on failure
-			expect(result.checkpointCreated).toBe(false);
-			expect(result.message).toBeDefined();
 		});
 	});
 

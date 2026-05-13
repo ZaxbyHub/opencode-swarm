@@ -1,5 +1,5 @@
 /**
- * Tests for AgentRunContext and getRunContext.
+ * Tests for AgentRunContext and getRunContext (Phase 3 — dark foundation).
  *
  * Verifies:
  *   1. swarmState maps are the same objects as defaultRunContext maps (facade equivalence).

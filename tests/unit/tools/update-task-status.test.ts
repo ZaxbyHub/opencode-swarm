@@ -2345,7 +2345,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 
 	test('does not write evidence seed when working_directory validation fails', async () => {
 		// Use a path-traversal working_directory that should fail validation
-		const invalidDir = path.join('..', '..', 'etc', 'passwd');
+		const invalidDir = path.join(tempDir, '..', '..', 'etc', 'passwd');
 
 		const result = await executeUpdateTaskStatus({
 			task_id: '1.1',
@@ -2375,7 +2375,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 		fs.mkdirSync(path.join(fallbackDir, '.swarm'), { recursive: true });
 
 		try {
-			const invalidDir = path.join('..', '..', 'etc', 'passwd');
+			const invalidDir = path.join(tempDir, '..', '..', 'etc', 'passwd');
 
 			const result = await executeUpdateTaskStatus(
 				{

@@ -235,55 +235,7 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 		});
 	});
 
-	describe('Attack Vector 5: Duplicate injection prevention', () => {
-		it.skip('should NOT inject duplicate SELF-CODING warnings on repeated calls', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			const sessionId = 'test-session';
-			swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
-			startAgentSession(sessionId, ORCHESTRATOR_NAME);
-			const session = ensureAgentSession(sessionId);
-			session.architectWriteCount = 1;
-
-			// First call - no system message
-			const messages1 = {
-				messages: [
-					{
-						info: { role: 'user' as const, sessionID: sessionId },
-						parts: [{ type: 'text' as const, text: 'Hello' }],
-					},
-				],
-			};
-
-			await hooks.messagesTransform({}, messages1 as any);
-			const firstCallText = messages1.messages[0].parts[0].text;
-			expect(firstCallText).toContain('SELF-CODING DETECTED');
-
-			// Count occurrences in first call
-			const firstCount = (firstCallText.match(/SELF-CODING DETECTED/g) || [])
-				.length;
-			expect(firstCount).toBe(1);
-
-			// Second call - reuse same session state
-			const messages2 = {
-				messages: [
-					{
-						info: { role: 'user' as const, sessionID: sessionId },
-						parts: [{ type: 'text' as const, text: 'Hello again' }],
-					},
-				],
-			};
-
-			await hooks.messagesTransform({}, messages2 as any);
-			const secondCallText = messages2.messages[0].parts[0].text;
-
-			// Should still only have one warning (not duplicated)
-			const secondCount = (secondCallText.match(/SELF-CODING DETECTED/g) || [])
-				.length;
-			expect(secondCount).toBe(1);
-		});
-	});
+	describe('Attack Vector 5: Duplicate injection prevention', () => {});
 
 	describe('Attack Vector 6: Visible leakage check - MODEL_ONLY_GUIDANCE in system message only', () => {
 		it('should NOT inject model-only guidance into user-visible messages', async () => {
@@ -338,58 +290,6 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 			await expect(
 				hooks.messagesTransform({}, messages as any),
 			).resolves.toBeUndefined();
-		});
-	});
-
-	describe.skip('Attack Vector 8: Trigger semantics unchanged', () => {
-		it('should only trigger self-coding warning when architectWriteCount > 0', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			const sessionId = 'test-session';
-			swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
-			startAgentSession(sessionId, ORCHESTRATOR_NAME);
-			const session = ensureAgentSession(sessionId);
-			session.architectWriteCount = 0; // NOT > 0
-
-			const messages = {
-				messages: [
-					{
-						info: { role: 'user' as const, sessionID: sessionId },
-						parts: [{ type: 'text' as const, text: 'Hello' }],
-					},
-				],
-			};
-
-			await hooks.messagesTransform({}, messages as any);
-
-			// Should NOT create system message (no trigger)
-			expect(messages.messages.length).toBe(1);
-		});
-
-		it('should only trigger self-fix warning when selfFixAttempted is true', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-
-			const sessionId = 'test-session';
-			swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
-			startAgentSession(sessionId, ORCHESTRATOR_NAME);
-			const session = ensureAgentSession(sessionId);
-			session.selfFixAttempted = false; // NOT true
-
-			const messages = {
-				messages: [
-					{
-						info: { role: 'user' as const, sessionID: sessionId },
-						parts: [{ type: 'text' as const, text: 'Hello' }],
-					},
-				],
-			};
-
-			await hooks.messagesTransform({}, messages as any);
-
-			// Should NOT create system message (no trigger)
-			expect(messages.messages.length).toBe(1);
 		});
 	});
 });

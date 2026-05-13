@@ -7,12 +7,7 @@
  */
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import { loadPluginConfig } from '../config/loader';
-import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
 import type { CouncilMemberVerdict } from '../council/types';
-import { validateSwarmPath } from '../hooks/utils';
-import { loadPlan } from '../plan/manager.js';
-import { derivePlanId } from '../plan/utils.js';
 export declare const ArgsSchema: z.ZodObject<{
     phase: z.ZodNumber;
     projectSummary: z.ZodString;
@@ -60,13 +55,6 @@ export interface WriteFinalCouncilEvidenceArgs {
     /** Collected verdicts from critic, reviewer, sme, test_engineer, explorer */
     verdicts: CouncilMemberVerdict[];
 }
-export declare const _internals: {
-    loadPluginConfig: typeof loadPluginConfig;
-    synthesizeFinalCouncilAdvisory: typeof synthesizeFinalCouncilAdvisory;
-    loadPlan: typeof loadPlan;
-    derivePlanId: typeof derivePlanId;
-    validateSwarmPath: typeof validateSwarmPath;
-};
 /**
  * Execute the write_final_council_evidence tool.
  * Validates input, synthesizes project-scoped council evidence, and writes it.

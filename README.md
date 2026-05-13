@@ -24,7 +24,7 @@ bunx opencode-swarm install
 
 > This single command installs the package, registers it as an OpenCode plugin, disables conflicting default agents, and creates a ready-to-edit config at `~/.config/opencode/opencode-swarm.json`. Requires [Bun](https://bun.sh) (`bun --version` to check). If you must use npm: `npm install -g opencode-swarm && opencode-swarm install`.
 
-> ⚠️ **Select a Swarm architect before starting work.** The installer registers Swarm architect agents as primary choices, but the default OpenCode `Build` and `Plan` modes **bypass this plugin entirely** — none of the gates, reviewers, or test agents below run. Open the OpenCode mode/agent picker and choose `architect` or a `*_architect`; it then coordinates every other agent automatically. If you ever see Swarm "do nothing," this is almost always the cause.
+> ⚠️ **On first run, Swarm auto-selects the architect and shows a welcome message.** The default OpenCode `Build` and `Plan` modes **bypass this plugin entirely** — none of the gates, reviewers, or test agents below run. If you ever need to switch architect manually, open the OpenCode mode/agent picker and choose the Swarm architect; it then coordinates every other agent automatically. If you ever see Swarm "do nothing," this is almost always the cause.
 
 ### Why Swarm?
 
@@ -41,7 +41,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🆓 **Free tier** — works with OpenCode Zen's free model roster
 - ⚙️ **Fully configurable** — override any agent's model, disable agents, tune guardrails
 
-> **The Swarm architect coordinates all other agents automatically after you select it.** You never manually switch between internal roles. If you use the default OpenCode `Build` / `Plan` modes, the plugin is bypassed entirely (see the install warning above).
+> **The Swarm architect is auto-selected on first run and coordinates all other agents automatically.** You never manually switch between internal roles. If you use the default OpenCode `Build` / `Plan` modes, the plugin is bypassed entirely (see the install warning above).
 
 ---
 
@@ -126,9 +126,9 @@ The 15-minute guide covers:
 - Troubleshooting common issues
 
 On first run, Swarm automatically:
-- Creates project config at `.opencode/opencode-swarm.json` if missing
-- Registers Swarm architect agents as primary choices in OpenCode
-- Shows a welcome message with next steps the first time you run `/swarm`
+- Creates project config at `.opencode/opencode-swarm.json` with all agents enabled
+- Selects the Swarm architect as the default
+- Shows a welcome message with next steps
 
 ---
 
@@ -142,7 +142,8 @@ No animated GIF is shipped in the repo — instead, here is the exact terminal s
 # 1. Install the plugin (5s)
 bunx opencode-swarm install
 
-# 2. Open opencode and select the Swarm architect in the agent/mode picker
+# 2. Open opencode — Swarm auto-selects architect on first run
+#    (the architect is auto-selected; manual selection is only needed to override)
 opencode
 
 # 3. Inside the OpenCode session, verify Swarm is live (5s)
@@ -166,7 +167,7 @@ Build me a JWT auth helper with tests.
 │ ✓ created .opencode/opencode-swarm.json                     │
 │                                                              │
 │ $ opencode                                                   │
-│ [Swarm] Welcome! Run /swarm diagnose, then /swarm agents    │
+│ [Swarm] Welcome! Architect auto-selected. Type /swarm help  │
 │                                                              │
 │ > /swarm help                                                │
 │ Available commands: status, plan, agents, help, diagnose... │
@@ -217,7 +218,7 @@ in your `opencode-swarm.json`.
 
 ## Commands
 
-Core subcommands at a glance:
+All 43 subcommands at a glance:
 
 ```bash
 /swarm help [command]      # List all commands or get detailed help for a specific command
@@ -231,17 +232,9 @@ Core subcommands at a glance:
 
 Use `/swarm help` to see all available commands categorized by function. Use `/swarm help <command>` for detailed usage information on a specific command.
 
-> ⚠️ **Chat-typed `/swarm` is currently LLM-mediated.** The OpenCode runtime invokes the model unconditionally after the plugin handles a `command.execute.before` slash command (upstream issue [anomalyco/opencode#9306](https://github.com/anomalyco/opencode/issues/9306)). What you see in chat is the model's reformulation of the canonical handler output, which can drift on weak models or in long sessions. For deterministic, scriptable output, run the underlying command directly:
->
-> ```bash
-> bunx opencode-swarm run <subcommand>   # e.g. bunx opencode-swarm run agents
-> ```
->
-> This is a temporary mitigation. A deterministic in-chat path (either a `swarm` MCP tool or upstream `noReply` support) is tracked separately.
-
 Nine commands display a ⚠️ warning in help output because they share names with Claude Code built-in slash commands (e.g., `/plan`, `/reset`, `/status`). The warning reminds you to always use `/swarm <command>` — the bare CC command does something different and sometimes destructive. See [docs/commands.md#claude-code-command-conflicts](docs/commands.md#claude-code-command-conflicts) for the full conflict registry.
 
-See [docs/commands.md](docs/commands.md) for the full command reference.
+See [docs/commands.md](docs/commands.md) for the full reference (43 commands).
 
 ## Command Aliases
 
@@ -375,13 +368,10 @@ No API key required. Excellent starting point:
   "agents": {
     "coder": { "model": "opencode/minimax-m2.5-free" },
     "reviewer": { "model": "opencode/big-pickle" },
-    "critic": { "model": "opencode/big-pickle" },
     "explorer": { "model": "opencode/big-pickle" }
   }
 }
 ```
-
-Zen's roster changes. Always confirm current IDs with `/models` in OpenCode or `https://opencode.ai/zen/v1/models` before pasting a model into config. Do not copy private workspace providers such as `grove-openai/*` unless that provider appears in your own OpenCode model list.
 
 ### Paid Providers
 
@@ -391,13 +381,10 @@ For production, mix providers by role:
 |---|---|---|
 | architect | OpenCode UI selection | Needs strongest reasoning |
 | coder | minimax-coding-plan/MiniMax-M2.5 | Fast, accurate code generation |
-| critic | opencode/gpt-5.5 or your strongest reasoning model | Challenges the architect before coding |
-| reviewer | zai-coding-plan/glm-5 or a different strong model | Different training from coder |
-| test_engineer | opencode/big-pickle or another model distinct from coder | Catches test blind spots |
+| reviewer | zai-coding-plan/glm-5 | Different training from coder |
+| test_engineer | minimax-coding-plan/MiniMax-M2.5 | Same strengths as coder |
 | explorer | google/gemini-2.5-flash | Fast read-heavy analysis |
 | sme | kimi-for-coding/k2p5 | Strong domain expertise |
-
-Model assignment rule of thumb: architect and critic should be your strongest pair, and they should not be the same blind spot. Coder/test_engineer can be faster coding models; explorer/docs/curator can be cheaper readers. Do not put a premium model on `designer` while leaving `critic` on a weaker model.
 
 ### Provider Formats
 
@@ -419,7 +406,7 @@ Automatic fallback to a secondary model on transient errors:
   "agents": {
     "coder": {
       "model": "anthropic/claude-sonnet-4-20250514",
-      "fallback_models": ["opencode/big-pickle"]
+      "fallback_models": ["opencode/gpt-5-nano"]
     }
   }
 }
@@ -1157,15 +1144,15 @@ Config file location: `~/.config/opencode/opencode-swarm.json` (global) or `.ope
 ```json
 {
   "agents": {
-    "architect": { "model": "opencode/claude-opus-4-6" },
-    "coder": { "model": "opencode/minimax-m2.5", "fallback_models": ["opencode/big-pickle"] },
-    "explorer": { "model": "opencode/big-pickle" },
-    "sme": { "model": "opencode/kimi-k2.6" },
-    "critic": { "model": "opencode/gpt-5.5" },
+    "architect": { "model": "anthropic/claude-opus-4-6" },
+    "coder": { "model": "minimax-coding-plan/MiniMax-M2.5", "fallback_models": ["minimax-coding-plan/MiniMax-M2.1"] },
+    "explorer": { "model": "minimax-coding-plan/MiniMax-M2.1" },
+    "sme": { "model": "kimi-for-coding/k2p5" },
+    "critic": { "model": "zai-coding-plan/glm-5" },
     "reviewer": { "model": "zai-coding-plan/glm-5", "fallback_models": ["opencode/big-pickle"] },
-    "test_engineer": { "model": "opencode/minimax-m2.5" },
-    "docs": { "model": "opencode/big-pickle" },
-    "designer": { "model": "opencode/kimi-k2.6" }
+    "test_engineer": { "model": "minimax-coding-plan/MiniMax-M2.5" },
+    "docs": { "model": "zai-coding-plan/glm-4.7-flash" },
+    "designer": { "model": "kimi-for-coding/k2p5" }
   },
   "guardrails": {
     "max_tool_calls": 200,
@@ -1414,7 +1401,7 @@ bun test
 - [Installation Guide](docs/installation.md) — comprehensive reference
 - [Architecture Deep Dive](docs/architecture.md) — control model, pipeline, tools
 - [Design Rationale](docs/design-rationale.md) — why every major decision
-- [Commands Reference](docs/commands.md) — full `/swarm` command reference
+- [Commands Reference](docs/commands.md) — all 41 `/swarm` subcommands
 - [Modes Guide](docs/modes.md) — session modes (Turbo, Full-Auto) and project modes (strict/balanced/fast)
 - [Configuration](docs/configuration.md) — all config keys and examples
 - [Planning Guide](docs/planning.md) — task format, phase structure, sizing

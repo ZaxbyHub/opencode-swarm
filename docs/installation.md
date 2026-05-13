@@ -38,16 +38,18 @@ Create `~/.config/opencode/opencode-swarm.json`:
 ```json
 {
   "agents": {
-    "coder": { "model": "opencode/minimax-m2.5-free" },
-    "reviewer": { "model": "opencode/big-pickle" },
-    "critic": { "model": "opencode/big-pickle" },
-    "test_engineer": { "model": "opencode/big-pickle" },
-    "explorer": { "model": "opencode/big-pickle" }
+    "architect": { "model": "anthropic/claude-sonnet-4-20250514" },
+    "explorer": { "model": "google/gemini-2.5-flash" },
+    "coder": { "model": "anthropic/claude-sonnet-4-20250514" },
+    "sme": { "model": "google/gemini-2.5-flash" },
+    "reviewer": { "model": "google/gemini-2.5-flash" },
+    "critic": { "model": "google/gemini-2.5-flash" },
+    "test_engineer": { "model": "google/gemini-2.5-flash" },
+    "docs": { "model": "google/gemini-2.5-flash" },
+    "designer": { "model": "google/gemini-2.5-flash" }
   }
 }
 ```
-
-You can also skip this file at first; the installer creates a starter global config and the architect inherits the model you select in OpenCode. Confirm current Zen model IDs with `/models` before copying examples.
 
 ### 3. Start OpenCode
 
@@ -86,9 +88,9 @@ Each agent can use a different model:
 ```json
 {
   "agents": {
-    "coder": { "model": "opencode/minimax-m2.5-free" },
-    "reviewer": { "model": "opencode/big-pickle" },
-    "critic": { "model": "opencode/big-pickle" }
+    "architect": { "model": "anthropic/claude-sonnet-4-20250514" },
+    "coder": { "model": "anthropic/claude-sonnet-4-20250514" },
+    "explorer": { "model": "google/gemini-2.5-flash" }
   }
 }
 ```

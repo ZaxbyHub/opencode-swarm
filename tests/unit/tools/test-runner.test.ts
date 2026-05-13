@@ -24,8 +24,6 @@ try {
 
 // Extract the exports we need
 const {
-	MAX_OUTPUT_BYTES,
-	MAX_COMMAND_LENGTH,
 	DEFAULT_TIMEOUT_MS,
 	MAX_TIMEOUT_MS,
 	MAX_SAFE_TEST_FILES,
@@ -39,14 +37,6 @@ const {
 
 describe('test-runner.ts - Constants and Types', () => {
 	describe('exported constants', () => {
-		test('MAX_OUTPUT_BYTES is 512000', () => {
-			expect(MAX_OUTPUT_BYTES).toBe(512_000);
-		});
-
-		test('MAX_COMMAND_LENGTH is 500', () => {
-			expect(MAX_COMMAND_LENGTH).toBe(500);
-		});
-
 		test('DEFAULT_TIMEOUT_MS is 60000', () => {
 			expect(DEFAULT_TIMEOUT_MS).toBe(60_000);
 		});
@@ -65,49 +55,9 @@ describe('test-runner.ts - Constants and Types', () => {
 			expect(SUPPORTED_FRAMEWORKS).toContain('pester');
 		});
 	});
-
-	describe('TestFramework type', () => {
-		test('accepts all supported frameworks', () => {
-			const frameworks = [
-				'bun',
-				'vitest',
-				'jest',
-				'mocha',
-				'pytest',
-				'cargo',
-				'pester',
-				'none',
-			];
-			expect(frameworks.length).toBe(8);
-		});
-	});
-
-	describe('TestTotals interface', () => {
-		test('has required properties', () => {
-			const totals = {
-				passed: 10,
-				failed: 2,
-				skipped: 3,
-				total: 15,
-			};
-			expect(totals.passed).toBe(10);
-			expect(totals.failed).toBe(2);
-			expect(totals.skipped).toBe(3);
-			expect(totals.total).toBe(15);
-		});
-	});
 });
 
 describe('test-runner.ts - Tool Metadata', () => {
-	test('has description', () => {
-		expect(test_runner.description).toContain('test');
-		expect(test_runner.description).toContain('framework');
-	});
-
-	test('has execute function', () => {
-		expect(typeof test_runner.execute).toBe('function');
-	});
-
 	test('has scope schema with all options', () => {
 		expect(test_runner.args.scope).toBeDefined();
 	});

@@ -285,11 +285,10 @@ describe('Error handling catch block', () => {
 			output,
 		);
 
-		// Should return an unknown-command suggestion, not an execution error
+		// Should return help text, not an error
 		expect(output.parts).toHaveLength(1);
 		const text = (output.parts[0] as { text: string }).text;
-		expect(text).toContain('Command `/swarm nonexistentcommand` not found.');
-		expect(text).toContain('Run `/swarm help` for all commands.');
+		expect(text).toContain('## Swarm Commands');
 		// Should NOT contain error prefix
 		expect(text).not.toContain('Error executing /swarm');
 	});
@@ -309,9 +308,9 @@ describe('Error handling catch block', () => {
 
 		expect(output.parts).toHaveLength(1);
 		const text = (output.parts[0] as { text: string }).text;
-		expect(text).toContain('Command `/swarm definitelynotacommand` not found.');
-		expect(text).toContain('Run `/swarm help` for all commands.');
-		// This is not an error - the command just isn't registered.
+		expect(text).toContain('## Swarm Commands');
+		// This is not an error - the command just isn't registered
+		// so help text is shown
 		expect(text).not.toContain('Error executing');
 	});
 });

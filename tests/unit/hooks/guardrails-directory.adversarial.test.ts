@@ -714,20 +714,6 @@ describe('guardrails adversarial - directory parameter injection', () => {
 			expect(() => createGuardrailsHooks(config as any)).toThrow(TypeError);
 		});
 
-		it.skip('BUG: legacy call with config where enabled is undefined causes crash', () => {
-			const config = { enabled: undefined };
-
-			// 'enabled' in config is false (property exists but value is undefined)
-			// So this would go to new signature path with guardrailsConfig = undefined
-			expect(() => createGuardrailsHooks(config as any)).toThrow(TypeError);
-		});
-
-		it.skip('should handle new signature with directory that looks like legacy config', () => {
-			// directoryOrConfig is a string that looks like a config object
-			const hooks = createGuardrailsHooks('/test', '{enabled: true}' as any);
-			expect(hooks).toBeDefined();
-		});
-
 		it('should handle both parameters as config objects (ambiguous)', () => {
 			const config1 = { enabled: true };
 			const config2 = { max_tool_calls: 50 };
