@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.18.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.2...v7.18.3) (2026-05-13)
+
+
+### Bug Fixes
+
+* **commands:** mutate output.parts in place + document LLM-mediation gap ([#845](https://github.com/zaxbysauce/opencode-swarm/issues/845)) ([dbf3891](https://github.com/zaxbysauce/opencode-swarm/commit/dbf3891c90dfeebeadb1ce577fa28f130be4bae5))
+
 ## [7.18.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.1...v7.18.2) (2026-05-13)
 
 
