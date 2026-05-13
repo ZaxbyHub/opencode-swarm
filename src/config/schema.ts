@@ -424,7 +424,7 @@ const AdversarialTestingConfigSchemaBase = z.object({
 	scope: z.enum(['all', 'security-only']).default('all'),
 });
 
-export const AdversarialTestingConfigSchema: z.ZodType<AdversarialTestingConfig> =
+export const AdversarialTestingConfigSchema =
 	AdversarialTestingConfigSchemaBase.default(() => ({
 		enabled: true,
 		scope: 'all' as const,
@@ -881,7 +881,7 @@ const AutomationConfigSchemaBase = z.object({
 export type AutomationConfig = z.infer<typeof AutomationConfigSchemaBase>;
 
 // Schema for optional automation field - applies defaults when field is present
-export const AutomationConfigSchema: z.ZodType<AutomationConfig> =
+export const AutomationConfigSchema =
 	AutomationConfigSchemaBase;
 
 // Knowledge base configuration (v6.17 two-tier cross-project knowledge)

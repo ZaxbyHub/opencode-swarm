@@ -1,0 +1,13 @@
+{
+  "name": "gemini-swarm",
+  "version": "7.18.2",
+  "description": "Architect-centric agentic swarm for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
+  "mcpServers": {
+    "swarm-tools": {
+      "command": "node",
+      "args": ["${extensionPath}/dist/cli/index.js", "mcp"],
+      "cwd": "${extensionPath}"
+    }
+  },
+  "contextFileName": "GEMINI.md"
+}

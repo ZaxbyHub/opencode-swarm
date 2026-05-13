@@ -67,7 +67,7 @@ export type SpecDelta = z.infer<typeof SpecDeltaSchema>;
 // ---------------------------------------------------------------------------
 // DeltaSpec (union of full spec and delta forms)
 // ---------------------------------------------------------------------------
-export const DeltaSpecSchema: z.ZodType<SwarmSpec | SpecDelta> = z.union([
+export const DeltaSpecSchema = z.union([
 	SwarmSpecSchema,
 	SpecDeltaSchema,
 ]);

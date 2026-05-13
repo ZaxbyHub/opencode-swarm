@@ -38,7 +38,7 @@
 	],
 	"scripts": {
 		"clean": "bun -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli/index.ts --outdir dist/cli --target node --format esm && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome lint .",
@@ -49,6 +49,7 @@
 		"repro:704": "node scripts/repro-704.mjs"
 	},
 	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@opencode-ai/plugin": "^1.1.53",
 		"@opencode-ai/sdk": "^1.1.53",
 		"@vscode/tree-sitter-wasm": "^0.3.0",
@@ -57,7 +58,8 @@
 		"proper-lockfile": "^4.1.2",
 		"quick-lru": "^7.3.0",
 		"web-tree-sitter": "^0.25.0",
-		"zod": "^4.1.8"
+		"zod": "^3.23.8",
+		"zod-to-json-schema": "^3.25.2"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.14",

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import { resolveCommand, VALID_COMMANDS } from '../commands/registry.js';
+import { handleMcpCommand } from './mcp.js';
 import {
 	getPluginCachePaths,
 	getPluginConfigDir,
@@ -527,6 +528,7 @@ Commands:
   install     Install and configure the plugin (default)
   update      Refresh OpenCode's plugin cache so the next start fetches latest from npm
   uninstall   Remove the plugin from OpenCode config
+  mcp         Start the MCP server for Gemini CLI extension support
   run         Run a plugin command directly (for use outside OpenCode)
 
 Options:
@@ -588,6 +590,8 @@ async function main(): Promise<void> {
 	} else if (command === 'uninstall') {
 		const exitCode = await uninstall();
 		process.exit(exitCode);
+	} else if (command === 'mcp') {
+		await handleMcpCommand(args.slice(1));
 	} else if (command === 'run') {
 		const exitCode = await run(args.slice(1));
 		process.exit(exitCode);
