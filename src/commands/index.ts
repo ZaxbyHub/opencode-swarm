@@ -222,6 +222,7 @@ export function buildHelpText(): string {
 export function createSwarmCommandHandler(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	client?: unknown,
 ): (
 	input: { command: string; sessionID: string; arguments: string },
 	output: { parts: unknown[] },
@@ -299,6 +300,7 @@ export function createSwarmCommandHandler(
 					args: resolved.remainingArgs,
 					sessionID: input.sessionID,
 					agents,
+					client,
 				});
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';
@@ -317,7 +319,9 @@ export function createSwarmCommandHandler(
 			const welcomeMessage =
 				`Welcome to OpenCode Swarm! 🐝\n` +
 				`\n` +
-				`Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.\n`;
+				`Start here: run \`/swarm diagnose\`, then \`/swarm agents\` to confirm the plugin loaded and see the exact models in use.\n` +
+				`If a model is unavailable, edit \`.opencode/opencode-swarm.json\` or \`~/.config/opencode/opencode-swarm.json\` and run \`/swarm config doctor\`.\n` +
+				`Useful next steps: \`/swarm brainstorm <task>\` for guided planning, \`/swarm full-auto on\` for autonomous runs after enabling it in config, and \`/swarm council <question>\` after enabling council.general.\n\n`;
 			text = welcomeMessage + text;
 		}
 

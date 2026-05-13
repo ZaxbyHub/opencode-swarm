@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.18.0",
+    version: "7.18.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16519,8 +16519,7 @@ var init_constants = __esm(() => {
       "skill_improve",
       "search",
       "doc_scan",
-      "doc_extract",
-      "web_search"
+      "doc_extract"
     ],
     spec_writer: [
       "search",
@@ -16620,67 +16619,67 @@ var init_constants = __esm(() => {
   DEFAULT_AGENT_CONFIGS = {
     coder: {
       model: "opencode/minimax-m2.5-free",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/big-pickle"]
     },
     reviewer: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     test_engineer: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     explorer: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     sme: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     critic: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     docs: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     designer: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     critic_sounding_board: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     critic_drift_verifier: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     critic_hallucination_verifier: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     critic_oversight: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     curator_init: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     curator_phase: {
-      model: "opencode/gpt-5-nano",
-      fallback_models: ["opencode/big-pickle"]
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     skill_improver: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     },
     spec_writer: {
       model: "opencode/big-pickle",
-      fallback_models: ["opencode/gpt-5-nano"]
+      fallback_models: ["opencode/minimax-m2.5-free"]
     }
   };
 });
@@ -17563,7 +17562,8 @@ function handleAgentsCommand(agents, guardrails) {
   if (hasUnregistered) {
     lines.push("", "### Unregistered Subagents");
     for (const name of unregistered) {
-      lines.push(`- **${name}** (requires configuration)`);
+      const hint = UNREGISTERED_AGENT_HINTS[name] ?? "requires configuration";
+      lines.push(`- **${name}** (${hint})`);
     }
   }
   if (guardrails?.profiles && Object.keys(guardrails.profiles).length > 0) {
@@ -17592,9 +17592,18 @@ function handleAgentsCommand(agents, guardrails) {
   return lines.join(`
 `);
 }
+var UNREGISTERED_AGENT_HINTS;
 var init_agents = __esm(() => {
   init_constants();
   init_schema();
+  UNREGISTERED_AGENT_HINTS = {
+    designer: "enable ui_review.enabled",
+    council_generalist: "enable council.general.enabled",
+    council_skeptic: "enable council.general.enabled",
+    council_domain_expert: "enable council.general.enabled",
+    skill_improver: "registered by default unless agents.skill_improver.disabled is true",
+    spec_writer: "registered by default unless agents.spec_writer.disabled is true"
+  };
 });
 
 // src/commands/analyze.ts
@@ -38265,11 +38274,30 @@ function parseArgs(args) {
   }
   return out;
 }
-async function handleCouncilCommand(_directory, args) {
+async function handleCouncilCommand(directory, args) {
   const parsed = parseArgs(args);
   const question = sanitizeQuestion(parsed.rest.join(" "));
   if (!question) {
     return USAGE;
+  }
+  const config3 = loadPluginConfig(directory);
+  if (config3.council?.general?.enabled !== true) {
+    return [
+      "General Council is not enabled for this project.",
+      "",
+      "Enable it in `.opencode/opencode-swarm.json` or `~/.config/opencode/opencode-swarm.json`:",
+      "",
+      "```json",
+      "{",
+      '  "council": {',
+      '    "general": { "enabled": true }',
+      "  }",
+      "}",
+      "```",
+      "",
+      "Then restart OpenCode and run `/swarm config doctor` before trying `/swarm council` again."
+    ].join(`
+`);
   }
   const tokens = ["MODE: COUNCIL"];
   if (parsed.preset) {
@@ -38282,6 +38310,7 @@ async function handleCouncilCommand(_directory, args) {
 }
 var MAX_QUESTION_LEN = 2000, USAGE;
 var init_council = __esm(() => {
+  init_loader();
   USAGE = [
     "Usage: /swarm council <question> [--preset <name>] [--spec-review]",
     "",
@@ -39758,6 +39787,7 @@ __export(exports_config_doctor, {
   restoreFromBackup: () => restoreFromBackup,
   getConfigPaths: () => getConfigPaths,
   createConfigBackup: () => createConfigBackup,
+  collectConfiguredModelRefs: () => collectConfiguredModelRefs,
   applySafeAutoFixes: () => applySafeAutoFixes
 });
 import * as crypto3 from "crypto";
@@ -40151,6 +40181,129 @@ function validateConfigKey(path24, value, _config) {
   }
   return findings;
 }
+function addConfiguredModel(refs, model, configPath) {
+  if (typeof model !== "string")
+    return;
+  const trimmed = model.trim();
+  if (!trimmed)
+    return;
+  const paths = refs.get(trimmed) ?? new Set;
+  paths.add(configPath);
+  refs.set(trimmed, paths);
+}
+function addConfiguredAgentModels(refs, agents, prefix) {
+  if (!agents || typeof agents !== "object" || Array.isArray(agents))
+    return;
+  for (const [agentName, value] of Object.entries(agents)) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      continue;
+    const agent = value;
+    addConfiguredModel(refs, agent.model, `${prefix}.${agentName}.model`);
+    if (Array.isArray(agent.fallback_models)) {
+      agent.fallback_models.forEach((model, index) => {
+        addConfiguredModel(refs, model, `${prefix}.${agentName}.fallback_models[${index}]`);
+      });
+    }
+  }
+}
+function collectConfiguredModelRefs(config3) {
+  const refs = new Map;
+  const rawConfig = config3;
+  addConfiguredAgentModels(refs, rawConfig.agents, "agents");
+  if (rawConfig.swarms && typeof rawConfig.swarms === "object" && !Array.isArray(rawConfig.swarms)) {
+    for (const [swarmId, value] of Object.entries(rawConfig.swarms)) {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        continue;
+      addConfiguredAgentModels(refs, value.agents, `swarms.${swarmId}.agents`);
+    }
+  }
+  if (rawConfig.full_auto && typeof rawConfig.full_auto === "object" && !Array.isArray(rawConfig.full_auto)) {
+    addConfiguredModel(refs, rawConfig.full_auto.critic_model, "full_auto.critic_model");
+  }
+  if (rawConfig.skill_improver && typeof rawConfig.skill_improver === "object" && !Array.isArray(rawConfig.skill_improver)) {
+    const skillImprover = rawConfig.skill_improver;
+    addConfiguredModel(refs, skillImprover.model, "skill_improver.model");
+    if (Array.isArray(skillImprover.fallback_models)) {
+      skillImprover.fallback_models.forEach((model, index) => {
+        addConfiguredModel(refs, model, `skill_improver.fallback_models[${index}]`);
+      });
+    }
+  }
+  if (rawConfig.spec_writer && typeof rawConfig.spec_writer === "object" && !Array.isArray(rawConfig.spec_writer)) {
+    const specWriter = rawConfig.spec_writer;
+    addConfiguredModel(refs, specWriter.model, "spec_writer.model");
+    if (Array.isArray(specWriter.fallback_models)) {
+      specWriter.fallback_models.forEach((model, index) => {
+        addConfiguredModel(refs, model, `spec_writer.fallback_models[${index}]`);
+      });
+    }
+  }
+  const council = rawConfig.council;
+  const general = council && typeof council === "object" && !Array.isArray(council) ? council.general : undefined;
+  if (general && typeof general === "object" && !Array.isArray(general)) {
+    addConfiguredModel(refs, general.moderatorModel, "council.general.moderatorModel");
+    if (Array.isArray(general.members)) {
+      general.members.forEach((member, index) => {
+        if (!member || typeof member !== "object" || Array.isArray(member)) {
+          return;
+        }
+        addConfiguredModel(refs, member.model, `council.general.members[${index}].model`);
+      });
+    }
+    if (general.presets && typeof general.presets === "object" && !Array.isArray(general.presets)) {
+      for (const [presetName, members] of Object.entries(general.presets)) {
+        if (!Array.isArray(members))
+          continue;
+        members.forEach((member, index) => {
+          if (!member || typeof member !== "object" || Array.isArray(member)) {
+            return;
+          }
+          addConfiguredModel(refs, member.model, `council.general.presets.${presetName}[${index}].model`);
+        });
+      }
+    }
+  }
+  return refs;
+}
+function validateConfiguredModels(config3, modelAvailability) {
+  const refs = collectConfiguredModelRefs(config3);
+  const findings = [];
+  if (modelAvailability.error) {
+    findings.push({
+      id: "model-availability-unchecked",
+      title: "Model availability check skipped",
+      description: `Could not load OpenCode provider models from ${modelAvailability.source}: ` + modelAvailability.error,
+      severity: "info",
+      path: "agents",
+      autoFixable: false
+    });
+    return findings;
+  }
+  if (refs.size === 0)
+    return findings;
+  for (const [modelId, paths] of refs.entries()) {
+    if (modelAvailability.availableModelIds.has(modelId))
+      continue;
+    findings.push({
+      id: "configured-model-unavailable",
+      title: "Configured model is unavailable",
+      description: `Configured model ${formatModelIdForDoctor(modelId)} was not found in the active OpenCode provider model registry. ` + "Run `/models` to choose a currently available model, then update opencode-swarm.json.",
+      severity: "error",
+      path: [...paths].sort().join(", "),
+      currentValue: modelId,
+      autoFixable: false
+    });
+  }
+  return findings;
+}
+function formatModelIdForDoctor(modelId) {
+  const json3 = JSON.stringify(modelId);
+  if (!json3)
+    return '"<invalid model id>"';
+  if (json3.length <= 160)
+    return json3;
+  return `${json3.slice(0, 157)}..."`;
+}
 function walkConfigAndValidate(obj, path24, config3, findings) {
   if (obj === null || obj === undefined) {
     return;
@@ -40175,9 +40328,12 @@ function walkConfigAndValidate(obj, path24, config3, findings) {
     walkConfigAndValidate(value, newPath, config3, findings);
   }
 }
-function runConfigDoctor(config3, directory) {
+function runConfigDoctor(config3, directory, options = {}) {
   const findings = [];
   walkConfigAndValidate(config3, "", config3, findings);
+  if (options.modelAvailability) {
+    findings.push(...validateConfiguredModels(config3, options.modelAvailability));
+  }
   const summary = {
     info: findings.filter((f) => f.severity === "info").length,
     warn: findings.filter((f) => f.severity === "warn").length,
@@ -40339,8 +40495,8 @@ function shouldRunOnStartup(automationConfig) {
   }
   return automationConfig.capabilities?.config_doctor_on_startup === true;
 }
-async function runConfigDoctorWithFixes(directory, config3, autoFix = false) {
-  const result = runConfigDoctor(config3, directory);
+async function runConfigDoctorWithFixes(directory, config3, autoFix = false, options = {}) {
+  const result = runConfigDoctor(config3, directory, options);
   const artifactPath = writeDoctorArtifact(directory, result);
   if (!autoFix) {
     return {
@@ -40360,7 +40516,7 @@ async function runConfigDoctorWithFixes(directory, config3, autoFix = false) {
   if (appliedFixes.length > 0) {
     const freshConfig = readConfigFromFile(directory);
     if (freshConfig) {
-      const newResult = runConfigDoctor(freshConfig.config, directory);
+      const newResult = runConfigDoctor(freshConfig.config, directory, options);
       writeDoctorArtifact(directory, newResult);
     }
   }
@@ -41982,6 +42138,23 @@ var init_tool_doctor = __esm(() => {
   ];
 });
 
+// src/utils/timeout.ts
+async function withTimeout(promise3, ms, timeoutError) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError), ms);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+  });
+  try {
+    return await Promise.race([promise3, timeoutPromise]);
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+  }
+}
+
 // src/commands/doctor.ts
 function formatToolDoctorMarkdown(result) {
   const lines = [
@@ -42055,13 +42228,67 @@ function formatDoctorMarkdown(result) {
   return lines.join(`
 `);
 }
-async function handleDoctorCommand(directory, args) {
+function extractAvailableModelIds(response) {
+  const available = new Set;
+  if (response?.providers !== undefined && !Array.isArray(response.providers)) {
+    throw new Error("provider registry returned malformed provider list");
+  }
+  for (const provider of response?.providers ?? []) {
+    if (!provider || typeof provider !== "object" || !provider.id || !provider.models || typeof provider.models !== "object" || Array.isArray(provider.models)) {
+      continue;
+    }
+    for (const [modelKey, modelInfo] of Object.entries(provider.models)) {
+      available.add(`${provider.id}/${modelKey}`);
+      if (modelInfo && typeof modelInfo === "object" && modelInfo.id) {
+        available.add(`${provider.id}/${modelInfo.id}`);
+      }
+    }
+  }
+  return available;
+}
+async function loadModelAvailability(directory, client, options = {}) {
+  const providerClient = client;
+  const providers = providerClient?.config?.providers;
+  if (typeof providers !== "function") {
+    return;
+  }
+  try {
+    const response = await withTimeout(providers({ directory }), options.timeoutMs ?? MODEL_REGISTRY_TIMEOUT_MS, new Error(`OpenCode provider model registry lookup exceeded ${options.timeoutMs ?? MODEL_REGISTRY_TIMEOUT_MS}ms`));
+    if (response.error) {
+      return {
+        availableModelIds: new Set,
+        source: MODEL_REGISTRY_SOURCE,
+        error: typeof response.error === "string" ? response.error : JSON.stringify(response.error)
+      };
+    }
+    if (!response.data) {
+      return {
+        availableModelIds: new Set,
+        source: MODEL_REGISTRY_SOURCE,
+        error: "provider registry returned no data"
+      };
+    }
+    return {
+      availableModelIds: extractAvailableModelIds(response.data),
+      source: MODEL_REGISTRY_SOURCE
+    };
+  } catch (error93) {
+    return {
+      availableModelIds: new Set,
+      source: MODEL_REGISTRY_SOURCE,
+      error: error93 instanceof Error ? error93.message : String(error93)
+    };
+  }
+}
+async function handleDoctorCommand(directory, args, options = {}) {
   const enableAutoFix = args.includes("--fix") || args.includes("-f");
   const config3 = loadPluginConfig(directory);
-  const result = runConfigDoctor(config3, directory);
+  const modelAvailability = await loadModelAvailability(directory, options.client);
+  const doctorOptions = { modelAvailability };
+  const result = runConfigDoctor(config3, directory, doctorOptions);
   if (enableAutoFix && result.hasAutoFixableIssues) {
     const { runConfigDoctorWithFixes: runConfigDoctorWithFixes2 } = await Promise.resolve().then(() => (init_config_doctor(), exports_config_doctor));
-    const fixResult = await runConfigDoctorWithFixes2(directory, config3, true);
+    const fixResult = await runConfigDoctorWithFixes2(directory, config3, true, doctorOptions);
     return formatDoctorMarkdown(fixResult.result);
   }
   return formatDoctorMarkdown(result);
@@ -42070,6 +42297,7 @@ async function handleDoctorToolsCommand(directory, _args) {
   const result = runToolDoctor(directory);
   return formatToolDoctorMarkdown(result);
 }
+var MODEL_REGISTRY_TIMEOUT_MS = 3000, MODEL_REGISTRY_SOURCE = "OpenCode config.providers";
 var init_doctor = __esm(() => {
   init_loader();
   init_config_doctor();
@@ -51801,7 +52029,7 @@ function buildHelpText() {
   return lines.join(`
 `);
 }
-function createSwarmCommandHandler(directory, agents) {
+function createSwarmCommandHandler(directory, agents, client) {
   return async (input, output) => {
     if (input.command !== "swarm" && !input.command.startsWith("swarm-")) {
       return;
@@ -51848,7 +52076,8 @@ ${similar.map((cmd) => `  \u2022 /swarm ${cmd}`).join(`
           directory,
           args: resolved.remainingArgs,
           sessionID: input.sessionID,
-          agents
+          agents,
+          client
         });
       } catch (_err) {
         const cmdName = tokens[0] || "unknown";
@@ -51864,7 +52093,10 @@ ${text}`;
     if (isFirstRun) {
       const welcomeMessage = `Welcome to OpenCode Swarm! \uD83D\uDC1D
 ` + `
-` + `Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.
+` + `Start here: run \`/swarm diagnose\`, then \`/swarm agents\` to confirm the plugin loaded and see the exact models in use.
+` + `If a model is unavailable, edit \`.opencode/opencode-swarm.json\` or \`~/.config/opencode/opencode-swarm.json\` and run \`/swarm config doctor\`.
+` + `Useful next steps: \`/swarm brainstorm <task>\` for guided planning, \`/swarm full-auto on\` for autonomous runs after enabling it in config, and \`/swarm council <question>\` after enabling council.general.
+
 `;
       text = welcomeMessage + text;
     }
@@ -52181,13 +52413,13 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/config"
     },
     "config doctor": {
-      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
+      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
       description: "Run config doctor checks",
       subcommandOf: "config",
       category: "diagnostics"
     },
     "config-doctor": {
-      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
+      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
       description: "Run config doctor checks",
       subcommandOf: "config",
       category: "diagnostics",
@@ -52262,7 +52494,7 @@ var init_registry = __esm(() => {
       deprecated: true
     },
     doctor: {
-      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
+      handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args, { client: ctx.client }),
       description: "Run config doctor checks",
       category: "diagnostics",
       aliasOf: "config doctor",

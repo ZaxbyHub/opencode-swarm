@@ -35,6 +35,26 @@ You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
 
+## Model setup without walls
+
+New users should start with either no model overrides or the free Zen starter models above. Run `/swarm agents` after OpenCode starts; it shows the resolved model for every registered agent. If any model reports `ProviderModelNotFoundError`, replace it with one from OpenCode's live model list (`/models` in the TUI, or `https://opencode.ai/zen/v1/models`) and run `/swarm config doctor`.
+
+Avoid copy-pasting provider IDs from private workspaces, incubators, or screenshots. In particular, do not use `grove-openai/*` unless you personally have access to that provider in OpenCode. For public Zen models, use the `opencode/<model-id>` form shown by `/models`.
+
+`/swarm config doctor` performs a best-effort live check against OpenCode's provider registry. The lookup is capped at 3 seconds so doctor never blocks startup or interactive use; if OpenCode is offline, slow, or returns malformed provider data, doctor reports an informational "model availability check skipped" finding instead of raising model-not-found errors.
+
+Role guidance:
+
+| Role | Good default | Upgrade first when you have paid models |
+|---|---|---|
+| architect | OpenCode UI selection | strongest reasoning model you have |
+| critic / reviewer | `opencode/big-pickle` | a different strong model from the architect/coder |
+| coder | `opencode/minimax-m2.5-free` | fast coding model with reliable tool use |
+| test_engineer | `opencode/big-pickle` | separate model from coder for test blind spots |
+| explorer / docs / curator | `opencode/big-pickle` | cheaper fast reader/writer |
+
+Do not spend your strongest model on `designer` while leaving `critic` weaker. The critic's job is to fight the plan and catch blind spots before implementation starts.
+
 ## Per-agent override fields
 
 Each entry under `agents` accepts the following optional fields:
@@ -49,17 +69,17 @@ Each entry under `agents` accepts the following optional fields:
 
 ### Why `variant` is its own field
 
-OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `grove-openai/gpt-5.3-codex/medium`) in its model picker — the picker rewrites that input through a variant-aware resolver before applying it to the session. The agent loader, by contrast, uses a basic 2-segment parser, so embedding the variant into `model` resolves to a non-existent model id (`gpt-5.3-codex/medium`) and produces `ProviderModelNotFoundError`. Use the `variant` field instead:
+OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `opencode/gpt-5.3-codex/medium`) in its model picker — the picker rewrites that input through a variant-aware resolver before applying it to the session. The agent loader, by contrast, uses a basic 2-segment parser, so embedding the variant into `model` resolves to a non-existent model id (`gpt-5.3-codex/medium`) and produces `ProviderModelNotFoundError`. Use the `variant` field instead:
 
 ```json
 {
   "agents": {
     "test_engineer": {
-      "model": "grove-openai/gpt-5.3-codex",
+      "model": "opencode/gpt-5.3-codex",
       "variant": "medium"
     },
-    "designer": {
-      "model": "grove-openai/gpt-5.4",
+    "critic": {
+      "model": "opencode/gpt-5.4",
       "variant": "high"
     }
   }
@@ -68,7 +88,7 @@ OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `grove-opena
 
 ### Backward compatibility
 
-If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medium" }`, it will still work — the variant is automatically extracted and a deprecation warning is logged.
+If you currently have a config like `{ "model": "opencode/gpt-5.3-codex/medium" }`, it will still work — the variant is automatically extracted and a deprecation warning is logged.
 
 **Before** (deprecated — produces a warning):
 
@@ -76,7 +96,7 @@ If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medi
 {
   "agents": {
     "coder": {
-      "model": "grove-openai/gpt-5.3-codex/medium"
+      "model": "opencode/gpt-5.3-codex/medium"
     }
   }
 }
@@ -88,7 +108,7 @@ If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medi
 {
   "agents": {
     "coder": {
-      "model": "grove-openai/gpt-5.3-codex",
+      "model": "opencode/gpt-5.3-codex",
       "variant": "medium"
     }
   }

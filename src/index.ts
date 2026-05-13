@@ -447,6 +447,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
 		Object.fromEntries(agentDefinitions.map((agent) => [agent.name, agent])),
+		ctx.client,
 	);
 	const activityHooks = createAgentActivityHooks(config, ctx.directory);
 	const prmHook = createPrmHook(
