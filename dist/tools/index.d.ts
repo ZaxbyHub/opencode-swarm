@@ -50,6 +50,7 @@ export { skill_inspect } from './skill-inspect';
 export { skill_list } from './skill-list';
 export { spec_write } from './spec-write';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
+export { createSwarmCommandTool } from './swarm-command';
 import { suggestPatch } from './suggest-patch';
 export { suggestPatch };
 export type { SuggestPatchArgs } from './suggest-patch';

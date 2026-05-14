@@ -279,6 +279,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'skill_inspect',
 		'skill_improve',
 		'knowledge_ack',
+		'swarm_command',
 		'lean_turbo_plan_lanes',
 		'lean_turbo_acquire_locks',
 		'lean_turbo_runner_status',
@@ -301,6 +302,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'doc_scan',
 		'knowledge_recall',
 		'repo_map',
+		'swarm_command',
 	],
 	coder: [
 		'diff',
@@ -315,6 +317,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'knowledge_add',
 		'knowledge_recall',
 		'repo_map',
+		'swarm_command',
 	],
 	test_engineer: [
 		'test_runner',
@@ -330,6 +333,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'build_check',
 		'syntax_check',
 		'search',
+		'swarm_command',
 	],
 	sme: [
 		'complexity_hotspots',
@@ -341,6 +345,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'search',
 		'symbols',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	reviewer: [
 		'diff',
@@ -363,6 +368,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'batch_symbols',
 		'suggest_patch',
 		'repo_map',
+		'swarm_command',
 	],
 	critic: [
 		'complexity_hotspots',
@@ -374,6 +380,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'req_coverage',
 		'get_approved_plan',
 		'repo_map',
+		'swarm_command',
 	],
 	critic_sounding_board: [
 		'complexity_hotspots',
@@ -444,6 +451,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'symbols',
 		'todo_extract',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	designer: [
 		'extract_code_blocks',
@@ -451,6 +459,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'search',
 		'symbols',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	// Curator agents are read-only analysis roles — knowledge recall only
 	curator_init: ['knowledge_recall'],
@@ -613,6 +622,8 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	spec_write: 'author or update .swarm/spec.md for the current project',
 	knowledge_ack:
 		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
+	swarm_command:
+		'run supported /swarm commands through the canonical command registry',
 	lean_turbo_plan_lanes:
 		'partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution',
 	lean_turbo_acquire_locks:

@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.19.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.0...v7.19.0) (2026-05-14)
+
+
+### Features
+
+* **commands:** add native swarm command tool ([#851](https://github.com/zaxbysauce/opencode-swarm/issues/851)) ([001a6dc](https://github.com/zaxbysauce/opencode-swarm/commit/001a6dc77c4230593b81757e003ae4827478ae32))
+
+
+### Bug Fixes
+
+* **commands:** mutate output.parts in place + document LLM-mediation gap ([#845](https://github.com/zaxbysauce/opencode-swarm/issues/845)) ([dbf3891](https://github.com/zaxbysauce/opencode-swarm/commit/dbf3891c90dfeebeadb1ce577fa28f130be4bae5))
+* **gate-tracking:** close cross-phase evidence-routing and state leaks ([#839](https://github.com/zaxbysauce/opencode-swarm/issues/839)) ([76ce20f](https://github.com/zaxbysauce/opencode-swarm/commit/76ce20fd65ff91beb0772ea0cc6d62616f54c166))
+* **onboarding:** validate configured swarm models ([#841](https://github.com/zaxbysauce/opencode-swarm/issues/841)) ([bf6afe9](https://github.com/zaxbysauce/opencode-swarm/commit/bf6afe93977ccfae73c7b25d8c092e8700a74e86))
+
 ## [7.18.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.3...v7.18.0) (2026-05-14)
 
 

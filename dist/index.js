@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.18.0",
+    version: "7.19.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -191,6 +191,7 @@ var init_tool_names = __esm(() => {
     "skill_improve",
     "spec_write",
     "knowledge_ack",
+    "swarm_command",
     "lean_turbo_plan_lanes",
     "lean_turbo_acquire_locks",
     "lean_turbo_runner_status",
@@ -520,6 +521,7 @@ var init_constants = __esm(() => {
       "skill_inspect",
       "skill_improve",
       "knowledge_ack",
+      "swarm_command",
       "lean_turbo_plan_lanes",
       "lean_turbo_acquire_locks",
       "lean_turbo_runner_status",
@@ -541,7 +543,8 @@ var init_constants = __esm(() => {
       "todo_extract",
       "doc_scan",
       "knowledge_recall",
-      "repo_map"
+      "repo_map",
+      "swarm_command"
     ],
     coder: [
       "diff",
@@ -555,7 +558,8 @@ var init_constants = __esm(() => {
       "syntax_check",
       "knowledge_add",
       "knowledge_recall",
-      "repo_map"
+      "repo_map",
+      "swarm_command"
     ],
     test_engineer: [
       "test_runner",
@@ -570,7 +574,8 @@ var init_constants = __esm(() => {
       "pkg_audit",
       "build_check",
       "syntax_check",
-      "search"
+      "search",
+      "swarm_command"
     ],
     sme: [
       "complexity_hotspots",
@@ -581,7 +586,8 @@ var init_constants = __esm(() => {
       "schema_drift",
       "search",
       "symbols",
-      "knowledge_recall"
+      "knowledge_recall",
+      "swarm_command"
     ],
     reviewer: [
       "diff",
@@ -603,7 +609,8 @@ var init_constants = __esm(() => {
       "search",
       "batch_symbols",
       "suggest_patch",
-      "repo_map"
+      "repo_map",
+      "swarm_command"
     ],
     critic: [
       "complexity_hotspots",
@@ -614,7 +621,8 @@ var init_constants = __esm(() => {
       "knowledge_recall",
       "req_coverage",
       "get_approved_plan",
-      "repo_map"
+      "repo_map",
+      "swarm_command"
     ],
     critic_sounding_board: [
       "complexity_hotspots",
@@ -682,14 +690,16 @@ var init_constants = __esm(() => {
       "search",
       "symbols",
       "todo_extract",
-      "knowledge_recall"
+      "knowledge_recall",
+      "swarm_command"
     ],
     designer: [
       "extract_code_blocks",
       "retrieve_summary",
       "search",
       "symbols",
-      "knowledge_recall"
+      "knowledge_recall",
+      "swarm_command"
     ],
     curator_init: ["knowledge_recall"],
     curator_phase: ["knowledge_recall"],
@@ -801,6 +811,7 @@ var init_constants = __esm(() => {
     skill_improve: "run the skill_improver agent to review and refine skills",
     spec_write: "author or update .swarm/spec.md for the current project",
     knowledge_ack: "record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment",
+    swarm_command: "run supported /swarm commands through the canonical command registry",
     lean_turbo_plan_lanes: "partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution",
     lean_turbo_acquire_locks: "acquire file locks for all files in a lane (all-or-nothing) before lane execution",
     lean_turbo_runner_status: "read Lean Turbo run state from .swarm/turbo-state.json",
@@ -60636,6 +60647,270 @@ var init_write_retro2 = __esm(() => {
   init_write_retro();
 });
 
+// src/commands/command-dispatch.ts
+import fs36 from "node:fs";
+import path55 from "node:path";
+function normalizeSwarmCommandInput(command, argumentText) {
+  if (command !== "swarm" && !command.startsWith("swarm-")) {
+    return { isSwarmCommand: false, tokens: [] };
+  }
+  if (command === "swarm") {
+    return {
+      isSwarmCommand: true,
+      tokens: argumentText.trim().split(/\s+/).filter(Boolean)
+    };
+  }
+  const subcommand = command.slice("swarm-".length);
+  const extraArgs = argumentText.trim().split(/\s+/).filter(Boolean);
+  return {
+    isSwarmCommand: true,
+    tokens: [subcommand, ...extraArgs].filter(Boolean)
+  };
+}
+function canonicalCommandKey(resolved) {
+  return resolved.entry.aliasOf ?? resolved.key;
+}
+function formatCommandNotFound(tokens) {
+  const attemptedCommand = tokens[0] || "";
+  const MAX_DISPLAY = 100;
+  const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
+  const similar = _internals34.findSimilarCommands(attemptedCommand);
+  const header = `Command \`/swarm ${displayCommand}\` not found.`;
+  const suggestions = similar.length > 0 ? `Did you mean:
+${similar.map((cmd) => `  - /swarm ${cmd}`).join(`
+`)}` : "";
+  const footer = "Run `/swarm help` for all commands.";
+  return [header, suggestions, footer].filter(Boolean).join(`
+
+`);
+}
+function maybeMarkFirstRun(directory) {
+  const sentinelPath = path55.join(directory, ".swarm", ".first-run-complete");
+  try {
+    const swarmDir = path55.join(directory, ".swarm");
+    fs36.mkdirSync(swarmDir, { recursive: true });
+    fs36.writeFileSync(sentinelPath, `first-run-complete: ${new Date().toISOString()}
+`, { flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function prependWelcome(text) {
+  const welcomeMessage = `Welcome to OpenCode Swarm!
+` + `
+` + `Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.
+`;
+  return welcomeMessage + text;
+}
+async function executeSwarmCommand(args2) {
+  const {
+    directory,
+    agents,
+    sessionID,
+    tokens,
+    includeWelcome = false,
+    buildHelpText,
+    policy
+  } = args2;
+  let text;
+  const resolved = resolveCommand(tokens);
+  if (!resolved) {
+    text = tokens.length === 0 && buildHelpText ? buildHelpText() : formatCommandNotFound(tokens);
+  } else {
+    const policyResult = policy?.(resolved) ?? { allowed: true };
+    if (!policyResult.allowed) {
+      text = policyResult.message;
+    } else {
+      try {
+        text = await resolved.entry.handler({
+          directory,
+          args: resolved.remainingArgs,
+          sessionID,
+          agents
+        });
+      } catch (_err) {
+        const cmdName = tokens[0] || "unknown";
+        const errMsg = _err instanceof Error ? _err.message : String(_err);
+        text = `Error executing /swarm ${cmdName}: ${errMsg}`;
+      }
+      if (resolved.warning) {
+        text = `${resolved.warning}
+
+${text}`;
+      }
+    }
+  }
+  if (includeWelcome && maybeMarkFirstRun(directory)) {
+    text = prependWelcome(text);
+  }
+  return {
+    text,
+    resolved: resolved ?? undefined,
+    canonicalKey: resolved ? canonicalCommandKey(resolved) : undefined
+  };
+}
+var init_command_dispatch = __esm(() => {
+  init_registry();
+});
+
+// src/commands/tool-policy.ts
+function classifySwarmCommandToolUse(resolved) {
+  const canonicalKey = canonicalCommandKey(resolved);
+  const args2 = resolved.remainingArgs;
+  if (!SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey)) {
+    return {
+      allowed: false,
+      message: `/swarm ${canonicalKey} is not available through the chat tool yet.
+
+` + `Use the canonical CLI path for now: \`bunx opencode-swarm run ${canonicalKey}\`.
+` + `Commands with state changes, auto-heal behavior, or subprocesses need confirmation gates before chat-tool support.`
+    };
+  }
+  if (canonicalKey === "config doctor" && args2.some((arg) => arg === "--fix" || arg === "-f")) {
+    return {
+      allowed: false,
+      message: "/swarm config doctor --fix is not available through swarm_command. Run the CLI command directly when you intend to modify config files."
+    };
+  }
+  if (NO_ARGS.has(canonicalKey) && args2.length > 0) {
+    return {
+      allowed: false,
+      message: `/swarm ${canonicalKey} does not accept arguments through swarm_command.`
+    };
+  }
+  if (canonicalKey === "knowledge") {
+    if (args2.length === 0)
+      return { allowed: true };
+    if (args2.length === 1 && args2[0] === "list")
+      return { allowed: true };
+    return {
+      allowed: false,
+      message: "Only `/swarm knowledge` and `/swarm knowledge list` are available through swarm_command. Knowledge migrate/quarantine/restore are intentionally excluded."
+    };
+  }
+  if (canonicalKey === "retrieve") {
+    if (args2.length !== 1 || !SUMMARY_ID_PATTERN.test(args2[0])) {
+      return {
+        allowed: false,
+        message: "Usage through swarm_command: `/swarm retrieve <summary-id>` with a single summary ID such as S1."
+      };
+    }
+  }
+  if (canonicalKey === "benchmark") {
+    const allowedFlags = new Set(["--cumulative", "--ci-gate"]);
+    const invalid = args2.filter((arg) => !allowedFlags.has(arg));
+    if (invalid.length > 0) {
+      return {
+        allowed: false,
+        message: "Only `--cumulative` and `--ci-gate` are supported for `/swarm benchmark` through swarm_command."
+      };
+    }
+  }
+  if (canonicalKey === "show-plan") {
+    if (args2.length > 1 || args2[0] && !/^\d+$/.test(args2[0])) {
+      return {
+        allowed: false,
+        message: "Usage through swarm_command: `/swarm show-plan` or `/swarm show-plan <phase-number>`."
+      };
+    }
+  }
+  if (canonicalKey === "evidence") {
+    if (args2.length > 1 || args2[0] && !TASK_ID_PATTERN.test(args2[0])) {
+      return {
+        allowed: false,
+        message: "Usage through swarm_command: `/swarm evidence` or `/swarm evidence <task-id>`."
+      };
+    }
+  }
+  if (canonicalKey === "help" && args2.length > 2) {
+    return {
+      allowed: false,
+      message: "Usage through swarm_command: `/swarm help` or `/swarm help <command>`."
+    };
+  }
+  return { allowed: true };
+}
+function classifySwarmCommandChatFallbackUse(resolved) {
+  const canonicalKey = canonicalCommandKey(resolved);
+  const args2 = resolved.remainingArgs;
+  if (canonicalKey === "config doctor" && args2.some((arg) => arg === "--fix" || arg === "-f")) {
+    return {
+      allowed: false,
+      message: "/swarm config doctor --fix is not available through chat fallback because it can modify configuration files. Run the CLI command directly when you intend to apply fixes."
+    };
+  }
+  if (canonicalKey === "knowledge migrate" || canonicalKey === "knowledge quarantine" || canonicalKey === "knowledge restore") {
+    return {
+      allowed: false,
+      message: `/swarm ${canonicalKey} is not available through chat fallback because it mutates .swarm knowledge state. ` + "Run the CLI command directly after confirming the intended state change."
+    };
+  }
+  return { allowed: true };
+}
+var SWARM_COMMAND_TOOL_COMMANDS, SWARM_COMMAND_TOOL_ALLOWLIST, NO_ARGS, SUMMARY_ID_PATTERN, TASK_ID_PATTERN;
+var init_tool_policy = __esm(() => {
+  init_command_dispatch();
+  SWARM_COMMAND_TOOL_COMMANDS = [
+    "agents",
+    "config",
+    "config doctor",
+    "config-doctor",
+    "doctor",
+    "doctor tools",
+    "status",
+    "show-plan",
+    "plan",
+    "help",
+    "history",
+    "evidence",
+    "evidence summary",
+    "evidence-summary",
+    "retrieve",
+    "diagnose",
+    "preflight",
+    "benchmark",
+    "knowledge",
+    "sync-plan",
+    "export",
+    "list-agents"
+  ];
+  SWARM_COMMAND_TOOL_ALLOWLIST = new Set([
+    "agents",
+    "config",
+    "config doctor",
+    "doctor tools",
+    "status",
+    "show-plan",
+    "help",
+    "history",
+    "evidence",
+    "evidence summary",
+    "retrieve",
+    "diagnose",
+    "preflight",
+    "benchmark",
+    "knowledge",
+    "sync-plan",
+    "export"
+  ]);
+  NO_ARGS = new Set([
+    "agents",
+    "config",
+    "config doctor",
+    "doctor tools",
+    "status",
+    "history",
+    "evidence summary",
+    "diagnose",
+    "preflight",
+    "sync-plan",
+    "export"
+  ]);
+  SUMMARY_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+  TASK_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
+});
+
 // src/commands/command-names.ts
 var COMMAND_NAMES, COMMAND_NAME_SET;
 var init_command_names = __esm(() => {
@@ -60648,6 +60923,7 @@ var init_command_names = __esm(() => {
 var exports_commands = {};
 __export(exports_commands, {
   resolveCommand: () => resolveCommand,
+  normalizeSwarmCommandInput: () => normalizeSwarmCommandInput,
   handleWriteRetroCommand: () => handleWriteRetroCommand,
   handleTurboCommand: () => handleTurboCommand,
   handleSyncPlanCommand: () => handleSyncPlanCommand,
@@ -60689,17 +60965,27 @@ __export(exports_commands, {
   handleAnalyzeCommand: () => handleAnalyzeCommand,
   handleAgentsCommand: () => handleAgentsCommand,
   handleAcknowledgeSpecDriftCommand: () => handleAcknowledgeSpecDriftCommand,
+  formatCommandNotFound: () => formatCommandNotFound,
+  executeSwarmCommand: () => executeSwarmCommand,
   createSwarmCommandHandler: () => createSwarmCommandHandler,
+  classifySwarmCommandToolUse: () => classifySwarmCommandToolUse,
+  classifySwarmCommandChatFallbackUse: () => classifySwarmCommandChatFallbackUse,
   buildHelpText: () => buildHelpText,
+  agentHasSwarmCommandTool: () => agentHasSwarmCommandTool,
   VALID_COMMANDS: () => VALID_COMMANDS,
+  SWARM_COMMAND_TOOL_COMMANDS: () => SWARM_COMMAND_TOOL_COMMANDS,
+  SWARM_COMMAND_TOOL_ALLOWLIST: () => SWARM_COMMAND_TOOL_ALLOWLIST,
   COMMAND_REGISTRY: () => COMMAND_REGISTRY,
   COMMAND_NAME_SET: () => COMMAND_NAME_SET,
   COMMAND_NAMES: () => COMMAND_NAMES
 });
-import fs36 from "node:fs";
-import path55 from "node:path";
 function buildHelpText() {
-  const lines = ["## Swarm Commands", ""];
+  const lines = [
+    "## Swarm Commands",
+    "",
+    "**Chat routing note**: supported read-only `/swarm` commands are routed through the `swarm_command` tool when the active agent has that tool. Unsupported or state-changing commands remain chat-mediated; use `bunx opencode-swarm run <subcommand>` when you need canonical output.",
+    ""
+  ];
   const CATEGORIES = [
     "core",
     "agent",
@@ -60794,86 +61080,127 @@ function buildHelpText() {
   return lines.join(`
 `);
 }
-function createSwarmCommandHandler(directory, agents) {
+function createSwarmCommandHandler(directory, agents, options = {}) {
   return async (input, output) => {
-    if (input.command !== "swarm" && !input.command.startsWith("swarm-")) {
+    const normalized = normalizeSwarmCommandInput(input.command, input.arguments);
+    if (!normalized.isSwarmCommand) {
       return;
     }
-    let isFirstRun = false;
-    const sentinelPath = path55.join(directory, ".swarm", ".first-run-complete");
-    try {
-      const swarmDir = path55.join(directory, ".swarm");
-      fs36.mkdirSync(swarmDir, { recursive: true });
-      fs36.writeFileSync(sentinelPath, `first-run-complete: ${new Date().toISOString()}
-`, { flag: "wx" });
-      isFirstRun = true;
-    } catch (_err) {}
-    let tokens;
-    if (input.command === "swarm") {
-      tokens = input.arguments.trim().split(/\s+/).filter(Boolean);
-    } else {
-      const subcommand = input.command.slice("swarm-".length);
-      const extraArgs = input.arguments.trim().split(/\s+/).filter(Boolean);
-      tokens = [subcommand, ...extraArgs];
-    }
-    let text;
-    const resolved = resolveCommand(tokens);
-    if (!resolved) {
-      if (tokens.length === 0) {
-        text = buildHelpText();
-      } else {
-        const attemptedCommand = tokens[0] || "";
-        const MAX_DISPLAY = 100;
-        const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-        const similar = _internals34.findSimilarCommands(attemptedCommand);
-        const header = `Command \`/swarm ${displayCommand}\` not found.`;
-        const suggestions = similar.length > 0 ? `Did you mean:
-${similar.map((cmd) => `  • /swarm ${cmd}`).join(`
-`)}` : "";
-        const footer = "Run `/swarm help` for all commands.";
-        text = [header, suggestions, footer].filter(Boolean).join(`
-
-`);
-      }
-    } else {
-      try {
-        text = await resolved.entry.handler({
-          directory,
-          args: resolved.remainingArgs,
-          sessionID: input.sessionID,
-          agents
-        });
-      } catch (_err) {
-        const cmdName = tokens[0] || "unknown";
-        const errMsg = _err instanceof Error ? _err.message : String(_err);
-        text = `Error executing /swarm ${cmdName}: ${errMsg}`;
-      }
-      if (resolved.warning) {
-        text = `${resolved.warning}
-
-${text}`;
-      }
-    }
-    if (isFirstRun) {
-      const welcomeMessage = `Welcome to OpenCode Swarm! \uD83D\uDC1D
-` + `
-` + `Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.
-`;
-      text = welcomeMessage + text;
-    }
-    output.parts = [
-      { type: "text", text }
-    ];
+    output.parts.splice(0, output.parts.length, {
+      type: "text",
+      text: await buildSwarmCommandPrompt({
+        directory,
+        agents,
+        sessionID: input.sessionID,
+        tokens: normalized.tokens,
+        activeAgentName: options.getActiveAgentName?.(input.sessionID),
+        registeredAgents: options.registeredAgents
+      })
+    });
+    return;
   };
 }
+async function buildSwarmCommandPrompt(args2) {
+  const {
+    directory,
+    agents,
+    sessionID,
+    tokens,
+    activeAgentName,
+    registeredAgents
+  } = args2;
+  const resolved = _internals34.resolveCommand(tokens);
+  if (!resolved) {
+    if (tokens.length === 0) {
+      return buildHelpText();
+    }
+    return formatCommandNotFound(tokens);
+  }
+  const typedResolved = resolved;
+  const canonicalKey = canonicalCommandKey(typedResolved);
+  const policy = classifySwarmCommandToolUse(typedResolved);
+  const isV1ToolCommand = SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey);
+  const canUseTool = agentHasSwarmCommandTool(activeAgentName, agents, registeredAgents);
+  if (canUseTool && policy.allowed && isV1ToolCommand) {
+    return routeToSwarmCommandTool({
+      command: canonicalKey,
+      args: resolved.remainingArgs,
+      original: `/swarm ${tokens.join(" ")}`.trim()
+    });
+  }
+  if (canUseTool && isV1ToolCommand && !policy.allowed) {
+    return [
+      `The user typed \`/swarm ${tokens.join(" ")}\`.`,
+      policy.message,
+      "Do not invent command output. Explain the limitation and recommend the canonical CLI path above."
+    ].join(`
+`);
+  }
+  const chatFallbackPolicy = classifySwarmCommandChatFallbackUse(typedResolved);
+  if (!chatFallbackPolicy.allowed) {
+    return [
+      `The user typed \`/swarm ${tokens.join(" ")}\`.`,
+      chatFallbackPolicy.message,
+      "Do not execute this command through chat and do not invent command output."
+    ].join(`
+`);
+  }
+  const result = await executeSwarmCommand({
+    directory,
+    agents,
+    sessionID,
+    tokens
+  });
+  return formatCanonicalPromptFallback({
+    original: `/swarm ${tokens.join(" ")}`.trim(),
+    text: result.text
+  });
+}
+function agentHasSwarmCommandTool(activeAgentName, agents, registeredAgents) {
+  const name2 = activeAgentName ?? ORCHESTRATOR_NAME;
+  const registeredTools = registeredAgents?.[name2]?.tools;
+  if (registeredTools) {
+    return registeredTools.swarm_command === true;
+  }
+  const explicitTools = agents[name2]?.config?.tools;
+  if (explicitTools) {
+    return explicitTools.swarm_command === true;
+  }
+  const baseName = stripKnownSwarmPrefix(name2);
+  return AGENT_TOOL_MAP[baseName]?.includes("swarm_command") === true;
+}
+function formatCanonicalPromptFallback(args2) {
+  return [
+    `The user typed \`${args2.original}\`.`,
+    "Canonical opencode-swarm command output follows.",
+    "Show this output verbatim and add no extra swarm state.",
+    "",
+    args2.text
+  ].join(`
+`);
+}
+function routeToSwarmCommandTool(args2) {
+  return [
+    `The user typed \`${args2.original}\`.`,
+    "Call the `swarm_command` tool exactly once with:",
+    JSON.stringify({ command: args2.command, args: args2.args }, null, 2),
+    "After the tool returns, show the tool output verbatim and add no extra swarm state."
+  ].join(`
+`);
+}
 var init_commands = __esm(() => {
+  init_constants();
+  init_schema();
+  init_command_dispatch();
   init_registry();
+  init_tool_policy();
   init_acknowledge_spec_drift();
   init_agents();
   init_archive();
   init_benchmark();
   init_checkpoint2();
   init_close();
+  init_command_dispatch();
   init_command_names();
   init_config2();
   init_council();
@@ -60901,6 +61228,7 @@ var init_commands = __esm(() => {
   init_simulate();
   init_status();
   init_sync_plan();
+  init_tool_policy();
   init_turbo();
   init_write_retro2();
 });
@@ -98332,6 +98660,31 @@ function formatMutationGapFeedback(finding) {
 - **[${finding.severity}]** \`${finding.location}\` (${finding.category}) — ${finding.detail}
   _Evidence:_ ${finding.evidence}`;
 }
+// src/tools/swarm-command.ts
+init_zod();
+init_command_dispatch();
+init_tool_policy();
+init_create_tool();
+function createSwarmCommandTool(agents) {
+  return createSwarmTool({
+    description: "Run supported /swarm commands through the canonical opencode-swarm command registry. Return the tool output verbatim to the user.",
+    args: {
+      command: exports_external.enum(SWARM_COMMAND_TOOL_COMMANDS).describe("The /swarm subcommand to run, without the /swarm prefix."),
+      args: exports_external.array(exports_external.string()).default([]).describe("Additional command arguments as separate tokens.")
+    },
+    async execute(rawArgs, directory, ctx) {
+      const args2 = rawArgs;
+      const result = await executeSwarmCommand({
+        directory,
+        agents,
+        sessionID: ctx?.sessionID ?? "",
+        tokens: [args2.command, ...args2.args ?? []],
+        policy: classifySwarmCommandToolUse
+      });
+      return result.text;
+    }
+  });
+}
 // src/tools/suggest-patch.ts
 init_zod();
 init_path_security();
@@ -103292,6 +103645,27 @@ ${footerLines.join(`
 // src/index.ts
 init_warning_buffer();
 var _heartbeatTimers = new Map;
+var SWARM_COMMAND_SYSTEM_RULE_TAG = "[opencode-swarm:swarm-command-rule]";
+function createSwarmCommandSystemRuleHook(agentDefinitions, registeredAgents) {
+  return async (input, output) => {
+    const { sessionID } = input;
+    const activeAgentName = sessionID ? swarmState.activeAgent.get(sessionID) : undefined;
+    if (!agentHasSwarmCommandTool(activeAgentName, agentDefinitions, registeredAgents)) {
+      return;
+    }
+    const system = Array.isArray(output.system) ? output.system : [];
+    if (system.some((entry) => entry.includes(SWARM_COMMAND_SYSTEM_RULE_TAG))) {
+      output.system = system;
+      return;
+    }
+    system.push([
+      SWARM_COMMAND_SYSTEM_RULE_TAG,
+      "When a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output."
+    ].join(`
+`));
+    output.system = system;
+  };
+}
 var OpenCodeSwarm = async (ctx) => {
   try {
     return await initializeOpenCodeSwarm(ctx);
@@ -103391,6 +103765,7 @@ async function initializeOpenCodeSwarm(ctx) {
   });
   const agents = getAgentConfigs(config3, ctx.directory, undefined, projectContext ?? undefined);
   const agentDefinitions = createAgents(config3, projectContext ?? undefined);
+  const agentDefinitionMap = Object.fromEntries(agentDefinitions.map((agent) => [agent.name, agent]));
   swarmState.curatorInitAgentNames = Object.keys(agents).filter((k) => k === "curator_init" || k.endsWith("_curator_init"));
   swarmState.curatorPhaseAgentNames = Object.keys(agents).filter((k) => k === "curator_phase" || k.endsWith("_curator_phase"));
   swarmState.skillImproverAgentNames = Object.keys(agents).filter((k) => k === "skill_improver" || k.endsWith("_skill_improver"));
@@ -103400,7 +103775,11 @@ async function initializeOpenCodeSwarm(ctx) {
   const systemEnhancerHook = createSystemEnhancerHook(config3, ctx.directory);
   const compactionHook = createCompactionCustomizerHook(config3, ctx.directory);
   const contextBudgetHandler = createContextBudgetHandler(config3);
-  const commandHandler = createSwarmCommandHandler(ctx.directory, Object.fromEntries(agentDefinitions.map((agent) => [agent.name, agent])));
+  const commandHandler = createSwarmCommandHandler(ctx.directory, agentDefinitionMap, {
+    getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+    registeredAgents: agents
+  });
+  const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(agentDefinitionMap, agents);
   const activityHooks = createAgentActivityHooks(config3, ctx.directory);
   const prmHook = createPrmHook(config3.prm ?? PrmConfigSchema.parse({}), ctx.directory);
   const trajectoryLoggerHook = createTrajectoryLoggerHook({
@@ -103695,7 +104074,8 @@ async function initializeOpenCodeSwarm(ctx) {
       write_hallucination_evidence,
       write_mutation_evidence,
       write_final_council_evidence,
-      declare_scope
+      declare_scope,
+      swarm_command: createSwarmCommandTool(agentDefinitionMap)
     },
     config: async (opencodeConfig) => {
       if (!opencodeConfig.agent) {
@@ -103953,6 +104333,7 @@ async function initializeOpenCodeSwarm(ctx) {
         return Promise.resolve();
       },
       automationConfig.capabilities?.phase_preflight === true && preflightTriggerManager ? createPhaseMonitorHook(ctx.directory, preflightTriggerManager, undefined, (sessionId) => createCuratorLLMDelegate(ctx.directory, "init", sessionId)) : knowledgeConfig.enabled ? createPhaseMonitorHook(ctx.directory, undefined, undefined, (sessionId) => createCuratorLLMDelegate(ctx.directory, "init", sessionId)) : undefined,
+      swarmCommandSystemRuleHook,
       (_input, output) => {
         if (Array.isArray(output.system) && output.system.length > 1) {
           output.system = [output.system.join(`
