@@ -31,10 +31,10 @@ describe('AGENT_TOOL_MAP', () => {
 		}
 	});
 
-	it('subagent tool counts are <= 20', () => {
+	it('subagent tool counts are <= 21', () => {
 		for (const agent of allAgentNames) {
 			if (agent === 'architect') continue;
-			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(20);
+			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(21);
 		}
 	});
 
@@ -69,6 +69,12 @@ describe('AGENT_TOOL_MAP', () => {
 		];
 		for (const tool of criticalTools) {
 			expect(architectTools).toContain(tool);
+		}
+	});
+
+	it('user-facing swarm agents can call swarm_command', () => {
+		for (const agent of allAgentNames) {
+			expect(AGENT_TOOL_MAP[agent]).toContain('swarm_command');
 		}
 	});
 });

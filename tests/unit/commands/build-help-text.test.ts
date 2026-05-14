@@ -238,6 +238,12 @@ describe('buildHelpText() — Task 2.2 changes', () => {
 		test('help text starts with "## Swarm Commands" header', () => {
 			expect(helpText).toStartWith('## Swarm Commands');
 		});
+
+		test('help text includes the tool-mediated chat routing note', () => {
+			expect(helpText).toContain('Chat routing note');
+			expect(helpText).toContain('swarm_command');
+			expect(helpText).toContain('bunx opencode-swarm run <subcommand>');
+		});
 	});
 
 	// -------------------------------------------------------------------------

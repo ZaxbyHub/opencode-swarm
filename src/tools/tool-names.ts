@@ -72,6 +72,7 @@ export type ToolName =
 	| 'skill_improve'
 	| 'spec_write'
 	| 'knowledge_ack'
+	| 'swarm_command'
 	| 'lean_turbo_plan_lanes'
 	| 'lean_turbo_acquire_locks'
 	| 'lean_turbo_runner_status'
@@ -148,6 +149,7 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'skill_improve',
 	'spec_write',
 	'knowledge_ack',
+	'swarm_command',
 	'lean_turbo_plan_lanes',
 	'lean_turbo_acquire_locks',
 	'lean_turbo_runner_status',

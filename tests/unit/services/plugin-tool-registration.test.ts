@@ -72,6 +72,10 @@ describe('plugin tool registration alignment', () => {
 		expect(registered.has('declare_council_criteria')).toBe(true);
 	});
 
+	test('swarm_command is registered in plugin tool block', () => {
+		expect(registered.has('swarm_command')).toBe(true);
+	});
+
 	test('every AGENT_TOOL_MAP tool is registered in plugin tool block', () => {
 		const missing: Array<{ agent: string; tool: string }> = [];
 		for (const [agent, tools] of Object.entries(AGENT_TOOL_MAP)) {

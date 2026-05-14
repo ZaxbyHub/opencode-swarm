@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import type { Plugin } from '@opencode-ai/plugin';
 import packageJson from '../package.json' with { type: 'json' };
-import { createAgents, getAgentConfigs } from './agents';
+import { type AgentDefinition, createAgents, getAgentConfigs } from './agents';
 import { parseSoundingBoardResponse } from './agents/critic.js';
 import {
 	type AutomationStatusArtifact,
@@ -10,7 +10,10 @@ import {
 	PlanSyncWorker,
 	type PreflightTriggerManager,
 } from './background';
-import { createSwarmCommandHandler } from './commands';
+import {
+	agentHasSwarmCommandTool,
+	createSwarmCommandHandler,
+} from './commands';
 import { loadPluginConfigWithMetaAsync } from './config';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
 import {
@@ -94,6 +97,7 @@ import {
 	completion_verify,
 	complexity_hotspots,
 	convene_general_council,
+	createSwarmCommandTool,
 	curator_analyze,
 	declare_council_criteria,
 	declare_scope,
@@ -185,6 +189,43 @@ import {
 	addDeferredWarning,
 	deferredWarnings,
 } from './services/warning-buffer.js';
+
+const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
+
+function createSwarmCommandSystemRuleHook(
+	agentDefinitions: Record<string, AgentDefinition>,
+	registeredAgents: Record<string, { tools?: Record<string, boolean> }>,
+): (input: unknown, output: { system?: string[] }) => Promise<void> {
+	return async (input, output) => {
+		const { sessionID } = input as { sessionID?: string };
+		const activeAgentName = sessionID
+			? swarmState.activeAgent.get(sessionID)
+			: undefined;
+		if (
+			!agentHasSwarmCommandTool(
+				activeAgentName,
+				agentDefinitions,
+				registeredAgents,
+			)
+		) {
+			return;
+		}
+
+		const system = Array.isArray(output.system) ? output.system : [];
+		if (system.some((entry) => entry.includes(SWARM_COMMAND_SYSTEM_RULE_TAG))) {
+			output.system = system;
+			return;
+		}
+
+		system.push(
+			[
+				SWARM_COMMAND_SYSTEM_RULE_TAG,
+				'When a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output.',
+			].join('\n'),
+		);
+		output.system = system;
+	};
+}
 
 const OpenCodeSwarm: Plugin = async (ctx) => {
 	try {
@@ -414,6 +455,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		projectContext ?? undefined,
 	);
 	const agentDefinitions = createAgents(config, projectContext ?? undefined);
+	const agentDefinitionMap = Object.fromEntries(
+		agentDefinitions.map((agent) => [agent.name, agent]),
+	);
 
 	// Collect all registered curator agent names across all swarms.
 	// The factory resolves the correct name at call time by matching the active
@@ -446,7 +490,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
-		Object.fromEntries(agentDefinitions.map((agent) => [agent.name, agent])),
+		agentDefinitionMap,
+		{
+			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+			registeredAgents: agents,
+		},
+	);
+	const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(
+		agentDefinitionMap,
+		agents,
 	);
 	const activityHooks = createAgentActivityHooks(config, ctx.directory);
 	const prmHook = createPrmHook(
@@ -914,6 +966,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			write_mutation_evidence,
 			write_final_council_evidence,
 			declare_scope,
+			swarm_command: createSwarmCommandTool(agentDefinitionMap),
 		},
 
 		// Configure OpenCode - merge agents into config
@@ -1255,6 +1308,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 									createCuratorLLMDelegate(ctx.directory, 'init', sessionId),
 							)
 						: undefined,
+				swarmCommandSystemRuleHook,
 				(_input: unknown, output: { system?: string[] }): Promise<void> => {
 					if (Array.isArray(output.system) && output.system.length > 1) {
 						output.system = [output.system.join('\n\n')];

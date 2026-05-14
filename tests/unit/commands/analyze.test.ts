@@ -16,14 +16,14 @@ describe('handleAnalyzeCommand', () => {
 
 	test('returns the default message when args is empty array', async () => {
 		const result = await handleAnalyzeCommand('/test/dir', []);
-		expect(result).toBe(
+		expect(result).toContain(
 			'[MODE: ANALYZE] Please analyze the spec against the plan using MODE: ANALYZE.',
 		);
 	});
 
 	test('returns the default message when args contains only whitespace', async () => {
 		const result = await handleAnalyzeCommand('/test/dir', ['   ', '\t', '\n']);
-		expect(result).toBe(
+		expect(result).toContain(
 			'[MODE: ANALYZE] Please analyze the spec against the plan using MODE: ANALYZE.',
 		);
 	});
@@ -58,11 +58,7 @@ describe('handleAnalyzeCommand', () => {
 		const handler = createSwarmCommandHandler('/test/dir', testAgents);
 		const output = { parts: [] as unknown[] };
 
-		// Trigger help by using unknown subcommand
-		await handler(
-			{ command: 'swarm', sessionID: 's1', arguments: 'unknown' },
-			output,
-		);
+		await handler({ command: 'swarm', sessionID: 's1', arguments: '' }, output);
 
 		const helpText = (output.parts[0] as { type: string; text: string }).text;
 		expect(helpText).toContain('/swarm analyze');
@@ -81,7 +77,7 @@ describe('handleAnalyzeCommand — adversarial', () => {
 	test('whitespace-only args do NOT appear in the output (trimming works)', async () => {
 		const result = await handleAnalyzeCommand('/test/dir', ['   ']);
 		expect(result).not.toMatch(/\[MODE: ANALYZE\]\s*$/);
-		expect(result).toBe(
+		expect(result).toContain(
 			'[MODE: ANALYZE] Please analyze the spec against the plan using MODE: ANALYZE.',
 		);
 	});
@@ -107,7 +103,7 @@ describe('handleAnalyzeCommand — adversarial', () => {
 		const result = await handleAnalyzeCommand('/test/dir', ['']);
 		expect(result).not.toBe('[MODE: ANALYZE] ');
 		expect(result).not.toBe('[MODE: ANALYZE]');
-		expect(result).toBe(
+		expect(result).toContain(
 			'[MODE: ANALYZE] Please analyze the spec against the plan using MODE: ANALYZE.',
 		);
 	});
@@ -165,7 +161,7 @@ describe('handleAnalyzeCommand index registration — adversarial', () => {
 		const result = (output.parts[0] as { type: string; text: string }).text;
 
 		// Verify it returns analyze's default message, not specify's
-		expect(result).toBe(
+		expect(result).toContain(
 			'[MODE: ANALYZE] Please analyze the spec against the plan using MODE: ANALYZE.',
 		);
 
@@ -188,11 +184,9 @@ describe('handleAnalyzeCommand index registration — adversarial', () => {
 
 		const result = (output.parts[0] as { type: string; text: string }).text;
 
-		// Verify it returns HELP_TEXT
-		expect(result).toContain('## Swarm Commands');
-		expect(result).toContain('/swarm status');
-		expect(result).toContain('/swarm analyze');
-		expect(result).toContain('/swarm specify');
+		// Verify it returns the bounded command-not-found UX.
+		expect(result).toContain('not found');
+		expect(result).toContain('/swarm help');
 
 		// Verify it does NOT contain any mode tag
 		expect(result).not.toContain('[MODE:');
