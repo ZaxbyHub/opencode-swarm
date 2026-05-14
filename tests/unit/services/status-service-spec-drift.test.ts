@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import {
 	formatStatusMarkdown,
 	getStatusData,
+	handleStatusCommand,
 } from '../../../src/services/status-service';
 
 let tmpDir: string;
@@ -74,5 +75,23 @@ describe('formatStatusMarkdown spec drift line', () => {
 		expect(md).toContain('current: abc123');
 		expect(md).toContain('/swarm clarify');
 		expect(md).toContain('/swarm acknowledge-spec-drift');
+	});
+});
+
+describe('handleStatusCommand spec drift fallback (PR #855 follow-up)', () => {
+	test('emits the drift block even when no plan is loaded', async () => {
+		await writeStalenessFile();
+		const md = await handleStatusCommand(tmpDir, {});
+		expect(md).toContain('No active swarm plan found.');
+		expect(md).toContain('**Spec drift detected**');
+		expect(md).toContain('stored: def456');
+		expect(md).toContain('current: abc123');
+		expect(md).toContain('/swarm clarify');
+		expect(md).toContain('/swarm acknowledge-spec-drift');
+	});
+
+	test('falls back to plain no-plan message when drift signal is absent', async () => {
+		const md = await handleStatusCommand(tmpDir, {});
+		expect(md).toBe('No active swarm plan found.');
 	});
 });
