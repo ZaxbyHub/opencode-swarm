@@ -1,13 +1,28 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import type { AgentDefinition } from '../agents/index.js';
+import {
+	AGENT_TOOL_MAP,
+	type AgentName,
+	ORCHESTRATOR_NAME,
+} from '../config/constants.js';
+import { stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	canonicalCommandKey,
+	executeSwarmCommand,
+	formatCommandNotFound,
+	normalizeSwarmCommandInput,
+	type ResolvedSwarmCommand,
+} from './command-dispatch.js';
 import {
 	_internals,
 	COMMAND_REGISTRY,
 	type CommandEntry,
-	resolveCommand,
 	VALID_COMMANDS,
 } from './registry.js';
+import {
+	classifySwarmCommandChatFallbackUse,
+	classifySwarmCommandToolUse,
+	SWARM_COMMAND_TOOL_ALLOWLIST,
+} from './tool-policy.js';
 
 export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 // Re-export individual handlers
@@ -19,6 +34,11 @@ export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
 export { handleClarifyCommand } from './clarify';
 export { handleCloseCommand } from './close';
+export {
+	executeSwarmCommand,
+	formatCommandNotFound,
+	normalizeSwarmCommandInput,
+} from './command-dispatch.js';
 export type { CommandName } from './command-names.js';
 export { COMMAND_NAME_SET, COMMAND_NAMES } from './command-names.js';
 export { handleConfigCommand } from './config';
@@ -66,11 +86,22 @@ export { handleSimulateCommand } from './simulate';
 export { handleSpecifyCommand } from './specify';
 export { handleStatusCommand } from './status';
 export { handleSyncPlanCommand } from './sync-plan';
+export {
+	classifySwarmCommandChatFallbackUse,
+	classifySwarmCommandToolUse,
+	SWARM_COMMAND_TOOL_ALLOWLIST,
+	SWARM_COMMAND_TOOL_COMMANDS,
+} from './tool-policy.js';
 export { handleTurboCommand } from './turbo';
 export { handleWriteRetroCommand } from './write-retro';
 
 export function buildHelpText(): string {
-	const lines: string[] = ['## Swarm Commands', ''];
+	const lines: string[] = [
+		'## Swarm Commands',
+		'',
+		'**Chat routing note**: supported read-only `/swarm` commands are routed through the `swarm_command` tool when the active agent has that tool. Unsupported or state-changing commands remain chat-mediated; use `bunx opencode-swarm run <subcommand>` when you need canonical output.',
+		'',
+	];
 
 	// Valid categories in display order
 	const CATEGORIES = [
@@ -222,108 +253,155 @@ export function buildHelpText(): string {
 export function createSwarmCommandHandler(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	options: {
+		getActiveAgentName?: (sessionID: string) => string | undefined;
+		registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
+	} = {},
 ): (
 	input: { command: string; sessionID: string; arguments: string },
 	output: { parts: unknown[] },
 ) => Promise<void> {
 	return async (input, output) => {
-		// Accept both the generic 'swarm' command and individual shortcut commands
-		// like 'swarm-config', 'swarm-status', 'swarm-sync-plan', etc.
-		// When a user selects a shortcut from the command picker (e.g. swarm-config),
-		// OpenCode sets input.command to the registered key ('swarm-config') and
-		// input.arguments to any additional $ARGUMENTS the user typed. Without this
-		// check those shortcuts were silently ignored and fell through to the LLM.
-		if (input.command !== 'swarm' && !input.command.startsWith('swarm-')) {
+		const normalized = normalizeSwarmCommandInput(
+			input.command,
+			input.arguments,
+		);
+		if (!normalized.isSwarmCommand) {
 			return;
 		}
-
-		// First-run sentinel detection (atomic — only swarm commands can initialize)
-		let isFirstRun = false;
-		const sentinelPath = path.join(directory, '.swarm', '.first-run-complete');
-		try {
-			const swarmDir = path.join(directory, '.swarm');
-			fs.mkdirSync(swarmDir, { recursive: true });
-			// 'wx' flag: write-only, fails atomically if file already exists
-			fs.writeFileSync(
-				sentinelPath,
-				`first-run-complete: ${new Date().toISOString()}\n`,
-				{ flag: 'wx' },
-			);
-			isFirstRun = true; // Only reached if write succeeded (file didn't exist)
-		} catch (_err) {
-			// EEXIST means file already existed — not first run; other errors: proceed silently
-		}
-
-		// Verified: input.arguments receives the expanded $ARGUMENTS from the template.
-		// The hook output.parts overrides the LLM response in the UI.
-		// Parse arguments
-		let tokens: string[];
-		if (input.command === 'swarm') {
-			// Generic /swarm $ARGUMENTS: arguments contain the full subcommand + args
-			tokens = input.arguments.trim().split(/\s+/).filter(Boolean);
-		} else {
-			// Shortcut command like 'swarm-config': extract subcommand from the key
-			// e.g. 'swarm-config' → 'config', 'swarm-sync-plan' → 'sync-plan'
-			const subcommand = input.command.slice('swarm-'.length);
-			const extraArgs = input.arguments.trim().split(/\s+/).filter(Boolean);
-			tokens = [subcommand, ...extraArgs];
-		}
-
-		let text: string;
-
-		const resolved = resolveCommand(tokens);
-
-		if (!resolved) {
-			if (tokens.length === 0) {
-				text = buildHelpText();
-			} else {
-				const attemptedCommand = tokens[0] || '';
-				const MAX_DISPLAY = 100;
-				const displayCommand =
-					attemptedCommand.length > MAX_DISPLAY
-						? `${attemptedCommand.slice(0, MAX_DISPLAY)}...`
-						: attemptedCommand;
-				const similar = _internals.findSimilarCommands(attemptedCommand);
-				const header = `Command \`/swarm ${displayCommand}\` not found.`;
-				const suggestions =
-					similar.length > 0
-						? `Did you mean:\n${similar.map((cmd) => `  • /swarm ${cmd}`).join('\n')}`
-						: '';
-				const footer = 'Run `/swarm help` for all commands.';
-				text = [header, suggestions, footer].filter(Boolean).join('\n\n');
-			}
-		} else {
-			try {
-				text = await resolved.entry.handler({
-					directory,
-					args: resolved.remainingArgs,
-					sessionID: input.sessionID,
-					agents,
-				});
-			} catch (_err) {
-				const cmdName = tokens[0] || 'unknown';
-				const errMsg = _err instanceof Error ? _err.message : String(_err);
-				text = `Error executing /swarm ${cmdName}: ${errMsg}`;
-			}
-
-			// Prepend deprecation warning if the resolved command is a deprecated alias
-			if (resolved.warning) {
-				text = `${resolved.warning}\n\n${text}`;
-			}
-		}
-
-		// Prepend welcome message on first run
-		if (isFirstRun) {
-			const welcomeMessage =
-				`Welcome to OpenCode Swarm! 🐝\n` +
-				`\n` +
-				`Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.\n`;
-			text = welcomeMessage + text;
-		}
-
-		// Convert string result to Part[]
-		output.parts = [
-			{ type: 'text', text } as unknown as (typeof output.parts)[number],
-		];
+		output.parts.splice(0, output.parts.length, {
+			type: 'text',
+			text: await buildSwarmCommandPrompt({
+				directory,
+				agents,
+				sessionID: input.sessionID,
+				tokens: normalized.tokens,
+				activeAgentName: options.getActiveAgentName?.(input.sessionID),
+				registeredAgents: options.registeredAgents,
+			}),
+		} as unknown as (typeof output.parts)[number]);
+		return;
 	};
+}
+
+async function buildSwarmCommandPrompt(args: {
+	directory: string;
+	agents: Record<string, AgentDefinition>;
+	sessionID: string;
+	tokens: string[];
+	activeAgentName?: string;
+	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
+}): Promise<string> {
+	const {
+		directory,
+		agents,
+		sessionID,
+		tokens,
+		activeAgentName,
+		registeredAgents,
+	} = args;
+	const resolved = _internals.resolveCommand(tokens);
+	if (!resolved) {
+		if (tokens.length === 0) {
+			return buildHelpText();
+		}
+		return formatCommandNotFound(tokens);
+	}
+
+	const typedResolved = resolved as ResolvedSwarmCommand;
+	const canonicalKey = canonicalCommandKey(typedResolved);
+	const policy = classifySwarmCommandToolUse(typedResolved);
+	const isV1ToolCommand = SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey);
+	const canUseTool = agentHasSwarmCommandTool(
+		activeAgentName,
+		agents,
+		registeredAgents,
+	);
+	if (canUseTool && policy.allowed && isV1ToolCommand) {
+		return routeToSwarmCommandTool({
+			command: canonicalKey,
+			args: resolved.remainingArgs,
+			original: `/swarm ${tokens.join(' ')}`.trim(),
+		});
+	}
+
+	if (canUseTool && isV1ToolCommand && !policy.allowed) {
+		return [
+			`The user typed \`/swarm ${tokens.join(' ')}\`.`,
+			policy.message,
+			'Do not invent command output. Explain the limitation and recommend the canonical CLI path above.',
+		].join('\n');
+	}
+
+	const chatFallbackPolicy = classifySwarmCommandChatFallbackUse(typedResolved);
+	if (!chatFallbackPolicy.allowed) {
+		return [
+			`The user typed \`/swarm ${tokens.join(' ')}\`.`,
+			chatFallbackPolicy.message,
+			'Do not execute this command through chat and do not invent command output.',
+		].join('\n');
+	}
+
+	const result = await executeSwarmCommand({
+		directory,
+		agents,
+		sessionID,
+		tokens,
+	});
+
+	return formatCanonicalPromptFallback({
+		original: `/swarm ${tokens.join(' ')}`.trim(),
+		text: result.text,
+	});
+}
+
+export function agentHasSwarmCommandTool(
+	activeAgentName: string | undefined,
+	agents: Record<string, AgentDefinition>,
+	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>,
+): boolean {
+	const name = activeAgentName ?? ORCHESTRATOR_NAME;
+	const registeredTools = registeredAgents?.[name]?.tools;
+	if (registeredTools) {
+		// Registered runtime tools are authoritative. Falling through to
+		// AGENT_TOOL_MAP here could tell an agent to call a tool OpenCode did
+		// not actually register for it.
+		return registeredTools.swarm_command === true;
+	}
+
+	const explicitTools = agents[name]?.config?.tools;
+	if (explicitTools) {
+		// Explicit factory tools are also authoritative for tests and direct
+		// consumers that do not pass OpenCode's registered agent map.
+		return explicitTools.swarm_command === true;
+	}
+
+	const baseName = stripKnownSwarmPrefix(name) as AgentName;
+	return AGENT_TOOL_MAP[baseName]?.includes('swarm_command') === true;
+}
+
+function formatCanonicalPromptFallback(args: {
+	original: string;
+	text: string;
+}): string {
+	return [
+		`The user typed \`${args.original}\`.`,
+		'Canonical opencode-swarm command output follows.',
+		'Show this output verbatim and add no extra swarm state.',
+		'',
+		args.text,
+	].join('\n');
+}
+
+function routeToSwarmCommandTool(args: {
+	command: string;
+	args: string[];
+	original: string;
+}): string {
+	return [
+		`The user typed \`${args.original}\`.`,
+		'Call the `swarm_command` tool exactly once with:',
+		JSON.stringify({ command: args.command, args: args.args }, null, 2),
+		'After the tool returns, show the tool output verbatim and add no extra swarm state.',
+	].join('\n');
 }

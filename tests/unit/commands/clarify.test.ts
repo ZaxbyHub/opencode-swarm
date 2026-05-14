@@ -58,11 +58,7 @@ describe('handleClarifyCommand', () => {
 		const handler = createSwarmCommandHandler('/test/dir', testAgents);
 		const output = { parts: [] as unknown[] };
 
-		// Trigger help by using unknown subcommand
-		await handler(
-			{ command: 'swarm', sessionID: 's1', arguments: 'unknown' },
-			output,
-		);
+		await handler({ command: 'swarm', sessionID: 's1', arguments: '' }, output);
 
 		const helpText = (output.parts[0] as { type: string; text: string }).text;
 		expect(helpText).toContain('/swarm clarify');

@@ -13,6 +13,12 @@ describe('buildHelpText()', () => {
 		test('starts with "## Swarm Commands"', () => {
 			expect(helpText.startsWith('## Swarm Commands')).toBe(true);
 		});
+
+		test('describes the tool-mediated chat routing path', () => {
+			expect(helpText).toContain('Chat routing note');
+			expect(helpText).toContain('swarm_command');
+			expect(helpText).toContain('bunx opencode-swarm run <subcommand>');
+		});
 	});
 
 	describe('command entries', () => {

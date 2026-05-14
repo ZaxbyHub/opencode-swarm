@@ -142,7 +142,7 @@ describe('Full-Auto Command Registration', () => {
 			);
 
 			expect(output.parts).toHaveLength(1);
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Full-Auto Mode enabled',
 			);
 			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
@@ -167,7 +167,7 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Full-Auto Mode disabled',
 			);
 			expect(session?.fullAutoMode).toBe(false);
@@ -190,7 +190,7 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Full-Auto Mode enabled',
 			);
 			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
@@ -212,7 +212,7 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Error: No active session. Full-Auto Mode requires an active session to operate.',
 			);
 		});

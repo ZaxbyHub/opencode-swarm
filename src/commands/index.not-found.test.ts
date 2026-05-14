@@ -124,9 +124,9 @@ describe('Command-not-found UX', () => {
 				expect(text).toContain('Command `/swarm confg` not found.');
 				// Suggestions section with bullet format
 				expect(text).toContain('Did you mean:');
-				expect(text).toContain('  • /swarm config');
-				expect(text).toContain('  • /swarm diagnose');
-				expect(text).toContain('  • /swarm check');
+				expect(text).toContain('  - /swarm config');
+				expect(text).toContain('  - /swarm diagnose');
+				expect(text).toContain('  - /swarm check');
 				// Footer
 				expect(text).toContain('Run `/swarm help` for all commands.');
 			} finally {
@@ -245,9 +245,9 @@ describe('Command-not-found UX', () => {
 				const text = (output.parts[0] as { text: string }).text;
 
 				// All similar commands should appear with bullet format
-				expect(text).toContain('  • /swarm diagnose');
-				expect(text).toContain('  • /swarm diagnostics');
-				expect(text).toContain('  • /swarm dark-matter');
+				expect(text).toContain('  - /swarm diagnose');
+				expect(text).toContain('  - /swarm diagnostics');
+				expect(text).toContain('  - /swarm dark-matter');
 			} finally {
 				_internals.findSimilarCommands = originalFn;
 			}
@@ -277,8 +277,8 @@ describe('Command-not-found UX', () => {
 				// Should show command-not-found UX for the extracted subcommand
 				expect(text).toContain('Command `/swarm nonexistent` not found.');
 				expect(text).toContain('Did you mean:');
-				expect(text).toContain('  • /swarm status');
-				expect(text).toContain('  • /swarm agents');
+				expect(text).toContain('  - /swarm status');
+				expect(text).toContain('  - /swarm agents');
 				expect(text).toContain('Run `/swarm help` for all commands.');
 			} finally {
 				_internals.findSimilarCommands = originalFn;

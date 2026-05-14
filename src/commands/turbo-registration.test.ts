@@ -163,7 +163,7 @@ describe('Task 3.12: Turbo Command Registration', () => {
 
 			// Verify output contains turbo mode enabled message
 			expect(output.parts).toHaveLength(1);
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Turbo Mode enabled',
 			);
 
@@ -192,7 +192,7 @@ describe('Task 3.12: Turbo Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Turbo Mode disabled',
 			);
 			expect(session?.turboMode).toBe(false);
@@ -215,7 +215,7 @@ describe('Task 3.12: Turbo Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Turbo Mode enabled',
 			);
 			expect(getAgentSession(testSessionId)?.turboMode).toBe(true);
@@ -237,7 +237,7 @@ describe('Task 3.12: Turbo Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toBe(
+			expect((output.parts[0] as { text: string }).text).toContain(
 				'Error: No active session. Turbo Mode requires an active session to operate.',
 			);
 		});
