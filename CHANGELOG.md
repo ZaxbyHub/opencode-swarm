@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.19.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.0...v7.19.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **plan:** make save_plan task removal explicit + surface spec drift ([#853](https://github.com/zaxbysauce/opencode-swarm/issues/853)) ([#855](https://github.com/zaxbysauce/opencode-swarm/issues/855)) ([6c70889](https://github.com/zaxbysauce/opencode-swarm/commit/6c708898fc10215e061eb92418bf7447c8dc2d0c))
+
 ## [7.19.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.0...v7.19.0) (2026-05-14)
 
 
