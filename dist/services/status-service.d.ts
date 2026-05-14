@@ -46,6 +46,14 @@ export interface StatusData {
     compactionCount: number;
     /** ISO timestamp of last compaction snapshot, or null if none */
     lastSnapshotAt: string | null;
+    /** Issue #853 Layer C: true if spec drift was detected for this plan */
+    specStale?: boolean;
+    /** Reason text from .swarm/spec-staleness.json (or RuntimePlan._specStaleReason) */
+    specStaleReason?: string;
+    /** Stored spec hash from when the plan was last saved */
+    specStaleStoredHash?: string;
+    /** Current spec.md hash on disk (null when spec.md is missing) */
+    specStaleCurrentHash?: string | null;
 }
 /**
  * Get status data from the swarm directory.

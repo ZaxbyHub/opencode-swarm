@@ -18,6 +18,45 @@ export class PlanConcurrentModificationError extends Error {
 	}
 }
 
+/**
+ * Thrown when savePlan detects that the incoming plan would silently drop one
+ * or more tasks from the prior plan without the caller acknowledging the
+ * removal (issue #853).
+ *
+ * Callers must pass `options.acknowledged_removals.ids` covering every missing
+ * task id together with a non-empty reason to proceed.
+ */
+export class PlanTaskRemovalNotAcknowledgedError extends Error {
+	readonly missingTasks: Array<{
+		id: string;
+		phase: number;
+		status: TaskStatus;
+	}>;
+	constructor(
+		missingTasks: Array<{ id: string; phase: number; status: TaskStatus }>,
+	) {
+		const idList = missingTasks.map((t) => `${t.id}(${t.status})`).join(', ');
+		super(
+			`PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED: the following tasks were present in the prior plan but missing from the new save: ${idList}. Pass acknowledged_removals.ids covering all missing task IDs with a non-empty reason to proceed.`,
+		);
+		this.name = 'PlanTaskRemovalNotAcknowledgedError';
+		this.missingTasks = missingTasks;
+	}
+}
+
+/**
+ * Caller-supplied acknowledgement that a save_plan operation is intentionally
+ * removing tasks from the prior plan (issue #853). Passed to savePlan via the
+ * `acknowledged_removals` option; `ids` must list every task id missing from
+ * the incoming plan; `reason` must be non-empty; `source` identifies the
+ * caller (e.g. 'save_plan_tool', 'phase_complete_rebuild_from_ledger').
+ */
+export interface AcknowledgedRemovals {
+	ids: string[];
+	reason: string;
+	source: string;
+}
+
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -587,8 +626,21 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 				const planMdContent = await readSwarmFileAsync(directory, 'plan.md');
 				if (planMdContent !== null) {
 					const migrated = migrateLegacyPlan(planMdContent);
-					// savePlan writes both plan.json and plan.md
-					await savePlan(directory, migrated);
+					// savePlan writes both plan.json and plan.md. Recovery path:
+					// auto-acknowledge any tasks dropped by the legacy-md migration
+					// so Layer A can disclose the audit count to the model.
+					const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
+						directory,
+						migrated,
+						'load_plan_migration_from_md',
+						'migrate legacy plan.md to plan.json',
+					);
+					if (removedCount > 0) {
+						(migrated as RuntimePlan)._midLoadRemovals = {
+							count: removedCount,
+							source: 'load_plan_migration_from_md',
+						};
+					}
 					return migrated;
 				}
 				// If plan.md doesn't exist either, fall through to step 3
@@ -627,7 +679,18 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 		try {
 			const rebuilt = await replayFromLedger(directory);
 			if (rebuilt) {
-				await savePlan(directory, rebuilt);
+				const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
+					directory,
+					rebuilt,
+					'load_plan_rebuild_from_ledger',
+					'rebuild plan from ledger replay',
+				);
+				if (removedCount > 0) {
+					(rebuilt as RuntimePlan)._midLoadRemovals = {
+						count: removedCount,
+						source: 'load_plan_rebuild_from_ledger',
+					};
+				}
 				return rebuilt;
 			}
 
@@ -668,7 +731,19 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 					warn(
 						`[loadPlan] Ledger replay returned no plan — recovered from critic-approved snapshot seq=${approved.seq} timestamp=${approved.timestamp} (approval phase=${approvedPhase ?? 'unknown'}). This may roll the plan back to an earlier phase — verify before continuing.`,
 					);
-					await savePlan(directory, approved.plan);
+					const { removedCount: snapshotRemovedCount } =
+						await savePlanWithAutoAcknowledgedRemovals(
+							directory,
+							approved.plan,
+							'load_plan_recovery_from_approved_snapshot',
+							'restore from critic-approved snapshot',
+						);
+					if (snapshotRemovedCount > 0) {
+						(approved.plan as RuntimePlan)._midLoadRemovals = {
+							count: snapshotRemovedCount,
+							source: 'load_plan_recovery_from_approved_snapshot',
+						};
+					}
 					// Heal the ledger tail: append a fresh snapshot so the next
 					// loadPlan call doesn't re-enter this recovery path in a new
 					// process (where the startup-check cache is empty). Without this
@@ -701,13 +776,57 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 }
 
 /**
+ * Recovery-path helper for callers that legitimately need to replace the
+ * plan task set without explicit per-id acknowledgement (e.g. rebuilding
+ * from the ledger after replay, importing an external checkpoint, or
+ * recovering from a critic-approved snapshot).
+ *
+ * Diffs the on-disk plan against the incoming plan, auto-populates
+ * `acknowledged_removals` with every missing id, and delegates to savePlan.
+ * The architect-facing save_plan tool MUST NOT use this — it should fail
+ * closed and require the caller to enumerate removals explicitly.
+ *
+ * Returns the count of auto-acknowledged removals so the caller can attach
+ * `_midLoadRemovals` to the RuntimePlan for Layer A disclosure.
+ */
+export async function savePlanWithAutoAcknowledgedRemovals(
+	directory: string,
+	plan: Plan,
+	source: string,
+	reason: string,
+	options?: { preserveCompletedStatuses?: boolean },
+): Promise<{ removedCount: number }> {
+	const existing = await _internals.loadPlanJsonOnly(directory);
+	const newIds = new Set<string>();
+	for (const phase of plan.phases) {
+		for (const task of phase.tasks) newIds.add(task.id);
+	}
+	const removedIds: string[] = [];
+	if (existing) {
+		for (const phase of existing.phases) {
+			for (const task of phase.tasks) {
+				if (!newIds.has(task.id)) removedIds.push(task.id);
+			}
+		}
+	}
+	await savePlan(directory, plan, {
+		...(options ?? {}),
+		acknowledged_removals: { ids: removedIds, reason, source },
+	});
+	return { removedCount: removedIds.length };
+}
+
+/**
  * Validate against PlanSchema (throw on invalid), write to .swarm/plan.json via atomic temp+rename pattern,
  * then derive and write .swarm/plan.md
  */
 export async function savePlan(
 	directory: string,
 	plan: Plan,
-	options?: { preserveCompletedStatuses?: boolean },
+	options?: {
+		preserveCompletedStatuses?: boolean;
+		acknowledged_removals?: AcknowledgedRemovals;
+	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
 	if (
@@ -964,6 +1083,87 @@ export async function savePlan(
 		for (const phase of currentPlan.phases) {
 			for (const task of phase.tasks) {
 				oldTaskMap.set(task.id, { phase: task.phase, status: task.status });
+			}
+		}
+
+		// Task-removal guard (issue #853).
+		// Detect tasks present in the prior plan but missing from the incoming
+		// plan. Reject the save unless the caller acknowledged every missing id
+		// via options.acknowledged_removals. The guard lives at the manager
+		// layer so every save-path (tool, checkpoint import, phase-complete
+		// rebuild, ledger-replay rebuild) benefits.
+		const newTaskIds = new Set<string>();
+		for (const phase of validated.phases) {
+			for (const task of phase.tasks) newTaskIds.add(task.id);
+		}
+		const missingTasks: Array<{
+			id: string;
+			phase: number;
+			status: TaskStatus;
+		}> = [];
+		for (const [id, info] of oldTaskMap.entries()) {
+			if (!newTaskIds.has(id)) {
+				missingTasks.push({ id, phase: info.phase, status: info.status });
+			}
+		}
+
+		const ack = options?.acknowledged_removals;
+		if (missingTasks.length > 0) {
+			if (!ack) {
+				throw new PlanTaskRemovalNotAcknowledgedError(missingTasks);
+			}
+			const ackSet = new Set(ack.ids);
+			const missingIdsSet = new Set(missingTasks.map((t) => t.id));
+			const unacked = missingTasks.filter((t) => !ackSet.has(t.id));
+			if (unacked.length > 0) {
+				throw new PlanTaskRemovalNotAcknowledgedError(unacked);
+			}
+			for (const id of ack.ids) {
+				if (!missingIdsSet.has(id)) {
+					throw new Error(
+						`PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals contains "${id}" but that task is not missing from the plan.`,
+					);
+				}
+			}
+
+			// Emit task_removed audit events. Each event runs under
+			// retryCasWithBackoff so concurrent savePlan writers do not
+			// lose audit events to a single CAS collision; verifyValid
+			// makes the append idempotent when another writer has
+			// already removed the same task.
+			try {
+				for (const missing of missingTasks) {
+					const eventInput: LedgerEventInput = {
+						plan_id: derivePlanId(validated),
+						event_type: 'task_removed',
+						task_id: missing.id,
+						phase_id: missing.phase,
+						from_status: missing.status,
+						source: ack.source,
+						payload: { reason: ack.reason, source: ack.source },
+					};
+					const capturedTaskId = missing.id;
+					await retryCasWithBackoff(directory, eventInput, {
+						expectedHash: currentHash,
+						planHashAfter: hashAfter,
+						verifyValid: async () => {
+							const onDisk = await _internals.loadPlanJsonOnly(directory);
+							if (!onDisk) return true;
+							for (const p of onDisk.phases) {
+								if (p.tasks.some((x) => x.id === capturedTaskId)) return true;
+							}
+							// Already removed by a concurrent writer — skip idempotently.
+							return false;
+						},
+					});
+				}
+			} catch (error) {
+				if (error instanceof LedgerStaleWriterError) {
+					throw new PlanConcurrentModificationError(
+						`Concurrent plan modification detected after retries: ${error.message}. Please retry the operation.`,
+					);
+				}
+				throw error;
 			}
 		}
 

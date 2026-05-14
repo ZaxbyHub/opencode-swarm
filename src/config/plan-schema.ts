@@ -107,10 +107,15 @@ export type Plan = z.infer<typeof PlanSchema>;
 /**
  * Runtime plan with spec staleness tracking.
  * Extends Plan with runtime-only fields that are not persisted.
+ *
+ * `_midLoadRemovals` is attached by loadPlan-recovery paths that auto-
+ * acknowledged task removals (issue #853) so the system-enhancer Layer A
+ * can disclose the count to the model without re-reading the ledger.
  */
 export type RuntimePlan = Plan & {
 	_specStale?: boolean;
 	_specStaleReason?: string;
+	_midLoadRemovals?: { count: number; source: string };
 };
 
 /**

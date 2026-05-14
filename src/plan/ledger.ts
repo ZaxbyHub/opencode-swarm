@@ -17,9 +17,14 @@ import {
 import { derivePlanId } from './utils';
 
 /**
- * Ledger schema version
+ * Ledger schema version.
+ *
+ * v7.19.0: bumped from 1.0.0 → 1.1.0 with the addition of `task_removed`.
+ * Older plugin readers throw on unknown event types (applyEventToPlan default
+ * branch); restart any running OpenCode session after upgrade so the new
+ * reader is loaded in-process.
  */
-export const LEDGER_SCHEMA_VERSION = '1.0.0';
+export const LEDGER_SCHEMA_VERSION = '1.1.0';
 
 /**
  * Valid ledger event types
@@ -27,6 +32,7 @@ export const LEDGER_SCHEMA_VERSION = '1.0.0';
 export const LEDGER_EVENT_TYPES = [
 	'plan_created',
 	'task_added',
+	'task_removed',
 	'task_updated',
 	'task_status_changed',
 	'task_reordered',
@@ -753,6 +759,13 @@ function applyEventToPlan(plan: Plan, event: LedgerEvent): Plan | null {
 
 		case 'task_added':
 			// Audit-only: task was added but is already in plan.json
+			return plan;
+
+		case 'task_removed':
+			// Audit-only (symmetric to task_added). Plan state during replay
+			// derives from plan_created/snapshot payloads — task_removed is
+			// observability-only. Keeps computePlanHash deterministic relative
+			// to snapshot payloads.
 			return plan;
 
 		case 'task_updated':

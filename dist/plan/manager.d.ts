@@ -6,6 +6,38 @@
 export declare class PlanConcurrentModificationError extends Error {
     constructor(message: string);
 }
+/**
+ * Thrown when savePlan detects that the incoming plan would silently drop one
+ * or more tasks from the prior plan without the caller acknowledging the
+ * removal (issue #853).
+ *
+ * Callers must pass `options.acknowledged_removals.ids` covering every missing
+ * task id together with a non-empty reason to proceed.
+ */
+export declare class PlanTaskRemovalNotAcknowledgedError extends Error {
+    readonly missingTasks: Array<{
+        id: string;
+        phase: number;
+        status: TaskStatus;
+    }>;
+    constructor(missingTasks: Array<{
+        id: string;
+        phase: number;
+        status: TaskStatus;
+    }>);
+}
+/**
+ * Caller-supplied acknowledgement that a save_plan operation is intentionally
+ * removing tasks from the prior plan (issue #853). Passed to savePlan via the
+ * `acknowledged_removals` option; `ids` must list every task id missing from
+ * the incoming plan; `reason` must be non-empty; `source` identifies the
+ * caller (e.g. 'save_plan_tool', 'phase_complete_rebuild_from_ledger').
+ */
+export interface AcknowledgedRemovals {
+    ids: string[];
+    reason: string;
+    source: string;
+}
 import { type Plan, type RuntimePlan, type TaskStatus } from '../config/plan-schema';
 import { type LedgerEvent, type LedgerEventInput } from './ledger';
 /** Reset the startup ledger check flag. For testing only. */
@@ -64,11 +96,31 @@ export declare function regeneratePlanMarkdown(directory: string, plan: Plan): P
  */
 export declare function loadPlan(directory: string): Promise<RuntimePlan | null>;
 /**
+ * Recovery-path helper for callers that legitimately need to replace the
+ * plan task set without explicit per-id acknowledgement (e.g. rebuilding
+ * from the ledger after replay, importing an external checkpoint, or
+ * recovering from a critic-approved snapshot).
+ *
+ * Diffs the on-disk plan against the incoming plan, auto-populates
+ * `acknowledged_removals` with every missing id, and delegates to savePlan.
+ * The architect-facing save_plan tool MUST NOT use this — it should fail
+ * closed and require the caller to enumerate removals explicitly.
+ *
+ * Returns the count of auto-acknowledged removals so the caller can attach
+ * `_midLoadRemovals` to the RuntimePlan for Layer A disclosure.
+ */
+export declare function savePlanWithAutoAcknowledgedRemovals(directory: string, plan: Plan, source: string, reason: string, options?: {
+    preserveCompletedStatuses?: boolean;
+}): Promise<{
+    removedCount: number;
+}>;
+/**
  * Validate against PlanSchema (throw on invalid), write to .swarm/plan.json via atomic temp+rename pattern,
  * then derive and write .swarm/plan.md
  */
 export declare function savePlan(directory: string, plan: Plan, options?: {
     preserveCompletedStatuses?: boolean;
+    acknowledged_removals?: AcknowledgedRemovals;
 }): Promise<void>;
 /**
  * Rebuild plan from ledger events.

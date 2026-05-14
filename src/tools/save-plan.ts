@@ -24,7 +24,11 @@ import {
 	computePlanHash,
 	takeSnapshotEvent,
 } from '../plan/ledger';
-import { loadPlanJsonOnly, savePlan } from '../plan/manager';
+import {
+	loadPlanJsonOnly,
+	PlanTaskRemovalNotAcknowledgedError,
+	savePlan,
+} from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
@@ -59,6 +63,25 @@ export interface SavePlanArgs {
 	 * after a failed phase).  Defaults to false (existing statuses preserved).
 	 */
 	reset_statuses?: boolean;
+	/**
+	 * Issue #853: tasks that are present in the prior plan but intentionally
+	 * being removed by this save. Every task missing from `phases` must be
+	 * enumerated here, otherwise save_plan rejects with
+	 * `PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED`.
+	 */
+	removed_task_ids?: string[];
+	/**
+	 * Human-readable reason for the removals listed in `removed_task_ids`.
+	 * Must be non-empty when `removed_task_ids` is non-empty. Recorded on
+	 * each `task_removed` ledger event for audit.
+	 */
+	removal_reason?: string;
+	/**
+	 * Required when both `reset_statuses` is true AND at least one task is
+	 * missing from the new plan. Without this flag set, save_plan rejects to
+	 * prevent a destructive reset from silently dropping unfinished work.
+	 */
+	confirm_destructive_reset?: boolean;
 	/**
 	 * Architect-facing concurrency controls for this plan.
 	 * When execution_profile.locked is true the profile is immutable — subsequent
@@ -370,6 +393,10 @@ export async function executeSavePlan(
 	// reject any attempt to change it (fail-closed).
 	const dir = targetWorkspace as string;
 	const existingStatusMap: Map<string, TaskStatus> = new Map();
+	// Captured regardless of reset_statuses so the task-removal acknowledgement
+	// check below can compare incoming task IDs against the prior plan
+	// (issue #853).
+	const priorTaskIds = new Set<string>();
 	let preservedExecutionProfile: Plan['execution_profile'];
 	{
 		let existing: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
@@ -380,6 +407,9 @@ export async function executeSavePlan(
 		}
 
 		if (existing) {
+			for (const phase of existing.phases) {
+				for (const task of phase.tasks) priorTaskIds.add(task.id);
+			}
 			// Status map (skip when resetting)
 			if (!args.reset_statuses) {
 				for (const phase of existing.phases) {
@@ -442,6 +472,126 @@ export async function executeSavePlan(
 			};
 		}
 		resolvedProfile = parsed.data;
+	}
+
+	// Step 3.5: Task-removal acknowledgement (issue #853).
+	// Detect tasks present in the prior plan but absent from the new args.phases.
+	// Reject the save unless the caller explicitly acknowledged each missing id
+	// via removed_task_ids + a non-empty removal_reason. The destructive-reset
+	// shortcut (reset_statuses + confirm_destructive_reset) auto-populates the
+	// acknowledged set so the architect can reset a plan in one call.
+	const incomingTaskIds = new Set<string>();
+	for (const phase of args.phases) {
+		for (const task of phase.tasks) incomingTaskIds.add(task.id);
+	}
+	const missingTaskIds: string[] = [];
+	for (const id of priorTaskIds) {
+		if (!incomingTaskIds.has(id)) missingTaskIds.push(id);
+	}
+
+	const rawRemovedIds = args.removed_task_ids ?? [];
+	if (rawRemovedIds.length > 0) {
+		const seen = new Set<string>();
+		for (const id of rawRemovedIds) {
+			if (seen.has(id)) {
+				return {
+					success: false,
+					message:
+						'PLAN_TASK_REMOVAL_INVALID: removed_task_ids contains duplicate entries',
+					errors: [`Duplicate id in removed_task_ids: "${id}"`],
+					recovery_guidance:
+						'Deduplicate removed_task_ids and retry save_plan.',
+				};
+			}
+			seen.add(id);
+		}
+		for (const id of rawRemovedIds) {
+			if (incomingTaskIds.has(id)) {
+				return {
+					success: false,
+					message:
+						'PLAN_TASK_REMOVAL_INVALID: removed_task_ids contains a task that also appears in args.phases',
+					errors: [
+						`Task "${id}" appears in both removed_task_ids and args.phases — these are contradictory`,
+					],
+					recovery_guidance:
+						'A task cannot be both kept and removed in the same save_plan call. Either drop it from args.phases or remove it from removed_task_ids.',
+				};
+			}
+		}
+		for (const id of rawRemovedIds) {
+			if (!priorTaskIds.has(id)) {
+				return {
+					success: false,
+					message:
+						'PLAN_TASK_REMOVAL_INVALID: removed_task_ids contains an id that was not in the prior plan',
+					errors: [
+						`Task "${id}" is in removed_task_ids but not present in the prior plan`,
+					],
+					recovery_guidance:
+						'Re-read the prior plan and update removed_task_ids to only list tasks that actually existed.',
+				};
+			}
+		}
+	}
+
+	let resolvedRemovedIds: string[] = [...rawRemovedIds];
+	let resolvedRemovalReason: string | undefined = args.removal_reason;
+
+	if (args.reset_statuses === true && missingTaskIds.length > 0) {
+		if (args.confirm_destructive_reset !== true) {
+			return {
+				success: false,
+				message:
+					'PLAN_DESTRUCTIVE_RESET_NOT_CONFIRMED: reset_statuses with missing tasks requires confirm_destructive_reset: true',
+				errors: [
+					`reset_statuses: true would drop ${missingTaskIds.length} task(s) from the prior plan: ${missingTaskIds.join(', ')}`,
+				],
+				recovery_guidance:
+					'Surface the list of dropped tasks to the user and confirm intent before retrying. ' +
+					'Pass confirm_destructive_reset: true (with reset_statuses: true) to acknowledge the destructive reset, ' +
+					'or list removed_task_ids explicitly with a removal_reason.',
+			};
+		}
+		if (rawRemovedIds.length === 0) {
+			// Destructive-reset shortcut: auto-populate removals from the
+			// computed missing set so the caller does not need to enumerate.
+			resolvedRemovedIds = [...missingTaskIds];
+			resolvedRemovalReason = 'destructive reset acknowledged';
+		}
+	}
+
+	if (resolvedRemovedIds.length > 0) {
+		const reason = (resolvedRemovalReason ?? '').trim();
+		if (reason.length === 0) {
+			return {
+				success: false,
+				message:
+					'PLAN_TASK_REMOVAL_INVALID: removal_reason is required when removed_task_ids is non-empty',
+				errors: ['removal_reason must be a non-empty, non-whitespace string'],
+				recovery_guidance:
+					'Provide a removal_reason describing why these tasks are being dropped.',
+			};
+		}
+	}
+
+	if (missingTaskIds.length > 0) {
+		const ackSet = new Set(resolvedRemovedIds);
+		const unacked = missingTaskIds.filter((id) => !ackSet.has(id));
+		if (unacked.length > 0) {
+			return {
+				success: false,
+				message:
+					'PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED: this save would silently drop tasks from the prior plan',
+				errors: [
+					`The following prior tasks are missing from the new save and were not listed in removed_task_ids: ${unacked.join(', ')}`,
+				],
+				recovery_guidance:
+					'Re-read the current plan, then retry save_plan with ' +
+					`removed_task_ids: ${JSON.stringify(unacked)} and a non-empty removal_reason. ` +
+					'Tasks not yet finished (status pending/in_progress/blocked) MUST NOT be removed without explicit user confirmation.',
+			};
+		}
 	}
 
 	// Step 4: Build the Plan object from args
@@ -513,6 +663,15 @@ export async function executeSavePlan(
 			// silently restore 'completed' statuses — so we must also disable it here.
 			await savePlan(dir, plan, {
 				preserveCompletedStatuses: !args.reset_statuses,
+				...(resolvedRemovedIds.length > 0
+					? {
+							acknowledged_removals: {
+								ids: resolvedRemovedIds,
+								reason: (resolvedRemovalReason ?? '').trim(),
+								source: 'save_plan_tool',
+							},
+						}
+					: {}),
 			});
 			// Take an explicit snapshot after every save_plan call.
 			// This ensures replayFromLedger always has a complete plan baseline to work from.
@@ -605,6 +764,22 @@ export async function executeSavePlan(
 			}
 		}
 	} catch (error) {
+		// Defense-in-depth: the manager-level guard fires when the in-process
+		// save-plan tool layer somehow bypasses the Step 3.5 acknowledgement
+		// check (e.g. a future caller adds a new code path). Translate the
+		// typed error into the standard SavePlanResult shape.
+		if (error instanceof PlanTaskRemovalNotAcknowledgedError) {
+			const ids = error.missingTasks.map((t) => t.id);
+			return {
+				success: false,
+				message:
+					'PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED: this save would silently drop tasks from the prior plan',
+				errors: [error.message],
+				recovery_guidance:
+					'Re-read the current plan, then retry save_plan with ' +
+					`removed_task_ids: ${JSON.stringify(ids)} and a non-empty removal_reason.`,
+			};
+		}
 		return {
 			success: false,
 			message:
@@ -697,6 +872,32 @@ export const save_plan: ToolDefinition = createSwarmTool({
 				'When true, reset ALL task statuses to pending regardless of prior completion state. ' +
 					'Use only when deliberately re-planning a phase from scratch. ' +
 					'Default false (preserves existing task statuses across plan revisions).',
+			),
+		removed_task_ids: z
+			.array(z.string())
+			.optional()
+			.describe(
+				'Task IDs that are present in the prior plan but intentionally being ' +
+					'removed by this save. Every task missing from `phases` MUST be enumerated ' +
+					'here, otherwise save_plan rejects with PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED. ' +
+					'Tasks not yet finished (status pending/in_progress/blocked) MUST NOT be ' +
+					'removed without explicit user confirmation.',
+			),
+		removal_reason: z
+			.string()
+			.optional()
+			.describe(
+				'Required when removed_task_ids is non-empty. Human-readable reason recorded ' +
+					'on each task_removed ledger event.',
+			),
+		confirm_destructive_reset: z
+			.boolean()
+			.optional()
+			.describe(
+				'Required when reset_statuses is true AND at least one task is missing from ' +
+					'the new plan. Set true to acknowledge that the destructive reset drops ' +
+					'unfinished work. When set together with reset_statuses, save_plan auto-' +
+					'populates removed_task_ids from the missing set.',
 			),
 		execution_profile: z
 			.object({

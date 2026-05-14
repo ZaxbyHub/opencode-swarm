@@ -1,3 +1,5 @@
+import * as fsSync from 'node:fs';
+import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import {
 	extractCurrentPhase,
@@ -61,6 +63,48 @@ export interface StatusData {
 	compactionCount: number;
 	/** ISO timestamp of last compaction snapshot, or null if none */
 	lastSnapshotAt: string | null;
+	/** Issue #853 Layer C: true if spec drift was detected for this plan */
+	specStale?: boolean;
+	/** Reason text from .swarm/spec-staleness.json (or RuntimePlan._specStaleReason) */
+	specStaleReason?: string;
+	/** Stored spec hash from when the plan was last saved */
+	specStaleStoredHash?: string;
+	/** Current spec.md hash on disk (null when spec.md is missing) */
+	specStaleCurrentHash?: string | null;
+}
+
+/**
+ * Issue #853 Layer C: read .swarm/spec-staleness.json so /swarm status can
+ * surface drift information directly (independent of the in-memory plan).
+ * Returns `{ stale: false }` when the file is absent or malformed.
+ */
+function readSpecStalenessSnapshot(directory: string): {
+	stale: boolean;
+	reason?: string;
+	storedHash?: string;
+	currentHash?: string | null;
+} {
+	try {
+		const p = path.join(directory, '.swarm', 'spec-staleness.json');
+		if (!fsSync.existsSync(p)) return { stale: false };
+		const raw = fsSync.readFileSync(p, 'utf-8');
+		const parsed = JSON.parse(raw);
+		return {
+			stale: true,
+			reason: typeof parsed?.reason === 'string' ? parsed.reason : undefined,
+			storedHash:
+				typeof parsed?.specHash_plan === 'string'
+					? parsed.specHash_plan
+					: undefined,
+			currentHash:
+				typeof parsed?.specHash_current === 'string' ||
+				parsed?.specHash_current === null
+					? parsed.specHash_current
+					: undefined,
+		};
+	} catch {
+		return { stale: false };
+	}
 }
 
 /**
@@ -145,6 +189,20 @@ export async function getStatusData(
 				lastSnapshotAt: metrics.lastSnapshotAt,
 			};
 		}
+	}
+
+	// Issue #853 Layer C: surface spec drift in /swarm status output.
+	const drift = readSpecStalenessSnapshot(directory);
+	if (drift.stale) {
+		status.specStale = true;
+		status.specStaleReason = drift.reason;
+		status.specStaleStoredHash = drift.storedHash;
+		status.specStaleCurrentHash = drift.currentHash;
+	} else if (plan && (plan as { _specStale?: boolean })._specStale) {
+		status.specStale = true;
+		status.specStaleReason = (
+			plan as { _specStaleReason?: string }
+		)._specStaleReason;
 	}
 
 	// Enrich with Lean Turbo data if active
@@ -241,6 +299,18 @@ export function formatStatusMarkdown(status: StatusData): string {
 		`**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
 		`**Agents**: ${status.agentCount} registered`,
 	];
+
+	// Issue #853 Layer C: spec drift surfacing in /swarm status output.
+	if (status.specStale) {
+		const reason = status.specStaleReason ?? 'spec.md changed since plan saved';
+		const stored = status.specStaleStoredHash ?? 'unknown';
+		const current = status.specStaleCurrentHash ?? '(spec.md missing)';
+		lines.push(
+			'',
+			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
+			'Run `/swarm clarify` to update the spec or `/swarm acknowledge-spec-drift` to dismiss.',
+		);
+	}
 
 	// Turbo status display - strategy-specific
 	if (status.turboStrategy && status.turboStrategy !== 'off') {

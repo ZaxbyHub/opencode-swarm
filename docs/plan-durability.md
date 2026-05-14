@@ -21,6 +21,7 @@
 ```json
 {"type":"plan_created","phase":1,"data":{...},"ts":"ISO8601"}
 {"type":"task_added","taskId":"1.1","data":{...},"ts":"ISO8601"}
+{"type":"task_removed","taskId":"1.1","phase_id":1,"from_status":"pending","source":"save_plan_tool","payload":{"reason":"...","source":"..."},"ts":"ISO8601"}
 {"type":"task_updated","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_status_changed","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_reordered","taskId":"1.1","afterTaskId":"1.2","ts":"ISO8601"}
@@ -32,6 +33,65 @@
 {"type":"execution_profile_set","data":{"execution_profile":{...}},"ts":"ISO8601"}
 {"type":"execution_profile_locked","ts":"ISO8601"}
 ```
+
+### Task removal contract (v7.19.0+)
+
+As of v7.19.0 (issue #853), `savePlan` is non-destructive by default. Any
+task present in the prior plan but absent from the incoming plan must be
+acknowledged explicitly via `options.acknowledged_removals.ids` with a
+non-empty `reason`. Unacknowledged removals throw
+`PlanTaskRemovalNotAcknowledgedError`.
+
+- The architect-facing `save_plan` tool exposes three optional args:
+  `removed_task_ids`, `removal_reason`, and `confirm_destructive_reset`.
+  The tool layer rejects (`PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED`) before
+  reaching the manager when an acknowledgement is missing or invalid.
+- Recovery paths use `savePlanWithAutoAcknowledgedRemovals(dir, plan,
+  source, reason)`, which diffs on-disk vs incoming and auto-populates
+  `acknowledged_removals`. Callers: `loadPlan` migrate-from-md, ledger
+  replay rebuild, approved-snapshot recovery, `importCheckpoint`,
+  `phase-complete` rebuild.
+- Source tags identify the caller on each `task_removed` event:
+  `save_plan_tool`, `load_plan_migration_from_md`,
+  `load_plan_rebuild_from_ledger`,
+  `load_plan_recovery_from_approved_snapshot`, `import_checkpoint`,
+  `phase_complete_rebuild_from_ledger`.
+
+### Replay semantics
+
+`task_added` and `task_removed` are audit-only on replay. Plan state during
+`replayFromLedger` derives from `plan_created` and `snapshot` payloads —
+the two task-lifecycle events do not mutate state. This keeps
+`computePlanHash` deterministic relative to snapshot payloads and prevents
+asymmetric replay if the snapshot is regenerated.
+
+### Schema version
+
+`LEDGER_SCHEMA_VERSION` was bumped from `1.0.0` → `1.1.0` with the
+addition of `task_removed`. Older plugin readers throw on unknown event
+types (the `applyEventToPlan` default branch). After upgrading, restart
+any running OpenCode session so the new in-memory reader is loaded —
+otherwise the first `task_removed` event written by the new plugin will
+break ledger replay in the legacy process.
+
+### Spec drift surfacing (v7.19.0+)
+
+Three independent layers surface `.swarm/spec-staleness.json` proactively:
+
+- **Layer A** (`src/hooks/system-enhancer.ts`,
+  `buildSpecDriftAdvisory`): injects `[spec-drift]` system-prompt
+  guidance after every `loadPlan` call inside
+  `experimental.chat.system.transform`. Survives the single-system-
+  message collapse. Discloses any `_midLoadRemovals` attached by recovery
+  paths.
+- **Layer B** (`src/hooks/guardrails.ts`, `enforceSpecDriftGate`):
+  structurally blocks the `SPEC_DRIFT_BLOCKED_TOOLS` set (`save_plan`,
+  `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
+  `lean_turbo_acquire_locks`) while the staleness file exists. No cache
+  — `/swarm acknowledge-spec-drift` is reflected immediately.
+- **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
+  a `**Spec drift detected**` line with stored/current hashes and the
+  resolution commands.
 
 ## Rebuild / Import / Export
 

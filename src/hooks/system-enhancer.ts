@@ -17,10 +17,93 @@ import {
 	TURBO_MODE_BANNER,
 } from '../config/constants';
 import type { RetrospectiveEvidence } from '../config/evidence-schema';
+import type { RuntimePlan } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
+
+/**
+ * Build the [spec-drift] advisory injected into the model's system prompt
+ * after every loadPlan whenever spec staleness is detected (issue #853
+ * Layer A). The text is appended to `output.system` and survives the
+ * single-system-message collapse at `experimental.chat.system.transform`.
+ *
+ * The "Do NOT proceed" line enumerates every tool in SPEC_DRIFT_BLOCKED_TOOLS
+ * so the architect knows exactly which calls will return SPEC_DRIFT_BLOCK
+ * from Layer B.
+ */
+export function buildSpecDriftAdvisory(args: {
+	reason: string;
+	currentHash: string | null;
+	storedHash: string;
+	midLoadRemovals?: { count: number; source: string };
+}): string {
+	const lines = [
+		'[spec-drift]',
+		`Reason: ${args.reason}`,
+		`Stored spec hash: ${args.storedHash}`,
+		`Current spec hash: ${args.currentHash ?? '(spec.md missing)'}`,
+		'Action: surface this warning to the user at your next user-facing reply. ' +
+			'Do NOT proceed with destructive plan operations (save_plan with removals, ' +
+			'update_task_status, phase_complete, lean_turbo_run_phase, ' +
+			'lean_turbo_acquire_locks) until the user runs /swarm clarify or ' +
+			'/swarm acknowledge-spec-drift.',
+	];
+	if (args.midLoadRemovals) {
+		lines.push(
+			`Auto-removed during recovery: ${args.midLoadRemovals.count} task(s) ` +
+				`(source: ${args.midLoadRemovals.source}). See ` +
+				'.swarm/plan-ledger.jsonl for IDs.',
+		);
+	}
+	return lines.join('\n');
+}
+
+function readSpecStalenessSnapshot(
+	directory: string,
+): { specHash_plan: string; specHash_current: string | null } | null {
+	try {
+		const p = path.join(directory, '.swarm', 'spec-staleness.json');
+		if (!fs.existsSync(p)) return null;
+		const raw = fs.readFileSync(p, 'utf-8');
+		const parsed = JSON.parse(raw);
+		if (
+			typeof parsed?.specHash_plan === 'string' &&
+			(typeof parsed?.specHash_current === 'string' ||
+				parsed?.specHash_current === null)
+		) {
+			return {
+				specHash_plan: parsed.specHash_plan,
+				specHash_current: parsed.specHash_current,
+			};
+		}
+	} catch {
+		/* malformed — fall through */
+	}
+	return null;
+}
+
+function maybeAppendSpecDriftAdvisory(
+	output: { system: string[] },
+	directory: string,
+	plan: RuntimePlan | null,
+): void {
+	if (!plan?._specStale) return;
+	const snap = readSpecStalenessSnapshot(directory);
+	const storedHash =
+		snap?.specHash_plan ?? plan.specHash ?? '(unknown — plan missing specHash)';
+	const currentHash = snap?.specHash_current ?? null;
+	output.system.push(
+		buildSpecDriftAdvisory({
+			reason: plan._specStaleReason ?? 'spec.md changed since plan was saved',
+			currentHash,
+			storedHash,
+			midLoadRemovals: plan._midLoadRemovals,
+		}),
+	);
+}
+
 import {
 	analyzeDecisionDrift,
 	formatBudgetWarning,
@@ -624,6 +707,8 @@ export function createSystemEnhancerHook(
 								`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
 							);
 						}
+						// Issue #853 Layer A: surface spec drift to the model.
+						maybeAppendSpecDriftAdvisory(output, directory, plan);
 						const mode = await detectArchitectMode(directory);
 						let planContent: string | null = null;
 						let phaseHeader = '';
@@ -1329,6 +1414,8 @@ ${handoffContent}`;
 							`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
+					// Issue #853 Layer A: surface spec drift to the model.
+					maybeAppendSpecDriftAdvisory(output, directory, plan);
 					let currentPhase: string | null = null;
 					let currentTask: string | null = null;
 

@@ -49,7 +49,11 @@ import {
 	replayFromLedger,
 	takeSnapshotEvent,
 } from '../plan/ledger';
-import { loadPlan, savePlan } from '../plan/manager';
+import {
+	loadPlan,
+	savePlan,
+	savePlanWithAutoAcknowledgedRemovals,
+} from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
@@ -2090,7 +2094,12 @@ export async function executePhaseComplete(
 							);
 							if (phaseObj) {
 								phaseObj.status = 'complete';
-								await savePlan(dir, rebuilt);
+								await savePlanWithAutoAcknowledgedRemovals(
+									dir,
+									rebuilt,
+									'phase_complete_rebuild_from_ledger',
+									'phase-complete rebuild from ledger',
+								);
 								// After successful phase completion, take a snapshot
 								try {
 									await takeSnapshotEvent(dir, rebuilt).catch(() => {});
@@ -2153,7 +2162,12 @@ export async function executePhaseComplete(
 						);
 						if (phaseObj) {
 							phaseObj.status = 'complete';
-							await savePlan(dir, rebuilt);
+							await savePlanWithAutoAcknowledgedRemovals(
+								dir,
+								rebuilt,
+								'phase_complete_rebuild_from_ledger',
+								'phase-complete rebuild from ledger',
+							);
 							// After successful phase completion, take a snapshot
 							try {
 								await takeSnapshotEvent(dir, rebuilt).catch(() => {});

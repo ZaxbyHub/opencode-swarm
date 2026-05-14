@@ -49,6 +49,48 @@ import { extractModelInfo } from './model-limits';
 import { normalizeToolName } from './normalize-tool-name';
 
 /**
+ * Issue #853 Layer B: tools that are structurally blocked while
+ * `.swarm/spec-staleness.json` exists. Every blocked tool mutates plan
+ * state (save_plan, update_task_status, phase_complete) or proceeds with
+ * lean-turbo execution (lean_turbo_run_phase, lean_turbo_acquire_locks).
+ * The architect must run /swarm clarify or /swarm acknowledge-spec-drift
+ * before any of these will succeed.
+ *
+ * Read tools (get_approved_plan, lint_spec, set_qa_gates, convene_*,
+ * lean_turbo_plan_lanes, lean_turbo_runner_status, lean_turbo_review) are
+ * intentionally NOT blocked — drift surfacing should not block exploration.
+ */
+export const SPEC_DRIFT_BLOCKED_TOOLS = new Set<string>([
+	'save_plan',
+	'update_task_status',
+	'phase_complete',
+	'lean_turbo_run_phase',
+	'lean_turbo_acquire_locks',
+]);
+
+/**
+ * Throw SPEC_DRIFT_BLOCK if the tool is on the block-list and the
+ * spec-staleness marker file exists. Layer B is structural (not a
+ * retryable error) — deterministic disk read every call, no cache, so
+ * /swarm acknowledge-spec-drift (which removes the marker) is reflected
+ * immediately on the next tool call.
+ */
+export function enforceSpecDriftGate(
+	directory: string | undefined,
+	toolName: string,
+): void {
+	if (!directory) return;
+	if (!SPEC_DRIFT_BLOCKED_TOOLS.has(toolName)) return;
+	const stalePath = path.join(directory, '.swarm', 'spec-staleness.json');
+	if (fsSync.existsSync(stalePath)) {
+		throw new Error(
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
+				'Run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to dismiss, then retry.',
+		);
+	}
+}
+
+/**
  * v6.12: Module-level storage for tool input args by callID.
  * Used by guardrails for delegation detection, exposed via safe accessor helpers.
  */
@@ -2079,6 +2121,10 @@ export function createGuardrailsHooks(
 
 			// Block destructive shell commands (rm -rf, force push, kubectl delete, etc.)
 			checkDestructiveCommand(input.tool, output.args);
+
+			// Issue #853 Layer B: structural spec-drift block.
+			// Refuses plan-mutating tools while .swarm/spec-staleness.json exists.
+			enforceSpecDriftGate(effectiveDirectory, input.tool);
 
 			// Plan state + scope protection — architect-only
 			if (isArchitect(input.sessionID) && isWriteTool(input.tool)) {

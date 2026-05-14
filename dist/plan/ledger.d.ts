@@ -6,13 +6,18 @@
  */
 import { type Plan } from '../config/plan-schema';
 /**
- * Ledger schema version
+ * Ledger schema version.
+ *
+ * v7.19.0: bumped from 1.0.0 → 1.1.0 with the addition of `task_removed`.
+ * Older plugin readers throw on unknown event types (applyEventToPlan default
+ * branch); restart any running OpenCode session after upgrade so the new
+ * reader is loaded in-process.
  */
-export declare const LEDGER_SCHEMA_VERSION = "1.0.0";
+export declare const LEDGER_SCHEMA_VERSION = "1.1.0";
 /**
  * Valid ledger event types
  */
-export declare const LEDGER_EVENT_TYPES: readonly ["plan_created", "task_added", "task_updated", "task_status_changed", "task_reordered", "phase_completed", "plan_rebuilt", "plan_exported", "plan_reset", "snapshot", "execution_profile_set", "execution_profile_locked"];
+export declare const LEDGER_EVENT_TYPES: readonly ["plan_created", "task_added", "task_removed", "task_updated", "task_status_changed", "task_reordered", "phase_completed", "plan_rebuilt", "plan_exported", "plan_reset", "snapshot", "execution_profile_set", "execution_profile_locked"];
 export type LedgerEventType = (typeof LEDGER_EVENT_TYPES)[number];
 /**
  * A ledger event representing a plan mutation.

@@ -1409,6 +1409,18 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
   - Run /swarm clarify to update the spec and align it with the plan, OR
   - Run /swarm acknowledge-spec-drift to acknowledge the drift and suppress further warnings
 - Do NOT proceed with implementation until spec staleness is resolved.
+- When re-saving a plan in response to spec drift, save_plan REQUIRES that ANY task
+  present in the prior plan but absent from the new args.phases be enumerated
+  in removed_task_ids with a removal_reason. save_plan will reject the call
+  otherwise (PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED). Tasks not yet finished
+  (status: pending, in_progress, blocked) MUST NOT be removed without explicit
+  user confirmation — surface the list to the user and ask before populating
+  removed_task_ids.
+- While .swarm/spec-staleness.json exists, the runtime STRUCTURALLY BLOCKS the
+  following tools (SPEC_DRIFT_BLOCKED_TOOLS): save_plan, update_task_status,
+  phase_complete, lean_turbo_run_phase, lean_turbo_acquire_locks. If a call
+  returns SPEC_DRIFT_BLOCK, do NOT retry; instead present the drift to the
+  user and run /swarm clarify or /swarm acknowledge-spec-drift first.
 
 ### MODE: EXECUTE
 For each task (respecting dependencies):

@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.17.3",
+    version: "7.18.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -14911,6 +14911,8 @@ function applyEventToPlan(plan, event) {
       return plan;
     case "task_added":
       return plan;
+    case "task_removed":
+      return plan;
     case "task_updated":
       return plan;
     case "plan_rebuilt":
@@ -15018,7 +15020,7 @@ async function loadLastApprovedPlan(directory, expectedPlanId) {
   }
   return null;
 }
-var LEDGER_SCHEMA_VERSION = "1.0.0", LEDGER_FILENAME = "plan-ledger.jsonl", PLAN_JSON_FILENAME = "plan.json", LedgerStaleWriterError;
+var LEDGER_SCHEMA_VERSION = "1.1.0", LEDGER_FILENAME = "plan-ledger.jsonl", PLAN_JSON_FILENAME = "plan.json", LedgerStaleWriterError;
 var init_ledger = __esm(() => {
   init_plan_schema();
   LedgerStaleWriterError = class LedgerStaleWriterError extends Error {
@@ -15308,7 +15310,13 @@ async function loadPlan(directory) {
         const planMdContent2 = await readSwarmFileAsync(directory, "plan.md");
         if (planMdContent2 !== null) {
           const migrated = migrateLegacyPlan(planMdContent2);
-          await savePlan(directory, migrated);
+          const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(directory, migrated, "load_plan_migration_from_md", "migrate legacy plan.md to plan.json");
+          if (removedCount > 0) {
+            migrated._midLoadRemovals = {
+              count: removedCount,
+              source: "load_plan_migration_from_md"
+            };
+          }
           return migrated;
         }
       }
@@ -15337,7 +15345,13 @@ async function loadPlan(directory) {
     try {
       const rebuilt = await replayFromLedger(directory);
       if (rebuilt) {
-        await savePlan(directory, rebuilt);
+        const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(directory, rebuilt, "load_plan_rebuild_from_ledger", "rebuild plan from ledger replay");
+        if (removedCount > 0) {
+          rebuilt._midLoadRemovals = {
+            count: removedCount,
+            source: "load_plan_rebuild_from_ledger"
+          };
+        }
         return rebuilt;
       }
       try {
@@ -15351,7 +15365,13 @@ async function loadPlan(directory) {
         if (approved) {
           const approvedPhase = approved.approval && typeof approved.approval === "object" && "phase" in approved.approval ? approved.approval.phase : undefined;
           warn(`[loadPlan] Ledger replay returned no plan \u2014 recovered from critic-approved snapshot seq=${approved.seq} timestamp=${approved.timestamp} (approval phase=${approvedPhase ?? "unknown"}). This may roll the plan back to an earlier phase \u2014 verify before continuing.`);
-          await savePlan(directory, approved.plan);
+          const { removedCount: snapshotRemovedCount } = await savePlanWithAutoAcknowledgedRemovals(directory, approved.plan, "load_plan_recovery_from_approved_snapshot", "restore from critic-approved snapshot");
+          if (snapshotRemovedCount > 0) {
+            approved.plan._midLoadRemovals = {
+              count: snapshotRemovedCount,
+              source: "load_plan_recovery_from_approved_snapshot"
+            };
+          }
           try {
             await takeSnapshotEvent(directory, approved.plan, {
               source: "recovery_from_approved_snapshot",
@@ -15371,6 +15391,28 @@ async function loadPlan(directory) {
     }
   }
   return null;
+}
+async function savePlanWithAutoAcknowledgedRemovals(directory, plan, source, reason, options) {
+  const existing = await _internals3.loadPlanJsonOnly(directory);
+  const newIds = new Set;
+  for (const phase of plan.phases) {
+    for (const task of phase.tasks)
+      newIds.add(task.id);
+  }
+  const removedIds = [];
+  if (existing) {
+    for (const phase of existing.phases) {
+      for (const task of phase.tasks) {
+        if (!newIds.has(task.id))
+          removedIds.push(task.id);
+      }
+    }
+  }
+  await savePlan(directory, plan, {
+    ...options ?? {},
+    acknowledged_removals: { ids: removedIds, reason, source }
+  });
+  return { removedCount: removedIds.length };
 }
 async function savePlan(directory, plan, options) {
   if (directory === null || directory === undefined || typeof directory !== "string" || directory.trim().length === 0) {
@@ -15506,6 +15548,67 @@ async function savePlan(directory, plan, options) {
     for (const phase of currentPlan.phases) {
       for (const task of phase.tasks) {
         oldTaskMap.set(task.id, { phase: task.phase, status: task.status });
+      }
+    }
+    const newTaskIds = new Set;
+    for (const phase of validated.phases) {
+      for (const task of phase.tasks)
+        newTaskIds.add(task.id);
+    }
+    const missingTasks = [];
+    for (const [id, info] of oldTaskMap.entries()) {
+      if (!newTaskIds.has(id)) {
+        missingTasks.push({ id, phase: info.phase, status: info.status });
+      }
+    }
+    const ack = options?.acknowledged_removals;
+    if (missingTasks.length > 0) {
+      if (!ack) {
+        throw new PlanTaskRemovalNotAcknowledgedError(missingTasks);
+      }
+      const ackSet = new Set(ack.ids);
+      const missingIdsSet = new Set(missingTasks.map((t) => t.id));
+      const unacked = missingTasks.filter((t) => !ackSet.has(t.id));
+      if (unacked.length > 0) {
+        throw new PlanTaskRemovalNotAcknowledgedError(unacked);
+      }
+      for (const id of ack.ids) {
+        if (!missingIdsSet.has(id)) {
+          throw new Error(`PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals contains "${id}" but that task is not missing from the plan.`);
+        }
+      }
+      try {
+        for (const missing of missingTasks) {
+          const eventInput = {
+            plan_id: derivePlanId(validated),
+            event_type: "task_removed",
+            task_id: missing.id,
+            phase_id: missing.phase,
+            from_status: missing.status,
+            source: ack.source,
+            payload: { reason: ack.reason, source: ack.source }
+          };
+          const capturedTaskId = missing.id;
+          await retryCasWithBackoff(directory, eventInput, {
+            expectedHash: currentHash,
+            planHashAfter: hashAfter,
+            verifyValid: async () => {
+              const onDisk = await _internals3.loadPlanJsonOnly(directory);
+              if (!onDisk)
+                return true;
+              for (const p of onDisk.phases) {
+                if (p.tasks.some((x) => x.id === capturedTaskId))
+                  return true;
+              }
+              return false;
+            }
+          });
+        }
+      } catch (error49) {
+        if (error49 instanceof LedgerStaleWriterError) {
+          throw new PlanConcurrentModificationError(`Concurrent plan modification detected after retries: ${error49.message}. Please retry the operation.`);
+        }
+        throw error49;
       }
     }
     try {
@@ -15908,7 +16011,7 @@ function migrateLegacyPlan(planContent, swarmId) {
   };
   return plan;
 }
-var PlanConcurrentModificationError, startupLedgerCheckedWorkspaces, recoveryMutexes, _internals3, CAS_BACKOFF_START_MS = 5, CAS_BACKOFF_CAP_MS = 250, CAS_BACKOFF_JITTER = 0.25, CAS_MAX_RETRIES = 3;
+var PlanConcurrentModificationError, PlanTaskRemovalNotAcknowledgedError, startupLedgerCheckedWorkspaces, recoveryMutexes, _internals3, CAS_BACKOFF_START_MS = 5, CAS_BACKOFF_CAP_MS = 250, CAS_BACKOFF_JITTER = 0.25, CAS_MAX_RETRIES = 3;
 var init_manager = __esm(() => {
   init_plan_schema();
   init_utils2();
@@ -15921,6 +16024,15 @@ var init_manager = __esm(() => {
     constructor(message) {
       super(message);
       this.name = "PlanConcurrentModificationError";
+    }
+  };
+  PlanTaskRemovalNotAcknowledgedError = class PlanTaskRemovalNotAcknowledgedError extends Error {
+    missingTasks;
+    constructor(missingTasks) {
+      const idList = missingTasks.map((t) => `${t.id}(${t.status})`).join(", ");
+      super(`PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED: the following tasks were present in the prior plan but missing from the new save: ${idList}. Pass acknowledged_removals.ids covering all missing task IDs with a non-empty reason to proceed.`);
+      this.name = "PlanTaskRemovalNotAcknowledgedError";
+      this.missingTasks = missingTasks;
     }
   };
   startupLedgerCheckedWorkspaces = new Set;
@@ -20828,7 +20940,7 @@ var init_model_limits = __esm(() => {
 var init_normalize_tool_name = () => {};
 
 // src/hooks/guardrails.ts
-var storedInputArgs, TRANSIENT_STATUS_CODES, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_SAFE_TARGETS, DC_FS_ROOTS, pathNormalizationCache, globMatcherCache;
+var SPEC_DRIFT_BLOCKED_TOOLS, storedInputArgs, TRANSIENT_STATUS_CODES, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_SAFE_TARGETS, DC_FS_ROOTS, pathNormalizationCache, globMatcherCache;
 var init_guardrails = __esm(() => {
   init_quick_lru();
   init_agents2();
@@ -20847,6 +20959,13 @@ var init_guardrails = __esm(() => {
   init_loop_detector();
   init_model_limits();
   init_normalize_tool_name();
+  SPEC_DRIFT_BLOCKED_TOOLS = new Set([
+    "save_plan",
+    "update_task_status",
+    "phase_complete",
+    "lean_turbo_run_phase",
+    "lean_turbo_acquire_locks"
+  ]);
   storedInputArgs = new Map;
   TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
   toolCallsSinceLastWrite = new Map;
@@ -51165,6 +51284,25 @@ var init_context_budget_service = __esm(() => {
 });
 
 // src/services/status-service.ts
+import * as fsSync2 from "fs";
+import * as path46 from "path";
+function readSpecStalenessSnapshot(directory) {
+  try {
+    const p = path46.join(directory, ".swarm", "spec-staleness.json");
+    if (!fsSync2.existsSync(p))
+      return { stale: false };
+    const raw = fsSync2.readFileSync(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    return {
+      stale: true,
+      reason: typeof parsed?.reason === "string" ? parsed.reason : undefined,
+      storedHash: typeof parsed?.specHash_plan === "string" ? parsed.specHash_plan : undefined,
+      currentHash: typeof parsed?.specHash_current === "string" || parsed?.specHash_current === null ? parsed.specHash_current : undefined
+    };
+  } catch {
+    return { stale: false };
+  }
+}
 async function getStatusData(directory, agents) {
   const plan = await loadPlan(directory);
   let status;
@@ -51229,6 +51367,16 @@ async function getStatusData(directory, agents) {
         lastSnapshotAt: metrics.lastSnapshotAt
       };
     }
+  }
+  const drift = readSpecStalenessSnapshot(directory);
+  if (drift.stale) {
+    status.specStale = true;
+    status.specStaleReason = drift.reason;
+    status.specStaleStoredHash = drift.storedHash;
+    status.specStaleCurrentHash = drift.currentHash;
+  } else if (plan && plan._specStale) {
+    status.specStale = true;
+    status.specStaleReason = plan._specStaleReason;
   }
   return enrichWithLeanTurbo(status, directory);
 }
@@ -51296,6 +51444,12 @@ function formatStatusMarkdown(status) {
     `**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
     `**Agents**: ${status.agentCount} registered`
   ];
+  if (status.specStale) {
+    const reason = status.specStaleReason ?? "spec.md changed since plan saved";
+    const stored = status.specStaleStoredHash ?? "unknown";
+    const current = status.specStaleCurrentHash ?? "(spec.md missing)";
+    lines.push("", `**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`, "Run `/swarm clarify` to update the spec or `/swarm acknowledge-spec-drift` to dismiss.");
+  }
   if (status.turboStrategy && status.turboStrategy !== "off") {
     lines.push("");
     if (status.turboStrategy === "lean") {
@@ -51707,7 +51861,7 @@ __export(exports_commands, {
   COMMAND_NAMES: () => COMMAND_NAMES
 });
 import fs28 from "fs";
-import path46 from "path";
+import path47 from "path";
 function buildHelpText() {
   const lines = ["## Swarm Commands", ""];
   const CATEGORIES = [
@@ -51810,9 +51964,9 @@ function createSwarmCommandHandler(directory, agents) {
       return;
     }
     let isFirstRun = false;
-    const sentinelPath = path46.join(directory, ".swarm", ".first-run-complete");
+    const sentinelPath = path47.join(directory, ".swarm", ".first-run-complete");
     try {
-      const swarmDir = path46.join(directory, ".swarm");
+      const swarmDir = path47.join(directory, ".swarm");
       fs28.mkdirSync(swarmDir, { recursive: true });
       fs28.writeFileSync(sentinelPath, `first-run-complete: ${new Date().toISOString()}
 `, { flag: "wx" });
@@ -52037,24 +52191,24 @@ function validateAliases() {
       }
       aliasTargets.get(target).push(name);
       const visited = new Set;
-      const path47 = [];
+      const path48 = [];
       let current = target;
       while (current) {
         const currentEntry = COMMAND_REGISTRY[current];
         if (!currentEntry)
           break;
         if (visited.has(current)) {
-          const cycleStart = path47.indexOf(current);
+          const cycleStart = path48.indexOf(current);
           const fullChain = [
             name,
-            ...path47.slice(0, cycleStart > 0 ? cycleStart : path47.length),
+            ...path48.slice(0, cycleStart > 0 ? cycleStart : path48.length),
             current
           ].join(" \u2192 ");
           errors5.push(`Circular alias detected: ${fullChain}`);
           break;
         }
         visited.add(current);
-        path47.push(current);
+        path48.push(current);
         current = currentEntry.aliasOf || "";
       }
     }
@@ -52565,53 +52719,53 @@ init_cache_paths();
 init_constants();
 import * as fs29 from "fs";
 import * as os7 from "os";
-import * as path47 from "path";
+import * as path48 from "path";
 var { version: version4 } = package_default;
 var CONFIG_DIR = getPluginConfigDir();
-var OPENCODE_CONFIG_PATH = path47.join(CONFIG_DIR, "opencode.json");
-var PLUGIN_CONFIG_PATH = path47.join(CONFIG_DIR, "opencode-swarm.json");
-var PROMPTS_DIR = path47.join(CONFIG_DIR, "opencode-swarm");
+var OPENCODE_CONFIG_PATH = path48.join(CONFIG_DIR, "opencode.json");
+var PLUGIN_CONFIG_PATH = path48.join(CONFIG_DIR, "opencode-swarm.json");
+var PROMPTS_DIR = path48.join(CONFIG_DIR, "opencode-swarm");
 var OPENCODE_PLUGIN_CACHE_PATHS = getPluginCachePaths();
 var OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
 function isSafeCachePath(p) {
-  const resolved = path47.resolve(p);
-  const home = path47.resolve(os7.homedir());
+  const resolved = path48.resolve(p);
+  const home = path48.resolve(os7.homedir());
   if (resolved === "/" || resolved === home || resolved.length <= home.length) {
     return false;
   }
-  const segments = resolved.split(path47.sep).filter((s) => s.length > 0);
+  const segments = resolved.split(path48.sep).filter((s) => s.length > 0);
   if (segments.length < 4) {
     return false;
   }
-  const leaf = path47.basename(resolved);
+  const leaf = path48.basename(resolved);
   if (leaf !== "opencode-swarm@latest" && leaf !== "opencode-swarm") {
     return false;
   }
-  const parent = path47.basename(path47.dirname(resolved));
+  const parent = path48.basename(path48.dirname(resolved));
   if (parent !== "packages" && parent !== "node_modules") {
     return false;
   }
-  const grandparent = path47.basename(path47.dirname(path47.dirname(resolved)));
+  const grandparent = path48.basename(path48.dirname(path48.dirname(resolved)));
   if (grandparent !== "opencode") {
     return false;
   }
   return true;
 }
 function isSafeLockFilePath(p) {
-  const resolved = path47.resolve(p);
-  const home = path47.resolve(os7.homedir());
+  const resolved = path48.resolve(p);
+  const home = path48.resolve(os7.homedir());
   if (resolved === "/" || resolved === home || resolved.length <= home.length) {
     return false;
   }
-  const segments = resolved.split(path47.sep).filter((s) => s.length > 0);
+  const segments = resolved.split(path48.sep).filter((s) => s.length > 0);
   if (segments.length < 4) {
     return false;
   }
-  const leaf = path47.basename(resolved);
+  const leaf = path48.basename(resolved);
   if (leaf !== "bun.lock" && leaf !== "bun.lockb" && leaf !== "package-lock.json") {
     return false;
   }
-  const parent = path47.basename(path47.dirname(resolved));
+  const parent = path48.basename(path48.dirname(resolved));
   if (parent !== "opencode") {
     return false;
   }
@@ -52637,8 +52791,8 @@ function saveJson(filepath, data) {
 }
 function writeProjectConfigIfMissing(cwd) {
   try {
-    const opencodeDir = path47.join(cwd, ".opencode");
-    const projectConfigPath = path47.join(opencodeDir, "opencode-swarm.json");
+    const opencodeDir = path48.join(cwd, ".opencode");
+    const projectConfigPath = path48.join(opencodeDir, "opencode-swarm.json");
     if (fs29.existsSync(projectConfigPath)) {
       return;
     }
@@ -52655,7 +52809,7 @@ async function install() {
 `);
   ensureDir(CONFIG_DIR);
   ensureDir(PROMPTS_DIR);
-  const LEGACY_CONFIG_PATH = path47.join(CONFIG_DIR, "config.json");
+  const LEGACY_CONFIG_PATH = path48.join(CONFIG_DIR, "config.json");
   let opencodeConfig = loadJson(OPENCODE_CONFIG_PATH);
   if (!opencodeConfig) {
     const legacyConfig = loadJson(LEGACY_CONFIG_PATH);

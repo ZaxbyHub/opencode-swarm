@@ -10,6 +10,27 @@ import * as path from 'node:path';
 import { type AuthorityConfig, type GuardrailsConfig } from '../config/schema';
 import { type FileZone } from '../context/zone-classifier';
 /**
+ * Issue #853 Layer B: tools that are structurally blocked while
+ * `.swarm/spec-staleness.json` exists. Every blocked tool mutates plan
+ * state (save_plan, update_task_status, phase_complete) or proceeds with
+ * lean-turbo execution (lean_turbo_run_phase, lean_turbo_acquire_locks).
+ * The architect must run /swarm clarify or /swarm acknowledge-spec-drift
+ * before any of these will succeed.
+ *
+ * Read tools (get_approved_plan, lint_spec, set_qa_gates, convene_*,
+ * lean_turbo_plan_lanes, lean_turbo_runner_status, lean_turbo_review) are
+ * intentionally NOT blocked — drift surfacing should not block exploration.
+ */
+export declare const SPEC_DRIFT_BLOCKED_TOOLS: Set<string>;
+/**
+ * Throw SPEC_DRIFT_BLOCK if the tool is on the block-list and the
+ * spec-staleness marker file exists. Layer B is structural (not a
+ * retryable error) — deterministic disk read every call, no cache, so
+ * /swarm acknowledge-spec-drift (which removes the marker) is reflected
+ * immediately on the next tool call.
+ */
+export declare function enforceSpecDriftGate(directory: string | undefined, toolName: string): void;
+/**
  * Retrieves stored input args for a given callID.
  * Used by other hooks (e.g., delegation-gate) to access tool input args.
  * @param callID The callID to look up

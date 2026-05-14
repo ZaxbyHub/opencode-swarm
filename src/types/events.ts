@@ -114,6 +114,22 @@ export interface SpecDriftAcknowledgedEvent {
 	newHash: string | null;
 }
 
+/**
+ * Emitted whenever savePlan removes one or more tasks from the prior plan
+ * (issue #853). Audit-only — replayFromLedger does not mutate plan state on
+ * this event. The `reason` describes why the task was removed; `source`
+ * identifies the caller (e.g. 'save_plan_tool', 'phase_complete_rebuild_from_ledger').
+ */
+export interface TaskRemovedEvent {
+	type: 'task_removed';
+	timestamp: string;
+	task_id: string;
+	phase_id: number;
+	from_status: string;
+	source: string;
+	reason: string;
+}
+
 export interface PrmPatternDetectedEvent {
 	type: 'prm_pattern_detected';
 	timestamp: string;

@@ -10,7 +10,11 @@ import * as path from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { appendLedgerEvent } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
-import { derivePlanMarkdown, loadPlan, savePlan } from './manager';
+import {
+	derivePlanMarkdown,
+	loadPlan,
+	savePlanWithAutoAcknowledgedRemovals,
+} from './manager';
 
 /**
  * Write SWARM_PLAN.json and SWARM_PLAN.md inside the .swarm/ directory under the project root.
@@ -86,7 +90,12 @@ export async function importCheckpoint(
 		const parsed = JSON.parse(rawContent);
 		const plan = PlanSchema.parse(parsed) as Plan;
 
-		await savePlan(directory, plan);
+		await savePlanWithAutoAcknowledgedRemovals(
+			directory,
+			plan,
+			'import_checkpoint',
+			'import external checkpoint',
+		);
 
 		await appendLedgerEvent(directory, {
 			event_type: 'plan_rebuilt',
