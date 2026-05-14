@@ -201,7 +201,7 @@ export async function loadPlanJsonOnly(
 	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
 	if (planJsonContent !== null) {
 		// SECURITY: Reject content with null bytes (injection) or invalid UTF-8 (corruption markers)
-		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
+		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
 			warn(
 				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
 			);
@@ -391,7 +391,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
 	if (planJsonContent !== null) {
 		// SECURITY: Reject content with null bytes or invalid UTF-8
-		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
+		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
 			warn(
 				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
 			);
@@ -1112,6 +1112,16 @@ export async function savePlan(
 			if (!ack) {
 				throw new PlanTaskRemovalNotAcknowledgedError(missingTasks);
 			}
+			if (typeof ack.reason !== 'string' || ack.reason.trim().length === 0) {
+				throw new Error(
+					'PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals.reason must be a non-empty string.',
+				);
+			}
+			if (typeof ack.source !== 'string' || ack.source.trim().length === 0) {
+				throw new Error(
+					'PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals.source must be a non-empty string.',
+				);
+			}
 			const ackSet = new Set(ack.ids);
 			const missingIdsSet = new Set(missingTasks.map((t) => t.id));
 			const unacked = missingTasks.filter((t) => !ackSet.has(t.id));
@@ -1126,11 +1136,15 @@ export async function savePlan(
 				}
 			}
 
-			// Emit task_removed audit events. Each event runs under
+			// Emit task_removed events. Each event runs under
 			// retryCasWithBackoff so concurrent savePlan writers do not
 			// lose audit events to a single CAS collision; verifyValid
 			// makes the append idempotent when another writer has
-			// already removed the same task.
+			// already removed the same task. The event is functional on
+			// replay (see applyEventToPlan in src/plan/ledger.ts): if a
+			// crash lands the ledger append but loses the plan.json
+			// rename, replayFromLedger must drop the task to preserve
+			// crash consistency. (#853 post-merge review.)
 			try {
 				for (const missing of missingTasks) {
 					const eventInput: LedgerEventInput = {
