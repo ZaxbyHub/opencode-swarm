@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.18.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.3...v7.18.0) (2026-05-14)
+
+
+### Features
+
+* **parallelization:** wire standard stage b gate groups ([#837](https://github.com/zaxbysauce/opencode-swarm/issues/837)) ([c5c706b](https://github.com/zaxbysauce/opencode-swarm/commit/c5c706b8fc3faa87ffe8a9306eb0f24941e2aa83))
+
+
+### Bug Fixes
+
+* **commands:** mutate output.parts in place + document LLM-mediation gap ([#845](https://github.com/zaxbysauce/opencode-swarm/issues/845)) ([dbf3891](https://github.com/zaxbysauce/opencode-swarm/commit/dbf3891c90dfeebeadb1ce577fa28f130be4bae5))
+* **gate-tracking:** close cross-phase evidence-routing and state leaks ([#839](https://github.com/zaxbysauce/opencode-swarm/issues/839)) ([76ce20f](https://github.com/zaxbysauce/opencode-swarm/commit/76ce20fd65ff91beb0772ea0cc6d62616f54c166))
+* **onboarding:** validate configured swarm models ([#841](https://github.com/zaxbysauce/opencode-swarm/issues/841)) ([bf6afe9](https://github.com/zaxbysauce/opencode-swarm/commit/bf6afe93977ccfae73c7b25d8c092e8700a74e86))
+* **qa-gate:** harden final council evidence writes ([#834](https://github.com/zaxbysauce/opencode-swarm/issues/834)) ([5ce1a6b](https://github.com/zaxbysauce/opencode-swarm/commit/5ce1a6b7b6d882b5428ff37ae7eb7647711969ac))
+
 ## [7.17.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.2...v7.17.3) (2026-05-12)
 
 
