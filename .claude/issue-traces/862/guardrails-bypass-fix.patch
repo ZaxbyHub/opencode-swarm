@@ -1,0 +1,234 @@
+diff --git a/src/hooks/guardrails.ts b/src/hooks/guardrails.ts
+--- a/src/hooks/guardrails.ts
++++ b/src/hooks/guardrails.ts
+@@ -210,8 +210,38 @@
+ 	`^\\.swarm/evidence/${STRICT_TASK_ID_PATTERN.source.slice(1, -1)}\\.json$`,
+ );
+ 
++// Boundary character class for Bash matching: start-of-string OR any character
++// that can legitimately precede a path token. Critically includes quote chars
++// (single, double, backtick) and common shell delimiters so that
++// `rm '.swarm/evidence/4.4.json'`, `python -c "open('.swarm/evidence/…')"`,
++// and `cmd=.swarm/evidence/4.4.json` all match. Issue #862 follow-up.
++const BASH_PATH_BOUNDARY = `(?:^|[\\s/'"\`=:(,\\[{])`;
++
+ const PER_TASK_GATE_FILE_BASH_RE = new RegExp(
+-	`(?:^|[\\s/])\\.swarm/evidence/${STRICT_TASK_ID_PATTERN.source.slice(1, -1)}\\.json\\b`,
++	`${BASH_PATH_BOUNDARY}\\.swarm/evidence/${STRICT_TASK_ID_PATTERN.source.slice(1, -1)}\\.json\\b`,
++);
++
++// Matches any mention of the `.swarm/evidence` path (either the directory
++// itself or any child). Used as the quick filter and for `find -delete`-style
++// checks where the per-task filename is hidden behind `-name`.
++const EVIDENCE_DIR_BASH_RE = new RegExp(
++	`${BASH_PATH_BOUNDARY}\\.swarm/evidence(?:/|$|[\\s'"\`)\\]}])`,
++);
++
++// Matches the `.swarm/evidence` directory EXACTLY (NOT as a parent of some
++// child path). Used for directory-level mutation blocks where targeting the
++// dir itself (`mv .swarm/evidence /tmp/x`, `rm -rf .swarm/evidence`) wipes
++// all per-task files in one stroke, but operating on a child (e.g.
++// `.swarm/evidence/retro-3/...` — phase-scoped subdir) remains permitted by
++// the universal guard.
++const EVIDENCE_DIR_EXACT_BASH_RE = new RegExp(
++	`${BASH_PATH_BOUNDARY}\\.swarm/evidence(?=$|[\\s'"\`)\\]}])`,
++);
++
++// Suffix match for absolute paths — blocks cross-repo escapes where an agent
++// uses an absolute path outside cwd to reach another repo's evidence file.
++const ABS_PER_TASK_GATE_FILE_RE = new RegExp(
++	`/\\.swarm/evidence/${STRICT_TASK_ID_PATTERN.source.slice(1, -1)}\\.json$`,
+ );
+ 
+ function isPerTaskGateEvidencePath(filePath: string, cwd: string): boolean {
+@@ -219,6 +249,12 @@
+ 	const abs = path.isAbsolute(filePath)
+ 		? filePath
+ 		: path.resolve(cwd, filePath);
++	// Cross-repo guard (#862 bypass #7): any absolute path whose suffix matches
++	// `.swarm/evidence/<id>.json` is hook-managed regardless of which working
++	// tree it belongs to. Agents in repo A have no business writing repo B's
++	// evidence ledger.
++	const normalizedAbs = abs.replace(/\\/g, '/');
++	if (ABS_PER_TASK_GATE_FILE_RE.test(normalizedAbs)) return true;
+ 	const rel = path
+ 		.relative(path.resolve(cwd), abs)
+ 		.replace(/\\/g, '/')
+@@ -1501,17 +1537,34 @@
+ 		const rawCommand =
+ 			typeof toolArgs?.command === 'string' ? toolArgs.command : '';
+ 		if (!rawCommand) return;
++		// Normalize-then-check pipeline. The raw command may contain `..`
++		// traversal (`rm .swarm/x/../evidence/4.4.json`) or quoted paths
++		// (`rm '.swarm/evidence/4.4.json'`) that defeat naive substring
++		// matching. We canonicalize the command in two steps:
++		//   1. Strip surrounding quotes from path-shaped tokens so the boundary
++		//      regex sees `.swarm/evidence/...` against whitespace, not `'`.
++		//   2. Collapse `..` traversals in path-shaped tokens via posix.normalize.
++		// The normalized form is used purely for matching; the original command
++		// is never mutated.
++		const normalizeForMatch = (raw: string): string => {
++			return raw.replace(
++				/(['"\`]?)((?:[\w./~\\-]|\$\{[^}]*\})*\.swarm\/[^\s'"\`|&;<>]*)\1/g,
++				(_full, _quote, token) => ` ${path.posix.normalize(token)} `,
++			);
++		};
++		const normalizedRaw = normalizeForMatch(rawCommand);
++
+ 		// Quick filter — must mention either an explicit per-task gate file
+ 		// OR the .swarm/evidence directory (for `find -delete`-style commands
+ 		// where the target file name is supplied via -name).
+ 		const mentionsEvidenceDir =
+-			PER_TASK_GATE_FILE_BASH_RE.test(rawCommand) ||
+-			/(?:^|\s|\/)\.swarm\/evidence(?:\/|$|\s)/.test(rawCommand);
++			PER_TASK_GATE_FILE_BASH_RE.test(normalizedRaw) ||
++			EVIDENCE_DIR_BASH_RE.test(normalizedRaw);
+ 		if (!mentionsEvidenceDir) return;
+ 
+ 		// Mirror checkDestructiveCommand: normalize + unwrap shell wrappers
+ 		// (bash -c / sh -c / eval / xargs sh -c) before per-segment analysis.
+-		const command = dcNormalizeCommand(rawCommand);
++		const command = dcNormalizeCommand(normalizedRaw);
+ 		const unwrapped = dcUnwrapWrappers(command);
+ 		const outerSegments = dcSplitSegments(command);
+ 		const innerSegments = dcSplitSegments(unwrapped);
+@@ -1526,22 +1579,68 @@
+ 			`${verb} is not permitted — delegate to the gate agent ` +
+ 			`(reviewer, test_engineer, etc.) and call update_task_status.`;
+ 
++		// Indirect-execution prefixes that pass the verb through unchanged:
++		// `command rm …`, `timeout 5 rm …`, `exec rm …`, plus backslash-escape
++		// forms `\rm …` (POSIX way to bypass shell aliases). dcUnwrapWrappers
++		// already handles `env`, `sudo`, `nohup`, `nice`, `time`; this is the
++		// gap.
++		const stripIndirectPrefix = (seg: string): string => {
++			let s = seg.trim();
++			let progressed = true;
++			let safety = 0;
++			while (progressed && safety++ < 4) {
++				progressed = false;
++				const m =
++					/^command\s+(?:-[pvV]\s+)?(.+)$/s.exec(s) ??
++					/^exec\s+(.+)$/s.exec(s) ??
++					/^timeout\s+(?:-[a-zA-Z]\s+\S+\s+)?(?:--\S+(?:=\S+|\s+\S+)\s+)?(?:\d+(?:[smhd]|\.\d+)?\s+)?(.+)$/s.exec(
++						s,
++					);
++				if (m) {
++					s = m[1].trim();
++					progressed = true;
++				}
++			}
++			// Strip leading backslash escapes: `\rm` -> `rm`, `\cp` -> `cp`.
++			s = s.replace(/^\\+/, '');
++			return s;
++		};
++
++		// Mutation primitives (file-positional): the verb consumes a path arg.
++		// Issue #862 follow-up: added `ln` (symlink replacement bypass) and
++		// `link` (hardlink), plus rare archive/utility commands. `mv` and `cp`
++		// also appear in the directory-mutation arm below.
++		const FILE_MUTATION_RE =
++			/^(?:rm|unlink|mv|cp|install|truncate|tee|dd|chmod|chown|shred|ln|link|mktemp)(?:\.exe)?$/i;
++		// Directory-mutation primitives: applied to `.swarm/evidence` itself.
++		// Issue #862 follow-up: `mv .swarm/evidence /tmp/x` and `rm -rf
++		// .swarm/evidence` previously wiped all per-task files in one stroke.
++		const DIR_MUTATION_RE =
++			/^(?:rm|mv|cp|ln|link|install|chmod|chown|shred|truncate|rsync)(?:\.exe)?$/i;
++		// Generic interpreters that can perform arbitrary file mutation through
++		// their language runtime (open('…','w'), unlink, write_text, etc.).
++		// When an interpreter invocation names a per-task evidence file we
++		// block it conservatively — agents should read evidence via cat/jq and
++		// never write via an interpreter.
++		const INTERPRETER_RE =
++			/^(?:python|python2|python3|node|nodejs|deno|bun|perl|ruby|php|awk|gawk|mawk|nawk|osascript|pwsh|powershell|tar|cpio|7z|7za|zip|unzip)(?:\.exe)?$/i;
++
+ 		for (const segment of allSegments) {
+ 			const seg = segment.trim();
+ 			if (!seg) continue;
+ 
+-			const first = seg.split(/\s+/)[0] ?? '';
++			const stripped = stripIndirectPrefix(seg);
++			const first = stripped.split(/\s+/)[0] ?? '';
+ 			const head = first.replace(/^.*[\\/]/, '');
+ 
+ 			const segMentionsEvidenceFile = PER_TASK_GATE_FILE_BASH_RE.test(seg);
+ 			const segMentionsEvidenceDir =
+-				segMentionsEvidenceFile ||
+-				/(?:^|\s|\/)\.swarm\/evidence(?:\/|$|\s)/.test(seg);
++				segMentionsEvidenceFile || EVIDENCE_DIR_BASH_RE.test(seg);
+ 
+ 			// `find <dir> ... -delete` — applies to the whole .swarm/evidence
+ 			// directory, even when the per-task filename is hidden behind -name.
+ 			if (
+-				/^find\b/.test(seg) &&
++				/^find\b/.test(stripped) &&
+ 				segMentionsEvidenceDir &&
+ 				/\s-delete\b/.test(seg)
+ 			) {
+@@ -1551,32 +1650,55 @@
+ 			// surfaced the per-task file in the compound command, so the
+ 			// outer-command-level mention check has already gated us here.
+ 			if (
+-				/^xargs\b/.test(seg) &&
+-				/\b(?:rm|unlink|mv|cp|truncate|chmod)\b/.test(seg)
++				/^xargs\b/.test(stripped) &&
++				/\b(?:rm|unlink|mv|cp|truncate|chmod|ln)\b/.test(seg)
+ 			) {
+ 				throw new Error(blockedMessage('Mutation via xargs'));
+ 			}
+ 
++			// Directory-level mutation: `mv .swarm/evidence /tmp/x`,
++			// `rm -rf .swarm/evidence`, `cp -r .swarm/evidence /tmp/backup`.
++			// Requires the segment to name `.swarm/evidence` EXACTLY (not as a
++			// parent of a child path) — phase-scoped children like
++			// `.swarm/evidence/retro-3/...` are agent-writable and must flow
++			// through the per-agent authority rules.
++			// Issue #862 bypass #5.
++			const segTargetsEvidenceDirExact =
++				EVIDENCE_DIR_EXACT_BASH_RE.test(seg);
++			if (segTargetsEvidenceDirExact && DIR_MUTATION_RE.test(head)) {
++				throw new Error(
++					blockedMessage('Directory-level mutation of .swarm/evidence'),
++				);
++			}
++
+ 			// Remaining checks need the segment itself to name a per-task file.
+ 			if (!segMentionsEvidenceFile) continue;
+ 
+ 			// Mutation primitives that take the path as a positional argument.
+-			if (
+-				/^(?:rm|unlink|mv|cp|install|truncate|tee|dd|chmod|chown|shred)(?:\.exe)?$/i.test(
+-					head,
+-				)
+-			) {
++			if (FILE_MUTATION_RE.test(head)) {
+ 				throw new Error(blockedMessage('Direct file mutation'));
+ 			}
++			// Generic interpreters naming the per-task file — block unless
++			// the segment is clearly read-only (no write-intent keywords).
++			// Conservative: block any interpreter invocation that names the
++			// file. Read-only access through `cat`/`jq` remains unaffected.
++			// Issue #862 bypass #6.
++			if (INTERPRETER_RE.test(head)) {
++				throw new Error(
++					blockedMessage(`Interpreter-driven mutation (${head})`),
++				);
++			}
+ 			// `sed -i` (in-place edit), `sed --in-place=...`
+ 			if (/^sed\b[^>]*\s(?:-i\b|--in-place\b)/.test(seg)) {
+ 				throw new Error(blockedMessage('In-place edit (sed -i)'));
+ 			}
+ 			// Redirect into a per-task gate file: `... > .swarm/evidence/3.1.json`
+-			// or `... >> .swarm/evidence/3.1.json`
+-			const redirectMatch = seg.match(/(>{1,2})\s*([^\s|&;<>]+)/);
+-			if (redirectMatch && PER_TASK_GATE_FILE_BASH_RE.test(redirectMatch[2])) {
+-				throw new Error(blockedMessage('Output redirection'));
++			// or `... >> .swarm/evidence/3.1.json`. matchAll catches multiple
++			// redirects in one segment (`cmd 2>&1 > .swarm/evidence/3.1.json`).
++			for (const redirect of seg.matchAll(/(>{1,2})\s*([^\s|&;<>]+)/g)) {
++				if (PER_TASK_GATE_FILE_BASH_RE.test(redirect[2])) {
++					throw new Error(blockedMessage('Output redirection'));
++				}
+ 			}
+ 		}
+ 	}
