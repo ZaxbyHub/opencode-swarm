@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.19.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.1...v7.19.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **test-runner:** add pre-discovery source-file guard to prevent session-killing cascade ([#867](https://github.com/zaxbysauce/opencode-swarm/issues/867)) ([c1ee8eb](https://github.com/zaxbysauce/opencode-swarm/commit/c1ee8eb24b987f1d7c705549f5930fa14342d875)), closes [#864](https://github.com/zaxbysauce/opencode-swarm/issues/864)
+
 ## [7.19.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.0...v7.19.1) (2026-05-14)
 
 
