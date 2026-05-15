@@ -4,6 +4,7 @@ export declare const MAX_COMMAND_LENGTH = 500;
 export declare const DEFAULT_TIMEOUT_MS = 60000;
 export declare const MAX_TIMEOUT_MS = 300000;
 export declare const MAX_SAFE_TEST_FILES = 50;
+export declare const MAX_SAFE_SOURCE_FILES = 1;
 export declare const SUPPORTED_FRAMEWORKS: readonly ["bun", "vitest", "jest", "mocha", "pytest", "cargo", "pester", "go-test", "maven", "gradle", "dotnet-test", "ctest", "swift-test", "dart-test", "rspec", "minitest"];
 export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
 export interface TestRunnerArgs {

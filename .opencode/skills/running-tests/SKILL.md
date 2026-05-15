@@ -16,10 +16,13 @@ This skill is about **executing** tests safely. For **writing** tests, see `writ
 
 ## ⛔ The One Rule That Prevents Session Kills
 
-**Never use `test_runner` with `scope: 'graph'` or `scope: 'impact'` on multiple files.**
+**Never use `test_runner` with more than one source file for any discovery scope.**
 
-Each file fans out to its own import tree. The union blows past `MAX_SAFE_TEST_FILES = 50`
-(`src/tools/test-runner.ts:26`), which stalls or kills the OpenCode session before the guard fires.
+`graph` and `impact` each fan out per file through the import tree; `convention` maps
+each source file to a test file by name convention. The union quickly exceeds
+`MAX_SAFE_TEST_FILES = 50`, triggering `scope_exceeded`, which causes LLMs to
+cascade to `scope: 'all'` and kill the session. All three scopes now reject with
+`scope_exceeded` before fan-out when `sourceFiles.length > MAX_SAFE_SOURCE_FILES = 1`.
 
 ---
 
@@ -40,7 +43,8 @@ Do you need to run tests?
 │
 ├─ Find tests related to MULTIPLE changed source files
 │   └─ Shell only — per-file loop over the changed files, or run the whole directory.
-│      test_runner with scope:'graph' + multiple files = session kill.
+│      test_runner with any discovery scope + multiple source files = scope_exceeded
+│      (guard fires before fan-out for convention, graph, and impact scopes).
 │
 └─ Validate the entire repo (pre-push)
     └─ Shell only — 5-tier suite from commit-pr skill. Never test_runner scope:'all'.
@@ -50,14 +54,14 @@ Do you need to run tests?
 
 ## Scope Safety Reference
 
-| Scope | With `files: [one]` | With `files: [many]` | Notes |
-|-------|--------------------|--------------------|-------|
-| `'convention'` | ✅ Safe | ✅ Safe | Maps source → test by filename convention only |
-| `'graph'` | ✅ Safe | ❌ Session kill | Traces imports — fan-out multiplies per file |
-| `'impact'` | ✅ Safe | ❌ Session kill | Same fan-out risk as graph |
+| Scope | With `files: [one source]` | With `files: [many sources]` | Notes |
+|-------|---------------------------|------------------------------|-------|
+| `'convention'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before fan-out; direct test file paths exempt |
+| `'graph'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before import-graph traversal |
+| `'impact'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before impact analysis |
 | `'all'` | ❌ Never | ❌ Never | Requires `allow_full_suite: true`; CI mirror only |
 
-**Rule of thumb:** If you're passing more than one file to `test_runner`, use shell instead.
+**Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
 
 ---
 

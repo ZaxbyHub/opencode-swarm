@@ -24,6 +24,7 @@ export const MAX_COMMAND_LENGTH = 500;
 export const DEFAULT_TIMEOUT_MS = 60_000; // 60 seconds default
 export const MAX_TIMEOUT_MS = 300_000; // 5 minutes max
 export const MAX_SAFE_TEST_FILES = 50; // Maximum resolved test files allowed in interactive session
+export const MAX_SAFE_SOURCE_FILES = 1; // Maximum source files allowed for graph/impact scopes (>1 fans out to too many test files)
 
 // Supported test frameworks
 export const SUPPORTED_FRAMEWORKS = [
@@ -1969,9 +1970,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					framework: 'none',
 					scope: 'all',
 					error:
-						'scope "all" is not allowed without explicit files. Use scope "convention" or "graph" with a files array to run targeted tests.',
+						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with exactly one source file.',
 					message:
-						'Running the full test suite without file targeting is blocked. Provide scope "convention" or "graph" with specific source files in the files array. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
+						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with exactly one source file. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
 					outcome: 'error',
 				};
 				return JSON.stringify(errorResult, null, 2);
@@ -2110,6 +2111,20 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
+			// Guard: Reject when too many source files would cause fan-out to many test files.
+			// Direct test files are exempt — they are explicitly named and don't fan out.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "convention" accepts at most ${MAX_SAFE_SOURCE_FILES} source file for discovery (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "convention" discovery (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or pass direct test file paths instead of source files.`,
+					outcome: 'scope_exceeded',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
 			testFiles = [
 				...directTestFiles,
 				...getTestFilesFromConvention(sourceFiles, workingDir),
@@ -2136,6 +2151,22 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					message:
 						'The files array for scope "graph" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
 					outcome: 'error',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
+			// Guard: Reject before any I/O when too many source files are provided.
+			// graph discovery fans out: each source file can match many test files, easily
+			// exceeding MAX_SAFE_TEST_FILES and triggering a scope_exceeded cascade that
+			// causes LLMs to retry with scope "all", freezing the OpenCode SSE session.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "graph" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					outcome: 'scope_exceeded',
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
@@ -2175,6 +2206,22 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					message:
 						'The files array for scope "impact" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
 					outcome: 'error',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
+			// Guard: Reject before any I/O when too many source files are provided.
+			// impact analysis fans out through the import graph, then may fall back to graph
+			// discovery; either path can exceed MAX_SAFE_TEST_FILES and cause LLMs to cascade
+			// to scope "all", freezing the OpenCode SSE session.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "impact" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					outcome: 'scope_exceeded',
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}

@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.19.0",
+    version: "7.19.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -57308,7 +57308,7 @@ function analyzeFailures(workingDir) {
   } catch {}
   return report;
 }
-var MAX_OUTPUT_BYTES3 = 512000, MAX_COMMAND_LENGTH2 = 500, DEFAULT_TIMEOUT_MS = 60000, MAX_TIMEOUT_MS = 300000, MAX_SAFE_TEST_FILES = 50, POWERSHELL_METACHARACTERS, DISPATCH_FRAMEWORK_MAP, COMPOUND_TEST_EXTENSIONS, TEST_DIRECTORY_NAMES, SOURCE_EXTENSIONS, SKIP_DIRECTORIES, test_runner;
+var MAX_OUTPUT_BYTES3 = 512000, MAX_COMMAND_LENGTH2 = 500, DEFAULT_TIMEOUT_MS = 60000, MAX_TIMEOUT_MS = 300000, MAX_SAFE_TEST_FILES = 50, MAX_SAFE_SOURCE_FILES = 1, POWERSHELL_METACHARACTERS, DISPATCH_FRAMEWORK_MAP, COMPOUND_TEST_EXTENSIONS, TEST_DIRECTORY_NAMES, SOURCE_EXTENSIONS, SKIP_DIRECTORIES, test_runner;
 var init_test_runner = __esm(() => {
   init_zod();
   init_discovery();
@@ -57495,8 +57495,8 @@ var init_test_runner = __esm(() => {
             success: false,
             framework: "none",
             scope: "all",
-            error: 'scope "all" is not allowed without explicit files. Use scope "convention" or "graph" with a files array to run targeted tests.',
-            message: 'Running the full test suite without file targeting is blocked. Provide scope "convention" or "graph" with specific source files in the files array. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
+            error: 'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with exactly one source file.',
+            message: 'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with exactly one source file. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
             outcome: "error"
           };
           return JSON.stringify(errorResult, null, 2);
@@ -57577,6 +57577,17 @@ var init_test_runner = __esm(() => {
           };
           return JSON.stringify(errorResult, null, 2);
         }
+        if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+          const errorResult = {
+            success: false,
+            framework,
+            scope,
+            error: `scope "convention" accepts at most ${MAX_SAFE_SOURCE_FILES} source file for discovery (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+            message: `Too many source files for scope "convention" discovery (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or pass direct test file paths instead of source files.`,
+            outcome: "scope_exceeded"
+          };
+          return JSON.stringify(errorResult, null, 2);
+        }
         testFiles = [
           ...directTestFiles,
           ...getTestFilesFromConvention(sourceFiles, workingDir)
@@ -57597,6 +57608,17 @@ var init_test_runner = __esm(() => {
             error: "Provided files contain no source files with recognized extensions",
             message: 'The files array for scope "graph" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
             outcome: "error"
+          };
+          return JSON.stringify(errorResult, null, 2);
+        }
+        if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+          const errorResult = {
+            success: false,
+            framework,
+            scope,
+            error: `scope "graph" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+            message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+            outcome: "scope_exceeded"
           };
           return JSON.stringify(errorResult, null, 2);
         }
@@ -57624,6 +57646,17 @@ var init_test_runner = __esm(() => {
             error: "Provided files contain no source files with recognized extensions",
             message: 'The files array for scope "impact" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
             outcome: "error"
+          };
+          return JSON.stringify(errorResult, null, 2);
+        }
+        if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+          const errorResult = {
+            success: false,
+            framework,
+            scope,
+            error: `scope "impact" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+            message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+            outcome: "scope_exceeded"
           };
           return JSON.stringify(errorResult, null, 2);
         }
