@@ -116,12 +116,125 @@ function extractStatusCode(errorMsg: string): number | null {
 	return null;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(value.constructor === Object || Object.getPrototypeOf(value) === null)
+	);
+}
+
+function readSignalField(
+	source: Record<string, unknown>,
+	key: string,
+): unknown {
+	try {
+		return source[key];
+	} catch {
+		return undefined;
+	}
+}
+
+function pushSignalValue(parts: string[], value: unknown): void {
+	if (typeof value === 'string') {
+		parts.push(value);
+		return;
+	}
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		parts.push(String(value));
+	}
+}
+
+function appendSelectedFields(
+	parts: string[],
+	source: Record<string, unknown>,
+	keys: readonly string[],
+): void {
+	for (const key of keys) {
+		pushSignalValue(parts, readSignalField(source, key));
+	}
+}
+
+function appendNestedErrorSignal(parts: string[], value: unknown): void {
+	if (typeof value === 'string') {
+		parts.push(value);
+		return;
+	}
+	if (value instanceof Error) {
+		parts.push(value.name, value.message);
+		appendSelectedFields(parts, value as unknown as Record<string, unknown>, [
+			'code',
+			'status',
+			'statusCode',
+		]);
+		return;
+	}
+	if (!isPlainObject(value)) return;
+	appendSelectedFields(parts, value, [
+		'code',
+		'status',
+		'statusCode',
+		'message',
+		'error_type',
+	]);
+}
+
+/**
+ * Extracts bounded provider/error signal from unknown hook error payloads.
+ * Do not stringify arbitrary objects here: unrelated fields like `phase: 502`
+ * must not accidentally become transient provider errors.
+ */
+function extractErrorSignal(errorContent: unknown): string {
+	if (typeof errorContent === 'string') return errorContent;
+	if (errorContent == null) return '';
+
+	const parts: string[] = [];
+
+	try {
+		if (errorContent instanceof Error) {
+			parts.push(errorContent.name, errorContent.message);
+			appendSelectedFields(
+				parts,
+				errorContent as unknown as Record<string, unknown>,
+				['code', 'status', 'statusCode'],
+			);
+			return parts.join(' ');
+		}
+
+		if (!isPlainObject(errorContent)) return '';
+
+		appendSelectedFields(parts, errorContent, [
+			'code',
+			'status',
+			'statusCode',
+			'message',
+			'error_type',
+		]);
+
+		appendNestedErrorSignal(parts, readSignalField(errorContent, 'error'));
+		const metadata = readSignalField(errorContent, 'metadata');
+		if (isPlainObject(metadata)) {
+			appendSelectedFields(parts, metadata, [
+				'code',
+				'status',
+				'statusCode',
+				'error_type',
+			]);
+		}
+		appendNestedErrorSignal(parts, readSignalField(errorContent, 'cause'));
+	} catch {
+		return parts.join(' ');
+	}
+
+	return parts.join(' ');
+}
+
 /**
  * v6.33: Regex pattern for transient model errors that should trigger fallback.
  * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
  */
 const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|server.?error|connection.?(refused|reset|timeout)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider.?unavailable|server.?error|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
 
 /**
  * v7.12: Regex pattern for degraded model errors — context-length/token-limit/content-filter
@@ -2534,6 +2647,7 @@ export function createGuardrailsHooks(
 				// output.error may contain error message for failed tool calls (not in TS type but present at runtime)
 				const errorContent =
 					(output as Record<string, unknown>).error ?? outputStr;
+				const errorSignal = extractErrorSignal(errorContent);
 
 				// v6.34: Transient model errors (429, 503, 529, timeout, overloaded) bypass
 				// consecutiveErrors for up to cfg.max_transient_retries attempts per invocation
@@ -2541,18 +2655,14 @@ export function createGuardrailsHooks(
 				// !modelFallbackExhausted, which expired immediately when no fallback_models were
 				// configured, causing the circuit breaker to fire after a single transient error.
 				// Check HTTP status code first (more reliable than keyword matching)
-				const extractedStatus =
-					typeof errorContent === 'string'
-						? extractStatusCode(errorContent)
-						: null;
+				const extractedStatus = extractStatusCode(errorSignal);
 				const isTransientStatusCode =
 					extractedStatus !== null &&
 					TRANSIENT_STATUS_CODES.has(extractedStatus);
 
 				// Fall back to keyword matching if no status code found
 				const isTransientPatternMatch =
-					typeof errorContent === 'string' &&
-					TRANSIENT_MODEL_ERROR_PATTERN.test(errorContent);
+					TRANSIENT_MODEL_ERROR_PATTERN.test(errorSignal);
 
 				const isTransientMatch =
 					isTransientStatusCode || isTransientPatternMatch;
@@ -2564,18 +2674,14 @@ export function createGuardrailsHooks(
 
 				// Degraded errors (context-length, token-limit) bypass both counters
 				const isDegraded =
-					!isTransient &&
-					typeof errorContent === 'string' &&
-					DEGRADED_ERROR_PATTERN.test(errorContent);
+					!isTransient && DEGRADED_ERROR_PATTERN.test(errorSignal);
 
 				if (isTransient) {
 					window.transientRetryCount++;
 				} else if (isDegraded) {
 					// Degraded errors do NOT increment consecutiveErrors or transientRetryCount
 					// They indicate the provider is rejecting this specific input, not a logic error
-					const isContentFilter =
-						typeof errorContent === 'string' &&
-						CONTENT_FILTER_PATTERN.test(errorContent);
+					const isContentFilter = CONTENT_FILTER_PATTERN.test(errorSignal);
 
 					if (session && !session.modelFallbackExhausted) {
 						session.model_fallback_index++;

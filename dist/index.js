@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.19.1",
+    version: "7.19.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -24201,6 +24201,91 @@ function extractStatusCode(errorMsg) {
   }
   return null;
 }
+function isPlainObject2(value) {
+  return typeof value === "object" && value !== null && (value.constructor === Object || Object.getPrototypeOf(value) === null);
+}
+function readSignalField(source, key) {
+  try {
+    return source[key];
+  } catch {
+    return;
+  }
+}
+function pushSignalValue(parts2, value) {
+  if (typeof value === "string") {
+    parts2.push(value);
+    return;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    parts2.push(String(value));
+  }
+}
+function appendSelectedFields(parts2, source, keys) {
+  for (const key of keys) {
+    pushSignalValue(parts2, readSignalField(source, key));
+  }
+}
+function appendNestedErrorSignal(parts2, value) {
+  if (typeof value === "string") {
+    parts2.push(value);
+    return;
+  }
+  if (value instanceof Error) {
+    parts2.push(value.name, value.message);
+    appendSelectedFields(parts2, value, [
+      "code",
+      "status",
+      "statusCode"
+    ]);
+    return;
+  }
+  if (!isPlainObject2(value))
+    return;
+  appendSelectedFields(parts2, value, [
+    "code",
+    "status",
+    "statusCode",
+    "message",
+    "error_type"
+  ]);
+}
+function extractErrorSignal(errorContent) {
+  if (typeof errorContent === "string")
+    return errorContent;
+  if (errorContent == null)
+    return "";
+  const parts2 = [];
+  try {
+    if (errorContent instanceof Error) {
+      parts2.push(errorContent.name, errorContent.message);
+      appendSelectedFields(parts2, errorContent, ["code", "status", "statusCode"]);
+      return parts2.join(" ");
+    }
+    if (!isPlainObject2(errorContent))
+      return "";
+    appendSelectedFields(parts2, errorContent, [
+      "code",
+      "status",
+      "statusCode",
+      "message",
+      "error_type"
+    ]);
+    appendNestedErrorSignal(parts2, readSignalField(errorContent, "error"));
+    const metadata2 = readSignalField(errorContent, "metadata");
+    if (isPlainObject2(metadata2)) {
+      appendSelectedFields(parts2, metadata2, [
+        "code",
+        "status",
+        "statusCode",
+        "error_type"
+      ]);
+    }
+    appendNestedErrorSignal(parts2, readSignalField(errorContent, "cause"));
+  } catch {
+    return parts2.join(" ");
+  }
+  return parts2.join(" ");
+}
 function getStoredInputArgs(callID) {
   return storedInputArgs.get(callID);
 }
@@ -25410,16 +25495,17 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       if (hasError) {
         const outputStr = typeof output.output === "string" ? output.output : "";
         const errorContent = output.error ?? outputStr;
-        const extractedStatus = typeof errorContent === "string" ? extractStatusCode(errorContent) : null;
+        const errorSignal = extractErrorSignal(errorContent);
+        const extractedStatus = extractStatusCode(errorSignal);
         const isTransientStatusCode = extractedStatus !== null && TRANSIENT_STATUS_CODES.has(extractedStatus);
-        const isTransientPatternMatch = typeof errorContent === "string" && TRANSIENT_MODEL_ERROR_PATTERN.test(errorContent);
+        const isTransientPatternMatch = TRANSIENT_MODEL_ERROR_PATTERN.test(errorSignal);
         const isTransientMatch = isTransientStatusCode || isTransientPatternMatch;
         const isTransient = !!session && isTransientMatch && window2.transientRetryCount < cfg.max_transient_retries;
-        const isDegraded = !isTransient && typeof errorContent === "string" && DEGRADED_ERROR_PATTERN.test(errorContent);
+        const isDegraded = !isTransient && DEGRADED_ERROR_PATTERN.test(errorSignal);
         if (isTransient) {
           window2.transientRetryCount++;
         } else if (isDegraded) {
-          const isContentFilter = typeof errorContent === "string" && CONTENT_FILTER_PATTERN.test(errorContent);
+          const isContentFilter = CONTENT_FILTER_PATTERN.test(errorSignal);
           if (session && !session.modelFallbackExhausted) {
             session.model_fallback_index++;
             const baseAgentName = session.agentName ? session.agentName.replace(/^[^_]+[_]/, "") : "";
@@ -26076,7 +26162,7 @@ var init_guardrails = __esm(() => {
   ]);
   storedInputArgs = new Map;
   TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|server.?error|connection.?(refused|reset|timeout)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider.?unavailable|server.?error|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
   DEGRADED_ERROR_PATTERN = /context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
   CONTENT_FILTER_PATTERN = /content.?filter/i;
   toolCallsSinceLastWrite = new Map;
@@ -28275,7 +28361,7 @@ __export(exports_util2, {
   jsonStringifyReplacer: () => jsonStringifyReplacer2,
   joinValues: () => joinValues2,
   issue: () => issue2,
-  isPlainObject: () => isPlainObject2,
+  isPlainObject: () => isPlainObject3,
   isObject: () => isObject2,
   hexToUint8Array: () => hexToUint8Array2,
   getSizableOrigin: () => getSizableOrigin2,
@@ -28443,7 +28529,7 @@ function esc2(str) {
 function isObject2(data) {
   return typeof data === "object" && data !== null && !Array.isArray(data);
 }
-function isPlainObject2(o) {
+function isPlainObject3(o) {
   if (isObject2(o) === false)
     return false;
   const ctor = o.constructor;
@@ -28458,7 +28544,7 @@ function isPlainObject2(o) {
   return true;
 }
 function shallowClone2(o) {
-  if (isPlainObject2(o))
+  if (isPlainObject3(o))
     return { ...o };
   if (Array.isArray(o))
     return [...o];
@@ -28584,7 +28670,7 @@ function omit2(schema, mask) {
   return clone2(schema, def);
 }
 function extend2(schema, shape) {
-  if (!isPlainObject2(shape)) {
+  if (!isPlainObject3(shape)) {
     throw new Error("Invalid input to extend: expected a plain object");
   }
   const checks3 = schema._zod.def.checks;
@@ -28603,7 +28689,7 @@ function extend2(schema, shape) {
   return clone2(schema, def);
 }
 function safeExtend2(schema, shape) {
-  if (!isPlainObject2(shape)) {
+  if (!isPlainObject3(shape)) {
     throw new Error("Invalid input to safeExtend: expected a plain object");
   }
   const def = {
@@ -29986,7 +30072,7 @@ function mergeValues2(a, b) {
   if (a instanceof Date && b instanceof Date && +a === +b) {
     return { valid: true, data: a };
   }
-  if (isPlainObject2(a) && isPlainObject2(b)) {
+  if (isPlainObject3(a) && isPlainObject3(b)) {
     const bKeys = Object.keys(b);
     const sharedKeys = Object.keys(a).filter((key) => bKeys.indexOf(key) !== -1);
     const newObj = { ...a, ...b };
@@ -31083,7 +31169,7 @@ var init_schemas3 = __esm(() => {
     $ZodType2.init(inst, def);
     inst._zod.parse = (payload, ctx) => {
       const input = payload.value;
-      if (!isPlainObject2(input)) {
+      if (!isPlainObject3(input)) {
         payload.issues.push({
           expected: "record",
           code: "invalid_type",
