@@ -3,6 +3,7 @@
  * Allows agents to mark tasks as pending, in_progress, completed, or blocked.
  */
 
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
@@ -252,23 +253,49 @@ export function checkReviewerGate(
 					`Delegate the missing gate agents before marking task as completed.`;
 			}
 		} catch (error) {
-			// Malformed JSON, permission error, or other non-ENOENT issue — BLOCK
+			// Issue #862: malformed evidence files are quarantined — never deleted —
+			// and we fall through to session-state evaluation. The previous behaviour
+			// returned blocked:true with an instruction to "delete the file", which
+			// agents followed verbatim, destroying durable evidence (issue #862).
+			// The canonical hook (recordGateEvidence) will rewrite a fresh file on
+			// the next legitimate gate pass.
 			console.warn(
-				`[gate-evidence] Evidence file for task ${taskId} is corrupt or unreadable:`,
+				`[gate-evidence] Evidence file for task ${taskId} is unreadable; ` +
+					`quarantining and falling through to session state:`,
 				error instanceof Error ? error.message : String(error),
 			);
+			try {
+				const evidencePath = path.join(
+					resolvedDir,
+					'.swarm',
+					'evidence',
+					`${taskId}.json`,
+				);
+				const quarantinePath = path.join(
+					resolvedDir,
+					'.swarm',
+					'evidence',
+					`${taskId}.corrupt-${Date.now()}-${randomBytes(4).toString('hex')}.json`,
+				);
+				if (fs.existsSync(evidencePath)) {
+					fs.renameSync(evidencePath, quarantinePath);
+				}
+			} catch (quarantineError) {
+				// Best-effort: a failed quarantine still falls through to session state.
+				console.warn(
+					`[gate-evidence] Failed to quarantine evidence file for task ${taskId}:`,
+					quarantineError instanceof Error
+						? quarantineError.message
+						: String(quarantineError),
+				);
+			}
 			telemetry.gateFailed(
 				'',
 				'qa_gate',
 				taskId,
-				`Evidence file corrupt or unreadable`,
+				`Evidence file quarantined (unreadable)`,
 			);
-			return {
-				blocked: true,
-				reason:
-					`Evidence file for task ${taskId} is corrupt or unreadable. ` +
-					`Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`,
-			};
+			// Fall through to session-state evaluation below — do not return blocked here.
 		}
 
 		// === session state check (fallback for pre-evidence tasks) ===
