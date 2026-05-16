@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.19.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.2...v7.19.3) (2026-05-16)
+
+
+### Bug Fixes
+
+* **guardrails:** classify structured provider errors as transient ([#871](https://github.com/zaxbysauce/opencode-swarm/issues/871)) ([2f6a2d6](https://github.com/zaxbysauce/opencode-swarm/commit/2f6a2d6e5ae1b65c35930f771994356b7c2d3d12))
+
 ## [7.19.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.1...v7.19.2) (2026-05-15)
 
 

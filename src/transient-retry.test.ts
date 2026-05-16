@@ -23,7 +23,7 @@ import {
 // The regex is private to guardrails.ts; test it inline against the same
 // source pattern so that any future change to the constant triggers a test failure.
 const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|503|529|timeout|overloaded|model.?not.?found|temporarily unavailable|server error/i;
+	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider.?unavailable|server.?error|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
 
 let testSessionId: string;
 
@@ -89,6 +89,18 @@ describe('TRANSIENT_MODEL_ERROR_PATTERN regex — pre-existing terms (regression
 		expect(
 			TRANSIENT_MODEL_ERROR_PATTERN.test('service temporarily unavailable'),
 		).toBe(true);
+	});
+
+	it('1.8a matches provider_unavailable', () => {
+		expect(TRANSIENT_MODEL_ERROR_PATTERN.test('provider_unavailable')).toBe(
+			true,
+		);
+	});
+
+	it('1.8b matches connection lost', () => {
+		expect(TRANSIENT_MODEL_ERROR_PATTERN.test('Network connection lost.')).toBe(
+			true,
+		);
 	});
 
 	it('1.9 does NOT match a generic non-transient error', () => {
