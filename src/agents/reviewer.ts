@@ -206,6 +206,7 @@ AFFECTS: [callers/consumers/dependents to inspect, or "infer from diff"]
 CHECK: [list of dimensions to evaluate]
 GATES: [pre-completed gate results (lint, SAST, secretscan, etc.), or "none" if unavailable]
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
+SKILLS_USED_BY_CODER: [list of skill paths that were passed to the coder for this task, or "none" if no skills were used]
 
 SKILLS HANDLING: If SKILLS is present and not "none", load EVERY referenced skill before beginning your review.
 - For \`file:\` entries, use the search tool to read the referenced \`SKILL.md\` file with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 1000\`, and \`max_lines: 1000\`.
@@ -213,6 +214,13 @@ SKILLS HANDLING: If SKILLS is present and not "none", load EVERY referenced skil
 - If the search result has \`total > 0\` and \`truncated\` is \`false\`, reconstruct the full skill content from the line-by-line matches and apply it.
 - If inline \`--- skill-name ---\` sections are present, read them directly.
 - Skills contain project-specific constraints (coding standards, architectural invariants, security requirements) that supplement and may extend your normal review dimensions. Flag any violation of a skill rule at the same severity as a logic error.
+
+SKILL COMPLIANCE REVIEW: When SKILLS_USED_BY_CODER is provided and not "none":
+- Load each skill the coder received using the same SKILLS HANDLING procedure above
+- For each skill rule, verify the coder's changes comply
+- Flag violations at the same severity as logic errors
+- Report the overall compliance verdict in SKILL_COMPLIANCE field of your output
+- If you cannot load a skill (SKILL_LOAD_FAILED), report SKILL_COMPLIANCE: PARTIAL — [skill path] could not be loaded
 
 PROCESSING: If GATES is provided and includes passing results for lint, SAST, placeholder-scan, or secret-scan: skip the corresponding Tier 2 checks that those gates already cover. Focus Tier 2 time on checks NOT covered by automated gates.
 
@@ -223,6 +231,7 @@ VERDICT: APPROVED | REJECTED
 REUSE_RE_VERIFICATION: [VERIFIED | DUPLICATION_DETECTED | SKIPPED] — DUPLICATION_DETECTED is only valid when VERDICT is REJECTED
 RISK: LOW | MEDIUM | HIGH | CRITICAL
 ISSUES: list with line numbers, grouped by CHECK dimension
+SKILL_COMPLIANCE: COMPLIANT | PARTIAL | VIOLATED — [list of violations or "all rules followed"]
 FIXES: required changes if rejected
 Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.
 

@@ -77,6 +77,10 @@ import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
+import {
+	skillPropagationGateBefore,
+	skillPropagationTransformScan,
+} from './hooks/skill-propagation-gate.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
@@ -1248,6 +1252,21 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						return Promise.resolve();
 					}
 				},
+				// v2: scan for skill propagation warnings and compliance tracking
+				(input: unknown, output: unknown): Promise<void> => {
+					try {
+						const p = input as { sessionID?: string };
+						return skillPropagationTransformScan(
+							ctx.directory,
+							output as {
+								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+							},
+							p.sessionID,
+						);
+					} catch {
+						return Promise.resolve();
+					}
+				},
 				// Final transformation: consolidate multiple system messages into one
 				(_input: unknown, output: { messages?: unknown[] }): Promise<void> => {
 					if (output.messages) {
@@ -1426,6 +1445,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				KnowledgeApplicationConfigSchema.parse(
 					config.knowledge_application ?? {},
 				),
+			);
+			// 7. Skill propagation gate (soft warning when SKILLS field missing).
+			//    Logs to events.jsonl when architect delegates to skill-capable
+			//    agents without a SKILLS field. Never blocks execution.
+			await skillPropagationGateBefore(
+				ctx.directory,
+				{
+					tool: input.tool,
+					agent: input.agent,
+					sessionID: input.sessionID,
+					args: input.args,
+				},
+				{ enabled: true },
 			);
 			// ---------------------------------------------------------------
 

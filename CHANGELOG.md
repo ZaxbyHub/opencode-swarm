@@ -295,9 +295,14 @@
 * **conflict-registry:** add pure-data module mapping 9 swarm commands to their CC built-in counterparts with severity ratings (CRITICAL/HIGH/MEDIUM); commands with conflicts display a ⚠️ warning in `/swarm help` output
 * **ci-gate:** add `src/commands/conflict-registry.test.ts` CI gate that prevents new CRITICAL conflicts from being merged without explicit acknowledgment in the test allow-list
 * **constants:** add `CLAUDE_CODE_NATIVE_COMMANDS` frozen set (115 CC built-in commands) to `src/config/constants.ts` for runtime intercept hook; includes `freezeSet()` helper that throws on mutation attempts
+* **skill-scoring:** add `src/hooks/skill-scoring.ts` with 5-component relevance scoring (frequency 0.3, compliance 0.3, recency 0.15, taskID diversity 0.05, context matching 0.20) based on historical usage data from `.swarm/skill-usage.jsonl`; exports `rankSkillsForContext`, `getSkillStats`, `formatSkillIndexWithContext`
+* **skill-usage:** add `.swarm/skill-usage.jsonl` audit log tracking skill delegations and reviewer compliance outcomes; `skill-propagation-gate.ts` now records delegation entries and compliance verdicts for auditability
+* **architect:** enrich delegation prompt with skill usage/compliance metadata at delegation time via auto-enrichment prompt step
 
 ### Changed
 
+* **skill-propagation-gate:** `parseSkillPaths` now preserves case for accurate skill discovery matching
+* **skill-propagation-gate:** `COMPLIANCE_PATTERN` regex updated to handle both notes-full (`— notes`) and notes-less verdict forms
 * **registry:** add optional `clashesWithNativeCcCommand` field to `CommandEntry` type; populated on 9 commands (`plan`, `reset`, `checkpoint`, `status`, `agents`, `config`, `export`, `doctor`, `history`)
 * **index:** `buildHelpText()` now renders a ⚠️ conflict warning line for every command that has `clashesWithNativeCcCommand` set
 
