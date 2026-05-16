@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.21.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.2...v7.21.0) (2026-05-16)
+
+
+### Features
+
+* **skill-propagation:** intelligent skill tracking, validation, and scoring pipeline ([#880](https://github.com/zaxbysauce/opencode-swarm/issues/880)) ([bbba04b](https://github.com/zaxbysauce/opencode-swarm/commit/bbba04b6567af170fcd7b7da93f196e2ca6af9c2))
+
 ## [7.20.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.1...v7.20.2) (2026-05-16)
 
 
