@@ -8,6 +8,7 @@ export interface TestImpactResult {
 	unrelatedTests: string[];
 	untestedFiles: string[];
 	impactMap: Record<string, string[]>;
+	budgetExceeded?: boolean;
 }
 
 // TS/JS imports (multi-line aware — matches across newlines).
@@ -430,8 +431,15 @@ export async function buildImpactMap(
 	return impactMap;
 }
 
+export interface LoadImpactMapOptions {
+	/** If true and cache is stale, return the stale map instead of rebuilding.
+	 *  Use for estimation-only reads where slight staleness is acceptable. */
+	skipRebuild?: boolean;
+}
+
 export async function loadImpactMap(
 	cwd: string,
+	options?: LoadImpactMapOptions,
 ): Promise<Record<string, string[]>> {
 	const cachePath = path.join(cwd, '.swarm', 'cache', 'impact-map.json');
 
@@ -439,19 +447,48 @@ export async function loadImpactMap(
 		try {
 			const content = fs.readFileSync(cachePath, 'utf-8');
 			const data = JSON.parse(content);
-			const map = data.map as Record<string, string[]>;
-			const generatedAt = new Date(data.generatedAt).getTime();
 
-			// Check if any source file is newer than cache
-			if (!_internals.isCacheStale(map, generatedAt)) {
-				return map;
+			// Validate cache structure before using it — a poisoned map file could
+			// inject values into test runner subprocess argv via the impact result.
+			if (
+				data.map !== null &&
+				typeof data.map === 'object' &&
+				!Array.isArray(data.map)
+			) {
+				const map = data.map as Record<string, string[]>;
+				// Verify every value is an array of strings (not null/undefined/other)
+				const hasValidValues = Object.values(map).every(
+					(v) =>
+						Array.isArray(v) && v.every((item) => typeof item === 'string'),
+				);
+				if (hasValidValues) {
+					const generatedAt = new Date(data.generatedAt).getTime();
+					// Check if any source file is newer than cache
+					if (!_internals.isCacheStale(map, generatedAt)) {
+						return map;
+					}
+					// Cache is stale: if skipRebuild, return stale map; otherwise fall through to rebuild
+					if (options?.skipRebuild) {
+						return map;
+					}
+				}
+				// map exists but has invalid values — fall through to rebuild
 			}
-			// Cache is stale, fall through to rebuild
+			// Cache corrupted, invalid structure, or unreadable
+			if (options?.skipRebuild) {
+				return {}; // Return empty map rather than rebuilding
+			}
 		} catch {
-			// Cache corrupted or unreadable, rebuild
+			// Cache unreadable (parse error, etc.)
+			if (options?.skipRebuild) {
+				return {}; // Return empty map rather than rebuilding
+			}
 		}
 	}
 
+	if (options?.skipRebuild) {
+		return {}; // No cache or unreadable, return empty rather than rebuilding
+	}
 	return _internals.buildImpactMap(cwd);
 }
 
@@ -479,6 +516,7 @@ async function saveImpactMap(
 export async function analyzeImpact(
 	changedFiles: string[],
 	cwd: string,
+	budget?: number,
 ): Promise<TestImpactResult> {
 	// Validate input
 	if (!Array.isArray(changedFiles)) {
@@ -501,30 +539,53 @@ export async function analyzeImpact(
 
 	const impactedTestsSet = new Set<string>();
 	const untestedFiles: string[] = [];
+	let visitedCount = 0;
+	let budgetExceeded = false;
 
 	for (const changedFile of validFiles) {
+		if (budget !== undefined && visitedCount >= budget) {
+			budgetExceeded = true;
+			break;
+		}
+
 		const normalizedChanged = normalizePath(path.resolve(changedFile));
 
 		const tests = impactMap[normalizedChanged];
 		if (tests && tests.length > 0) {
 			for (const test of tests) {
+				if (budget !== undefined && visitedCount >= budget) {
+					budgetExceeded = true;
+					break;
+				}
 				impactedTestsSet.add(test);
+				visitedCount++;
 			}
+			if (budgetExceeded) break;
 		} else {
 			// Check with different path variations
 			let found = false;
 			for (const [sourcePath, tests] of Object.entries(impactMap)) {
+				if (budget !== undefined && visitedCount >= budget) {
+					budgetExceeded = true;
+					break;
+				}
 				if (
 					sourcePath.endsWith(changedFile) ||
 					changedFile.endsWith(sourcePath)
 				) {
 					for (const test of tests) {
+						if (budget !== undefined && visitedCount >= budget) {
+							budgetExceeded = true;
+							break;
+						}
 						impactedTestsSet.add(test);
+						visitedCount++;
 					}
+					if (budgetExceeded) break;
 					found = true;
-					break;
 				}
 			}
+			if (budgetExceeded) break;
 			if (!found) {
 				untestedFiles.push(changedFile);
 			}
@@ -549,5 +610,6 @@ export async function analyzeImpact(
 		unrelatedTests,
 		untestedFiles,
 		impactMap,
+		budgetExceeded,
 	};
 }

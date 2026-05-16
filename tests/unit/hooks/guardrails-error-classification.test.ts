@@ -521,6 +521,30 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			expect(window?.consecutiveErrors).toBe(0);
 			expect(window?.transientRetryCount).toBe(1);
 		});
+
+		test('OpenRouter 502 object payload â†’ transient with fallback accounting', async () => {
+			const sessionId = 'session-openrouter-object-502';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 502,
+					message: 'Network connection lost.',
+					metadata: { error_type: 'provider_unavailable' },
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
 	});
 
 	describe('permanent errors increment consecutiveErrors', () => {
@@ -590,6 +614,97 @@ describe('guardrails transient error classification (toolAfter)', () => {
 				title: 'bash',
 				output: null,
 				error: 'file not found at /path/to/file',
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(1);
+			expect(window?.transientRetryCount).toBe(0);
+		});
+
+		test('non-transient object payload â†’ permanent', async () => {
+			const sessionId = 'session-object-auth-error';
+			await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 401,
+					message: 'unauthorized: invalid API key',
+					metadata: { error_type: 'invalid_key' },
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(1);
+			expect(window?.transientRetryCount).toBe(0);
+		});
+
+		test('structured type server_error with non-transient status remains permanent', async () => {
+			const sessionId = 'session-object-auth-server-error-type';
+			await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 401,
+					type: 'server_error',
+					message: 'invalid credentials',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(1);
+			expect(window?.transientRetryCount).toBe(0);
+		});
+
+		test('transient-looking unrelated object fields are ignored', async () => {
+			const sessionId = 'session-object-unrelated-transient-looking-fields';
+			await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					message: 'validation failed',
+					phase: 502,
+					details: 'retry after timeout',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(1);
+			expect(window?.transientRetryCount).toBe(0);
+		});
+
+		test('cyclic object payload does not throw and remains permanent without provider signal', async () => {
+			const sessionId = 'session-object-cyclic';
+			await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const cyclic: Record<string, unknown> = { message: 'validation failed' };
+			cyclic.self = cyclic;
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: cyclic,
 				metadata: {},
 			};
 
@@ -942,6 +1057,29 @@ describe('guardrails transient error classification (toolAfter)', () => {
 				title: 'bash',
 				output: null,
 				error: 'content filter triggered',
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(0);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('object-shaped content-filter error is degraded', async () => {
+			const sessionId = 'session-object-content-filter';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					message: 'content filter triggered',
+					metadata: { error_type: 'policy_violation' },
+				},
 				metadata: {},
 			};
 

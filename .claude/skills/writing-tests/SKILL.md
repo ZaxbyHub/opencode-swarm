@@ -17,10 +17,12 @@ description: >
 
 | Scope | Files param | Safe? |
 |-------|------------|-------|
-| `'convention'` | any | ✅ Safe |
+| `'convention'` | single source file | ✅ Safe |
+| `'convention'` | **multiple source files** | ❌ **Rejected** — guard fires (`scope_exceeded`) before fan-out; use shell loop |
+| `'convention'` | direct test file paths | ✅ Safe — exempt from source-file limit |
 | `'graph'` | single file | ✅ Safe |
-| `'graph'` | **multiple files** | ❌ **SESSION KILL** — each file fans out to its own import tree; union blows past MAX_SAFE_TEST_FILES=50 |
-| `'impact'` | multiple files | ❌ **SESSION KILL** — same reason |
+| `'graph'` | **multiple files** | ❌ **Rejected** (`scope_exceeded`) — guard fires before import-graph traversal |
+| `'impact'` | multiple files | ❌ **Rejected** (`scope_exceeded`) — same reason |
 | `'all'` | any | ❌ **Never in agent context** |
 
 **If you need to run tests across multiple source files: use a per-file shell loop, not `test_runner`.**

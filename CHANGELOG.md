@@ -1,5 +1,26 @@
 # Changelog
 
+## [7.20.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.3...v7.20.0) (2026-05-16)
+
+
+### Features
+
+* **test-runner:** three-layer defense against session-blocking fan-out ([#870](https://github.com/zaxbysauce/opencode-swarm/issues/870)) ([ee9af91](https://github.com/zaxbysauce/opencode-swarm/commit/ee9af91fa801c62bb4bc0ba35ad63e968ed4de78))
+
+## [7.19.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.2...v7.19.3) (2026-05-16)
+
+
+### Bug Fixes
+
+* **guardrails:** classify structured provider errors as transient ([#871](https://github.com/zaxbysauce/opencode-swarm/issues/871)) ([2f6a2d6](https://github.com/zaxbysauce/opencode-swarm/commit/2f6a2d6e5ae1b65c35930f771994356b7c2d3d12))
+
+## [7.19.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.1...v7.19.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **test-runner:** add pre-discovery source-file guard to prevent session-killing cascade ([#867](https://github.com/zaxbysauce/opencode-swarm/issues/867)) ([c1ee8eb](https://github.com/zaxbysauce/opencode-swarm/commit/c1ee8eb24b987f1d7c705549f5930fa14342d875)), closes [#864](https://github.com/zaxbysauce/opencode-swarm/issues/864)
+
 ## [7.19.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.0...v7.19.1) (2026-05-14)
 
 

@@ -27,6 +27,7 @@ const {
 	DEFAULT_TIMEOUT_MS,
 	MAX_TIMEOUT_MS,
 	MAX_SAFE_TEST_FILES,
+	MAX_SAFE_SOURCE_FILES,
 	SUPPORTED_FRAMEWORKS,
 	test_runner,
 	detectTestFramework,
@@ -663,8 +664,9 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
 		expect(parsed.scope).toBe('all');
-		expect(parsed.error).toContain('scope "all" is not allowed');
-		expect(parsed.message).toContain('scope "convention" or "graph"');
+		expect(parsed.error).toContain('scope "all" is blocked');
+		expect(parsed.message).toContain('scope "convention"');
+		expect(parsed.message).toContain('scope "graph"');
 	});
 
 	// Flaky on macOS/Windows: spawns vitest in temp dir without node_modules installed
@@ -840,7 +842,7 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.scope).toBe('all');
-			expect(parsed.error).toContain('scope "all" is not allowed');
+			expect(parsed.error).toContain('scope "all" is blocked');
 		});
 
 		// Flaky on macOS/Windows: spawns vitest via npx in temp dir without node_modules installed
@@ -971,7 +973,7 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.scope).toBe('all');
-			expect(parsed.error).toContain('scope "all" is not allowed');
+			expect(parsed.error).toContain('scope "all" is blocked');
 		});
 
 		test('scope:"all" with allow_full_suite:undefined returns error (same as missing)', async () => {
@@ -982,7 +984,7 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.scope).toBe('all');
-			expect(parsed.error).toContain('scope "all" is not allowed');
+			expect(parsed.error).toContain('scope "all" is blocked');
 		});
 	});
 
@@ -1636,5 +1638,276 @@ describe('test-runner.ts — targeted framework safeguards', () => {
 		} finally {
 			Bun.spawn = originalSpawn;
 		}
+	});
+});
+
+/**
+ * MAX_SAFE_SOURCE_FILES guard tests (issue #864)
+ *
+ * scope "graph" and scope "impact" must reject before discovery fan-out when the
+ * caller provides more than MAX_SAFE_SOURCE_FILES source files.  Without this guard,
+ * discovery fans out to many test files, triggers scope_exceeded, and LLMs
+ * cascade to scope "all" + allow_full_suite:true — freezing the OpenCode session.
+ */
+describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
+	test('MAX_SAFE_SOURCE_FILES is exported and equals 1', () => {
+		expect(MAX_SAFE_SOURCE_FILES).toBe(1);
+	});
+
+	test('scope "graph" with 1 source file does NOT trigger source-file guard', async () => {
+		// A single source file is the allowed case — guard must not fire.
+		// The call will fail later (no test framework in CWD), but not at the source-file guard.
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-1src-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
+
+		const result = await test_runner.execute(
+			{ scope: 'graph', files: ['src/utils.ts'] },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		// Must NOT be the source-file guard error
+		expect(parsed.error).not.toContain('accepts at most');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "graph" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-2src-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync('src/a.ts', 'export const a = 1;');
+		fs.writeFileSync('src/b.ts', 'export const b = 2;');
+
+		const result = await test_runner.execute(
+			{ scope: 'graph', files: ['src/a.ts', 'src/b.ts'] },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.scope).toBe('graph');
+		expect(parsed.outcome).toBe('scope_exceeded');
+		expect(parsed.error).toContain('accepts at most');
+		expect(parsed.error).toContain('Treat this as SKIP without retry');
+		expect(parsed.message).toContain('Call test_runner once per source file');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "graph" with many source files returns scope_exceeded before discovery fan-out', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-manysrc-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		const manyFiles = Array.from({ length: 20 }, (_, i) => {
+			const name = `src/file${i}.ts`;
+			fs.writeFileSync(name, `export const val${i} = ${i};`);
+			return name;
+		});
+
+		const result = await test_runner.execute(
+			{ scope: 'graph', files: manyFiles },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.scope).toBe('graph');
+		expect(parsed.outcome).toBe('scope_exceeded');
+		expect(parsed.error).toContain('got 20');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "impact" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-impact-2src-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync('src/a.ts', 'export const a = 1;');
+		fs.writeFileSync('src/b.ts', 'export const b = 2;');
+
+		const result = await test_runner.execute(
+			{ scope: 'impact', files: ['src/a.ts', 'src/b.ts'] },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.scope).toBe('impact');
+		expect(parsed.outcome).toBe('scope_exceeded');
+		expect(parsed.error).toContain('accepts at most');
+		expect(parsed.error).toContain('Treat this as SKIP without retry');
+		expect(parsed.message).toContain('Call test_runner once per source file');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "convention" with 2 source files returns scope_exceeded before discovery', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-conv-2src-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync('src/a.ts', 'export const a = 1;');
+		fs.writeFileSync('src/b.ts', 'export const b = 2;');
+
+		const result = await test_runner.execute(
+			{ scope: 'convention', files: ['src/a.ts', 'src/b.ts'] },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.scope).toBe('convention');
+		expect(parsed.outcome).toBe('scope_exceeded');
+		expect(parsed.error).toContain('accepts at most');
+		expect(parsed.error).toContain('Treat this as SKIP without retry');
+		expect(parsed.message).toContain('Call test_runner once per source file');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "convention" with 1 source file + 1 direct test file does NOT trigger source-file guard', async () => {
+		// Direct test files are exempt from the MAX_SAFE_SOURCE_FILES limit.
+		// Only source-file discovery fans out; direct test file paths are explicitly named.
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-conv-1src1tst-')),
+		);
+		const originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		fs.writeFileSync(
+			'package.json',
+			JSON.stringify({
+				scripts: { test: 'vitest run' },
+				devDependencies: { vitest: '^1.0.0' },
+			}),
+		);
+		fs.mkdirSync('src', { recursive: true });
+		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
+		fs.writeFileSync(
+			'src/utils.test.ts',
+			'import { x } from "./utils"; export const v = x;',
+		);
+
+		const result = await test_runner.execute(
+			{ scope: 'convention', files: ['src/utils.ts', 'src/utils.test.ts'] },
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+
+		// Must NOT hit the source-file guard (1 source file is within limit)
+		expect(parsed.error).not.toContain('accepts at most');
+
+		process.chdir(originalCwd);
+		setTimeout(() => {
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
+		}, 100);
+	}, 15000);
+
+	test('scope "all" blocked error does not recommend "graph" with multiple files', async () => {
+		const result = await test_runner.execute({ scope: 'all' }, {} as any);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.outcome).toBe('error');
+		// Must not name the bypass flag (LLMs follow such hints literally)
+		expect(parsed.error).not.toContain('allow_full_suite');
+		expect(parsed.error).toContain('scope "convention"');
+		expect(parsed.message).toContain('exactly one source file');
 	});
 });

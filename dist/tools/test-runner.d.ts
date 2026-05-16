@@ -4,6 +4,18 @@ export declare const MAX_COMMAND_LENGTH = 500;
 export declare const DEFAULT_TIMEOUT_MS = 60000;
 export declare const MAX_TIMEOUT_MS = 300000;
 export declare const MAX_SAFE_TEST_FILES = 50;
+export declare const MAX_SAFE_SOURCE_FILES = 1;
+/**
+ * Estimate the fan-out (number of unique test files) for given source files
+ * by reading the cached impact map without spawning a subprocess.
+ * This is a pre-resolution check to prevent session blocking.
+ *
+ * Completes in <100ms by design — reads only the cached JSON and performs
+ * in-memory Set collection.
+ */
+export declare function estimateFanOut(sourceFiles: string[], cwd: string): Promise<{
+    estimatedCount: number;
+}>;
 export declare const SUPPORTED_FRAMEWORKS: readonly ["bun", "vitest", "jest", "mocha", "pytest", "cargo", "pester", "go-test", "maven", "gradle", "dotnet-test", "ctest", "swift-test", "dart-test", "rspec", "minitest"];
 export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
 export interface TestRunnerArgs {

@@ -3,6 +3,7 @@ export interface TestImpactResult {
     unrelatedTests: string[];
     untestedFiles: string[];
     impactMap: Record<string, string[]>;
+    budgetExceeded?: boolean;
 }
 declare function normalizePath(p: string): string;
 declare function isCacheStale(impactMap: Record<string, string[]>, generatedAtMs: number): boolean;
@@ -30,7 +31,12 @@ export declare const _internals: {
     _clearGoModuleCache: typeof _clearGoModuleCache;
 };
 export declare function buildImpactMap(cwd: string): Promise<Record<string, string[]>>;
-export declare function loadImpactMap(cwd: string): Promise<Record<string, string[]>>;
+export interface LoadImpactMapOptions {
+    /** If true and cache is stale, return the stale map instead of rebuilding.
+     *  Use for estimation-only reads where slight staleness is acceptable. */
+    skipRebuild?: boolean;
+}
+export declare function loadImpactMap(cwd: string, options?: LoadImpactMapOptions): Promise<Record<string, string[]>>;
 declare function saveImpactMap(cwd: string, impactMap: Record<string, string[]>): Promise<void>;
-export declare function analyzeImpact(changedFiles: string[], cwd: string): Promise<TestImpactResult>;
+export declare function analyzeImpact(changedFiles: string[], cwd: string, budget?: number): Promise<TestImpactResult>;
 export {};
