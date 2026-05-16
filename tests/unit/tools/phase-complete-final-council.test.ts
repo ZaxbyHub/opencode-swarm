@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let tempDir: string;
@@ -60,7 +61,12 @@ function writePluginConfig() {
 	writeFileSync(
 		join(tempDir, '.opencode', 'opencode-swarm.json'),
 		JSON.stringify({
-			phase_complete: { enabled: true, required_agents: [], policy: 'warn' },
+			phase_complete: {
+				enabled: true,
+				required_agents: [],
+				require_docs: false,
+				policy: 'warn',
+			},
 		}),
 	);
 }
@@ -215,10 +221,12 @@ function setupIntermediatePhase(finalCouncilEnabled: boolean) {
 }
 
 beforeEach(() => {
+	resetSwarmState();
 	tempDir = mkdtempSync(join(tmpdir(), 'pc-final-council-'));
 });
 
 afterEach(() => {
+	resetSwarmState();
 	closeProjectDb(tempDir);
 	try {
 		rmSync(tempDir, {

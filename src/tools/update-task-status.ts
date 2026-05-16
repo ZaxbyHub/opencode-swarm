@@ -130,6 +130,23 @@ function matchesTier3Pattern(files: string[]): boolean {
 	return false;
 }
 
+function hasPassedDurableGateEvidence(
+	workingDirectory: string,
+	taskId: string,
+): boolean {
+	const evidence = readTaskEvidenceRaw(workingDirectory, taskId);
+	if (
+		!evidence ||
+		!Array.isArray(evidence.required_gates) ||
+		evidence.required_gates.length === 0
+	) {
+		return false;
+	}
+	return evidence.required_gates.every(
+		(gate) => evidence.gates?.[gate] != null,
+	);
+}
+
 /**
  * Check if a task has passed required QA gates using the state machine.
  * Requires the task to be in 'tests_run' or 'complete' state, which means
@@ -232,10 +249,12 @@ export function checkReviewerGate(
 				Array.isArray(evidence.required_gates) &&
 				evidence.gates
 			) {
-				const allGatesMet = evidence.required_gates.every(
-					(gate: string) => evidence.gates![gate] != null,
-				);
-				if (allGatesMet) {
+				if (
+					evidence.required_gates.length > 0 &&
+					evidence.required_gates.every(
+						(gate: string) => evidence.gates![gate] != null,
+					)
+				) {
 					return { blocked: false, reason: '' };
 				}
 				// Evidence file shows incomplete gates — save the reason and fall through to
@@ -246,10 +265,12 @@ export function checkReviewerGate(
 					(gate: string) => evidence.gates![gate] == null,
 				);
 				evidenceIncompleteReason =
-					`Task ${taskId} is missing required gates: [${missingGates.join(', ')}]. ` +
-					`Required: [${evidence.required_gates.join(', ')}]. ` +
-					`Completed: [${Object.keys(evidence.gates).join(', ')}]. ` +
-					`Delegate the missing gate agents before marking task as completed.`;
+					evidence.required_gates.length === 0
+						? `Task ${taskId} has an evidence file with no required gates. Delegate reviewer and test_engineer before marking task as completed.`
+						: `Task ${taskId} is missing required gates: [${missingGates.join(', ')}]. ` +
+							`Required: [${evidence.required_gates.join(', ')}]. ` +
+							`Completed: [${Object.keys(evidence.gates).join(', ')}]. ` +
+							`Delegate the missing gate agents before marking task as completed.`;
 			}
 		} catch (error) {
 			// Malformed JSON, permission error, or other non-ENOENT issue — BLOCK
@@ -273,8 +294,10 @@ export function checkReviewerGate(
 
 		// === session state check (fallback for pre-evidence tasks) ===
 
-		// If no active sessions, allow through (test context)
-		if (swarmState.agentSessions.size === 0) {
+		// If no active sessions, allow through only when no evidence file asserted
+		// incomplete/invalid gate state. This preserves test-context behavior for
+		// missing evidence while preventing empty evidence from vacuously passing.
+		if (swarmState.agentSessions.size === 0 && !evidenceIncompleteReason) {
 			return { blocked: false, reason: '' };
 		}
 
@@ -304,7 +327,7 @@ export function checkReviewerGate(
 
 		// If all sessions had corrupt workflow state, allow through —
 		// we cannot make a reliable gate assertion without valid state.
-		if (validSessionCount === 0) {
+		if (validSessionCount === 0 && !evidenceIncompleteReason) {
 			return { blocked: false, reason: '' };
 		}
 
@@ -318,8 +341,8 @@ export function checkReviewerGate(
 		}
 
 		// Bug 3 fix: no session has this task in tests_run or complete state.
-		// Check plan.json as fallback — covers session restarts where task was
-		// completed in a prior session and plan.json is the source of truth.
+		// Trust plan.json restart recovery only when durable gate evidence proves
+		// the required reviewer/test_engineer gates passed before completion.
 		try {
 			const resolvedDir = workingDirectory!;
 			const planPath = path.join(resolvedDir, '.swarm', 'plan.json');
@@ -329,7 +352,11 @@ export function checkReviewerGate(
 			};
 			for (const planPhase of plan.phases ?? []) {
 				for (const task of planPhase.tasks ?? []) {
-					if (task.id === taskId && task.status === 'completed') {
+					if (
+						task.id === taskId &&
+						task.status === 'completed' &&
+						hasPassedDurableGateEvidence(resolvedDir, taskId)
+					) {
 						return { blocked: false, reason: '' };
 					}
 				}
@@ -338,12 +365,10 @@ export function checkReviewerGate(
 			// plan.json missing or unreadable — fall through to blocked:true
 		}
 
-		// Final fallback: scan delegation chains directly for reviewer+test_engineer.
+		// Final fallback: scan task-scoped delegation chains directly for reviewer+test_engineer.
 		// This covers cases where:
 		// - Session was restarted (in-memory state lost)
-		// - Pure-verification/code-organization tasks with no coder delegation
 		// - toolAfter hook didn't fire (subagent_type not captured)
-		// Uses the same unscoped scan as recoverTaskStateFromDelegations.
 		{
 			let hasReviewer = false;
 			let hasTestEngineer = false;
@@ -358,26 +383,6 @@ export function checkReviewerGate(
 				) {
 					for (const delegation of chain) {
 						const target = stripKnownSwarmPrefix(delegation.to);
-						if (target === 'reviewer') hasReviewer = true;
-						if (target === 'test_engineer') hasTestEngineer = true;
-					}
-				}
-			}
-
-			// Pass 2: unscoped fallback when no task-scoped sessions found
-			if (!hasReviewer && !hasTestEngineer) {
-				for (const [, chain] of swarmState.delegationChains) {
-					let lastCoderIndex = -1;
-					for (let i = chain.length - 1; i >= 0; i--) {
-						const target = stripKnownSwarmPrefix(chain[i].to);
-						if (target === 'coder') {
-							lastCoderIndex = i;
-							break;
-						}
-					}
-					const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex + 1;
-					for (let i = searchStart; i < chain.length; i++) {
-						const target = stripKnownSwarmPrefix(chain[i].to);
 						if (target === 'reviewer') hasReviewer = true;
 						if (target === 'test_engineer') hasTestEngineer = true;
 					}
@@ -449,11 +454,10 @@ export async function checkReviewerGateWithScope(
 
 /**
  * Recovery mechanism: reconcile task state with delegation history.
- * When reviewer/test_engineer delegations occurred but the state machine
- * was not advanced (e.g., toolAfter didn't fire, subagent_type missing,
- * cross-session gaps, or pure verification tasks without coder delegation),
- * this function walks all delegation chains and advances the task state
- * so that checkReviewerGate can make an accurate decision.
+ * When task-scoped reviewer/test_engineer delegations occurred but the state
+ * machine was not advanced (e.g., toolAfter didn't fire or subagent_type was
+ * missing), this function advances the task state so that checkReviewerGate can
+ * make an accurate decision without attributing unrelated delegation activity.
  *
  * @param taskId - The task ID to recover state for
  */
@@ -472,34 +476,6 @@ export function recoverTaskStateFromDelegations(taskId: string): void {
 		) {
 			for (const delegation of chain) {
 				const target = stripKnownSwarmPrefix(delegation.to);
-				if (target === 'reviewer') hasReviewer = true;
-				if (target === 'test_engineer') hasTestEngineer = true;
-			}
-		}
-	}
-
-	// Pass 2 (unscoped fallback): when no task-scoped sessions were found,
-	// scan ALL delegation chains. This covers pure-verification tasks and
-	// code-organization tasks where no coder delegation occurred, so
-	// currentTaskId / lastCoderDelegationTaskId were never set to this taskId.
-	// Safety: only scan delegations that occurred after the last coder delegation
-	// in each chain (or from the start if no coder delegation exists), to avoid
-	// attributing reviewer/test_engineer from a prior task to this one.
-	if (!hasReviewer && !hasTestEngineer) {
-		for (const [, chain] of swarmState.delegationChains) {
-			// Find the last coder delegation index in this chain
-			let lastCoderIndex = -1;
-			for (let i = chain.length - 1; i >= 0; i--) {
-				const target = stripKnownSwarmPrefix(chain[i].to);
-				if (target === 'coder') {
-					lastCoderIndex = i;
-					break;
-				}
-			}
-			// Scan from after the last coder delegation (or from start if no coder)
-			const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex + 1;
-			for (let i = searchStart; i < chain.length; i++) {
-				const target = stripKnownSwarmPrefix(chain[i].to);
 				if (target === 'reviewer') hasReviewer = true;
 				if (target === 'test_engineer') hasTestEngineer = true;
 			}

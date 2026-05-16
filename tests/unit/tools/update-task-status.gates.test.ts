@@ -163,6 +163,62 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		expect(result.blocked).toBe(false);
 	});
 
+	it('gate check blocks when plan.json says completed but durable gate evidence is absent', () => {
+		const completedPlan = JSON.parse(PLAN_JSON);
+		completedPlan.phases[0].tasks[0].status = 'completed';
+		fs.writeFileSync(
+			path.join(tmpDir, '.swarm', 'plan.json'),
+			JSON.stringify(completedPlan),
+		);
+		resetSwarmState();
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+			currentTaskId: '1.1',
+		});
+
+		const result = checkReviewerGate('1.1', tmpDir);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('has not passed QA gates');
+		expect(result.reason).toContain('1.1');
+	});
+
+	it('gate check blocks when evidence has no required gates', () => {
+		fs.mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		fs.writeFileSync(
+			evidencePath(tmpDir, '1.1'),
+			JSON.stringify({ taskId: '1.1', required_gates: [], gates: {} }),
+		);
+		resetSwarmState();
+
+		const result = checkReviewerGate('1.1', tmpDir);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('no required gates');
+	});
+
+	it('executeUpdateTaskStatus does not recover completion from unscoped delegation chains', async () => {
+		resetSwarmState();
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+		});
+		swarmState.delegationChains.set('test-session', [
+			{ from: 'architect', to: 'reviewer', timestamp: Date.now() - 1000 },
+			{
+				from: 'reviewer',
+				to: 'test_engineer',
+				timestamp: Date.now() - 500,
+			},
+		]);
+
+		const result = await executeUpdateTaskStatus(
+			{ task_id: '1.1', status: 'completed' },
+			tmpDir,
+		);
+		expect(result.success).toBe(false);
+		expect(result.errors?.join('\n')).toContain('has not passed QA gates');
+	});
+
 	// -----------------------------------------------------------------------
 	// Seed evidence file created on in_progress transition
 	// -----------------------------------------------------------------------

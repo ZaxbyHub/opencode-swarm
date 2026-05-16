@@ -90244,6 +90244,7 @@ function phaseIsExplicitlyNonCode(directory, phase) {
 }
 
 // src/tools/phase-complete.ts
+init_gate_evidence();
 init_curator();
 init_knowledge_curator();
 init_knowledge_reader();
@@ -90779,6 +90780,23 @@ function safeWarn(message, error93) {
     warn(message, error93 instanceof Error ? error93.message : String(error93));
   } catch {}
 }
+var TASK_GATE_INFERABLE_AGENTS = new Set([
+  "coder",
+  "reviewer",
+  "test_engineer"
+]);
+function canInferMissingAgentsFromTaskGates(agentsMissing) {
+  return agentsMissing.every((agent) => TASK_GATE_INFERABLE_AGENTS.has(agent));
+}
+async function allCompletedTasksHavePassedGateEvidence(directory, tasks) {
+  for (const task of tasks) {
+    if (task.status !== "completed")
+      return false;
+    if (!await hasPassedAllGates(directory, task.id))
+      return false;
+  }
+  return tasks.length > 0;
+}
 function collectCrossSessionDispatchedAgents(phaseReferenceTimestamp, callerSessionId) {
   const agents = new Set;
   const contributorSessionIds = [];
@@ -90790,12 +90808,9 @@ function collectCrossSessionDispatchedAgents(phaseReferenceTimestamp, callerSess
         agents.add(agent);
       }
     }
-    const callerDelegations = swarmState.delegationChains.get(callerSessionId);
-    if (callerDelegations) {
-      for (const delegation of callerDelegations) {
-        agents.add(stripKnownSwarmPrefix(delegation.from));
-        agents.add(stripKnownSwarmPrefix(delegation.to));
-      }
+    for (const delegation of _getDelegationsSince(callerSessionId, phaseReferenceTimestamp)) {
+      agents.add(stripKnownSwarmPrefix(delegation.from));
+      agents.add(stripKnownSwarmPrefix(delegation.to));
     }
   }
   for (const [sessionId, session] of swarmState.agentSessions) {
@@ -90814,16 +90829,23 @@ function collectCrossSessionDispatchedAgents(phaseReferenceTimestamp, callerSess
           agents.add(agent);
         }
       }
-      const delegations2 = swarmState.delegationChains.get(sessionId);
-      if (delegations2) {
-        for (const delegation of delegations2) {
-          agents.add(stripKnownSwarmPrefix(delegation.from));
-          agents.add(stripKnownSwarmPrefix(delegation.to));
-        }
+      for (const delegation of _getDelegationsSince(sessionId, phaseReferenceTimestamp)) {
+        agents.add(stripKnownSwarmPrefix(delegation.from));
+        agents.add(stripKnownSwarmPrefix(delegation.to));
       }
     }
   }
   return { agents, contributorSessionIds };
+}
+function _getDelegationsSince(sessionID, sinceTimestamp) {
+  const chain = swarmState.delegationChains.get(sessionID);
+  if (!chain) {
+    return [];
+  }
+  if (sinceTimestamp === 0) {
+    return chain;
+  }
+  return chain.filter((entry) => entry.timestamp > sinceTimestamp);
 }
 function isValidRetroEntry(entry, phase) {
   return entry.type === "retrospective" && "phase_number" in entry && entry.phase_number === phase && "verdict" in entry && entry.verdict === "pass";
@@ -91770,8 +91792,8 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
       const planRaw = fs84.readFileSync(planPath, "utf-8");
       const plan = JSON.parse(planRaw);
       const targetPhase = plan.phases.find((p) => p.id === phase);
-      if (targetPhase && targetPhase.tasks.length > 0 && targetPhase.tasks.every((t) => t.status === "completed")) {
-        warnings.push(`Agent dispatch fallback: all ${targetPhase.tasks.length} tasks in phase ${phase} are completed in plan.json. Clearing missing agents: ${agentsMissing.join(", ")}.`);
+      if (targetPhase && targetPhase.tasks.length > 0 && canInferMissingAgentsFromTaskGates(agentsMissing) && await allCompletedTasksHavePassedGateEvidence(dir, targetPhase.tasks)) {
+        warnings.push(`Agent dispatch fallback: all ${targetPhase.tasks.length} tasks in phase ${phase} are completed in plan.json and durable gate evidence passed. Clearing missing agents: ${agentsMissing.join(", ")}.`);
         agentsMissing = [];
       }
     } catch {}
@@ -103361,6 +103383,13 @@ function matchesTier3Pattern2(files) {
   }
   return false;
 }
+function hasPassedDurableGateEvidence(workingDirectory, taskId) {
+  const evidence = readTaskEvidenceRaw(workingDirectory, taskId);
+  if (!evidence || !Array.isArray(evidence.required_gates) || evidence.required_gates.length === 0) {
+    return false;
+  }
+  return evidence.required_gates.every((gate) => evidence.gates?.[gate] != null);
+}
 function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = false, sessionID) {
   try {
     let skipStandardTurboBypass = false;
@@ -103407,12 +103436,11 @@ function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = fal
     try {
       const evidence = readTaskEvidenceRaw(resolvedDir, taskId);
       if (evidence === null) {} else if (evidence.required_gates && Array.isArray(evidence.required_gates) && evidence.gates) {
-        const allGatesMet = evidence.required_gates.every((gate) => evidence.gates[gate] != null);
-        if (allGatesMet) {
+        if (evidence.required_gates.length > 0 && evidence.required_gates.every((gate) => evidence.gates[gate] != null)) {
           return { blocked: false, reason: "" };
         }
         const missingGates = evidence.required_gates.filter((gate) => evidence.gates[gate] == null);
-        evidenceIncompleteReason = `Task ${taskId} is missing required gates: [${missingGates.join(", ")}]. ` + `Required: [${evidence.required_gates.join(", ")}]. ` + `Completed: [${Object.keys(evidence.gates).join(", ")}]. ` + `Delegate the missing gate agents before marking task as completed.`;
+        evidenceIncompleteReason = evidence.required_gates.length === 0 ? `Task ${taskId} has an evidence file with no required gates. Delegate reviewer and test_engineer before marking task as completed.` : `Task ${taskId} is missing required gates: [${missingGates.join(", ")}]. ` + `Required: [${evidence.required_gates.join(", ")}]. ` + `Completed: [${Object.keys(evidence.gates).join(", ")}]. ` + `Delegate the missing gate agents before marking task as completed.`;
       }
     } catch (error93) {
       console.warn(`[gate-evidence] Evidence file for task ${taskId} is corrupt or unreadable:`, error93 instanceof Error ? error93.message : String(error93));
@@ -103422,7 +103450,7 @@ function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = fal
         reason: `Evidence file for task ${taskId} is corrupt or unreadable. ` + `Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`
       };
     }
-    if (swarmState.agentSessions.size === 0) {
+    if (swarmState.agentSessions.size === 0 && !evidenceIncompleteReason) {
       return { blocked: false, reason: "" };
     }
     let validSessionCount = 0;
@@ -103439,7 +103467,7 @@ function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = fal
         return { blocked: false, reason: "" };
       }
     }
-    if (validSessionCount === 0) {
+    if (validSessionCount === 0 && !evidenceIncompleteReason) {
       return { blocked: false, reason: "" };
     }
     const stateEntries = [];
@@ -103456,7 +103484,7 @@ function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = fal
       const plan = JSON.parse(planRaw);
       for (const planPhase of plan.phases ?? []) {
         for (const task of planPhase.tasks ?? []) {
-          if (task.id === taskId && task.status === "completed") {
+          if (task.id === taskId && task.status === "completed" && hasPassedDurableGateEvidence(resolvedDir2, taskId)) {
             return { blocked: false, reason: "" };
           }
         }
@@ -103470,26 +103498,6 @@ function checkReviewerGate(taskId, workingDirectory, stageBParallelEnabled = fal
         if (session && (session.currentTaskId === taskId || session.lastCoderDelegationTaskId === taskId)) {
           for (const delegation of chain) {
             const target = stripKnownSwarmPrefix(delegation.to);
-            if (target === "reviewer")
-              hasReviewer = true;
-            if (target === "test_engineer")
-              hasTestEngineer = true;
-          }
-        }
-      }
-      if (!hasReviewer && !hasTestEngineer) {
-        for (const [, chain] of swarmState.delegationChains) {
-          let lastCoderIndex = -1;
-          for (let i2 = chain.length - 1;i2 >= 0; i2--) {
-            const target = stripKnownSwarmPrefix(chain[i2].to);
-            if (target === "coder") {
-              lastCoderIndex = i2;
-              break;
-            }
-          }
-          const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex + 1;
-          for (let i2 = searchStart;i2 < chain.length; i2++) {
-            const target = stripKnownSwarmPrefix(chain[i2].to);
             if (target === "reviewer")
               hasReviewer = true;
             if (target === "test_engineer")
@@ -103532,26 +103540,6 @@ function recoverTaskStateFromDelegations(taskId) {
     if (session && (session.currentTaskId === taskId || session.lastCoderDelegationTaskId === taskId)) {
       for (const delegation of chain) {
         const target = stripKnownSwarmPrefix(delegation.to);
-        if (target === "reviewer")
-          hasReviewer = true;
-        if (target === "test_engineer")
-          hasTestEngineer = true;
-      }
-    }
-  }
-  if (!hasReviewer && !hasTestEngineer) {
-    for (const [, chain] of swarmState.delegationChains) {
-      let lastCoderIndex = -1;
-      for (let i2 = chain.length - 1;i2 >= 0; i2--) {
-        const target = stripKnownSwarmPrefix(chain[i2].to);
-        if (target === "coder") {
-          lastCoderIndex = i2;
-          break;
-        }
-      }
-      const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex + 1;
-      for (let i2 = searchStart;i2 < chain.length; i2++) {
-        const target = stripKnownSwarmPrefix(chain[i2].to);
         if (target === "reviewer")
           hasReviewer = true;
         if (target === "test_engineer")

@@ -14,6 +14,7 @@ import {
 const { phase_complete, executePhaseComplete } = await import(
 	'../../../src/tools/phase-complete'
 );
+const { recordGateEvidence } = await import('../../../src/gate-evidence');
 
 /**
  * Helper function to write a valid retro bundle for a phase
@@ -622,6 +623,50 @@ describe('phase_complete tool', () => {
 			expect(parsed.agentsDispatched).toContain('coder');
 			expect(parsed.agentsDispatched).toContain('reviewer');
 		});
+
+		test('ignores caller delegation chains from before the phase reference timestamp', async () => {
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder', 'reviewer'],
+						require_docs: false,
+						policy: 'enforce',
+					},
+				}),
+			);
+
+			const referenceTimestamp = Date.now();
+			ensureAgentSession('sess1');
+			swarmState.agentSessions.get('sess1')!.lastPhaseCompleteTimestamp =
+				referenceTimestamp;
+			swarmState.delegationChains.set('sess1', [
+				{
+					from: 'architect',
+					to: 'coder',
+					timestamp: referenceTimestamp - 5000,
+				},
+				{
+					from: 'coder',
+					to: 'reviewer',
+					timestamp: referenceTimestamp - 3000,
+				},
+			]);
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.agentsDispatched).not.toContain('coder');
+			expect(parsed.agentsDispatched).not.toContain('reviewer');
+			expect(parsed.agentsMissing).toContain('coder');
+			expect(parsed.agentsMissing).toContain('reviewer');
+		});
 	});
 
 	describe('summary truncation', () => {
@@ -1142,6 +1187,59 @@ describe('phase_complete tool', () => {
 			expect(sess2After?.lastPhaseCompleteTimestamp).toBe(0);
 		});
 
+		test('ignores stale non-caller delegation chains even when the session has recent activity', async () => {
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder', 'reviewer'],
+						require_docs: false,
+						policy: 'enforce',
+					},
+				}),
+			);
+
+			const referenceTimestamp = Date.now();
+			ensureAgentSession('caller');
+			swarmState.agentSessions.get('caller')!.lastPhaseCompleteTimestamp =
+				referenceTimestamp;
+
+			ensureAgentSession('worker');
+			swarmState.agentSessions.get('worker')!.lastToolCallTime =
+				referenceTimestamp + 1000;
+			swarmState.delegationChains.set('worker', [
+				{
+					from: 'architect',
+					to: 'coder',
+					timestamp: referenceTimestamp - 5000,
+				},
+				{
+					from: 'coder',
+					to: 'reviewer',
+					timestamp: referenceTimestamp - 3000,
+				},
+				{
+					from: 'architect',
+					to: 'noop',
+					timestamp: referenceTimestamp + 500,
+				},
+			]);
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'caller',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.agentsDispatched).not.toContain('coder');
+			expect(parsed.agentsDispatched).not.toContain('reviewer');
+			expect(parsed.agentsMissing).toContain('coder');
+			expect(parsed.agentsMissing).toContain('reviewer');
+		});
+
 		test('includes restored session agents when lastPhaseCompleteTimestamp matches reference', async () => {
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
@@ -1444,7 +1542,7 @@ describe('phase_complete tool', () => {
 	});
 
 	describe('plan.json agent dispatch fallback', () => {
-		test('fallback activates when all tasks completed and agents missing', async () => {
+		test('fallback does NOT activate when all tasks completed but gate evidence is missing', async () => {
 			// Set up permissive config with required_agents
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
@@ -1502,6 +1600,84 @@ describe('phase_complete tool', () => {
 			// Set up session with NO agents dispatched (agents missing)
 			ensureAgentSession('sess1');
 			// No recordPhaseAgentDispatch call - simulating session restart
+
+			const result = await phase_complete.execute({
+				phase: 1,
+				sessionID: 'sess1',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('incomplete');
+			expect(parsed.agentsMissing).toContain('coder');
+			expect(
+				parsed.warnings.some((w: string) =>
+					w.includes('Agent dispatch fallback'),
+				),
+			).toBe(false);
+		});
+
+		test('fallback activates when all tasks completed and durable gate evidence passed', async () => {
+			// Set up permissive config with required_agents
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: ['coder'],
+						require_docs: false,
+						policy: 'enforce',
+					},
+				}),
+			);
+
+			// Create source file so completion-verify can find identifiers
+			fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, 'src', 'setup.ts'),
+				'export function setupProject() {}\n',
+			);
+
+			const planJson = {
+				schema_version: '1.0.0',
+				title: 'Test Plan',
+				swarm: 'mega',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'pending',
+						tasks: [
+							{
+								id: '1.1',
+								phase: 1,
+								status: 'completed',
+								description: 'Implement `setupProject` in src/setup.ts',
+							},
+							{
+								id: '1.2',
+								phase: 1,
+								status: 'completed',
+								description: 'Implement `setupProject` in src/setup.ts',
+							},
+						],
+					},
+				],
+			};
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'plan.json'),
+				JSON.stringify(planJson, null, 2),
+			);
+
+			await recordGateEvidence(tempDir, '1.1', 'reviewer', 'reviewer-sess');
+			await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'test-sess');
+			await recordGateEvidence(tempDir, '1.2', 'reviewer', 'reviewer-sess');
+			await recordGateEvidence(tempDir, '1.2', 'test_engineer', 'test-sess');
+
+			// Set up session with NO agents dispatched, as after a session restart.
+			ensureAgentSession('sess1');
 
 			const result = await phase_complete.execute({
 				phase: 1,
@@ -1902,10 +2078,12 @@ describe('phase_complete tool', () => {
 				path.join(tempDir, '.swarm', 'plan.json'),
 				JSON.stringify(planJson, null, 2),
 			);
+			await recordGateEvidence(tempDir, '1.1', 'reviewer', 'reviewer-sess');
+			await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'test-sess');
 
 			// Set up session with NO agents dispatched
 			ensureAgentSession('sess1');
-			// No agents dispatched - fallback should activate
+			// No agents dispatched, but durable gate evidence proves restart recovery is safe.
 
 			const result = await phase_complete.execute({
 				phase: 1,
@@ -1913,7 +2091,7 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Should succeed due to fallback
+			// Should succeed due to evidence-backed fallback
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('success');
 			expect(

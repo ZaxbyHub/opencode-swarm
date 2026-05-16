@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let tempDir: string;
@@ -45,7 +46,12 @@ function writePluginConfig(overrides?: { council?: Record<string, unknown> }) {
 	writeFileSync(
 		join(tempDir, '.opencode', 'opencode-swarm.json'),
 		JSON.stringify({
-			phase_complete: { enabled: true, required_agents: [], policy: 'warn' },
+			phase_complete: {
+				enabled: true,
+				required_agents: [],
+				require_docs: false,
+				policy: 'warn',
+			},
 			...(overrides?.council ? { council: overrides.council } : {}),
 		}),
 	);
@@ -134,10 +140,12 @@ function setup(councilMode: boolean) {
 }
 
 beforeEach(() => {
+	resetSwarmState();
 	tempDir = mkdtempSync(join(tmpdir(), 'pc-council-'));
 });
 
 afterEach(() => {
+	resetSwarmState();
 	closeProjectDb(tempDir);
 	rmSync(tempDir, { recursive: true, force: true });
 });

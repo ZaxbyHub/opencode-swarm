@@ -19,6 +19,7 @@ import {
 import { getEffectiveGates, getProfile } from '../db/qa-gate-profile.js';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
+import { hasPassedAllGates } from '../gate-evidence';
 import {
 	applyCuratorKnowledgeUpdates,
 	runCuratorPhase,
@@ -117,6 +118,27 @@ function safeWarn(message: string, error: unknown): void {
 	}
 }
 
+const TASK_GATE_INFERABLE_AGENTS = new Set([
+	'coder',
+	'reviewer',
+	'test_engineer',
+]);
+
+function canInferMissingAgentsFromTaskGates(agentsMissing: string[]): boolean {
+	return agentsMissing.every((agent) => TASK_GATE_INFERABLE_AGENTS.has(agent));
+}
+
+async function allCompletedTasksHavePassedGateEvidence(
+	directory: string,
+	tasks: Array<{ id: string; status: string }>,
+): Promise<boolean> {
+	for (const task of tasks) {
+		if (task.status !== 'completed') return false;
+		if (!(await hasPassedAllGates(directory, task.id))) return false;
+	}
+	return tasks.length > 0;
+}
+
 /**
  * Collect dispatched agents across contributor sessions.
  * Contributor sessions are defined as those with activity since a phase reference timestamp,
@@ -145,13 +167,15 @@ function collectCrossSessionDispatchedAgents(
 			}
 		}
 
-		// Collect agents from caller's delegation chains
-		const callerDelegations = swarmState.delegationChains.get(callerSessionId);
-		if (callerDelegations) {
-			for (const delegation of callerDelegations) {
-				agents.add(stripKnownSwarmPrefix(delegation.from));
-				agents.add(stripKnownSwarmPrefix(delegation.to));
-			}
+		// Collect only caller delegation chains from the current phase window.
+		// The caller session itself is always a contributor, but old delegations from
+		// before the phase boundary must not satisfy this phase's required agents.
+		for (const delegation of _getDelegationsSince(
+			callerSessionId,
+			phaseReferenceTimestamp,
+		)) {
+			agents.add(stripKnownSwarmPrefix(delegation.from));
+			agents.add(stripKnownSwarmPrefix(delegation.to));
 		}
 	}
 
@@ -198,13 +222,15 @@ function collectCrossSessionDispatchedAgents(
 				}
 			}
 
-			// Collect agents from this session's delegation chains
-			const delegations = swarmState.delegationChains.get(sessionId);
-			if (delegations) {
-				for (const delegation of delegations) {
-					agents.add(stripKnownSwarmPrefix(delegation.from));
-					agents.add(stripKnownSwarmPrefix(delegation.to));
-				}
+			// Collect only delegation chains from this phase window. A session can
+			// have recent activity and still carry old chain entries from a previous
+			// phase; those older entries must not satisfy this phase's required agents.
+			for (const delegation of _getDelegationsSince(
+				sessionId,
+				phaseReferenceTimestamp,
+			)) {
+				agents.add(stripKnownSwarmPrefix(delegation.from));
+				agents.add(stripKnownSwarmPrefix(delegation.to));
 			}
 		}
 	}
@@ -1821,9 +1847,10 @@ export async function executePhaseComplete(
 
 	// Build warnings and determine success based on policy
 
-	// Plan.json fallback: if agents are missing but all tasks in the phase are
-	// completed in plan.json, treat the phase as closeable. Completed tasks prove
-	// agents were dispatched (update_task_status requires QA gates to pass).
+	// Plan.json fallback: if agents are missing after a session restart but all
+	// tasks in the phase are completed, treat the phase as closeable only when
+	// durable per-task gate evidence also proves the QA gates ran. A completed
+	// plan alone is not proof; it can be stale or hand-edited.
 	if (agentsMissing.length > 0) {
 		try {
 			const planPath = validateSwarmPath(dir, 'plan.json');
@@ -1839,10 +1866,11 @@ export async function executePhaseComplete(
 			if (
 				targetPhase &&
 				targetPhase.tasks.length > 0 &&
-				targetPhase.tasks.every((t) => t.status === 'completed')
+				canInferMissingAgentsFromTaskGates(agentsMissing) &&
+				(await allCompletedTasksHavePassedGateEvidence(dir, targetPhase.tasks))
 			) {
 				warnings.push(
-					`Agent dispatch fallback: all ${targetPhase.tasks.length} tasks in phase ${phase} are completed in plan.json. Clearing missing agents: ${agentsMissing.join(', ')}.`,
+					`Agent dispatch fallback: all ${targetPhase.tasks.length} tasks in phase ${phase} are completed in plan.json and durable gate evidence passed. Clearing missing agents: ${agentsMissing.join(', ')}.`,
 				);
 				agentsMissing = [];
 			}

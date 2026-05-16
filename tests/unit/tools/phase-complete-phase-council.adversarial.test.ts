@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import {
+	ensureAgentSession,
+	recordPhaseAgentDispatch,
+	resetSwarmState,
+} from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let tempDir: string;
@@ -50,7 +55,12 @@ function writePluginConfig(
 ) {
 	mkdirSync(join(tempDir, '.opencode'), { recursive: true });
 	const config: Record<string, unknown> = {
-		phase_complete: { enabled: true, required_agents: [], policy: 'warn' },
+		phase_complete: {
+			enabled: true,
+			required_agents: [],
+			require_docs: false,
+			policy: 'warn',
+		},
 		...extraConfig,
 	};
 	if (councilOverrides === null) {
@@ -148,6 +158,11 @@ function setup(councilMode: boolean) {
 	writePlan();
 	writePluginConfig();
 	writeRetro();
+	ensureAgentSession(SESSION_ID);
+	recordPhaseAgentDispatch(SESSION_ID, 'coder');
+	recordPhaseAgentDispatch(SESSION_ID, 'reviewer');
+	recordPhaseAgentDispatch(SESSION_ID, 'test_engineer');
+	recordPhaseAgentDispatch(SESSION_ID, 'docs');
 	if (councilMode) enableCouncilMode();
 }
 
@@ -160,10 +175,12 @@ async function phaseComplete() {
 }
 
 beforeEach(() => {
+	resetSwarmState();
 	tempDir = mkdtempSync(join(tmpdir(), 'pc-adv-'));
 });
 
 afterEach(() => {
+	resetSwarmState();
 	closeProjectDb(tempDir);
 	rmSync(tempDir, { recursive: true, force: true });
 });
@@ -450,7 +467,12 @@ describe('adversarial: config.council empty object', () => {
 		writeFileSync(
 			join(tempDir, '.opencode', 'opencode-swarm.json'),
 			JSON.stringify({
-				phase_complete: { enabled: true, required_agents: [], policy: 'warn' },
+				phase_complete: {
+					enabled: true,
+					required_agents: [],
+					require_docs: false,
+					policy: 'warn',
+				},
 				council: {},
 			}),
 		);
@@ -481,7 +503,12 @@ describe('adversarial: extra unknown keys in council config', () => {
 		writeFileSync(
 			join(tempDir, '.opencode', 'opencode-swarm.json'),
 			JSON.stringify({
-				phase_complete: { enabled: true, required_agents: [], policy: 'warn' },
+				phase_complete: {
+					enabled: true,
+					required_agents: [],
+					require_docs: false,
+					policy: 'warn',
+				},
 				council: {
 					phaseConcernsAllowComplete: true,
 					unknownField: 'should cause strict rejection',
