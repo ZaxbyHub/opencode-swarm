@@ -2049,15 +2049,119 @@ describe('phase_complete tool', () => {
 			swarmState.agentSessions.get('sess1')!.turboMode = true;
 			recordPhaseAgentDispatch('sess1', 'coder');
 
-			const result = await executePhaseComplete(
-				{ phase: 3, sessionID: 'sess1' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
+			const originalWarn = console.warn;
+			const originalError = console.error;
+			const warnCalls: unknown[][] = [];
+			const errorCalls: unknown[][] = [];
+			console.warn = (...args: unknown[]) => {
+				warnCalls.push(args);
+			};
+			console.error = (...args: unknown[]) => {
+				errorCalls.push(args);
+			};
+
+			let parsed: {
+				success: boolean;
+				status: string;
+				warnings: string[];
+			};
+			try {
+				const result = await executePhaseComplete(
+					{ phase: 3, sessionID: 'sess1' },
+					tempDir,
+				);
+				parsed = JSON.parse(result);
+			} finally {
+				console.warn = originalWarn;
+				console.error = originalError;
+			}
 
 			// Should succeed even without drift evidence because turbo mode bypasses gates
 			expect(parsed.success).toBe(true);
 			expect(parsed.status).toBe('success');
+			expect(
+				parsed.warnings.some((warning) =>
+					warning.includes('Turbo mode active'),
+				),
+			).toBe(true);
+			expect(warnCalls).toHaveLength(0);
+			expect(errorCalls).toHaveLength(0);
+		});
+
+		test('non-code drift skip uses result warnings instead of console info (F875)', async () => {
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'plan.json'),
+				JSON.stringify(
+					{
+						schema_version: '1.0.0',
+						title: 'Test Plan',
+						swarm: 'test-swarm',
+						current_phase: 3,
+						migration_status: 'migrated',
+						phases: [
+							{
+								id: 3,
+								name: 'Phase 3',
+								type: 'non-code',
+								status: 'in_progress',
+								tasks: [],
+							},
+						],
+					},
+					null,
+					2,
+				),
+			);
+			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					phase_complete: {
+						enabled: true,
+						required_agents: [],
+						require_docs: false,
+						policy: 'enforce',
+					},
+				}),
+			);
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'spec.md'),
+				'# Test Spec\n\n## FR-01\nFeature requirement 1.\n',
+			);
+			writeRetroBundle(tempDir, 3, 'pass');
+
+			ensureAgentSession('sess1');
+			recordPhaseAgentDispatch('sess1', 'coder');
+
+			const originalInfo = console.info;
+			const infoCalls: unknown[][] = [];
+			console.info = (...args: unknown[]) => {
+				infoCalls.push(args);
+			};
+
+			let parsed: {
+				success: boolean;
+				status: string;
+				warnings: string[];
+			};
+			try {
+				const result = await executePhaseComplete(
+					{ phase: 3, sessionID: 'sess1' },
+					tempDir,
+				);
+				parsed = JSON.parse(result);
+			} finally {
+				console.info = originalInfo;
+			}
+
+			expect(parsed.success).toBe(true);
+			expect(parsed.status).toBe('success');
+			expect(
+				parsed.warnings.some((warning) =>
+					warning.includes("annotated as 'non-code'"),
+				),
+			).toBe(true);
+			expect(infoCalls).toHaveLength(0);
 		});
 
 		/**

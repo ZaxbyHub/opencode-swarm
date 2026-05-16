@@ -64,6 +64,7 @@ import {
 } from '../state';
 import { telemetry } from '../telemetry';
 import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
+import * as logger from '../utils/logger';
 import { executeCompletionVerify } from './completion-verify';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -107,7 +108,7 @@ interface CrossSessionAgentsResult {
 
 function safeWarn(message: string, error: unknown): void {
 	try {
-		console.warn(
+		logger.warn(
 			message,
 			error instanceof Error ? error.message : String(error),
 		);
@@ -502,9 +503,8 @@ export async function executePhaseComplete(
 
 	// Turbo mode: skip completion-verify, drift-verifier, and hallucination-guard gates
 	if (hasActiveTurboMode(sessionID)) {
-		// Non-blocking warning so architect knows gates were bypassed
-		console.warn(
-			`[phase_complete] Turbo mode active — skipping completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}`,
+		warnings.push(
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
 		);
 	} else {
 		// Gate 1: Completion Verify (deterministic, in-process)
@@ -571,9 +571,6 @@ export async function executePhaseComplete(
 
 		if (!driftCheckEnabled) {
 			// drift_check gate disabled — skip drift verification entirely
-			console.info(
-				`[phase_complete] drift_check disabled — skipping drift verification gate for phase ${phase}`,
-			);
 			warnings.push(
 				`drift_check gate is disabled. Drift verification was skipped for phase ${phase}.`,
 			);
@@ -597,9 +594,6 @@ export async function executePhaseComplete(
 
 			if (phaseType === 'non-code') {
 				// Phase annotated as non-code — drift check not required, skip entirely
-				console.info(
-					`[phase_complete] Phase ${phase} annotated as 'non-code' — drift verification skipped.`,
-				);
 				warnings.push(
 					`Phase ${phase} is annotated as 'non-code'. Drift verification was skipped per phase type annotation.`,
 				);
@@ -2004,7 +1998,12 @@ export async function executePhaseComplete(
 			try {
 				await lockResult.lock._release();
 			} catch (releaseError) {
-				console.error('[phase-complete] Lock release failed:', releaseError);
+				logger.warn(
+					'[phase_complete] Lock release failed (non-blocking):',
+					releaseError instanceof Error
+						? releaseError.message
+						: String(releaseError),
+				);
 			}
 		}
 	}

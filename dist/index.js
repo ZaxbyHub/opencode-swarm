@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.19.3",
+    version: "7.20.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -11578,7 +11578,7 @@ function finalize(ctx, schema) {
     result.$schema = "http://json-schema.org/draft-07/schema#";
   } else if (ctx.target === "draft-04") {
     result.$schema = "http://json-schema.org/draft-04/schema#";
-  } else if (ctx.target === "openapi-3.0") {} else {}
+  } else if (ctx.target === "openapi-3.0") {}
   if (ctx.external?.uri) {
     const id = ctx.external.registry.get(schema)?.id;
     if (!id)
@@ -11843,7 +11843,7 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     if (val === undefined) {
       if (ctx.unrepresentable === "throw") {
         throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-      } else {}
+      }
     } else if (typeof val === "bigint") {
       if (ctx.unrepresentable === "throw") {
         throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -38754,7 +38754,7 @@ class JSONSchemaGenerator2 {
               if (val === undefined) {
                 if (this.unrepresentable === "throw") {
                   throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-                } else {}
+                }
               } else if (typeof val === "bigint") {
                 if (this.unrepresentable === "throw") {
                   throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -69035,7 +69035,7 @@ ${JSON.stringify(symbolNames, null, 2)}`);
             throw new Error(response.status + " : " + response.url);
           }, "readAsync");
         }
-      } else {}
+      }
       var out = Module["print"] || console.log.bind(console);
       var err = Module["printErr"] || console.error.bind(console);
       Object.assign(Module, moduleOverrides);
@@ -90003,11 +90003,12 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
 }
 
 // src/tools/phase-complete.ts
+init_logger();
 init_create_tool();
 init_resolve_working_directory();
 function safeWarn(message, error93) {
   try {
-    console.warn(message, error93 instanceof Error ? error93.message : String(error93));
+    warn(message, error93 instanceof Error ? error93.message : String(error93));
   } catch {}
 }
 function collectCrossSessionDispatchedAgents(phaseReferenceTimestamp, callerSessionId) {
@@ -90198,7 +90199,7 @@ async function executePhaseComplete(args2, workingDirectory, directory) {
     }, null, 2);
   }
   if (hasActiveTurboMode(sessionID)) {
-    console.warn(`[phase_complete] Turbo mode active — skipping completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}`);
+    warnings.push(`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`);
   } else {
     try {
       const completionResultRaw = await executeCompletionVerify({ phase }, dir);
@@ -90240,7 +90241,6 @@ async function executePhaseComplete(args2, workingDirectory, directory) {
       safeWarn(`[phase_complete] QA gate profile load error, drift_check defaults to enabled:`, gateLoadError);
     }
     if (!driftCheckEnabled) {
-      console.info(`[phase_complete] drift_check disabled — skipping drift verification gate for phase ${phase}`);
       warnings.push(`drift_check gate is disabled. Drift verification was skipped for phase ${phase}.`);
     } else {
       let phaseType;
@@ -90254,7 +90254,6 @@ async function executePhaseComplete(args2, workingDirectory, directory) {
         }
       } catch {}
       if (phaseType === "non-code") {
-        console.info(`[phase_complete] Phase ${phase} annotated as 'non-code' — drift verification skipped.`);
         warnings.push(`Phase ${phase} is annotated as 'non-code'. Drift verification was skipped per phase type annotation.`);
       } else {
         try {
@@ -91103,7 +91102,7 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
       try {
         await lockResult.lock._release();
       } catch (releaseError) {
-        console.error("[phase-complete] Lock release failed:", releaseError);
+        warn("[phase_complete] Lock release failed (non-blocking):", releaseError instanceof Error ? releaseError.message : String(releaseError));
       }
     }
   }
