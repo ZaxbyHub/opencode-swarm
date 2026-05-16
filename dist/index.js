@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.19.3",
+    version: "7.20.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -24286,6 +24286,33 @@ function extractErrorSignal(errorContent) {
   }
   return parts2.join(" ");
 }
+function getMessageText(message) {
+  if (!message?.parts)
+    return "";
+  return message.parts.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join(`
+`);
+}
+function getMostRecentAssistantText(messages) {
+  for (let i2 = messages.length - 1;i2 >= 0; i2--) {
+    if (messages[i2]?.info?.role === "assistant") {
+      return getMessageText(messages[i2]);
+    }
+  }
+  return "";
+}
+function isTransientProviderFailureText(text) {
+  if (!text.trim())
+    return false;
+  const providerFailureMarker = /provider[_\s-]?unavailable|network\s+connection\s+lost/i.test(text);
+  if (!providerFailureMarker)
+    return false;
+  const status = extractStatusCode(text);
+  const hasTransientStatus = status !== null && TRANSIENT_STATUS_CODES.has(status);
+  return hasTransientStatus || TRANSIENT_MODEL_ERROR_PATTERN.test(text);
+}
+function getProviderFailureFingerprint(text) {
+  return String(hashArgs({ providerFailure: text.slice(-4000) }));
+}
 function getStoredInputArgs(callID) {
   return storedInputArgs.get(callID);
 }
@@ -25500,7 +25527,8 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
         const isTransientStatusCode = extractedStatus !== null && TRANSIENT_STATUS_CODES.has(extractedStatus);
         const isTransientPatternMatch = TRANSIENT_MODEL_ERROR_PATTERN.test(errorSignal);
         const isTransientMatch = isTransientStatusCode || isTransientPatternMatch;
-        const isTransient = !!session && isTransientMatch && window2.transientRetryCount < cfg.max_transient_retries;
+        const maxTransientRetries = cfg.max_transient_retries ?? 5;
+        const isTransient = !!session && isTransientMatch && window2.transientRetryCount < maxTransientRetries;
         const isDegraded = !isTransient && DEGRADED_ERROR_PATTERN.test(errorSignal);
         if (isTransient) {
           window2.transientRetryCount++;
@@ -25509,7 +25537,7 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
           if (session && !session.modelFallbackExhausted) {
             session.model_fallback_index++;
             const baseAgentName = session.agentName ? session.agentName.replace(/^[^_]+[_]/, "") : "";
-            const swarmAgents = getSwarmAgents();
+            const swarmAgents = _internals10.getSwarmAgents();
             const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
             session.modelFallbackExhausted = !fallbackModels || session.model_fallback_index > fallbackModels.length;
             session.pendingAdvisoryMessages ??= [];
@@ -25529,13 +25557,14 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
         } else {
           window2.consecutiveErrors++;
         }
+        let modelFallbackAdvisoryEmitted = false;
         if (session && isTransientMatch && !session.modelFallbackExhausted && !isDegraded) {
           session.model_fallback_index++;
           const baseAgentName = session.agentName ? session.agentName.replace(/^[^_]+[_]/, "") : "";
-          const swarmAgents = getSwarmAgents();
+          const swarmAgents = _internals10.getSwarmAgents();
           const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
           session.modelFallbackExhausted = !fallbackModels || session.model_fallback_index > fallbackModels.length;
-          const fallbackModel = resolveFallbackModel(baseAgentName, session.model_fallback_index, swarmAgents);
+          const fallbackModel = _internals10.resolveFallbackModel(baseAgentName, session.model_fallback_index, swarmAgents);
           const primaryModel = swarmAgents?.[baseAgentName]?.model ?? "default";
           if (fallbackModel) {
             if (swarmAgents?.[baseAgentName]) {
@@ -25543,17 +25572,19 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
             }
             session.pendingAdvisoryMessages ??= [];
             session.pendingAdvisoryMessages.push(`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` + `Using /swarm handoff to reset to primary model.`);
+            modelFallbackAdvisoryEmitted = true;
           } else {
             session.pendingAdvisoryMessages ??= [];
             session.pendingAdvisoryMessages.push(`MODEL FALLBACK: Transient model error detected (attempt ${session.model_fallback_index}). ` + `No fallback models configured for this agent. Add "fallback_models": ["model-a", "model-b"] ` + `to the agent's config in opencode-swarm.json.`);
+            modelFallbackAdvisoryEmitted = true;
           }
           telemetry.modelFallback(input.sessionID, session.agentName, primaryModel, fallbackModel ?? "none", "transient_model_error");
           swarmState.pendingEvents++;
         }
-        if (session && isTransient && isTransientMatch) {
+        if (session && isTransient && isTransientMatch && !modelFallbackAdvisoryEmitted) {
           session.pendingAdvisoryMessages ??= [];
-          if (!session.pendingAdvisoryMessages.some((m) => m.startsWith("TRANSIENT ERROR:"))) {
-            session.pendingAdvisoryMessages.push(`TRANSIENT ERROR: Provider error detected (attempt ${window2.transientRetryCount}/${cfg.max_transient_retries ?? 5}). Retrying...`);
+          if (!session.pendingAdvisoryMessages.some((m) => m.startsWith("TRANSIENT ERROR:") || m.startsWith("MODEL FALLBACK:"))) {
+            session.pendingAdvisoryMessages.push(`TRANSIENT ERROR: Provider error detected (attempt ${window2.transientRetryCount}/${maxTransientRetries}). Retrying...`);
           }
         }
       } else {
@@ -25606,6 +25637,21 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       const activeAgent = swarmState.activeAgent.get(sessionId);
       const isArchitectSession = activeAgent ? stripKnownSwarmPrefix(activeAgent) === ORCHESTRATOR_NAME : session ? stripKnownSwarmPrefix(session.agentName) === ORCHESTRATOR_NAME : false;
       const systemMessages = messages.filter((msg) => msg.info?.role === "system");
+      if (isArchitectSession && session) {
+        const lastAssistantText = getMostRecentAssistantText(messages);
+        if (isTransientProviderFailureText(lastAssistantText)) {
+          const fingerprint = getProviderFailureFingerprint(lastAssistantText);
+          session.pendingAdvisoryMessages ??= [];
+          const alreadyPending = session.pendingAdvisoryMessages.some((message) => message.startsWith(TRANSIENT_PROVIDER_RECOVERY_TAG));
+          const alreadyInjected = systemMessages.some((message) => getMessageText(message).includes(TRANSIENT_PROVIDER_RECOVERY_TAG));
+          if (session.lastProviderRecoveryFingerprint !== fingerprint && !alreadyPending && !alreadyInjected) {
+            session.pendingAdvisoryMessages.push(`${TRANSIENT_PROVIDER_RECOVERY_TAG}: The previous Architect response appears to have been interrupted by a transient provider/network error. On this turn, continue from the last stable step, inspect current repo or plan state if needed, and keep working instead of treating the interrupted response as task completion.`);
+            session.lastProviderRecoveryFingerprint = fingerprint;
+          }
+        } else {
+          session.lastProviderRecoveryFingerprint = undefined;
+        }
+      }
       if (isArchitectSession) {
         let lastAssistantMsg;
         for (let i2 = messages.length - 1;i2 >= 0; i2--) {
@@ -26133,7 +26179,7 @@ function checkFileAuthorityWithRules(agentName, filePath, cwd, effectiveRules, o
   }
   return { allowed: true };
 }
-var import_picomatch, SPEC_DRIFT_BLOCKED_TOOLS, storedInputArgs, TRANSIENT_STATUS_CODES, TRANSIENT_MODEL_ERROR_PATTERN, DEGRADED_ERROR_PATTERN, CONTENT_FILTER_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
+var import_picomatch, _internals10, SPEC_DRIFT_BLOCKED_TOOLS, storedInputArgs, TRANSIENT_STATUS_CODES, TRANSIENT_MODEL_ERROR_PATTERN, TRANSIENT_PROVIDER_RECOVERY_TAG = "TRANSIENT PROVIDER RECOVERY", DEGRADED_ERROR_PATTERN, CONTENT_FILTER_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
 var init_guardrails = __esm(() => {
   init_quick_lru();
   init_agents2();
@@ -26153,6 +26199,13 @@ var init_guardrails = __esm(() => {
   init_model_limits();
   init_normalize_tool_name();
   import_picomatch = __toESM(require_picomatch2(), 1);
+  _internals10 = {
+    getSwarmAgents,
+    getMostRecentAssistantText,
+    getProviderFailureFingerprint,
+    isTransientProviderFailureText,
+    resolveFallbackModel
+  };
   SPEC_DRIFT_BLOCKED_TOOLS = new Set([
     "save_plan",
     "update_task_status",
@@ -26162,7 +26215,7 @@ var init_guardrails = __esm(() => {
   ]);
   storedInputArgs = new Map;
   TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider.?unavailable|server.?error|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
   DEGRADED_ERROR_PATTERN = /context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
   CONTENT_FILTER_PATTERN = /content.?filter/i;
   toolCallsSinceLastWrite = new Map;
@@ -27153,7 +27206,7 @@ __export(exports_state, {
   advanceTaskState: () => advanceTaskState,
   addKnowledgeAckDedup: () => addKnowledgeAckDedup,
   _resetCouncilDisagreementWarnings: () => _resetCouncilDisagreementWarnings,
-  _internals: () => _internals10,
+  _internals: () => _internals11,
   MAX_TRACKED_KNOWLEDGE_ACKS: () => MAX_TRACKED_KNOWLEDGE_ACKS,
   MAX_TRACKED_CRITICAL_SHOWN: () => MAX_TRACKED_CRITICAL_SHOWN,
   AgentRunContext: () => AgentRunContext
@@ -27257,10 +27310,10 @@ function startAgentSession(sessionId, agentName, staleDurationMs = 7200000, dire
   swarmState.agentSessions.set(sessionId, sessionState);
   telemetry.sessionStarted(sessionId, agentName);
   swarmState.activeAgent.set(sessionId, agentName);
-  _internals10.applyRehydrationCache(sessionState);
+  _internals11.applyRehydrationCache(sessionState);
   if (directory) {
     let rehydrationPromise;
-    rehydrationPromise = _internals10.rehydrateSessionFromDisk(directory, sessionState).catch((err2) => {
+    rehydrationPromise = _internals11.rehydrateSessionFromDisk(directory, sessionState).catch((err2) => {
       warn("[state] Rehydration failed:", err2 instanceof Error ? err2.message : String(err2));
     }).finally(() => {
       swarmState.pendingRehydrations.delete(rehydrationPromise);
@@ -27424,7 +27477,7 @@ function ensureAgentSession(sessionId, agentName, directory) {
     session.lastToolCallTime = now;
     return session;
   }
-  _internals10.startAgentSession(sessionId, agentName ?? "unknown", 7200000, directory);
+  _internals11.startAgentSession(sessionId, agentName ?? "unknown", 7200000, directory);
   session = swarmState.agentSessions.get(sessionId);
   if (!session) {
     throw new Error(`Failed to create guardrail session for ${sessionId}`);
@@ -27778,8 +27831,8 @@ function applyRehydrationCache(session) {
   }
 }
 async function rehydrateSessionFromDisk(directory, session) {
-  await _internals10.buildRehydrationCache(directory);
-  _internals10.applyRehydrationCache(session);
+  await _internals11.buildRehydrationCache(directory);
+  _internals11.applyRehydrationCache(session);
 }
 function hasActiveTurboMode(sessionID) {
   if (sessionID) {
@@ -27860,7 +27913,7 @@ function addKnowledgeAckDedup(key) {
       set2.delete(oldest);
   }
 }
-var _rehydrationCache = null, _councilDisagreementWarned, _toolAggregates, defaultRunContext, _runContexts, swarmState, MAX_TRACKED_CRITICAL_SHOWN = 500, MAX_TRACKED_KNOWLEDGE_ACKS = 5000, _internals10;
+var _rehydrationCache = null, _councilDisagreementWarned, _toolAggregates, defaultRunContext, _runContexts, swarmState, MAX_TRACKED_CRITICAL_SHOWN = 500, MAX_TRACKED_KNOWLEDGE_ACKS = 5000, _internals11;
 var init_state = __esm(() => {
   init_constants();
   init_plan_schema();
@@ -27894,7 +27947,7 @@ var init_state = __esm(() => {
     fullAutoEnabledInConfig: false,
     environmentProfiles: defaultRunContext.environmentProfiles
   };
-  _internals10 = {
+  _internals11 = {
     swarmState,
     resetSwarmState,
     ensureAgentSession,
@@ -41504,7 +41557,7 @@ function resetToRemoteBranch(cwd, options) {
   const prunedBranches = [];
   try {
     const currentBranch = getCurrentBranch(cwd);
-    const defaultRemoteBranch = _internals11.detectDefaultRemoteBranch(cwd);
+    const defaultRemoteBranch = _internals12.detectDefaultRemoteBranch(cwd);
     if (!defaultRemoteBranch) {
       return {
         success: false,
@@ -41686,7 +41739,7 @@ function resetToRemoteBranch(cwd, options) {
 function resetToMainAfterMerge(cwd, options) {
   const warnings = [];
   try {
-    const defaultBranch = _internals11.detectDefaultRemoteBranch(cwd);
+    const defaultBranch = _internals12.detectDefaultRemoteBranch(cwd);
     if (!defaultBranch) {
       return {
         success: false,
@@ -41713,7 +41766,7 @@ function resetToMainAfterMerge(cwd, options) {
     }
     if (currentBranch === defaultBranch) {
       try {
-        const logOutput = _internals11.gitExec(["log", `${targetBranch}..HEAD`, "--oneline"], cwd);
+        const logOutput = _internals12.gitExec(["log", `${targetBranch}..HEAD`, "--oneline"], cwd);
         if (logOutput.trim().length > 0) {
           return {
             success: false,
@@ -41728,11 +41781,11 @@ function resetToMainAfterMerge(cwd, options) {
       } catch {}
     } else {
       try {
-        _internals11.gitExec(["rev-parse", "--abbrev-ref", `${currentBranch}@{upstream}`], cwd);
+        _internals12.gitExec(["rev-parse", "--abbrev-ref", `${currentBranch}@{upstream}`], cwd);
       } catch {
         try {
-          const localSha = _internals11.gitExec(["rev-parse", "HEAD"], cwd).trim();
-          const remoteSha = _internals11.gitExec(["rev-parse", targetBranch], cwd).trim();
+          const localSha = _internals12.gitExec(["rev-parse", "HEAD"], cwd).trim();
+          const remoteSha = _internals12.gitExec(["rev-parse", targetBranch], cwd).trim();
           if (localSha !== remoteSha) {
             return {
               success: false,
@@ -41758,7 +41811,7 @@ function resetToMainAfterMerge(cwd, options) {
       }
     }
     try {
-      _internals11.gitExec(["fetch", "--prune", "origin"], cwd);
+      _internals12.gitExec(["fetch", "--prune", "origin"], cwd);
     } catch (err2) {
       return {
         success: false,
@@ -41774,7 +41827,7 @@ function resetToMainAfterMerge(cwd, options) {
     let switchedBranch = false;
     if (currentBranch !== defaultBranch) {
       try {
-        _internals11.gitExec(["checkout", defaultBranch], cwd);
+        _internals12.gitExec(["checkout", defaultBranch], cwd);
         switchedBranch = true;
       } catch (err2) {
         return {
@@ -41789,7 +41842,7 @@ function resetToMainAfterMerge(cwd, options) {
       }
     }
     try {
-      _internals11.gitExec(["reset", "--hard", targetBranch], cwd);
+      _internals12.gitExec(["reset", "--hard", targetBranch], cwd);
     } catch (err2) {
       return {
         success: false,
@@ -41810,7 +41863,7 @@ function resetToMainAfterMerge(cwd, options) {
           while (Date.now() < endTime) {}
         }
         try {
-          _internals11.gitExec(["checkout", "--", "."], cwd);
+          _internals12.gitExec(["checkout", "--", "."], cwd);
           discardSucceeded = true;
           break;
         } catch {}
@@ -41821,18 +41874,18 @@ function resetToMainAfterMerge(cwd, options) {
       changesDiscarded = discardSucceeded;
     }
     try {
-      _internals11.gitExec(["clean", "-fd"], cwd);
+      _internals12.gitExec(["clean", "-fd"], cwd);
     } catch {
       warnings.push("Could not clean untracked files");
     }
     let branchDeleted = false;
     if (switchedBranch && previousBranch !== defaultBranch) {
       try {
-        const mergedOutput = _internals11.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const mergedOutput = _internals12.gitExec(["branch", "--merged", defaultBranch], cwd);
         const isMerged = mergedOutput.split(`
 `).some((line) => line.trim() === previousBranch || line.trim() === `* ${previousBranch}`);
         if (isMerged) {
-          _internals11.gitExec(["branch", "-d", previousBranch], cwd);
+          _internals12.gitExec(["branch", "-d", previousBranch], cwd);
           branchDeleted = true;
         } else {
           warnings.push(`Branch ${previousBranch} is not merged into ${defaultBranch} — keeping it`);
@@ -41843,7 +41896,7 @@ function resetToMainAfterMerge(cwd, options) {
     }
     if (options?.pruneBranches) {
       try {
-        const mergedOutput = _internals11.gitExec(["branch", "--merged", defaultBranch], cwd);
+        const mergedOutput = _internals12.gitExec(["branch", "--merged", defaultBranch], cwd);
         const mergedLines = mergedOutput.split(`
 `);
         for (const line of mergedLines) {
@@ -41852,7 +41905,7 @@ function resetToMainAfterMerge(cwd, options) {
             continue;
           }
           try {
-            _internals11.gitExec(["branch", "-d", trimmedLine], cwd);
+            _internals12.gitExec(["branch", "-d", trimmedLine], cwd);
           } catch {
             warnings.push(`Could not prune branch: ${trimmedLine}`);
           }
@@ -41882,10 +41935,10 @@ function resetToMainAfterMerge(cwd, options) {
     };
   }
 }
-var GIT_TIMEOUT_MS2 = 30000, _internals11;
+var GIT_TIMEOUT_MS2 = 30000, _internals12;
 var init_branch = __esm(() => {
   init_logger();
-  _internals11 = {
+  _internals12 = {
     gitExec: gitExec2,
     detectDefaultRemoteBranch,
     getDefaultBaseBranch,
@@ -42962,7 +43015,7 @@ __export(exports_skill_generator, {
   activeRepoRelativePath: () => activeRepoRelativePath,
   activePath: () => activePath,
   activateProposal: () => activateProposal,
-  _internals: () => _internals12
+  _internals: () => _internals13
 });
 import { existsSync as existsSync11 } from "node:fs";
 import { mkdir as mkdir5, readFile as readFile6, rename as rename3, writeFile as writeFile5 } from "node:fs/promises";
@@ -43410,13 +43463,13 @@ async function inspectSkill(directory, slug, prefer = "auto") {
   }
   return { found: false };
 }
-var SLUG_PATTERN, _internals12;
+var SLUG_PATTERN, _internals13;
 var init_skill_generator = __esm(() => {
   init_knowledge_store();
   init_knowledge_validator();
   init_logger();
   SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
-  _internals12 = {
+  _internals13 = {
     sanitizeSlug,
     isValidSlug,
     selectCandidateEntries,
@@ -43638,8 +43691,8 @@ function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, pha
   const observations = [];
   const timestamp = new Date().toISOString();
   for (const agent of requiredAgents) {
-    const normalizedAgent = _internals13.normalizeAgentName(agent);
-    const isDispatched = agentsDispatched.some((a) => _internals13.normalizeAgentName(a) === normalizedAgent);
+    const normalizedAgent = _internals14.normalizeAgentName(agent);
+    const isDispatched = agentsDispatched.some((a) => _internals14.normalizeAgentName(a) === normalizedAgent);
     if (!isDispatched) {
       observations.push({
         phase,
@@ -43658,7 +43711,7 @@ function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, pha
       if (e.type === "agent.delegation") {
         const agent = e.agent;
         if (agent && typeof agent === "string") {
-          const normalized = _internals13.normalizeAgentName(agent);
+          const normalized = _internals14.normalizeAgentName(agent);
           if (normalized === "coder") {
             coderDelegations.push({ event: e, index: i2 });
           } else if (normalized === "reviewer") {
@@ -43715,7 +43768,7 @@ function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, pha
       if (e.type === "agent.delegation" && e.agent) {
         const agent = e.agent;
         if (agent && typeof agent === "string") {
-          const normalized = _internals13.normalizeAgentName(agent);
+          const normalized = _internals14.normalizeAgentName(agent);
           if (normalized === "sme") {
             smeDelegations.push({ event: e, index: i2 });
           }
@@ -43739,7 +43792,7 @@ function checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, pha
 }
 async function runCuratorInit(directory, config3, llmDelegate) {
   try {
-    const priorSummary = await _internals13.readCuratorSummary(directory);
+    const priorSummary = await _internals14.readCuratorSummary(directory);
     const knowledgePath = resolveSwarmKnowledgePath(directory);
     const allEntries = await readKnowledge(knowledgePath);
     const highConfidenceEntries = allEntries.filter((e) => typeof e.confidence === "number" && e.confidence >= config3.min_knowledge_confidence);
@@ -43860,7 +43913,7 @@ Could not load prior session context.`,
 }
 async function runCuratorPhase(directory, phase, agentsDispatched, config3, _knowledgeConfig, llmDelegate) {
   try {
-    const priorSummary = await _internals13.readCuratorSummary(directory);
+    const priorSummary = await _internals14.readCuratorSummary(directory);
     if (priorSummary?.phase_digests.some((d) => d.phase === phase)) {
       const existingDigest = priorSummary.phase_digests.find((d) => d.phase === phase);
       return {
@@ -43872,10 +43925,10 @@ async function runCuratorPhase(directory, phase, agentsDispatched, config3, _kno
       };
     }
     const eventsJsonlContent = await readSwarmFileAsync(directory, "events.jsonl");
-    const phaseEvents = eventsJsonlContent ? _internals13.filterPhaseEvents(eventsJsonlContent, phase) : [];
+    const phaseEvents = eventsJsonlContent ? _internals14.filterPhaseEvents(eventsJsonlContent, phase) : [];
     const contextMd = await readSwarmFileAsync(directory, "context.md");
     const requiredAgents = ["reviewer", "test_engineer"];
-    const complianceObservations = _internals13.checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase);
+    const complianceObservations = _internals14.checkPhaseCompliance(phaseEvents, agentsDispatched, requiredAgents, phase);
     const plan = await loadPlanJsonOnly(directory);
     const phaseData = plan?.phases.find((p) => p.id === phase);
     const tasksCompleted = phaseData ? phaseData.tasks.filter((t) => t.status === "completed").length : 0;
@@ -43899,7 +43952,7 @@ async function runCuratorPhase(directory, phase, agentsDispatched, config3, _kno
       timestamp: new Date().toISOString(),
       summary: `Phase ${phase} completed. ${tasksCompleted}/${tasksTotal} tasks completed. ${complianceObservations.length} compliance observations.`,
       agents_used: [
-        ...new Set(agentsDispatched.map((a) => _internals13.normalizeAgentName(a)))
+        ...new Set(agentsDispatched.map((a) => _internals14.normalizeAgentName(a)))
       ],
       tasks_completed: tasksCompleted,
       tasks_total: tasksTotal,
@@ -43949,7 +44002,7 @@ async function runCuratorPhase(directory, phase, agentsDispatched, config3, _kno
           clearTimeout(timer);
         }
         if (llmOutput?.trim()) {
-          knowledgeRecommendations = _internals13.parseKnowledgeRecommendations(llmOutput);
+          knowledgeRecommendations = _internals14.parseKnowledgeRecommendations(llmOutput);
           const structured = parseStructuredCuratorBlocks(llmOutput);
           knowledgeApplicationFindings = structured.findings;
           skillCandidates = structured.candidates;
@@ -44000,7 +44053,7 @@ ${phaseDigest.summary}`,
         knowledge_recommendations: knowledgeRecommendations
       };
     }
-    await _internals13.writeCuratorSummary(directory, updatedSummary);
+    await _internals14.writeCuratorSummary(directory, updatedSummary);
     const eventsPath = path18.join(directory, ".swarm", "events.jsonl");
     for (const obs of complianceObservations) {
       await appendKnowledge(eventsPath, {
@@ -44206,7 +44259,7 @@ async function applyCuratorKnowledgeUpdates(directory, recommendations, knowledg
   }
   return { applied, skipped };
 }
-var DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300000, _internals13;
+var DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300000, _internals14;
 var init_curator = __esm(() => {
   init_event_bus();
   init_schema();
@@ -44217,7 +44270,7 @@ var init_curator = __esm(() => {
   init_knowledge_store();
   init_knowledge_validator();
   init_utils2();
-  _internals13 = {
+  _internals14 = {
     parseKnowledgeRecommendations,
     readCuratorSummary,
     writeCuratorSummary,
@@ -45032,7 +45085,7 @@ async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, c
     existingEntries.push(entry);
   }
   await enforceKnowledgeCap(knowledgePath, config3.swarm_max_entries);
-  await _internals14.runAutoPromotion(directory, config3);
+  await _internals15.runAutoPromotion(directory, config3);
   return { stored, skipped, rejected };
 }
 async function runAutoPromotion(directory, config3) {
@@ -45113,7 +45166,7 @@ function createKnowledgeCuratorHook(directory, config3) {
       });
       const projectName2 = evidenceData.project_name ?? "unknown";
       const phaseNumber2 = typeof evidenceData.phase_number === "number" ? evidenceData.phase_number : 1;
-      await _internals14.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
+      await _internals15.curateAndStoreSwarm(lessons, projectName2, { phase_number: phaseNumber2 }, directory, config3);
       await updateRetrievalOutcome(directory, `Phase ${phaseNumber2}`, true);
       return;
     }
@@ -45136,19 +45189,19 @@ function createKnowledgeCuratorHook(directory, config3) {
     const projectName = projectNameMatch ? projectNameMatch[1].trim() : "unknown";
     const phaseMatch = /^Phase:\s*(\d+)/m.exec(planContent);
     const phaseNumber = phaseMatch ? parseInt(phaseMatch[1], 10) : 1;
-    await _internals14.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
+    await _internals15.curateAndStoreSwarm(normalLessons, projectName, { phase_number: phaseNumber }, directory, config3);
     await updateRetrievalOutcome(directory, `Phase ${phaseNumber}`, true);
   };
   return safeHook(handler);
 }
-var seenRetroSections, _internals14;
+var seenRetroSections, _internals15;
 var init_knowledge_curator = __esm(() => {
   init_knowledge_reader();
   init_knowledge_store();
   init_knowledge_validator();
   init_utils2();
   seenRetroSections = new Map;
-  _internals14 = {
+  _internals15 = {
     isWriteToEvidenceFile,
     curateAndStoreSwarm,
     runAutoPromotion,
@@ -46024,7 +46077,7 @@ async function executeWriteRetro(args2, directory) {
     }, null, 2);
   }
 }
-var write_retro, _internals15;
+var write_retro, _internals16;
 var init_write_retro = __esm(() => {
   init_zod();
   init_evidence_schema();
@@ -46071,13 +46124,13 @@ var init_write_retro = __esm(() => {
           task_id: args2.task_id !== undefined ? String(args2.task_id) : undefined,
           metadata: args2.metadata
         };
-        return await _internals15.executeWriteRetro(writeRetroArgs, directory);
+        return await _internals16.executeWriteRetro(writeRetroArgs, directory);
       } catch {
         return JSON.stringify({ success: false, phase: rawPhase, message: "Invalid arguments" }, null, 2);
       }
     }
   });
-  _internals15 = {
+  _internals16 = {
     executeWriteRetro,
     write_retro
   };
@@ -46856,7 +46909,7 @@ __export(exports_co_change_analyzer, {
   darkMatterToKnowledgeEntries: () => darkMatterToKnowledgeEntries,
   co_change_analyzer: () => co_change_analyzer,
   buildCoChangeMatrix: () => buildCoChangeMatrix,
-  _internals: () => _internals16
+  _internals: () => _internals17
 });
 import * as child_process3 from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -47079,9 +47132,9 @@ async function detectDarkMatter(directory, options) {
   } catch {
     return [];
   }
-  const commitMap = await _internals16.parseGitLog(directory, maxCommitsToAnalyze);
-  const matrix = _internals16.buildCoChangeMatrix(commitMap);
-  const staticEdges = await _internals16.getStaticEdges(directory);
+  const commitMap = await _internals17.parseGitLog(directory, maxCommitsToAnalyze);
+  const matrix = _internals17.buildCoChangeMatrix(commitMap);
+  const staticEdges = await _internals17.getStaticEdges(directory);
   const results = [];
   for (const entry of matrix.values()) {
     const key = `${entry.fileA}::${entry.fileB}`;
@@ -47161,7 +47214,7 @@ ${rows}
 These pairs likely share an architectural concern invisible to static analysis.
 Consider adding explicit documentation or extracting the shared concern.`;
 }
-var co_change_analyzer, _internals16;
+var co_change_analyzer, _internals17;
 var init_co_change_analyzer = __esm(() => {
   init_zod();
   init_create_tool();
@@ -47193,11 +47246,11 @@ var init_co_change_analyzer = __esm(() => {
         npmiThreshold,
         maxCommitsToAnalyze
       };
-      const pairs = await _internals16.detectDarkMatter(directory, options);
-      return _internals16.formatDarkMatterOutput(pairs);
+      const pairs = await _internals17.detectDarkMatter(directory, options);
+      return _internals17.formatDarkMatterOutput(pairs);
     }
   });
-  _internals16 = {
+  _internals17 = {
     parseGitLog,
     buildCoChangeMatrix,
     getStaticEdges,
@@ -47228,7 +47281,7 @@ async function handleDarkMatterCommand(directory, args2) {
   }
   let pairs;
   try {
-    pairs = await _internals16.detectDarkMatter(directory, options);
+    pairs = await _internals17.detectDarkMatter(directory, options);
   } catch (err2) {
     const errMsg = err2 instanceof Error ? err2.message : String(err2);
     return `## Dark Matter Analysis Failed
@@ -50073,7 +50126,7 @@ function isCommandAvailable(command) {
   const isWindows = process.platform === "win32";
   const cmd = isWindows ? `${command}.exe` : command;
   try {
-    const result = _internals17.spawnSyncImpl(isWindows ? ["where", cmd] : ["which", cmd], {
+    const result = _internals18.spawnSyncImpl(isWindows ? ["where", cmd] : ["which", cmd], {
       cwd: process.cwd(),
       stdin: "ignore",
       stdout: "ignore",
@@ -50223,7 +50276,7 @@ async function discoverBuildCommands(workingDir, options) {
   const scope = options?.scope ?? "all";
   const changedFiles = options?.changedFiles ?? [];
   const _filesToCheck = filterByScope(workingDir, scope, changedFiles);
-  const profileResult = await _internals17.discoverBuildCommandsFromProfiles(workingDir);
+  const profileResult = await _internals18.discoverBuildCommandsFromProfiles(workingDir);
   const profileCommands = profileResult.commands;
   const profileSkipped = profileResult.skipped;
   const coveredEcosystems = new Set;
@@ -50286,7 +50339,7 @@ function clearToolchainCache() {
 function getEcosystems() {
   return ECOSYSTEMS.map((e) => e.ecosystem);
 }
-var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, IS_COMMAND_AVAILABLE_TIMEOUT_MS = 3000, _internals17, build_discovery;
+var ECOSYSTEMS, PROFILE_TO_ECOSYSTEM_NAMES, toolchainCache, IS_COMMAND_AVAILABLE_TIMEOUT_MS = 3000, _internals18, build_discovery;
 var init_discovery = __esm(() => {
   init_dist();
   init_detector();
@@ -50404,7 +50457,7 @@ var init_discovery = __esm(() => {
     php: ["php-composer"]
   };
   toolchainCache = new Map;
-  _internals17 = {
+  _internals18 = {
     isCommandAvailable,
     discoverBuildCommandsFromProfiles,
     discoverBuildCommands,
@@ -50674,7 +50727,7 @@ var exports_evidence_summary_service = {};
 __export(exports_evidence_summary_service, {
   isAutoSummaryEnabled: () => isAutoSummaryEnabled,
   buildEvidenceSummary: () => buildEvidenceSummary,
-  _internals: () => _internals18,
+  _internals: () => _internals19,
   REQUIRED_EVIDENCE_TYPES: () => REQUIRED_EVIDENCE_TYPES,
   EVIDENCE_SUMMARY_VERSION: () => EVIDENCE_SUMMARY_VERSION
 });
@@ -50712,14 +50765,14 @@ function getTaskStatus(task, bundle) {
   if (task?.status) {
     return task.status;
   }
-  const entries = _internals18.normalizeBundleEntries(bundle);
+  const entries = _internals19.normalizeBundleEntries(bundle);
   if (entries.length > 0) {
     return "completed";
   }
   return "pending";
 }
 function isEvidenceComplete(bundle) {
-  const entries = _internals18.normalizeBundleEntries(bundle);
+  const entries = _internals19.normalizeBundleEntries(bundle);
   if (entries.length === 0) {
     return {
       isComplete: false,
@@ -50755,10 +50808,10 @@ async function buildTaskSummary(directory, task, taskId) {
   const result = await loadEvidence(directory, taskId);
   const bundle = result.status === "found" ? result.bundle : null;
   const phase = task?.phase ?? 0;
-  const status = _internals18.getTaskStatus(task, bundle);
-  const evidenceCheck = _internals18.isEvidenceComplete(bundle);
-  const blockers = _internals18.getTaskBlockers(task, evidenceCheck, status);
-  const entries = _internals18.normalizeBundleEntries(bundle);
+  const status = _internals19.getTaskStatus(task, bundle);
+  const evidenceCheck = _internals19.isEvidenceComplete(bundle);
+  const blockers = _internals19.getTaskBlockers(task, evidenceCheck, status);
+  const entries = _internals19.normalizeBundleEntries(bundle);
   const hasReview = entries.some((e) => e.type === "review");
   const hasTest = entries.some((e) => e.type === "test");
   const hasApproval = entries.some((e) => e.type === "approval");
@@ -50787,12 +50840,12 @@ async function buildPhaseSummary(directory, phase) {
   const taskSummaries = [];
   const _taskMap = new Map(phase.tasks.map((t) => [t.id, t]));
   for (const task of phase.tasks) {
-    const summary = await _internals18.buildTaskSummary(directory, task, task.id);
+    const summary = await _internals19.buildTaskSummary(directory, task, task.id);
     taskSummaries.push(summary);
   }
   const extraTaskIds = taskIds.filter((id) => !phaseTaskIds.has(id));
   for (const taskId of extraTaskIds) {
-    const summary = await _internals18.buildTaskSummary(directory, undefined, taskId);
+    const summary = await _internals19.buildTaskSummary(directory, undefined, taskId);
     if (summary.phase === phase.id) {
       taskSummaries.push(summary);
     }
@@ -50893,7 +50946,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
   let totalTasks = 0;
   let completedTasks = 0;
   for (const phase of phasesToProcess) {
-    const summary = await _internals18.buildPhaseSummary(directory, phase);
+    const summary = await _internals19.buildPhaseSummary(directory, phase);
     phaseSummaries.push(summary);
     totalTasks += summary.totalTasks;
     completedTasks += summary.completedTasks;
@@ -50915,7 +50968,7 @@ async function buildEvidenceSummary(directory, currentPhase) {
     overallBlockers,
     summaryText: ""
   };
-  artifact.summaryText = _internals18.generateSummaryText(artifact);
+  artifact.summaryText = _internals19.generateSummaryText(artifact);
   log("[EvidenceSummary] Summary built", {
     phases: phaseSummaries.length,
     totalTasks,
@@ -50934,7 +50987,7 @@ function isAutoSummaryEnabled(automationConfig) {
   }
   return automationConfig.capabilities?.evidence_auto_summaries === true;
 }
-var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals18;
+var VALID_EVIDENCE_TYPES2, REQUIRED_EVIDENCE_TYPES, EVIDENCE_SUMMARY_VERSION = "1.0.0", _internals19;
 var init_evidence_summary_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -50948,7 +51001,7 @@ var init_evidence_summary_service = __esm(() => {
     "retrospective"
   ]);
   REQUIRED_EVIDENCE_TYPES = ["review", "test"];
-  _internals18 = {
+  _internals19 = {
     buildEvidenceSummary,
     isAutoSummaryEnabled,
     normalizeBundleEntries,
@@ -51003,7 +51056,7 @@ function getVerdictEmoji(verdict) {
   return getVerdictIcon(verdict);
 }
 async function getTaskEvidenceData(directory, taskId) {
-  const result = await _internals19.loadEvidence(directory, taskId);
+  const result = await _internals20.loadEvidence(directory, taskId);
   if (result.status !== "found") {
     return {
       hasEvidence: false,
@@ -51026,13 +51079,13 @@ async function getTaskEvidenceData(directory, taskId) {
   };
 }
 async function getEvidenceListData(directory) {
-  const taskIds = await _internals19.listEvidenceTaskIds(directory);
+  const taskIds = await _internals20.listEvidenceTaskIds(directory);
   if (taskIds.length === 0) {
     return { hasEvidence: false, tasks: [] };
   }
   const tasks = [];
   for (const taskId of taskIds) {
-    const result = await _internals19.loadEvidence(directory, taskId);
+    const result = await _internals20.loadEvidence(directory, taskId);
     if (result.status === "found") {
       tasks.push({
         taskId,
@@ -51146,10 +51199,10 @@ async function handleEvidenceSummaryCommand(directory) {
   return lines.join(`
 `);
 }
-var _internals19;
+var _internals20;
 var init_evidence_service = __esm(() => {
   init_manager2();
-  _internals19 = {
+  _internals20 = {
     loadEvidence,
     listEvidenceTaskIds
   };
@@ -51670,7 +51723,7 @@ function extractCurrentPhaseFromPlan2(plan) {
   if (!plan) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
-  if (!_internals20.validatePlanPhases(plan)) {
+  if (!_internals21.validatePlanPhases(plan)) {
     return { currentPhase: null, currentTask: null, incompleteTasks: [] };
   }
   let currentPhase = null;
@@ -51812,9 +51865,9 @@ function extractPhaseMetrics(content) {
 async function getHandoffData(directory) {
   const now = new Date().toISOString();
   const sessionContent = await readSwarmFileAsync(directory, "session/state.json");
-  const sessionState = _internals20.parseSessionState(sessionContent);
+  const sessionState = _internals21.parseSessionState(sessionContent);
   const plan = await loadPlanJsonOnly(directory);
-  const planInfo = _internals20.extractCurrentPhaseFromPlan(plan);
+  const planInfo = _internals21.extractCurrentPhaseFromPlan(plan);
   if (!plan) {
     const planMdContent = await readSwarmFileAsync(directory, "plan.md");
     if (planMdContent) {
@@ -51833,8 +51886,8 @@ async function getHandoffData(directory) {
     }
   }
   const contextContent = await readSwarmFileAsync(directory, "context.md");
-  const recentDecisions = _internals20.extractDecisions(contextContent);
-  const rawPhaseMetrics = _internals20.extractPhaseMetrics(contextContent);
+  const recentDecisions = _internals21.extractDecisions(contextContent);
+  const rawPhaseMetrics = _internals21.extractPhaseMetrics(contextContent);
   const phaseMetrics = sanitizeString(rawPhaseMetrics, 1000);
   let delegationState = null;
   if (sessionState?.delegationState) {
@@ -51998,13 +52051,13 @@ ${lines.join(`
 `)}
 \`\`\``;
 }
-var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals20;
+var RTL_OVERRIDE_PATTERN, MAX_TASK_ID_LENGTH = 100, MAX_DECISION_LENGTH = 500, MAX_INCOMPLETE_TASKS = 20, _internals21;
 var init_handoff_service = __esm(() => {
   init_utils2();
   init_manager();
   init_utils();
   RTL_OVERRIDE_PATTERN = /[\u202e\u202d\u202c\u200f]/g;
-  _internals20 = {
+  _internals21 = {
     getHandoffData,
     formatHandoffMarkdown,
     formatContinuationPrompt,
@@ -52123,22 +52176,22 @@ async function writeSnapshot(directory, state) {
 }
 function createSnapshotWriterHook(directory) {
   return (_input, _output) => {
-    _writeInFlight = _writeInFlight.then(() => _internals21.writeSnapshot(directory, swarmState), () => _internals21.writeSnapshot(directory, swarmState));
+    _writeInFlight = _writeInFlight.then(() => _internals22.writeSnapshot(directory, swarmState), () => _internals22.writeSnapshot(directory, swarmState));
     return _writeInFlight;
   };
 }
 async function flushPendingSnapshot(directory) {
-  _writeInFlight = _writeInFlight.then(() => _internals21.writeSnapshot(directory, swarmState), () => _internals21.writeSnapshot(directory, swarmState));
+  _writeInFlight = _writeInFlight.then(() => _internals22.writeSnapshot(directory, swarmState), () => _internals22.writeSnapshot(directory, swarmState));
   await _writeInFlight;
 }
-var _writeInFlight, _internals21;
+var _writeInFlight, _internals22;
 var init_snapshot_writer = __esm(() => {
   init_utils2();
   init_state();
   init_utils();
   init_bun_compat();
   _writeInFlight = Promise.resolve();
-  _internals21 = {
+  _internals22 = {
     writeSnapshot,
     createSnapshotWriterHook,
     flushPendingSnapshot
@@ -52603,9 +52656,9 @@ async function migrateContextToKnowledge(directory, config3) {
       skippedReason: "empty-context"
     };
   }
-  const rawEntries = _internals22.parseContextMd(contextContent);
+  const rawEntries = _internals23.parseContextMd(contextContent);
   if (rawEntries.length === 0) {
-    await _internals22.writeSentinel(sentinelPath, 0, 0);
+    await _internals23.writeSentinel(sentinelPath, 0, 0);
     return {
       migrated: true,
       entriesMigrated: 0,
@@ -52616,10 +52669,10 @@ async function migrateContextToKnowledge(directory, config3) {
   const existing = await readKnowledge(knowledgePath);
   let migrated = 0;
   let dropped = 0;
-  const projectName = _internals22.inferProjectName(directory);
+  const projectName = _internals23.inferProjectName(directory);
   for (const raw of rawEntries) {
     if (config3.validation_enabled !== false) {
-      const category = raw.categoryHint ?? _internals22.inferCategoryFromText(raw.text);
+      const category = raw.categoryHint ?? _internals23.inferCategoryFromText(raw.text);
       const result = validateLesson(raw.text, existing.map((e) => e.lesson), {
         category,
         scope: "global",
@@ -52639,8 +52692,8 @@ async function migrateContextToKnowledge(directory, config3) {
     const entry = {
       id: randomUUID3(),
       tier: "swarm",
-      lesson: _internals22.truncateLesson(raw.text),
-      category: raw.categoryHint ?? _internals22.inferCategoryFromText(raw.text),
+      lesson: _internals23.truncateLesson(raw.text),
+      category: raw.categoryHint ?? _internals23.inferCategoryFromText(raw.text),
       tags: [...inferredTags, `migration:${raw.sourceSection}`],
       scope: "global",
       confidence: 0.3,
@@ -52663,7 +52716,7 @@ async function migrateContextToKnowledge(directory, config3) {
   if (migrated > 0) {
     await rewriteKnowledge(knowledgePath, existing);
   }
-  await _internals22.writeSentinel(sentinelPath, migrated, dropped);
+  await _internals23.writeSentinel(sentinelPath, migrated, dropped);
   log(`[knowledge-migrator] Migrated ${migrated} entries, dropped ${dropped}`);
   return {
     migrated: true,
@@ -52673,7 +52726,7 @@ async function migrateContextToKnowledge(directory, config3) {
   };
 }
 function parseContextMd(content) {
-  const sections = _internals22.splitIntoSections(content);
+  const sections = _internals23.splitIntoSections(content);
   const entries = [];
   const seen = new Set;
   const sectionPatterns = [
@@ -52689,7 +52742,7 @@ function parseContextMd(content) {
     const match = sectionPatterns.find((sp) => sp.pattern.test(section.heading));
     if (!match)
       continue;
-    const bullets = _internals22.extractBullets(section.body);
+    const bullets = _internals23.extractBullets(section.body);
     for (const bullet of bullets) {
       if (bullet.length < 15)
         continue;
@@ -52698,9 +52751,9 @@ function parseContextMd(content) {
         continue;
       seen.add(normalized);
       entries.push({
-        text: _internals22.truncateLesson(bullet),
+        text: _internals23.truncateLesson(bullet),
         sourceSection: match.sourceSection,
-        categoryHint: _internals22.inferCategoryFromText(bullet)
+        categoryHint: _internals23.inferCategoryFromText(bullet)
       });
     }
   }
@@ -52793,12 +52846,12 @@ async function writeSentinel(sentinelPath, migrated, dropped) {
   await mkdir9(path34.dirname(sentinelPath), { recursive: true });
   await writeFile9(sentinelPath, JSON.stringify(sentinel, null, 2), "utf-8");
 }
-var _internals22;
+var _internals23;
 var init_knowledge_migrator = __esm(() => {
   init_logger();
   init_knowledge_store();
   init_knowledge_validator();
-  _internals22 = {
+  _internals23 = {
     migrateContextToKnowledge,
     migrateKnowledgeToExternal,
     parseContextMd,
@@ -52935,9 +52988,9 @@ var init_knowledge = __esm(() => {
 
 // src/services/plan-service.ts
 async function getPlanData(directory, phaseArg) {
-  const plan = await _internals23.loadPlanJsonOnly(directory);
+  const plan = await _internals24.loadPlanJsonOnly(directory);
   if (plan) {
-    const fullMarkdown = _internals23.derivePlanMarkdown(plan);
+    const fullMarkdown = _internals24.derivePlanMarkdown(plan);
     if (phaseArg === undefined || phaseArg === null || phaseArg === "") {
       return {
         hasPlan: true,
@@ -52980,7 +53033,7 @@ async function getPlanData(directory, phaseArg) {
       isLegacy: false
     };
   }
-  const planContent = await _internals23.readSwarmFileAsync(directory, "plan.md");
+  const planContent = await _internals24.readSwarmFileAsync(directory, "plan.md");
   if (!planContent) {
     return {
       hasPlan: false,
@@ -53076,11 +53129,11 @@ async function handlePlanCommand(directory, args2) {
   const planData = await getPlanData(directory, phaseArg);
   return formatPlanMarkdown(planData);
 }
-var _internals23;
+var _internals24;
 var init_plan_service = __esm(() => {
   init_utils2();
   init_manager();
-  _internals23 = {
+  _internals24 = {
     loadPlanJsonOnly,
     derivePlanMarkdown,
     readSwarmFileAsync
@@ -53722,7 +53775,7 @@ async function runAdditionalLint(linter, mode, cwd) {
     };
   }
 }
-var MAX_OUTPUT_BYTES = 512000, MAX_COMMAND_LENGTH = 500, lint, _internals24;
+var MAX_OUTPUT_BYTES = 512000, MAX_COMMAND_LENGTH = 500, lint, _internals25;
 var init_lint = __esm(() => {
   init_zod();
   init_discovery();
@@ -53754,15 +53807,15 @@ var init_lint = __esm(() => {
       }
       const { mode } = args2;
       const cwd = directory;
-      const linter = await _internals24.detectAvailableLinter(directory);
+      const linter = await _internals25.detectAvailableLinter(directory);
       if (linter) {
-        const result = await _internals24.runLint(linter, mode, directory);
+        const result = await _internals25.runLint(linter, mode, directory);
         return JSON.stringify(result, null, 2);
       }
-      const additionalLinter = _internals24.detectAdditionalLinter(cwd);
+      const additionalLinter = _internals25.detectAdditionalLinter(cwd);
       if (additionalLinter) {
         warn(`[lint] Using ${additionalLinter} linter for this project`);
-        const result = await _internals24.runAdditionalLint(additionalLinter, mode, cwd);
+        const result = await _internals25.runAdditionalLint(additionalLinter, mode, cwd);
         return JSON.stringify(result, null, 2);
       }
       const errorResult = {
@@ -53776,7 +53829,7 @@ For Rust: rustup component add clippy`
       return JSON.stringify(errorResult, null, 2);
     }
   });
-  _internals24 = {
+  _internals25 = {
     detectAvailableLinter,
     runLint,
     detectAdditionalLinter,
@@ -54090,7 +54143,7 @@ function findScannableFiles(dir, excludeExact, excludeGlobs, scanDir, visited, s
 }
 async function runSecretscan(directory) {
   try {
-    const result = await _internals25.secretscan.execute({ directory }, {});
+    const result = await _internals26.secretscan.execute({ directory }, {});
     const jsonStr = typeof result === "string" ? result : result.output;
     return JSON.parse(jsonStr);
   } catch (e) {
@@ -54105,7 +54158,7 @@ async function runSecretscan(directory) {
     return errorResult;
   }
 }
-var MAX_FILE_PATH_LENGTH = 500, MAX_FILE_SIZE_BYTES, MAX_FILES_SCANNED = 1000, MAX_FINDINGS = 100, MAX_OUTPUT_BYTES2 = 512000, MAX_LINE_LENGTH = 1e4, MAX_CONTENT_BYTES, BINARY_SIGNATURES, BINARY_PREFIX_BYTES = 4, BINARY_NULL_CHECK_BYTES = 8192, BINARY_NULL_THRESHOLD = 0.1, DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_EXTENSIONS, SECRET_PATTERNS, O_NOFOLLOW, secretscan, _internals25;
+var MAX_FILE_PATH_LENGTH = 500, MAX_FILE_SIZE_BYTES, MAX_FILES_SCANNED = 1000, MAX_FINDINGS = 100, MAX_OUTPUT_BYTES2 = 512000, MAX_LINE_LENGTH = 1e4, MAX_CONTENT_BYTES, BINARY_SIGNATURES, BINARY_PREFIX_BYTES = 4, BINARY_NULL_CHECK_BYTES = 8192, BINARY_NULL_THRESHOLD = 0.1, DEFAULT_EXCLUDE_DIRS, DEFAULT_EXCLUDE_EXTENSIONS, SECRET_PATTERNS, O_NOFOLLOW, secretscan, _internals26;
 var init_secretscan = __esm(() => {
   init_zod();
   init_path_security();
@@ -54477,7 +54530,7 @@ var init_secretscan = __esm(() => {
       }
     }
   });
-  _internals25 = {
+  _internals26 = {
     secretscan,
     runSecretscan
   };
@@ -55049,14 +55102,14 @@ function buildGoBackend() {
     selectEntryPoints
   };
 }
-var PROFILE_ID = "go", IMPORT_REGEX_SINGLE, IMPORT_REGEX_GROUP, IMPORT_REGEX_GROUP_LINE, _internals26;
+var PROFILE_ID = "go", IMPORT_REGEX_SINGLE, IMPORT_REGEX_GROUP, IMPORT_REGEX_GROUP_LINE, _internals27;
 var init_go = __esm(() => {
   init_default_backend();
   init_profiles();
   IMPORT_REGEX_SINGLE = /^\s*import\s+(?:[a-zA-Z_.][a-zA-Z0-9_]*\s+)?"([^"]+)"/gm;
   IMPORT_REGEX_GROUP = /^\s*import\s*\(([\s\S]*?)\)/gm;
   IMPORT_REGEX_GROUP_LINE = /(?:[a-zA-Z_.][a-zA-Z0-9_]*\s+)?"([^"]+)"/g;
-  _internals26 = { extractImports };
+  _internals27 = { extractImports };
 });
 
 // src/lang/backends/python.ts
@@ -55168,13 +55221,13 @@ function buildPythonBackend() {
     selectEntryPoints: selectEntryPoints2
   };
 }
-var PROFILE_ID2 = "python", IMPORT_REGEX_FROM_WITH_TARGETS, IMPORT_REGEX_IMPORT, _internals27;
+var PROFILE_ID2 = "python", IMPORT_REGEX_FROM_WITH_TARGETS, IMPORT_REGEX_IMPORT, _internals28;
 var init_python = __esm(() => {
   init_default_backend();
   init_profiles();
   IMPORT_REGEX_FROM_WITH_TARGETS = /^\s*from\s+(\.*[\w.]*)\s+import\s+(\([^)]*\)|[^\n#]+)/gm;
   IMPORT_REGEX_IMPORT = /^\s*import\s+([^\n#]+)/gm;
-  _internals27 = { extractImports: extractImports2 };
+  _internals28 = { extractImports: extractImports2 };
 });
 
 // src/test-impact/analyzer.ts
@@ -55385,7 +55438,7 @@ function addImpactEdgesForTestFile(testFile, content, impactMap) {
     return;
   }
   if (PYTHON_EXTENSIONS.has(ext)) {
-    const modules = _internals27.extractImports(testFile, content);
+    const modules = _internals28.extractImports(testFile, content);
     for (const mod of modules) {
       const resolved = resolvePythonImport(testDir, mod);
       if (resolved !== null)
@@ -55394,7 +55447,7 @@ function addImpactEdgesForTestFile(testFile, content, impactMap) {
     return;
   }
   if (GO_EXTENSIONS.has(ext)) {
-    const imports = _internals26.extractImports(testFile, content);
+    const imports = _internals27.extractImports(testFile, content);
     for (const importPath of imports) {
       const sourceFiles = resolveGoImport(testDir, importPath);
       for (const source of sourceFiles)
@@ -55421,8 +55474,8 @@ async function buildImpactMapInternal(cwd) {
   return impactMap;
 }
 async function buildImpactMap(cwd) {
-  const impactMap = await _internals28.buildImpactMapInternal(cwd);
-  await _internals28.saveImpactMap(cwd, impactMap);
+  const impactMap = await _internals29.buildImpactMapInternal(cwd);
+  await _internals29.saveImpactMap(cwd, impactMap);
   return impactMap;
 }
 async function loadImpactMap(cwd, options) {
@@ -55436,7 +55489,7 @@ async function loadImpactMap(cwd, options) {
         const hasValidValues = Object.values(map3).every((v) => Array.isArray(v) && v.every((item) => typeof item === "string"));
         if (hasValidValues) {
           const generatedAt = new Date(data.generatedAt).getTime();
-          if (!_internals28.isCacheStale(map3, generatedAt)) {
+          if (!_internals29.isCacheStale(map3, generatedAt)) {
             return map3;
           }
           if (options?.skipRebuild) {
@@ -55456,7 +55509,7 @@ async function loadImpactMap(cwd, options) {
   if (options?.skipRebuild) {
     return {};
   }
-  return _internals28.buildImpactMap(cwd);
+  return _internals29.buildImpactMap(cwd);
 }
 async function saveImpactMap(cwd, impactMap) {
   const cacheDir2 = path41.join(cwd, ".swarm", "cache");
@@ -55482,7 +55535,7 @@ async function analyzeImpact(changedFiles, cwd, budget) {
     };
   }
   const validFiles = changedFiles.filter((f) => typeof f === "string" && f.length > 0 && !f.includes("\x00"));
-  const impactMap = await _internals28.loadImpactMap(cwd);
+  const impactMap = await _internals29.loadImpactMap(cwd);
   const impactedTestsSet = new Set;
   const untestedFiles = [];
   let visitedCount = 0;
@@ -55549,7 +55602,7 @@ async function analyzeImpact(changedFiles, cwd, budget) {
     budgetExceeded
   };
 }
-var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, TS_EXTENSIONS, PYTHON_EXTENSIONS, GO_EXTENSIONS, EXTENSIONS_TO_TRY, goModuleCache, _internals28;
+var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, TS_EXTENSIONS, PYTHON_EXTENSIONS, GO_EXTENSIONS, EXTENSIONS_TO_TRY, goModuleCache, _internals29;
 var init_analyzer = __esm(() => {
   init_go();
   init_python();
@@ -55561,7 +55614,7 @@ var init_analyzer = __esm(() => {
   GO_EXTENSIONS = new Set([".go"]);
   EXTENSIONS_TO_TRY = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
   goModuleCache = new Map;
-  _internals28 = {
+  _internals29 = {
     normalizePath,
     isCacheStale,
     resolveRelativeImport,
@@ -56041,7 +56094,7 @@ function readPackageJsonRaw(dir) {
   }
 }
 function readPackageJson(dir) {
-  return _internals29.readPackageJsonRaw(dir);
+  return _internals30.readPackageJsonRaw(dir);
 }
 function readPackageJsonTestScript(dir) {
   return readPackageJson(dir)?.scripts?.test ?? null;
@@ -56211,7 +56264,7 @@ function buildTypescriptBackend() {
     selectEntryPoints: selectEntryPoints3
   };
 }
-var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals29;
+var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals30;
 var init_typescript = __esm(() => {
   init_default_backend();
   init_profiles();
@@ -56220,7 +56273,7 @@ var init_typescript = __esm(() => {
   IMPORT_REGEX_REQUIRE2 = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_DYNAMIC = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_REEXPORT2 = /export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/g;
-  _internals29 = {
+  _internals30 = {
     readPackageJsonRaw,
     readPackageJsonTestScript,
     frameworkFromScriptsTest
@@ -56251,7 +56304,7 @@ __export(exports_dispatch, {
   pickedProfiles: () => pickedProfiles,
   pickBackend: () => pickBackend,
   clearDispatchCache: () => clearDispatchCache,
-  _internals: () => _internals30
+  _internals: () => _internals31
 });
 import * as fs28 from "node:fs";
 import * as path45 from "node:path";
@@ -56306,7 +56359,7 @@ function findManifestRoot(start2) {
   return start2;
 }
 function evictIfNeeded() {
-  if (cache.size <= _internals30.cacheCapacity)
+  if (cache.size <= _internals31.cacheCapacity)
     return;
   let oldestKey;
   let oldestOrder = Infinity;
@@ -56337,7 +56390,7 @@ async function pickBackend(dir) {
     evictIfNeeded();
     return null;
   }
-  const profiles = await _internals30.detectProjectLanguages(root);
+  const profiles = await _internals31.detectProjectLanguages(root);
   if (profiles.length === 0) {
     cache.set(cacheKey, {
       hash: hash3,
@@ -56369,12 +56422,12 @@ function clearDispatchCache() {
   manifestRootCache.clear();
   insertCounter = 0;
 }
-var _internals30, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
+var _internals31, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
 var init_dispatch = __esm(() => {
   init_backends();
   init_detector();
   init_registry_backend();
-  _internals30 = {
+  _internals31 = {
     detectProjectLanguages,
     cacheCapacity: 64
   };
@@ -57998,9 +58051,9 @@ function getVersionFileVersion(dir) {
 async function runVersionCheck2(dir, _timeoutMs) {
   const startTime = Date.now();
   try {
-    const packageVersion = _internals31.getPackageVersion(dir);
-    const changelogVersion = _internals31.getChangelogVersion(dir);
-    const versionFileVersion = _internals31.getVersionFileVersion(dir);
+    const packageVersion = _internals32.getPackageVersion(dir);
+    const changelogVersion = _internals32.getChangelogVersion(dir);
+    const versionFileVersion = _internals32.getVersionFileVersion(dir);
     const versions3 = [];
     if (packageVersion)
       versions3.push(`package.json: ${packageVersion}`);
@@ -58350,7 +58403,7 @@ async function runPreflight(dir, phase, config3) {
   const reportId = `preflight-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let validatedDir;
   try {
-    validatedDir = _internals31.validateDirectoryPath(dir);
+    validatedDir = _internals32.validateDirectoryPath(dir);
   } catch (error93) {
     return {
       id: reportId,
@@ -58370,7 +58423,7 @@ async function runPreflight(dir, phase, config3) {
   }
   let validatedTimeout;
   try {
-    validatedTimeout = _internals31.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
+    validatedTimeout = _internals32.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
   } catch (error93) {
     return {
       id: reportId,
@@ -58411,12 +58464,12 @@ async function runPreflight(dir, phase, config3) {
   });
   const checks5 = [];
   log("[Preflight] Running lint check...");
-  const lintResult = await _internals31.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
+  const lintResult = await _internals32.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
   checks5.push(lintResult);
   log(`[Preflight] Lint check: ${lintResult.status} ${lintResult.message}`);
   if (!cfg.skipTests) {
     log("[Preflight] Running tests check...");
-    const testsResult = await _internals31.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
+    const testsResult = await _internals32.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
     checks5.push(testsResult);
     log(`[Preflight] Tests check: ${testsResult.status} ${testsResult.message}`);
   } else {
@@ -58428,7 +58481,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipSecrets) {
     log("[Preflight] Running secrets check...");
-    const secretsResult = await _internals31.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
+    const secretsResult = await _internals32.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(secretsResult);
     log(`[Preflight] Secrets check: ${secretsResult.status} ${secretsResult.message}`);
   } else {
@@ -58440,7 +58493,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipEvidence) {
     log("[Preflight] Running evidence check...");
-    const evidenceResult = await _internals31.runEvidenceCheck(validatedDir);
+    const evidenceResult = await _internals32.runEvidenceCheck(validatedDir);
     checks5.push(evidenceResult);
     log(`[Preflight] Evidence check: ${evidenceResult.status} ${evidenceResult.message}`);
   } else {
@@ -58451,12 +58504,12 @@ async function runPreflight(dir, phase, config3) {
     });
   }
   log("[Preflight] Running requirement coverage check...");
-  const reqCoverageResult = await _internals31.runRequirementCoverageCheck(validatedDir, phase);
+  const reqCoverageResult = await _internals32.runRequirementCoverageCheck(validatedDir, phase);
   checks5.push(reqCoverageResult);
   log(`[Preflight] Requirement coverage check: ${reqCoverageResult.status} ${reqCoverageResult.message}`);
   if (!cfg.skipVersion) {
     log("[Preflight] Running version check...");
-    const versionResult = await _internals31.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
+    const versionResult = await _internals32.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(versionResult);
     log(`[Preflight] Version check: ${versionResult.status} ${versionResult.message}`);
   } else {
@@ -58519,10 +58572,10 @@ function formatPreflightMarkdown(report) {
 async function handlePreflightCommand(directory, _args) {
   const plan = await loadPlan(directory);
   const phase = plan?.current_phase ?? 1;
-  const report = await _internals31.runPreflight(directory, phase);
-  return _internals31.formatPreflightMarkdown(report);
+  const report = await _internals32.runPreflight(directory, phase);
+  return _internals32.formatPreflightMarkdown(report);
 }
-var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals31;
+var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals32;
 var init_preflight_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -58539,7 +58592,7 @@ var init_preflight_service = __esm(() => {
     testScope: "convention",
     linter: "biome"
   };
-  _internals31 = {
+  _internals32 = {
     runPreflight,
     formatPreflightMarkdown,
     handlePreflightCommand,
@@ -59854,7 +59907,7 @@ async function handleSimulateCommand(directory, args2) {
   }
   let darkMatterPairs;
   try {
-    darkMatterPairs = await _internals16.detectDarkMatter(directory, options);
+    darkMatterPairs = await _internals17.detectDarkMatter(directory, options);
   } catch (err2) {
     const errMsg = err2 instanceof Error ? err2.message : String(err2);
     return `## Simulate Report
@@ -60434,7 +60487,7 @@ async function getStatusData(directory, agents) {
 }
 function enrichWithLeanTurbo(status, directory) {
   const turboMode = hasActiveTurboMode();
-  const leanActive = _internals32.hasActiveLeanTurbo();
+  const leanActive = _internals33.hasActiveLeanTurbo();
   let turboStrategy = "off";
   if (leanActive) {
     turboStrategy = "lean";
@@ -60453,7 +60506,7 @@ function enrichWithLeanTurbo(status, directory) {
     }
   }
   if (leanSessionID) {
-    const runState = _internals32.loadLeanTurboRunState(directory, leanSessionID);
+    const runState = _internals33.loadLeanTurboRunState(directory, leanSessionID);
     if (runState) {
       status.leanTurboPhase = runState.phase;
       status.leanMaxParallelCoders = runState.maxParallelCoders;
@@ -60485,7 +60538,7 @@ function enrichWithLeanTurbo(status, directory) {
       }
     }
   }
-  status.fullAutoActive = _internals32.hasActiveFullAuto();
+  status.fullAutoActive = _internals33.hasActiveFullAuto();
   return status;
 }
 function formatStatusMarkdown(status) {
@@ -60567,7 +60620,7 @@ async function handleStatusCommand(directory, agents) {
   }
   return formatStatusMarkdown(statusData);
 }
-var _internals32;
+var _internals33;
 var init_status_service = __esm(() => {
   init_extractors();
   init_utils2();
@@ -60576,7 +60629,7 @@ var init_status_service = __esm(() => {
   init_state3();
   init_compaction_service();
   init_context_budget_service();
-  _internals32 = {
+  _internals33 = {
     loadLeanTurboRunState,
     hasActiveLeanTurbo,
     hasActiveFullAuto
@@ -60667,7 +60720,7 @@ async function handleTurboCommand(directory, args2, sessionID) {
   if (arg0 === "on") {
     let strategy = "standard";
     try {
-      const { config: config3 } = _internals33.loadPluginConfigWithMeta(directory);
+      const { config: config3 } = _internals34.loadPluginConfigWithMeta(directory);
       if (config3.turbo?.strategy === "lean") {
         strategy = "lean";
       }
@@ -60722,7 +60775,7 @@ function enableLeanTurbo(session, directory, sessionID) {
   let maxParallelCoders = 4;
   let conflictPolicy = "serialize";
   try {
-    const { config: config3 } = _internals33.loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals34.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.lean;
     if (leanConfig) {
       maxParallelCoders = leanConfig.max_parallel_coders ?? 4;
@@ -60792,13 +60845,13 @@ function buildStatusMessage(session, directory, sessionID) {
   ].join(`
 `);
 }
-var _internals33;
+var _internals34;
 var init_turbo = __esm(() => {
   init_config();
   init_state();
   init_state3();
   init_logger();
-  _internals33 = {
+  _internals34 = {
     loadPluginConfigWithMeta
   };
 });
@@ -60891,7 +60944,7 @@ function formatCommandNotFound(tokens) {
   const attemptedCommand = tokens[0] || "";
   const MAX_DISPLAY = 100;
   const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-  const similar = _internals34.findSimilarCommands(attemptedCommand);
+  const similar = _internals35.findSimilarCommands(attemptedCommand);
   const header = `Command \`/swarm ${displayCommand}\` not found.`;
   const suggestions = similar.length > 0 ? `Did you mean:
 ${similar.map((cmd) => `  - /swarm ${cmd}`).join(`
@@ -61326,7 +61379,7 @@ async function buildSwarmCommandPrompt(args2) {
     activeAgentName,
     registeredAgents
   } = args2;
-  const resolved = _internals34.resolveCommand(tokens);
+  const resolved = _internals35.resolveCommand(tokens);
   if (!resolved) {
     if (tokens.length === 0) {
       return buildHelpText();
@@ -61477,7 +61530,7 @@ function findSimilarCommands(query) {
   }
   const scored = VALID_COMMANDS.map((cmd) => {
     const cmdLower = cmd.toLowerCase();
-    const fullScore = _internals34.levenshteinDistance(q, cmdLower);
+    const fullScore = _internals35.levenshteinDistance(q, cmdLower);
     let tokenScore = Infinity;
     if (cmd.includes(" ") || cmd.includes("-")) {
       const qTokens = q.split(/[\s-]+/);
@@ -61490,7 +61543,7 @@ function findSimilarCommands(query) {
         for (const ct of cmdTokens) {
           if (ct.length === 0)
             continue;
-          const dist = _internals34.levenshteinDistance(qt, ct);
+          const dist = _internals35.levenshteinDistance(qt, ct);
           if (dist < minDist)
             minDist = dist;
         }
@@ -61500,7 +61553,7 @@ function findSimilarCommands(query) {
     }
     const dashStrippedQ = q.replace(/-/g, "");
     const dashStrippedCmd = cmdLower.replace(/-/g, "");
-    const dashScore = _internals34.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const dashScore = _internals35.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
     const score = Math.min(fullScore, tokenScore, dashScore);
     return { cmd, score };
   });
@@ -61532,11 +61585,11 @@ async function handleHelpCommand(ctx) {
     return buildHelpText2();
   }
   const tokens = targetCommand.split(/\s+/);
-  const resolved = _internals34.resolveCommand(tokens);
+  const resolved = _internals35.resolveCommand(tokens);
   if (resolved) {
-    return _internals34.buildDetailedHelp(resolved.key, resolved.entry);
+    return _internals35.buildDetailedHelp(resolved.key, resolved.entry);
   }
-  const similar = _internals34.findSimilarCommands(targetCommand);
+  const similar = _internals35.findSimilarCommands(targetCommand);
   const { buildHelpText: fullHelp } = await Promise.resolve().then(() => (init_commands(), exports_commands));
   if (similar.length > 0) {
     return `Command '/swarm ${targetCommand}' not found.
@@ -61630,7 +61683,7 @@ function resolveCommand(tokens) {
   }
   return null;
 }
-var COMMAND_REGISTRY, VALID_COMMANDS, _internals34, validation;
+var COMMAND_REGISTRY, VALID_COMMANDS, _internals35, validation;
 var init_registry = __esm(() => {
   init_acknowledge_spec_drift();
   init_agents();
@@ -61700,7 +61753,7 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/agents"
     },
     help: {
-      handler: (ctx) => _internals34.handleHelpCommand(ctx),
+      handler: (ctx) => _internals35.handleHelpCommand(ctx),
       description: "Show help for swarm commands",
       category: "core",
       args: "[command]",
@@ -62072,7 +62125,7 @@ Subcommands:
     }
   };
   VALID_COMMANDS = Object.keys(COMMAND_REGISTRY);
-  _internals34 = {
+  _internals35 = {
     handleHelpCommand,
     validateAliases,
     resolveCommand,
@@ -62080,7 +62133,7 @@ Subcommands:
     findSimilarCommands,
     buildDetailedHelp
   };
-  validation = _internals34.validateAliases();
+  validation = _internals35.validateAliases();
   if (!validation.valid) {
     throw new Error(`COMMAND_REGISTRY alias validation failed:
 ${validation.errors.join(`
@@ -70705,7 +70758,7 @@ __export(exports_runtime, {
   getSupportedLanguages: () => getSupportedLanguages,
   getInitializedLanguages: () => getInitializedLanguages,
   clearParserCache: () => clearParserCache,
-  _internals: () => _internals35
+  _internals: () => _internals36
 });
 import * as path77 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -70715,10 +70768,10 @@ async function initTreeSitter() {
       const thisDir = path77.dirname(fileURLToPath2(import.meta.url));
       const isSource = thisDir.replace(/\\/g, "/").endsWith("/src/lang");
       if (isSource) {
-        await _internals35.parserInit();
+        await _internals36.parserInit();
       } else {
         const grammarsDir = getGrammarsDirAbsolute();
-        await _internals35.parserInit({
+        await _internals36.parserInit({
           locateFile(scriptName) {
             return path77.join(grammarsDir, scriptName);
           }
@@ -70820,12 +70873,12 @@ function getInitializedLanguages() {
 function getSupportedLanguages() {
   return Object.keys(LANGUAGE_WASM_MAP);
 }
-var parserCache, initializedLanguages, treeSitterInitPromise = null, _internals35, LANGUAGE_WASM_MAP;
+var parserCache, initializedLanguages, treeSitterInitPromise = null, _internals36, LANGUAGE_WASM_MAP;
 var init_runtime = __esm(() => {
   init_tree_sitter();
   parserCache = new Map;
   initializedLanguages = new Set;
-  _internals35 = {
+  _internals36 = {
     parserInit: Parser.init
   };
   LANGUAGE_WASM_MAP = {
@@ -71282,9 +71335,9 @@ var init_doc_scan = __esm(() => {
 var exports_knowledge_recall = {};
 __export(exports_knowledge_recall, {
   knowledge_recall: () => knowledge_recall,
-  _internals: () => _internals36
+  _internals: () => _internals37
 });
-var knowledge_recall, _internals36;
+var knowledge_recall, _internals37;
 var init_knowledge_recall = __esm(() => {
   init_zod();
   init_knowledge_store();
@@ -71370,7 +71423,7 @@ var init_knowledge_recall = __esm(() => {
       return JSON.stringify(result);
     }
   });
-  _internals36 = {
+  _internals37 = {
     knowledge_recall
   };
 });
@@ -71425,7 +71478,7 @@ __export(exports_curator_drift, {
   runDeterministicDriftCheck: () => runDeterministicDriftCheck,
   readPriorDriftReports: () => readPriorDriftReports,
   buildDriftInjectionText: () => buildDriftInjectionText,
-  _internals: () => _internals38
+  _internals: () => _internals39
 });
 import * as fs60 from "node:fs";
 import * as path85 from "node:path";
@@ -71470,7 +71523,7 @@ async function runDeterministicDriftCheck(directory, phase, curatorResult, confi
   try {
     const planMd = await readSwarmFileAsync(directory, "plan.md");
     const specMd = await readSwarmFileAsync(directory, "spec.md");
-    const priorReports = await _internals38.readPriorDriftReports(directory);
+    const priorReports = await _internals39.readPriorDriftReports(directory);
     const complianceCount = curatorResult.compliance.length;
     const warningCompliance = curatorResult.compliance.filter((obs) => obs.severity === "warning");
     let alignment = "ALIGNED";
@@ -71519,7 +71572,7 @@ async function runDeterministicDriftCheck(directory, phase, curatorResult, confi
       scope_additions: [],
       injection_summary: injectionSummary
     };
-    const reportPath = await _internals38.writeDriftReport(directory, report);
+    const reportPath = await _internals39.writeDriftReport(directory, report);
     getGlobalEventBus().publish("curator.drift.completed", {
       phase,
       alignment,
@@ -71582,12 +71635,12 @@ function buildDriftInjectionText(report, maxChars) {
   }
   return text.slice(0, maxChars);
 }
-var DRIFT_REPORT_PREFIX = "drift-report-phase-", _internals38;
+var DRIFT_REPORT_PREFIX = "drift-report-phase-", _internals39;
 var init_curator_drift = __esm(() => {
   init_event_bus();
   init_logger();
   init_utils2();
-  _internals38 = {
+  _internals39 = {
     readPriorDriftReports,
     writeDriftReport,
     runDeterministicDriftCheck,
@@ -71599,7 +71652,7 @@ var init_curator_drift = __esm(() => {
 var exports_project_context = {};
 __export(exports_project_context, {
   buildProjectContext: () => buildProjectContext,
-  _internals: () => _internals51,
+  _internals: () => _internals52,
   LANG_BACKEND_DETECTION_TIMEOUT_MS: () => LANG_BACKEND_DETECTION_TIMEOUT_MS
 });
 import * as fs110 from "node:fs";
@@ -71683,7 +71736,7 @@ function selectLintCommand(backend, directory) {
   return null;
 }
 async function buildProjectContext(directory) {
-  const backend = await _internals51.pickBackend(directory);
+  const backend = await _internals52.pickBackend(directory);
   if (!backend)
     return null;
   const ctx = emptyProjectContext();
@@ -71714,16 +71767,16 @@ async function buildProjectContext(directory) {
   if (backend.prompts.reviewerChecklist.length > 0) {
     ctx.REVIEWER_CHECKLIST = bulletList(backend.prompts.reviewerChecklist);
   }
-  const profiles = _internals51.pickedProfiles(directory);
+  const profiles = _internals52.pickedProfiles(directory);
   if (profiles.length > 1) {
     ctx.PROJECT_CONTEXT_SECONDARY_LANGUAGES = profiles.slice(1).map((p) => p.id).join(", ");
   }
   return ctx;
 }
-var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals51;
+var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals52;
 var init_project_context = __esm(() => {
   init_dispatch();
-  _internals51 = {
+  _internals52 = {
     pickBackend,
     pickedProfiles
   };
@@ -72289,7 +72342,7 @@ async function writeFullAutoOversightEvidence(directory, phase, event) {
   }
 }
 async function dispatchFullAutoOversight(input) {
-  const client = _internals10.swarmState.opencodeClient;
+  const client = _internals11.swarmState.opencodeClient;
   const sequence = nextFullAutoOversightSequence(input.directory);
   oversightSequenceCounter = sequence;
   const beforeStatus = loadFullAutoRunState(input.directory, input.sessionID)?.status;
@@ -73927,7 +73980,7 @@ Critic reasoning: ${criticResult.reasoning}`
   }
 }
 async function dispatchCriticAndWriteEvent(directory, architectOutput, criticContext, criticModel, escalationType, interactionCount, deadlockCount, oversightAgentName, sessionID) {
-  const client = _internals10.swarmState.opencodeClient;
+  const client = _internals11.swarmState.opencodeClient;
   if (!client) {
     warn("[full-auto-intercept] No opencodeClient — critic dispatch skipped (fallback to PENDING)");
     const result = {
@@ -74060,11 +74113,11 @@ function createFullAutoInterceptHook(config3, directory) {
     if (!architectText)
       return;
     const sessionID = architectMessage.info?.sessionID;
-    if (!_internals10.hasActiveFullAuto(sessionID))
+    if (!_internals11.hasActiveFullAuto(sessionID))
       return;
     let session = null;
     if (sessionID) {
-      session = _internals10.ensureAgentSession(sessionID);
+      session = _internals11.ensureAgentSession(sessionID);
     }
     if (session) {
       const interactionCount = session.fullAutoInteractionCount ?? 0;
@@ -82159,10 +82212,10 @@ async function getRunMemorySummary(directory) {
   if (entries.length === 0) {
     return null;
   }
-  const groups = _internals37.groupByTaskId(entries);
+  const groups = _internals38.groupByTaskId(entries);
   const summaries = [];
   for (const [taskId, taskEntries] of groups) {
-    const summary = _internals37.summarizeTask(taskId, taskEntries);
+    const summary = _internals38.summarizeTask(taskId, taskEntries);
     if (summary) {
       summaries.push(summary);
     }
@@ -82195,7 +82248,7 @@ Use this data to avoid repeating known failure patterns.`;
   }
   return prefix + summaryText + suffix;
 }
-var _internals37 = {
+var _internals38 = {
   generateTaskFingerprint,
   recordOutcome,
   getTaskHistory,
@@ -89708,7 +89761,7 @@ function listLaneEvidenceSync(directory, phase) {
   }
   return laneIds;
 }
-var _internals39 = {
+var _internals40 = {
   listActiveLocks,
   readPersisted: readPersisted2,
   readPlanJson: defaultReadPlanJson,
@@ -89769,7 +89822,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
       reason: "Lean Turbo state unreadable or missing"
     };
   }
-  const persisted = _internals39.readPersisted(directory);
+  const persisted = _internals40.readPersisted(directory);
   if (!persisted) {
     return {
       ok: false,
@@ -89833,7 +89886,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
     }
   }
   if (runState.lanes.length > 0) {
-    const evidenceLaneIds = new Set(_internals39.listLaneEvidenceSync(directory, phase));
+    const evidenceLaneIds = new Set(_internals40.listLaneEvidenceSync(directory, phase));
     for (const lane of runState.lanes) {
       if ((lane.status === "completed" || lane.status === "failed") && !evidenceLaneIds.has(lane.laneId)) {
         return {
@@ -89843,7 +89896,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
       }
     }
   }
-  const activeLocks = _internals39.listActiveLocks(directory);
+  const activeLocks = _internals40.listActiveLocks(directory);
   const phaseLaneIds = new Set(laneIds);
   for (const lock of activeLocks) {
     if (lock.laneId && phaseLaneIds.has(lock.laneId)) {
@@ -89863,7 +89916,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   const serialDegradedTasks = runState.degradedTasks.filter((dt) => !laneTaskIds.has(dt.taskId));
   if (serialDegradedTasks.length > 0) {
-    const plan = _internals39.readPlanJson(directory);
+    const plan = _internals40.readPlanJson(directory);
     if (!plan) {
       return {
         ok: false,
@@ -89907,7 +89960,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   const serializedTasks = runState.serializedTasks;
   if (Array.isArray(serializedTasks) && serializedTasks.length > 0) {
-    const plan = _internals39.readPlanJson(directory);
+    const plan = _internals40.readPlanJson(directory);
     if (!plan) {
       return {
         ok: false,
@@ -89966,7 +90019,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   let reviewerVerdict = runState.lastReviewerVerdict;
   if (!reviewerVerdict) {
-    const evidence = _internals39.readReviewerEvidence(directory, phase);
+    const evidence = _internals40.readReviewerEvidence(directory, phase);
     reviewerVerdict = evidence?.verdict ?? undefined;
   }
   if (mergedConfig.phase_reviewer) {
@@ -89979,7 +90032,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   let criticVerdict = runState.lastCriticVerdict;
   if (!criticVerdict) {
-    const evidence = _internals39.readCriticEvidence(directory, phase);
+    const evidence = _internals40.readCriticEvidence(directory, phase);
     criticVerdict = evidence?.verdict ?? undefined;
   }
   if (mergedConfig.phase_critic) {
@@ -90882,7 +90935,7 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
       phase_critic: leanConfig.phase_critic,
       integrated_diff_required: leanConfig.integrated_diff_required
     } : undefined;
-    const leanCheck = _internals39.verifyLeanTurboPhaseReady(dir, phase, sessionID, leanPhaseReadyConfig);
+    const leanCheck = _internals40.verifyLeanTurboPhaseReady(dir, phase, sessionID, leanPhaseReadyConfig);
     if (!leanCheck.ok) {
       return JSON.stringify({
         success: false,
@@ -93070,11 +93123,11 @@ var quality_budget = createSwarmTool({
     }).optional().describe("Quality budget thresholds")
   },
   async execute(args2, directory) {
-    const result = await _internals40.qualityBudget(args2, directory);
+    const result = await _internals41.qualityBudget(args2, directory);
     return JSON.stringify(result);
   }
 });
-var _internals40 = {
+var _internals41 = {
   qualityBudget
 };
 
@@ -93803,7 +93856,7 @@ import * as path110 from "node:path";
 var semgrepAvailableCache = null;
 var DEFAULT_RULES_DIR = ".swarm/semgrep-rules";
 var DEFAULT_TIMEOUT_MS3 = 30000;
-var _internals41 = {
+var _internals42 = {
   isSemgrepAvailable,
   checkSemgrepAvailable,
   resetSemgrepCache,
@@ -93828,7 +93881,7 @@ function isSemgrepAvailable() {
   }
 }
 async function checkSemgrepAvailable() {
-  return _internals41.isSemgrepAvailable();
+  return _internals42.isSemgrepAvailable();
 }
 function resetSemgrepCache() {
   semgrepAvailableCache = null;
@@ -93925,12 +93978,12 @@ async function runSemgrep(options) {
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS3;
   if (files.length === 0) {
     return {
-      available: _internals41.isSemgrepAvailable(),
+      available: _internals42.isSemgrepAvailable(),
       findings: [],
       engine: "tier_a"
     };
   }
-  if (!_internals41.isSemgrepAvailable()) {
+  if (!_internals42.isSemgrepAvailable()) {
     return {
       available: false,
       findings: [],
@@ -94089,7 +94142,7 @@ function assignOccurrenceIndices(findings, directory) {
     }
     const occIdx = countMap.get(baseKey) ?? 0;
     countMap.set(baseKey, occIdx + 1);
-    const fp = _internals42.fingerprintFinding(finding, directory, occIdx);
+    const fp = _internals43.fingerprintFinding(finding, directory, occIdx);
     return {
       finding,
       index: occIdx,
@@ -94158,7 +94211,7 @@ async function captureOrMergeBaseline(directory, phase, findings, engine, scanne
       }
     } catch {}
     const scannedRelFiles = new Set(scannedFiles.map((f) => normalizeFindingPath(directory, f)));
-    const indexed = _internals42.assignOccurrenceIndices(findings, directory);
+    const indexed = _internals43.assignOccurrenceIndices(findings, directory);
     if (existing && !opts?.force) {
       const prunedFingerprints = existing.fingerprints.filter((fp) => {
         const relFile = fp.slice(0, fp.indexOf("|"));
@@ -94298,7 +94351,7 @@ function loadBaseline(directory, phase) {
     };
   }
 }
-var _internals42 = {
+var _internals43 = {
   fingerprintFinding,
   assignOccurrenceIndices,
   captureOrMergeBaseline,
@@ -94708,11 +94761,11 @@ var sast_scan = createSwarmTool({
       capture_baseline: safeArgs.capture_baseline,
       phase: safeArgs.phase
     };
-    const result = await _internals43.sastScan(input, directory);
+    const result = await _internals44.sastScan(input, directory);
     return JSON.stringify(result, null, 2);
   }
 });
-var _internals43 = {
+var _internals44 = {
   sastScan,
   sast_scan
 };
@@ -100036,7 +100089,7 @@ function resolveDefaultReviewerAgent(generatedAgentNames) {
 }
 async function compileReviewPackage(directory, phase, sessionID, requireDiffSummary) {
   const lanes = await listLaneEvidence(directory, phase);
-  const persisted = _internals44.readPersisted?.(directory) ?? null;
+  const persisted = _internals45.readPersisted?.(directory) ?? null;
   if (persisted) {
     let matchingRunState = null;
     for (const sessionState of Object.values(persisted.sessions)) {
@@ -100228,7 +100281,7 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
     client.session.delete({ path: { id: sessionId } }).catch(() => {});
   }
 }
-var _internals44 = {
+var _internals45 = {
   compileReviewPackage,
   parseReviewerVerdict,
   writeReviewerEvidence,
@@ -100245,28 +100298,28 @@ async function dispatchPhaseReviewer(directory, phase, sessionID, config3) {
   };
   const generatedAgentNames = swarmState.generatedAgentNames;
   const agentName = mergedConfig.reviewerAgent || resolveDefaultReviewerAgent(generatedAgentNames);
-  const pkg = await _internals44.compileReviewPackage(directory, phase, sessionID, mergedConfig.requireDiffSummary);
+  const pkg = await _internals45.compileReviewPackage(directory, phase, sessionID, mergedConfig.requireDiffSummary);
   let responseText;
   try {
-    responseText = await _internals44.dispatchReviewerAgent(directory, pkg, agentName, mergedConfig.timeoutMs);
+    responseText = await _internals45.dispatchReviewerAgent(directory, pkg, agentName, mergedConfig.timeoutMs);
   } catch (error93) {
-    const evidencePath2 = await _internals44.writeReviewerEvidence(directory, phase, "REJECTED", error93 instanceof Error ? error93.message : String(error93));
+    const evidencePath2 = await _internals45.writeReviewerEvidence(directory, phase, "REJECTED", error93 instanceof Error ? error93.message : String(error93));
     return {
       verdict: "REJECTED",
       reason: `Reviewer dispatch failed: ${error93 instanceof Error ? error93.message : String(error93)}`,
       evidencePath: evidencePath2
     };
   }
-  const parsed = _internals44.parseReviewerVerdict(responseText);
+  const parsed = _internals45.parseReviewerVerdict(responseText);
   if (!parsed) {
-    const evidencePath2 = await _internals44.writeReviewerEvidence(directory, phase, "REJECTED", "Reviewer response could not be parsed");
+    const evidencePath2 = await _internals45.writeReviewerEvidence(directory, phase, "REJECTED", "Reviewer response could not be parsed");
     return {
       verdict: "REJECTED",
       reason: "Reviewer response could not be parsed",
       evidencePath: evidencePath2
     };
   }
-  const evidencePath = await _internals44.writeReviewerEvidence(directory, phase, parsed.verdict, parsed.reason);
+  const evidencePath = await _internals45.writeReviewerEvidence(directory, phase, parsed.verdict, parsed.reason);
   return {
     verdict: parsed.verdict,
     reason: parsed.reason,
@@ -100772,7 +100825,7 @@ ${fileList}
 
 // src/tools/lean-turbo-run-phase.ts
 init_create_tool();
-var _internals45 = {
+var _internals46 = {
   LeanTurboRunner,
   loadPluginConfigWithMeta
 };
@@ -100782,9 +100835,9 @@ async function executeLeanTurboRunPhase(args2) {
   let runError = null;
   let runner = null;
   try {
-    const { config: config3 } = _internals45.loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals46.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.strategy === "lean" ? config3.turbo.lean : undefined;
-    runner = new _internals45.LeanTurboRunner({
+    runner = new _internals46.LeanTurboRunner({
       directory,
       sessionID,
       opencodeClient: swarmState.opencodeClient ?? null,
@@ -101138,7 +101191,7 @@ function isStaticallyEquivalent(originalCode, mutatedCode) {
   const strippedMutated = stripCode(mutatedCode);
   return strippedOriginal === strippedMutated;
 }
-var _internals46 = {
+var _internals47 = {
   isStaticallyEquivalent,
   checkEquivalence,
   batchCheckEquivalence
@@ -101178,7 +101231,7 @@ async function batchCheckEquivalence(patches, llmJudge) {
   const results = [];
   for (const { patch, originalCode, mutatedCode } of patches) {
     try {
-      const result = await _internals46.checkEquivalence(patch, originalCode, mutatedCode, llmJudge);
+      const result = await _internals47.checkEquivalence(patch, originalCode, mutatedCode, llmJudge);
       results.push(result);
     } catch (err3) {
       results.push({
@@ -101478,7 +101531,7 @@ async function executeMutationSuite(patches, testCommand, testFiles, workingDir,
 }
 
 // src/mutation/gate.ts
-var _internals47 = {
+var _internals48 = {
   evaluateMutationGate,
   buildTestImprovementPrompt,
   buildMessage
@@ -101499,8 +101552,8 @@ function evaluateMutationGate(report, passThreshold = PASS_THRESHOLD, warnThresh
   } else {
     verdict = "fail";
   }
-  const testImprovementPrompt = _internals47.buildTestImprovementPrompt(report, passThreshold, verdict);
-  const message = _internals47.buildMessage(verdict, adjustedKillRate, report.killed, report.totalMutants, report.equivalent, warnThreshold);
+  const testImprovementPrompt = _internals48.buildTestImprovementPrompt(report, passThreshold, verdict);
+  const message = _internals48.buildMessage(verdict, adjustedKillRate, report.killed, report.totalMutants, report.equivalent, warnThreshold);
   return {
     verdict,
     killRate: report.killRate,
@@ -102117,7 +102170,7 @@ import * as path132 from "node:path";
 init_bun_compat();
 import * as fs102 from "node:fs";
 import * as path131 from "node:path";
-var _internals48 = { bunSpawn };
+var _internals49 = { bunSpawn };
 var _swarmGitExcludedChecked = false;
 function fileCoversSwarm(content) {
   for (const rawLine of content.split(`
@@ -102150,7 +102203,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
       checkIgnoreExitCode
     ] = await Promise.all([
       (async () => {
-        const proc = _internals48.bunSpawn(["git", "-C", directory, "rev-parse", "--show-toplevel"], GIT_SPAWN_OPTIONS);
+        const proc = _internals49.bunSpawn(["git", "-C", directory, "rev-parse", "--show-toplevel"], GIT_SPAWN_OPTIONS);
         try {
           return await Promise.all([proc.exited, proc.stdout.text()]);
         } finally {
@@ -102160,7 +102213,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       })(),
       (async () => {
-        const proc = _internals48.bunSpawn(["git", "-C", directory, "rev-parse", "--git-path", "info/exclude"], GIT_SPAWN_OPTIONS);
+        const proc = _internals49.bunSpawn(["git", "-C", directory, "rev-parse", "--git-path", "info/exclude"], GIT_SPAWN_OPTIONS);
         try {
           return await Promise.all([proc.exited, proc.stdout.text()]);
         } finally {
@@ -102170,7 +102223,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       })(),
       (async () => {
-        const proc = _internals48.bunSpawn(["git", "-C", directory, "check-ignore", "-q", ".swarm/.gitkeep"], GIT_SPAWN_OPTIONS);
+        const proc = _internals49.bunSpawn(["git", "-C", directory, "check-ignore", "-q", ".swarm/.gitkeep"], GIT_SPAWN_OPTIONS);
         try {
           return await proc.exited;
         } finally {
@@ -102209,7 +102262,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       } catch {}
     }
-    const trackedProc = _internals48.bunSpawn(["git", "-C", directory, "ls-files", "--", ".swarm"], GIT_SPAWN_OPTIONS);
+    const trackedProc = _internals49.bunSpawn(["git", "-C", directory, "ls-files", "--", ".swarm"], GIT_SPAWN_OPTIONS);
     let trackedExitCode;
     let trackedOutput;
     try {
@@ -102234,7 +102287,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
 }
 
 // src/hooks/diff-scope.ts
-var _internals49 = { bunSpawn };
+var _internals50 = { bunSpawn };
 function getDeclaredScope(taskId, directory) {
   try {
     const planPath = path132.join(directory, ".swarm", "plan.json");
@@ -102269,7 +102322,7 @@ var GIT_DIFF_SPAWN_OPTIONS = {
 };
 async function getChangedFiles(directory) {
   try {
-    const proc = _internals49.bunSpawn(["git", "diff", "--name-only", "HEAD~1"], {
+    const proc = _internals50.bunSpawn(["git", "diff", "--name-only", "HEAD~1"], {
       cwd: directory,
       ...GIT_DIFF_SPAWN_OPTIONS
     });
@@ -102286,7 +102339,7 @@ async function getChangedFiles(directory) {
       return stdout.trim().split(`
 `).map((f) => f.trim()).filter((f) => f.length > 0);
     }
-    const proc2 = _internals49.bunSpawn(["git", "diff", "--name-only", "HEAD"], {
+    const proc2 = _internals50.bunSpawn(["git", "diff", "--name-only", "HEAD"], {
       cwd: directory,
       ...GIT_DIFF_SPAWN_OPTIONS
     });
@@ -102344,7 +102397,7 @@ init_telemetry();
 init_file_locks();
 import * as fs104 from "node:fs";
 import * as path133 from "node:path";
-var _internals50 = {
+var _internals51 = {
   listActiveLocks,
   verifyLeanTurboTaskCompletion
 };
@@ -102486,7 +102539,7 @@ function verifyLeanTurboTaskCompletion(directory, taskId, sessionID) {
       }
     };
   }
-  const activeLocks = _internals50.listActiveLocks(directory);
+  const activeLocks = _internals51.listActiveLocks(directory);
   const laneLocks = activeLocks.filter((lock) => lock.laneId === lane.laneId);
   if (laneLocks.length > 0) {
     return {

@@ -194,6 +194,8 @@ export interface AgentSessionState {
     contextPressureWarningSent?: boolean;
     /** Queue of advisory messages (e.g., SLOP, context pressure) pending injection into next messagesTransform */
     pendingAdvisoryMessages?: string[];
+    /** Fingerprint of the most recent provider-failure transcript that received recovery guidance */
+    lastProviderRecoveryFingerprint?: string;
     /** Timestamp when session was rehydrated from snapshot (0 if never rehydrated) */
     sessionRehydratedAt: number;
     /** Pattern type to detection count mapping */

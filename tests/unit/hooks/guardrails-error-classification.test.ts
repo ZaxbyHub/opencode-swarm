@@ -1,7 +1,10 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as os from 'node:os';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	ensureAgentSession,
 	getActiveWindow,
@@ -10,6 +13,8 @@ import {
 } from '../../../src/state';
 
 const TEST_DIR = os.tmpdir();
+const realGetSwarmAgents = _internals.getSwarmAgents;
+const realResolveFallbackModel = _internals.resolveFallbackModel;
 
 const defaultConfig: GuardrailsConfig = {
 	enabled: true,
@@ -65,6 +70,8 @@ describe('guardrails transient error classification (toolAfter)', () => {
 	});
 
 	afterEach(() => {
+		_internals.getSwarmAgents = realGetSwarmAgents;
+		_internals.resolveFallbackModel = realResolveFallbackModel;
 		resetSwarmState();
 	});
 
@@ -350,6 +357,27 @@ describe('guardrails transient error classification (toolAfter)', () => {
 				title: 'bash',
 				output: null,
 				error: 'service unavailable',
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('OpenRouter provider_unavailable "Network connection lost" without status code -> transient', async () => {
+			const sessionId = 'session-provider-unavailable';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error:
+					'{"message":"Network connection lost.","metadata":{"error_type":"provider_unavailable"}}',
 				metadata: {},
 			};
 
@@ -1135,10 +1163,9 @@ describe('guardrails transient error classification (toolAfter)', () => {
 		});
 
 		test('degraded error sets modelFallbackExhausted when fallback models exhausted', async () => {
-			await mock.module('../../../src/agents/index', () => ({
-				getSwarmAgents: () => ({ coder: { fallback_models: ['model-a'] } }),
-				resolveFallbackModel: () => 'model-a',
-			}));
+			_internals.getSwarmAgents = () =>
+				({ coder: { fallback_models: ['model-a'] } }) as any;
+			_internals.resolveFallbackModel = () => 'model-a';
 
 			const sessionId = 'session-degraded-exhausted';
 			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -1160,17 +1187,12 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			// After increment, index becomes 2 which exceeds length 1
 			expect(session.model_fallback_index).toBe(2);
 			expect(session.modelFallbackExhausted).toBe(true);
-
-			mock.restore();
 		});
 
 		test('degraded error advisory includes fallback index and total count', async () => {
-			await mock.module('../../../src/agents/index', () => ({
-				getSwarmAgents: () => ({
-					coder: { fallback_models: ['model-a', 'model-b'] },
-				}),
-				resolveFallbackModel: () => 'model-a',
-			}));
+			_internals.getSwarmAgents = () =>
+				({ coder: { fallback_models: ['model-a', 'model-b'] } }) as any;
+			_internals.resolveFallbackModel = () => 'model-a';
 
 			const sessionId = 'session-degraded-index-count';
 			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -1197,8 +1219,6 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			const advisory = session.pendingAdvisoryMessages?.[0] ?? '';
 			expect(advisory).toContain('1/2');
 			expect(advisory).toContain('considered');
-
-			mock.restore();
 		});
 
 		// -------------------------------------------------------------------------
@@ -1208,10 +1228,8 @@ describe('guardrails transient error classification (toolAfter)', () => {
 		test('F-001: no fallback_models configured → modelFallbackExhausted=true on first degraded error', async () => {
 			// When fallback_models is undefined, exhaustion is set immediately
 			// on the first degraded error (no models were ever available to try)
-			await mock.module('../../../src/agents/index', () => ({
-				getSwarmAgents: () => ({ coder: {} }), // no fallback_models key at all
-				resolveFallbackModel: () => null,
-			}));
+			_internals.getSwarmAgents = () => ({ coder: {} }) as any; // no fallback_models key at all
+			_internals.resolveFallbackModel = () => null;
 
 			const sessionId = 'session-no-fallback-models';
 			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -1241,8 +1259,6 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			const advisory = session.pendingAdvisoryMessages?.[0] ?? '';
 			expect(advisory).toContain('Fallback model');
 			expect(advisory).toContain('considered');
-
-			mock.restore();
 		});
 
 		test('F-001: consecutive degraded errors increment index and exhaust fallback models', async () => {
@@ -1252,12 +1268,9 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			//   3rd: index=3, exhausted=true (3 > 2), "3/2" still pushed on this call
 			//        (exhaustion is detected after increment, so the advisory still fires)
 			//   4th: exhausted=true, "No fallback models available" via exhausted branch
-			await mock.module('../../../src/agents/index', () => ({
-				getSwarmAgents: () => ({
-					coder: { fallback_models: ['model-a', 'model-b'] },
-				}),
-				resolveFallbackModel: () => 'model-a',
-			}));
+			_internals.getSwarmAgents = () =>
+				({ coder: { fallback_models: ['model-a', 'model-b'] } }) as any;
+			_internals.resolveFallbackModel = () => 'model-a';
 
 			const sessionId = 'session-consecutive-degraded';
 			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -1309,18 +1322,13 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			expect(session.pendingAdvisoryMessages?.[3]).toContain(
 				'No fallback models available',
 			);
-
-			mock.restore();
 		});
 
 		test('F-001: degraded error advisory uses "Fallback model N/M considered", NOT "Attempting fallback"', async () => {
 			// The old misleading text was "Attempting fallback model" — verify it is gone
-			await mock.module('../../../src/agents/index', () => ({
-				getSwarmAgents: () => ({
-					coder: { fallback_models: ['model-a'] },
-				}),
-				resolveFallbackModel: () => 'model-a',
-			}));
+			_internals.getSwarmAgents = () =>
+				({ coder: { fallback_models: ['model-a'] } }) as any;
+			_internals.resolveFallbackModel = () => 'model-a';
 
 			const sessionId = 'session-no-attempting-fallback';
 			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
@@ -1344,8 +1352,6 @@ describe('guardrails transient error classification (toolAfter)', () => {
 			// Old misleading text must NOT appear
 			expect(advisory).not.toContain('Attempting fallback');
 			expect(advisory).not.toContain('attempting fallback');
-
-			mock.restore();
 		});
 	});
 

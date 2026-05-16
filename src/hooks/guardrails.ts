@@ -48,6 +48,14 @@ import { detectLoop } from './loop-detector';
 import { extractModelInfo } from './model-limits';
 import { normalizeToolName } from './normalize-tool-name';
 
+export const _internals = {
+	getSwarmAgents,
+	getMostRecentAssistantText,
+	getProviderFailureFingerprint,
+	isTransientProviderFailureText,
+	resolveFallbackModel,
+};
+
 /**
  * Issue #853 Layer B: tools that are structurally blocked while
  * `.swarm/spec-staleness.json` exists. Every blocked tool mutates plan
@@ -234,7 +242,47 @@ function extractErrorSignal(errorContent: unknown): string {
  * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
  */
 const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider.?unavailable|server.?error|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+
+const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
+
+type ChatMessageLike = {
+	info?: { role?: string; sessionID?: string };
+	parts?: Array<{ type?: string; text?: unknown }>;
+};
+
+function getMessageText(message: ChatMessageLike | undefined): string {
+	if (!message?.parts) return '';
+	return message.parts
+		.filter((part) => part?.type === 'text' && typeof part.text === 'string')
+		.map((part) => part.text as string)
+		.join('\n');
+}
+
+function getMostRecentAssistantText(messages: ChatMessageLike[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i]?.info?.role === 'assistant') {
+			return getMessageText(messages[i]);
+		}
+	}
+	return '';
+}
+
+function isTransientProviderFailureText(text: string): boolean {
+	if (!text.trim()) return false;
+	const providerFailureMarker =
+		/provider[_\s-]?unavailable|network\s+connection\s+lost/i.test(text);
+	if (!providerFailureMarker) return false;
+
+	const status = extractStatusCode(text);
+	const hasTransientStatus =
+		status !== null && TRANSIENT_STATUS_CODES.has(status);
+	return hasTransientStatus || TRANSIENT_MODEL_ERROR_PATTERN.test(text);
+}
+
+function getProviderFailureFingerprint(text: string): string {
+	return String(hashArgs({ providerFailure: text.slice(-4000) }));
+}
 
 /**
  * v7.12: Regex pattern for degraded model errors — context-length/token-limit/content-filter
@@ -2666,11 +2714,12 @@ export function createGuardrailsHooks(
 
 				const isTransientMatch =
 					isTransientStatusCode || isTransientPatternMatch;
+				const maxTransientRetries = cfg.max_transient_retries ?? 5;
 
 				const isTransient =
 					!!session &&
 					isTransientMatch &&
-					window.transientRetryCount < cfg.max_transient_retries;
+					window.transientRetryCount < maxTransientRetries;
 
 				// Degraded errors (context-length, token-limit) bypass both counters
 				const isDegraded =
@@ -2690,7 +2739,7 @@ export function createGuardrailsHooks(
 						const baseAgentName = session.agentName
 							? session.agentName.replace(/^[^_]+[_]/, '')
 							: '';
-						const swarmAgents = getSwarmAgents();
+						const swarmAgents = _internals.getSwarmAgents();
 						const fallbackModels =
 							swarmAgents?.[baseAgentName]?.fallback_models;
 						session.modelFallbackExhausted =
@@ -2727,6 +2776,8 @@ export function createGuardrailsHooks(
 					window.consecutiveErrors++;
 				}
 
+				let modelFallbackAdvisoryEmitted = false;
+
 				// v6.33: Model fallback detection for transient model failures
 				// Only check for subagent sessions (not architect)
 				if (
@@ -2742,14 +2793,14 @@ export function createGuardrailsHooks(
 					const baseAgentName = session.agentName
 						? session.agentName.replace(/^[^_]+[_]/, '')
 						: '';
-					const swarmAgents = getSwarmAgents();
+					const swarmAgents = _internals.getSwarmAgents();
 					const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
 					// Mark exhausted only when all fallback models have been tried
 					session.modelFallbackExhausted =
 						!fallbackModels ||
 						session.model_fallback_index > fallbackModels.length;
 
-					const fallbackModel = resolveFallbackModel(
+					const fallbackModel = _internals.resolveFallbackModel(
 						baseAgentName,
 						session.model_fallback_index,
 						swarmAgents,
@@ -2770,6 +2821,7 @@ export function createGuardrailsHooks(
 							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` +
 								`Using /swarm handoff to reset to primary model.`,
 						);
+						modelFallbackAdvisoryEmitted = true;
 					} else {
 						// No fallback configured — generic advisory
 						session.pendingAdvisoryMessages ??= [];
@@ -2778,6 +2830,7 @@ export function createGuardrailsHooks(
 								`No fallback models configured for this agent. Add "fallback_models": ["model-a", "model-b"] ` +
 								`to the agent's config in opencode-swarm.json.`,
 						);
+						modelFallbackAdvisoryEmitted = true;
 					}
 
 					// Always emit telemetry when a transient model error is detected
@@ -2798,16 +2851,23 @@ export function createGuardrailsHooks(
 
 				// Advisory for transient errors that didn't trigger model fallback
 				// (fallback exhausted or no fallback configured)
-				if (session && isTransient && isTransientMatch) {
+				if (
+					session &&
+					isTransient &&
+					isTransientMatch &&
+					!modelFallbackAdvisoryEmitted
+				) {
 					session.pendingAdvisoryMessages ??= [];
 					// Only emit if no TRANSIENT ERROR advisory already exists (dedup via .some)
 					if (
-						!session.pendingAdvisoryMessages.some((m: string) =>
-							m.startsWith('TRANSIENT ERROR:'),
+						!session.pendingAdvisoryMessages.some(
+							(m: string) =>
+								m.startsWith('TRANSIENT ERROR:') ||
+								m.startsWith('MODEL FALLBACK:'),
 						)
 					) {
 						session.pendingAdvisoryMessages.push(
-							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${cfg.max_transient_retries ?? 5}). Retrying...`,
+							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${maxTransientRetries}). Retrying...`,
 						);
 					}
 				}
@@ -2886,6 +2946,37 @@ export function createGuardrailsHooks(
 			);
 
 			// v6.35.1: Runaway output detector — catch models streaming without tool calls
+			if (isArchitectSession && session) {
+				const lastAssistantText = getMostRecentAssistantText(
+					messages as ChatMessageLike[],
+				);
+				if (isTransientProviderFailureText(lastAssistantText)) {
+					const fingerprint = getProviderFailureFingerprint(lastAssistantText);
+					session.pendingAdvisoryMessages ??= [];
+					const alreadyPending = session.pendingAdvisoryMessages.some(
+						(message: string) =>
+							message.startsWith(TRANSIENT_PROVIDER_RECOVERY_TAG),
+					);
+					const alreadyInjected = systemMessages.some((message) =>
+						getMessageText(message as ChatMessageLike).includes(
+							TRANSIENT_PROVIDER_RECOVERY_TAG,
+						),
+					);
+					if (
+						session.lastProviderRecoveryFingerprint !== fingerprint &&
+						!alreadyPending &&
+						!alreadyInjected
+					) {
+						session.pendingAdvisoryMessages.push(
+							`${TRANSIENT_PROVIDER_RECOVERY_TAG}: The previous Architect response appears to have been interrupted by a transient provider/network error. On this turn, continue from the last stable step, inspect current repo or plan state if needed, and keep working instead of treating the interrupted response as task completion.`,
+						);
+						session.lastProviderRecoveryFingerprint = fingerprint;
+					}
+				} else {
+					session.lastProviderRecoveryFingerprint = undefined;
+				}
+			}
+
 			// Uses module-level consecutiveNoToolTurns Map for state across calls
 			if (isArchitectSession) {
 				// Find the last assistant message in conversation

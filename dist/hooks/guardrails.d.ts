@@ -7,8 +7,16 @@
  * - Layer 2 (Hard Block @ 100%): Throws error in toolBefore to block further calls, injects STOP message
  */
 import * as path from 'node:path';
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
 import { type AuthorityConfig, type GuardrailsConfig } from '../config/schema';
 import { type FileZone } from '../context/zone-classifier';
+export declare const _internals: {
+    getSwarmAgents: typeof getSwarmAgents;
+    getMostRecentAssistantText: typeof getMostRecentAssistantText;
+    getProviderFailureFingerprint: typeof getProviderFailureFingerprint;
+    isTransientProviderFailureText: typeof isTransientProviderFailureText;
+    resolveFallbackModel: typeof resolveFallbackModel;
+};
 /**
  * Issue #853 Layer B: tools that are structurally blocked while
  * `.swarm/spec-staleness.json` exists. Every blocked tool mutates plan
@@ -30,6 +38,19 @@ export declare const SPEC_DRIFT_BLOCKED_TOOLS: Set<string>;
  * immediately on the next tool call.
  */
 export declare function enforceSpecDriftGate(directory: string | undefined, toolName: string): void;
+type ChatMessageLike = {
+    info?: {
+        role?: string;
+        sessionID?: string;
+    };
+    parts?: Array<{
+        type?: string;
+        text?: unknown;
+    }>;
+};
+declare function getMostRecentAssistantText(messages: ChatMessageLike[]): string;
+declare function isTransientProviderFailureText(text: string): boolean;
+declare function getProviderFailureFingerprint(text: string): string;
 /**
  * Retrieves stored input args for a given callID.
  * Used by other hooks (e.g., delegation-gate) to access tool input args.
