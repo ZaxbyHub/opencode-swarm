@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.21.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.0...v7.21.1) (2026-05-17)
+
+
+### Bug Fixes
+
+* **phase-complete:** require durable gate proof ([#883](https://github.com/zaxbysauce/opencode-swarm/issues/883)) ([0d76429](https://github.com/zaxbysauce/opencode-swarm/commit/0d764296c95160ec574731e7a583216b6a3f9011))
+
 ## [7.21.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.2...v7.21.0) (2026-05-16)
 
 
