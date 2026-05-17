@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.21.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.1...v7.21.2) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** block rm bypass via mv/move/ren/Move-Item on .swarm/ paths ([#885](https://github.com/zaxbysauce/opencode-swarm/issues/885)) ([64d77cb](https://github.com/zaxbysauce/opencode-swarm/commit/64d77cb0d2ed57f91b40730e443084f16b3e79f6))
+
 ## [7.21.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.0...v7.21.1) (2026-05-17)
 
 
