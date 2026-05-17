@@ -17396,7 +17396,8 @@ var init_schema = __esm(() => {
   AuthorityConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(true),
     rules: exports_external.record(exports_external.string(), AgentAuthorityRuleSchema).default({}),
-    universal_deny_prefixes: exports_external.array(exports_external.string().min(1)).default([])
+    universal_deny_prefixes: exports_external.array(exports_external.string().min(1)).default([]),
+    verifier_config_paths: exports_external.array(exports_external.string()).optional().describe("Additional glob patterns for verifier config files that should be protected from agent modification. These patterns are merged with the built-in verifier config globs (guardrails.ts).")
   });
   GeneralCouncilMemberConfigSchema = exports_external.object({
     memberId: exports_external.string().min(1),

@@ -166,6 +166,79 @@ describe('classifyCommandRisk', () => {
 				.decision,
 		).toBe('escalate_critic');
 	});
+
+	// ---- Config-file shell sabotage: DENY patterns ----
+
+	test('denies sed -i on biome.json replacing error with warn', () => {
+		expect(
+			classifyCommandRisk("sed -i 's/error/warn/' biome.json", '', {
+				directory: PROJECT,
+			}).decision,
+		).toBe('deny');
+	});
+
+	test('denies sed -i on oxlintrc replacing strict with warn', () => {
+		expect(
+			classifyCommandRisk("sed -i 's/strict/warn/' oxlintrc", '', {
+				directory: PROJECT,
+			}).decision,
+		).toBe('deny');
+	});
+
+	test('denies sed -i on biome.json replacing off with error', () => {
+		expect(
+			classifyCommandRisk("sed -i 's/off/error/' biome.json", '', {
+				directory: PROJECT,
+			}).decision,
+		).toBe('deny');
+	});
+
+	// ---- Config-file shell writes: ESCALATE patterns ----
+
+	test('escalates echo redirect to .eslintrc.json', () => {
+		expect(
+			classifyCommandRisk('echo \'{"rules":{}}\' > .eslintrc.json', '', {
+				directory: PROJECT,
+			}).decision,
+		).toBe('escalate_critic');
+	});
+
+	test('escalates printf redirect to biome.json', () => {
+		expect(
+			classifyCommandRisk("printf 'config' > biome.json", '', {
+				directory: PROJECT,
+			}).decision,
+		).toBe('escalate_critic');
+	});
+
+	// ---- Non-matching commands (safe or escalate, not deny) ----
+
+	test('bunx biome check --write src/ is not matched as sed/echo/printf config sabotage', () => {
+		// bunx biome check --write is not in SAFE_SHELL_PATTERNS (*check* yes,
+		// but --write is a flag, not a read-only subcommand), so it escalates via
+		// "not in safe/deny set". The key is it does NOT match the config-sabotage
+		// DENY or ESCALATE patterns since it is not sed -i / echo / printf.
+		const result = classifyCommandRisk('bunx biome check --write src/', '', {
+			directory: PROJECT,
+		});
+		expect(result.decision).not.toBe('deny');
+	});
+
+	test('echo redirect to non-config file escalates via metacharacter check', () => {
+		// "echo hello > README.md" contains > which is a metacharacter, so it is
+		// not eligible for the SAFE allowlist and escalates.
+		expect(
+			classifyCommandRisk('echo hello > README.md', '', { directory: PROJECT })
+				.decision,
+		).toBe('escalate_critic');
+	});
+
+	test('plain echo without redirect is allowed (matches SAFE pattern)', () => {
+		// No metacharacter, no config-sabotage pattern, no deny pattern.
+		expect(
+			classifyCommandRisk('echo "hello"', '', { directory: PROJECT }).decision,
+		).toBe('allow');
+	});
 });
 
 describe('classifyFullAutoToolAction', () => {

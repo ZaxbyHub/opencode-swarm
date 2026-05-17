@@ -259,6 +259,180 @@ describe('checkFileAuthorityWithRules - DENY-first evaluation', () => {
 		});
 	});
 
+	describe('Architect default blockedGlobs (#894)', () => {
+		// v7.x (#894): architect has blockedGlobs for known verifier/linter config files
+		// to prevent bypassing lint gates by editing config instead of fixing source.
+
+		test('blocks oxlintrc (root level)', () => {
+			const result = checkFileAuthority('architect', 'oxlintrc', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .oxlintrc (dotfile)', () => {
+			const result = checkFileAuthority('architect', '.oxlintrc', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .eslintrc (any variant)', () => {
+			const result = checkFileAuthority('architect', '.eslintrc', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .eslintrc.js (with extension)', () => {
+			const result = checkFileAuthority('architect', '.eslintrc.js', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks eslint.config.js (flat config)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'eslint.config.js',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks eslint.config.mjs (ESM flat config)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'eslint.config.mjs',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .prettierrc (dotfile)', () => {
+			const result = checkFileAuthority('architect', '.prettierrc', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .prettierrc.json (with format)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'.prettierrc.json',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks biome.jsonc (biome config)', () => {
+			const result = checkFileAuthority('architect', 'biome.jsonc', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .secretscanignore', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'.secretscanignore',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .golangci.toml (golangci-lint toml config)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'.golangci.toml',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks .golangci.yaml (golangci-lint yaml config)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'.golangci.yaml',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks nested .eslintrc (e.g., in subdir/)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'subdir/.eslintrc',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('blocks eslint.config.js in subdir/', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'packages/eslint.config.js',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toContain('blocked (glob');
+		});
+
+		test('does NOT block biome.json (not biome.jsonc)', () => {
+			// biome.json is NOT in the blockedGlobs; it's blocked by config zone instead
+			// This test verifies the glob pattern specificity
+			const result = checkFileAuthority('architect', 'biome.json', TEST_CWD);
+			// Should still be blocked but by config zone, not glob
+			expect(result.allowed).toBe(false);
+			if (!result.allowed) {
+				// Blocked by zone, not glob
+				expect(result.reason).toContain('config');
+			}
+		});
+
+		test('does NOT block regular source files (no overblocking)', () => {
+			const result = checkFileAuthority('architect', 'src/app.ts', TEST_CWD);
+			expect(result.allowed).toBe(true);
+		});
+
+		test('does NOT block test files (no overblocking)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'tests/unit/app.test.ts',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		test('does NOT block documentation files (no overblocking)', () => {
+			const result = checkFileAuthority('architect', 'docs/guide.md', TEST_CWD);
+			expect(result.allowed).toBe(true);
+		});
+
+		test('regression: architect still blocked from generated zone', () => {
+			// Ensure we did not accidentally remove generated zone blocking
+			const result = checkFileAuthority(
+				'architect',
+				'src/dist/bundle.js',
+				TEST_CWD,
+			);
+			expect(result.allowed).toBe(false);
+			if (!result.allowed) {
+				expect(result.zone).toBe('generated');
+			}
+		});
+
+		test('regression: coder still blocked from config zone', () => {
+			// Ensure we did not accidentally affect coder's config zone blocking
+			const result = checkFileAuthority('coder', 'package.json', TEST_CWD);
+			expect(result.allowed).toBe(false);
+			if (!result.allowed) {
+				expect(result.zone).toBe('config');
+			}
+		});
+	});
+
 	describe('Step 4: allowedExact', () => {
 		test('allows exact paths even if would be blocked by prefix', () => {
 			const authorityConfig: AuthorityConfig = {

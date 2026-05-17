@@ -15609,7 +15609,8 @@ var init_schema = __esm(() => {
   AuthorityConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(true),
     rules: exports_external.record(exports_external.string(), AgentAuthorityRuleSchema).default({}),
-    universal_deny_prefixes: exports_external.array(exports_external.string().min(1)).default([])
+    universal_deny_prefixes: exports_external.array(exports_external.string().min(1)).default([]),
+    verifier_config_paths: exports_external.array(exports_external.string()).optional().describe("Additional glob patterns for verifier config files that should be protected from agent modification. These patterns are merged with the built-in verifier config globs (guardrails.ts).")
   });
   GeneralCouncilMemberConfigSchema = exports_external.object({
     memberId: exports_external.string().min(1),
@@ -24184,6 +24185,21 @@ var init_normalize_tool_name = __esm(() => {
 import * as fsSync2 from "node:fs";
 import * as fs8 from "node:fs/promises";
 import * as path10 from "node:path";
+function isConfigFilePath(filePath, cwd, extraGlobs) {
+  const normalized = path10.relative(path10.resolve(cwd), path10.resolve(cwd, filePath)).replace(/\\/g, "/");
+  const { zone } = classifyFile(normalized);
+  if (zone === "config") {
+    return true;
+  }
+  const allGlobs = extraGlobs && extraGlobs.length > 0 ? [...KNOWN_VERIFIER_CONFIG_GLOBS, ...extraGlobs] : KNOWN_VERIFIER_CONFIG_GLOBS;
+  for (const glob of allGlobs) {
+    const matcher = getGlobMatcher(glob);
+    if (matcher(normalized)) {
+      return true;
+    }
+  }
+  return false;
+}
 function enforceSpecDriftGate(directory, toolName) {
   if (!directory)
     return;
@@ -25120,6 +25136,19 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
           if (!authorityCheck.allowed) {
             throw new Error(`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${delegTargetPath}". Reason: ${authorityCheck.reason}`);
           }
+          if (isConfigFilePath(delegTargetPath, cwd, authorityConfig?.verifier_config_paths)) {
+            const normalizedPath = path10.relative(path10.resolve(cwd), path10.resolve(cwd, delegTargetPath)).replace(/\\/g, "/");
+            const logEntry = {
+              agent: agentName,
+              path: normalizedPath,
+              allowed: authorityCheck.allowed,
+              type: "delegated_write"
+            };
+            if (!authorityCheck.allowed && "reason" in authorityCheck) {
+              logEntry.reason = authorityCheck.reason;
+            }
+            warn("Config file write attempt", logEntry);
+          }
           if (!currentSession.modifiedFilesThisCoderTask.includes(delegTargetPath)) {
             currentSession.modifiedFilesThisCoderTask.push(delegTargetPath);
           }
@@ -25130,6 +25159,19 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
         const cwd = effectiveDirectory;
         for (const p of extractPatchTargetPaths(tool, args2)) {
           const authorityCheck = checkFileAuthorityWithRules(agentName, p, cwd, precomputedAuthorityRules, { declaredScope: resolveDeclaredScope(sessionID) });
+          if (isConfigFilePath(p, cwd, authorityConfig?.verifier_config_paths)) {
+            const normalizedPath = path10.relative(path10.resolve(cwd), path10.resolve(cwd, p)).replace(/\\/g, "/");
+            const logEntry = {
+              agent: agentName,
+              path: normalizedPath,
+              allowed: authorityCheck.allowed,
+              type: "delegated_patch"
+            };
+            if (!authorityCheck.allowed && "reason" in authorityCheck) {
+              logEntry.reason = authorityCheck.reason;
+            }
+            warn("Config file write attempt", logEntry);
+          }
           if (!authorityCheck.allowed) {
             throw new Error(`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`);
           }
@@ -25461,6 +25503,19 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
           if (!authorityCheck.allowed) {
             throw new Error(`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}`);
           }
+          if (isConfigFilePath(targetPath, effectiveDirectory, authorityConfig?.verifier_config_paths)) {
+            const normalizedPath = path10.relative(path10.resolve(effectiveDirectory), path10.resolve(effectiveDirectory, targetPath)).replace(/\\/g, "/");
+            const logEntry = {
+              agent: agentName,
+              path: normalizedPath,
+              allowed: authorityCheck.allowed,
+              type: "direct_write"
+            };
+            if (!authorityCheck.allowed && "reason" in authorityCheck) {
+              logEntry.reason = authorityCheck.reason;
+            }
+            warn("Config file write attempt", logEntry);
+          }
         }
       }
       if (input.tool === "apply_patch" || input.tool === "patch") {
@@ -25485,6 +25540,19 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
           const authorityCheck = checkFileAuthorityWithRules(patchAgentName, p, effectiveDirectory, precomputedAuthorityRules, { declaredScope: patchDeclaredScope });
           if (!authorityCheck.allowed) {
             throw new Error(`WRITE BLOCKED: Agent "${patchAgentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`);
+          }
+          if (isConfigFilePath(p, effectiveDirectory, authorityConfig?.verifier_config_paths)) {
+            const normalizedPath = path10.relative(path10.resolve(effectiveDirectory), path10.resolve(effectiveDirectory, p)).replace(/\\/g, "/");
+            const logEntry = {
+              agent: patchAgentName,
+              path: normalizedPath,
+              allowed: authorityCheck.allowed,
+              type: "direct_patch"
+            };
+            if (!authorityCheck.allowed && "reason" in authorityCheck) {
+              logEntry.reason = authorityCheck.reason;
+            }
+            warn("Config file write attempt", logEntry);
           }
         }
       }
@@ -26330,7 +26398,7 @@ function checkFileAuthorityWithRules(agentName, filePath, cwd, effectiveRules, o
   }
   return { allowed: true };
 }
-var import_picomatch, _internals10, SPEC_DRIFT_BLOCKED_TOOLS, storedInputArgs, TRANSIENT_STATUS_CODES, TRANSIENT_MODEL_ERROR_PATTERN, TRANSIENT_PROVIDER_RECOVERY_TAG = "TRANSIENT PROVIDER RECOVERY", DEGRADED_ERROR_PATTERN, CONTENT_FILTER_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
+var import_picomatch, KNOWN_VERIFIER_CONFIG_GLOBS, _internals10, SPEC_DRIFT_BLOCKED_TOOLS, storedInputArgs, TRANSIENT_STATUS_CODES, TRANSIENT_MODEL_ERROR_PATTERN, TRANSIENT_PROVIDER_RECOVERY_TAG = "TRANSIENT PROVIDER RECOVERY", DEGRADED_ERROR_PATTERN, CONTENT_FILTER_PATTERN, toolCallsSinceLastWrite, noOpWarningIssued, consecutiveNoToolTurns, DC_MAX_UNWRAP_DEPTH = 5, DC_SAFE_TARGETS, DC_BLOCKED_ABSOLUTE_PREFIXES, DC_FS_ROOTS, DC_REMOTE_PREFIXES, pathNormalizationCache, globMatcherCache, DEFAULT_AGENT_AUTHORITY_RULES;
 var init_guardrails = __esm(() => {
   init_quick_lru();
   init_agents2();
@@ -26350,6 +26418,16 @@ var init_guardrails = __esm(() => {
   init_model_limits();
   init_normalize_tool_name();
   import_picomatch = __toESM(require_picomatch2(), 1);
+  KNOWN_VERIFIER_CONFIG_GLOBS = [
+    "**/oxlintrc*",
+    "**/.oxlintrc*",
+    "**/.eslintrc*",
+    "**/eslint.config.*",
+    "**/.prettierrc*",
+    "**/biome.jsonc",
+    "**/.secretscanignore",
+    "**/.golangci*"
+  ];
   _internals10 = {
     getSwarmAgents,
     getMostRecentAssistantText,
@@ -26444,7 +26522,17 @@ var init_guardrails = __esm(() => {
     explore: {},
     architect: {
       blockedExact: [".swarm/plan.md", ".swarm/plan.json"],
-      blockedZones: ["generated"]
+      blockedZones: ["generated", "config"],
+      blockedGlobs: [
+        "**/oxlintrc*",
+        "**/.oxlintrc*",
+        "**/.eslintrc*",
+        "**/eslint.config.*",
+        "**/.prettierrc*",
+        "**/biome.jsonc",
+        "**/.secretscanignore",
+        "**/.golangci*"
+      ]
     },
     coder: {
       blockedPrefix: [".swarm/"],
@@ -65797,6 +65885,18 @@ DO (explicitly):
 - VERIFY platform compatibility: path.join() used for all paths, no hardcoded separators
 - For confirmed issues requiring a concrete fix: use suggest_patch to produce a structured patch artifact for the coder
 
+## CONFIG STRICTNESS VERIFICATION
+
+When the declared scope includes a verifier/linter config file (biome.json, biome.jsonc, oxlintrc, oxlintrc.json, .eslintrc, .eslintrc.json, eslint.config.*, .prettierrc, .prettierrc.json, prettier.config.*, biome.jsonc, .secretscanignore, golangci-lint configs, tsconfig.json, tsconfig.*.json, or any other linter/formatter/security-tool configuration):
+
+- Verify the change does NOT reduce strictness of any existing rule
+- Reject changes that downgrade "error" to "warn", remove rules, weaken validation thresholds, or narrow file/sirectory scopes
+- Allow changes that ADD new stricter rules, enable additional rule categories, fix syntax errors, or correct misconfigured paths
+- Document the specific config change and its impact on validation strictness in your review output
+- If a rule is changed from "error" to "warn" or a rule is removed: REJECT with STRICTNESS_REDUCTION: [rule name] — [original setting] → [new setting]
+
+This is a pre-review gate: if config strictness is reduced, reject immediately without proceeding to Tier review.
+
 ## REUSE RE-VERIFICATION (MANDATORY FOR NEW EXPORTS)
 
 When EXPORTS_ADDED is non-empty in the coder's completion report:
@@ -80634,7 +80734,9 @@ var DENY_SHELL_PATTERNS = [
   /\bbunx?\s+publish\b/i,
   /\bterraform\s+(?:apply|destroy)\b/i,
   /\bkubectl\s+(?:delete|apply\s+-f)/i,
-  /\bdrop\s+(?:database|table)\b/i
+  /\bdrop\s+(?:database|table)\b/i,
+  /\bsed\s+-i\b(?=[^\n]*\b(?:biome\.json|eslintrc|oxlintrc)\b)(?=[^\n]*\b(?:error|warn|off)\b)/i,
+  /\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.json|eslintrc|oxlintrc)\b[^\n]*\b(error|warn|off)\b/i
 ];
 var ESCALATE_SHELL_PATTERNS = [
   /\bcurl\b/i,
@@ -80654,7 +80756,9 @@ var ESCALATE_SHELL_PATTERNS = [
   /\bgit\s+pull\b/i,
   /\bgit\s+rebase\b/i,
   /\bgit\s+merge\b/i,
-  /\bgit\s+commit\b/i
+  /\bgit\s+commit\b/i,
+  /\b(sed\s+-i|echo\s+|printf\s+)[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json)\b/i,
+  /\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json)\b/i
 ];
 function isReadOnlyTool(toolName) {
   if (!toolName)

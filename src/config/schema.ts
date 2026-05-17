@@ -1139,6 +1139,12 @@ export const AuthorityConfigSchema = z.object({
 	// Applied before per-agent authority checks and cannot be overridden.
 	// Example: [".env", ".git/config", "secrets/"]
 	universal_deny_prefixes: z.array(z.string().min(1)).default([]),
+	verifier_config_paths: z
+		.array(z.string())
+		.optional()
+		.describe(
+			'Additional glob patterns for verifier config files that should be protected from agent modification. These patterns are merged with the built-in verifier config globs (guardrails.ts).',
+		),
 });
 
 export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;

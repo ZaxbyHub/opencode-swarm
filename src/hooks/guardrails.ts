@@ -39,6 +39,56 @@ import {
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import { log, warn } from '../utils';
+
+/**
+ * Known verifier/linter config file glob patterns for config-zone logging.
+ * Matches patterns from architect's blockedGlobs that represent config files.
+ */
+const KNOWN_VERIFIER_CONFIG_GLOBS = [
+	'**/oxlintrc*',
+	'**/.oxlintrc*',
+	'**/.eslintrc*',
+	'**/eslint.config.*',
+	'**/.prettierrc*',
+	'**/biome.jsonc',
+	'**/.secretscanignore',
+	'**/.golangci*',
+] as const;
+
+/**
+ * Checks if a file path is a config file either via zone classification
+ * or by matching known verifier config glob patterns.
+ */
+function isConfigFilePath(
+	filePath: string,
+	cwd: string,
+	extraGlobs?: readonly string[],
+): boolean {
+	const normalized = path
+		.relative(path.resolve(cwd), path.resolve(cwd, filePath))
+		.replace(/\\/g, '/');
+
+	// Check zone classification
+	const { zone } = classifyFile(normalized);
+	if (zone === 'config') {
+		return true;
+	}
+
+	// Check against known verifier config globs
+	const allGlobs =
+		extraGlobs && extraGlobs.length > 0
+			? [...KNOWN_VERIFIER_CONFIG_GLOBS, ...extraGlobs]
+			: KNOWN_VERIFIER_CONFIG_GLOBS;
+	for (const glob of allGlobs) {
+		const matcher = getGlobMatcher(glob);
+		if (matcher(normalized)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 import { bunHash } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
 import { resolveAgentConflict } from './conflict-resolution';
@@ -2118,6 +2168,31 @@ export function createGuardrailsHooks(
 						);
 					}
 
+					// Log config file write attempts
+					if (
+						isConfigFilePath(
+							delegTargetPath,
+							cwd,
+							authorityConfig?.verifier_config_paths,
+						)
+					) {
+						const normalizedPath = path
+							.relative(path.resolve(cwd), path.resolve(cwd, delegTargetPath))
+							.replace(/\\/g, '/');
+						const logEntry: Record<string, unknown> = {
+							agent: agentName,
+							path: normalizedPath,
+							allowed: authorityCheck.allowed,
+							type: 'delegated_write',
+						};
+						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
+							logEntry.reason = (
+								authorityCheck as { allowed: false; reason: string }
+							).reason;
+						}
+						warn('Config file write attempt', logEntry);
+					}
+
 					if (
 						!currentSession.modifiedFilesThisCoderTask.includes(delegTargetPath)
 					) {
@@ -2139,6 +2214,28 @@ export function createGuardrailsHooks(
 						precomputedAuthorityRules,
 						{ declaredScope: resolveDeclaredScope(sessionID) },
 					);
+
+					// Log config file write attempts for patches
+					if (
+						isConfigFilePath(p, cwd, authorityConfig?.verifier_config_paths)
+					) {
+						const normalizedPath = path
+							.relative(path.resolve(cwd), path.resolve(cwd, p))
+							.replace(/\\/g, '/');
+						const logEntry: Record<string, unknown> = {
+							agent: agentName,
+							path: normalizedPath,
+							allowed: authorityCheck.allowed,
+							type: 'delegated_patch',
+						};
+						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
+							logEntry.reason = (
+								authorityCheck as { allowed: false; reason: string }
+							).reason;
+						}
+						warn('Config file write attempt', logEntry);
+					}
+
 					if (!authorityCheck.allowed) {
 						throw new Error(
 							`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`,
@@ -2771,6 +2868,34 @@ export function createGuardrailsHooks(
 							`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}`,
 						);
 					}
+
+					// Log config file write attempts for direct writes
+					if (
+						isConfigFilePath(
+							targetPath,
+							effectiveDirectory,
+							authorityConfig?.verifier_config_paths,
+						)
+					) {
+						const normalizedPath = path
+							.relative(
+								path.resolve(effectiveDirectory),
+								path.resolve(effectiveDirectory, targetPath),
+							)
+							.replace(/\\/g, '/');
+						const logEntry: Record<string, unknown> = {
+							agent: agentName,
+							path: normalizedPath,
+							allowed: authorityCheck.allowed,
+							type: 'direct_write',
+						};
+						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
+							logEntry.reason = (
+								authorityCheck as { allowed: false; reason: string }
+							).reason;
+						}
+						warn('Config file write attempt', logEntry);
+					}
 				}
 			}
 
@@ -2824,6 +2949,34 @@ export function createGuardrailsHooks(
 						throw new Error(
 							`WRITE BLOCKED: Agent "${patchAgentName}" is not authorised to write "${p}" (via patch). Reason: ${authorityCheck.reason}`,
 						);
+					}
+
+					// Log config file write attempts for direct patches
+					if (
+						isConfigFilePath(
+							p,
+							effectiveDirectory,
+							authorityConfig?.verifier_config_paths,
+						)
+					) {
+						const normalizedPath = path
+							.relative(
+								path.resolve(effectiveDirectory),
+								path.resolve(effectiveDirectory, p),
+							)
+							.replace(/\\/g, '/');
+						const logEntry: Record<string, unknown> = {
+							agent: patchAgentName,
+							path: normalizedPath,
+							allowed: authorityCheck.allowed,
+							type: 'direct_patch',
+						};
+						if (!authorityCheck.allowed && 'reason' in authorityCheck) {
+							logEntry.reason = (
+								authorityCheck as { allowed: false; reason: string }
+							).reason;
+						}
+						warn('Config file write attempt', logEntry);
 					}
 				}
 			}
@@ -4139,7 +4292,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 
 	architect: {
 		blockedExact: ['.swarm/plan.md', '.swarm/plan.json'],
-		blockedZones: ['generated'],
+		// v7.x (#894): block config zone so architect cannot bypass lint gates
+		// by editing config files (biome.json, eslintrc, tsconfig, etc.)
+		// instead of fixing the underlying source code.
+		blockedZones: ['generated', 'config'],
+		blockedGlobs: [
+			'**/oxlintrc*',
+			'**/.oxlintrc*',
+			'**/.eslintrc*',
+			'**/eslint.config.*',
+			'**/.prettierrc*',
+			'**/biome.jsonc',
+			'**/.secretscanignore',
+			'**/.golangci*',
+		],
 	},
 	coder: {
 		blockedPrefix: ['.swarm/'],

@@ -102,6 +102,18 @@ DO (explicitly):
 - VERIFY platform compatibility: path.join() used for all paths, no hardcoded separators
 - For confirmed issues requiring a concrete fix: use suggest_patch to produce a structured patch artifact for the coder
 
+## CONFIG STRICTNESS VERIFICATION
+
+When the declared scope includes a verifier/linter config file (biome.json, biome.jsonc, oxlintrc, oxlintrc.json, .eslintrc, .eslintrc.json, eslint.config.*, .prettierrc, .prettierrc.json, prettier.config.*, biome.jsonc, .secretscanignore, golangci-lint configs, tsconfig.json, tsconfig.*.json, or any other linter/formatter/security-tool configuration):
+
+- Verify the change does NOT reduce strictness of any existing rule
+- Reject changes that downgrade "error" to "warn", remove rules, weaken validation thresholds, or narrow file/sirectory scopes
+- Allow changes that ADD new stricter rules, enable additional rule categories, fix syntax errors, or correct misconfigured paths
+- Document the specific config change and its impact on validation strictness in your review output
+- If a rule is changed from "error" to "warn" or a rule is removed: REJECT with STRICTNESS_REDUCTION: [rule name] — [original setting] → [new setting]
+
+This is a pre-review gate: if config strictness is reduced, reject immediately without proceeding to Tier review.
+
 ## REUSE RE-VERIFICATION (MANDATORY FOR NEW EXPORTS)
 
 When EXPORTS_ADDED is non-empty in the coder's completion report:

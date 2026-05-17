@@ -251,6 +251,10 @@ const DENY_SHELL_PATTERNS: RegExp[] = [
 	/\bterraform\s+(?:apply|destroy)\b/i,
 	/\bkubectl\s+(?:delete|apply\s+-f)/i,
 	/\bdrop\s+(?:database|table)\b/i,
+	// config sabotage: sed -i targeting config files with error/warn/off replacement
+	/\bsed\s+-i\b(?=[^\n]*\b(?:biome\.json|eslintrc|oxlintrc)\b)(?=[^\n]*\b(?:error|warn|off)\b)/i,
+	// Redirect config sabotage: cat >, tee commands writing to config files with severity changes
+	/\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.json|eslintrc|oxlintrc)\b[^\n]*\b(error|warn|off)\b/i,
 ];
 
 const ESCALATE_SHELL_PATTERNS: RegExp[] = [
@@ -272,6 +276,10 @@ const ESCALATE_SHELL_PATTERNS: RegExp[] = [
 	/\bgit\s+rebase\b/i,
 	/\bgit\s+merge\b/i,
 	/\bgit\s+commit\b/i,
+	// config file write detection: sed -i, echo, printf, cat redirecting to config files
+	/\b(sed\s+-i|echo\s+|printf\s+)[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json)\b/i,
+	// Config file writes via cat/tee redirect
+	/\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json)\b/i,
 ];
 
 // ---------------------------------------------------------------------------
