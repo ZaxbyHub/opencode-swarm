@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.21.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.4...v7.21.5) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** prevent agents from editing verifier config files to bypass lint/test gates ([#899](https://github.com/zaxbysauce/opencode-swarm/issues/899)) ([b94be92](https://github.com/zaxbysauce/opencode-swarm/commit/b94be9213f177d5a2fc75047068f3874619366a4))
+
 ## [7.21.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.3...v7.21.4) (2026-05-17)
 
 
