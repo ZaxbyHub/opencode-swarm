@@ -242,7 +242,7 @@ function extractErrorSignal(errorContent: unknown): string {
  * Matches: rate limits, overloaded, timeouts, model not found, temporary failures.
  */
 const TRANSIENT_MODEL_ERROR_PATTERN =
-	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+	/rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
 
 const TRANSIENT_PROVIDER_RECOVERY_TAG = 'TRANSIENT PROVIDER RECOVERY';
 
@@ -271,7 +271,9 @@ function getMostRecentAssistantText(messages: ChatMessageLike[]): string {
 function isTransientProviderFailureText(text: string): boolean {
 	if (!text.trim()) return false;
 	const providerFailureMarker =
-		/provider[_\s-]?unavailable|network\s+connection\s+lost/i.test(text);
+		/provider[_\s-]?unavailable|network\s+connection\s+lost|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN|connection\s+reset|connection\s+refused/i.test(
+			text,
+		);
 	if (!providerFailureMarker) return false;
 
 	const status = extractStatusCode(text);
@@ -3247,8 +3249,36 @@ export function createGuardrailsHooks(
 				session &&
 				(session.pendingAdvisoryMessages?.length ?? 0) > 0
 			) {
-				// Non-architect sessions never inject advisories, but must still drain
-				// the queue to prevent unbounded accumulation in long-lived coder sessions.
+				const allAdvisories = session.pendingAdvisoryMessages ?? [];
+				const TRANSIENT_PREFIXES = [
+					'TRANSIENT ERROR:',
+					'MODEL FALLBACK:',
+					'DEGRADED:',
+				];
+				const transientAdvisories = allAdvisories.filter((m: string) =>
+					TRANSIENT_PREFIXES.some((p) => m.startsWith(p)),
+				);
+				if (transientAdvisories.length > 0) {
+					let targetMsg = systemMessages[0];
+					if (!targetMsg) {
+						const newMsg = {
+							info: { role: 'system' as const },
+							parts: [{ type: 'text' as const, text: '' }],
+						};
+						messages.unshift(newMsg);
+						targetMsg = newMsg;
+					}
+					const textPart = (targetMsg.parts ?? []).find(
+						(part): part is { type: string; text: string } =>
+							part.type === 'text' && typeof part.text === 'string',
+					);
+					if (textPart) {
+						const joined = transientAdvisories.join('\n---\n');
+						textPart.text = `[ADVISORIES]\n${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
+					}
+				}
+				// Drain all advisories — transient ones were injected above,
+				// non-transient ones are discarded to prevent noise in subagent sessions.
 				session.pendingAdvisoryMessages = [];
 			}
 

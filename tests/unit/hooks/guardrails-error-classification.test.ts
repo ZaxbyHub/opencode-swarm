@@ -391,6 +391,186 @@ describe('guardrails transient error classification (toolAfter)', () => {
 	});
 
 	// -------------------------------------------------------------------------
+	// Node.js Raw Error Code Classification Tests (FR-003)
+	// These verify that raw Node.js error.code strings (extracted by
+	// extractErrorSignal) are matched by TRANSIENT_MODEL_ERROR_PATTERN.
+	// -------------------------------------------------------------------------
+
+	describe('Node.js raw error codes classified as transient', () => {
+		test('error.code "ECONNRESET" → transient', async () => {
+			const sessionId = 'session-econnreset';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: { code: 'ECONNRESET', message: 'read ECONNRESET' },
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('error.code "ECONNREFUSED" → transient', async () => {
+			const sessionId = 'session-econnrefused';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 'ECONNREFUSED',
+					message: 'connect ECONNREFUSED 127.0.0.1:443',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('error.code "ETIMEDOUT" → transient', async () => {
+			const sessionId = 'session-etimedout';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 'ETIMEDOUT',
+					message: 'connect ETIMEDOUT 203.0.113.1:443',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('error.code "EPIPE" → transient', async () => {
+			const sessionId = 'session-epipe';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: { code: 'EPIPE', message: 'write EPIPE' },
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('error.code "ENOTFOUND" → transient', async () => {
+			const sessionId = 'session-enotfound';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 'ENOTFOUND',
+					message: 'getaddrinfo ENOTFOUND api.example.com',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('error.code "EAI_AGAIN" (DNS transient) → transient', async () => {
+			const sessionId = 'session-eai-again';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: {
+					code: 'EAI_AGAIN',
+					message: 'getaddrinfo EAI_AGAIN api.example.com',
+				},
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('human-readable "DNS resolution failed" → transient', async () => {
+			const sessionId = 'session-dns-resolution-failed';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: 'Error: DNS resolution failed for api.example.com',
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+
+		test('raw error code in error string (not object) → transient', async () => {
+			const sessionId = 'session-raw-code-string';
+			const session = await setupSubagentSessionWithWindow(hooks, sessionId);
+
+			const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
+			const output = {
+				title: 'bash',
+				output: null,
+				error: 'Error: connect ECONNREFUSED 127.0.0.1:443',
+				metadata: {},
+			};
+
+			await hooks.toolAfter(input as any, output as any);
+
+			const window = getActiveWindow(sessionId);
+			expect(window?.consecutiveErrors).toBe(0);
+			expect(window?.transientRetryCount).toBe(1);
+			expect(session.model_fallback_index).toBe(1);
+		});
+	});
+
+	// -------------------------------------------------------------------------
 	// Status Code Extraction Tests
 	// extractStatusCode uses /\b(408|429|500|502|503|504|529)\b/
 	// Should extract known transient codes, NOT arbitrary 3-digit numbers

@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.21.1",
+    version: "7.21.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -24303,7 +24303,7 @@ function getMostRecentAssistantText(messages) {
 function isTransientProviderFailureText(text) {
   if (!text.trim())
     return false;
-  const providerFailureMarker = /provider[_\s-]?unavailable|network\s+connection\s+lost/i.test(text);
+  const providerFailureMarker = /provider[_\s-]?unavailable|network\s+connection\s+lost|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN|connection\s+reset|connection\s+refused/i.test(text);
   if (!providerFailureMarker)
     return false;
   const status = extractStatusCode(text);
@@ -25780,6 +25780,35 @@ ${textPart2.text}`;
         }
         session.pendingAdvisoryMessages = [];
       } else if (!isArchitectSession && session && (session.pendingAdvisoryMessages?.length ?? 0) > 0) {
+        const allAdvisories = session.pendingAdvisoryMessages ?? [];
+        const TRANSIENT_PREFIXES = [
+          "TRANSIENT ERROR:",
+          "MODEL FALLBACK:",
+          "DEGRADED:"
+        ];
+        const transientAdvisories = allAdvisories.filter((m) => TRANSIENT_PREFIXES.some((p) => m.startsWith(p)));
+        if (transientAdvisories.length > 0) {
+          let targetMsg = systemMessages[0];
+          if (!targetMsg) {
+            const newMsg = {
+              info: { role: "system" },
+              parts: [{ type: "text", text: "" }]
+            };
+            messages.unshift(newMsg);
+            targetMsg = newMsg;
+          }
+          const textPart2 = (targetMsg.parts ?? []).find((part) => part.type === "text" && typeof part.text === "string");
+          if (textPart2) {
+            const joined = transientAdvisories.join(`
+---
+`);
+            textPart2.text = `[ADVISORIES]
+${joined}
+[/ADVISORIES]
+
+${textPart2.text}`;
+          }
+        }
         session.pendingAdvisoryMessages = [];
       }
       if (isArchitectSession && session?.prmHardStopPending) {
@@ -26255,7 +26284,7 @@ var init_guardrails = __esm(() => {
   ]);
   storedInputArgs = new Map;
   TRANSIENT_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504, 529]);
-  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable/i;
+  TRANSIENT_MODEL_ERROR_PATTERN = /rate.?limit|429|500|502|503|504|529|timeout|overloaded|model.?not.?found|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
   DEGRADED_ERROR_PATTERN = /context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
   CONTENT_FILTER_PATTERN = /content.?filter/i;
   toolCallsSinceLastWrite = new Map;
