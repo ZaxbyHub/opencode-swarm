@@ -298,6 +298,37 @@ When you edit any agent prompt (`src/agents/*.ts`), tests that assert on prompt 
 
 Prompt-text tests are especially fragile because they test content, not behaviour — a refactor that seems unrelated (e.g. changing a delegation format example) can silently break assertions checking for specific template strings.
 
+### Troubleshooting — Release workflow automation gaps
+
+When release-please creates a release (`releases_created=true`), the `update-pr-notes` job is **skipped** because its `if` condition checks `releases_created != 'true'`. This means pending release-note fragments are NOT automatically injected into the next release PR body.
+
+**Symptom**: A new release PR exists but its body only contains the release-please auto-generated changelog, missing the `<!-- custom-release-notes:start -->` block with aggregated fragments.
+
+**Fix**: Manually aggregate fragments into the release PR body:
+```powershell
+# Read the current PR body
+$prBody = (gh pr view <number> --json body | ConvertFrom-Json).body
+
+# Read the pending fragment(s)
+$fragment = Get-Content docs/releases/pending/<slug>.md -Raw
+
+# Append to PR body
+$newBody = "$prBody`n`n---`n`n$fragment"
+$newBody | Out-File "$env:TEMP\pr_body_update.txt" -Encoding UTF8
+gh pr edit <number> --body-file "$env:TEMP\pr_body_update.txt"
+```
+
+Also update the GitHub Release body for the just-created release (append, don't replace):
+```powershell
+$existingNotes = (gh release view v7.X.Y --json body | ConvertFrom-Json).body
+$fragment = Get-Content docs/releases/pending/<slug>.md -Raw
+$combined = "$existingNotes`n`n---`n`n$fragment"
+$combined | Out-File "$env:TEMP\release_notes_update.txt" -Encoding UTF8
+gh release edit v7.X.Y --notes-file "$env:TEMP\release_notes_update.txt"
+```
+
+**PowerShell note**: `gh` CLI `--jq` expressions containing `$` (e.g. `--jq '.[] | .id'`) fail in PowerShell because `$` is interpreted as a variable prefix. Use `--json` output piped to `ConvertFrom-Json` instead. Note that `--notes "$(Get-Content ...)"` also has the same `$` expansion risk — always use `--body-file` / `--notes-file` with `Out-File` for multiline content.
+
 ### Troubleshooting — CI fails on tests that seem unrelated to your changes
 
 If a test fails and you suspect it is pre-existing (unrelated to your changes):
