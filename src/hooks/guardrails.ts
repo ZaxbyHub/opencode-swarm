@@ -1737,6 +1737,166 @@ export function createGuardrailsHooks(
 			//     block ALL git clean -fd and worktree remove --force commands,
 			//     which inherently covers .swarm/ paths. No extension needed.)
 			// ----------------------------------------------------------------
+
+			// ----------------------------------------------------------------
+			// 23. Swarm CLI bypass — human-only `/swarm` subcommands
+			//    (Issue #890: architect self-acknowledged spec drift by
+			//     shelling out to `bunx opencode-swarm run acknowledge-spec-drift`,
+			//     which bypassed the chat-tool refusal and the runtime
+			//     SPEC_DRIFT_BLOCK gate.)
+			//
+			//    These subcommands release human-only safety gates (spec-drift
+			//    acknowledgment, plan reset, rollback, checkpoint
+			//    save/restore/delete). They must be invoked by a human user —
+			//    either via `/swarm <cmd>` inside OpenCode or by typing the
+			//    `bunx opencode-swarm run <cmd>` form into a real terminal.
+			//    They MUST NOT be invoked from the agent's Bash tool.
+			//
+			//    `dcUnwrapWrappers` already strips `bash -c`, `sh -c`,
+			//    `powershell -c`, `cmd /c`, `env VAR=`, `sudo`, etc. before we
+			//    see the segment. We additionally strip three evasions inline
+			//    that `dcStripOneWrapper` does NOT cover: bare env-var prefix
+			//    (`FOO=bar <cmd>`), `eval "..."`, and a leading `(...)`
+			//    subshell.
+			// ----------------------------------------------------------------
+			{
+				const HUMAN_ONLY_SWARM_SUBCOMMANDS = new Set<string>([
+					'acknowledge-spec-drift',
+					'reset',
+					'reset-session',
+					'rollback',
+					'checkpoint',
+				]);
+
+				let probe = seg
+					.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '')
+					.replace(/^eval(?:\s+--)?\s+["']?/, '')
+					.replace(/["']\s*$/, '')
+					// Strip `$(`, `(`, or backtick command-substitution wrappers.
+					// Order matters: `$(` before `(` so the dollar sign comes off.
+					.replace(/^\$\(\s*/, '')
+					.replace(/^\(\s*/, '')
+					.replace(/\s*\)$/, '')
+					.replace(/^`/, '')
+					.replace(/`$/, '')
+					.trim();
+
+				// Strip prefixes that re-introduce a runner indirectly. The
+				// `env` wrapper handled by `dcStripOneWrapper` only matches
+				// the `env KEY=VAL` form; this also catches `env -i`,
+				// `env -u <var>`, `env --ignore-environment`, and the POSIX
+				// `command` builtin (which suppresses function lookup but
+				// otherwise execs the next token). Loop because they can stack
+				// (e.g. `command env -i bunx ...`).
+				for (let i = 0; i < 4; i++) {
+					const before = probe;
+					probe = probe
+						// `env -i <cmd>`, `env --ignore-environment <cmd>`, `env -u FOO <cmd>`
+						.replace(
+							/^env\s+(?:-i\b|--ignore-environment\b|-u\s+\S+|-[a-zA-Z]+\s+)*\s*/,
+							'',
+						)
+						// POSIX `command` builtin: `command [-p] [-v] [-V] <cmd>`
+						.replace(/^command\s+(?:-[pvV]\s+)*/, '')
+						// Re-strip env-var-assignment prefix in case a wrapper exposed one
+						.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '')
+						.trim();
+					if (probe === before) break;
+				}
+
+				// Form A: <runner> ... opencode-swarm ... run <subcmd>
+				const swarmCliBypassMatch = probe.match(
+					/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+				);
+				if (
+					swarmCliBypassMatch &&
+					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliBypassMatch[1])
+				) {
+					throw new Error(
+						`BLOCKED: "${swarmCliBypassMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+							`Present the situation to the user and ask them to run \`/swarm ${swarmCliBypassMatch[1]}\` themselves.`,
+					);
+				}
+
+				// Form B: bare `opencode-swarm` on PATH (post-install global / local bin).
+				const swarmBareBinMatch = probe.match(
+					/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+				);
+				if (
+					swarmBareBinMatch &&
+					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmBareBinMatch[1])
+				) {
+					throw new Error(
+						`BLOCKED: "${swarmBareBinMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+							`Present the situation to the user and ask them to run \`/swarm ${swarmBareBinMatch[1]}\` themselves.`,
+					);
+				}
+
+				// Secondary: dist-relative CLI path invocation (pnpm
+				// content-addressed store, symlinked dev installs, custom dist
+				// copies where the literal "opencode-swarm" token does not
+				// appear in argv but `cli/index.[mc]?js` does).
+				const swarmCliPathMatch = probe.match(
+					/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+				);
+				if (
+					swarmCliPathMatch &&
+					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliPathMatch[1])
+				) {
+					throw new Error(
+						`BLOCKED: "${swarmCliPathMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+							`Present the situation to the user and ask them to run \`/swarm ${swarmCliPathMatch[1]}\` themselves.`,
+					);
+				}
+			}
+
+			// ----------------------------------------------------------------
+			// 24. Direct shell manipulation of .swarm/spec-staleness.json
+			//    (Issue #890 deepening: closes the `bun -e fs.unlinkSync(...)`,
+			//     `node -e fs.unlinkSync(...)`, script-file, command-substitution,
+			//     xargs, heredoc, and any other path that mentions the
+			//     staleness file in a shell context. The file is system-managed;
+			//     agents have no legitimate reason to reference it from shell.
+			//     Even READING is uncommon — but only writes/deletes can break
+			//     the gate, so we match on the path token in a destructive
+			//     context. The pre-Section 19 (rm-on-.swarm) and write-tool
+			//     guards already cover the obvious cases; this section closes
+			//     the indirect-tool / script-eval surface.)
+			//
+			//    Pattern: ANY mention of `.swarm/spec-staleness.json` (or the
+			//    Windows-backslash form `.swarm\spec-staleness.json`) in a
+			//    segment that is NOT a pure read (cat/less/more/head/tail).
+			// ----------------------------------------------------------------
+			{
+				// Normalize the segment so path-noise variants
+				// (`.swarm/./spec-staleness.json`, `.swarm//spec-staleness.json`,
+				// Windows backslashes mixed with forward slashes) collapse to the
+				// canonical form before we match. This is a string-level
+				// normalization scoped to detection; we don't rewrite the actual
+				// shell command, only the form we inspect.
+				const normForPathCheck = seg
+					.replace(/\\/g, '/')
+					.replace(/\/(?:\.\/+)+/g, '/')
+					.replace(/\/{2,}/g, '/');
+				if (/\.swarm\/spec-staleness\.json\b/i.test(normForPathCheck)) {
+					const trimmed = seg.trim();
+					const looksReadOnly =
+						/^(?:cat|less|more|head|tail|file|stat|ls|dir|Get-Content|gc|Get-Item|gi|type)\b/i.test(
+							trimmed,
+						);
+					// `cat > file` and `cat >> file` are WRITES via redirection,
+					// not reads. Demote the read-only exemption if a redirect
+					// target appears anywhere in the segment.
+					const hasWriteRedirect = />{1,2}\s*[^\s>]/.test(trimmed);
+					if (!looksReadOnly || hasWriteRedirect) {
+						throw new Error(
+							'BLOCKED: shell command targeting .swarm/spec-staleness.json detected. ' +
+								'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
+								'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
+						);
+					}
+				}
+			}
 		}
 	}
 
@@ -2107,14 +2267,66 @@ export function createGuardrailsHooks(
 	}
 
 	/**
+	 * Collects every patch-payload field that an apply_patch / patch tool
+	 * invocation might carry. Issue #890 PR #896 follow-up review #3: a
+	 * single "first-non-null" priority chain (`input ?? patch ?? cmd[1]`)
+	 * lets an attacker put benign content in one field and malicious
+	 * content in another — the scanner reads the decoy and the runtime
+	 * honours the payload. The fix is to inspect every present field.
+	 *
+	 * Returns an array of all string payloads found in args, in stable
+	 * order. Callers should concatenate (or iterate) instead of
+	 * short-circuiting on the first one.
+	 */
+	function extractAllPatchPayloads(args: unknown): string[] {
+		const toolArgs = args as Record<string, unknown> | undefined;
+		if (!toolArgs) return [];
+		const out: string[] = [];
+		for (const key of ['patch', 'input', 'diff'] as const) {
+			const v = toolArgs[key];
+			if (typeof v === 'string' && v.length > 0) out.push(v);
+		}
+		const cmd = toolArgs.cmd;
+		if (Array.isArray(cmd)) {
+			// `cmd[1]` is the documented patch-payload slot, but scan every
+			// string in the array defensively in case a runtime variant
+			// places it elsewhere. Cheap; the array is bounded in practice.
+			for (const entry of cmd) {
+				if (typeof entry === 'string' && entry.length > 0) out.push(entry);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Returns true if any of the apply_patch / patch payloads contain an
+	 * invocation of a human-only swarm CLI subcommand. Scans every
+	 * present field (not just the first non-null), so an attacker cannot
+	 * decoy with a benign `patch` and smuggle the real payload via `cmd[1]`.
+	 */
+	function patchPayloadHasHumanOnlyInvocation(args: unknown): boolean {
+		const payloads = extractAllPatchPayloads(args);
+		if (payloads.length === 0) return false;
+		const re =
+			/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i;
+		return payloads.some((p) => re.test(p));
+	}
+
+	/**
 	 * Extracts target file paths from apply_patch / patch tool arguments.
 	 * Returns an empty array for any other tool or unparseable payload.
 	 */
 	function extractPatchTargetPaths(tool: string, args: unknown): string[] {
 		if (tool !== 'apply_patch' && tool !== 'patch') return [];
 		const toolArgs = args as Record<string, unknown> | undefined;
+		// Reviewer of PR #896 noted `diff` was missing from this chain —
+		// add it so diff-only patches still go through path-level checks.
+		// The `cmd[1]` shape and the `input`/`patch` shapes remain
+		// supported in priority order (input first matches the historic
+		// extractor contract).
 		const patchText = (toolArgs?.input ??
 			toolArgs?.patch ??
+			toolArgs?.diff ??
 			(Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined)) as
 			| string
 			| undefined;
@@ -2176,6 +2388,25 @@ export function createGuardrailsHooks(
 			toolArgs?.file ??
 			toolArgs?.target;
 
+		// PR #896 follow-up review #3: scan apply_patch / patch payload
+		// content BEFORE any branching on `targetPath`. Previously the
+		// `if (!targetPath && tool === 'apply_patch')` guard let an
+		// attacker pair a benign `filePath` with a malicious `cmd[1]`
+		// payload — the direct-write branch ran (and only scanned
+		// `args.content/text/...`), missing the patch payload entirely.
+		// Run the scan unconditionally for apply_patch / patch tools, on
+		// every present payload field, so neither `filePath` short-circuit
+		// nor field-priority divergence (decoy in `patch`, real payload in
+		// `cmd[1]`) can bypass it.
+		if (tool === 'apply_patch' || tool === 'patch') {
+			if (patchPayloadHasHumanOnlyInvocation(args)) {
+				throw new Error(
+					'BLOCKED: apply_patch would introduce a script invoking a human-only swarm CLI subcommand. ' +
+						'Present the situation to the user and ask them to run the command themselves.',
+				);
+			}
+		}
+
 		// Plan state protection: block direct writes to .swarm/plan.md and .swarm/plan.json
 		if (typeof targetPath === 'string' && targetPath.length > 0) {
 			const resolvedTarget = path
@@ -2196,9 +2427,50 @@ export function createGuardrailsHooks(
 						'Use phase_complete() for phase transitions only.',
 				);
 			}
+			// Issue #890: spec-staleness marker is system-managed. Direct write
+			// or edit by the architect would let the agent forge a "drift
+			// resolved" state without the user acknowledging. Empty / malformed
+			// JSON also triggers the handler's malformed-file fast path
+			// (acknowledge-spec-drift.ts JSON.parse catch → unlink), so even
+			// rewriting the content unlocks the gate.
+			const specStalenessPath = path
+				.resolve(effectiveDirectory, '.swarm', 'spec-staleness.json')
+				.toLowerCase();
+			if (resolvedTarget === specStalenessPath) {
+				throw new Error(
+					'SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. ' +
+						'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
+						'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
+				);
+			}
+			// Issue #890 script-indirection guard: if the architect writes a
+			// script file whose content invokes a HUMAN_ONLY swarm CLI
+			// subcommand, block the write. The Bash guard inspects shell
+			// commands the host SEES, but `bash tmp.sh` only shows `bash
+			// tmp.sh` — the host cannot read tmp.sh's body once the
+			// subprocess executes. Closing that surface here at write time.
+			const content =
+				toolArgs?.content ??
+				toolArgs?.text ??
+				toolArgs?.new_string ??
+				toolArgs?.newText;
+			if (
+				typeof content === 'string' &&
+				/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i.test(
+					content,
+				)
+			) {
+				throw new Error(
+					'BLOCKED: write/edit tool would create a script invoking a human-only swarm CLI subcommand. ' +
+						'Present the situation to the user and ask them to run the command themselves.',
+				);
+			}
 		}
 
-		// Fallback: apply_patch / patch tools send args as a single diff string
+		// Fallback: apply_patch / patch tools send args as a single diff
+		// string. Note: the script-indirection content scan for human-only
+		// swarm CLI invocations already ran above (unconditionally for
+		// apply_patch/patch) — this loop handles path-level protection only.
 		if (!targetPath && (tool === 'apply_patch' || tool === 'patch')) {
 			for (const p of extractPatchTargetPaths(tool, args)) {
 				const resolvedP = path.resolve(effectiveDirectory, p);
@@ -2207,6 +2479,9 @@ export function createGuardrailsHooks(
 					.toLowerCase();
 				const planJsonPath = path
 					.resolve(effectiveDirectory, '.swarm', 'plan.json')
+					.toLowerCase();
+				const specStalenessPath = path
+					.resolve(effectiveDirectory, '.swarm', 'spec-staleness.json')
 					.toLowerCase();
 				if (
 					resolvedP.toLowerCase() === planMdPath ||
@@ -2218,6 +2493,13 @@ export function createGuardrailsHooks(
 							'Use save_plan for ALL structural plan changes (adding/removing tasks, updating descriptions, dependencies, or phase names). ' +
 							'Use update_task_status() for task status only. ' +
 							'Use phase_complete() for phase transitions only.',
+					);
+				}
+				if (resolvedP.toLowerCase() === specStalenessPath) {
+					throw new Error(
+						'SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. ' +
+							'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
+							'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
 					);
 				}
 				if (

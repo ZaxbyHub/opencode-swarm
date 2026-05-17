@@ -52,6 +52,22 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'export',
 ]);
 
+/**
+ * Issue #890: subcommands that must be invoked by a human user, not by the
+ * agent. The runtime Bash guardrail
+ * (`src/hooks/guardrails.ts` section 23) blocks the equivalent
+ * `bunx opencode-swarm run <cmd>` shell invocation; this set drives the
+ * chat-tool refusal message so the agent is told to surface to the user
+ * instead of being pointed at the CLI bypass it just attempted.
+ */
+export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
+	'acknowledge-spec-drift',
+	'reset',
+	'reset-session',
+	'rollback',
+	'checkpoint',
+]);
+
 const NO_ARGS = new Set([
 	'agents',
 	'config',
@@ -76,6 +92,17 @@ export function classifySwarmCommandToolUse(
 	const args = resolved.remainingArgs;
 
 	if (!SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey)) {
+		if (HUMAN_ONLY_SWARM_COMMANDS.has(canonicalKey)) {
+			return {
+				allowed: false,
+				message:
+					`/swarm ${canonicalKey} is a human-only command. ` +
+					`Present the situation to the user and ask them to run \`/swarm ${canonicalKey}\` themselves ` +
+					`(or \`bunx opencode-swarm run ${canonicalKey}\` from a terminal). ` +
+					`You MUST NOT run it yourself via Bash, swarm_command, or any other tool — ` +
+					`the runtime guardrail will block such attempts.`,
+			};
+		}
 		return {
 			allowed: false,
 			message:

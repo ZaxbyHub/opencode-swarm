@@ -104,22 +104,25 @@ The PR title is the squash merge commit message. Choose based on primary change:
 - Mixed feat + fix → use `feat` (minor subsumes patch)
 - `docs`/`chore`/`refactor`/`test`/`ci`/`build` only → no version bump is triggered
 
-### Step 3 — Determine NEXT_VERSION and create the release notes file
+### Step 3 — Create a pending release-note fragment
 
-1. Read `.release-please-manifest.json` to find the current version
-2. Determine the bump from your commit type:
-   - `fix`, `perf`, `revert` → patch (e.g. `6.33.1` → `6.33.2`)
-   - `feat` → minor (e.g. `6.33.1` → `6.34.0`)
-   - breaking change (`!` or `BREAKING CHANGE:` footer) → major (e.g. `6.33.1` → `7.0.0`)
-   - `docs`, `chore`, `refactor`, `test`, `ci`, `build` → no bump; use the current version as NEXT_VERSION (still create the file)
-3. Create `docs/releases/v{NEXT_VERSION}.md` with freeform markdown covering:
+⛔ **Do NOT** calculate `NEXT_VERSION`. ⛔ **Do NOT** create `docs/releases/vX.Y.Z.md`. ⛔ **Do NOT** write to a shared `docs/releases/unreleased.md` (same conflict hotspot, just relocated). release-please picks the actual version; the release workflow aggregates fragments at release time.
+
+1. Choose a short, descriptive, kebab-case slug that names the change. Pick something unlikely to collide with other open PRs — concurrent PRs each adding a *different* file produces zero merge conflicts.
+2. Create `docs/releases/pending/<your-slug>.md` with freeform markdown covering:
    - **What changed** — changes grouped by theme
    - **Why** — motivation (bug report, feature request, hardening)
    - **Migration steps** — if any API, config, or behavior changed
    - **Breaking changes** — if any
    - **Known caveats** — anything users should watch out for
+3. Do not include a version prefix in the heading (`# v7.21.4`). Use a descriptive topic heading: `# <topic>` (e.g. `# Spec-drift self-acknowledgment guardrail (issue #890)`).
 
-This file is **mandatory on every PR, no exceptions**, including one-line fixes.
+Examples of good slugs:
+- `docs/releases/pending/guardrails-transient-node-errors.md`
+- `docs/releases/pending/spec-drift-self-ack-guardrail.md`
+- `docs/releases/pending/phase-complete-durable-gate-proof.md`
+
+This file is **mandatory on every user-visible PR, no exceptions**, including one-line fixes. The aggregation is implemented by `scripts/release-notes-fragments.mjs`, invoked by the `update-pr-notes` and `update-release-notes` jobs in `.github/workflows/release-and-publish.yml`.
 
 ### Step 4 — Never touch these files manually
 
@@ -443,7 +446,7 @@ Verify every item before asking for a merge:
 - [ ] `test_runner` was NOT used with `scope: 'all'` or broad `'graph'` / `'impact'` scope to validate this repo (use shell commands instead)
 - [ ] Branch has exactly **one commit** — the squashed commit from Step 7 (`git log --oneline origin/main..HEAD` shows one line)
 - [ ] That commit message matches the PR title exactly, and both follow `<type>(<scope>): <description>`
-- [ ] `docs/releases/v{NEXT_VERSION}.md` exists with meaningful release notes
+- [ ] `docs/releases/pending/<unique-slug>.md` exists with meaningful release notes (NOT a `docs/releases/vX.Y.Z.md` file)
 - [ ] `package.json` version, `CHANGELOG.md`, `.release-please-manifest.json` are untouched
 - [ ] All 5 test tiers from Step 5 were actually run (not assumed — you must have the output in context), including `bunx biome ci .` on the full project (not scoped)
 - [ ] If the repo tracks `dist/` files: `bun run build` was run and dist/ artifacts are included in the squash commit

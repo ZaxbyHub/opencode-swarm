@@ -127,6 +127,7 @@ export async function executeSwarmCommand(args: {
 					args: resolved.remainingArgs,
 					sessionID,
 					agents,
+					source: 'chat',
 				});
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';

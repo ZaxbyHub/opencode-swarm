@@ -80,23 +80,25 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      - name: Update release body from docs/releases
+      - name: Aggregate pending release-note fragments into the GitHub Release body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          NOTES_FILE="docs/releases/${TAG_NAME}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            echo "Found release notes at $NOTES_FILE — updating release body"
-            gh release edit "${TAG_NAME}" --notes-file "$NOTES_FILE"
-          else
-            echo "No release notes file found at $NOTES_FILE — skipping"
-          fi
+        run: node scripts/release-notes-fragments.mjs update-release
 
   update-pr-notes:
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created != 'true' }}
     runs-on: ubuntu-latest
+    # Serialize this job across concurrent merges to main. Two updates
+    # would otherwise race on read-modify-write of the release PR body
+    # (each run reads the current body, recomputes notes from its own
+    # checkout, then `gh pr edit`s — last writer would silently win and
+    # could overwrite fragments added between the read and the write).
+    concurrency:
+      group: update-pr-notes
+      cancel-in-progress: false
     permissions:
       contents: read
       pull-requests: write
@@ -105,35 +107,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Update release PR body from docs/releases
+      - name: Aggregate pending release-note fragments into the release PR body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUMBER=$(gh pr list --label "autorelease: pending" --json number -q '.[0].number')
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No autorelease PR found — skipping"
-            exit 0
-          fi
-          VERSION=$(gh pr view "$PR_NUMBER" --json title -q '.title' | grep -oP '\d+\.\d+\.\d+' | head -1)
-          if [ -z "$VERSION" ]; then
-            echo "No version found in PR title — skipping"
-            exit 0
-          fi
-          # Explicit semver regex guard to prevent injection via malformed PR titles
-          if ! echo "$VERSION" | grep -qP '^\\d+\\.\\d+\\.\\d+$'; then
-            echo "VERSION does not match semver pattern — skipping"
-            exit 0
-          fi
-          NOTES_FILE="docs/releases/v${VERSION}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            echo "Found release notes at $NOTES_FILE — prepending to PR #$PR_NUMBER body"
-            # Preserve the existing PR body (contains release-please markers needed for
-            # release creation). Prepend custom release notes above the markers.
-            EXISTING_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body')
-            NOTES_CONTENT=$(cat "$NOTES_FILE")
-            COMBINED=$(printf '%s\n\n---\n\n%s' "$NOTES_CONTENT" "$EXISTING_BODY")
-            echo "$COMBINED" | gh pr edit "$PR_NUMBER" --body-file -
-          else
-            echo "No release notes file found at $NOTES_FILE — skipping"
-          fi
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/release-notes-fragments.mjs update-pr
 

@@ -97,7 +97,8 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 			expect(event.type).toBe('spec_drift_acknowledged');
 			expect(event.phase).toBe(3);
 			expect(event.planTitle).toBe('Test Plan');
-			expect(event.acknowledgedBy).toBe('architect');
+			// Issue #890: actor is now caller-supplied; default is 'unknown'
+			expect(event.acknowledgedBy).toBe('unknown');
 			expect(event.timestamp).toBeDefined();
 		});
 
@@ -180,6 +181,51 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 			expect(result).toContain('Spec drift acknowledged');
 			// spec-staleness.json should still be deleted
 			await expect(unlink(specStalenessPath)).rejects.toThrow();
+		});
+	});
+
+	// Issue #890: caller-supplied actor for forensic audit trail.
+	describe('acknowledgedBy actor parameter (issue #890)', () => {
+		test('records "user" when invoked via chat slash command', async () => {
+			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
+			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
+			await writeFile(
+				specStalenessPath,
+				JSON.stringify({
+					planTitle: 'P',
+					phase: 1,
+					specHash_plan: 'h',
+					specHash_current: 'h',
+					reason: 'r',
+					timestamp: '2024-01-01T00:00:00.000Z',
+				}),
+			);
+			await handleAcknowledgeSpecDriftCommand(tempDir, [], 'user');
+			const event = JSON.parse(
+				(await readFile(eventsPath, 'utf-8')).trim().split('\n').pop() ?? '{}',
+			);
+			expect(event.acknowledgedBy).toBe('user');
+		});
+
+		test('records "cli" when invoked via CLI run dispatch', async () => {
+			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
+			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
+			await writeFile(
+				specStalenessPath,
+				JSON.stringify({
+					planTitle: 'P',
+					phase: 1,
+					specHash_plan: 'h',
+					specHash_current: 'h',
+					reason: 'r',
+					timestamp: '2024-01-01T00:00:00.000Z',
+				}),
+			);
+			await handleAcknowledgeSpecDriftCommand(tempDir, [], 'cli');
+			const event = JSON.parse(
+				(await readFile(eventsPath, 'utf-8')).trim().split('\n').pop() ?? '{}',
+			);
+			expect(event.acknowledgedBy).toBe('cli');
 		});
 	});
 });

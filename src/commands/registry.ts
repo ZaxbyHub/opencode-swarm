@@ -190,6 +190,14 @@ export type CommandContext = {
 	args: string[];
 	sessionID: string;
 	agents: Record<string, AgentDefinition>;
+	/**
+	 * Dispatch path identifier. Issue #890: forensic audit trail for
+	 * commands that need to distinguish "user typed /swarm <cmd>" (chat)
+	 * from "user ran bunx opencode-swarm run <cmd>" (cli). Handlers that
+	 * don't care can ignore this field. Optional for backwards-compatibility
+	 * with existing callers.
+	 */
+	source?: 'cli' | 'chat';
 };
 
 export type CommandResult = Promise<string>;
@@ -234,7 +242,15 @@ export type CommandEntry = {
 export const COMMAND_REGISTRY = {
 	'acknowledge-spec-drift': {
 		handler: (ctx) =>
-			handleAcknowledgeSpecDriftCommand(ctx.directory, ctx.args),
+			handleAcknowledgeSpecDriftCommand(
+				ctx.directory,
+				ctx.args,
+				ctx.source === 'cli'
+					? 'cli'
+					: ctx.source === 'chat'
+						? 'user'
+						: 'unknown',
+			),
 		description:
 			'Acknowledge that the spec has drifted from the plan and suppress further warnings',
 		args: '',

@@ -531,7 +531,7 @@ Continue handling small touch-ups (typos, cross-references) inline.
 ## SLASH COMMANDS
 {{SLASH_COMMANDS}}
 Commands above are documented with args and behavioral details. Run commands via /swarm <command> [args].
-Outside OpenCode, invoke any plugin command via: \`bunx opencode-swarm run <command> [args]\` (e.g. \`bunx opencode-swarm run knowledge migrate\`). Do not use \`bun -e\` or look for \`src/commands/\` — those paths are internal to the plugin source and do not exist in user project directories.
+Outside OpenCode, invoke any plugin command via: \`bunx opencode-swarm run <command> [args]\` (e.g. \`bunx opencode-swarm run knowledge migrate\`). Do not use \`bun -e\` or look for \`src/commands/\` — those paths are internal to the plugin source and do not exist in user project directories. EXCEPTION — human-only commands (including but not limited to \`acknowledge-spec-drift\`, \`reset\`, \`reset-session\`, \`rollback\`, \`checkpoint\`, and any command that releases a runtime safety gate or destroys plan state): you MUST present these to the user and ask them to run the command themselves. Never invoke a human-only command via Bash, swarm_command, or chat fallback. The runtime guardrail will block such attempts; if a Bash call returns \`BLOCKED\` with a "human-only" message, do not retry under a different shell form — present the situation to the user instead.
 
 SMEs advise only. Reviewer and critic review only. None of them write code.
 
@@ -1419,10 +1419,17 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
 - This rule is satisfied by the save_plan tool's own spec gate — it exists as a reminder that planning requires a spec.
 
 6k. SPEC-STALENESS GUARD:
-- If _specStale or .swarm/spec-staleness.json exists, the Architect MUST read the file and either:
-  - Run /swarm clarify to update the spec and align it with the plan, OR
-  - Run /swarm acknowledge-spec-drift to acknowledge the drift and suppress further warnings
-- Do NOT proceed with implementation until spec staleness is resolved.
+- If _specStale or .swarm/spec-staleness.json exists, the Architect MUST stop
+  and SURFACE THE DRIFT TO THE USER. The user (not the Architect) then runs
+  either:
+  - /swarm clarify to update the spec and align it with the plan, OR
+  - /swarm acknowledge-spec-drift to acknowledge the drift and suppress further warnings
+- The Architect MUST NOT run /swarm acknowledge-spec-drift itself — not via
+  the swarm_command tool, not via the chat fallback, and NOT by shelling out
+  to \`bunx opencode-swarm run acknowledge-spec-drift\` (or any equivalent
+  \`npx\`/\`node\`/\`bun\` invocation). Any such self-invocation is a
+  control-bypass and will be refused by the runtime guardrails.
+- Do NOT proceed with implementation until the user resolves the staleness.
 - When re-saving a plan in response to spec drift, save_plan REQUIRES that ANY task
   present in the prior plan but absent from the new args.phases be enumerated
   in removed_task_ids with a removal_reason. save_plan will reject the call
@@ -1433,8 +1440,8 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
 - While .swarm/spec-staleness.json exists, the runtime STRUCTURALLY BLOCKS the
   following tools (SPEC_DRIFT_BLOCKED_TOOLS): save_plan, update_task_status,
   phase_complete, lean_turbo_run_phase, lean_turbo_acquire_locks. If a call
-  returns SPEC_DRIFT_BLOCK, do NOT retry; instead present the drift to the
-  user and run /swarm clarify or /swarm acknowledge-spec-drift first.
+  returns SPEC_DRIFT_BLOCK, do NOT retry; surface the drift to the user and
+  WAIT for them to run /swarm clarify or /swarm acknowledge-spec-drift.
 
 ### MODE: EXECUTE
 For each task (respecting dependencies):

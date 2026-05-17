@@ -104,8 +104,7 @@ bun --smol test tests/unit/path/to/test.test.ts --timeout 30000
 
 Check if any fix requires documentation updates:
 
-- **Release notes** (`docs/releases/v{VERSION}.md`): Update if the fix changes user-visible behavior, fixes a documented issue, or alters an API described in the notes.
-  - **Version source:** Derive the version from the latest tag on main (`git describe --tags origin/main`), NOT from `package.json` which may be stale from the dev start. The release-please manifest is the authoritative source.
+- **Release notes** (`docs/releases/pending/<slug>.md`): Add or update a pending fragment if the fix changes user-visible behavior, fixes a documented issue, or alters an API. Do NOT compute a next version or create `docs/releases/vX.Y.Z.md` — release-please owns the version, and `scripts/release-notes-fragments.mjs` aggregates pending fragments at release time. Pick a unique kebab-case slug.
 - **README / guides**: Update if the fix changes installation steps, configuration options, or usage patterns.
 - **Code comments**: Update if the fix invalidates an existing comment or makes a non-obvious behavior change.
 
@@ -114,7 +113,7 @@ Check if any fix requires documentation updates:
 1. Stage ALL fix files (code + tests + docs). Do not stage unrelated changes.
    - Use explicit path staging to include new files (tests, docs) that `git add -u` would miss:
    ```bash
-   git add src/path/to/changed-file.ts tests/unit/path/to/new-test.test.ts docs/releases/v7.21.0.md
+   git add src/path/to/changed-file.ts tests/unit/path/to/new-test.test.ts docs/releases/pending/your-fix-slug.md
    ```
 2. If this is an amendment to the PR commit:
 

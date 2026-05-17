@@ -640,6 +640,7 @@ export async function run(args: string[]): Promise<number> {
 		args: resolved.remainingArgs,
 		sessionID: '',
 		agents: {},
+		source: 'cli',
 	});
 
 	console.log(result);

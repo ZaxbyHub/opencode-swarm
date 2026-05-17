@@ -112,7 +112,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
 - A plugin fix is incomplete if users stay pinned to a stale OpenCode plugin cache. Install / update / cache changes must cover **all known cache layouts**, including the macOS / Windows variants documented in v6.86.9 (Layout 1 `~/.cache/opencode/packages/opencode-swarm@latest`, Layout 2 `~/.config/opencode/node_modules/opencode-swarm`, Layout 3 `~/.cache/opencode/node_modules/opencode-swarm`).
 - Cache-deletion code must use `isSafeCachePath` four-layer defense (depth, basename whitelist, recognized parent, canonical structure).
 - **Never hand-edit** `package.json#version`, `CHANGELOG.md`, or `.release-please-manifest.json`. release-please owns those.
-- Every PR ships a `docs/releases/v{NEXT_VERSION}.md` file (mandatory — see `contributing.md`). It is the only narrative future users will see in their GitHub Release body.
+- Every user-visible PR ships a `docs/releases/pending/<unique-slug>.md` fragment (mandatory — see `contributing.md`). Do NOT compute a next version or create `docs/releases/vX.Y.Z.md`; release-please owns the version, and `scripts/release-notes-fragments.mjs` aggregates pending fragments into the release PR / GitHub Release body. The aggregated text is the only narrative future users will see.
 
 ## Invariant audit required in PRs
 

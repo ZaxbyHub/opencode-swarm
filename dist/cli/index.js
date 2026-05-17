@@ -16061,7 +16061,7 @@ var init_manager = __esm(() => {
 
 // src/commands/acknowledge-spec-drift.ts
 import { promises as fsPromises3 } from "fs";
-async function handleAcknowledgeSpecDriftCommand(directory, _args) {
+async function handleAcknowledgeSpecDriftCommand(directory, _args, acknowledgedBy = "unknown") {
   const specStalenessPath = validateSwarmPath(directory, "spec-staleness.json");
   let stalenessContent;
   try {
@@ -16102,7 +16102,7 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
     timestamp: new Date().toISOString(),
     phase,
     planTitle,
-    acknowledgedBy: "architect",
+    acknowledgedBy,
     previousHash: stalenessData.specHash_plan,
     newHash: currentHash
   };
@@ -52049,7 +52049,8 @@ async function executeSwarmCommand(args) {
           directory,
           args: resolved.remainingArgs,
           sessionID,
-          agents
+          agents,
+          source: "chat"
         });
       } catch (_err) {
         const cmdName = tokens[0] || "unknown";
@@ -52081,6 +52082,12 @@ function classifySwarmCommandToolUse(resolved) {
   const canonicalKey = canonicalCommandKey(resolved);
   const args = resolved.remainingArgs;
   if (!SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey)) {
+    if (HUMAN_ONLY_SWARM_COMMANDS.has(canonicalKey)) {
+      return {
+        allowed: false,
+        message: `/swarm ${canonicalKey} is a human-only command. ` + `Present the situation to the user and ask them to run \`/swarm ${canonicalKey}\` themselves ` + `(or \`bunx opencode-swarm run ${canonicalKey}\` from a terminal). ` + `You MUST NOT run it yourself via Bash, swarm_command, or any other tool \u2014 ` + `the runtime guardrail will block such attempts.`
+      };
+    }
     return {
       allowed: false,
       message: `/swarm ${canonicalKey} is not available through the chat tool yet.
@@ -52170,7 +52177,7 @@ function classifySwarmCommandChatFallbackUse(resolved) {
   }
   return { allowed: true };
 }
-var SWARM_COMMAND_TOOL_COMMANDS, SWARM_COMMAND_TOOL_ALLOWLIST, NO_ARGS, SUMMARY_ID_PATTERN, TASK_ID_PATTERN;
+var SWARM_COMMAND_TOOL_COMMANDS, SWARM_COMMAND_TOOL_ALLOWLIST, HUMAN_ONLY_SWARM_COMMANDS, NO_ARGS, SUMMARY_ID_PATTERN, TASK_ID_PATTERN;
 var init_tool_policy = __esm(() => {
   init_command_dispatch();
   SWARM_COMMAND_TOOL_COMMANDS = [
@@ -52215,6 +52222,13 @@ var init_tool_policy = __esm(() => {
     "knowledge",
     "sync-plan",
     "export"
+  ]);
+  HUMAN_ONLY_SWARM_COMMANDS = new Set([
+    "acknowledge-spec-drift",
+    "reset",
+    "reset-session",
+    "rollback",
+    "checkpoint"
   ]);
   NO_ARGS = new Set([
     "agents",
@@ -52773,7 +52787,7 @@ var init_registry = __esm(() => {
   init_write_retro2();
   COMMAND_REGISTRY = {
     "acknowledge-spec-drift": {
-      handler: (ctx) => handleAcknowledgeSpecDriftCommand(ctx.directory, ctx.args),
+      handler: (ctx) => handleAcknowledgeSpecDriftCommand(ctx.directory, ctx.args, ctx.source === "cli" ? "cli" : ctx.source === "chat" ? "user" : "unknown"),
       description: "Acknowledge that the spec has drifted from the plan and suppress further warnings",
       args: "",
       category: "diagnostics"
@@ -53619,7 +53633,8 @@ Valid commands: ${VALID_COMMANDS.join(", ")}`);
     directory: cwd,
     args: resolved.remainingArgs,
     sessionID: "",
-    agents: {}
+    agents: {},
+    source: "cli"
   });
   console.log(result);
   return 0;

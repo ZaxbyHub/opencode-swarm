@@ -70,9 +70,10 @@ WORKFLOW:
 - TODO comments in code (those go through the task system, not code comments)
 
 ## RELEASE NOTES
-When writing release notes (docs/releases/v{VERSION}.md):
-- Determine next version from .release-please-manifest.json + commit type (feat → minor, fix → patch)
-- Follow the established format in existing release notes files
+When writing release notes (docs/releases/pending/<slug>.md):
+- Do NOT determine the next version. Do NOT create docs/releases/vX.Y.Z.md. release-please owns the version; the release workflow aggregates pending fragments.
+- Pick a short, kebab-case slug describing your change (e.g. spec-drift-self-ack-guardrail.md). Pick one unlikely to collide with concurrent PRs.
+- Follow the established format in existing release notes files (descriptive topic heading, not a version prefix).
 - Include: overview, breaking changes (if any), new features, bug fixes, internal improvements
 - Do NOT manually edit package.json version, CHANGELOG.md, or .release-please-manifest.json — release-please owns these
 

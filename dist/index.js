@@ -18582,7 +18582,7 @@ var init_manager = __esm(() => {
 
 // src/commands/acknowledge-spec-drift.ts
 import { promises as fsPromises4 } from "node:fs";
-async function handleAcknowledgeSpecDriftCommand(directory, _args) {
+async function handleAcknowledgeSpecDriftCommand(directory, _args, acknowledgedBy = "unknown") {
   const specStalenessPath = validateSwarmPath(directory, "spec-staleness.json");
   let stalenessContent;
   try {
@@ -18623,7 +18623,7 @@ async function handleAcknowledgeSpecDriftCommand(directory, _args) {
     timestamp: new Date().toISOString(),
     phase,
     planTitle,
-    acknowledgedBy: "architect",
+    acknowledgedBy,
     previousHash: stalenessData.specHash_plan,
     newHash: currentHash
   };
@@ -24980,6 +24980,45 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       if (/^7z\b.*\s-sdel\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
         throw new Error(`BLOCKED: "7z" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`);
       }
+      {
+        const HUMAN_ONLY_SWARM_SUBCOMMANDS = new Set([
+          "acknowledge-spec-drift",
+          "reset",
+          "reset-session",
+          "rollback",
+          "checkpoint"
+        ]);
+        let probe = seg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, "").replace(/^eval(?:\s+--)?\s+["']?/, "").replace(/["']\s*$/, "").replace(/^\$\(\s*/, "").replace(/^\(\s*/, "").replace(/\s*\)$/, "").replace(/^`/, "").replace(/`$/, "").trim();
+        for (let i2 = 0;i2 < 4; i2++) {
+          const before = probe;
+          probe = probe.replace(/^env\s+(?:-i\b|--ignore-environment\b|-u\s+\S+|-[a-zA-Z]+\s+)*\s*/, "").replace(/^command\s+(?:-[pvV]\s+)*/, "").replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, "").trim();
+          if (probe === before)
+            break;
+        }
+        const swarmCliBypassMatch = probe.match(/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i);
+        if (swarmCliBypassMatch && HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliBypassMatch[1])) {
+          throw new Error(`BLOCKED: "${swarmCliBypassMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` + `Present the situation to the user and ask them to run \`/swarm ${swarmCliBypassMatch[1]}\` themselves.`);
+        }
+        const swarmBareBinMatch = probe.match(/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i);
+        if (swarmBareBinMatch && HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmBareBinMatch[1])) {
+          throw new Error(`BLOCKED: "${swarmBareBinMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` + `Present the situation to the user and ask them to run \`/swarm ${swarmBareBinMatch[1]}\` themselves.`);
+        }
+        const swarmCliPathMatch = probe.match(/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i);
+        if (swarmCliPathMatch && HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliPathMatch[1])) {
+          throw new Error(`BLOCKED: "${swarmCliPathMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` + `Present the situation to the user and ask them to run \`/swarm ${swarmCliPathMatch[1]}\` themselves.`);
+        }
+      }
+      {
+        const normForPathCheck = seg.replace(/\\/g, "/").replace(/\/(?:\.\/+)+/g, "/").replace(/\/{2,}/g, "/");
+        if (/\.swarm\/spec-staleness\.json\b/i.test(normForPathCheck)) {
+          const trimmed = seg.trim();
+          const looksReadOnly = /^(?:cat|less|more|head|tail|file|stat|ls|dir|Get-Content|gc|Get-Item|gi|type)\b/i.test(trimmed);
+          const hasWriteRedirect = />{1,2}\s*[^\s>]/.test(trimmed);
+          if (!looksReadOnly || hasWriteRedirect) {
+            throw new Error("BLOCKED: shell command targeting .swarm/spec-staleness.json detected. " + "This file is system-managed and gates plan-mutating tools while spec drift is unresolved. " + "Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.");
+          }
+        }
+      }
     }
   }
   async function checkGateLimits(params) {
@@ -25167,11 +25206,37 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       }
     }
   }
+  function extractAllPatchPayloads(args2) {
+    const toolArgs = args2;
+    if (!toolArgs)
+      return [];
+    const out2 = [];
+    for (const key of ["patch", "input", "diff"]) {
+      const v = toolArgs[key];
+      if (typeof v === "string" && v.length > 0)
+        out2.push(v);
+    }
+    const cmd = toolArgs.cmd;
+    if (Array.isArray(cmd)) {
+      for (const entry of cmd) {
+        if (typeof entry === "string" && entry.length > 0)
+          out2.push(entry);
+      }
+    }
+    return out2;
+  }
+  function patchPayloadHasHumanOnlyInvocation(args2) {
+    const payloads = extractAllPatchPayloads(args2);
+    if (payloads.length === 0)
+      return false;
+    const re = /\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i;
+    return payloads.some((p) => re.test(p));
+  }
   function extractPatchTargetPaths(tool, args2) {
     if (tool !== "apply_patch" && tool !== "patch")
       return [];
     const toolArgs = args2;
-    const patchText = toolArgs?.input ?? toolArgs?.patch ?? (Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined);
+    const patchText = toolArgs?.input ?? toolArgs?.patch ?? toolArgs?.diff ?? (Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined);
     if (typeof patchText !== "string")
       return [];
     if (patchText.length > 1e6) {
@@ -25219,6 +25284,11 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
   function handlePlanAndScopeProtection(sessionID, tool, args2) {
     const toolArgs = args2;
     const targetPath = toolArgs?.filePath ?? toolArgs?.path ?? toolArgs?.file ?? toolArgs?.target;
+    if (tool === "apply_patch" || tool === "patch") {
+      if (patchPayloadHasHumanOnlyInvocation(args2)) {
+        throw new Error("BLOCKED: apply_patch would introduce a script invoking a human-only swarm CLI subcommand. " + "Present the situation to the user and ask them to run the command themselves.");
+      }
+    }
     if (typeof targetPath === "string" && targetPath.length > 0) {
       const resolvedTarget = path10.resolve(effectiveDirectory, targetPath).toLowerCase();
       const planMdPath = path10.resolve(effectiveDirectory, ".swarm", "plan.md").toLowerCase();
@@ -25226,14 +25296,26 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       if (resolvedTarget === planMdPath || resolvedTarget === planJsonPath) {
         throw new Error("PLAN STATE VIOLATION: Direct writes to .swarm/plan.md and .swarm/plan.json are blocked. " + "plan.md is auto-regenerated from plan.json by PlanSyncWorker. " + "Use save_plan for ALL structural plan changes (adding/removing tasks, updating descriptions, dependencies, or phase names). " + "Use update_task_status() for task status only. " + "Use phase_complete() for phase transitions only.");
       }
+      const specStalenessPath = path10.resolve(effectiveDirectory, ".swarm", "spec-staleness.json").toLowerCase();
+      if (resolvedTarget === specStalenessPath) {
+        throw new Error("SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. " + "This file is system-managed and gates plan-mutating tools while spec drift is unresolved. " + "Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.");
+      }
+      const content = toolArgs?.content ?? toolArgs?.text ?? toolArgs?.new_string ?? toolArgs?.newText;
+      if (typeof content === "string" && /\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i.test(content)) {
+        throw new Error("BLOCKED: write/edit tool would create a script invoking a human-only swarm CLI subcommand. " + "Present the situation to the user and ask them to run the command themselves.");
+      }
     }
     if (!targetPath && (tool === "apply_patch" || tool === "patch")) {
       for (const p of extractPatchTargetPaths(tool, args2)) {
         const resolvedP = path10.resolve(effectiveDirectory, p);
         const planMdPath = path10.resolve(effectiveDirectory, ".swarm", "plan.md").toLowerCase();
         const planJsonPath = path10.resolve(effectiveDirectory, ".swarm", "plan.json").toLowerCase();
+        const specStalenessPath = path10.resolve(effectiveDirectory, ".swarm", "spec-staleness.json").toLowerCase();
         if (resolvedP.toLowerCase() === planMdPath || resolvedP.toLowerCase() === planJsonPath) {
           throw new Error("PLAN STATE VIOLATION: Direct writes to .swarm/plan.md and .swarm/plan.json are blocked. " + "plan.md is auto-regenerated from plan.json by PlanSyncWorker. " + "Use save_plan for ALL structural plan changes (adding/removing tasks, updating descriptions, dependencies, or phase names). " + "Use update_task_status() for task status only. " + "Use phase_complete() for phase transitions only.");
+        }
+        if (resolvedP.toLowerCase() === specStalenessPath) {
+          throw new Error("SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. " + "This file is system-managed and gates plan-mutating tools while spec drift is unresolved. " + "Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.");
         }
         if (isOutsideSwarmDir(p, effectiveDirectory) && (isSourceCodePath(p) || hasTraversalSegments(p))) {
           const session = swarmState.agentSessions.get(sessionID);
@@ -61066,7 +61148,8 @@ async function executeSwarmCommand(args2) {
           directory,
           args: resolved.remainingArgs,
           sessionID,
-          agents
+          agents,
+          source: "chat"
         });
       } catch (_err) {
         const cmdName = tokens[0] || "unknown";
@@ -61098,6 +61181,12 @@ function classifySwarmCommandToolUse(resolved) {
   const canonicalKey = canonicalCommandKey(resolved);
   const args2 = resolved.remainingArgs;
   if (!SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey)) {
+    if (HUMAN_ONLY_SWARM_COMMANDS.has(canonicalKey)) {
+      return {
+        allowed: false,
+        message: `/swarm ${canonicalKey} is a human-only command. ` + `Present the situation to the user and ask them to run \`/swarm ${canonicalKey}\` themselves ` + `(or \`bunx opencode-swarm run ${canonicalKey}\` from a terminal). ` + `You MUST NOT run it yourself via Bash, swarm_command, or any other tool — ` + `the runtime guardrail will block such attempts.`
+      };
+    }
     return {
       allowed: false,
       message: `/swarm ${canonicalKey} is not available through the chat tool yet.
@@ -61187,7 +61276,7 @@ function classifySwarmCommandChatFallbackUse(resolved) {
   }
   return { allowed: true };
 }
-var SWARM_COMMAND_TOOL_COMMANDS, SWARM_COMMAND_TOOL_ALLOWLIST, NO_ARGS, SUMMARY_ID_PATTERN, TASK_ID_PATTERN;
+var SWARM_COMMAND_TOOL_COMMANDS, SWARM_COMMAND_TOOL_ALLOWLIST, HUMAN_ONLY_SWARM_COMMANDS, NO_ARGS, SUMMARY_ID_PATTERN, TASK_ID_PATTERN;
 var init_tool_policy = __esm(() => {
   init_command_dispatch();
   SWARM_COMMAND_TOOL_COMMANDS = [
@@ -61232,6 +61321,13 @@ var init_tool_policy = __esm(() => {
     "knowledge",
     "sync-plan",
     "export"
+  ]);
+  HUMAN_ONLY_SWARM_COMMANDS = new Set([
+    "acknowledge-spec-drift",
+    "reset",
+    "reset-session",
+    "rollback",
+    "checkpoint"
   ]);
   NO_ARGS = new Set([
     "agents",
@@ -61790,7 +61886,7 @@ var init_registry = __esm(() => {
   init_write_retro2();
   COMMAND_REGISTRY = {
     "acknowledge-spec-drift": {
-      handler: (ctx) => handleAcknowledgeSpecDriftCommand(ctx.directory, ctx.args),
+      handler: (ctx) => handleAcknowledgeSpecDriftCommand(ctx.directory, ctx.args, ctx.source === "cli" ? "cli" : ctx.source === "chat" ? "user" : "unknown"),
       description: "Acknowledge that the spec has drifted from the plan and suppress further warnings",
       args: "",
       category: "diagnostics"
@@ -63046,7 +63142,7 @@ Continue handling small touch-ups (typos, cross-references) inline.
 ## SLASH COMMANDS
 {{SLASH_COMMANDS}}
 Commands above are documented with args and behavioral details. Run commands via /swarm <command> [args].
-Outside OpenCode, invoke any plugin command via: \`bunx opencode-swarm run <command> [args]\` (e.g. \`bunx opencode-swarm run knowledge migrate\`). Do not use \`bun -e\` or look for \`src/commands/\` — those paths are internal to the plugin source and do not exist in user project directories.
+Outside OpenCode, invoke any plugin command via: \`bunx opencode-swarm run <command> [args]\` (e.g. \`bunx opencode-swarm run knowledge migrate\`). Do not use \`bun -e\` or look for \`src/commands/\` — those paths are internal to the plugin source and do not exist in user project directories. EXCEPTION — human-only commands (including but not limited to \`acknowledge-spec-drift\`, \`reset\`, \`reset-session\`, \`rollback\`, \`checkpoint\`, and any command that releases a runtime safety gate or destroys plan state): you MUST present these to the user and ask them to run the command themselves. Never invoke a human-only command via Bash, swarm_command, or chat fallback. The runtime guardrail will block such attempts; if a Bash call returns \`BLOCKED\` with a "human-only" message, do not retry under a different shell form — present the situation to the user instead.
 
 SMEs advise only. Reviewer and critic review only. None of them write code.
 
@@ -63934,10 +64030,17 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
 - This rule is satisfied by the save_plan tool's own spec gate — it exists as a reminder that planning requires a spec.
 
 6k. SPEC-STALENESS GUARD:
-- If _specStale or .swarm/spec-staleness.json exists, the Architect MUST read the file and either:
-  - Run /swarm clarify to update the spec and align it with the plan, OR
-  - Run /swarm acknowledge-spec-drift to acknowledge the drift and suppress further warnings
-- Do NOT proceed with implementation until spec staleness is resolved.
+- If _specStale or .swarm/spec-staleness.json exists, the Architect MUST stop
+  and SURFACE THE DRIFT TO THE USER. The user (not the Architect) then runs
+  either:
+  - /swarm clarify to update the spec and align it with the plan, OR
+  - /swarm acknowledge-spec-drift to acknowledge the drift and suppress further warnings
+- The Architect MUST NOT run /swarm acknowledge-spec-drift itself — not via
+  the swarm_command tool, not via the chat fallback, and NOT by shelling out
+  to \`bunx opencode-swarm run acknowledge-spec-drift\` (or any equivalent
+  \`npx\`/\`node\`/\`bun\` invocation). Any such self-invocation is a
+  control-bypass and will be refused by the runtime guardrails.
+- Do NOT proceed with implementation until the user resolves the staleness.
 - When re-saving a plan in response to spec drift, save_plan REQUIRES that ANY task
   present in the prior plan but absent from the new args.phases be enumerated
   in removed_task_ids with a removal_reason. save_plan will reject the call
@@ -63948,8 +64051,8 @@ If resuming a project with an existing approved plan, CRITIC-GATE is already sat
 - While .swarm/spec-staleness.json exists, the runtime STRUCTURALLY BLOCKS the
   following tools (SPEC_DRIFT_BLOCKED_TOOLS): save_plan, update_task_status,
   phase_complete, lean_turbo_run_phase, lean_turbo_acquire_locks. If a call
-  returns SPEC_DRIFT_BLOCK, do NOT retry; instead present the drift to the
-  user and run /swarm clarify or /swarm acknowledge-spec-drift first.
+  returns SPEC_DRIFT_BLOCK, do NOT retry; surface the drift to the user and
+  WAIT for them to run /swarm clarify or /swarm acknowledge-spec-drift.
 
 ### MODE: EXECUTE
 For each task (respecting dependencies):
@@ -65546,9 +65649,10 @@ WORKFLOW:
 - TODO comments in code (those go through the task system, not code comments)
 
 ## RELEASE NOTES
-When writing release notes (docs/releases/v{VERSION}.md):
-- Determine next version from .release-please-manifest.json + commit type (feat → minor, fix → patch)
-- Follow the established format in existing release notes files
+When writing release notes (docs/releases/pending/<slug>.md):
+- Do NOT determine the next version. Do NOT create docs/releases/vX.Y.Z.md. release-please owns the version; the release workflow aggregates pending fragments.
+- Pick a short, kebab-case slug describing your change (e.g. spec-drift-self-ack-guardrail.md). Pick one unlikely to collide with concurrent PRs.
+- Follow the established format in existing release notes files (descriptive topic heading, not a version prefix).
 - Include: overview, breaking changes (if any), new features, bug fixes, internal improvements
 - Do NOT manually edit package.json version, CHANGELOG.md, or .release-please-manifest.json — release-please owns these
 
