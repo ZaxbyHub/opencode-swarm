@@ -1245,16 +1245,18 @@ export function createGuardrailsHooks(
 	// Pre-compute effective authority rules once — authorityConfig is immutable after plugin init
 	const precomputedAuthorityRules = buildEffectiveRules(authorityConfig);
 
-	// Merge user-supplied verifier config globs into architect's blockedGlobs for enforcement
+	// Merge user-supplied verifier config globs into architect's blockedGlobs for enforcement.
+	// Uses object spread to avoid mutating DEFAULT_AGENT_AUTHORITY_RULES.architect reference.
 	const verifierPaths = authorityConfig?.verifier_config_paths;
 	if (verifierPaths && verifierPaths.length > 0) {
-		const architect = precomputedAuthorityRules['architect'];
-		if (architect) {
-			architect.blockedGlobs = [
-				...(architect.blockedGlobs ?? []),
+		const existingArchitect = precomputedAuthorityRules.architect ?? {};
+		precomputedAuthorityRules.architect = {
+			...existingArchitect,
+			blockedGlobs: [
+				...(existingArchitect.blockedGlobs ?? []),
 				...verifierPaths,
-			];
-		}
+			],
+		};
 	}
 
 	// Global deny prefixes — apply to all agents regardless of per-agent rules
@@ -4446,11 +4448,11 @@ function buildEffectiveRules(
 	authorityConfig?: AuthorityConfig,
 ): Record<string, AgentRule> {
 	if (authorityConfig?.enabled === false || !authorityConfig?.rules) {
-		return DEFAULT_AGENT_AUTHORITY_RULES;
+		return { ...DEFAULT_AGENT_AUTHORITY_RULES };
 	}
 	const entries = Object.entries(authorityConfig.rules);
 	if (entries.length === 0) {
-		return DEFAULT_AGENT_AUTHORITY_RULES; // fast path: no allocation
+		return { ...DEFAULT_AGENT_AUTHORITY_RULES }; // shallow copy so caller can mutate safely
 	}
 	const merged: Record<string, AgentRule> = {
 		...DEFAULT_AGENT_AUTHORITY_RULES,
