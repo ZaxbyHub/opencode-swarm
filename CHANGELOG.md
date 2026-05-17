@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.21.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.2...v7.21.3) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** expand transient network error detection for Node.js raw error codes ([#886](https://github.com/zaxbysauce/opencode-swarm/issues/886)) ([8bfdff1](https://github.com/zaxbysauce/opencode-swarm/commit/8bfdff1e7f0582adc7165c95105f1389550fded2))
+
 ## [7.21.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.1...v7.21.2) (2026-05-17)
 
 
