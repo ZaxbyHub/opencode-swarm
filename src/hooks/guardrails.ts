@@ -1606,6 +1606,135 @@ export function createGuardrailsHooks(
 					`BLOCKED: Disk format command (mkfs) detected — disk formatting operation`,
 				);
 			}
+
+			// ----------------------------------------------------------------
+			// 16. POSIX mv targeting .swarm/ paths
+			//    (FR-ADDED-1: mv can bypass rm blocks by relocating files)
+			// ----------------------------------------------------------------
+			// Block when mv has .swarm in ANY argument (source or destination)
+			if (/^\\?mv\s/i.test(seg)) {
+				// Extract arguments after 'mv' command (optional leading backslash for \mv evasion)
+				const mvMatch = seg.match(/^\\?mv\s+(.+)$/i);
+				if (mvMatch) {
+					const argsStr = mvMatch[1];
+					// Check if .swarm appears in the arguments (handles quoted and unquoted paths)
+					// Strip common quote patterns before checking
+					const strippedArgs = argsStr.replace(/["']/g, '');
+					// Match .swarm followed by /, \, whitespace (argument boundary), or end-of-string
+					// to catch both subpath (.swarm/evidence/) and whole-directory (.swarm) targeting
+					if (/\.swarm(?:[\x5c/\s]|$)/.test(strippedArgs)) {
+						throw new Error(
+							`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
+						);
+					}
+				}
+			}
+
+			// ----------------------------------------------------------------
+			// 17. Windows cmd move/ren targeting .swarm\ paths
+			//    (FR-ADDED-2: move/ren can bypass rm blocks by renaming files)
+			// ----------------------------------------------------------------
+			if (/^\\?(?:move|ren)(?:\.exe)?\s/i.test(seg)) {
+				const moveMatch = seg.match(/^\\?(?:move|ren)(?:\.exe)?\s+(.+)$/i);
+				if (moveMatch) {
+					const argsStr = moveMatch[1].replace(/["']/g, '');
+					if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
+						throw new Error(
+							`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
+						);
+					}
+				}
+			}
+
+			// ----------------------------------------------------------------
+			// 18. PowerShell Move-Item/Rename-Item targeting .swarm/ paths
+			//    (FR-ADDED-3: Move-Item/Rename-Item can bypass rm blocks)
+			//    Covers aliases: move, mi, mv (for Move-Item); ren, rni (for Rename-Item)
+			// ----------------------------------------------------------------
+			if (
+				/^\\?(?:Move-Item|Rename-Item|move|mi|mv|ren|rni)\b.*\.swarm(?:[\x5c/\s]|$)/i.test(
+					seg,
+				)
+			) {
+				throw new Error(
+					`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
+				);
+			}
+
+			// ----------------------------------------------------------------
+			// 19. Non-recursive rm targeting .swarm/ paths
+			//    (FR-ADDED-4: rm without -r/-f flags on single files was not blocked)
+			// ----------------------------------------------------------------
+			// Match any rm targeting .swarm/ — but NOT recursive forms (handled by Section 3 above)
+			if (
+				/^\\?rm\b/i.test(seg) &&
+				!/^\\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/i.test(seg) &&
+				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
+			) {
+				throw new Error(
+					`BLOCKED: "rm" targeting .swarm/ detected — deleting files under .swarm/ is not allowed from shell commands`,
+				);
+			}
+
+			// ----------------------------------------------------------------
+			// 20. cp + rm chain detection (copy-then-delete bypass)
+			//    (FR-ADDED-5: cp to copy .swarm/ file out, then rm the source)
+			// ----------------------------------------------------------------
+			// Check for cp of .swarm/ file followed by rm of .swarm/ in same segment
+			if (
+				/\bcp\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg) &&
+				/\brm\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg)
+			) {
+				throw new Error(
+					`BLOCKED: "cp" of .swarm/ file followed by "rm" of .swarm/ source detected — copy-and-delete bypass is not allowed`,
+				);
+			}
+
+			// ----------------------------------------------------------------
+			// 21. Archive tools with delete-source flags targeting .swarm/
+			//    (FR-ADDED-6: rsync --remove-source-files, tar --remove-files,
+			//     zip -m, 7z -sdel can delete .swarm/ contents)
+			// ----------------------------------------------------------------
+			// rsync --remove-source-files
+			if (
+				/^rsync\b.*--remove-source-files\b/i.test(seg) &&
+				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
+			) {
+				throw new Error(
+					`BLOCKED: "rsync" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
+				);
+			}
+			// tar --remove-files
+			if (
+				/^tar\b.*--remove-files\b/i.test(seg) &&
+				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
+			) {
+				throw new Error(
+					`BLOCKED: "tar" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
+				);
+			}
+			// zip -m (move flag)
+			if (/^zip\b.*\s-m\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+				throw new Error(
+					`BLOCKED: "zip" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
+				);
+			}
+			// 7z -sdel (delete source files after archiving)
+			if (
+				/^7z\b.*\s-sdel\b/i.test(seg) &&
+				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
+			) {
+				throw new Error(
+					`BLOCKED: "7z" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
+				);
+			}
+
+			// ----------------------------------------------------------------
+			// 22. git clean -fd and git worktree remove --force (verify .swarm/ coverage)
+			//    (FR-ADDED-7: Already implemented in sections 11 above - patterns
+			//     block ALL git clean -fd and worktree remove --force commands,
+			//     which inherently covers .swarm/ paths. No extension needed.)
+			// ----------------------------------------------------------------
 		}
 	}
 

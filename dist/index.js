@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.21.0",
+    version: "7.21.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -24939,6 +24939,46 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       }
       if (/^mkfs[./]/.test(seg)) {
         throw new Error(`BLOCKED: Disk format command (mkfs) detected — disk formatting operation`);
+      }
+      if (/^\\?mv\s/i.test(seg)) {
+        const mvMatch = seg.match(/^\\?mv\s+(.+)$/i);
+        if (mvMatch) {
+          const argsStr = mvMatch[1];
+          const strippedArgs = argsStr.replace(/["']/g, "");
+          if (/\.swarm(?:[\x5c/\s]|$)/.test(strippedArgs)) {
+            throw new Error(`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`);
+          }
+        }
+      }
+      if (/^\\?(?:move|ren)(?:\.exe)?\s/i.test(seg)) {
+        const moveMatch = seg.match(/^\\?(?:move|ren)(?:\.exe)?\s+(.+)$/i);
+        if (moveMatch) {
+          const argsStr = moveMatch[1].replace(/["']/g, "");
+          if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
+            throw new Error(`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`);
+          }
+        }
+      }
+      if (/^\\?(?:Move-Item|Rename-Item|move|mi|mv|ren|rni)\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`);
+      }
+      if (/^\\?rm\b/i.test(seg) && !/^\\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "rm" targeting .swarm/ detected — deleting files under .swarm/ is not allowed from shell commands`);
+      }
+      if (/\bcp\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg) && /\brm\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "cp" of .swarm/ file followed by "rm" of .swarm/ source detected — copy-and-delete bypass is not allowed`);
+      }
+      if (/^rsync\b.*--remove-source-files\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "rsync" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`);
+      }
+      if (/^tar\b.*--remove-files\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "tar" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`);
+      }
+      if (/^zip\b.*\s-m\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "zip" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`);
+      }
+      if (/^7z\b.*\s-sdel\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
+        throw new Error(`BLOCKED: "7z" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`);
       }
     }
   }
@@ -62592,6 +62632,7 @@ If a tool modifies a file, it is a CODER tool. Delegate.
   - Before you delegate a coding task, call declare_scope with { taskId, files } where \`files\` is the exact list of paths the coder is allowed to write. Bundle any generated/lockfile paths that the change will produce (e.g. package-lock.json, Cargo.lock, dist/*).
   - If coder returns "WRITE BLOCKED" for a path outside the declared list: call declare_scope again with the missing path added. Do NOT instruct the coder to use bash, sed, echo, cat, tee, dd, or any interpreter eval (python -c, node -e, bun -e, ruby -e) to bypass the block. Those routes bypass the authority check and violate scope discipline.
   - Never wrap a file write in eval, bash -c, sh -c, a subshell, or a heredoc-to-file redirect. Those are bash workarounds and are banned even when scope appears to permit them — the write-authority guard is tool-scoped; bash is unguarded and must not be used as a write path.
+  - Do NOT use mv, Move-Item, move, ren, Rename-Item, or cp-then-rm chains to relocate, rename, or delete files under \`.swarm/\` as a workaround for blocked destructive commands. Those are file-move shell bypasses and are banned. Use the tool's dedicated tools (\`.swarm/\` file management or evidence manager tools) instead.
   - If you cannot enumerate files up front (e.g. a broad refactor), declare the containing directories — declare_scope accepts directory entries and grants containment.
   - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
