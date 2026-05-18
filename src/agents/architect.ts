@@ -151,6 +151,8 @@ If a tool modifies a file, it is a CODER tool. Delegate.
   - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
+   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required.
+   This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
 3. ONE task per {{AGENT_PREFIX}}coder call. Never batch.
 3a. PRE-DELEGATION SCOPE CALL (required): BEFORE every {{AGENT_PREFIX}}coder delegation, you MUST call \`declare_scope\` with { taskId, files } listing the exact file(s) this task will modify (including generated/lockfile paths). No \`declare_scope\` call → no coder delegation. See Rule 1a.
 <!-- BEHAVIORAL_GUIDANCE_START -->
@@ -291,7 +293,7 @@ VERIFICATION PROTOCOL: After the coder reports DONE, and before running Stage B 
 The reviewer's verdict MUST include a REUSE_RE_VERIFICATION field — do NOT accept an APPROVED verdict without it. Validate the field value against context: if the coder's EXPORTS_ADDED was non-empty, REUSE_RE_VERIFICATION must be VERIFIED or DUPLICATION_DETECTED (not SKIPPED). If EXPORTS_ADDED was "none", REUSE_RE_VERIFICATION must be SKIPPED.
 Stage B runs by default for TIER 1-3 classifications. Stage A passing does not satisfy Stage B.
 Stage B is where logic errors, security flaws, edge cases, and behavioral bugs are caught.
-You MUST delegate to each Stage B agent and wait for their response.
+You MUST delegate to each required Stage B agent. For the standard reviewer + test_engineer pair, dispatch both before waiting so Stage B actually runs in parallel.
 
 Stage B (reviewer + test_engineer) **always runs per-task** regardless of council mode — it is never replaced, never omitted, never deferred. When \`council_mode\` is enabled in the QA gate profile, a **phase-level** council review is additionally required before calling \`phase_complete\`: dispatch all 5 council members, collect their verdicts, call \`submit_phase_council_verdicts\`, then call \`phase_complete\` (Gate 5 validates the resulting \`phase-council.json\` evidence). Stage A (\`pre_check_batch\`) still runs as the pre-review gate for each task.
 

@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.21.5",
+    version: "7.22.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -26792,6 +26792,70 @@ function extractPlanTaskId(text) {
 function getSeedTaskId(session) {
   return session.currentTaskId ?? session.lastCoderDelegationTaskId;
 }
+function isTaskCompletedForParallelGuidance(task) {
+  const status = task.status ?? "pending";
+  return status === "completed" || status === "closed";
+}
+async function buildParallelExecutionGuidance(directory, sessionID, session) {
+  if (!directory)
+    return null;
+  const plan = await loadPlanJsonOnly(directory);
+  if (!plan) {
+    return null;
+  }
+  const profile = plan.execution_profile;
+  const enabled = profile?.parallelization_enabled === true;
+  const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+  if (!enabled || maxConcurrent <= 1)
+    return null;
+  if (hasActiveLeanTurbo(sessionID)) {
+    return "[NEXT] Lean Turbo is active; use lean_turbo_run_phase and Lean Turbo lane guidance instead of standard execution-profile slot filling.";
+  }
+  const currentPhase = plan.current_phase !== undefined ? plan.phases.find((phase) => phase.id === plan.current_phase) : plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+  if (!currentPhase)
+    return null;
+  const tasks = currentPhase.tasks;
+  if (tasks.length === 0)
+    return null;
+  const allTasks = plan.phases.flatMap((phase) => phase.tasks);
+  const completed = new Set;
+  for (const task of allTasks) {
+    const taskId = task.id;
+    if (isTaskCompletedForParallelGuidance(task))
+      completed.add(taskId);
+    if (getTaskState(session, taskId) === "complete")
+      completed.add(taskId);
+  }
+  const occupied = new Set;
+  for (const task of allTasks) {
+    const taskId = task.id;
+    if (task.status === "in_progress")
+      occupied.add(taskId);
+    const state = getTaskState(session, taskId);
+    if (ACTIVE_PARALLEL_TASK_STATES.has(state))
+      occupied.add(taskId);
+  }
+  const availableSlots = Math.max(0, maxConcurrent - occupied.size);
+  if (availableSlots <= 0) {
+    return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; all standard execution slots are occupied. Continue current active task gates before starting more coder work.`;
+  }
+  const eligible = tasks.filter((task) => {
+    const taskId = task.id;
+    const status = task.status ?? "pending";
+    if (status !== "pending")
+      return false;
+    if (occupied.has(taskId))
+      return false;
+    return task.depends.every((dep) => completed.has(dep));
+  }).map((task) => task.id).slice(0, availableSlots);
+  if (eligible.length === 0) {
+    return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
+  }
+  return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(", ")}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
+}
+function isParallelGuidancePhaseComplete(phase) {
+  return phase.status === "complete" || phase.status === "completed" || phase.status === "closed";
+}
 async function getEvidenceTaskId(session, directory) {
   const primary = session.currentTaskId ?? session.lastCoderDelegationTaskId;
   if (primary)
@@ -27297,15 +27361,16 @@ ${trimComment}${after}`;
           if (!/^[a-zA-Z0-9_-]{1,128}$/.test(deliberationSessionID)) {} else {
             const deliberationSession = ensureAgentSession(deliberationSessionID);
             const lastGate = deliberationSession.lastGateOutcome;
+            const parallelGuidance = await buildParallelExecutionGuidance(directory, deliberationSessionID, deliberationSession);
             let guidance;
             if (lastGate?.taskId) {
               const gateResult = lastGate.passed ? "PASSED" : "FAILED";
               const sanitizedGate = lastGate.gate.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\[ \]/g, "()").replace(/\[/g, "(").replace(/\]/g, ")").replace(/[\r\n]/g, " ").slice(0, 64);
               const sanitizedTaskId = lastGate.taskId.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\[/g, "(").replace(/\]/g, ")").replace(/[\r\n]/g, " ").slice(0, 32);
               guidance = `[Last gate: ${sanitizedGate} ${gateResult} for task ${sanitizedTaskId}]
-[NEXT] Execute the next gate for the current task.`;
+${parallelGuidance ?? "[NEXT] Execute the next gate for the current task."}`;
             } else {
-              guidance = "[NEXT] Begin the first plan task and run gates sequentially.";
+              guidance = parallelGuidance ?? "[NEXT] Begin the first plan task and run gates sequentially.";
             }
             const systemMsgIdx = messages.findIndex((m) => m && m.info?.role === "system");
             const insertIdx = systemMsgIdx >= 0 ? systemMsgIdx + 1 : 0;
@@ -27398,9 +27463,10 @@ ${warningLines.join(`
     toolAfter
   };
 }
-var pendingCoderScopeByTaskId;
+var pendingCoderScopeByTaskId, ACTIVE_PARALLEL_TASK_STATES;
 var init_delegation_gate = __esm(() => {
   init_schema();
+  init_manager();
   init_state();
   init_telemetry();
   init_logger();
@@ -27409,6 +27475,12 @@ var init_delegation_gate = __esm(() => {
   init_normalize_tool_name();
   init_utils2();
   pendingCoderScopeByTaskId = new Map;
+  ACTIVE_PARALLEL_TASK_STATES = new Set([
+    "coder_delegated",
+    "pre_check_passed",
+    "reviewer_run",
+    "tests_run"
+  ]);
 });
 
 // src/state/agent-run-context.ts
@@ -62871,6 +62943,8 @@ If a tool modifies a file, it is a CODER tool. Delegate.
   - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
+   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required.
+   This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
 3. ONE task per {{AGENT_PREFIX}}coder call. Never batch.
 3a. PRE-DELEGATION SCOPE CALL (required): BEFORE every {{AGENT_PREFIX}}coder delegation, you MUST call \`declare_scope\` with { taskId, files } listing the exact file(s) this task will modify (including generated/lockfile paths). No \`declare_scope\` call → no coder delegation. See Rule 1a.
 <!-- BEHAVIORAL_GUIDANCE_START -->
@@ -63011,7 +63085,7 @@ VERIFICATION PROTOCOL: After the coder reports DONE, and before running Stage B 
 The reviewer's verdict MUST include a REUSE_RE_VERIFICATION field — do NOT accept an APPROVED verdict without it. Validate the field value against context: if the coder's EXPORTS_ADDED was non-empty, REUSE_RE_VERIFICATION must be VERIFIED or DUPLICATION_DETECTED (not SKIPPED). If EXPORTS_ADDED was "none", REUSE_RE_VERIFICATION must be SKIPPED.
 Stage B runs by default for TIER 1-3 classifications. Stage A passing does not satisfy Stage B.
 Stage B is where logic errors, security flaws, edge cases, and behavioral bugs are caught.
-You MUST delegate to each Stage B agent and wait for their response.
+You MUST delegate to each required Stage B agent. For the standard reviewer + test_engineer pair, dispatch both before waiting so Stage B actually runs in parallel.
 
 Stage B (reviewer + test_engineer) **always runs per-task** regardless of council mode — it is never replaced, never omitted, never deferred. When \`council_mode\` is enabled in the QA gate profile, a **phase-level** council review is additionally required before calling \`phase_complete\`: dispatch all 5 council members, collect their verdicts, call \`submit_phase_council_verdicts\`, then call \`phase_complete\` (Gate 5 validates the resulting \`phase-council.json\` evidence). Stage A (\`pre_check_batch\`) still runs as the pre-review gate for each task.
 
