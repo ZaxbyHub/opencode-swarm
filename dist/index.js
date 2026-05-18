@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.23.0",
+    version: "7.23.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -41435,6 +41435,14 @@ function gitExec(args2) {
   }
   return result.stdout;
 }
+function appendRetentionEvent(directory, event) {
+  try {
+    const eventsPath = path14.join(directory, ".swarm", "events.jsonl");
+    const line = `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}
+`;
+    fs11.appendFileSync(eventsPath, line);
+  } catch {}
+}
 function getCurrentSha() {
   const output = gitExec(["rev-parse", "HEAD"]);
   return output.trim();
@@ -41486,6 +41494,17 @@ function handleSave(label, directory) {
       sha: newSha,
       timestamp
     });
+    if (log2.checkpoints.length > maxCheckpoints) {
+      const evicted = log2.checkpoints.splice(0, log2.checkpoints.length - maxCheckpoints);
+      try {
+        appendRetentionEvent(directory, {
+          event: "checkpoint_retention_applied",
+          evicted_labels: evicted.map((e) => e.label),
+          evicted_count: evicted.length,
+          remaining_count: log2.checkpoints.length
+        });
+      } catch {}
+    }
     writeCheckpointLog(log2, directory);
     return JSON.stringify({
       action: "save",
@@ -62651,7 +62670,17 @@ If the user answered the gate question, immediately follow up with ONE more ques
 - locked: true
 - recorded_at: <ISO timestamp>
 \`\`\`
-If the user accepts the default (1), skip writing this section entirely — serial execution is the default and needs no config.`;
+If the user accepts the default (1), skip writing this section entirely — serial execution is the default and needs no config.
+
+After asking the parallelization question (regardless of whether the user chose serial or parallel), immediately follow up with ONE more question: "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)".
+
+If the user chooses per-task commits, write this section to \`.swarm/context.md\`:
+\`\`\`
+## Task Completion Commit Policy
+- commit_after_each_completed_task: true
+- recorded_at: <ISO timestamp>
+\`\`\`
+If the user keeps the default phase-level behavior, do not write this section.`;
 }
 function buildAvailableToolsList(council) {
   const tools = AGENT_TOOL_MAP.architect ?? [];
@@ -64140,7 +64169,10 @@ save_plan({
 After \`save_plan\` succeeds, read \`.swarm/context.md\`:
 - If a \`## Pending QA Gate Selection\` section exists: parse the gate values, call \`set_qa_gates\` with those flags, confirm with the user ("QA gates applied: <list>"), then remove the section from context.md.
 - If a \`## Pending Parallelization Config\` section also exists: parse the values and call \`save_plan\` again with \`execution_profile\` set to \`{ parallelization_enabled: <parsed>, max_concurrent_tasks: <parsed>, council_parallel: false, locked: true }\`. Then remove the section from context.md. If the plan already had \`execution_profile.locked: true\`, skip this step — the profile is already locked and immutable.
+- If a \`## Task Completion Commit Policy\` section exists: preserve it in \`.swarm/context.md\` (do NOT remove). This section is execution-time guidance for optional per-task checkpoint commits after \`update_task_status(status="completed")\`.
 - If no pending section exists: {{QA_GATE_DIALOGUE_PLAN}}
+- If a \`## Task Completion Commit Policy\` section already exists in context.md, honor it as execution-time guidance (do NOT remove).
+- If no \`## Task Completion Commit Policy\` section exists AND the \`{{QA_GATE_DIALOGUE_PLAN}}\` template was not rendered (pending sections were pre-written), ask the commit-frequency question now. Write the section to context.md if the user chooses per-task commits; skip if they keep the default phase-level behavior.
 <!-- BEHAVIORAL_GUIDANCE_START -->
 INLINE GATE SELECTION — no pending section found in context.md. You MUST ask now.
   ✗ "I'll call set_qa_gates with defaults and move on"
@@ -64425,7 +64457,14 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
   Any blank "value: ___" field = gate was not run = task is NOT complete.
   Filling this checklist from memory ("I think I ran it") is INVALID. Each value must come from actual tool/agent output in this session.
 
-    5o. Call update_task_status with status "completed", proceed to next task.
+    5p. Call update_task_status with status "completed".
+    5q. OPTIONAL TASK-COMPLETION COMMIT POLICY: read \`.swarm/context.md\`.
+        - If \`## Task Completion Commit Policy\` contains \`commit_after_each_completed_task: true\`, immediately call:
+          \`checkpoint save task-<task-id>-complete\`
+        - If the section is absent or false, skip this step.
+        - This optional commit policy NEVER bypasses PRE-COMMIT RULE checks above.
+        - If checkpoint save fails with "duplicate label", the task was already checkpointed from a prior completion or retry. Silently skip — the existing checkpoint is valid.
+    5r. Proceed to next task.
 
 ## ⛔ RETROSPECTIVE GATE
 
@@ -83644,8 +83683,8 @@ ${formattedIndex}
         } else {
           if (existingContent.length > 0 && !existingContent.endsWith(`
 `)) {
-            updatedContent = existingContent + `
-` + newSection;
+            updatedContent = `${existingContent}
+${newSection}`;
           } else {
             updatedContent = existingContent + newSection;
           }
@@ -87127,7 +87166,7 @@ ${body2}`);
 
 // src/council/council-evidence-writer.ts
 import {
-  appendFileSync as appendFileSync11,
+  appendFileSync as appendFileSync12,
   existsSync as existsSync53,
   mkdirSync as mkdirSync24,
   readFileSync as readFileSync44,
@@ -87211,7 +87250,7 @@ function writeCouncilEvidence(workingDir, synthesis) {
       timestamp: synthesis.timestamp,
       vetoedBy: synthesis.vetoedBy
     });
-    appendFileSync11(join83(councilDir, `${synthesis.taskId}.rounds.jsonl`), `${auditLine}
+    appendFileSync12(join83(councilDir, `${synthesis.taskId}.rounds.jsonl`), `${auditLine}
 `);
   } catch (auditError) {
     console.warn(`writeCouncilEvidence: failed to append round-history audit log: ${auditError instanceof Error ? auditError.message : String(auditError)}`);
@@ -104047,9 +104086,9 @@ function recoverTaskStateFromDelegations(taskId, directory) {
     try {
       const evidence = readTaskEvidenceRaw(directory, taskId);
       if (evidence && evidence.gates && Array.isArray(evidence.required_gates)) {
-        if (evidence.gates["reviewer"] != null)
+        if (evidence.gates.reviewer != null)
           hasReviewer = true;
-        if (evidence.gates["test_engineer"] != null)
+        if (evidence.gates.test_engineer != null)
           hasTestEngineer = true;
       }
     } catch {}

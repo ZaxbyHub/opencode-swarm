@@ -116,6 +116,13 @@ describe('buildQaGateSelectionDialogue text', () => {
 		expect(text).toContain('eleven gates');
 		expect(text).toContain('council_general_review');
 	});
+
+	test('dialogue includes follow-up commit-frequency question and policy section', () => {
+		const text = buildQaGateSelectionDialogue('SPECIFY');
+		expect(text).toContain('Commit frequency for completed tasks?');
+		expect(text).toContain('## Task Completion Commit Policy');
+		expect(text).toContain('commit_after_each_completed_task: true');
+	});
 });
 
 describe('Architect prompt behavioral guidance markers', () => {
@@ -152,6 +159,12 @@ describe('Architect prompt behavioral guidance markers', () => {
 		);
 		expect(bulletMatches).not.toBeNull();
 		expect(bulletMatches!.length).toBeGreaterThanOrEqual(2);
+	});
+
+	test('prompt includes task-completion commit policy instructions', () => {
+		expect(renderedPrompt).toContain('## Task Completion Commit Policy');
+		expect(renderedPrompt).toContain('OPTIONAL TASK-COMPLETION COMMIT POLICY');
+		expect(renderedPrompt).toContain('checkpoint save task-<task-id>-complete');
 	});
 });
 

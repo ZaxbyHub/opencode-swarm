@@ -530,8 +530,8 @@ export function recoverTaskStateFromDelegations(
 				evidence.gates &&
 				Array.isArray(evidence.required_gates)
 			) {
-				if (evidence.gates['reviewer'] != null) hasReviewer = true;
-				if (evidence.gates['test_engineer'] != null) hasTestEngineer = true;
+				if (evidence.gates.reviewer != null) hasReviewer = true;
+				if (evidence.gates.test_engineer != null) hasTestEngineer = true;
 			}
 		} catch {
 			// Evidence file corrupt or unreadable — non-fatal, delegation chain

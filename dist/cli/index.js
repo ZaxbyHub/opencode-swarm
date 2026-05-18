@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.23.0",
+    version: "7.23.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -34310,6 +34310,14 @@ function gitExec(args) {
   }
   return result.stdout;
 }
+function appendRetentionEvent(directory, event) {
+  try {
+    const eventsPath = path9.join(directory, ".swarm", "events.jsonl");
+    const line = `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}
+`;
+    fs6.appendFileSync(eventsPath, line);
+  } catch {}
+}
 function getCurrentSha() {
   const output = gitExec(["rev-parse", "HEAD"]);
   return output.trim();
@@ -34361,6 +34369,17 @@ function handleSave(label, directory) {
       sha: newSha,
       timestamp
     });
+    if (log2.checkpoints.length > maxCheckpoints) {
+      const evicted = log2.checkpoints.splice(0, log2.checkpoints.length - maxCheckpoints);
+      try {
+        appendRetentionEvent(directory, {
+          event: "checkpoint_retention_applied",
+          evicted_labels: evicted.map((e) => e.label),
+          evicted_count: evicted.length,
+          remaining_count: log2.checkpoints.length
+        });
+      } catch {}
+    }
     writeCheckpointLog(log2, directory);
     return JSON.stringify({
       action: "save",

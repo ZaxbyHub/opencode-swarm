@@ -508,7 +508,7 @@ export async function skillPropagationGateBefore(
 				} else {
 					// Append new section
 					if (existingContent.length > 0 && !existingContent.endsWith('\n')) {
-						updatedContent = existingContent + '\n' + newSection;
+						updatedContent = `${existingContent}\n${newSection}`;
 					} else {
 						updatedContent = existingContent + newSection;
 					}

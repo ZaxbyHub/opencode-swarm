@@ -30,6 +30,13 @@ interface CheckpointLog {
 	checkpoints: CheckpointEntry[];
 }
 
+interface RetentionEvent {
+	event: 'checkpoint_retention_applied';
+	evicted_labels: string[];
+	evicted_count: number;
+	remaining_count: number;
+}
+
 // ============ Validation ============
 
 // Control characters to reject: tab, newline, carriage return, vertical tab, form feed, null, etc.
@@ -163,6 +170,16 @@ function gitExec(args: string[]): string {
 	return result.stdout;
 }
 
+function appendRetentionEvent(directory: string, event: RetentionEvent): void {
+	try {
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		const line = `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}\n`;
+		fs.appendFileSync(eventsPath, line);
+	} catch {
+		// Event logging is best-effort — failures are silently ignored.
+	}
+}
+
 /**
  * Get current git SHA
  */
@@ -254,6 +271,25 @@ function handleSave(label: string, directory: string): string {
 			sha: newSha,
 			timestamp,
 		});
+
+		// Enforce checkpoint retention limit — evict oldest checkpoints
+		if (log.checkpoints.length > maxCheckpoints) {
+			const evicted = log.checkpoints.splice(
+				0,
+				log.checkpoints.length - maxCheckpoints,
+			);
+			try {
+				appendRetentionEvent(directory, {
+					event: 'checkpoint_retention_applied',
+					evicted_labels: evicted.map((e) => e.label),
+					evicted_count: evicted.length,
+					remaining_count: log.checkpoints.length,
+				});
+			} catch {
+				// Event logging is best-effort, don't fail the save
+			}
+		}
+
 		writeCheckpointLog(log, directory);
 
 		return JSON.stringify(
