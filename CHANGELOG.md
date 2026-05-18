@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.23.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.22.1...v7.23.0) (2026-05-18)
+
+
+### Features
+
+* auto-populate skill context and enforce skill propagation to sub-agents ([#909](https://github.com/zaxbysauce/opencode-swarm/issues/909)) ([275fd2f](https://github.com/zaxbysauce/opencode-swarm/commit/275fd2fcb53c791951aa840de92aba3ccf484a29))
+
 ## [7.22.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.22.0...v7.22.1) (2026-05-18)
 
 
