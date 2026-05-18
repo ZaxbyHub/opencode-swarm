@@ -398,7 +398,8 @@ export async function skillPropagationGateBefore(
 	// unbounded file reads stalling every delegated Task call.
 	// Uses ONLY pre-loaded session entries — no additional file reads.
 	let scoringSkipped = false;
-	let scored: Array<{ skillPath: string; score: number; usageCount: number }> = [];
+	let scored: Array<{ skillPath: string; score: number; usageCount: number }> =
+		[];
 	if (
 		skillsValue &&
 		skillsValue.toLowerCase() !== 'none' &&
@@ -632,7 +633,8 @@ export async function skillPropagationTransformScan(
 	// Prevents duplicate entries when the same message is scanned on
 	// repeated messagesTransform calls.
 	let dedupKeys = new Set<string>();
-	let existingEntries: ReturnType<typeof _internals.readSkillUsageEntriesTail> = [];
+	let existingEntries: ReturnType<typeof _internals.readSkillUsageEntriesTail> =
+		[];
 	try {
 		existingEntries = _internals.readSkillUsageEntriesTail(directory, {
 			sessionID,
