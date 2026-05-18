@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.24.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.23.1...v7.24.0) (2026-05-18)
+
+
+### Features
+
+* **architect:** add optional per-task checkpoint commit policy ([#913](https://github.com/zaxbysauce/opencode-swarm/issues/913)) ([8fe36b9](https://github.com/zaxbysauce/opencode-swarm/commit/8fe36b93aaee8a37a669ae9ae29a896ea4ffe0ef))
+
 ## [7.23.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.23.0...v7.23.1) (2026-05-18)
 
 
