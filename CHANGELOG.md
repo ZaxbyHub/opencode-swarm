@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.22.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.22.0...v7.22.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **architect:** honor parallel execution profiles ([#905](https://github.com/zaxbysauce/opencode-swarm/issues/905)) ([87667ce](https://github.com/zaxbysauce/opencode-swarm/commit/87667ce25e680105643ece4e40e4376a8a407cab))
+
 ## [7.22.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.5...v7.22.0) (2026-05-18)
 
 
