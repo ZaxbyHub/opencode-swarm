@@ -43,7 +43,8 @@ describe('ARCHITECT WORKFLOW: Sequence Bypass Prevention', () => {
 		);
 		const stripped = between45and5
 			.replace(/SWARM_SKIP_SPEC_GATE/gi, '')
-			.replace(/env var bypass/gi, '');
+			.replace(/env var bypass/gi, '')
+			.replace(/control-bypass/gi, '');
 		const lowerStripped = stripped.toLowerCase();
 		expect(lowerStripped).not.toContain('skip');
 		expect(lowerStripped).not.toContain('bypass');
@@ -343,6 +344,17 @@ describe('ARCHITECT WORKFLOW: Delegation Safety', () => {
 	test('SECURITY: One agent per message (Rule 2)', () => {
 		expect(prompt).toContain('ONE agent per message');
 		expect(prompt).toContain('Send, STOP, wait for response');
+	});
+
+	test('SECURITY: Stage B parallel exception is narrow and does not weaken coder task isolation', () => {
+		expect(prompt).toContain(
+			'Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task',
+		);
+		expect(prompt).toContain(
+			'This exception NEVER applies to coder delegations',
+		);
+		expect(prompt).toContain('ONE task per {{AGENT_PREFIX}}coder call');
+		expect(prompt).toContain('Never batch');
 	});
 
 	test('SECURITY: One task per coder call (Rule 3)', () => {

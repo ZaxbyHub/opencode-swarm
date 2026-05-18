@@ -9,17 +9,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import type { PluginConfig } from '../config';
+import type { Phase, Plan, Task } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import { loadPlanJsonOnly } from '../plan/manager';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
 	advanceTaskStateAndPersist,
 	ensureAgentSession,
 	getTaskState,
+	hasActiveLeanTurbo,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
 	isCouncilGateActive,
@@ -349,6 +352,97 @@ function extractPlanTaskId(text: string): string | null {
  */
 function getSeedTaskId(session: AgentSessionState): string | null {
 	return session.currentTaskId ?? session.lastCoderDelegationTaskId;
+}
+
+const ACTIVE_PARALLEL_TASK_STATES = new Set([
+	'coder_delegated',
+	'pre_check_passed',
+	'reviewer_run',
+	'tests_run',
+]);
+
+function isTaskCompletedForParallelGuidance(task: Task): boolean {
+	const status = task.status ?? 'pending';
+	return status === 'completed' || status === 'closed';
+}
+
+async function buildParallelExecutionGuidance(
+	directory: string | undefined,
+	sessionID: string,
+	session: AgentSessionState,
+): Promise<string | null> {
+	if (!directory) return null;
+
+	const plan: Plan | null = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		return null;
+	}
+
+	const profile = plan.execution_profile;
+	const enabled = profile?.parallelization_enabled === true;
+	const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+	if (!enabled || maxConcurrent <= 1) return null;
+
+	if (hasActiveLeanTurbo(sessionID)) {
+		return '[NEXT] Lean Turbo is active; use lean_turbo_run_phase and Lean Turbo lane guidance instead of standard execution-profile slot filling.';
+	}
+
+	const currentPhase =
+		plan.current_phase !== undefined
+			? plan.phases.find((phase) => phase.id === plan.current_phase)
+			: plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+	if (!currentPhase) return null;
+
+	const tasks = currentPhase.tasks;
+	if (tasks.length === 0) return null;
+
+	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
+	const completed = new Set<string>();
+	for (const task of allTasks) {
+		const taskId = task.id;
+		if (isTaskCompletedForParallelGuidance(task)) completed.add(taskId);
+		if (getTaskState(session, taskId) === 'complete') completed.add(taskId);
+	}
+
+	// max_concurrent_tasks is a plan-level budget, so active work in earlier or
+	// later phases still occupies a standard execution slot.
+	const occupied = new Set<string>();
+	for (const task of allTasks) {
+		const taskId = task.id;
+		if (task.status === 'in_progress') occupied.add(taskId);
+		const state = getTaskState(session, taskId);
+		if (ACTIVE_PARALLEL_TASK_STATES.has(state)) occupied.add(taskId);
+	}
+
+	const availableSlots = Math.max(0, maxConcurrent - occupied.size);
+	if (availableSlots <= 0) {
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; all standard execution slots are occupied. Continue current active task gates before starting more coder work.`;
+	}
+
+	const eligible = tasks
+		.filter((task) => {
+			const taskId = task.id;
+			const status = task.status ?? 'pending';
+			if (status !== 'pending') return false;
+			if (occupied.has(taskId)) return false;
+			return task.depends.every((dep) => completed.has(dep));
+		})
+		.map((task) => task.id)
+		.slice(0, availableSlots);
+
+	if (eligible.length === 0) {
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
+	}
+
+	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
+}
+
+function isParallelGuidancePhaseComplete(phase: Phase): boolean {
+	return (
+		phase.status === 'complete' ||
+		phase.status === 'completed' ||
+		phase.status === 'closed'
+	);
 }
 
 /**
@@ -1350,6 +1444,11 @@ export function createDelegationGateHook(
 							deliberationSessionID,
 						);
 						const lastGate = deliberationSession.lastGateOutcome;
+						const parallelGuidance = await buildParallelExecutionGuidance(
+							directory,
+							deliberationSessionID,
+							deliberationSession,
+						);
 						let guidance: string;
 						if (lastGate?.taskId) {
 							const gateResult = lastGate.passed ? 'PASSED' : 'FAILED';
@@ -1370,11 +1469,15 @@ export function createDelegationGateHook(
 								.replace(/[\r\n]/g, ' ')
 								.slice(0, 32);
 							// Concise [NEXT] directive with last-gate status
-							guidance = `[Last gate: ${sanitizedGate} ${gateResult} for task ${sanitizedTaskId}]\n[NEXT] Execute the next gate for the current task.`;
+							guidance = `[Last gate: ${sanitizedGate} ${gateResult} for task ${sanitizedTaskId}]\n${
+								parallelGuidance ??
+								'[NEXT] Execute the next gate for the current task.'
+							}`;
 						} else {
 							// Concise [NEXT] directive to begin first plan task
 							// Also handles case where lastGate exists but taskId is missing
 							guidance =
+								parallelGuidance ??
 								'[NEXT] Begin the first plan task and run gates sequentially.';
 						}
 

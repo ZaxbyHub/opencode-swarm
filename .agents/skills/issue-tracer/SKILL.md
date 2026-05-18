@@ -26,6 +26,7 @@ Infer the mode from the user request and newest instructions.
 - `plan-then-approval`: produce a reviewed plan and wait for explicit approval before production-code edits.
 - `approved implementation`: if the user already asked to fix or implement, continue through reproduction, localization, minimal patch, validation, and PR-ready summary.
 - `high-risk`: require approval before edits when the fix is destructive, broad, breaking, migration-heavy, or depends on unavailable secrets/data.
+- `review-followup`: if the user pastes PR review feedback, treat each finding as a claim to verify against the current branch or live PR head before editing. Classify items as confirmed, disproved, pre-existing, or unverified, and patch only the confirmed gaps.
 
 Do not force a blocking approval gate for ordinary Codex implementation work when the user already asked for the fix. Do force it for plan-only requests, high-risk work, destructive operations, or explicit user instructions.
 
@@ -37,7 +38,7 @@ For `opencode-swarm`, read the repo contract before meaningful work:
 2. `docs/engineering-invariants.md` when touching relevant invariants
 3. `.opencode/skills/writing-tests/SKILL.md` before writing or modifying tests
 4. `.opencode/skills/engineering-conventions/SKILL.md` before architecture, plugin init, subprocess, tool registration, plan durability, `.swarm` storage, runtime portability, session/global state, guardrails/retry, chat/system hook, or release/cache work
-5. `.claude/skills/commit-pr/SKILL.md` before commit, push, or PR creation unless a Codex publish skill supersedes it
+5. `.agents/skills/commit-pr/SKILL.md` before commit, push, or PR creation; use `.claude/skills/commit-pr/SKILL.md` as the underlying repo protocol it points to
 
 If `.Codex/session/swarm-mode.md` exists, read it before complex work and follow its quality gates.
 
@@ -89,10 +90,11 @@ gh issue view <id> --comments --json number,title,body,author,labels,state,comme
 ```
 
 2. Read linked PRs, commits, logs, screenshots, discussions, and external docs referenced by the issue.
-3. Extract observed behavior, expected behavior, exact errors, reproduction steps, environment, acceptance criteria, and ambiguities.
-4. Discover verification commands from actual repo files, not memory.
-5. Reproduce with the smallest faithful command or scenario.
-6. If direct reproduction is impossible, create or describe a minimal failing test/script/checklist that targets the reported behavior.
+3. If the input includes PR review feedback, refresh the live PR head or active branch before trusting any pasted claim.
+4. Extract observed behavior, expected behavior, exact errors, reproduction steps, environment, acceptance criteria, and ambiguities.
+5. Discover verification commands from actual repo files, not memory.
+6. Reproduce with the smallest faithful command or scenario.
+7. If direct reproduction is impossible, create or describe a minimal failing test/script/checklist that targets the reported behavior.
 
 Gate: continue only when the issue is reproduced, a faithful failing regression exists, or non-reproducibility is documented with missing inputs.
 
@@ -130,7 +132,8 @@ Gate: implementation may begin only when mode permits it and critic blockers are
 4. Apply the minimal fix with `apply_patch`.
 5. Re-read changed files and verify all runtime entry points are wired.
 6. Run focused regression tests, impacted tests, and repo-required checks. For `opencode-swarm`, use shell commands for repo validation; do not use broad OpenCode `test_runner` scopes.
-7. Record commands, exit codes, and meaningful output.
+7. When broad local suites are noisy, host-specific, or plausibly pre-existing, compare the failing path against a clean `origin/main` worktree and document the result. Use remote CI as the final cross-platform publish signal when local host behavior is not authoritative.
+8. Record commands, exit codes, and meaningful output.
 
 Gate: changed behavior matches the reviewed plan or the deviation is documented; regression protection exists or infeasibility is justified; impacted checks pass or unrelated failures are proven.
 
@@ -140,7 +143,8 @@ Gate: changed behavior matches the reviewed plan or the deviation is documented;
 2. Verify no unrelated files changed.
 3. Prepare PR text with `assets/pr-template.md`.
 4. Include root cause with file/line references, change summary, tests/checks, regression coverage, invariant audit evidence for touched areas, and residual risks.
-5. Commit, push, or open a PR only when the user explicitly asked and the repo publish instructions have been loaded.
+5. If this is review follow-up work, refresh the existing PR body and validation summary when pass counts, caveats, or invariant evidence changed.
+6. Commit, push, or open a PR only when the user explicitly asked and the repo publish instructions have been loaded.
 
 ## No-Gap Checklist
 
@@ -152,5 +156,6 @@ Gate: changed behavior matches the reviewed plan or the deviation is documented;
 - Positive, negative, boundary, and adversarial cases are covered or explicitly ruled out.
 - Regression test fails before the fix and passes after the fix when feasible.
 - Impacted tests and quality checks are run.
+- Suspected pre-existing or host-specific failures are compared against clean `origin/main` or explicitly documented as unverified.
 - Critic review completed before approval or implementation gate.
 - PR-ready summary is complete.
