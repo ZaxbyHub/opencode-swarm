@@ -127,7 +127,56 @@ mock.module('../../../src/utils/path-security', () => ({
 
 ## Two-Tier Mock Convention
 
-The codebase uses a two-tier strategy for mock isolation:
+The codebase uses a two-tier strategy for mock isolation, plus a zero-mock testing pattern:
+
+### Tier 0: _test_exports Pure Function Testing (Zero Mocks)
+
+When a module contains internal utility functions (formatters, normalizers, transformers) that don't need external dependencies, export them via a `_test_exports` object for direct unit testing. This avoids `mock.module` entirely and produces tests that are deterministic, fast, and immune to Bun's cross-file mock leakage:
+
+```typescript
+// In source file (src/tools/formatter.ts)
+function formatEntry(entry: SomeType): string {
+  // internal implementation — may use optional chaining, defaults, etc.
+  return entry.score?.toFixed(2) ?? 'N/A';
+}
+
+// Public API (tool handler, command handler, etc.)
+export function handleQuery(ctx: Context) {
+  const entries = readData(ctx);
+  return entries.map(formatEntry);
+}
+
+// Export seam for testing — only used by test files
+export const _test_exports = { formatEntry };
+```
+
+```typescript
+// In test file (tests/unit/tools/formatter.test.ts)
+import { _test_exports } from '../../../src/tools/formatter';
+
+const { formatEntry } = _test_exports;
+
+describe('formatEntry', () => {
+  test('handles missing score', () => {
+    expect(formatEntry({ score: undefined })).toBe('N/A');
+  });
+  test('formats numeric score', () => {
+    expect(formatEntry({ score: 0.85 })).toBe('0.85');
+  });
+});
+```
+
+**When to use Tier 0 vs Tier 1:**
+- **Tier 0 (`_test_exports`)**: The function is a pure utility (formatter, normalizer, transformer) that doesn't call external modules. No mocking needed — test it directly.
+- **Tier 1 (`_internals`)**: You need to mock a function within the same module to test the caller in isolation. The function has side effects or calls external APIs.
+- **Tier 2 (`mock.module`)**: You need to mock a dependency from another module (Node built-ins, other application modules).
+
+**Benefits of Tier 0:**
+- Zero mock pollution — no `mock.module` calls, no `mock.restore()` needed
+- Works in batch test runs without per-file isolation
+- Type-safe (the exported object carries the real TypeScript types)
+- No filesystem dependencies (no tmpDir, no chdir, no existsSync)
+- Deterministic on all platforms and CI environments
 
 ### Tier 1: _internals DI Seams (Within-Module)
 
