@@ -85,6 +85,7 @@ For each file group:
 - Batch-fixing all findings in one pass without reading each file individually.
 - "While I'm here" changes — only fix what was flagged.
 - Changing unrelated code to "improve" the area around the finding.
+- Accepting coder edits to template literal strings (backtick-delimited `.ts` content) without verifying that internal backticks are escaped. Unescaped backticks cause `SyntaxError` at build time even when the text looks correct in Read output.
 
 ## Step 4 — Update tests
 
@@ -129,7 +130,15 @@ git commit -m "fix(pr-review): address findings C-01, C-02, T-01, W-01"
 
 3. Verify the commit message follows conventional commit format.
 
-## Step 7 — Push and update PR
+## Step 7 — Pre-push validation
+
+Before pushing, run local validation to catch formatting and style issues that CI would reject:
+
+1. **Lint/format check**: Run the project's local linting tool on all modified files. This catches formatting-only issues without burning a CI cycle. On this project, check that any coder-written test files pass formatting validation.
+2. **Build check**: Run the project build command to verify no syntax errors (especially important when coders modify template literal strings — unescaped backticks cause build failures).
+3. Stage and commit.
+
+## Step 8 — Push and update PR
 
 ```bash
 # For amended commits:
@@ -157,21 +166,23 @@ Addressed N findings from PR review:
 Skipped: none
 ```
 
-## Step 8 — Monitor CI
+## Step 9 — Monitor CI
 
 1. Wait for CI to start.
-2. If CI fails:
-   - Read the failure log carefully.
-   - Determine if the failure is caused by your fix or is a pre-existing issue.
-   - If caused by your fix: return to Step 3 for that finding.
-   - If pre-existing (infrastructure flake, unrelated test):
-     a. Rerun the failed job once.
-     b. If the rerun passes: the failure was infrastructure. Proceed.
-     c. If the rerun fails the same way: this is a real pre-existing issue. Document it separately in the PR thread (do NOT mark CI as green). The PR author or maintainer must decide whether to merge with a known pre-existing failure or fix it first.
-3. CI outcomes:
-   - **Green (all checks pass)**: You're done.
-   - **Pre-existing failure confirmed after rerun**: Document in PR, flag to maintainer. Do NOT claim CI is green.
-   - **Blocked (job stuck/queued >30 min)**: May be a GitHub Actions capacity issue. Re-trigger the workflow.
+2. **If a CI run appears stuck (queued >10 minutes)**: check for stale in-progress runs from prior pushes. Cancel them with `gh run cancel <run-id>` — GitHub Actions concurrency groups queue new runs behind in-progress ones.
+3. If CI fails:
+    - Read the failure log carefully.
+    - Determine if the failure is caused by your fix or is a pre-existing issue.
+    - If caused by your fix: return to Step 3 for that finding.
+    - If caused by formatting/style: fix locally, rebuild, amend, and push again.
+    - If pre-existing (infrastructure flake, unrelated test):
+      a. Rerun the failed job once.
+      b. If the rerun passes: the failure was infrastructure. Proceed.
+      c. If the rerun fails the same way: this is a real pre-existing issue. Document it separately in the PR thread (do NOT mark CI as green). The PR author or maintainer must decide whether to merge with a known pre-existing failure or fix it first.
+4. CI outcomes:
+    - **Green (all checks pass)**: You're done.
+    - **Pre-existing failure confirmed after rerun**: Document in PR, flag to maintainer. Do NOT claim CI is green.
+    - **Blocked (job stuck/queued >30 min after cancellation)**: Re-trigger the workflow.
 
 ## Platform-specific notes
 
