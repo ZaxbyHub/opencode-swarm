@@ -46,19 +46,6 @@ function isAlreadyInHive(
 }
 
 /**
- * Count distinct phase numbers in a swarm entry's confirmed_by array.
- */
-function countDistinctPhases(
-	confirmedBy: SwarmKnowledgeEntry['confirmed_by'],
-): number {
-	const phaseNumbers = new Set<number>();
-	for (const record of confirmedBy) {
-		phaseNumbers.add(record.phase_number);
-	}
-	return phaseNumbers.size;
-}
-
-/**
  * Check whether a swarm knowledge entry is eligible for hive promotion.
  * Three routes to eligibility:
  *   Route 1: hive_eligible flag + 3+ distinct phases
@@ -144,15 +131,6 @@ function calculateEncounterScore(
 		Math.max(newScore, config.min_encounter_score),
 		config.max_encounter_score,
 	);
-}
-
-/**
- * Get the age of an entry in milliseconds.
- */
-function getEntryAgeMs(createdAt: string): number {
-	const createdTime = new Date(createdAt).getTime();
-	if (Number.isNaN(createdTime)) return 0;
-	return Date.now() - createdTime;
 }
 
 /**

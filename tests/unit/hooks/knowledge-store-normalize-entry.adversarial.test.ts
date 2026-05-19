@@ -138,9 +138,9 @@ describe('normalizeEntry — encounter_score adversarial', () => {
 		const throwingEntry = new Proxy(entry, {
 			get(target, prop) {
 				if (
-				prop === 'encounter_score' &&
-				!Object.hasOwn(target, 'encounter_score')
-			) {
+					prop === 'encounter_score' &&
+					!Object.hasOwn(target, 'encounter_score')
+				) {
 					throw new Error('Getter threw — prototype pollution simulation');
 				}
 				return Reflect.get(target, prop);

@@ -185,40 +185,94 @@ describe('handleCloseCommand — hive promotion', () => {
 			// Override mock to return 3 eligible entries
 			mockReadKnowledge.mockImplementation(async () => [
 				{
-					id: 'entry-1', lesson: 'Lesson one', category: 'process',
+					id: 'entry-1',
+					lesson: 'Lesson one',
+					category: 'process',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 				{
-					id: 'entry-2', lesson: 'Lesson two', category: 'architecture',
+					id: 'entry-2',
+					lesson: 'Lesson two',
+					category: 'architecture',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 				{
-					id: 'entry-3', lesson: 'Lesson three', category: 'tooling',
+					id: 'entry-3',
+					lesson: 'Lesson three',
+					category: 'tooling',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 			]);
 
@@ -252,40 +306,94 @@ describe('handleCloseCommand — hive promotion', () => {
 
 			mockReadKnowledge.mockImplementation(async () => [
 				{
-					id: 'entry-1', lesson: 'Lesson one', category: 'process',
+					id: 'entry-1',
+					lesson: 'Lesson one',
+					category: 'process',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 				{
-					id: 'entry-2', lesson: 'Lesson two', category: 'architecture',
+					id: 'entry-2',
+					lesson: 'Lesson two',
+					category: 'architecture',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 				{
-					id: 'entry-3', lesson: 'Lesson three', category: 'tooling',
+					id: 'entry-3',
+					lesson: 'Lesson three',
+					category: 'tooling',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 			]);
 
@@ -314,28 +422,64 @@ describe('handleCloseCommand — hive promotion', () => {
 
 			mockReadKnowledge.mockImplementation(async () => [
 				{
-					id: 'entry-1', lesson: 'Lesson one', category: 'process',
+					id: 'entry-1',
+					lesson: 'Lesson one',
+					category: 'process',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 				{
-					id: 'entry-2', lesson: 'Lesson two', category: 'architecture',
+					id: 'entry-2',
+					lesson: 'Lesson two',
+					category: 'architecture',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, task_id: '1.1', timestamp: new Date().toISOString() },
-						{ phase_number: 2, task_id: '2.1', timestamp: new Date().toISOString() },
-						{ phase_number: 3, task_id: '3.1', timestamp: new Date().toISOString() },
+						{
+							phase_number: 1,
+							task_id: '1.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 2,
+							task_id: '2.1',
+							timestamp: new Date().toISOString(),
+						},
+						{
+							phase_number: 3,
+							task_id: '3.1',
+							timestamp: new Date().toISOString(),
+						},
 					],
 					tags: [],
 					created_at: new Date().toISOString(),
-					retrieval_outcomes: { applied_count: 0, succeeded_after_count: 0, failed_after_count: 0 },
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
 				},
 			]);
 

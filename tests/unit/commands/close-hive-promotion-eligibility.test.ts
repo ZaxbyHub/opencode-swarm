@@ -18,7 +18,13 @@
  * close.ts (likely due to lazy/binding-time import patterns).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
@@ -30,13 +36,13 @@ import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 
 const mockCurateAndStoreSwarm = mock(async () => {});
 
-	// curateAndStoreSwarm must return { stored: 1 } to prevent knowledge.jsonl deletion
-	// (the deletion condition is curationSucceeded && allLessons.length > 0; with stored=1
-	// but empty allLessons, the condition is false and the file is preserved).
-	// Entries are pre-written to the file in beforeEach, so readKnowledge returns them.
-	mock.module('../../../src/hooks/knowledge-curator.js', () => ({
-		curateAndStoreSwarm: mockCurateAndStoreSwarm,
-	}));
+// curateAndStoreSwarm must return { stored: 1 } to prevent knowledge.jsonl deletion
+// (the deletion condition is curationSucceeded && allLessons.length > 0; with stored=1
+// but empty allLessons, the condition is false and the file is preserved).
+// Entries are pre-written to the file in beforeEach, so readKnowledge returns them.
+mock.module('../../../src/hooks/knowledge-curator.js', () => ({
+	curateAndStoreSwarm: mockCurateAndStoreSwarm,
+}));
 
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mock(async () => {}),
@@ -191,7 +197,9 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 	beforeEach(() => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockCurateAndStoreSwarm.mockImplementation(async () => ({ stored: 1 }));
-		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-hive-eligibility-test-'));
+		testDir = mkdtempSync(
+			path.join(os.tmpdir(), 'close-hive-eligibility-test-'),
+		);
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 		// Ensure no pre-existing knowledge file
 		if (existsSync(knowledgePath())) rmSync(knowledgePath());
@@ -217,7 +225,11 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 					lesson: 'Lesson with insufficient phase count',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'test' },
+						{
+							phase_number: 1,
+							confirmed_at: '2024-01-01T00:00:00Z',
+							project_name: 'test',
+						},
 					],
 				}),
 			]);
@@ -235,8 +247,16 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 					lesson: 'Lesson with only 2 phases',
 					hive_eligible: true,
 					confirmed_by: [
-						{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'test' },
-						{ phase_number: 2, confirmed_at: '2024-01-02T00:00:00Z', project_name: 'test' },
+						{
+							phase_number: 1,
+							confirmed_at: '2024-01-01T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 2,
+							confirmed_at: '2024-01-02T00:00:00Z',
+							project_name: 'test',
+						},
 					],
 				}),
 			]);
@@ -254,11 +274,31 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 					lesson: 'Lesson marked not hive eligible',
 					hive_eligible: false,
 					confirmed_by: [
-						{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'test' },
-						{ phase_number: 2, confirmed_at: '2024-01-02T00:00:00Z', project_name: 'test' },
-						{ phase_number: 3, confirmed_at: '2024-01-03T00:00:00Z', project_name: 'test' },
-						{ phase_number: 4, confirmed_at: '2024-01-04T00:00:00Z', project_name: 'test' },
-						{ phase_number: 5, confirmed_at: '2024-01-05T00:00:00Z', project_name: 'test' },
+						{
+							phase_number: 1,
+							confirmed_at: '2024-01-01T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 2,
+							confirmed_at: '2024-01-02T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 3,
+							confirmed_at: '2024-01-03T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 4,
+							confirmed_at: '2024-01-04T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 5,
+							confirmed_at: '2024-01-05T00:00:00Z',
+							project_name: 'test',
+						},
 					],
 				}),
 			]);
@@ -280,9 +320,21 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 					lesson: 'Many phases but not eligible and no fast-track',
 					hive_eligible: false,
 					confirmed_by: [
-						{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'test' },
-						{ phase_number: 2, confirmed_at: '2024-01-02T00:00:00Z', project_name: 'test' },
-						{ phase_number: 3, confirmed_at: '2024-01-03T00:00:00Z', project_name: 'test' },
+						{
+							phase_number: 1,
+							confirmed_at: '2024-01-01T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 2,
+							confirmed_at: '2024-01-02T00:00:00Z',
+							project_name: 'test',
+						},
+						{
+							phase_number: 3,
+							confirmed_at: '2024-01-03T00:00:00Z',
+							project_name: 'test',
+						},
 					],
 				}),
 			]);
@@ -375,7 +427,11 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 					hive_eligible: true,
 					// Only 1 valid phase_number, so size < 3 → not promoted
 					confirmed_by: [
-						{ phase_number: 1, confirmed_at: '2024-01-01T00:00:00Z', project_name: 'test' },
+						{
+							phase_number: 1,
+							confirmed_at: '2024-01-01T00:00:00Z',
+							project_name: 'test',
+						},
 						{
 							phase_number: null as unknown as number,
 							confirmed_at: '2024-01-02T00:00:00Z',
