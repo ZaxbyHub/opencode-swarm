@@ -93,6 +93,19 @@ afterEach(() => {
   mock.restore();
 });
 ```
+
+**CRITICAL: When using `mockImplementation()` on a `mock()` function, call `mockReset()` in `afterEach`.** `mock.restore()` only restores `mock.module` state — it does NOT reset `mockImplementation` on individual `mock()` functions. Without `mockReset()`, the implementation set in one test leaks into the next test's active window:
+```typescript
+const mockFn = mock(() => 'default');
+
+beforeEach(() => {
+  mockFn.mockClear();  // Clear call history before each test
+});
+
+afterEach(() => {
+  mockFn.mockReset();  // Clear call history and any mockImplementation set during the test
+});
+```
 **Exception — Windows EBUSY:** Test files that spawn async child processes (e.g. `pre-check-batch` tests) must **NOT** call `mock.restore()` on Windows. Child process handles can hold directory locks, and `mock.restore()` triggers cleanup that causes `EBUSY` errors. These files must use `describe.skipIf(process.platform === 'win32')` or `test.skipIf(process.platform === 'win32')` for affected tests.
 
 Intentionally skipped on Windows (async child process handles cause EBUSY):
@@ -135,8 +148,16 @@ For mocking functions within the same module, source files export an `_internals
 
 ```typescript
 // In source file (src/services/my-service.ts)
-export const _internals = {
-  helperFn: () => { /* real implementation */ }
+import { spawnSync } from 'node:child_process';
+
+type SpawnSyncFn = typeof spawnSync;  // Use typeof alias, NOT type import
+
+export const _internals: {
+  helperFn: typeof helperFn;
+  spawnSync: SpawnSyncFn;  // ← expose for test injection
+} = {
+  helperFn,
+  spawnSync,
 };
 
 export function mainFn() {
@@ -190,6 +211,8 @@ afterEach(() => mock.restore());
 | Mocking a Node built-in (fs, child_process, etc.) | `mock.module` + spread real | `mock.module('node:fs/promises', () => ({ ...realFs, readFile: mockFn }))` |
 | Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
 | File-scoped mock (applies to all tests in file) | `mock.module` at top level + `mockReset()` in `beforeEach` | Preflight tests with `mockLoadPlan.mockReset()` |
+
+**Migrating from `mock.module` to `_internals`:** See the `mock-to-internals-migration` generated skill for the step-by-step protocol.
 
 ## mock.module() Export Completeness
 
@@ -374,6 +397,7 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - **Do not hardcode version numbers.** Version bumps are automated — a test asserting `version === '6.31.3'` breaks on every release.
 - **Do not use `sleep` or `setTimeout` for synchronization.** Use explicit signals, resolved promises, or `Bun.sleep()` with tight bounds.
 - **Do not spawn `cat /dev/zero`, `yes`, or other infinite-output commands.** Use `sleep 30` for "blocking command" tests.
+- **Do not use weak assertions in adversarial tests.** `expect(result !== undefined).toBe(true)` and `expect(result).toBeDefined()` only verify "didn't crash" — they do NOT verify the system's actual response to the attack vector. Always assert specific behavior: `expect(result).toBeNull()`, `expect(result.status).toBe('invalid_schema')`, `expect(result.message).toContain('ERROR')`. Weak assertions hide regressions in graceful-degradation logic.
 
 ## Cross-Platform Requirements
 
@@ -494,7 +518,6 @@ The following source modules export `_internals` but have no test consumers (as 
 - `src/tools/sast-baseline.ts`
 - `src/mutation/gate.ts`
 - `src/mutation/equivalence.ts`
-- `src/mutation/engine.ts`
 - `src/db/qa-gate-profile.ts`
 - `src/config/schema.ts`
 - `src/config/index.ts`
