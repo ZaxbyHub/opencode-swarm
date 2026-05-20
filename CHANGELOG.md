@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.25.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.24.1...v7.25.0) (2026-05-20)
+
+
+### Features
+
+* **hooks:** shell write-interception and regression suite ([08a5d10](https://github.com/zaxbysauce/opencode-swarm/commit/08a5d10fa496b16058021574e6d1b83fc714221c))
+* **hooks:** shell write-interception and regression suite ([3f044bb](https://github.com/zaxbysauce/opencode-swarm/commit/3f044bb782178870999b54acfd0f94eee4e755ce))
+* **test-runner:** record per-test history with aggregate fallback ([#925](https://github.com/zaxbysauce/opencode-swarm/issues/925)) ([41af3a1](https://github.com/zaxbysauce/opencode-swarm/commit/41af3a1937e82798e807e02a8bd826f6fd9b13ac))
+
+
+### Bug Fixes
+
+* **containment:** prevent .swarm creation in subdirectories ([#933](https://github.com/zaxbysauce/opencode-swarm/issues/933)) ([da0a186](https://github.com/zaxbysauce/opencode-swarm/commit/da0a186f77ee288d0e7d486ab3a0017e1ad37095))
+* **gate-evidence:** record evidence for all eligible tasks per delegation ([#929](https://github.com/zaxbysauce/opencode-swarm/issues/929)) ([#932](https://github.com/zaxbysauce/opencode-swarm/issues/932)) ([3534d59](https://github.com/zaxbysauce/opencode-swarm/commit/3534d594bc2f526ddb7ed6eba94d5d0beaf2fdcc))
+* **gate:** reviewer gate permanently blocks docs tasks; misleading error causes delegation loop ([#931](https://github.com/zaxbysauce/opencode-swarm/issues/931)) ([aca5351](https://github.com/zaxbysauce/opencode-swarm/commit/aca5351315a9be5e3527865f5f3c3bdb122d7e35))
+
 ## [7.24.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.24.0...v7.24.1) (2026-05-19)
 
 
