@@ -562,8 +562,7 @@ export function recoverTaskStateFromDelegations(
 		try {
 			const taskEvidence = readTaskEvidenceRaw(directory, taskId);
 			if (
-				taskEvidence &&
-				taskEvidence.gates &&
+				taskEvidence?.gates &&
 				Array.isArray(taskEvidence.required_gates) &&
 				taskEvidence.required_gates.length > 0
 			) {
