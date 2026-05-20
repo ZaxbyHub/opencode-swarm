@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-	_internals as analyzerInternals,
 	analyzeImpact,
+	_internals as analyzerInternals,
 	buildImpactMap,
 } from '../analyzer';
 

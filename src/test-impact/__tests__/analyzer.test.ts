@@ -7,8 +7,8 @@ const isWindows = process.platform === 'win32';
 
 // Import the module under test
 import {
-	_internals as analyzerInternals,
 	analyzeImpact,
+	_internals as analyzerInternals,
 	buildImpactMap,
 	loadImpactMap,
 } from '../analyzer.js';

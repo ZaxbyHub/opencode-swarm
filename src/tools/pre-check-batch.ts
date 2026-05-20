@@ -1266,7 +1266,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 
 		// Resolve directory to absolute path first to ensure consistent behavior
 		// This handles cases where path.isAbsolute may not detect Windows paths correctly
-		let resolvedDirectory = path.resolve(typedArgs.directory);
+		const resolvedDirectory = path.resolve(typedArgs.directory);
 
 		// Determine workspace anchor: use the injected project root (directory parameter)
 		// rather than the user-supplied arg value, to prevent self-validation bypass
