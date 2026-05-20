@@ -283,6 +283,43 @@ describe('classifyFailure', () => {
 		}
 	});
 
+	test('regression F2: assertion text containing killed preserves regression classification', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'domain kill behavior',
+			result: 'fail',
+			errorMessage: 'AssertionError: expected process to be killed',
+			stackPrefix: 'at killed (src/foo.ts:1)',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const history: TestRunRecord[] = [
+			makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName: 'domain kill behavior',
+				result: 'pass',
+				timestamp: ts(1),
+			}),
+			makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName: 'domain kill behavior',
+				result: 'pass',
+				timestamp: ts(2),
+			}),
+			makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName: 'domain kill behavior',
+				result: 'pass',
+				timestamp: ts(3),
+			}),
+		];
+
+		// Previous code matched any standalone "killed" text before checking
+		// recent-pass regression history, so this became infrastructure_failure.
+		const result = classifyFailure(current, history);
+		expect(result.classification).toBe('new_regression');
+	});
+
 	// Behavior 6: confidence scores
 	test('confidence is 1.0 when history length >= 5', () => {
 		const current = makeRecord({

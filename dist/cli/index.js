@@ -47066,10 +47066,26 @@ function stringHash(str) {
   h2 ^= Math.imul(h1 ^ h1 >>> 13, 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
+function isInfrastructureFailure(currentResult) {
+  const combinedText = `${currentResult.errorMessage || ""}
+${currentResult.stackPrefix || ""}`;
+  return INFRASTRUCTURE_FAILURE_PATTERNS.some((pattern) => pattern.test(combinedText));
+}
 function classifyFailure(currentResult, history) {
   const normalizedFile = currentResult.testFile.toLowerCase();
   const normalizedName = currentResult.testName.toLowerCase();
   const testHistory = history.filter((r) => r.testFile.toLowerCase() === normalizedFile && r.testName.toLowerCase() === normalizedName).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  if (isInfrastructureFailure(currentResult)) {
+    return {
+      testFile: currentResult.testFile,
+      testName: currentResult.testName,
+      classification: "infrastructure_failure",
+      errorMessage: currentResult.errorMessage,
+      stackPrefix: currentResult.stackPrefix,
+      durationMs: currentResult.durationMs,
+      confidence: computeConfidence2(testHistory.length)
+    };
+  }
   const lastThree = testHistory.slice(0, 3);
   const lastTen = testHistory.slice(0, 10);
   const normalizedTestFile = currentResult.testFile.toLowerCase();
@@ -47169,6 +47185,17 @@ function classifyAndCluster(testResults, history) {
   const clusters = clusterFailures(classified);
   return { classified, clusters };
 }
+var INFRASTRUCTURE_FAILURE_PATTERNS;
+var init_failure_classifier = __esm(() => {
+  INFRASTRUCTURE_FAILURE_PATTERNS = [
+    /\boutofmemoryerror\b/i,
+    /(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:out of memory|oom|by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
+    /\betimedout\b/i,
+    /\beconnrefused\b/i,
+    /\benotfound\b/i,
+    /\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*137\b/i
+  ];
+});
 
 // src/test-impact/flaky-detector.ts
 function detectFlakyTests(allHistory) {
@@ -48913,6 +48940,7 @@ var init_test_runner = __esm(() => {
   init_zod();
   init_discovery();
   init_analyzer();
+  init_failure_classifier();
   init_history_store();
   init_bun_compat();
   init_path_security();

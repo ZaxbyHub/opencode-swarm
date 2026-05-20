@@ -70,7 +70,7 @@ function stringHash(str: string): string {
 
 const INFRASTRUCTURE_FAILURE_PATTERNS = [
 	/\boutofmemoryerror\b/i,
-	/\bkilled\b/i,
+	/(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:out of memory|oom|by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
 	/\betimedout\b/i,
 	/\beconnrefused\b/i,
 	/\benotfound\b/i,

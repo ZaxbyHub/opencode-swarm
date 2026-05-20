@@ -1,5 +1,5 @@
 import type { TestRunRecord } from './history-store.js';
-export type FailureClassification = 'new_regression' | 'pre_existing' | 'flaky' | 'unknown';
+export type FailureClassification = 'new_regression' | 'pre_existing' | 'flaky' | 'infrastructure_failure' | 'unknown';
 export interface ClassifiedFailure {
     testFile: string;
     testName: string;
