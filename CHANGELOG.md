@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.25.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.24.1...v7.25.0) (2026-05-19)
+
+
+### Features
+
+* **test-runner:** record per-test history with aggregate fallback ([#925](https://github.com/zaxbysauce/opencode-swarm/issues/925)) ([41af3a1](https://github.com/zaxbysauce/opencode-swarm/commit/41af3a1937e82798e807e02a8bd826f6fd9b13ac))
+
 ## [7.24.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.24.0...v7.24.1) (2026-05-19)
 
 
