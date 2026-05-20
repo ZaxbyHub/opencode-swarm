@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.25.0",
+    version: "7.25.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -97278,7 +97278,7 @@ var pre_check_batch = createSwarmTool({
       };
       return JSON.stringify(errorResult, null, 2);
     }
-    let resolvedDirectory = path116.resolve(typedArgs.directory);
+    const resolvedDirectory = path116.resolve(typedArgs.directory);
     const workspaceAnchor = path116.resolve(directory);
     if (resolvedDirectory !== workspaceAnchor && resolvedDirectory.startsWith(workspaceAnchor + path116.sep)) {
       const subDirError = `directory "${typedArgs.directory}" is a subdirectory of the project root — pre_check_batch requires the project root directory "${workspaceAnchor}"`;
@@ -104661,7 +104661,7 @@ function recoverTaskStateFromDelegations(taskId, directory) {
   if (directory) {
     try {
       const taskEvidence = readTaskEvidenceRaw(directory, taskId);
-      if (taskEvidence && taskEvidence.gates && Array.isArray(taskEvidence.required_gates) && taskEvidence.required_gates.length > 0) {
+      if (taskEvidence?.gates && Array.isArray(taskEvidence.required_gates) && taskEvidence.required_gates.length > 0) {
         const gates = taskEvidence.gates;
         hasDurableIncompleteGates = taskEvidence.required_gates.some((g) => gates[g] == null);
       }
