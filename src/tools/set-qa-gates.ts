@@ -9,7 +9,8 @@
  * partial update.
  */
 
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import {
 	computeProfileHash,
 	getOrCreateProfile,
@@ -17,16 +18,8 @@ import {
 	setGates,
 } from '../db/qa-gate-profile.js';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import { createSwarmTool } from './create-tool';
-
-/**
- * Derive plan identity string matching the ledger format.
- * Must stay in sync with takeSnapshotEvent in ledger.ts and the other
- * consumers that derive plan_id (get-approved-plan.ts, write-drift-evidence.ts).
- */
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
 
 export interface SetQaGatesArgs {
 	reviewer?: boolean;
@@ -38,6 +31,8 @@ export interface SetQaGatesArgs {
 	sast_enabled?: boolean;
 	mutation_test?: boolean;
 	council_general_review?: boolean;
+	drift_check?: boolean;
+	final_council?: boolean;
 	project_type?: string;
 }
 
@@ -85,6 +80,8 @@ export async function executeSetQaGates(
 		'sast_enabled',
 		'mutation_test',
 		'council_general_review',
+		'drift_check',
+		'final_council',
 	] as Array<keyof QaGates>) {
 		if (args[key] !== undefined) partial[key] = args[key] as boolean;
 	}
@@ -126,41 +123,38 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 		'locked (after critic approval). Creates the profile with defaults if ' +
 		'none exists. plan_id is derived automatically from plan.json.',
 	args: {
-		reviewer: tool.schema
+		reviewer: z
 			.boolean()
 			.optional()
 			.describe('Enable the reviewer gate (true) — cannot be disabled.'),
-		test_engineer: tool.schema
+		test_engineer: z
 			.boolean()
 			.optional()
 			.describe(
 				'Enable the test_engineer gate (true) — cannot be disabled once on.',
 			),
-		council_mode: tool.schema
+		council_mode: z
 			.boolean()
 			.optional()
 			.describe(
 				'Enable council mode (multi-SME consensus on high-risk phases).',
 			),
-		sme_enabled: tool.schema
-			.boolean()
-			.optional()
-			.describe('Enable SME consultation.'),
-		critic_pre_plan: tool.schema
+		sme_enabled: z.boolean().optional().describe('Enable SME consultation.'),
+		critic_pre_plan: z
 			.boolean()
 			.optional()
 			.describe('Enable critic_pre_plan review before plan approval.'),
-		hallucination_guard: tool.schema
+		hallucination_guard: z
 			.boolean()
 			.optional()
 			.describe(
 				'Enable hallucination_guard checks on plan and implementation claims.',
 			),
-		sast_enabled: tool.schema
+		sast_enabled: z
 			.boolean()
 			.optional()
 			.describe('Enable SAST scanning as a required QA gate.'),
-		mutation_test: tool.schema
+		mutation_test: z
 			.boolean()
 			.optional()
 			.describe(
@@ -168,7 +162,7 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 					'tests to achieve a passing kill rate before phase completion; ' +
 					'WARN verdict allows advancement, FAIL blocks.',
 			),
-		council_general_review: tool.schema
+		council_general_review: z
 			.boolean()
 			.optional()
 			.describe(
@@ -177,7 +171,26 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 					'before the critic-gate, folding multi-model deliberation into ' +
 					'the spec. Requires council.general.enabled and a search API key.',
 			),
-		project_type: tool.schema
+		drift_check: z
+			.boolean()
+			.optional()
+			.describe(
+				'Enable drift verification gate (default: on). Blocks phase_complete ' +
+					'until drift-verifier.json has an approved verdict. When disabled, ' +
+					'drift verification is skipped entirely.',
+			),
+		final_council: z
+			.boolean()
+			.optional()
+			.describe(
+				'Enable the final_council gate (default: off). When on, ' +
+					'after all phases complete the architect dispatches critic, reviewer, ' +
+					'sme, test_engineer, and explorer with project-scoped context, ' +
+					'collects their CouncilMemberVerdict objects, and calls ' +
+					'write_final_council_evidence. This is not General Council mode ' +
+					'and does not require council.general.enabled.',
+			),
+		project_type: z
 			.string()
 			.optional()
 			.describe(

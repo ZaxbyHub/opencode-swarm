@@ -35,17 +35,9 @@ describe('ESCALATION DISCIPLINE Verification', () => {
 	beforeEach(() => {
 		content = readFile(ARCHITECT_FILE);
 
-		// Extract ESCALATION DISCIPLINE section (lines 117-125 approximately)
-		const match = content.match(
-			/\*\*ESCALATION DISCIPLINE\*\*[\s\S]*?(?=\n\s*\d+\.|\n\s*#{2,}\s*\w)/,
-		);
-		if (match) {
-			escalationSection = match[0];
-		} else {
-			// Fallback: search for the pattern more broadly
-			const tier1Match = content.match(/TIER 1[\s\S]*?ESCALATION_SKIP/);
-			escalationSection = tier1Match ? tier1Match[0] : '';
-		}
+		// Extract only the ESCALATION DISCIPLINE block from TIER 1 through VIOLATION line
+		const tier1Match = content.match(/TIER 1[\s\S]*?ESCALATION_SKIP[^\n]*/);
+		escalationSection = tier1Match ? tier1Match[0] : '';
 	});
 
 	it('Requirement 1: Three-tier escalation present', () => {
@@ -67,8 +59,8 @@ describe('ESCALATION DISCIPLINE Verification', () => {
 
 		if (tier2Match) {
 			const tier2Content = tier2Match[1];
-			expect(tier2Content).toContain('SOUNDING_BOARD');
-			expect(tier2Content).toMatch(/SOUNDING_BOARD mode/);
+			expect(tier2Content).toContain('sounding_board');
+			expect(tier2Content).toMatch(/critic_sounding_board/);
 		}
 	});
 
@@ -81,7 +73,9 @@ describe('ESCALATION DISCIPLINE Verification', () => {
 		if (tier3Match) {
 			const tier3Content = tier3Match[1];
 			expect(tier3Content).toContain('APPROVED');
-			expect(tier3Content).toMatch(/after critic returns APPROVED/);
+			expect(tier3Content).toMatch(
+				/after critic_sounding_board returns APPROVED/,
+			);
 		}
 	});
 

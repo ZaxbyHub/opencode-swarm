@@ -20,11 +20,13 @@ import {
 } from './environment/profile.js';
 import type { TaskEvidence } from './gate-evidence';
 import { clearPendingCoderScope } from './hooks/delegation-gate.js';
-import { loadPlanJsonOnly } from './plan/manager.js';
+import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
+import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import type { PatternMatch } from './prm/types.js';
 import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
+import * as logger from './utils/logger';
 
 export { AgentRunContext } from './state/agent-run-context.js';
 
@@ -163,13 +165,23 @@ export interface AgentSessionState {
 	 * PR 2 Stage B barrier: per-task set of completed Stage B agents.
 	 * Order-independent — either 'reviewer' or 'test_engineer' may complete first.
 	 * When both are present, the task may advance to tests_run regardless of order.
-	 * Only populated when parallelization.stageB.parallel.enabled = true.
+	 * Always populated — Stage B is unconditionally parallel.
 	 */
 	stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
-	/** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when convene_council resolves. */
+	/** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
 	taskCouncilApproved?: Map<
 		string,
-		{ verdict: 'APPROVE' | 'REJECT' | 'CONCERNS'; roundNumber: number }
+		{
+			verdict: 'APPROVE' | 'REJECT' | 'CONCERNS';
+			roundNumber: number;
+			/**
+			 * Distinct council members that voted on this verdict.
+			 * Validated by the council fast-path against `council.minimumMembers`
+			 * (default 3). Old evidence files without this field rehydrate as
+			 * quorumSize: 1 — conservative; forces a fresh council run.
+			 */
+			quorumSize: number;
+		}
 	>;
 	/** Last gate outcome for deliberation preamble injection */
 	lastGateOutcome: {
@@ -213,6 +225,16 @@ export interface AgentSessionState {
 	/** Session-scoped Turbo Mode flag for controlling LLM inference speed */
 	turboMode: boolean;
 
+	// Lean Turbo Mode (Phase 2)
+	/** Session-scoped turbo strategy selection — standard or lean. When undefined,
+	 *  falls back to standard (current behavior). */
+	turboStrategy?: 'standard' | 'lean';
+	/** Whether Lean Turbo is actively running in this session. Requires
+	 *  turboStrategy === 'lean'. */
+	leanTurboActive?: boolean;
+	/** Current phase number when Lean Turbo is active (for durable state sync). */
+	leanTurboCurrentPhase?: number;
+
 	// QA Gate Profile session overrides (ratchet-tighter only)
 	/** Session-level QA gate overrides layered on top of the spec-level profile.
 	 *  Overrides can only enable gates (true); false values are ignored by
@@ -240,6 +262,8 @@ export interface AgentSessionState {
 	contextPressureWarningSent?: boolean;
 	/** Queue of advisory messages (e.g., SLOP, context pressure) pending injection into next messagesTransform */
 	pendingAdvisoryMessages?: string[];
+	/** Fingerprint of the most recent provider-failure transcript that received recovery guidance */
+	lastProviderRecoveryFingerprint?: string;
 
 	// Stale state detection (Bug B)
 	/** Timestamp when session was rehydrated from snapshot (0 if never rehydrated) */
@@ -286,6 +310,8 @@ export interface InvocationWindow {
 	warningIssued: boolean;
 	/** Human-readable warning reason */
 	warningReason: string;
+	/** Transient model error retry count for this invocation (resets per window) */
+	transientRetryCount: number;
 }
 
 // Process-global tool aggregates — intentionally shared across all run contexts.
@@ -348,6 +374,38 @@ export const swarmState = {
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
 
+	/** All registered skill_improver / spec_writer agent names across swarms,
+	 * mirroring curatorInitAgentNames so the LLM delegate factory can resolve
+	 * the correct prefixed agent under multi-swarm configs. */
+	skillImproverAgentNames: [] as string[],
+	specWriterAgentNames: [] as string[],
+
+	/** v2: in-memory cache of "currently-active critical directive ids" per
+	 *  session+task, populated by the knowledge-injector when it injects a
+	 *  critical+matching directive. Read by the toolBefore enforcement gate
+	 *  so we don't re-scan the entire knowledge file on every high-risk tool
+	 *  call. Cleared by phase change, curator commits, knowledge mutations,
+	 *  and resetSwarmState. FIFO-capped — see setCriticalShownIds. */
+	currentCriticalShownIds: new Map<
+		string,
+		{ ids: string[]; taskId?: string; phase?: string; generatedAt: number }
+	>(),
+
+	/** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}|${dayKey}`.
+	 *  Prevents the chat.messages.transform path AND a knowledge_ack tool call
+	 *  from double-counting the same ack within a session-day. FIFO-capped —
+	 *  see addKnowledgeAckDedup. */
+	knowledgeAckDedup: new Set<string>(),
+
+	/**
+	 * All generated agent names registered with OpenCode at plugin init.
+	 * Used by Full-Auto v2 delegation guard to apply strict registry-aware
+	 * canonical-role extraction (so user-supplied prose like
+	 * `not_an_architect` cannot collapse to `architect` via suffix-only
+	 * matching). Populated by `src/index.ts` after `createAgents`.
+	 */
+	generatedAgentNames: [] as string[],
+
 	/** Last known context budget percentage (0-100), updated by system-enhancer */
 	lastBudgetPct: 0,
 
@@ -380,6 +438,11 @@ export function resetSwarmState(): void {
 	swarmState.opencodeClient = null;
 	swarmState.curatorInitAgentNames = [];
 	swarmState.curatorPhaseAgentNames = [];
+	swarmState.skillImproverAgentNames = [];
+	swarmState.specWriterAgentNames = [];
+	swarmState.currentCriticalShownIds.clear();
+	swarmState.knowledgeAckDedup.clear();
+	swarmState.generatedAgentNames = [];
 	_rehydrationCache = null;
 	// Full Auto Mode (Phase 4)
 	swarmState.fullAutoEnabledInConfig = false;
@@ -463,6 +526,10 @@ export function startAgentSession(
 		modifiedFilesThisCoderTask: [],
 		// Turbo Mode (v6.26)
 		turboMode: false,
+		// Lean Turbo Mode (Phase 2)
+		turboStrategy: undefined,
+		leanTurboActive: false,
+		leanTurboCurrentPhase: undefined,
 		// QA Gate Profile session overrides
 		qaGateSessionOverrides: {},
 		// Full Auto Mode (Phase 2)
@@ -495,7 +562,7 @@ export function startAgentSession(
 
 	// Apply cached plan+evidence data so new sessions start with correct workflow
 	// state even when no snapshot existed at init time.
-	applyRehydrationCache(sessionState);
+	_internals.applyRehydrationCache(sessionState);
 
 	// Rehydrate workflow state from disk if directory provided (non-fatal).
 	// Register the promise in pendingRehydrations so rehydrateState can await it
@@ -503,9 +570,10 @@ export function startAgentSession(
 	// in-flight workflow state.
 	if (directory) {
 		let rehydrationPromise: Promise<void>;
-		rehydrationPromise = rehydrateSessionFromDisk(directory, sessionState)
+		rehydrationPromise = _internals
+			.rehydrateSessionFromDisk(directory, sessionState)
 			.catch((err) => {
-				console.warn(
+				logger.warn(
 					'[state] Rehydration failed:',
 					err instanceof Error ? err.message : String(err),
 				);
@@ -667,6 +735,16 @@ export function ensureAgentSession(
 		if (session.turboMode === undefined) {
 			session.turboMode = false;
 		}
+		// Lean Turbo Mode migration safety (Phase 2)
+		if (session.turboStrategy === undefined) {
+			session.turboStrategy = undefined;
+		}
+		if (session.leanTurboActive === undefined) {
+			session.leanTurboActive = false;
+		}
+		if (session.leanTurboCurrentPhase === undefined) {
+			session.leanTurboCurrentPhase = undefined;
+		}
 		// QA Gate Profile session overrides migration safety
 		if (session.qaGateSessionOverrides === undefined) {
 			session.qaGateSessionOverrides = {};
@@ -717,7 +795,12 @@ export function ensureAgentSession(
 	}
 
 	// Create new session
-	startAgentSession(sessionId, agentName ?? 'unknown', 7200000, directory);
+	_internals.startAgentSession(
+		sessionId,
+		agentName ?? 'unknown',
+		7200000,
+		directory,
+	);
 	session = swarmState.agentSessions.get(sessionId);
 	if (!session) {
 		// This should never happen, but TypeScript needs it
@@ -783,6 +866,7 @@ export function beginInvocation(
 		recentToolCalls: [],
 		warningIssued: false,
 		warningReason: '',
+		transientRetryCount: 0,
 	};
 
 	const key = `${stripped}:${newId}`;
@@ -908,6 +992,11 @@ export function advanceTaskState(
 	session: AgentSessionState,
 	taskId: string,
 	newState: TaskWorkflowState,
+	options?: {
+		telemetrySessionId?: string;
+		emitTelemetry?: boolean;
+	},
+	councilConfig?: { minimumMembers?: number; requireAllMembers?: boolean },
 ): void {
 	// Guard against invalid taskId - safely return without mutating state
 	if (!isValidTaskId(taskId)) {
@@ -941,11 +1030,24 @@ export function advanceTaskState(
 
 	// 'complete' can only be reached from 'tests_run' — enforce sequential progression
 	if (newState === 'complete' && current !== 'tests_run') {
-		// Council fast-path: if convene_council recorded an APPROVE verdict for this task,
+		// Council fast-path: if submit_council_verdicts recorded an APPROVE verdict for this task,
 		// allow advancement from any non-idle prior state. Pre-check (pre_check_passed) is
 		// still required to avoid skipping Stage A.
+		// Quorum gate: an APPROVE verdict only short-circuits the gate sequence
+		// when it was recorded with at least `minimumMembers` distinct member
+		// verdicts. Default 3; `requireAllMembers: true` overrides to 5.
+		// Callers without `councilConfig` get the default — old single-member
+		// approvals are no longer trusted automatically.
 		const councilEntry = session.taskCouncilApproved?.get(taskId);
-		const councilApproved = councilEntry?.verdict === 'APPROVE';
+		const effectiveMinimum = councilConfig?.requireAllMembers
+			? 5
+			: (councilConfig?.minimumMembers ?? 3);
+		const councilApproved =
+			councilEntry?.verdict === 'APPROVE' &&
+			// ?? 0: final safety net for Map entries lacking quorumSize. Old
+			// evidence rehydrates as quorumSize: 1 (Task 3.3); a missing field
+			// here is more conservative still and forces a fresh council run.
+			(councilEntry.quorumSize ?? 0) >= effectiveMinimum;
 		const pastPreCheck =
 			currentIndex >= STATE_ORDER.indexOf('pre_check_passed');
 		if (!councilApproved || !pastPreCheck) {
@@ -956,7 +1058,60 @@ export function advanceTaskState(
 	}
 
 	session.taskWorkflowStates.set(taskId, newState);
-	telemetry.taskStateChanged(session.agentName, taskId, newState, current);
+	if (options?.emitTelemetry !== false) {
+		telemetry.taskStateChanged(
+			options?.telemetrySessionId ?? session.agentName,
+			taskId,
+			newState,
+			current,
+		);
+	}
+}
+
+/**
+ * Advance the per-task workflow state machine AND persist the corresponding
+ * plan.json status at meaningful workflow boundaries.
+ *
+ * The two-layer model splits in-memory workflow state (Layer 1, fast, used by
+ * gates) from the durable plan (Layer 2, projected to plan.md). Without this
+ * bridge, council APPROVE → 'complete' updates Layer 1 only and plan.md goes
+ * stale. This helper closes the gap by mapping:
+ *   - 'coder_delegated' → plan.json status 'in_progress'
+ *   - 'complete'        → plan.json status 'completed'
+ * Other transitions are in-memory only (the task is already in_progress on disk
+ * once coder_delegated has fired).
+ *
+ * Persistence errors are logged and swallowed so a transient disk failure does
+ * not break the in-memory state machine — matches the existing defensive
+ * pattern around advanceTaskState call sites.
+ */
+export async function advanceTaskStateAndPersist(
+	session: AgentSessionState,
+	taskId: string,
+	newState: TaskWorkflowState,
+	directory: string,
+	options?: {
+		telemetrySessionId?: string;
+		emitTelemetry?: boolean;
+	},
+	councilConfig?: { minimumMembers?: number; requireAllMembers?: boolean },
+): Promise<void> {
+	advanceTaskState(session, taskId, newState, options, councilConfig);
+
+	if (newState !== 'coder_delegated' && newState !== 'complete') {
+		return;
+	}
+
+	const planStatus: TaskStatus =
+		newState === 'complete' ? 'completed' : 'in_progress';
+
+	try {
+		await updateTaskStatus(directory, taskId, planStatus);
+	} catch (err) {
+		logger.warn(
+			`[advanceTaskStateAndPersist] persist ${taskId} → ${planStatus} failed (in-memory state still advanced): ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 }
 
 /**
@@ -1030,14 +1185,6 @@ export function hasBothStageBCompletions(
 }
 
 /**
- * Derive the plan_id from a Plan, matching the format used by other consumers
- * (set_qa_gates / get_qa_gate_profile / get_approved_plan / write-drift-evidence).
- */
-function derivePlanIdFromPlan(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
-
-/**
  * Returns true iff council is authoritative for the current plan.
  *
  * AND semantics: council is authoritative when BOTH `pluginConfig.council.enabled === true`
@@ -1066,7 +1213,7 @@ export async function isCouncilGateActive(
 		return false;
 	}
 
-	const planId = derivePlanIdFromPlan(plan);
+	const planId = derivePlanId(plan);
 	let profile: ReturnType<typeof getProfile> | null = null;
 	try {
 		profile = getProfile(directory, planId);
@@ -1076,7 +1223,7 @@ export async function isCouncilGateActive(
 		const msg = err instanceof Error ? err.message : String(err);
 		const isBenign = msg.includes('SQLITE_CANTOPEN') || msg.includes('ENOENT');
 		if (!isBenign) {
-			console.warn(
+			logger.warn(
 				`[isCouncilGateActive] getProfile threw unexpectedly for plan ${planId}: ${msg}. Treating council as inactive.`,
 			);
 		}
@@ -1095,7 +1242,7 @@ export async function isCouncilGateActive(
 	// Disagreement case: warn once per plan_id, then fall back.
 	if (enabled !== councilMode && !_councilDisagreementWarned.has(planId)) {
 		_councilDisagreementWarned.add(planId);
-		console.warn(
+		logger.warn(
 			`[delegation-gate] Council mode mismatch for plan ${planId}: ` +
 				`pluginConfig.council.enabled=${enabled}, QaGates.council_mode=${councilMode}. ` +
 				'Falling back to Stage B (non-council) advancement.',
@@ -1252,7 +1399,8 @@ async function readGateEvidenceFromDisk(
  */
 /**
  * Reads plan.json + evidence/*.json from the project directory and populates the
- * module-level _rehydrationCache.  Called once at plugin init by loadSnapshot().
+ * module-level _rehydrationCache.  Called at plugin init by loadSnapshot() and
+ * refreshed after compaction by the compaction hook (src/hooks/compaction-customizer.ts).
  * Non-fatal: missing/malformed files leave an empty cache.
  */
 export async function buildRehydrationCache(directory: string): Promise<void> {
@@ -1344,10 +1492,11 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		if (session.taskCouncilApproved.has(taskId)) {
 			continue;
 		}
-		// Cast to extended type — verdict/roundNumber are preserved via passthrough()
-		// but not in the base GateEvidence interface (which only has sessionId/timestamp/agent).
+		// Cast to extended type — verdict/roundNumber/quorumSize are preserved via
+		// passthrough() but not in the base GateEvidence interface (which only has
+		// sessionId/timestamp/agent).
 		const council = evidence.gates?.council as
-			| { verdict?: string; roundNumber?: number }
+			| { verdict?: string; roundNumber?: number; quorumSize?: number }
 			| undefined;
 		if (!council) {
 			continue;
@@ -1368,9 +1517,21 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		if (typeof roundNumber !== 'number' || !Number.isFinite(roundNumber)) {
 			roundNumber = 1;
 		}
+		// Conservative default: pre-quorum evidence files (without quorumSize)
+		// rehydrate as 1, which fails the fast-path against the default
+		// minimumMembers=3 — forcing a fresh council run after upgrade rather
+		// than trusting an unverified single-member APPROVE.
+		const rawQuorumSize = council.quorumSize;
+		const quorumSize =
+			typeof rawQuorumSize === 'number' &&
+			Number.isFinite(rawQuorumSize) &&
+			rawQuorumSize >= 1
+				? rawQuorumSize
+				: 1;
 		session.taskCouncilApproved.set(taskId, {
 			verdict,
 			roundNumber,
+			quorumSize,
 		});
 	}
 }
@@ -1384,8 +1545,8 @@ export async function rehydrateSessionFromDisk(
 	directory: string,
 	session: AgentSessionState,
 ): Promise<void> {
-	await buildRehydrationCache(directory);
-	applyRehydrationCache(session);
+	await _internals.buildRehydrationCache(directory);
+	_internals.applyRehydrationCache(session);
 }
 
 /**
@@ -1422,6 +1583,35 @@ export function hasActiveFullAuto(sessionID?: string): boolean {
 	// Global fallback — existing behavior when no sessionID provided
 	for (const [_sessionId, session] of swarmState.agentSessions) {
 		if (session.fullAutoMode === true) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Check if Lean Turbo Mode is active for a specific session or ANY session.
+ * @param sessionID - Optional session ID to check. If provided, checks only that session.
+ *                    If omitted, checks all sessions.
+ * @returns true if the specified session has turboStrategy: 'lean' AND leanTurboActive: true,
+ *          or if any session has that combination when no sessionID provided.
+ */
+export function hasActiveLeanTurbo(sessionID?: string): boolean {
+	if (sessionID) {
+		const session = swarmState.agentSessions.get(sessionID);
+		return (
+			session?.turboMode === true &&
+			session?.turboStrategy === 'lean' &&
+			session?.leanTurboActive === true
+		);
+	}
+	// Global fallback
+	for (const [_sessionId, session] of swarmState.agentSessions) {
+		if (
+			session.turboMode === true &&
+			session.turboStrategy === 'lean' &&
+			session.leanTurboActive === true
+		) {
 			return true;
 		}
 	}
@@ -1466,3 +1656,98 @@ export function ensureSessionEnvironment(
 		});
 	return profile;
 }
+
+// Bounded-collection caps for v2 knowledge state (AGENTS.md invariant #8 —
+// "Module-level global state must have an explicit eviction strategy").
+// Values mirror MAX_TRACKED_SESSIONS in adversarial-detector.ts. The Map
+// preserves insertion order so `Map.keys().next()` is the FIFO oldest.
+export const MAX_TRACKED_CRITICAL_SHOWN = 500;
+export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
+
+/** Set the critical shown ids for a session, FIFO-evicting the oldest entry
+ * if the cap is exceeded. Re-setting an existing key keeps insertion order
+ * fresh for that key (delete-then-set). */
+export function setCriticalShownIds(
+	sessionID: string,
+	value: {
+		ids: string[];
+		taskId?: string;
+		phase?: string;
+		generatedAt: number;
+	},
+): void {
+	const map = swarmState.currentCriticalShownIds;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, value);
+	if (map.size > MAX_TRACKED_CRITICAL_SHOWN) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** Clear the critical shown ids for a session. Centralised so call sites do
+ *  not bypass the FIFO-cap pathway with a direct `.delete()`. Returns
+ *  whether an entry was removed. */
+export function clearCriticalShownIds(sessionID: string): boolean {
+	return swarmState.currentCriticalShownIds.delete(sessionID);
+}
+
+/** Add a knowledge ack dedup key, FIFO-evicting the oldest if the cap is
+ * exceeded. Sets preserve insertion order in JS. */
+export function addKnowledgeAckDedup(key: string): void {
+	const set = swarmState.knowledgeAckDedup;
+	if (set.has(key)) return;
+	set.add(key);
+	if (set.size > MAX_TRACKED_KNOWLEDGE_ACKS) {
+		const oldest = set.values().next().value;
+		if (oldest !== undefined) set.delete(oldest);
+	}
+}
+
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.*` for key exported functions and objects so tests can replace
+ * them without using `mock.module` — `mock.module` from `bun:test` leaks
+ * across files in Bun's shared test-runner process, which would corrupt
+ * unrelated test suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	swarmState: typeof swarmState;
+	resetSwarmState: typeof resetSwarmState;
+	ensureAgentSession: typeof ensureAgentSession;
+	startAgentSession: typeof startAgentSession;
+	getAgentSession: typeof getAgentSession;
+	beginInvocation: typeof beginInvocation;
+	getActiveWindow: typeof getActiveWindow;
+	advanceTaskState: typeof advanceTaskState;
+	getTaskState: typeof getTaskState;
+	hasActiveFullAuto: typeof hasActiveFullAuto;
+	hasActiveTurboMode: typeof hasActiveTurboMode;
+	hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
+	buildRehydrationCache: typeof buildRehydrationCache;
+	applyRehydrationCache: typeof applyRehydrationCache;
+	rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
+	isCouncilGateActive: typeof isCouncilGateActive;
+	defaultRunContext: typeof defaultRunContext;
+} = {
+	swarmState,
+	resetSwarmState,
+	ensureAgentSession,
+	startAgentSession,
+	getAgentSession,
+	beginInvocation,
+	getActiveWindow,
+	advanceTaskState,
+	getTaskState,
+	hasActiveFullAuto,
+	hasActiveTurboMode,
+	hasActiveLeanTurbo,
+	buildRehydrationCache,
+	applyRehydrationCache,
+	rehydrateSessionFromDisk,
+	isCouncilGateActive,
+	defaultRunContext,
+};

@@ -90,7 +90,6 @@ describe('ADVERSARIAL: index.ts stale-delegation bootstrap path (lines 594-598)'
 		const result = ensureAgentSession(
 			testSessionId,
 			ORCHESTRATOR_NAME,
-			// biome-ignore lint/suspicious/noExplicitAny: test passes null for optional param
 			null as any,
 		);
 
@@ -207,7 +206,6 @@ describe('ADVERSARIAL: index.ts Task handoff bootstrap path (lines 662-681)', ()
 		swarmState.activeAgent.set(testSessionId, ORCHESTRATOR_NAME);
 
 		expect(() => {
-			// biome-ignore lint/suspicious/noExplicitAny: test passes null for optional param
 			ensureAgentSession(testSessionId, ORCHESTRATOR_NAME, null as any);
 		}).not.toThrow();
 
@@ -409,20 +407,17 @@ describe('ADVERSARIAL: Breaking deterministic architect takeover', () => {
 		// Create plan with potential template injection
 		const maliciousPlan = {
 			schema_version: '1.0.0',
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 			title: 'Test${console.log("pwned")}',
 			swarm: 'test',
 			phases: [
 				{
 					id: 1,
-					// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 					name: 'Phase${require("fs").readdirSync("/")}',
 					status: 'pending',
 					tasks: [
 						{
 							id: '1.1',
 							phase: 1,
-							// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 							description: 'Task${globalThis.process.exit(1)}',
 							status: 'pending',
 							size: 'small',

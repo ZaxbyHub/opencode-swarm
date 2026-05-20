@@ -243,9 +243,12 @@ describe('telemetry wiring in state.ts', () => {
 
 			await recordGateEvidence(tempDir, taskId, gate, sessionId);
 
-			expect(capturedEvents).toHaveLength(1);
-			expect(capturedEvents[0].event).toBe('gate_passed');
-			expect(capturedEvents[0].data).toEqual({
+			const gateEvents = capturedEvents.filter(
+				(e) => e.event === 'gate_passed',
+			);
+			expect(gateEvents).toHaveLength(1);
+			expect(gateEvents[0].event).toBe('gate_passed');
+			expect(gateEvents[0].data).toEqual({
 				sessionId,
 				gate,
 				taskId,
@@ -259,10 +262,13 @@ describe('telemetry wiring in state.ts', () => {
 			await recordGateEvidence(tempDir, '1.2', 'lint', 'session-2');
 			await recordGateEvidence(tempDir, '1.3', 'reviewer', 'session-3');
 
-			expect(capturedEvents).toHaveLength(3);
-			expect(capturedEvents[0].data.gate).toBe('test_engineer');
-			expect(capturedEvents[1].data.gate).toBe('lint');
-			expect(capturedEvents[2].data.gate).toBe('reviewer');
+			const gateEvents = capturedEvents.filter(
+				(e) => e.event === 'gate_passed',
+			);
+			expect(gateEvents).toHaveLength(3);
+			expect(gateEvents[0].data.gate).toBe('test_engineer');
+			expect(gateEvents[1].data.gate).toBe('lint');
+			expect(gateEvents[2].data.gate).toBe('reviewer');
 		});
 
 		test('does not throw when telemetry is not initialized', async () => {

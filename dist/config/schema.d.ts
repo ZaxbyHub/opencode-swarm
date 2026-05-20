@@ -1,21 +1,74 @@
 import { z } from 'zod';
+import { type AgentName } from './constants';
 /**
- * Strips known Swarm prefixes from agent names to get the canonical agent name.
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    stripKnownSwarmPrefix: typeof stripKnownSwarmPrefix;
+    getCanonicalAgentRole: typeof getCanonicalAgentRole;
+    resolveGuardrailsConfig: typeof resolveGuardrailsConfig;
+};
+/**
+ * Type guard: returns true when `role` is a canonical agent role recognized
+ * by the plugin (e.g. "architect", "coder", "critic_oversight"). User-defined
+ * swarm IDs must NOT be treated as canonical roles.
+ */
+export declare function isKnownCanonicalRole(role: string): role is AgentName;
+/**
+ * Extract the canonical agent role from a generated agent name, using
+ * suffix-based matching with longest-suffix-wins.
  *
- * Strategy:
- * 1. First try stripping known prefixes from the front (e.g., 'paid_architect' -> 'architect')
- * 2. If that doesn't yield a known agent, check if the name ENDS with a known agent name
- *    (e.g., 'not-an-architect' -> 'architect', 'team-alpha-reviewer' -> 'reviewer')
+ * Generated agent names have the shape `<arbitrary user-defined swarm ID>
+ * <separator> <canonical role>`. The swarm ID is opaque to the plugin —
+ * it can be anything the user configures (e.g. `banana`, `acme-prod`,
+ * `customer123`). Only the canonical role suffix is plugin-defined.
  *
- * Supports underscore, hyphen, and space separators.
- * Case-insensitive matching, but returns the canonical lowercase agent name.
+ * Behavior:
+ *   - If `agentName` is itself a canonical role, return it unchanged.
+ *   - Else, find the longest canonical role `R` such that `agentName`
+ *     ends with `<sep><R>` for some separator in {"_", "-", " "}; return `R`.
+ *   - Else, return `agentName` unchanged (caller can detect "no role found"
+ *     by comparing the result to `agentName`, or by passing the result
+ *     through `isKnownCanonicalRole`).
  *
- * @param agentName - The potentially prefixed agent name
- * @returns The canonical agent name, or the original if no known agent found
+ * Optional `generatedAgentNames` argument: when supplied (e.g. from
+ * `getAgentConfigs` output at plugin init), the function ONLY infers a role
+ * for names actually present in that registry. Bare user-supplied strings
+ * like `not_an_architect` are NOT treated as roles unless they appear in
+ * the generated-name set. Callers that need this strict behavior should
+ * use `resolveGeneratedAgentRole` instead.
+ *
+ * Case-insensitive on the input; the returned role is the canonical
+ * lowercase form from `ALL_AGENT_NAMES`.
+ */
+export declare function getCanonicalAgentRole(agentName: string, generatedAgentNames?: Iterable<string>): AgentName | string;
+/**
+ * Strict variant of {@link getCanonicalAgentRole}: only infers a canonical
+ * role when the agent name is actually present in the supplied generated-
+ * name registry, OR is itself a canonical role. Use this from callers that
+ * must avoid treating arbitrary user-supplied strings as roles.
+ */
+export declare function resolveGeneratedAgentRole(agentName: string, generatedAgentNames: Iterable<string>): AgentName | string;
+/**
+ * Backward-compatible alias for {@link getCanonicalAgentRole}. The previous
+ * implementation stripped a hardcoded list of "known swarm prefixes" from
+ * the front of the agent name. That approach was wrong by design: swarm
+ * IDs are arbitrary user-defined strings — the plugin cannot enumerate
+ * them. The new implementation does suffix-based canonical role extraction
+ * (see `getCanonicalAgentRole`) which works for ANY user-defined swarm ID.
+ *
+ * Existing tests that pass `synthetic_reviewer` / `mega_architect` /
+ * `cloud_critic_oversight` / etc. continue to pass because those names
+ * end with `<sep><canonical role>`, which is exactly what the suffix
+ * extractor matches.
  */
 export declare function stripKnownSwarmPrefix(agentName: string): string;
 export declare const AgentOverrideConfigSchema: z.ZodObject<{
     model: z.ZodOptional<z.ZodString>;
+    variant: z.ZodOptional<z.ZodString>;
     temperature: z.ZodOptional<z.ZodNumber>;
     disabled: z.ZodOptional<z.ZodBoolean>;
     fallback_models: z.ZodOptional<z.ZodArray<z.ZodString>>;
@@ -25,6 +78,7 @@ export declare const SwarmConfigSchema: z.ZodObject<{
     name: z.ZodOptional<z.ZodString>;
     agents: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
         model: z.ZodOptional<z.ZodString>;
+        variant: z.ZodOptional<z.ZodString>;
         temperature: z.ZodOptional<z.ZodNumber>;
         disabled: z.ZodOptional<z.ZodBoolean>;
         fallback_models: z.ZodOptional<z.ZodArray<z.ZodString>>;
@@ -203,8 +257,8 @@ export declare const PhaseCompleteConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     required_agents: z.ZodDefault<z.ZodArray<z.ZodEnum<{
         reviewer: "reviewer";
-        coder: "coder";
         test_engineer: "test_engineer";
+        coder: "coder";
     }>>>;
     require_docs: z.ZodDefault<z.ZodBoolean>;
     policy: z.ZodDefault<z.ZodEnum<{
@@ -233,9 +287,9 @@ export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 export declare const AdversarialDetectionConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     policy: z.ZodDefault<z.ZodEnum<{
-        warn: "warn";
         gate: "gate";
         ignore: "ignore";
+        warn: "warn";
     }>>;
     pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
 }, z.core.$strip>;
@@ -295,6 +349,7 @@ export declare const GuardrailsProfileSchema: z.ZodObject<{
     max_consecutive_errors: z.ZodOptional<z.ZodNumber>;
     warning_threshold: z.ZodOptional<z.ZodNumber>;
     idle_timeout_minutes: z.ZodOptional<z.ZodNumber>;
+    max_transient_retries: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export type GuardrailsProfile = z.infer<typeof GuardrailsProfileSchema>;
 export declare const DEFAULT_AGENT_PROFILES: Record<string, GuardrailsProfile>;
@@ -306,6 +361,7 @@ export declare const DEFAULT_ARCHITECT_PROFILE: {
     max_consecutive_errors?: number | undefined;
     warning_threshold?: number | undefined;
     idle_timeout_minutes?: number | undefined;
+    max_transient_retries?: number | undefined;
 };
 export declare const GuardrailsConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
@@ -313,6 +369,7 @@ export declare const GuardrailsConfigSchema: z.ZodObject<{
     max_duration_minutes: z.ZodDefault<z.ZodNumber>;
     max_repetitions: z.ZodDefault<z.ZodNumber>;
     max_consecutive_errors: z.ZodDefault<z.ZodNumber>;
+    max_transient_retries: z.ZodDefault<z.ZodNumber>;
     warning_threshold: z.ZodDefault<z.ZodNumber>;
     idle_timeout_minutes: z.ZodDefault<z.ZodNumber>;
     no_op_warning_threshold: z.ZodDefault<z.ZodNumber>;
@@ -329,6 +386,7 @@ export declare const GuardrailsConfigSchema: z.ZodObject<{
         max_consecutive_errors: z.ZodOptional<z.ZodNumber>;
         warning_threshold: z.ZodOptional<z.ZodNumber>;
         idle_timeout_minutes: z.ZodOptional<z.ZodNumber>;
+        max_transient_retries: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>>>;
     block_destructive_commands: z.ZodDefault<z.ZodBoolean>;
     interpreter_allowed_agents: z.ZodOptional<z.ZodArray<z.ZodString>>;
@@ -378,6 +436,7 @@ export type PlanCursorConfig = z.infer<typeof PlanCursorConfigSchema>;
 export declare const CheckpointConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     auto_checkpoint_threshold: z.ZodDefault<z.ZodNumber>;
+    allow_empty_commits: z.ZodDefault<z.ZodBoolean>;
 }, z.core.$strict>;
 export type CheckpointConfig = z.infer<typeof CheckpointConfigSchema>;
 export declare const AutomationModeSchema: z.ZodEnum<{
@@ -431,6 +490,7 @@ export declare const KnowledgeConfigSchema: z.ZodObject<{
     low_utility_threshold: z.ZodDefault<z.ZodNumber>;
     min_retrievals_for_utility: z.ZodDefault<z.ZodNumber>;
     schema_version: z.ZodDefault<z.ZodNumber>;
+    directive_min_confidence: z.ZodDefault<z.ZodNumber>;
     same_project_weight: z.ZodDefault<z.ZodNumber>;
     cross_project_weight: z.ZodDefault<z.ZodNumber>;
     min_encounter_score: z.ZodDefault<z.ZodNumber>;
@@ -452,8 +512,60 @@ export declare const CuratorConfigSchema: z.ZodObject<{
     suppress_warnings: z.ZodDefault<z.ZodBoolean>;
     drift_inject_max_chars: z.ZodDefault<z.ZodNumber>;
     llm_timeout_ms: z.ZodDefault<z.ZodNumber>;
+    skill_generation_enabled: z.ZodDefault<z.ZodBoolean>;
+    skill_generation_mode: z.ZodDefault<z.ZodEnum<{
+        draft: "draft";
+        active: "active";
+    }>>;
+    min_skill_confidence: z.ZodDefault<z.ZodNumber>;
+    min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
+export declare const KnowledgeApplicationConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    mode: z.ZodDefault<z.ZodEnum<{
+        enforce: "enforce";
+        warn: "warn";
+    }>>;
+    min_confidence: z.ZodDefault<z.ZodNumber>;
+    critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
+    require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type KnowledgeApplicationConfig = z.infer<typeof KnowledgeApplicationConfigSchema>;
+export declare const SkillImproverConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    max_calls_per_day: z.ZodDefault<z.ZodNumber>;
+    trigger: z.ZodDefault<z.ZodEnum<{
+        manual: "manual";
+        scheduled: "scheduled";
+    }>>;
+    targets: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+        skills: "skills";
+        spec: "spec";
+        architect_prompt: "architect_prompt";
+        knowledge: "knowledge";
+    }>>>;
+    write_mode: z.ZodDefault<z.ZodEnum<{
+        proposal: "proposal";
+        draft_skills: "draft_skills";
+    }>>;
+    require_user_approval: z.ZodDefault<z.ZodBoolean>;
+    quota_window: z.ZodDefault<z.ZodEnum<{
+        utc: "utc";
+        local: "local";
+    }>>;
+    allow_deterministic_fallback: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type SkillImproverConfig = z.infer<typeof SkillImproverConfigSchema>;
+export declare const SpecWriterConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    allow_spec_write: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type SpecWriterConfig = z.infer<typeof SpecWriterConfigSchema>;
 export declare const SlopDetectorConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     classThreshold: z.ZodDefault<z.ZodNumber>;
@@ -529,6 +641,7 @@ export declare const AuthorityConfigSchema: z.ZodObject<{
         allowedGlobs: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>>;
     universal_deny_prefixes: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    verifier_config_paths: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;
 export declare const GeneralCouncilConfigSchema: z.ZodObject<{
@@ -574,7 +687,9 @@ export declare const CouncilConfigSchema: z.ZodObject<{
     parallelTimeoutMs: z.ZodDefault<z.ZodNumber>;
     vetoPriority: z.ZodDefault<z.ZodBoolean>;
     requireAllMembers: z.ZodDefault<z.ZodBoolean>;
+    minimumMembers: z.ZodDefault<z.ZodNumber>;
     escalateOnMaxRounds: z.ZodOptional<z.ZodString>;
+    phaseConcernsAllowComplete: z.ZodDefault<z.ZodBoolean>;
     general: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         searchProvider: z.ZodDefault<z.ZodEnum<{
@@ -617,24 +732,108 @@ export declare const ParallelizationConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     maxConcurrentTasks: z.ZodDefault<z.ZodNumber>;
     evidenceLockTimeoutMs: z.ZodDefault<z.ZodNumber>;
-    stageB: z.ZodDefault<z.ZodObject<{
-        parallel: z.ZodDefault<z.ZodObject<{
-            enabled: z.ZodDefault<z.ZodBoolean>;
-        }, z.core.$strip>>;
-    }, z.core.$strip>>;
+    max_coders: z.ZodDefault<z.ZodNumber>;
+    max_reviewers: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
+export declare const LeanTurboConfigSchema: z.ZodObject<{
+    max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+    require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+    conflict_policy: z.ZodDefault<z.ZodEnum<{
+        serialize: "serialize";
+        degrade: "degrade";
+    }>>;
+    degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+    phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+    phase_critic: z.ZodDefault<z.ZodBoolean>;
+    integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+    allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+    worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
+export declare const StandardTurboConfigSchema: z.ZodObject<{
+    strategy: z.ZodLiteral<"standard">;
+    lean: z.ZodOptional<z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const LeanTurboStrategyConfigSchema: z.ZodObject<{
+    strategy: z.ZodLiteral<"lean">;
+    lean: z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const TurboConfigSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
+    strategy: z.ZodLiteral<"standard">;
+    lean: z.ZodOptional<z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+}, z.core.$strip>, z.ZodObject<{
+    strategy: z.ZodLiteral<"lean">;
+    lean: z.ZodObject<{
+        max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+        require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+        conflict_policy: z.ZodDefault<z.ZodEnum<{
+            serialize: "serialize";
+            degrade: "degrade";
+        }>>;
+        degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+        phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+        phase_critic: z.ZodDefault<z.ZodBoolean>;
+        integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+        allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+        worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>;
+}, z.core.$strip>], "strategy">;
+export type TurboConfig = z.infer<typeof TurboConfigSchema>;
 export declare const PluginConfigSchema: z.ZodObject<{
     agents: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
         model: z.ZodOptional<z.ZodString>;
+        variant: z.ZodOptional<z.ZodString>;
         temperature: z.ZodOptional<z.ZodNumber>;
         disabled: z.ZodOptional<z.ZodBoolean>;
         fallback_models: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>>;
+    default_agent: z.ZodPipe<z.ZodOptional<z.ZodString>, z.ZodTransform<string | undefined, string | undefined>>;
+    auto_select_architect: z.ZodPipe<z.ZodOptional<z.ZodUnion<readonly [z.ZodBoolean, z.ZodString]>>, z.ZodTransform<string | boolean | undefined, string | boolean | undefined>>;
     swarms: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
         agents: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
             model: z.ZodOptional<z.ZodString>;
+            variant: z.ZodOptional<z.ZodString>;
             temperature: z.ZodOptional<z.ZodNumber>;
             disabled: z.ZodOptional<z.ZodBoolean>;
             fallback_models: z.ZodOptional<z.ZodArray<z.ZodString>>;
@@ -648,8 +847,8 @@ export declare const PluginConfigSchema: z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         required_agents: z.ZodDefault<z.ZodArray<z.ZodEnum<{
             reviewer: "reviewer";
-            coder: "coder";
             test_engineer: "test_engineer";
+            coder: "coder";
         }>>>;
         require_docs: z.ZodDefault<z.ZodBoolean>;
         policy: z.ZodDefault<z.ZodEnum<{
@@ -752,6 +951,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
         max_duration_minutes: z.ZodDefault<z.ZodNumber>;
         max_repetitions: z.ZodDefault<z.ZodNumber>;
         max_consecutive_errors: z.ZodDefault<z.ZodNumber>;
+        max_transient_retries: z.ZodDefault<z.ZodNumber>;
         warning_threshold: z.ZodDefault<z.ZodNumber>;
         idle_timeout_minutes: z.ZodDefault<z.ZodNumber>;
         no_op_warning_threshold: z.ZodDefault<z.ZodNumber>;
@@ -768,6 +968,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
             max_consecutive_errors: z.ZodOptional<z.ZodNumber>;
             warning_threshold: z.ZodOptional<z.ZodNumber>;
             idle_timeout_minutes: z.ZodOptional<z.ZodNumber>;
+            max_transient_retries: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strip>>>;
         block_destructive_commands: z.ZodDefault<z.ZodBoolean>;
         interpreter_allowed_agents: z.ZodOptional<z.ZodArray<z.ZodString>>;
@@ -806,6 +1007,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
             allowedGlobs: z.ZodOptional<z.ZodArray<z.ZodString>>;
         }, z.core.$strip>>>;
         universal_deny_prefixes: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        verifier_config_paths: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
     plan_cursor: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
@@ -833,9 +1035,9 @@ export declare const PluginConfigSchema: z.ZodObject<{
     adversarial_detection: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         policy: z.ZodDefault<z.ZodEnum<{
-            warn: "warn";
             gate: "gate";
             ignore: "ignore";
+            warn: "warn";
         }>>;
         pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
     }, z.core.$strip>>;
@@ -880,6 +1082,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
     checkpoint: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         auto_checkpoint_threshold: z.ZodDefault<z.ZodNumber>;
+        allow_empty_commits: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strict>>;
     automation: z.ZodOptional<z.ZodType<{
         mode: "auto" | "manual" | "hybrid";
@@ -921,6 +1124,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
         low_utility_threshold: z.ZodDefault<z.ZodNumber>;
         min_retrievals_for_utility: z.ZodDefault<z.ZodNumber>;
         schema_version: z.ZodDefault<z.ZodNumber>;
+        directive_min_confidence: z.ZodDefault<z.ZodNumber>;
         same_project_weight: z.ZodDefault<z.ZodNumber>;
         cross_project_weight: z.ZodDefault<z.ZodNumber>;
         min_encounter_score: z.ZodDefault<z.ZodNumber>;
@@ -941,6 +1145,55 @@ export declare const PluginConfigSchema: z.ZodObject<{
         suppress_warnings: z.ZodDefault<z.ZodBoolean>;
         drift_inject_max_chars: z.ZodDefault<z.ZodNumber>;
         llm_timeout_ms: z.ZodDefault<z.ZodNumber>;
+        skill_generation_enabled: z.ZodDefault<z.ZodBoolean>;
+        skill_generation_mode: z.ZodDefault<z.ZodEnum<{
+            draft: "draft";
+            active: "active";
+        }>>;
+        min_skill_confidence: z.ZodDefault<z.ZodNumber>;
+        min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strip>>;
+    knowledge_application: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        mode: z.ZodDefault<z.ZodEnum<{
+            enforce: "enforce";
+            warn: "warn";
+        }>>;
+        min_confidence: z.ZodDefault<z.ZodNumber>;
+        critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
+        require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    skill_improver: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        max_calls_per_day: z.ZodDefault<z.ZodNumber>;
+        trigger: z.ZodDefault<z.ZodEnum<{
+            manual: "manual";
+            scheduled: "scheduled";
+        }>>;
+        targets: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+            skills: "skills";
+            spec: "spec";
+            architect_prompt: "architect_prompt";
+            knowledge: "knowledge";
+        }>>>;
+        write_mode: z.ZodDefault<z.ZodEnum<{
+            proposal: "proposal";
+            draft_skills: "draft_skills";
+        }>>;
+        require_user_approval: z.ZodDefault<z.ZodBoolean>;
+        quota_window: z.ZodDefault<z.ZodEnum<{
+            utc: "utc";
+            local: "local";
+        }>>;
+        allow_deterministic_fallback: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    spec_writer: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        model: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        fallback_models: z.ZodDefault<z.ZodArray<z.ZodString>>;
+        allow_spec_write: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
     tool_output: z.ZodOptional<z.ZodObject<{
         truncation_enabled: z.ZodDefault<z.ZodBoolean>;
@@ -992,7 +1245,9 @@ export declare const PluginConfigSchema: z.ZodObject<{
         parallelTimeoutMs: z.ZodDefault<z.ZodNumber>;
         vetoPriority: z.ZodDefault<z.ZodBoolean>;
         requireAllMembers: z.ZodDefault<z.ZodBoolean>;
+        minimumMembers: z.ZodDefault<z.ZodNumber>;
         escalateOnMaxRounds: z.ZodOptional<z.ZodString>;
+        phaseConcernsAllowComplete: z.ZodDefault<z.ZodBoolean>;
         general: z.ZodOptional<z.ZodObject<{
             enabled: z.ZodDefault<z.ZodBoolean>;
             searchProvider: z.ZodDefault<z.ZodEnum<{
@@ -1034,13 +1289,45 @@ export declare const PluginConfigSchema: z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         maxConcurrentTasks: z.ZodDefault<z.ZodNumber>;
         evidenceLockTimeoutMs: z.ZodDefault<z.ZodNumber>;
-        stageB: z.ZodDefault<z.ZodObject<{
-            parallel: z.ZodDefault<z.ZodObject<{
-                enabled: z.ZodDefault<z.ZodBoolean>;
-            }, z.core.$strip>>;
-        }, z.core.$strip>>;
+        max_coders: z.ZodDefault<z.ZodNumber>;
+        max_reviewers: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strip>>;
+    turbo: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        strategy: z.ZodLiteral<"standard">;
+        lean: z.ZodOptional<z.ZodObject<{
+            max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+            require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+            conflict_policy: z.ZodDefault<z.ZodEnum<{
+                serialize: "serialize";
+                degrade: "degrade";
+            }>>;
+            degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+            phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+            phase_critic: z.ZodDefault<z.ZodBoolean>;
+            integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+            allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+            worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>, z.ZodObject<{
+        strategy: z.ZodLiteral<"lean">;
+        lean: z.ZodObject<{
+            max_parallel_coders: z.ZodDefault<z.ZodNumber>;
+            require_declared_scope: z.ZodDefault<z.ZodBoolean>;
+            conflict_policy: z.ZodDefault<z.ZodEnum<{
+                serialize: "serialize";
+                degrade: "degrade";
+            }>>;
+            degrade_on_risk: z.ZodDefault<z.ZodBoolean>;
+            phase_reviewer: z.ZodDefault<z.ZodBoolean>;
+            phase_critic: z.ZodDefault<z.ZodBoolean>;
+            integrated_diff_required: z.ZodDefault<z.ZodBoolean>;
+            allow_docs_only_without_reviewer: z.ZodDefault<z.ZodBoolean>;
+            worktree_isolation: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>;
+    }, z.core.$strip>], "strategy">>;
     turbo_mode: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;
+    quiet: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;
+    version_check: z.ZodOptional<z.ZodDefault<z.ZodBoolean>>;
     full_auto: z.ZodDefault<z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         critic_model: z.ZodOptional<z.ZodString>;
@@ -1050,6 +1337,37 @@ export declare const PluginConfigSchema: z.ZodObject<{
             pause: "pause";
             terminate: "terminate";
         }>>;
+        mode: z.ZodDefault<z.ZodEnum<{
+            strict: "strict";
+            assisted: "assisted";
+            supervised: "supervised";
+        }>>;
+        fail_closed: z.ZodDefault<z.ZodBoolean>;
+        permission_policy: z.ZodDefault<z.ZodObject<{
+            enabled: z.ZodDefault<z.ZodBoolean>;
+            trusted_roots: z.ZodDefault<z.ZodArray<z.ZodString>>;
+            trusted_domains: z.ZodDefault<z.ZodArray<z.ZodString>>;
+            protected_paths: z.ZodDefault<z.ZodArray<z.ZodString>>;
+            allow_defaults: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>>;
+        denials: z.ZodDefault<z.ZodObject<{
+            max_consecutive: z.ZodDefault<z.ZodNumber>;
+            max_total: z.ZodDefault<z.ZodNumber>;
+            on_limit: z.ZodDefault<z.ZodEnum<{
+                pause: "pause";
+                terminate: "terminate";
+            }>>;
+        }, z.core.$strip>>;
+        oversight: z.ZodDefault<z.ZodObject<{
+            on_plan_change: z.ZodDefault<z.ZodBoolean>;
+            on_task_completion: z.ZodDefault<z.ZodBoolean>;
+            on_phase_boundary: z.ZodDefault<z.ZodBoolean>;
+            on_high_risk_action: z.ZodDefault<z.ZodBoolean>;
+            on_subagent_return_warning: z.ZodDefault<z.ZodBoolean>;
+            every_tool_calls: z.ZodDefault<z.ZodNumber>;
+            every_architect_turns: z.ZodDefault<z.ZodNumber>;
+            every_minutes: z.ZodDefault<z.ZodNumber>;
+        }, z.core.$strip>>;
     }, z.core.$strip>>>;
 }, z.core.$strip>;
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

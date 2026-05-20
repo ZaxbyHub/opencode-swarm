@@ -44,11 +44,9 @@ const validateArgsDirect = (args: unknown): boolean => {
 			if (/^[a-zA-Z]:[/\\]/.test(f)) return false;
 			if (/^\\\\/.test(f)) return false;
 			// Check control characters
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security test pattern
 			if (/[\x00-\x08\x0a\x0b\x0c\x0d\x0e-\x1f\x7f\x80-\x9f]/.test(f))
 				return false;
 			// Check PowerShell metacharacters
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security test pattern
 			if (/[|;&`$(){}[\]<>"'#*?\x00-\x1f]/.test(f)) return false;
 		}
 	}

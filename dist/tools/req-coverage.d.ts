@@ -3,7 +3,7 @@
  * Reads .swarm/spec.md for FR-### requirements and checks coverage against
  * files touched during a phase via evidence files.
  */
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 declare const OBLIGATION_KEYWORDS: readonly ["MUST", "SHOULD", "SHALL"];
 type ObligationLevel = (typeof OBLIGATION_KEYWORDS)[number];
 interface Requirement {

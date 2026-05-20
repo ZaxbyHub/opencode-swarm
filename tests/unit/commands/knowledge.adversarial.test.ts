@@ -24,6 +24,18 @@ const mockMigrateContextToKnowledge = mock(
 	}),
 );
 
+// knowledge-store mock — quarantine/restore handlers call readKnowledge to resolve prefixes
+// before delegating to the backend. Default returns empty; tests that expect success must
+// call mockReadKnowledge.mockResolvedValueOnce([{ id: <expectedId> }]) first.
+const mockReadKnowledge = mock(
+	async (_path: string) => [] as Array<{ id: string }>,
+);
+
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	readKnowledge: mockReadKnowledge,
+	resolveSwarmKnowledgePath: (_dir: string) => `${_dir}/.swarm/knowledge.jsonl`,
+}));
+
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
@@ -40,6 +52,10 @@ const {
 	handleKnowledgeMigrateCommand,
 } = await import('../../../src/commands/knowledge.js');
 
+afterEach(() => {
+	mock.restore();
+});
+
 describe('Adversarial Security Tests for knowledge.ts', () => {
 	const testDirectory = '/test/directory';
 
@@ -47,6 +63,7 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 		mockQuarantineEntry.mockClear();
 		mockRestoreEntry.mockClear();
 		mockMigrateContextToKnowledge.mockClear();
+		mockReadKnowledge.mockClear();
 	});
 
 	describe('Input injection attacks on entryId', () => {
@@ -139,8 +156,9 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 		});
 
 		it('10. Maximum valid ID (exactly 64 chars) should SUCCEED', async () => {
-			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 			const validId = 'a'.repeat(64);
+			mockReadKnowledge.mockResolvedValueOnce([{ id: validId }]);
+			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 			const result = await handleKnowledgeQuarantineCommand(testDirectory, [
 				validId,
 			]);
@@ -199,6 +217,7 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 			const error = new Error(
 				'ENOENT: no such file or directory, open /home/user/.swarm/knowledge.jsonl',
 			);
+			mockReadKnowledge.mockResolvedValueOnce([{ id: 'valid-id' }]);
 			mockQuarantineEntry.mockImplementationOnce(async () => {
 				throw error;
 			});
@@ -218,6 +237,7 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 			const error = new Error(
 				'EACCES: permission denied, open /etc/sensitive-config',
 			);
+			mockReadKnowledge.mockResolvedValueOnce([{ id: 'valid-id' }]);
 			mockRestoreEntry.mockImplementationOnce(async () => {
 				throw error;
 			});
@@ -236,9 +256,10 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 
 	describe('Reason parameter attacks (pass through tests)', () => {
 		it('17. Extremely long reason (10000 chars) should pass to underlying function', async () => {
-			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 			const longReason = 'x'.repeat(10000);
 			const validId = 'valid-123';
+			mockReadKnowledge.mockResolvedValueOnce([{ id: validId }]);
+			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 
 			const result = await handleKnowledgeQuarantineCommand(testDirectory, [
 				validId,
@@ -255,9 +276,10 @@ describe('Adversarial Security Tests for knowledge.ts', () => {
 		});
 
 		it('18. Control characters in reason should pass to underlying function', async () => {
-			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 			const reasonWithControls = 'reason\x1b[31m\x00with\x07controls\n\r';
 			const validId = 'valid-123';
+			mockReadKnowledge.mockResolvedValueOnce([{ id: validId }]);
+			mockQuarantineEntry.mockImplementationOnce(async () => undefined);
 
 			const result = await handleKnowledgeQuarantineCommand(testDirectory, [
 				validId,

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import {
 	appendKnowledge,
+	findNearDuplicate,
+	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../hooks/knowledge-store.js';
 import type {
@@ -22,6 +24,7 @@ const VALID_CATEGORIES: KnowledgeCategory[] = [
 	'debugging',
 	'performance',
 	'integration',
+	'todo',
 	'other',
 ];
 
@@ -30,19 +33,19 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 		description:
 			'Store a new lesson in the knowledge base for future reference. The lesson will be available for retrieval via knowledge_recall.',
 		args: {
-			lesson: tool.schema
+			lesson: z
 				.string()
 				.min(15)
 				.max(280)
 				.describe('The lesson to store (15-280 characters)'),
-			category: tool.schema
+			category: z
 				.enum(VALID_CATEGORIES)
 				.describe('Knowledge category for the lesson'),
-			tags: tool.schema
-				.array(tool.schema.string())
+			tags: z
+				.array(z.string())
 				.optional()
 				.describe('Optional tags for better searchability'),
-			scope: tool.schema
+			scope: z
 				.string()
 				.optional()
 				.describe('Scope of the lesson (global or stack:<name>)'),
@@ -141,7 +144,7 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				schema_version: 1,
 				created_at: new Date().toISOString(),
 				updated_at: new Date().toISOString(),
-				auto_generated: true,
+				auto_generated: false,
 				hive_eligible: false,
 			};
 
@@ -163,6 +166,23 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				}
 			} catch {
 				// Config load failure should not block knowledge storage
+			}
+
+			// Near-duplicate detection
+			try {
+				const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
+					resolveSwarmKnowledgePath(directory),
+				);
+				const duplicate = findNearDuplicate(lesson, existingEntries, 0.6);
+				if (duplicate) {
+					return JSON.stringify({
+						success: false,
+						id: duplicate.id,
+						message: 'near-duplicate of existing entry',
+					});
+				}
+			} catch {
+				// Read failure should not block knowledge storage
 			}
 
 			// Append to knowledge store

@@ -12,6 +12,11 @@
  * NOTE: telemetry.autoOversightEscalation is ONLY called for interaction_limit and deadlock
  * escalations (when limits are hit), NOT for initial phase_completion/question detection.
  * The initial detection triggers autonomous oversight but does not emit telemetry.
+ *
+ * MOCK CONVERSION NOTES:
+ * - src/state.ts: Converted to _internals DI seam (mutate properties, not reassign)
+ * - src/telemetry.js, src/hooks/utils.js, src/parallel/file-locks.js, src/agents/critic.js:
+ *   Cannot convert - source uses direct imports (not _internals routing)
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
@@ -19,23 +24,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config/schema';
 
-// Track calls to telemetry.autoOversightEscalation
-const telemetryCalls: Array<{
-	sessionId: string;
-	reason: string;
-	interactionCount: number;
-	deadlockCount: number;
-	phase?: number;
-}> = [];
+// =============================================================================
+// STATE MODULE - Converted to _internals DI seam
+// =============================================================================
+// Import _internals directly - we mutate its properties, not reassign the object
+import { _internals } from '../../../src/state.js';
 
-// Track console.log calls to verify detection happened
-const consoleLogCalls: string[] = [];
+// Save original _internals properties for restoration in afterEach
+let origHasActiveFullAuto: typeof _internals.hasActiveFullAuto;
+let origSwarmState: typeof _internals.swarmState;
+let origEnsureAgentSession: typeof _internals.ensureAgentSession;
+let origResetSwarmState: typeof _internals.resetSwarmState;
 
-// Track console.warn calls to verify deadlock warnings
-const consoleWarnCalls: string[] = [];
+// Mock hasActiveFullAuto function
+const mockHasActiveFullAutoFn = mock(() => false);
 
 // Persistent session state storage (simulates real swarmState.agentSessions)
-// Use globalThis to ensure the mock and tests share the same storage instance
 interface SessionState {
 	fullAutoInteractionCount: number;
 	fullAutoDeadlockCount: number;
@@ -58,29 +62,58 @@ const stateRef: { sessionStorage: Map<string, SessionState> } = {
 // Backwards-compatible alias for tests that reference sessionStorage directly
 const sessionStorage = stateRef.sessionStorage;
 
-// Mock dependencies before importing the hook module
-const mockHasActiveFullAuto = mock(() => false);
+// Mock hasActiveFullAuto - starts returning false by default
+function mockHasActiveFullAuto(sessionId?: string): boolean {
+	return mockState.hasActiveFullAutoResult;
+}
 
-mock.module('../../../src/state.js', () => ({
-	hasActiveFullAuto: mockHasActiveFullAuto,
-	swarmState: {
-		agentSessions: stateRef.sessionStorage,
-	},
-	ensureAgentSession: (sessionId: string) => {
-		if (!stateRef.sessionStorage.has(sessionId)) {
-			stateRef.sessionStorage.set(sessionId, {
-				fullAutoInteractionCount: 0,
-				fullAutoDeadlockCount: 0,
-				fullAutoLastQuestionHash: undefined,
-			});
-		}
-		return stateRef.sessionStorage.get(sessionId)!;
-	},
-	resetSwarmState: () => {
-		stateRef.sessionStorage.clear();
-	},
-}));
+// Use an object to hold the mock state so it can be mutated
+const mockState = {
+	hasActiveFullAutoResult: false,
+};
 
+// Mock ensureAgentSession
+function mockEnsureAgentSession(sessionId: string) {
+	if (!stateRef.sessionStorage.has(sessionId)) {
+		stateRef.sessionStorage.set(sessionId, {
+			fullAutoInteractionCount: 0,
+			fullAutoDeadlockCount: 0,
+			fullAutoLastQuestionHash: undefined,
+		});
+	}
+	return stateRef.sessionStorage.get(sessionId)!;
+}
+
+// Mock resetSwarmState
+function mockResetSwarmState() {
+	stateRef.sessionStorage.clear();
+}
+
+// Mock swarmState object
+const mockSwarmState = {
+	agentSessions: stateRef.sessionStorage,
+	opencodeClient: null,
+};
+
+// =============================================================================
+// REMAINING MOCKS - Cannot convert (source uses direct imports, not _internals)
+// These remain as mock.module per the plan:
+// - src/telemetry.js: source imports { telemetry } directly, not via _internals
+// - src/hooks/utils.js: source imports { validateSwarmPath } directly
+// - src/parallel/file-locks.js: source imports { tryAcquireLock } directly
+// - src/agents/critic.js: source imports { createCriticAutonomousOversightAgent } directly
+// =============================================================================
+
+// Track calls to telemetry.autoOversightEscalation
+const telemetryCalls: Array<{
+	sessionId: string;
+	reason: string;
+	interactionCount: number;
+	deadlockCount: number;
+	phase?: number;
+}> = [];
+
+// Mock telemetry - remains as mock.module (no _internals seam for direct import)
 mock.module('../../../src/telemetry.js', () => ({
 	telemetry: {
 		autoOversightEscalation: mock(
@@ -144,6 +177,12 @@ const { createFullAutoInterceptHook } = await import(
 	'../../../src/hooks/full-auto-intercept.js'
 );
 
+// Track console.log calls to verify detection happened
+const consoleLogCalls: string[] = [];
+
+// Track console.warn calls to verify deadlock warnings
+const consoleWarnCalls: string[] = [];
+
 let testDir: string;
 
 function createFullAutoConfig(overrides?: {
@@ -195,7 +234,28 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 	let originalConsoleWarn: typeof console.warn;
 
 	beforeEach(() => {
-		mockHasActiveFullAuto.mockClear();
+		// Save original _internals properties
+		origHasActiveFullAuto = _internals.hasActiveFullAuto;
+		origSwarmState = _internals.swarmState;
+		origEnsureAgentSession = _internals.ensureAgentSession;
+		origResetSwarmState = _internals.resetSwarmState;
+
+		// Replace _internals properties with mocks
+		// Note: We mutate the properties of _internals, not _internals itself
+		// This works because the source captured a reference to _internals object
+		// at import time, and objects are passed by reference
+		_internals.hasActiveFullAuto = mockHasActiveFullAutoFn;
+		_internals.swarmState = mockSwarmState;
+		_internals.ensureAgentSession = mockEnsureAgentSession;
+		_internals.resetSwarmState = mockResetSwarmState;
+
+		// Set mock implementation to use mockState.hasActiveFullAutoResult
+		// This allows tests to control the mock by setting mockState.hasActiveFullAutoResult
+		mockHasActiveFullAutoFn.mockImplementation(
+			() => mockState.hasActiveFullAutoResult,
+		);
+
+		mockState.hasActiveFullAutoResult = false;
 		// Clear arrays properly
 		telemetryCalls.length = 0;
 		consoleLogCalls.length = 0;
@@ -224,6 +284,12 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 	});
 
 	afterEach(() => {
+		// Restore original _internals properties
+		_internals.hasActiveFullAuto = origHasActiveFullAuto;
+		_internals.swarmState = origSwarmState;
+		_internals.ensureAgentSession = origEnsureAgentSession;
+		_internals.resetSwarmState = origResetSwarmState;
+
 		// Restore console.log and console.warn to original
 		console.log = originalConsoleLog;
 		console.warn = originalConsoleWarn;
@@ -231,20 +297,19 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		consoleLogCalls.length = 0;
 		consoleWarnCalls.length = 0;
 		stateRef.sessionStorage.clear();
-		// Note: We intentionally do NOT call mock.restore() here because
-		// mock.module mocks persist for the lifetime of the test file.
-		// Calling restore would clear the src/state.js mock, causing
-		// subsequent tests to use the real module instead of our mock.
 		try {
 			fs.rmSync(testDir, { recursive: true, force: true });
 		} catch {
 			// Ignore cleanup errors
 		}
+
+		// Restore cross-module mocks
+		mock.restore();
 	});
 
 	describe('hasActiveFullAuto activation check', () => {
 		it('does NOT detect escalation when hasActiveFullAuto returns false', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => false);
+			mockState.hasActiveFullAutoResult = false;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -259,7 +324,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects escalation when hasActiveFullAuto returns true', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -276,7 +341,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('phase completion pattern detection', () => {
 		it('detects "Ready for Phase N+1?" pattern as phase completion question', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -296,7 +361,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "Ready for Phase [N+1]?" pattern with brackets', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -316,7 +381,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "Ready for Phase 2?" pattern (literal number, not N+1)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -336,7 +401,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "Ready for Phase 10?" pattern with larger number', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -356,7 +421,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects escalation patterns case-insensitively', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -378,7 +443,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('end-of-sentence question detection', () => {
 		it('detects "?" at end of architect output (standalone question)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -399,7 +464,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects question with whitespace before end', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -421,7 +486,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('mid-sentence question filtering', () => {
 		it('does NOT trigger on mid-sentence "?" in code like "v1?"', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -436,7 +501,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger on mid-sentence "?" in code like "v1.2?"', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -451,7 +516,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger on mid-sentence "?" in code like "y?.z" (optional chaining)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -466,7 +531,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger on mid-sentence "?" with API acronym', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -481,7 +546,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger on mid-sentence "?" with OK confirmation', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -496,7 +561,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger on numbers with question marks between them like "5?10"', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -513,7 +578,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('deadlock_threshold enforcement', () => {
 		it('triggers deadlock detection when same question is repeated 3 times with threshold=2', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({
 				enabled: true,
@@ -553,7 +618,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT trigger deadlock warning when below threshold', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({
 				enabled: true,
@@ -584,7 +649,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('interaction budget enforcement', () => {
 		it('counts interactions correctly', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({
 				enabled: true,
@@ -608,7 +673,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does NOT escalate when interaction count is below limit', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({
 				enabled: true,
@@ -634,7 +699,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('architect turn detection', () => {
 		it('only processes messages from architect role', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -653,7 +718,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with explicit agent: architect', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -670,7 +735,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with mega_architect prefix', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -691,7 +756,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('skips messages from other agents like coder', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -706,7 +771,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with cloud_architect prefix (cloud not in old allowlist)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -727,7 +792,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with enterprise_architect prefix (enterprise not in old allowlist)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -748,7 +813,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with synthetic_architect prefix (synthetic not in old allowlist)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -769,7 +834,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with team-architect prefix (Strategy 2: suffix matching with hyphen separator)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -790,7 +855,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('processes architect message with xyz_architect prefix (Strategy 2: arbitrary prefix suffix matching)', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -846,7 +911,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('empty/null edge cases', () => {
 		it('does not process empty messages array', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -857,7 +922,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does not process message with no text parts', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -879,7 +944,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('does not process message with empty text', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -903,7 +968,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 
 	describe('other escalation patterns', () => {
 		it('detects "escalat" pattern', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -920,7 +985,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "What would you like" pattern', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -937,7 +1002,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "Should I proceed" pattern', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);
@@ -957,7 +1022,7 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 
 		it('detects "Do you want" pattern', async () => {
-			mockHasActiveFullAuto.mockImplementation(() => true);
+			mockState.hasActiveFullAutoResult = true;
 
 			const config = createFullAutoConfig({ enabled: true });
 			const hooks = createFullAutoInterceptHook(config, testDir);

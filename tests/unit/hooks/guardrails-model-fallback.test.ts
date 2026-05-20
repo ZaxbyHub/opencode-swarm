@@ -682,9 +682,9 @@ describe('guardrails consecutiveErrors: transient errors skip increment', () => 
 	});
 
 	// -------------------------------------------------------------------------
-	// Once modelFallbackExhausted = true, transient errors count toward the breaker
+	// Transient retry budget is independent of modelFallbackExhausted.
 	// -------------------------------------------------------------------------
-	test('transient error increments consecutiveErrors when modelFallbackExhausted is true', async () => {
+	test('transient error does not increment consecutiveErrors when modelFallbackExhausted is true but retry budget remains', async () => {
 		const sessionId = 'session-cb-exhausted';
 		ensureAgentSession(sessionId, 'coder');
 		swarmState.activeAgent.set(sessionId, 'coder');
@@ -710,8 +710,9 @@ describe('guardrails consecutiveErrors: transient errors skip increment', () => 
 
 		const window = Object.values(session.windows)[0];
 		expect(window).toBeDefined();
-		// When fallback is exhausted, even transient errors must burn the breaker
-		expect(window!.consecutiveErrors).toBe(1);
+		// Transient retries are independent of fallback exhaustion.
+		expect(window!.consecutiveErrors).toBe(0);
+		expect(window!.transientRetryCount).toBe(1);
 		// model_fallback_index must not advance further
 		expect(session.model_fallback_index).toBe(2);
 	});

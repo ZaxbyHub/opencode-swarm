@@ -1,493 +1,620 @@
-import { describe, expect, test } from 'bun:test';
-import { synthesizeCouncilVerdicts } from '../../../src/council/council-service';
-import type { CouncilMemberVerdict } from '../../../src/council/types';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { synthesizePhaseCouncilAdvisory } from '../../../src/council/council-service';
+import type {
+	CouncilAgent,
+	CouncilFinding,
+	CouncilMemberVerdict,
+} from '../../../src/council/types';
 
-const makeVerdict = (
-	agent: CouncilMemberVerdict['agent'],
-	verdict: CouncilMemberVerdict['verdict'],
-	findings: CouncilMemberVerdict['findings'] = [],
-): CouncilMemberVerdict => ({
-	agent,
-	verdict,
-	confidence: 0.9,
-	findings,
-	criteriaAssessed: ['C1'],
-	criteriaUnmet: verdict === 'REJECT' ? ['C1'] : [],
-	durationMs: 1000,
+let tempDir: string;
+
+const PHASE_NUMBER = 1;
+const PHASE_SUMMARY = 'Test phase summary';
+
+beforeEach(() => {
+	tempDir = mkdtempSync(join(tmpdir(), 'council-service-test-'));
 });
 
-describe('synthesizeCouncilVerdicts — veto logic', () => {
-	test('unanimous APPROVE → overall APPROVE', () => {
-		const verdicts = [
-			makeVerdict('critic', 'APPROVE'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.overallVerdict).toBe('APPROVE');
-		expect(result.vetoedBy).toBeNull();
-		expect(result.allCriteriaMet).toBe(true);
-	});
-
-	test('single REJECT → overall REJECT (veto)', () => {
-		const verdicts = [
-			makeVerdict('critic', 'REJECT'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.overallVerdict).toBe('REJECT');
-		expect(result.vetoedBy).toContain('critic');
-	});
-
-	test('test_engineer REJECT alone blocks (veto parity)', () => {
-		const verdicts = [
-			makeVerdict('critic', 'APPROVE'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'REJECT', [
-				{
-					severity: 'HIGH',
-					category: 'test_gap',
-					location: 'tests/unit/foo.test.ts:0',
-					detail: 'No tests for null input path',
-					evidence: 'No null guard test exists',
-				},
-			]),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.overallVerdict).toBe('REJECT');
-		expect(result.vetoedBy).toContain('test_engineer');
-		expect(result.requiredFixes).toHaveLength(1);
-	});
-
-	test('CONCERNS without REJECT → overall CONCERNS', () => {
-		const verdicts = [
-			makeVerdict('critic', 'CONCERNS'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.overallVerdict).toBe('CONCERNS');
-		expect(result.vetoedBy).toBeNull();
-	});
-
-	test('vetoPriority: false → REJECT becomes CONCERNS if majority approve', () => {
-		const verdicts = [
-			makeVerdict('critic', 'REJECT'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-			{
-				vetoPriority: false,
-			},
-		);
-		// Without veto, REJECT is downgraded to CONCERNS (never silently swallowed).
-		expect(result.overallVerdict).toBe('CONCERNS');
-	});
+afterEach(() => {
+	rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe('synthesizeCouncilVerdicts — unified feedback', () => {
-	test('APPROVE feedback contains approval message', () => {
-		const verdicts = [
-			makeVerdict('critic', 'APPROVE'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.unifiedFeedbackMd).toContain('All council members approved');
-		expect(result.unifiedFeedbackMd).toContain('Round 1/3');
-	});
+function makeVerdict(
+	agent: CouncilAgent,
+	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT',
+	findings: CouncilFinding[] = [],
+	criteriaAssessed: string[] = [],
+	criteriaUnmet: string[] = [],
+): CouncilMemberVerdict {
+	return {
+		agent,
+		verdict,
+		confidence: 0.9,
+		findings,
+		criteriaAssessed,
+		criteriaUnmet,
+		durationMs: 1000,
+	};
+}
 
-	test('REJECT feedback contains veto notice and required fixes', () => {
-		const verdicts = [
-			makeVerdict('critic', 'REJECT', [
-				{
-					severity: 'HIGH',
-					category: 'logic',
-					location: 'src/foo.ts:10',
-					detail: 'Null deref',
-					evidence: 'Line 10 dereferences without guard',
-				},
-			]),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.unifiedFeedbackMd).toContain('BLOCKED');
-		expect(result.unifiedFeedbackMd).toContain('critic');
-		expect(result.unifiedFeedbackMd).toContain('Required Fixes');
-		expect(result.unifiedFeedbackMd).toContain('Null deref');
-	});
+function makeFinding(
+	severity: 'HIGH' | 'MEDIUM' | 'LOW',
+	location: string,
+	detail: string,
+): CouncilFinding {
+	return {
+		severity,
+		category: 'logic',
+		location,
+		detail,
+		evidence: 'test evidence',
+	};
+}
 
-	test('max rounds reached shows escalation notice', () => {
-		const verdicts = [
-			makeVerdict('critic', 'REJECT'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			3,
-		);
-		expect(result.unifiedFeedbackMd).toContain('Max rounds');
-		expect(result.unifiedFeedbackMd).toContain('Escalate to user');
-	});
-});
-
-describe('synthesizeCouncilVerdicts — conflict detection', () => {
-	test('same location add vs remove produces conflict', () => {
-		const verdicts: CouncilMemberVerdict[] = [
-			{
-				agent: 'critic',
-				verdict: 'CONCERNS',
-				confidence: 0.8,
-				findings: [
-					{
-						severity: 'MEDIUM',
-						category: 'logic',
-						location: 'src/foo.ts:42',
-						detail: 'Add null check here',
-						evidence: '...',
-					},
-				],
-				criteriaAssessed: [],
-				criteriaUnmet: [],
-				durationMs: 500,
-			},
-			{
-				agent: 'reviewer',
-				verdict: 'CONCERNS',
-				confidence: 0.8,
-				findings: [
-					{
-						severity: 'LOW',
-						category: 'maintainability',
-						location: 'src/foo.ts:42',
-						detail: 'Remove redundant check',
-						evidence: '...',
-					},
-				],
-				criteriaAssessed: [],
-				criteriaUnmet: [],
-				durationMs: 500,
-			},
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			null,
-			1,
-		);
-		expect(result.unresolvedConflicts.length).toBeGreaterThan(0);
-		expect(result.unifiedFeedbackMd).toContain('Conflicts to Resolve');
-	});
-});
-
-describe('synthesizeCouncilVerdicts — emptyVerdictsWarning field', () => {
-	test('empty verdicts array sets emptyVerdictsWarning to true', () => {
-		const result = synthesizeCouncilVerdicts('1.1', 's1', [], null, 1);
-		expect(result.emptyVerdictsWarning).toBe(true);
-		// Backward compatibility: APPROVE still returned on empty
-		expect(result.overallVerdict).toBe('APPROVE');
-		expect(result.vetoedBy).toBeNull();
-	});
-
-	test('non-empty verdicts array does NOT set emptyVerdictsWarning', () => {
-		const verdicts = [
-			makeVerdict('critic', 'APPROVE'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts('1.1', 's1', verdicts, null, 1);
-		expect(result.emptyVerdictsWarning).toBeUndefined();
-	});
-});
-
-describe('synthesizeCouncilVerdicts — criteria assessment', () => {
-	test('allCriteriaMet is false when a mandatory criterion was not assessed at all', () => {
-		// An unassessed mandatory criterion must NOT count as met — otherwise a
-		// council that simply forgot to evaluate C2 would silently auto-approve.
-		const verdicts: CouncilMemberVerdict[] = [
-			{
-				agent: 'critic',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'reviewer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'sme',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'test_engineer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			{
-				taskId: '1.1',
-				criteria: [
-					{ id: 'C1', description: 'x', mandatory: true },
-					{ id: 'C2', description: 'y', mandatory: true },
-				],
-				declaredAt: new Date().toISOString(),
-			},
-			1,
-		);
-		expect(result.allCriteriaMet).toBe(false);
-	});
-
-	test('allCriteriaMet with two mandatory criteria and one unmet catches .every/.some mutation', () => {
-		// With two mandatory criteria, C1 met and C2 unmet: .every returns false
-		// (correct), .some would return true (incorrect). This test will fail if
-		// someone ever flips .every to .some.
-		const verdicts: CouncilMemberVerdict[] = [
-			{
-				agent: 'critic',
-				verdict: 'CONCERNS',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: ['C2'],
-				durationMs: 10,
-			},
-			{
-				agent: 'reviewer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'sme',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'test_engineer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			{
-				taskId: '1.1',
-				criteria: [
-					{ id: 'C1', description: 'x', mandatory: true },
-					{ id: 'C2', description: 'y', mandatory: true },
-				],
-				declaredAt: new Date().toISOString(),
-			},
-			1,
-		);
-		expect(result.allCriteriaMet).toBe(false);
-	});
-
-	test('allCriteriaMet is true when both mandatory criteria are assessed and not unmet', () => {
-		const verdicts: CouncilMemberVerdict[] = [
-			{
-				agent: 'critic',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'reviewer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'sme',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-			{
-				agent: 'test_engineer',
-				verdict: 'APPROVE',
-				confidence: 1,
-				findings: [],
-				criteriaAssessed: ['C1', 'C2'],
-				criteriaUnmet: [],
-				durationMs: 10,
-			},
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			{
-				taskId: '1.1',
-				criteria: [
-					{ id: 'C1', description: 'x', mandatory: true },
-					{ id: 'C2', description: 'y', mandatory: true },
-				],
-				declaredAt: new Date().toISOString(),
-			},
-			1,
-		);
-		expect(result.allCriteriaMet).toBe(true);
-	});
-
-	test('allCriteriaMet is false when a mandatory criterion is unmet', () => {
-		const verdicts = [
-			makeVerdict('critic', 'REJECT'),
-			makeVerdict('reviewer', 'APPROVE'),
-			makeVerdict('sme', 'APPROVE'),
-			makeVerdict('test_engineer', 'APPROVE'),
-		];
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			verdicts,
-			{
-				taskId: '1.1',
-				criteria: [
-					{ id: 'C1', description: 'x', mandatory: true },
-					{ id: 'C2', description: 'y', mandatory: false },
-				],
-				declaredAt: new Date().toISOString(),
-			},
-			1,
-		);
-		// critic REJECT carries criteriaUnmet: ['C1']
-		expect(result.allCriteriaMet).toBe(false);
-	});
-
-	test('allCriteriaMet is true when only non-mandatory criteria are unmet', () => {
-		const verdict: CouncilMemberVerdict = {
-			agent: 'critic',
-			verdict: 'CONCERNS',
-			confidence: 0.8,
-			findings: [],
-			criteriaAssessed: ['C1', 'C2'],
-			criteriaUnmet: ['C2'],
-			durationMs: 100,
-		};
-		const result = synthesizeCouncilVerdicts(
-			'1.1',
-			'swarm-1',
-			[
-				verdict,
+describe('synthesizePhaseCouncilAdvisory', () => {
+	describe('verdict synthesis', () => {
+		test('all APPROVE → overallVerdict APPROVE, requiredFixes empty', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
 				makeVerdict('reviewer', 'APPROVE'),
 				makeVerdict('sme', 'APPROVE'),
-				makeVerdict('test_engineer', 'APPROVE'),
-			],
-			{
-				taskId: '1.1',
-				criteria: [
-					{ id: 'C1', description: 'x', mandatory: true },
-					{ id: 'C2', description: 'y', mandatory: false },
-				],
-				declaredAt: new Date().toISOString(),
-			},
-			1,
-		);
-		expect(result.allCriteriaMet).toBe(true);
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('APPROVE');
+			expect(result.requiredFixes).toEqual([]);
+			expect(result.vetoedBy).toBeNull();
+			expect(result.quorumSize).toBe(3);
+		});
+
+		test('single REJECT with vetoPriority=true → overallVerdict REJECT', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/file.ts:10', 'Critical bug'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{ vetoPriority: true },
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('REJECT');
+			expect(result.vetoedBy).toEqual(['critic']);
+			expect(result.requiredFixes).toHaveLength(1);
+			expect(result.requiredFixes[0].severity).toBe('HIGH');
+		});
+
+		test('single REJECT with vetoPriority=false → overallVerdict CONCERNS', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/file.ts:10', 'Critical bug'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{ vetoPriority: false },
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('CONCERNS');
+			expect(result.vetoedBy).toEqual(['critic']);
+		});
+
+		test('CONCERNS present without REJECT → overallVerdict CONCERNS', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'CONCERNS', [
+					makeFinding('LOW', 'src/file.ts:10', 'Minor issue'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('CONCERNS');
+			expect(result.vetoedBy).toBeNull();
+		});
+
+		test('mixed CONCERNS + APPROVE → overallVerdict CONCERNS', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'CONCERNS', [
+					makeFinding('MEDIUM', 'src/util.ts:5', 'Could be optimized'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('CONCERNS');
+		});
+
+		test('multiple REJECTs from different members → vetoedBy contains all rejecting', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/a.ts:1', 'Bug A'),
+				]),
+				makeVerdict('reviewer', 'REJECT', [
+					makeFinding('MEDIUM', 'src/b.ts:2', 'Bug B'),
+				]),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{ vetoPriority: true },
+				tempDir,
+			);
+
+			expect(result.overallVerdict).toBe('REJECT');
+			expect(result.vetoedBy).toContain('critic');
+			expect(result.vetoedBy).toContain('reviewer');
+			expect(result.requiredFixes).toHaveLength(2);
+		});
+	});
+
+	describe('quorum handling', () => {
+		test('quorum < 3 → advisory note added', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.quorumSize).toBe(2);
+			expect(result.advisoryNotes.some((n) => n.includes('quorum'))).toBeTrue();
+		});
+
+		test('quorum = 3 → no quorum advisory note', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.quorumSize).toBe(3);
+			expect(
+				result.advisoryNotes.some((n) => n.includes('quorum')),
+			).toBeFalse();
+		});
+
+		test('empty verdicts array → graceful handling', () => {
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				[],
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.quorumSize).toBe(0);
+			expect(result.advisoryNotes.some((n) => n.includes('quorum'))).toBeTrue();
+		});
+	});
+
+	describe('finding classification', () => {
+		test('HIGH severity from rejecting member → requiredFixes', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/bug.ts:1', 'Critical bug'),
+					makeFinding('LOW', 'src/style.ts:2', 'Style issue'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.requiredFixes).toHaveLength(1);
+			expect(result.requiredFixes[0].severity).toBe('HIGH');
+			expect(
+				result.advisoryFindings.some((f) => f.severity === 'LOW'),
+			).toBeTrue();
+		});
+
+		test('MEDIUM severity from rejecting member → requiredFixes', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('MEDIUM', 'src/issue.ts:5', 'Medium priority'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.requiredFixes).toHaveLength(1);
+			expect(result.requiredFixes[0].severity).toBe('MEDIUM');
+		});
+
+		test('LOW severity from rejecting member → advisoryFindings only', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('LOW', 'src/style.ts:1', 'Minor style'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.requiredFixes).toHaveLength(0);
+			expect(result.advisoryFindings).toHaveLength(1);
+			expect(result.advisoryFindings[0].severity).toBe('LOW');
+		});
+
+		test('findings from non-rejecting members → advisoryFindings', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE', [
+					makeFinding('MEDIUM', 'src/advisory.ts:1', 'Consider this'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(
+				result.advisoryFindings.some((f) => f.detail === 'Consider this'),
+			).toBeTrue();
+		});
+	});
+
+	describe('conflict detection', () => {
+		test('contradictory findings at same location → unresolvedConflicts', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'CONCERNS', [
+					makeFinding(
+						'HIGH',
+						'src/conflict.ts:1',
+						'Add validation for this input',
+					),
+				]),
+				makeVerdict('reviewer', 'CONCERNS', [
+					makeFinding(
+						'HIGH',
+						'src/conflict.ts:1',
+						'Remove validation for this input',
+					),
+				]),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.unresolvedConflicts.length).toBeGreaterThan(0);
+			expect(result.unresolvedConflicts[0]).toContain('Conflict at');
+		});
+	});
+
+	describe('return value', () => {
+		test('return value has correct schema for APPROVE verdict', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+			);
+
+			expect(result.overallVerdict).toBe('APPROVE');
+			expect(result.quorumSize).toBe(3);
+			expect(result.phaseNumber).toBe(PHASE_NUMBER);
+			expect(result.scope).toBe('phase');
+			expect(result.timestamp).toBeDefined();
+			expect(typeof result.timestamp).toBe('string');
+			expect(result.vetoedBy).toBeNull();
+		});
+
+		test('return value contains requiredFixes when present', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/bug.ts:1', 'Critical bug'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+			);
+
+			expect(result.requiredFixes).toBeDefined();
+			expect(result.requiredFixes.length).toBe(1);
+			expect(result.requiredFixes[0].severity).toBe('HIGH');
+			expect(result.requiredFixes[0].location).toBe('src/bug.ts:1');
+		});
+
+		test('return value contains advisoryNotes with quorum warning', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+			);
+
+			expect(result.advisoryNotes).toBeDefined();
+			expect(Array.isArray(result.advisoryNotes)).toBeTrue();
+			expect(result.advisoryNotes.some((n) => n.includes('quorum'))).toBeTrue();
+		});
+	});
+
+	describe('unifiedFeedbackMd generation', () => {
+		test('APPROVE verdict generates approval message', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.unifiedFeedbackMd).toContain('APPROVE');
+			expect(result.unifiedFeedbackMd).toContain('Phase Council Review');
+		});
+
+		test('REJECT verdict generates blocking message with required fixes', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'REJECT', [
+					makeFinding('HIGH', 'src/bug.ts:1', 'Critical bug'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.unifiedFeedbackMd).toContain('REJECT');
+			expect(result.unifiedFeedbackMd).toContain('BLOCKED');
+			expect(result.unifiedFeedbackMd).toContain('Required Fixes');
+		});
+
+		test('round number is included in feedback', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				2,
+				{ maxRounds: 3 },
+				tempDir,
+			);
+
+			expect(result.unifiedFeedbackMd).toContain('Round 2/3');
+		});
+	});
+
+	describe('phase number and summary', () => {
+		test('returned phaseNumber matches input', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				5,
+				'Phase 5 summary',
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.phaseNumber).toBe(5);
+			expect(result.phaseSummary).toBe('Phase 5 summary');
+		});
+
+		test('empty phase summary is handled', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE'),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				'',
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.phaseSummary).toBe('');
+		});
+	});
+
+	describe('advisory notes generation', () => {
+		test('advisory findings generate advisory notes', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'CONCERNS', [
+					makeFinding('LOW', 'src/style.ts:1', 'Minor style issue'),
+				]),
+				makeVerdict('reviewer', 'APPROVE'),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.advisoryNotes.length).toBeGreaterThan(0);
+			expect(result.advisoryNotes[0]).toContain('advisory finding');
+		});
+	});
+
+	describe('allCriteriaMet for phase council', () => {
+		test('no unmet criteria and non-empty verdicts → allCriteriaMet true', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE', [], ['C1', 'C2'], []),
+				makeVerdict('reviewer', 'APPROVE', [], ['C1', 'C2'], []),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.allCriteriaMet).toBeTrue();
+		});
+
+		test('some unmet criteria → allCriteriaMet false', () => {
+			const verdicts: CouncilMemberVerdict[] = [
+				makeVerdict('critic', 'APPROVE', [], ['C1'], []),
+				makeVerdict('reviewer', 'CONCERNS', [], ['C1'], ['C2']),
+				makeVerdict('sme', 'APPROVE'),
+			];
+
+			const result = synthesizePhaseCouncilAdvisory(
+				PHASE_NUMBER,
+				PHASE_SUMMARY,
+				verdicts,
+				1,
+				{},
+				tempDir,
+			);
+
+			expect(result.allCriteriaMet).toBeFalse();
+		});
 	});
 });

@@ -1,8 +1,15 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	stat,
+	writeFile,
+} from 'node:fs/promises';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { DocsConfigSchema } from '../config/schema.js';
 import {
 	appendKnowledge,
@@ -40,6 +47,14 @@ const SKIP_DIRECTORIES = new Set([
 	'build',
 	'.next',
 	'vendor',
+	// Bazel output trees
+	'bazel-out',
+	'bazel-bin',
+	'bazel-genfiles',
+	'bazel-testlogs',
+	// Gradle / Maven / Rust Cargo output trees
+	'.gradle',
+	'target',
 ]);
 
 const SKIP_PATTERNS = [/\.test\./, /\.spec\./, /\.d\.ts$/];
@@ -220,88 +235,122 @@ export async function scanDocIndex(
 		// No existing manifest or parse error - need to rescan
 	}
 
-	// Perform fresh scan
+	// Perform fresh scan using an async pruning directory walk.
+	// Directories in SKIP_DIRECTORIES are skipped before descent, so large
+	// build output trees (bazel-out, bazel-bin, node_modules, target, etc.)
+	// are never traversed. This avoids the synchronous event-loop block that
+	// readdirSync({recursive:true}) causes in monorepos with millions of files.
+	const resolvedDirectory = await realpath(directory).catch(() => directory);
 	const discoveredFiles: DocManifestFile[] = [];
+	let rootReadable = false;
 
-	// Use fs.readdirSync with recursive option
-	let rawEntries: (string | Buffer)[];
-	try {
-		rawEntries = fs.readdirSync(directory, { recursive: true });
-	} catch {
-		// Permission error or other - return empty manifest
-		const manifest: DocManifest = {
-			schema_version: 1,
-			scanned_at: new Date().toISOString(),
-			files: [],
+	const walkDir = async (dir: string): Promise<void> => {
+		let entries: fs.Dirent[];
+		try {
+			entries = await readdir(dir, { withFileTypes: true });
+			if (dir === directory) rootReadable = true;
+		} catch {
+			return; // permission error — skip subtree
+		}
+
+		for (const entry of entries) {
+			// Stop processing as soon as the cap is reached — avoids stat-ing and
+			// reading files that will be discarded by the post-walk splice.
+			if (discoveredFiles.length >= MAX_INDEXED_FILES) return;
+
+			const isDir = entry.isDirectory();
+			let isFile = entry.isFile();
+
+			// Follow symlinks for files so symlinked docs are indexed, matching
+			// the old readdirSync({recursive:true}) + statSync behavior.
+			// Directory symlinks are intentionally NOT followed to avoid cycles.
+			// realpath() resolves the canonical target path and enforces that it
+			// stays inside the project root, preventing traversal to /etc/passwd etc.
+			if (entry.isSymbolicLink()) {
+				try {
+					const symlinkPath = path.join(dir, entry.name);
+					const resolved = await realpath(symlinkPath);
+					const rel = path.relative(resolvedDirectory, resolved);
+					// Reject if the target escapes the project root
+					if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+					const targetStat = await stat(symlinkPath);
+					isFile = targetStat.isFile();
+					// isDir stays false — don't recurse into symlinked directories
+				} catch {
+					continue; // broken symlink or unresolvable — skip
+				}
+			}
+
+			if (isDir) {
+				if (!SKIP_DIRECTORIES.has(entry.name)) {
+					await walkDir(path.join(dir, entry.name));
+				}
+				continue;
+			}
+
+			if (!isFile) continue;
+
+			const fullPath = path.join(dir, entry.name);
+			const relPath = normalizeSeparators(path.relative(directory, fullPath));
+
+			// Skip test and type definition files
+			let skipThisFile = false;
+			for (const pattern of SKIP_PATTERNS) {
+				if (pattern.test(relPath)) {
+					skipThisFile = true;
+					break;
+				}
+			}
+			if (skipThisFile) continue;
+
+			// Only process files that match doc patterns
+			if (!matchesDocPattern(relPath, allPatterns)) continue;
+
+			// Get mtime for cache invalidation
+			let fileStat: fs.Stats;
+			try {
+				fileStat = await stat(fullPath);
+			} catch {
+				continue;
+			}
+
+			// Read file content to extract title and summary
+			let content: string;
+			try {
+				content = await readFile(fullPath, 'utf-8');
+			} catch {
+				continue;
+			}
+
+			const { title, summary } = extractTitleAndSummary(
+				content,
+				path.basename(relPath),
+			);
+
+			discoveredFiles.push({
+				path: relPath,
+				title,
+				summary,
+				lines: content.split('\n').length,
+				mtime: fileStat.mtimeMs,
+			});
+		}
+	};
+
+	await walkDir(directory);
+
+	// If the root directory was unreadable, return an empty manifest without
+	// caching it — matches the old readdirSync early-return behavior so a
+	// transient permission error does not poison the cache.
+	if (!rootReadable) {
+		return {
+			manifest: {
+				schema_version: 1,
+				scanned_at: new Date().toISOString(),
+				files: [],
+			},
+			cached: false,
 		};
-		return { manifest, cached: false };
-	}
-
-	// Filter to only string entries (Buffer entries on some systems)
-	const entries = rawEntries.filter((e): e is string => typeof e === 'string');
-
-	// Process entries
-	for (const entry of entries) {
-		const fullPath = path.join(directory, entry);
-
-		// Skip if not a file
-		let stat: fs.Stats;
-		try {
-			stat = fs.statSync(fullPath);
-		} catch {
-			continue;
-		}
-
-		if (!stat.isFile()) continue;
-
-		// Check skip directories - skip if entry path contains any skip directory
-		const pathParts = normalizeSeparators(entry).split('/');
-		let skipThisFile = false;
-		for (const part of pathParts) {
-			if (SKIP_DIRECTORIES.has(part)) {
-				skipThisFile = true;
-				break;
-			}
-		}
-		if (skipThisFile) continue;
-
-		// Skip test and type definition files
-		for (const pattern of SKIP_PATTERNS) {
-			if (pattern.test(entry)) {
-				skipThisFile = true;
-				break;
-			}
-		}
-		if (skipThisFile) continue;
-
-		// Check if matches doc patterns
-		if (!matchesDocPattern(entry, allPatterns)) {
-			continue;
-		}
-
-		// Read file content to extract title and summary
-		let content: string;
-		try {
-			content = fs.readFileSync(fullPath, 'utf-8');
-		} catch {
-			continue;
-		}
-
-		const { title, summary } = extractTitleAndSummary(
-			content,
-			path.basename(entry),
-		);
-
-		// Count total lines
-		const lineCount = content.split('\n').length;
-
-		discoveredFiles.push({
-			path: entry,
-			title,
-			summary,
-			lines: lineCount,
-			mtime: stat.mtimeMs,
-		});
 	}
 
 	// Sort files by path (case-insensitive)
@@ -541,7 +590,7 @@ export const doc_scan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Scan project documentation files and build an index manifest. Caches results in .swarm/doc-manifest.json for fast subsequent scans.',
 	args: {
-		force: tool.schema
+		force: z
 			.boolean()
 			.optional()
 			.describe('Force re-scan even if cache is valid'),
@@ -587,12 +636,10 @@ export const doc_extract: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Extract actionable constraints from project documentation relevant to the current task. Scans docs via doc-manifest, scores relevance via Jaccard bigram similarity, and stores non-duplicate constraints in .swarm/knowledge.jsonl.',
 	args: {
-		task_files: tool.schema
-			.array(tool.schema.string())
+		task_files: z
+			.array(z.string())
 			.describe('List of file paths involved in the current task'),
-		task_description: tool.schema
-			.string()
-			.describe('Description of the current task'),
+		task_description: z.string().describe('Description of the current task'),
 	},
 	execute: async (args: unknown, directory: string): Promise<string> => {
 		// Safe args extraction

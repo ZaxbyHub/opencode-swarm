@@ -40,8 +40,10 @@ describe('no duplicate export collisions', () => {
 		const exports = Object.keys(barrel);
 		const gateRelated = exports.filter((e) => e.includes('gate'));
 
-		// Should only have check_gate_status (not checkGateStatus, check-gate-status, etc.)
-		expect(gateRelated).toEqual(['check_gate_status']);
+		// Must include check_gate_status; no collision with camelCase or kebab-case variants
+		expect(gateRelated).toContain('check_gate_status');
+		expect(gateRelated).not.toContain('checkGateStatus');
+		expect(gateRelated).not.toContain('check-gate-status');
 	});
 });
 

@@ -15,6 +15,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			expect(architectConfig).toBeDefined();
 			expect(architectConfig.mode).toBe('primary');
 			expect(architectConfig.permission).toEqual({ task: 'allow' });
+			expect(architectConfig.tools?.swarm_command).toBe(true);
 		});
 
 		test('cloud_architect gets mode:primary and task:allow permission', () => {
@@ -32,6 +33,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			expect(cloudArchitectConfig).toBeDefined();
 			expect(cloudArchitectConfig.mode).toBe('primary');
 			expect(cloudArchitectConfig.permission).toEqual({ task: 'allow' });
+			expect(cloudArchitectConfig.tools?.swarm_command).toBe(true);
 		});
 
 		test('local_architect gets mode:primary and task:allow permission', () => {
@@ -49,6 +51,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			expect(localArchitectConfig).toBeDefined();
 			expect(localArchitectConfig.mode).toBe('primary');
 			expect(localArchitectConfig.permission).toEqual({ task: 'allow' });
+			expect(localArchitectConfig.tools?.swarm_command).toBe(true);
 		});
 	});
 
@@ -59,6 +62,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(coderConfig).toBeDefined();
 			expect(coderConfig.mode).toBe('subagent');
+			expect(coderConfig.tools?.swarm_command).toBe(true);
 			// Non-architects should NOT have task:allow permission
 			expect(coderConfig.permission).toBeUndefined();
 		});
@@ -94,6 +98,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(localReviewerConfig).toBeDefined();
 			expect(localReviewerConfig.mode).toBe('subagent');
+			expect(localReviewerConfig.tools?.swarm_command).toBe(true);
 			expect(localReviewerConfig.permission).toBeUndefined();
 		});
 
@@ -154,6 +159,10 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			// Non-architects in both swarms should be subagents
 			expect(configs['coder'].mode).toBe('subagent');
 			expect(configs['cloud_coder'].mode).toBe('subagent');
+			expect(configs['architect'].tools?.swarm_command).toBe(true);
+			expect(configs['cloud_architect'].tools?.swarm_command).toBe(true);
+			expect(configs['coder'].tools?.swarm_command).toBe(true);
+			expect(configs['cloud_coder'].tools?.swarm_command).toBe(true);
 		});
 	});
 });

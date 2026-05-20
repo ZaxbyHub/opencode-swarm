@@ -109,13 +109,20 @@ export interface AgentSessionState {
      * PR 2 Stage B barrier: per-task set of completed Stage B agents.
      * Order-independent — either 'reviewer' or 'test_engineer' may complete first.
      * When both are present, the task may advance to tests_run regardless of order.
-     * Only populated when parallelization.stageB.parallel.enabled = true.
+     * Always populated — Stage B is unconditionally parallel.
      */
     stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
-    /** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when convene_council resolves. */
+    /** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
     taskCouncilApproved?: Map<string, {
         verdict: 'APPROVE' | 'REJECT' | 'CONCERNS';
         roundNumber: number;
+        /**
+         * Distinct council members that voted on this verdict.
+         * Validated by the council fast-path against `council.minimumMembers`
+         * (default 3). Old evidence files without this field rehydrate as
+         * quorumSize: 1 — conservative; forces a fresh council run.
+         */
+        quorumSize: number;
     }>;
     /** Last gate outcome for deliberation preamble injection */
     lastGateOutcome: {
@@ -150,6 +157,14 @@ export interface AgentSessionState {
     modelFallbackExhausted: boolean;
     /** Session-scoped Turbo Mode flag for controlling LLM inference speed */
     turboMode: boolean;
+    /** Session-scoped turbo strategy selection — standard or lean. When undefined,
+     *  falls back to standard (current behavior). */
+    turboStrategy?: 'standard' | 'lean';
+    /** Whether Lean Turbo is actively running in this session. Requires
+     *  turboStrategy === 'lean'. */
+    leanTurboActive?: boolean;
+    /** Current phase number when Lean Turbo is active (for durable state sync). */
+    leanTurboCurrentPhase?: number;
     /** Session-level QA gate overrides layered on top of the spec-level profile.
      *  Overrides can only enable gates (true); false values are ignored by
      *  getEffectiveGates. Cleared on session reset. Optional for backwards
@@ -179,6 +194,8 @@ export interface AgentSessionState {
     contextPressureWarningSent?: boolean;
     /** Queue of advisory messages (e.g., SLOP, context pressure) pending injection into next messagesTransform */
     pendingAdvisoryMessages?: string[];
+    /** Fingerprint of the most recent provider-failure transcript that received recovery guidance */
+    lastProviderRecoveryFingerprint?: string;
     /** Timestamp when session was rehydrated from snapshot (0 if never rehydrated) */
     sessionRehydratedAt: number;
     /** Pattern type to detection count mapping */
@@ -224,6 +241,8 @@ export interface InvocationWindow {
     warningIssued: boolean;
     /** Human-readable warning reason */
     warningReason: string;
+    /** Transient model error retry count for this invocation (resets per window) */
+    transientRetryCount: number;
 }
 /**
  * Default run context — the single active run for current single-threaded behavior.
@@ -260,6 +279,36 @@ export declare const swarmState: {
      * name at call time by matching the active session's agent prefix. */
     curatorInitAgentNames: string[];
     curatorPhaseAgentNames: string[];
+    /** All registered skill_improver / spec_writer agent names across swarms,
+     * mirroring curatorInitAgentNames so the LLM delegate factory can resolve
+     * the correct prefixed agent under multi-swarm configs. */
+    skillImproverAgentNames: string[];
+    specWriterAgentNames: string[];
+    /** v2: in-memory cache of "currently-active critical directive ids" per
+     *  session+task, populated by the knowledge-injector when it injects a
+     *  critical+matching directive. Read by the toolBefore enforcement gate
+     *  so we don't re-scan the entire knowledge file on every high-risk tool
+     *  call. Cleared by phase change, curator commits, knowledge mutations,
+     *  and resetSwarmState. FIFO-capped — see setCriticalShownIds. */
+    currentCriticalShownIds: Map<string, {
+        ids: string[];
+        taskId?: string;
+        phase?: string;
+        generatedAt: number;
+    }>;
+    /** v2: dedup set for ack records. Key = `${sessionId}|${id}|${result}|${dayKey}`.
+     *  Prevents the chat.messages.transform path AND a knowledge_ack tool call
+     *  from double-counting the same ack within a session-day. FIFO-capped —
+     *  see addKnowledgeAckDedup. */
+    knowledgeAckDedup: Set<string>;
+    /**
+     * All generated agent names registered with OpenCode at plugin init.
+     * Used by Full-Auto v2 delegation guard to apply strict registry-aware
+     * canonical-role extraction (so user-supplied prose like
+     * `not_an_architect` cannot collapse to `architect` via suffix-only
+     * matching). Populated by `src/index.ts` after `createAgents`.
+     */
+    generatedAgentNames: string[];
     /** Last known context budget percentage (0-100), updated by system-enhancer */
     lastBudgetPct: number;
     /** Per-session guardrail state — keyed by sessionID */
@@ -359,7 +408,37 @@ export declare function recordPhaseAgentDispatch(sessionId: string, agentName: s
  * @param taskId - The task identifier
  * @param newState - The requested new state
  */
-export declare function advanceTaskState(session: AgentSessionState, taskId: string, newState: TaskWorkflowState): void;
+export declare function advanceTaskState(session: AgentSessionState, taskId: string, newState: TaskWorkflowState, options?: {
+    telemetrySessionId?: string;
+    emitTelemetry?: boolean;
+}, councilConfig?: {
+    minimumMembers?: number;
+    requireAllMembers?: boolean;
+}): void;
+/**
+ * Advance the per-task workflow state machine AND persist the corresponding
+ * plan.json status at meaningful workflow boundaries.
+ *
+ * The two-layer model splits in-memory workflow state (Layer 1, fast, used by
+ * gates) from the durable plan (Layer 2, projected to plan.md). Without this
+ * bridge, council APPROVE → 'complete' updates Layer 1 only and plan.md goes
+ * stale. This helper closes the gap by mapping:
+ *   - 'coder_delegated' → plan.json status 'in_progress'
+ *   - 'complete'        → plan.json status 'completed'
+ * Other transitions are in-memory only (the task is already in_progress on disk
+ * once coder_delegated has fired).
+ *
+ * Persistence errors are logged and swallowed so a transient disk failure does
+ * not break the in-memory state machine — matches the existing defensive
+ * pattern around advanceTaskState call sites.
+ */
+export declare function advanceTaskStateAndPersist(session: AgentSessionState, taskId: string, newState: TaskWorkflowState, directory: string, options?: {
+    telemetrySessionId?: string;
+    emitTelemetry?: boolean;
+}, councilConfig?: {
+    minimumMembers?: number;
+    requireAllMembers?: boolean;
+}): Promise<void>;
 /**
  * Get the current workflow state for a task.
  * Returns 'idle' if no entry exists.
@@ -431,7 +510,8 @@ export declare function _resetCouncilDisagreementWarnings(): void;
  */
 /**
  * Reads plan.json + evidence/*.json from the project directory and populates the
- * module-level _rehydrationCache.  Called once at plugin init by loadSnapshot().
+ * module-level _rehydrationCache.  Called at plugin init by loadSnapshot() and
+ * refreshed after compaction by the compaction hook (src/hooks/compaction-customizer.ts).
  * Non-fatal: missing/malformed files leave an empty cache.
  */
 export declare function buildRehydrationCache(directory: string): Promise<void>;
@@ -463,6 +543,59 @@ export declare function hasActiveTurboMode(sessionID?: string): boolean;
  * @returns true if the specified session has fullAutoMode: true (model validation is advisory-only).
  */
 export declare function hasActiveFullAuto(sessionID?: string): boolean;
+/**
+ * Check if Lean Turbo Mode is active for a specific session or ANY session.
+ * @param sessionID - Optional session ID to check. If provided, checks only that session.
+ *                    If omitted, checks all sessions.
+ * @returns true if the specified session has turboStrategy: 'lean' AND leanTurboActive: true,
+ *          or if any session has that combination when no sessionID provided.
+ */
+export declare function hasActiveLeanTurbo(sessionID?: string): boolean;
 export declare function setSessionEnvironment(sessionId: string, profile: EnvironmentProfile): void;
 export declare function getSessionEnvironment(sessionId: string): EnvironmentProfile | undefined;
 export declare function ensureSessionEnvironment(sessionId: string): EnvironmentProfile;
+export declare const MAX_TRACKED_CRITICAL_SHOWN = 500;
+export declare const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
+/** Set the critical shown ids for a session, FIFO-evicting the oldest entry
+ * if the cap is exceeded. Re-setting an existing key keeps insertion order
+ * fresh for that key (delete-then-set). */
+export declare function setCriticalShownIds(sessionID: string, value: {
+    ids: string[];
+    taskId?: string;
+    phase?: string;
+    generatedAt: number;
+}): void;
+/** Clear the critical shown ids for a session. Centralised so call sites do
+ *  not bypass the FIFO-cap pathway with a direct `.delete()`. Returns
+ *  whether an entry was removed. */
+export declare function clearCriticalShownIds(sessionID: string): boolean;
+/** Add a knowledge ack dedup key, FIFO-evicting the oldest if the cap is
+ * exceeded. Sets preserve insertion order in JS. */
+export declare function addKnowledgeAckDedup(key: string): void;
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.*` for key exported functions and objects so tests can replace
+ * them without using `mock.module` — `mock.module` from `bun:test` leaks
+ * across files in Bun's shared test-runner process, which would corrupt
+ * unrelated test suites. Mutating this local object is file-scoped and
+ * trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    swarmState: typeof swarmState;
+    resetSwarmState: typeof resetSwarmState;
+    ensureAgentSession: typeof ensureAgentSession;
+    startAgentSession: typeof startAgentSession;
+    getAgentSession: typeof getAgentSession;
+    beginInvocation: typeof beginInvocation;
+    getActiveWindow: typeof getActiveWindow;
+    advanceTaskState: typeof advanceTaskState;
+    getTaskState: typeof getTaskState;
+    hasActiveFullAuto: typeof hasActiveFullAuto;
+    hasActiveTurboMode: typeof hasActiveTurboMode;
+    hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
+    buildRehydrationCache: typeof buildRehydrationCache;
+    applyRehydrationCache: typeof applyRehydrationCache;
+    rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
+    isCouncilGateActive: typeof isCouncilGateActive;
+    defaultRunContext: typeof defaultRunContext;
+};

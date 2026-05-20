@@ -18,6 +18,16 @@ export interface MutationGateResult {
 	testImprovementPrompt: string;
 }
 
+export const _internals: {
+	evaluateMutationGate: typeof evaluateMutationGate;
+	buildTestImprovementPrompt: typeof buildTestImprovementPrompt;
+	buildMessage: typeof buildMessage;
+} = {
+	evaluateMutationGate,
+	buildTestImprovementPrompt,
+	buildMessage,
+} as const;
+
 /** Default thresholds */
 export const PASS_THRESHOLD = 0.8;
 export const WARN_THRESHOLD = 0.6;
@@ -54,13 +64,13 @@ export function evaluateMutationGate(
 		verdict = 'fail';
 	}
 
-	const testImprovementPrompt = buildTestImprovementPrompt(
+	const testImprovementPrompt = _internals.buildTestImprovementPrompt(
 		report,
 		passThreshold,
 		verdict,
 	);
 
-	const message = buildMessage(
+	const message = _internals.buildMessage(
 		verdict,
 		adjustedKillRate,
 		report.killed,

@@ -7,6 +7,15 @@ Swarm tracks two kinds of knowledge:
 
 When an architect receives a new message, entries from both stores are merged and deduplicated before injection.
 
+> **v2 actionable directives.** Knowledge entries can carry optional fields
+> (`triggers`, `required_actions`, `forbidden_actions`, `applies_to_tools`,
+> `applies_to_agents`, `directive_priority`, `generated_skill_path`). The
+> Architect receives these as a structured `<swarm_knowledge_directives>`
+> block and must acknowledge each applicable directive (`KNOWLEDGE_APPLIED`)
+> or explicitly skip it (`KNOWLEDGE_IGNORED reason=...`). See [Actionable
+> directives](#actionable-directives-v2) and
+> [Knowledge application contract](#knowledge-application-contract-v2) below.
+
 ---
 
 ## Storage Locations
@@ -185,7 +194,7 @@ Entries with `confidence ≥ 0.9` AND `utility_score ≥ 0.8` are marked evergre
 
 ### Low-utility
 
-Calculated after `min_retrievals_for_utility` retrievals (default 3). Entries at or below `low_utility_threshold` (default 0.3) with `applied_count ≥ 5` are flagged for removal.
+Calculated after `min_retrievals_for_utility` retrievals (default 3). Entries at or below `low_utility_threshold` (default 0.3) with `shown_count ≥ 5` are flagged for removal. (Pre-v2 entries used `applied_count` as the dominant signal; the v1→v2 normalizer copies the legacy field into `shown_count` on read so historical entries continue to trip this audit correctly. New code must read `shown_count` for "saw it" and `applied_explicit_count` for "applied it".)
 
 ### Encounter score (hive-only)
 
@@ -219,3 +228,314 @@ See [Commands Reference](commands.md) for full flag details.
 - [Architecture Deep Dive](architecture.md) — knowledge in the control loop
 - [Evidence and Telemetry](evidence-and-telemetry.md) — how retrieval outcomes feed utility scoring
 - [Configuration Reference](configuration.md) — full `knowledge.*` schema
+
+---
+
+## Actionable directives (v2)
+
+A v2 entry can carry optional metadata that turns a passive lesson into an
+actionable directive. All fields are optional and v1 entries continue to read
+without migration.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `triggers` | `string[]` | Phrases that surface the directive when the current task / tool / agent context matches. |
+| `required_actions` | `string[]` | What the architect / subagent MUST do when the trigger fires. |
+| `forbidden_actions` | `string[]` | What the directive forbids. |
+| `applies_to_agents` | `string[]` | Agent role names (snake_case) the directive applies to. |
+| `applies_to_tools` | `string[]` | Tool names the directive applies to. |
+| `verification_checks` | `string[]` | Reviewer / test_engineer / runtime checks. |
+| `directive_priority` | `"low"\|"medium"\|"high"\|"critical"` | Ranking + enforcement weight. |
+| `source_refs` | `string[]` | Pointers (file:line, plan section). Sanitized; no path traversal. |
+| `source_knowledge_ids` | `string[]` | UUIDs of source entries (for derived/clustered entries). |
+| `generated_skill_slug` | `string` | Slug of compiled SKILL.md. |
+| `generated_skill_path` | `string` | Repo-local path to compiled SKILL.md. Must live under `.opencode/skills/generated/` or `.swarm/skills/proposals/`. |
+| `last_applied_at` | ISO 8601 | Updated by `recordAcknowledgment("applied")`. |
+| `last_acknowledged_at` | ISO 8601 | Updated by any explicit ack. |
+
+Retrieval-outcome counters now distinguish:
+
+- `shown_count` — included in an injection block.
+- `acknowledged_count` — any explicit ack received.
+- `applied_explicit_count` — explicit `KNOWLEDGE_APPLIED`.
+- `ignored_count` — explicit `KNOWLEDGE_IGNORED`.
+- `violated_count` — explicit `KNOWLEDGE_VIOLATED` (or runtime-inferred).
+- `succeeded_after_shown_count` — phase succeeded after this entry was shown.
+- `failed_after_shown_count` — phase failed after this entry was shown.
+
+**Frozen legacy fields** (kept on disk for backward compatibility, never
+auto-incremented in v2):
+
+- `applied_count` — pre-v2 it was bumped on every "shown" event. The v1→v2
+  normalizer copies the historical value into `shown_count` on read.
+- `succeeded_after_count` / `failed_after_count` — replaced by
+  `succeeded_after_shown_count` / `failed_after_shown_count`.
+
+If you have analytics or downstream tooling that reads `applied_count`,
+migrate it to `shown_count` (for "shown") or `applied_explicit_count` (for
+"actually applied"). The frozen fields still exist on disk; they will not
+change after this release.
+
+---
+
+## Action-aware retrieval
+
+The injector now uses `readContextualKnowledge(directory, config, ctx)` where
+`ctx` carries the current phase, task id, tool/action name, target agent,
+file paths, recent reviewer/test failures, declared scope, and a `mode` value
+(`phase_start`, `delegation`, `tool_before`, `phase_complete`, `manual_recall`,
+`curator`).
+
+Ranking rules:
+
+- A `directive_priority: "critical"` entry whose trigger / tool / agent matches
+  the context is **forced into the top-N within budget**.
+- An entry whose `confidence >= directive_min_confidence` and whose
+  `applies_to_tools` / `applies_to_agents` matches the current action gets a
+  strong rank boost.
+- Entries with an active `generated_skill_path` are preferred over raw lesson
+  repetition.
+- Archived entries are excluded (also enforced by `knowledge_recall`).
+
+Cache key: phase + tool + action + targetAgent + taskId + filePaths hash. The
+phase-only cache from v1 has been retired.
+
+---
+
+## Knowledge application contract (v2)
+
+The Architect now receives a structured directive block:
+
+```
+<swarm_knowledge_directives>
+- id: <uuid>
+  confidence: 0.94
+  priority: critical
+  trigger: coder delegation modifying source files
+  required: call declare_scope before coder delegation
+  forbidden: bash/eval/heredoc file writes
+  skill: file:.opencode/skills/generated/scope-discipline/SKILL.md
+  verification: reviewer must reject scope bypass
+</swarm_knowledge_directives>
+```
+
+The Architect prompt requires inspecting this block before:
+
+1. Producing or saving a plan (`save_plan`).
+2. Updating a task status (`update_task_status`).
+3. Delegating to coder, reviewer, test_engineer, sme, docs, or designer.
+4. Calling `phase_complete`.
+5. Escalating or invoking `skill_improve`.
+
+For each applicable directive, the Architect emits:
+
+- `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
+- `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
+- `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
+
+You can also call the `knowledge_ack` tool for the same effect from structured
+tool args.
+
+### Audit log
+
+Every outcome is appended as a JSONL line to:
+
+```
+.swarm/knowledge-application.jsonl
+```
+
+with `{timestamp, phase, taskId, action, tool, targetAgent, knowledgeId,
+result: "shown"|"acknowledged"|"applied"|"ignored"|"violated", reason,
+generatedSkillPath, sessionId}`.
+
+### Enforcement modes
+
+```jsonc
+"knowledge_application": {
+  "enabled": true,
+  "mode": "warn",            // 'warn' (default) advises; 'enforce' blocks
+  "min_confidence": 0.85,
+  "critical_requires_ack": true,
+  "require_skill_refs": true
+}
+```
+
+In `enforce` mode the gate (`gateKnowledgeApplication` in
+`src/hooks/knowledge-application.ts`) blocks high-risk actions when a critical
+directive was shown but received no acknowledgment.
+
+---
+
+## Generated skills (knowledge-to-skill compiler)
+
+Mature, repeated, high-confidence knowledge can be compiled into a SKILL.md
+that subagents load via the existing `SKILLS:` delegation field.
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `skill_generate` | Compile candidates into draft (`.swarm/skills/proposals/<slug>.md`) or active (`.opencode/skills/generated/<slug>/SKILL.md`) skills. |
+| `skill_list` | List drafts and active generated skills. |
+| `skill_apply` | Activate a draft into `.opencode/skills/generated/<slug>/SKILL.md`. |
+| `skill_inspect` | Print a skill body with source knowledge IDs. |
+
+### Layout
+
+```
+.swarm/skills/proposals/<slug>.md           # drafts (curator + skill_improver)
+.opencode/skills/generated/<slug>/SKILL.md  # active generated skills
+```
+
+Generated files include the marker
+
+```
+<!-- generated by opencode-swarm skill-generator. ... -->
+```
+
+`skill_apply` will refuse to overwrite an active SKILL.md that lacks this
+marker (i.e. one a human authored or modified) unless `force=true` is passed.
+
+### Curator integration
+
+When `curator.skill_generation_enabled` is true (default), the curator's
+phase analysis can emit `skill_candidates` and `knowledge_application_findings`
+JSON blocks that are parsed strictly. Malformed JSON is silently dropped.
+High-confidence candidates (>= `curator.min_skill_confidence`) trigger
+`skill_generate` in **draft** mode; activation always requires a human or
+architect to call `skill_apply`.
+
+---
+
+## Skill improver agent (issue #629)
+
+The `skill_improver` agent runs rare, high-capability reviews of accumulated
+knowledge / skills / spec / architect prompt under a hard daily quota.
+
+When invoked the `skill_improve` tool dispatches the registered
+`skill_improver` agent on an ephemeral OpenCode session (same pattern as
+the curator LLM delegate). The agent's prompt requires it to emit a markdown
+proposal with sections: Inventory snapshot, Repeated ignored or violated
+directives, Concrete recommendations, Optional cluster suggestions, Risks.
+
+```jsonc
+"skill_improver": {
+  "enabled": false,
+  "max_calls_per_day": 10,
+  "trigger": "manual",
+  "targets": ["skills", "spec", "architect_prompt", "knowledge"],
+  "write_mode": "proposal",       // 'proposal' (no source mutation) | 'draft_skills'
+  "require_user_approval": true,
+  "quota_window": "utc",          // 'utc' (default) | 'local'
+  "allow_deterministic_fallback": true
+}
+```
+
+Set the **agent model** under `agents.skill_improver.model` (or
+`swarms.<id>.agents.skill_improver.model` for multi-swarm). The legacy
+top-level `skill_improver.model` field is **deprecated** and no longer drives
+the agent — use the standard `agents.<name>.model` precedence instead. (See
+the Configuration precedence section for details.)
+
+### Output source tagging
+
+Every proposal carries a YAML frontmatter line `source: llm` or
+`source: deterministic_fallback` so reviewers can immediately tell which path
+produced it:
+
+| `source` | When | Quality |
+|----------|------|---------|
+| `llm` | The OpenCode client was wired AND the configured `skill_improver` agent responded | Real LLM analysis |
+| `deterministic_fallback` | No client wired AND `allow_deterministic_fallback: true` (default for one minor — will flip to false in the next release) | Inventory-only summary; ⚠ NOT an LLM analysis |
+
+Set `allow_deterministic_fallback: false` to refuse with `no_llm_client` when
+no delegate is available.
+
+### Quota policy
+
+Quota state lives at `.swarm/skill-improver-quota.json`:
+
+```json
+{
+  "date": "2026-05-08",
+  "calls_used": 3,
+  "max_calls": 10,
+  "last_run_at": "2026-05-08T15:42:11Z",
+  "window": "utc"
+}
+```
+
+- Quota reservation runs under a `proper-lockfile` so parallel
+  `skill_improve` invocations cannot lost-update each other.
+- **No-client + fallback-disabled** → refuse pre-flight; quota untouched.
+- **Inventory failure (pre-network)** → release the reservation.
+- **LLM call started** → slot stays consumed even on failure (anti-flake
+  policy: a flaky model must not be allowed to burn unbounded retries
+  within a window).
+
+### How this closes #629
+
+- The improver is a separately-registered agent (`skill_improver`)
+  dispatched via the same ephemeral-session-per-call pattern as curator —
+  see `src/hooks/skill-improver-llm-factory.ts`.
+- Its model is independently configurable under `agents.skill_improver`,
+  typically a more expensive OpenRouter model than the Architect's.
+- Architect's prompt tells it to suggest `skill_improve` only after repeated
+  failures, many ignored directives, or stale skills, and to ask the user
+  before invoking when `require_user_approval` is true.
+- Daily-quota enforcement caps cost — typically `max_calls_per_day: 10`.
+- Default `write_mode: "proposal"` means the agent produces
+  `.swarm/skill-improver/proposals/<timestamp>.md` only. With
+  `write_mode: "draft_skills"` it additionally drafts SKILL.md proposals via
+  the `skill_generate` pipeline (still draft mode — never auto-activated).
+
+> **CI verification limitation.** The real-LLM dispatch path requires an
+> OpenCode runtime to wire `swarmState.opencodeClient`. Unit and integration
+> tests inject a mocked delegate and assert the dispatch shape. End-to-end
+> verification with a live model requires a manual smoke run.
+
+---
+
+## Spec writer agent
+
+`spec_writer` is an independently-modelled agent for authoring `.swarm/spec.md`.
+It can run on a higher-capability model than Architect.
+
+```jsonc
+"spec_writer": {
+  "enabled": true,
+  "allow_spec_write": true       // gate for the safe spec_write tool
+}
+```
+
+Set the agent model under `agents.spec_writer.model` (or
+`swarms.<id>.agents.spec_writer.model`). The legacy top-level
+`spec_writer.model` field is **deprecated** and no longer drives the agent.
+
+The agent has read-only access to the codebase plus the safe `spec_write` tool
+which atomically writes `.swarm/spec.md` (256 KiB cap, must contain a top-level
+`# Heading`). It cannot edit source files.
+
+The Architect prompt routes substantial spec authoring or revision to
+`spec_writer` while keeping itself on a cheaper model.
+
+---
+
+## Configuration precedence
+
+The model used by an agent is resolved in this order (highest priority first):
+
+1. `agents.<name>.model` (root-level agent override) and
+   `swarms.<id>.agents.<name>.model` (per-swarm override).
+2. `DEFAULT_MODELS.<name>` (built-in default in `src/config/constants.ts`).
+
+For new v2 agents:
+
+| Agent | Where to set model | Where it WAS / now-deprecated |
+|-------|-------------------|-------------------------------|
+| `skill_improver` | `agents.skill_improver.model` | top-level `skill_improver.model` (deprecated, no effect) |
+| `spec_writer` | `agents.spec_writer.model` | top-level `spec_writer.model` (deprecated, no effect) |
+
+The deprecated top-level `model` fields remain in the schema only so that
+config-doctor can warn when they are present without an `agents.<name>.model`
+counterpart. They will be removed in a future major release.

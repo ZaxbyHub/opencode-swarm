@@ -15,18 +15,12 @@ import {
 	type PlanSyncWorkerOptions,
 	type PlanSyncWorkerStatus,
 } from '../../../src/background/plan-sync-worker';
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
 
-// Mock the loadPlan function from plan/manager
+// Within-module DI seam: mock functions are assigned to _internals
 const mockLoadPlan = mock(async () => null);
 const mockLoadPlanJsonOnly = mock(async () => null);
 const mockRegeneratePlanMarkdown = mock(async () => {});
-
-// Mock the plan/manager module
-mock.module('../../../src/plan/manager', () => ({
-	loadPlan: mockLoadPlan,
-	loadPlanJsonOnly: mockLoadPlanJsonOnly,
-	regeneratePlanMarkdown: mockRegeneratePlanMarkdown,
-}));
 
 // File watcher timing varies significantly across platforms (macOS FSEvents,
 // Windows ReadDirectoryChangesW). Dozens of timing-sensitive assertions fail
@@ -81,18 +75,26 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	}
 
 	beforeEach(() => {
+		// Install mock functions onto _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
+		planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
+		planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
+
 		// Reset mock implementation to the default fast no-op before each test.
 		// This prevents a slow mockImplementation from a previous test from leaking
 		// into subsequent tests and causing timeouts.
 		mockLoadPlanJsonOnly.mockImplementation(async () => null);
 		mockLoadPlan.mockClear();
-		mockLoadPlanJsonOnly.mockImplementation(async () => null);
 		mockLoadPlanJsonOnly.mockClear();
 		mockRegeneratePlanMarkdown.mockImplementation(async () => {});
 		mockRegeneratePlanMarkdown.mockClear();
 	});
 
 	afterEach(async () => {
+		// Restore original functions to _internals seam
+		planManagerInternals.loadPlan = mockLoadPlan;
+		planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
+		planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
 		// Clean up worker
 		if (worker) {
 			worker.dispose();

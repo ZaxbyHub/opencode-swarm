@@ -1,10 +1,11 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { resetAutomationManager } from '../background/manager';
 import { validateSwarmPath } from '../hooks/utils';
 
 /**
  * Handles the /swarm reset command.
- * Clears plan.md and context.md from .swarm/ directory.
+ * Clears all swarm state files from .swarm/ and project root.
  * Stops background automation and resets in-memory queues.
  * Requires --confirm flag as a safety gate.
  */
@@ -18,7 +19,7 @@ export async function handleResetCommand(
 		return [
 			'## Swarm Reset',
 			'',
-			'⚠️ This will delete plan.md and context.md from .swarm/',
+			'⚠️ This will delete all swarm state from .swarm/ (plan, context, checkpoints, SWARM_PLAN artifacts)',
 			'',
 			'**Tip**: Run `/swarm export` first to backup your state.',
 			'',
@@ -26,7 +27,16 @@ export async function handleResetCommand(
 		].join('\n');
 	}
 
-	const filesToReset = ['plan.md', 'context.md'];
+	// Individual files inside .swarm/ that are always safe to delete
+	const filesToReset = [
+		'plan.md',
+		'plan.json',
+		'context.md',
+		'SWARM_PLAN.md',
+		'SWARM_PLAN.json',
+		'checkpoints.json',
+		'events.jsonl',
+	];
 	const results: string[] = [];
 
 	for (const filename of filesToReset) {
@@ -40,6 +50,19 @@ export async function handleResetCommand(
 			}
 		} catch {
 			results.push(`- ❌ Failed to delete ${filename}`);
+		}
+	}
+
+	// Also clean up legacy root-level SWARM_PLAN artifacts (pre-v7.x sessions)
+	for (const filename of ['SWARM_PLAN.md', 'SWARM_PLAN.json']) {
+		try {
+			const rootPath = path.join(directory, filename);
+			if (fs.existsSync(rootPath)) {
+				fs.unlinkSync(rootPath);
+				results.push(`- ✅ Deleted ${filename} (root)`);
+			}
+		} catch {
+			// Non-fatal: root-level cleanup is best-effort
 		}
 	}
 

@@ -472,13 +472,18 @@ describe('council verdict rehydration', () => {
 	// Helper to write evidence with a council gate
 	function writeCouncilEvidence(
 		taskId: string,
-		councilData: { verdict?: string; roundNumber?: number },
+		councilData: {
+			verdict?: string;
+			roundNumber?: number;
+			quorumSize?: number;
+		},
 		requiredGates: string[] = ['council'],
 	): void {
 		const gates: Record<string, unknown> = {};
 		if (
 			councilData.verdict !== undefined ||
-			councilData.roundNumber !== undefined
+			councilData.roundNumber !== undefined ||
+			councilData.quorumSize !== undefined
 		) {
 			gates.council = {
 				...(councilData.verdict !== undefined && {
@@ -486,6 +491,9 @@ describe('council verdict rehydration', () => {
 				}),
 				...(councilData.roundNumber !== undefined && {
 					roundNumber: councilData.roundNumber,
+				}),
+				...(councilData.quorumSize !== undefined && {
+					quorumSize: councilData.quorumSize,
 				}),
 			};
 		}
@@ -508,6 +516,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 2,
+			quorumSize: 1,
 		});
 	});
 
@@ -525,6 +534,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'REJECT',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -542,6 +552,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'CONCERNS',
 			roundNumber: 3,
+			quorumSize: 1,
 		});
 	});
 
@@ -571,6 +582,7 @@ describe('council verdict rehydration', () => {
 		session.taskCouncilApproved!.set('1.1', {
 			verdict: 'REJECT',
 			roundNumber: 1,
+			quorumSize: 3,
 		});
 
 		// Act
@@ -580,6 +592,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'REJECT',
 			roundNumber: 1,
+			quorumSize: 3,
 		});
 	});
 
@@ -663,6 +676,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -680,6 +694,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -697,6 +712,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -714,6 +730,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -734,6 +751,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -753,6 +771,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 0,
+			quorumSize: 1,
 		});
 	});
 
@@ -770,6 +789,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'CONCERNS',
 			roundNumber: 100,
+			quorumSize: 1,
 		});
 	});
 
@@ -793,14 +813,17 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 		expect(session.taskCouncilApproved!.get('1.2')).toEqual({
 			verdict: 'REJECT',
 			roundNumber: 2,
+			quorumSize: 1,
 		});
 		expect(session.taskCouncilApproved!.get('1.3')).toEqual({
 			verdict: 'CONCERNS',
 			roundNumber: 3,
+			quorumSize: 1,
 		});
 	});
 
@@ -823,6 +846,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -839,19 +863,96 @@ describe('council verdict rehydration', () => {
 		// Assert: no entry created
 		expect(session.taskCouncilApproved!.has('1.1')).toBe(false);
 	});
+
+	describe('quorumSize rehydration (Task 3.3)', () => {
+		it('evidence with quorumSize: 4 rehydrates correctly', async () => {
+			writePlan([{ id: '1.1', status: 'in_progress' }]);
+			writeCouncilEvidence('1.1', {
+				verdict: 'APPROVE',
+				roundNumber: 1,
+				quorumSize: 4,
+			});
+			const session = createTestSession();
+			await rehydrateSessionFromDisk(tmpDir, session);
+			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(4);
+		});
+
+		it('evidence missing quorumSize defaults to 1 (conservative for old evidence)', async () => {
+			writePlan([{ id: '1.1', status: 'in_progress' }]);
+			writeCouncilEvidence('1.1', { verdict: 'APPROVE', roundNumber: 1 });
+			const session = createTestSession();
+			await rehydrateSessionFromDisk(tmpDir, session);
+			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
+		});
+
+		it('evidence with non-numeric quorumSize defaults to 1', async () => {
+			writePlan([{ id: '1.1', status: 'in_progress' }]);
+			// Manually write to bypass the helper's typing
+			const dir = path.join(tmpDir, '.swarm', 'evidence');
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(
+				path.join(dir, '1.1.json'),
+				JSON.stringify({
+					taskId: '1.1',
+					required_gates: ['council'],
+					gates: {
+						council: {
+							verdict: 'APPROVE',
+							roundNumber: 1,
+							quorumSize: 'invalid',
+						},
+					},
+				}),
+			);
+			const session = createTestSession();
+			await rehydrateSessionFromDisk(tmpDir, session);
+			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
+		});
+
+		it('evidence with NaN quorumSize defaults to 1', async () => {
+			writePlan([{ id: '1.1', status: 'in_progress' }]);
+			writeCouncilEvidence('1.1', {
+				verdict: 'APPROVE',
+				roundNumber: 1,
+				quorumSize: NaN,
+			});
+			const session = createTestSession();
+			await rehydrateSessionFromDisk(tmpDir, session);
+			// NaN does not survive JSON serialization (becomes null), so the loaded
+			// value is non-numeric and falls through to the default of 1.
+			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
+		});
+
+		it('evidence with quorumSize: 0 defaults to 1 (must be >= 1)', async () => {
+			writePlan([{ id: '1.1', status: 'in_progress' }]);
+			writeCouncilEvidence('1.1', {
+				verdict: 'APPROVE',
+				roundNumber: 1,
+				quorumSize: 0,
+			});
+			const session = createTestSession();
+			await rehydrateSessionFromDisk(tmpDir, session);
+			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
+		});
+	});
 });
 
 describe('adversarial council verdict rehydration', () => {
 	// Helper to write evidence with a council gate
 	function writeCouncilEvidence(
 		taskId: string,
-		councilData: { verdict?: string; roundNumber?: number },
+		councilData: {
+			verdict?: string;
+			roundNumber?: number;
+			quorumSize?: number;
+		},
 		requiredGates: string[] = ['council'],
 	): void {
 		const gates: Record<string, unknown> = {};
 		if (
 			councilData.verdict !== undefined ||
-			councilData.roundNumber !== undefined
+			councilData.roundNumber !== undefined ||
+			councilData.quorumSize !== undefined
 		) {
 			gates.council = {
 				...(councilData.verdict !== undefined && {
@@ -859,6 +960,9 @@ describe('adversarial council verdict rehydration', () => {
 				}),
 				...(councilData.roundNumber !== undefined && {
 					roundNumber: councilData.roundNumber,
+				}),
+				...(councilData.quorumSize !== undefined && {
+					quorumSize: councilData.quorumSize,
 				}),
 			};
 		}
@@ -894,6 +998,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 		// Verify no prototype pollution
 		expect(Object.hasOwn({}, 'isEvil')).toBe(false);
@@ -928,6 +1033,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'REJECT',
 			roundNumber: 2,
+			quorumSize: 1,
 		});
 		// Verify no constructor prototype pollution
 		expect(Object.hasOwn({}, 'isAdmin')).toBe(false);
@@ -1059,6 +1165,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 9007199254740992,
+			quorumSize: 1,
 		});
 	});
 
@@ -1133,6 +1240,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'REJECT',
 			roundNumber: 2,
+			quorumSize: 1,
 		});
 	});
 
@@ -1231,6 +1339,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: -999999999,
+			quorumSize: 1,
 		});
 	});
 
@@ -1260,6 +1369,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: -Number.MAX_SAFE_INTEGER,
+			quorumSize: 1,
 		});
 	});
 
@@ -1383,6 +1493,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 		expect(Object.hasOwn({}, 'isAdmin')).toBe(false);
 	});
@@ -1480,6 +1591,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1.5,
+			quorumSize: 1,
 		});
 	});
 
@@ -1507,6 +1619,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 0,
+			quorumSize: 1,
 		});
 	});
 
@@ -1575,6 +1688,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -1593,6 +1707,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -1607,6 +1722,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 
@@ -1627,6 +1743,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
+			quorumSize: 1,
 		});
 	});
 

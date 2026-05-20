@@ -4,7 +4,7 @@ import type { PluginConfig } from '../../../src/config';
 
 /**
  * Hardening regression: when council.enabled === true, a user-supplied
- * tool_filter.overrides.architect that omits convene_council or
+ * tool_filter.overrides.architect that omits submit_council_verdicts or
  * declare_council_criteria is a CONFLICTING CONFIG. Rather than silently
  * force-including the tools (which overrides explicit user intent) or
  * silently dropping them (which re-creates the original 6.66.0 bug class),
@@ -64,7 +64,7 @@ describe('tool_filter override + council conflict detection', () => {
 						'read',
 						'write',
 						'task',
-						'convene_council',
+						'submit_council_verdicts',
 						'declare_council_criteria',
 					],
 				},
@@ -75,7 +75,7 @@ describe('tool_filter override + council conflict detection', () => {
 		const architect = agents['architect'];
 		expect(architect).toBeDefined();
 		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.convene_council).toBe(true);
+		expect(tools?.submit_council_verdicts).toBe(true);
 		expect(tools?.declare_council_criteria).toBe(true);
 	});
 
@@ -95,7 +95,7 @@ describe('tool_filter override + council conflict detection', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.convene_council).toBeUndefined();
+		expect(tools?.submit_council_verdicts).toBeUndefined();
 		expect(tools?.declare_council_criteria).toBeUndefined();
 	});
 
@@ -107,7 +107,7 @@ describe('tool_filter override + council conflict detection', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.convene_council).toBe(true);
+		expect(tools?.submit_council_verdicts).toBe(true);
 		expect(tools?.declare_council_criteria).toBe(true);
 	});
 
@@ -131,7 +131,7 @@ describe('tool_filter override + council conflict detection', () => {
 	});
 
 	test('throws on partial override (only one of two council tools present)', () => {
-		// Override includes convene_council but omits declare_council_criteria.
+		// Override includes submit_council_verdicts but omits declare_council_criteria.
 		// Both tools are required by the council workflow — a partial override
 		// is still a silent-failure path and must throw.
 		const config: PluginConfig = {
@@ -139,7 +139,7 @@ describe('tool_filter override + council conflict detection', () => {
 			tool_filter: {
 				enabled: true,
 				overrides: {
-					architect: ['read', 'write', 'task', 'convene_council'],
+					architect: ['read', 'write', 'task', 'submit_council_verdicts'],
 				},
 			},
 		} as PluginConfig;

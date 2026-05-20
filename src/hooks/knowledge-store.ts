@@ -5,7 +5,11 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
-import type { KnowledgeEntryBase, RejectedLesson } from './knowledge-types.js';
+import type {
+	ActionableDirectiveFields,
+	KnowledgeEntryBase,
+	RejectedLesson,
+} from './knowledge-types.js';
 
 // ============================================================================
 // Path Resolvers
@@ -14,7 +18,9 @@ import type { KnowledgeEntryBase, RejectedLesson } from './knowledge-types.js';
 // Returns the platform-specific config directory for opencode-swarm
 export function getPlatformConfigDir(): string {
 	const platform = process.platform;
-	const home = os.homedir();
+	// Read $HOME live each call so test redirection via process.env.HOME works.
+	// Bun caches os.homedir(), so changing $HOME after first call is ignored.
+	const home = process.env.HOME || os.homedir();
 	if (platform === 'win32') {
 		return path.join(
 			process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
@@ -44,7 +50,9 @@ export function resolveSwarmRejectedPath(directory: string): string {
 // Cross-platform resolver — inlined 15-line implementation (NO env-paths dependency)
 export function resolveHiveKnowledgePath(): string {
 	const platform = process.platform;
-	const home = os.homedir();
+	// Read $HOME live each call so test redirection via process.env.HOME works.
+	// Bun caches os.homedir(), so changing $HOME after first call is ignored.
+	const home = process.env.HOME || os.homedir();
 	let dataDir: string;
 	if (platform === 'win32') {
 		dataDir = path.join(
@@ -80,6 +88,8 @@ export function resolveHiveRejectedPath(): string {
 
 // Read JSONL file. Skip lines that fail JSON.parse (log a warning for each skipped line).
 // Returns empty array if file does not exist.
+// v2: each parsed entry is passed through normalizeEntry() so v1 entries get
+// optional v2 fields filled in WITHOUT mutating on-disk JSONL.
 export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 	if (!existsSync(filePath)) return [];
 	const content = await readFile(filePath, 'utf-8');
@@ -88,7 +98,8 @@ export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
-			results.push(JSON.parse(trimmed) as T);
+			const raw = JSON.parse(trimmed) as T;
+			results.push(normalizeEntry(raw));
 		} catch {
 			console.warn(
 				`[knowledge-store] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
@@ -99,6 +110,83 @@ export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 		}
 	}
 	return results;
+}
+
+// v2: Normalize a parsed entry to the current shape in memory.
+// Adds defaulted retrieval-outcome counters for v1 entries; leaves on-disk JSONL untouched.
+// Pass-through for non-knowledge types (RejectedLesson) — only mutates objects with retrieval_outcomes.
+export function normalizeEntry<T>(raw: T): T {
+	if (!raw || typeof raw !== 'object') return raw;
+	const obj = raw as unknown as Record<string, unknown>;
+	if (!('retrieval_outcomes' in obj)) return raw;
+	const ro = obj.retrieval_outcomes as Record<string, unknown> | null;
+	if (ro && typeof ro === 'object') {
+		// Migrate: legacy 'applied_count' represented "shown" before v2.
+		// We preserve it as-is for backward compatibility, but ensure all v2
+		// counters exist with sane defaults.
+		if (typeof ro.shown_count !== 'number') {
+			ro.shown_count =
+				typeof ro.applied_count === 'number' ? ro.applied_count : 0;
+		}
+		if (typeof ro.acknowledged_count !== 'number') ro.acknowledged_count = 0;
+		if (typeof ro.applied_explicit_count !== 'number') {
+			ro.applied_explicit_count = 0;
+		}
+		if (typeof ro.ignored_count !== 'number') ro.ignored_count = 0;
+		if (typeof ro.violated_count !== 'number') ro.violated_count = 0;
+		if (typeof ro.succeeded_after_shown_count !== 'number') {
+			ro.succeeded_after_shown_count =
+				typeof ro.succeeded_after_count === 'number'
+					? ro.succeeded_after_count
+					: 0;
+		}
+		if (typeof ro.failed_after_shown_count !== 'number') {
+			ro.failed_after_shown_count =
+				typeof ro.failed_after_count === 'number' ? ro.failed_after_count : 0;
+		}
+	}
+	// Backfill encounter_score for entries created before this field existed.
+	// Legacy hive entries may lack encounter_score; default to 0 per spec FR-002.
+	// try/catch guards against throwing getters (prototype pollution edge case).
+	try {
+		if (
+			typeof obj.encounter_score !== 'number' ||
+			Number.isNaN(obj.encounter_score)
+		) {
+			obj.encounter_score = 0;
+		}
+	} catch {
+		// Throwing getter or Proxy trap — define own property directly
+		// to bypass setter semantics on poisoned accessors
+		try {
+			Object.defineProperty(obj, 'encounter_score', {
+				value: 0,
+				writable: true,
+				configurable: true,
+				enumerable: true,
+			});
+		} catch {
+			// Completely frozen/sealed object — nothing we can do
+		}
+	}
+	// Ensure actionable arrays are at least undefined-or-array (never wrong type).
+	const arrayFields: Array<keyof ActionableDirectiveFields> = [
+		'triggers',
+		'required_actions',
+		'forbidden_actions',
+		'applies_to_agents',
+		'applies_to_tools',
+		'verification_checks',
+		'source_refs',
+		'source_knowledge_ids',
+	];
+	for (const f of arrayFields) {
+		const v = obj[f as string];
+		if (v !== undefined && !Array.isArray(v)) {
+			delete obj[f as string];
+		}
+	}
+	return raw;
 }
 
 // Reads from the swarm-level rejected lessons file
@@ -420,3 +508,49 @@ export function inferTags(lesson: string): string[] {
 
 	return Array.from(new Set(tags)); // deduplicate
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	getPlatformConfigDir: typeof getPlatformConfigDir;
+	resolveSwarmKnowledgePath: typeof resolveSwarmKnowledgePath;
+	resolveSwarmRejectedPath: typeof resolveSwarmRejectedPath;
+	resolveHiveKnowledgePath: typeof resolveHiveKnowledgePath;
+	resolveHiveRejectedPath: typeof resolveHiveRejectedPath;
+	readKnowledge: typeof readKnowledge;
+	readRejectedLessons: typeof readRejectedLessons;
+	appendKnowledge: typeof appendKnowledge;
+	rewriteKnowledge: typeof rewriteKnowledge;
+	enforceKnowledgeCap: typeof enforceKnowledgeCap;
+	sweepAgedEntries: typeof sweepAgedEntries;
+	sweepStaleTodos: typeof sweepStaleTodos;
+	appendRejectedLesson: typeof appendRejectedLesson;
+	normalize: typeof normalize;
+	wordBigrams: typeof wordBigrams;
+	jaccardBigram: typeof jaccardBigram;
+	findNearDuplicate: typeof findNearDuplicate;
+	computeConfidence: typeof computeConfidence;
+	inferTags: typeof inferTags;
+} = {
+	getPlatformConfigDir,
+	resolveSwarmKnowledgePath,
+	resolveSwarmRejectedPath,
+	resolveHiveKnowledgePath,
+	resolveHiveRejectedPath,
+	readKnowledge,
+	readRejectedLessons,
+	appendKnowledge,
+	rewriteKnowledge,
+	enforceKnowledgeCap,
+	sweepAgedEntries,
+	sweepStaleTodos,
+	appendRejectedLesson,
+	normalize,
+	wordBigrams,
+	jaccardBigram,
+	findNearDuplicate,
+	computeConfidence,
+	inferTags,
+};

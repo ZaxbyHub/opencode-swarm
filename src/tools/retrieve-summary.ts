@@ -1,4 +1,5 @@
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { loadFullOutput, sanitizeSummaryId } from '../summaries/manager';
 import { createSwarmTool } from './create-tool';
 
@@ -9,17 +10,17 @@ export const retrieve_summary: ReturnType<typeof createSwarmTool> =
 		description:
 			'Retrieve the full content of a stored tool output summary by its ID (e.g. S1, S2). Use this when a prior tool output was summarized and you need the full content.',
 		args: {
-			id: tool.schema
+			id: z
 				.string()
 				.describe(
 					'The summary ID to retrieve (e.g. S1, S2, S99). Must match pattern S followed by digits.',
 				),
-			offset: tool.schema
+			offset: z
 				.number()
 				.min(0)
 				.default(0)
 				.describe('Line offset to start from (default: 0).'),
-			limit: tool.schema
+			limit: z
 				.number()
 				.min(1)
 				.max(500)

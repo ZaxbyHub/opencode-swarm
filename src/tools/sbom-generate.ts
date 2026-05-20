@@ -7,7 +7,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { saveEvidence } from '../evidence/manager';
 import { generateCycloneDX, serializeCycloneDX } from '../sbom/cyclonedx';
 import {
@@ -256,16 +257,16 @@ export const sbom_generate: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Generate Software Bill of Materials (SBOM) by scanning project for dependency manifests. Uses CycloneDX format. Supports scanning entire project or only changed files.',
 	args: {
-		scope: tool.schema
+		scope: z
 			.enum(['changed', 'all'])
 			.describe(
 				'Scan scope: "changed" for modified files only, "all" for entire project',
 			),
-		changed_files: tool.schema
-			.array(tool.schema.string())
+		changed_files: z
+			.array(z.string())
 			.optional()
 			.describe('List of changed files (required if scope="changed")'),
-		output_dir: tool.schema
+		output_dir: z
 			.string()
 			.optional()
 			.describe('Output directory for SBOM (default: .swarm/evidence/sbom/)'),

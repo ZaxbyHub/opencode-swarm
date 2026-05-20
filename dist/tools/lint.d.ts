@@ -1,4 +1,4 @@
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 export declare const MAX_OUTPUT_BYTES = 512000;
 export declare const MAX_COMMAND_LENGTH = 500;
 export declare const SUPPORTED_LINTERS: readonly ["biome", "eslint"];
@@ -61,3 +61,13 @@ export declare function runLint(linter: SupportedLinter, mode: 'fix' | 'check', 
  */
 export declare function runAdditionalLint(linter: AdditionalLinter, mode: 'fix' | 'check', cwd: string): Promise<LintResult>;
 export declare const lint: ReturnType<typeof tool>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    detectAvailableLinter: typeof detectAvailableLinter;
+    runLint: typeof runLint;
+    detectAdditionalLinter: typeof detectAdditionalLinter;
+    runAdditionalLint: typeof runAdditionalLint;
+};

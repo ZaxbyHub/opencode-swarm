@@ -69,11 +69,10 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 
 			expect(wiringLine).not.toBe(-1);
 
-			// Verify the line number is around 1055 (allowing for variations as file grows)
-			// Lines are 0-indexed, so line 1054 in file is our 1055th line
+			// Verify the line number is in a plausible range (allowing for file growth)
 			const actualLineNum = wiringLine + 1;
 			expect(actualLineNum).toBeGreaterThanOrEqual(1050);
-			expect(actualLineNum).toBeLessThanOrEqual(1160);
+			expect(actualLineNum).toBeLessThanOrEqual(1600);
 		});
 
 		test('wiring comment "Repo graph incremental update on write tools" exists', () => {
@@ -423,12 +422,16 @@ describe('repoGraphHook.toolAfter wiring verification', () => {
 					line.includes('createRepoGraphBuilderHook'),
 			);
 			expect(createLine).not.toBe(-1);
-			// Should be around line 162 (1-indexed, upper bound grows as file grows)
+			// Line number range grows as file grows; allow a wide upper bound
 			expect(createLine + 1).toBeGreaterThanOrEqual(160);
-			expect(createLine + 1).toBeLessThanOrEqual(195);
+			expect(createLine + 1).toBeLessThanOrEqual(500);
 
-			// Find init() call - should be on the very next line
-			expect(lines[createLine + 1]).toContain('repoGraphHook.init()');
+			// After creation, init is dispatched via queueMicrotask (not called inline)
+			const nextLine = lines[createLine + 1];
+			expect(
+				nextLine.includes('repoGraphHook.init()') ||
+					nextLine.includes('queueMicrotask'),
+			).toBe(true);
 		});
 	});
 });

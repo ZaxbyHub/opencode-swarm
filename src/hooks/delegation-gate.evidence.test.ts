@@ -237,7 +237,8 @@ describe('delegation-gate evidence recording', () => {
 			expect(
 				warnCalls.some(
 					(msg) =>
-						msg.includes('evidence write failed') && msg.includes('1.11'),
+						msg.includes('evidence recording failed') ||
+						msg.includes('evidence write failed'),
 				),
 			).toBe(true);
 		} finally {

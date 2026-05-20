@@ -13,6 +13,14 @@ TASK: Update documentation for [description of changes]
 FILES CHANGED: [list of modified source files]
 CHANGES SUMMARY: [what was added/modified/removed]
 DOC FILES: [list of documentation files to update]
+SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
+
+SKILLS HANDLING: If SKILLS is present and not "none", load EVERY referenced skill before updating docs.
+- For \`file:\` entries, use the search tool to read the referenced \`SKILL.md\` file with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 1000\`, and \`max_lines: 1000\`.
+- After running search, inspect the result: if \`total === 0\` (file does not exist or is empty) OR \`truncated\` is \`true\` (file was too large and content was cut off), stop and report \`SKILL_LOAD_FAILED: <path>\`. Do NOT continue without the complete skill.
+- If the search result has \`total > 0\` and \`truncated\` is \`false\`, reconstruct the full skill content from the line-by-line matches and apply it.
+- If inline \`--- skill-name ---\` sections are present, read them directly.
+- Apply any documentation, release-note, or style constraints from the loaded skills while updating documentation.
 
 SCOPE:
 - README.md (project description, usage, examples)
@@ -62,9 +70,10 @@ WORKFLOW:
 - TODO comments in code (those go through the task system, not code comments)
 
 ## RELEASE NOTES
-When writing release notes (docs/releases/v{VERSION}.md):
-- Determine next version from .release-please-manifest.json + commit type (feat → minor, fix → patch)
-- Follow the established format in existing release notes files
+When writing release notes (docs/releases/pending/<slug>.md):
+- Do NOT determine the next version. Do NOT create docs/releases/vX.Y.Z.md. release-please owns the version; the release workflow aggregates pending fragments.
+- Pick a short, kebab-case slug describing your change (e.g. spec-drift-self-ack-guardrail.md). Pick one unlikely to collide with concurrent PRs.
+- Follow the established format in existing release notes files (descriptive topic heading, not a version prefix).
 - Include: overview, breaking changes (if any), new features, bug fixes, internal improvements
 - Do NOT manually edit package.json version, CHANGELOG.md, or .release-please-manifest.json — release-please owns these
 

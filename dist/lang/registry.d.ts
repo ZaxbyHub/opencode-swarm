@@ -1,4 +1,10 @@
 import { type Parser } from './runtime';
+export declare const _internals: {
+    getLanguageForExtension: typeof getLanguageForExtension;
+    listSupportedLanguages: typeof listSupportedLanguages;
+    getParserForFile: typeof getParserForFile;
+    isSupportedFile: typeof isSupportedFile;
+};
 export interface LanguageDefinition {
     id: string;
     extensions: string[];

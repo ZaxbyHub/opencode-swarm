@@ -39,6 +39,8 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				// v7.10.0+ directive retrieval threshold
+				directive_min_confidence: 0.75,
 			});
 		});
 
@@ -86,6 +88,8 @@ describe('KnowledgeConfigSchema', () => {
 				default_max_phases: 10,
 				todo_max_phases: 3,
 				sweep_enabled: true,
+				// v7.10.0+ directive retrieval threshold
+				directive_min_confidence: 0.75,
 			};
 
 			const result = KnowledgeConfigSchema.parse(fullConfig);
@@ -199,6 +203,8 @@ describe('KnowledgeConfigSchema', () => {
 					default_max_phases: 10,
 					todo_max_phases: 3,
 					sweep_enabled: true,
+					// v7.10.0+ directive retrieval threshold
+					directive_min_confidence: 0.75,
 				},
 			};
 

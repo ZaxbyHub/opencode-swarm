@@ -1,4 +1,4 @@
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 export interface PlaceholderScanInput {
     changed_files: string[];

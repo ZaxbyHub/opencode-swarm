@@ -29,6 +29,7 @@ describe('handleResetCommand - Background Automation Reset', () => {
 	});
 
 	afterEach(async () => {
+		mock.restore();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
 		}

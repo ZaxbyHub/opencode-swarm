@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { escapeRegex } from '../utils';
 import { createSwarmTool } from './create-tool';
 
@@ -233,11 +234,11 @@ export const todo_extract: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Scan the codebase for TODO/FIXME/HACK/XXX/WARN/NOTE comments. Returns JSON with count by priority and sorted entries. Useful for identifying pending tasks and code issues.',
 	args: {
-		paths: tool.schema
+		paths: z
 			.string()
 			.optional()
 			.describe('Directory or file to scan (default: entire project/cwd)'),
-		tags: tool.schema
+		tags: z
 			.string()
 			.optional()
 			.describe(

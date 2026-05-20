@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { CoChangeEntry } from '../../../src/tools/co-change-analyzer.js';
 
 // Mock the co-change-analyzer module with all needed exports
@@ -52,6 +52,10 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 const { handleDarkMatterCommand } = await import(
 	'../../../src/commands/dark-matter.js'
 );
+
+afterEach(() => {
+	mock.restore();
+});
 
 describe('Knowledge persistence wiring verification tests', () => {
 	beforeEach(() => {

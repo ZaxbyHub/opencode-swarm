@@ -2,7 +2,7 @@
  * Save plan tool for persisting validated implementation plans.
  * Allows the Architect agent to save structured plans to .swarm/plan.json and .swarm/plan.md.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the save_plan tool
  */
@@ -33,6 +33,25 @@ export interface SavePlanArgs {
      * after a failed phase).  Defaults to false (existing statuses preserved).
      */
     reset_statuses?: boolean;
+    /**
+     * Issue #853: tasks that are present in the prior plan but intentionally
+     * being removed by this save. Every task missing from `phases` must be
+     * enumerated here, otherwise save_plan rejects with
+     * `PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED`.
+     */
+    removed_task_ids?: string[];
+    /**
+     * Human-readable reason for the removals listed in `removed_task_ids`.
+     * Must be non-empty when `removed_task_ids` is non-empty. Recorded on
+     * each `task_removed` ledger event for audit.
+     */
+    removal_reason?: string;
+    /**
+     * Required when both `reset_statuses` is true AND at least one task is
+     * missing from the new plan. Without this flag set, save_plan rejects to
+     * prevent a destructive reset from silently dropping unfinished work.
+     */
+    confirm_destructive_reset?: boolean;
     /**
      * Architect-facing concurrency controls for this plan.
      * When execution_profile.locked is true the profile is immutable — subsequent

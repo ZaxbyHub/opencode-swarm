@@ -3,7 +3,8 @@
  */
 
 import { existsSync } from 'node:fs';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import {
 	readKnowledge,
@@ -34,6 +35,7 @@ const VALID_CATEGORIES: KnowledgeCategory[] = [
 	'debugging',
 	'performance',
 	'integration',
+	'todo',
 	'other',
 ];
 
@@ -213,7 +215,9 @@ function formatHiveEntry(entry: HiveKnowledgeEntry): string {
 	lines.push(`  Category: ${entry.category}`);
 	lines.push(`  Status: ${entry.status}`);
 	lines.push(`  Confidence: ${entry.confidence.toFixed(2)}`);
-	lines.push(`  Encounter Score: ${entry.encounter_score.toFixed(2)}`);
+	lines.push(
+		`  Encounter Score: ${entry.encounter_score?.toFixed(2) ?? 'N/A'}`,
+	);
 	lines.push(`  Source Project: ${entry.source_project}`);
 	lines.push(`  Confirmed by: ${entry.confirmed_by.length} project(s)`);
 	return lines.join('\n');
@@ -227,27 +231,27 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Query swarm knowledge (project-level) or hive knowledge (cross-project) with optional filters. Returns human-readable formatted text output. Use tier "all" to query both swarm and hive knowledge.',
 	args: {
-		tier: tool.schema
+		tier: z
 			.string()
 			.optional()
 			.describe(
 				"Knowledge tier to query: 'swarm', 'hive', or 'all' (default: 'all')",
 			),
-		status: tool.schema
+		status: z
 			.string()
 			.optional()
 			.describe("Filter by status: 'candidate', 'established', or 'promoted'"),
-		category: tool.schema
+		category: z
 			.string()
 			.optional()
 			.describe(
 				"Filter by category: 'process', 'architecture', 'tooling', 'security', 'testing', 'debugging', 'performance', 'integration', 'todo', or 'other'",
 			),
-		min_score: tool.schema
+		min_score: z
 			.number()
 			.optional()
 			.describe('Minimum confidence score filter (0.0-1.0)'),
-		limit: tool.schema
+		limit: z
 			.number()
 			.optional()
 			.describe(
@@ -366,3 +370,8 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 		return outputLines.join('\n');
 	},
 });
+
+// Test seam — exported for direct unit testing only
+export const _test_exports = {
+	formatHiveEntry,
+};

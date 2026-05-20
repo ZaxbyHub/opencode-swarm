@@ -24,7 +24,7 @@ const ADVISORY_HEADER = '[general_council] (advisory; not blocking)';
 
 /**
  * Push a GeneralCouncilResult into the architect's advisory queue. The body
- * is the synthesis markdown plus the moderator output when present.
+ * is the structural synthesis markdown returned by `convene_general_council`.
  *
  * Safe to call: missing session or empty advisory body silently skips.
  * Always idempotent at the architect-prompt level (no duplicate-suppression
@@ -43,9 +43,11 @@ export function pushGeneralCouncilAdvisory(
 }
 
 function renderAdvisoryBody(result: GeneralCouncilResult): string {
-	const parts: string[] = [result.synthesis];
-	if (result.moderatorOutput && result.moderatorOutput.trim().length > 0) {
-		parts.push('', '### Moderator Output', result.moderatorOutput);
-	}
-	return parts.join('\n').trim();
+	// Post-refactor the architect synthesizes the final user-facing answer
+	// directly from `result.synthesis` using inline output rules, so there
+	// is no separate moderator output to append. The deprecated
+	// `moderatorOutput` field on the type is intentionally not read here —
+	// it is never populated at runtime, and surfacing it would only matter
+	// for stale evidence files which are out of scope for live advisories.
+	return result.synthesis.trim();
 }

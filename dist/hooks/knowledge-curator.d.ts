@@ -25,3 +25,9 @@ export declare function runAutoPromotion(directory: string, config: KnowledgeCon
  * Watches for writes to .swarm/plan.md and extracts lessons from the retrospective section.
  */
 export declare function createKnowledgeCuratorHook(directory: string, config: KnowledgeConfig): (input: unknown, output: unknown) => Promise<void>;
+export declare const _internals: {
+    isWriteToEvidenceFile: typeof isWriteToEvidenceFile;
+    curateAndStoreSwarm: typeof curateAndStoreSwarm;
+    runAutoPromotion: typeof runAutoPromotion;
+    createKnowledgeCuratorHook: typeof createKnowledgeCuratorHook;
+};

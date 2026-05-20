@@ -48,7 +48,7 @@ describe('writeCheckpoint', () => {
 		],
 	};
 
-	describe('writes SWARM_PLAN.json at project root', () => {
+	describe('writes SWARM_PLAN.json inside .swarm/', () => {
 		test('writes valid JSON matching the plan', async () => {
 			const tmpDir = createTempDir();
 			try {
@@ -60,7 +60,7 @@ describe('writeCheckpoint', () => {
 				await writeCheckpoint(tmpDir);
 
 				// Verify SWARM_PLAN.json exists and contains valid JSON
-				const jsonPath = join(tmpDir, 'SWARM_PLAN.json');
+				const jsonPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
 				expect(existsSync(jsonPath)).toBe(true);
 
 				const content = readFileSync(jsonPath, 'utf8');
@@ -82,7 +82,7 @@ describe('writeCheckpoint', () => {
 		});
 	});
 
-	describe('writes SWARM_PLAN.md at project root', () => {
+	describe('writes SWARM_PLAN.md inside .swarm/', () => {
 		test('writes markdown content with plan details', async () => {
 			const tmpDir = createTempDir();
 			try {
@@ -91,7 +91,7 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const mdPath = join(tmpDir, 'SWARM_PLAN.md');
+				const mdPath = join(tmpDir, '.swarm', 'SWARM_PLAN.md');
 				expect(existsSync(mdPath)).toBe(true);
 
 				const content = readFileSync(mdPath, 'utf8');
@@ -133,7 +133,7 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const jsonPath = join(tmpDir, 'SWARM_PLAN.json');
+				const jsonPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
 				const originalContent = readFileSync(jsonPath, 'utf8');
 
 				// Modify the plan and save again
@@ -160,7 +160,7 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const mdPath = join(tmpDir, 'SWARM_PLAN.md');
+				const mdPath = join(tmpDir, '.swarm', 'SWARM_PLAN.md');
 				const originalContent = readFileSync(mdPath, 'utf8');
 
 				// Modify the plan and save again
@@ -190,7 +190,7 @@ describe('writeCheckpoint', () => {
 				await writeCheckpoint(tmpDir);
 
 				// Read both files
-				const checkpointPath = join(tmpDir, 'SWARM_PLAN.json');
+				const checkpointPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
 				const planPath = join(tmpDir, '.swarm', 'plan.json');
 
 				const checkpointContent = readFileSync(checkpointPath, 'utf8');
@@ -242,10 +242,10 @@ describe('importCheckpoint', () => {
 		const tmpDir = createTempDir();
 		try {
 			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
-			// Write a SWARM_PLAN.json at root
+			// Write a SWARM_PLAN.json inside .swarm/
 			const { writeFileSync } = await import('node:fs');
 			writeFileSync(
-				join(tmpDir, 'SWARM_PLAN.json'),
+				join(tmpDir, '.swarm', 'SWARM_PLAN.json'),
 				JSON.stringify(validPlan, null, 2),
 				'utf8',
 			);
@@ -276,7 +276,11 @@ describe('importCheckpoint', () => {
 		try {
 			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
 			const { writeFileSync } = await import('node:fs');
-			writeFileSync(join(tmpDir, 'SWARM_PLAN.json'), 'not valid json', 'utf8');
+			writeFileSync(
+				join(tmpDir, '.swarm', 'SWARM_PLAN.json'),
+				'not valid json',
+				'utf8',
+			);
 			const result = await importCheckpoint(tmpDir);
 			expect(result.success).toBe(false);
 			expect(result.error).toBeDefined();
@@ -297,6 +301,29 @@ describe('importCheckpoint', () => {
 			expect(result.success).toBe(true);
 			expect(result.plan!.title).toBe('Import Test Plan');
 			expect(result.plan!.phases[0].tasks[0].id).toBe('1.1');
+		} finally {
+			cleanupTempDir(tmpDir);
+		}
+	});
+
+	test('imports legacy root-level SWARM_PLAN.json with deprecation warning', async () => {
+		const tmpDir = createTempDir();
+		try {
+			// Note: do NOT create .swarm/SWARM_PLAN.json — we're testing the
+			// legacy fallback to the project-root location.
+			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+			const { writeFileSync } = await import('node:fs');
+			const rootPath = join(tmpDir, 'SWARM_PLAN.json');
+			writeFileSync(rootPath, JSON.stringify(validPlan, null, 2), 'utf8');
+
+			const result = await importCheckpoint(tmpDir);
+			expect(result.success).toBe(true);
+			expect(result.plan).not.toBeNull();
+			expect(result.plan!.title).toBe('Import Test Plan');
+
+			// Verify the savePlan side effect created .swarm/plan.json
+			const savedPlanPath = join(tmpDir, '.swarm', 'plan.json');
+			expect(existsSync(savedPlanPath)).toBe(true);
 		} finally {
 			cleanupTempDir(tmpDir);
 		}

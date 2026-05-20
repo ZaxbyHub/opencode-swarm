@@ -1,4 +1,5 @@
 export { createAgentActivityHooks } from './agent-activity';
+export { createCcCommandInterceptHook } from './cc-command-intercept';
 export { createCompactionCustomizerHook } from './compaction-customizer';
 export { createContextBudgetHandler } from './context-budget';
 export { createCuratorLLMDelegate } from './curator-llm-factory';
@@ -62,6 +63,7 @@ export {
 	resetSummaryIdCounter,
 } from './tool-summarizer';
 export {
+	composeBlockingHandlers,
 	composeHandlers,
 	estimateTokens,
 	readSwarmFileAsync,

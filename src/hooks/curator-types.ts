@@ -108,6 +108,33 @@ export interface CuratorPhaseResult {
 	compliance: ComplianceObservation[];
 	knowledge_recommendations: KnowledgeRecommendation[];
 	summary_updated: boolean;
+	/** v2: per-knowledge-entry application audit (applied/ignored/violated/n/a). */
+	knowledge_application_findings?: KnowledgeApplicationFinding[];
+	/** v2: candidate clusters the curator suggests compiling into SKILL.md. */
+	skill_candidates?: SkillCandidate[];
+}
+
+/** v2: machine-typed audit produced by the curator after each phase. */
+export interface KnowledgeApplicationFinding {
+	knowledge_id: string;
+	expected_behavior: string;
+	observed_behavior: string;
+	verdict: 'applied' | 'ignored' | 'violated' | 'not_applicable';
+	evidence_refs: string[];
+}
+
+/** v2: skill cluster proposal emitted by the curator. */
+export interface SkillCandidate {
+	slug: string;
+	title: string;
+	source_knowledge_ids: string[];
+	trigger: string;
+	required_procedure: string[];
+	forbidden_shortcuts: string[];
+	target_agents: string[];
+	reviewer_checks: string[];
+	confidence: number;
+	reason: string;
 }
 
 export interface CriticDriftResult {

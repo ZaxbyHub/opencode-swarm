@@ -274,7 +274,8 @@ export function extractIncompleteTasksFromPlan(
 	const lines = incomplete.map((t) => {
 		const deps =
 			t.depends.length > 0 ? ` (depends: ${t.depends.join(', ')})` : '';
-		return `- [ ] ${t.id}: ${t.description} [${t.size.toUpperCase()}]${deps}`;
+		const marker = t.status === 'in_progress' ? ' ← CURRENT' : '';
+		return `- [ ] ${t.id}: ${t.description} [${t.size.toUpperCase()}]${deps}${marker}`;
 	});
 
 	const text = lines.join('\n');
@@ -532,3 +533,29 @@ No plan content available. Start by creating a .swarm/plan.md file.
 
 	return output;
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	extractCurrentPhase: typeof extractCurrentPhase;
+	extractCurrentTask: typeof extractCurrentTask;
+	extractDecisions: typeof extractDecisions;
+	extractIncompleteTasks: typeof extractIncompleteTasks;
+	extractPatterns: typeof extractPatterns;
+	extractCurrentPhaseFromPlan: typeof extractCurrentPhaseFromPlan;
+	extractCurrentTaskFromPlan: typeof extractCurrentTaskFromPlan;
+	extractIncompleteTasksFromPlan: typeof extractIncompleteTasksFromPlan;
+	extractPlanCursor: typeof extractPlanCursor;
+} = {
+	extractCurrentPhase,
+	extractCurrentTask,
+	extractDecisions,
+	extractIncompleteTasks,
+	extractPatterns,
+	extractCurrentPhaseFromPlan,
+	extractCurrentTaskFromPlan,
+	extractIncompleteTasksFromPlan,
+	extractPlanCursor,
+};

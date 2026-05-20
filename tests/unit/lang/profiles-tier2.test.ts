@@ -3,7 +3,7 @@
  * Tests for Java, Kotlin, C#, C/C++, and Swift profiles
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import {
 	LANGUAGE_REGISTRY,
 	type LanguageProfile,
@@ -160,7 +160,7 @@ describe('Tier 2 Language Profile Registry - Adversarial Tests', () => {
 		expect(tsProfile).toBeUndefined();
 	});
 
-	it('19. register() with duplicate id overwrites previous profile (id: "java")', () => {
+	it('19. register() throws on duplicate id (id: "java")', () => {
 		// Create a fresh registry for this test
 		const isolatedRegistry = new LanguageRegistry();
 
@@ -170,7 +170,11 @@ describe('Tier 2 Language Profile Registry - Adversarial Tests', () => {
 			displayName: 'Java Original',
 			tier: 2,
 			extensions: ['.java'],
-			treeSitter: { grammarId: 'java', wasmFile: 'tree-sitter-java.wasm' },
+			treeSitter: {
+				grammarId: 'java',
+				wasmFile: 'tree-sitter-java.wasm',
+				commentNodes: ['line_comment', 'block_comment'],
+			},
 			build: { detectFiles: ['pom.xml'], commands: [] },
 			test: { detectFiles: ['pom.xml'], frameworks: [] },
 			lint: { detectFiles: ['pom.xml'], linters: [] },
@@ -183,37 +187,39 @@ describe('Tier 2 Language Profile Registry - Adversarial Tests', () => {
 		};
 
 		isolatedRegistry.register(originalJava);
-		let retrieved = isolatedRegistry.getById('java');
-		expect(retrieved?.displayName).toBe('Java Original');
-		expect(retrieved?.prompts.coderConstraints).toHaveLength(1);
+		expect(isolatedRegistry.getById('java')?.displayName).toBe('Java Original');
 
-		// Register new java profile with same id (should overwrite)
+		// Behavior change (Phase 1 of language-agnostic refactor): the registry
+		// now throws on duplicate id registration. The previous silent-overwrite
+		// behavior allowed a misregistered aux profile to silently replace a
+		// primary profile. See src/lang/profiles.ts:LanguageRegistry.register.
 		const newJava: LanguageProfile = {
 			id: 'java',
 			displayName: 'Java Overwritten',
 			tier: 2,
-			extensions: ['.java'],
-			treeSitter: { grammarId: 'java', wasmFile: 'tree-sitter-java.wasm' },
-			build: { detectFiles: ['pom.xml'], commands: [] },
-			test: { detectFiles: ['pom.xml'], frameworks: [] },
-			lint: { detectFiles: ['pom.xml'], linters: [] },
-			audit: { detectFiles: ['pom.xml'], command: null, outputFormat: 'json' },
-			sast: { nativeRuleSet: 'java', semgrepSupport: 'ga' },
-			prompts: {
-				coderConstraints: [
-					'overwritten constraint 1',
-					'overwritten constraint 2',
-				],
-				reviewerChecklist: [
-					'overwritten checklist 1',
-					'overwritten checklist 2',
-				],
+			extensions: ['.kt'], // different extension to isolate the id-collision check
+			treeSitter: {
+				grammarId: 'java',
+				wasmFile: 'tree-sitter-java.wasm',
+				commentNodes: ['line_comment', 'block_comment'],
 			},
+			build: { detectFiles: [], commands: [] },
+			test: { detectFiles: [], frameworks: [] },
+			lint: { detectFiles: [], linters: [] },
+			audit: { detectFiles: [], command: null, outputFormat: 'json' },
+			sast: { nativeRuleSet: null, semgrepSupport: 'none' },
+			prompts: { coderConstraints: [], reviewerChecklist: [] },
 		};
 
-		isolatedRegistry.register(newJava);
-		retrieved = isolatedRegistry.getById('java');
-		expect(retrieved?.displayName).toBe('Java Overwritten');
-		expect(retrieved?.prompts.coderConstraints).toHaveLength(2);
+		expect(() => isolatedRegistry.register(newJava)).toThrow(
+			/profile id "java" registered twice/,
+		);
+
+		// Original profile remains intact.
+		const retrieved = isolatedRegistry.getById('java');
+		expect(retrieved?.displayName).toBe('Java Original');
+		expect(retrieved?.prompts.coderConstraints).toEqual([
+			'original constraint',
+		]);
 	});
 });

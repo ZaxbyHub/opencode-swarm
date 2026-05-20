@@ -60,3 +60,23 @@ Ignore these thoughts:
 - "I should move on because this is taking too long"
 
 If any of those appear, slow down and return to the workflow.
+
+## Command Namespace
+
+All swarm commands use the /swarm <subcommand> form.
+
+The following bare slash commands share names with swarm subcommands and must never
+be invoked in a swarm session:
+
+| Bare CC Command | Why Prohibited | Swarm Equivalent |
+|---|---|---|
+| `/plan` | Enters CC plan mode — blocks execution | `/swarm plan` |
+| `/reset` | Wipes conversation context | `/swarm reset --confirm` |
+| `/checkpoint` | Reverts conversation history | `/swarm checkpoint <action>` |
+| `/clear` | Wipes conversation context | — |
+| `/compact` | Corrupts task-critical context | — |
+| `/status` | Shows CC version info | `/swarm status` |
+| `/agents` | Manages CC subagent configs | `/swarm agents` |
+| `/config` | Opens CC settings | `/swarm config` |
+| `/export` | Exports conversation text | `/swarm export` |
+| `/memory` | Edits CLAUDE.md | Use swarm knowledge tools |

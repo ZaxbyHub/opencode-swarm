@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import type { ToolResult } from './create-tool';
 
 // Mock fs module
 const mockReadFileSync = vi.fn();
@@ -13,6 +14,11 @@ vi.mock('../mutation/engine.js', () => ({
 }));
 
 import { mutation_test } from './mutation-test';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 describe('mutation_test security tests', () => {
 	beforeEach(() => {
@@ -100,7 +106,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should not crash - empty path should be skipped
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -117,7 +123,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Number is coerced to string "12345" - tool doesn't crash, just tries to read
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -134,7 +140,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Object is coerced to "[object Object]" - tool doesn't crash
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -151,7 +157,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// null is coerced to "null" string - tool doesn't crash
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -167,7 +173,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle null bytes gracefully
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -183,7 +189,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle long paths without crashing
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -199,7 +205,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
 
@@ -214,7 +220,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
 
@@ -258,7 +264,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should process legitimate files while skipping traversal attempts
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -278,7 +284,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle directory read error gracefully
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -307,7 +313,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle large patch arrays without crashing
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -327,7 +333,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
 
@@ -342,7 +348,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle special characters without command injection
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -359,7 +365,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// undefined is coerced to "undefined" string - tool doesn't crash
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -376,7 +382,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should handle binary in filePath without crashing
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -393,7 +399,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Array is coerced to comma-separated string - tool doesn't crash
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -462,7 +468,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Double dot in middle of valid path is legitimate
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -523,7 +529,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		// Should still call executeMutationSuite with empty sourceFiles
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 	});
@@ -542,7 +548,7 @@ describe('mutation_test security tests', () => {
 		// @ts-expect-error — security test bypasses type checking
 		const result = await tool.execute(args, '/project/root', {});
 
-		const _parsed = JSON.parse(result);
+		const _parsed = JSON.parse(resultToString(result));
 		expect(mockExecuteMutationSuite).toHaveBeenCalled();
 
 		const mockCalls = mockExecuteMutationSuite.mock.calls;

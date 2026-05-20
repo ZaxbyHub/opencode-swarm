@@ -20,7 +20,7 @@ function extractPromptTools(prompt: string): string[] {
 describe('architect prompt tool alignment', () => {
 	test('YOUR TOOLS with both councils enabled matches full AGENT_TOOL_MAP architect entry', () => {
 		// Both council.enabled=true AND council.general.enabled=true expose the
-		// full AGENT_TOOL_MAP.architect surface (convene_council,
+		// full AGENT_TOOL_MAP.architect surface (submit_council_verdicts,
 		// declare_council_criteria, convene_general_council). This is the only
 		// configuration where YOUR TOOLS matches the map exactly.
 		const agent = createArchitectAgent(
@@ -46,9 +46,9 @@ describe('architect prompt tool alignment', () => {
 
 	test('YOUR TOOLS with all councils disabled (default) excludes the three council tools', () => {
 		// Default no-arg call: council is undefined, which the prompt builder
-		// treats as disabled. convene_council, declare_council_criteria, and
-		// convene_general_council must all be filtered out so the model is
-		// not shown phantom tools the runtime gates would reject.
+		// treats as disabled. submit_council_verdicts, declare_council_criteria,
+		// submit_phase_council_verdicts, and convene_general_council must all be
+		// filtered out so the model is not shown phantom tools the runtime gates would reject.
 		const agent = createArchitectAgent('test-model');
 		const prompt =
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
@@ -57,8 +57,9 @@ describe('architect prompt tool alignment', () => {
 		const expected = [...AGENT_TOOL_MAP.architect]
 			.filter(
 				(t) =>
-					t !== 'convene_council' &&
+					t !== 'submit_council_verdicts' &&
 					t !== 'declare_council_criteria' &&
+					t !== 'submit_phase_council_verdicts' &&
 					t !== 'convene_general_council',
 			)
 			.sort();
@@ -68,8 +69,11 @@ describe('architect prompt tool alignment', () => {
 			.sort();
 
 		expect(promptToolsWithoutTask).toEqual(expected);
-		expect(promptToolsWithoutTask).not.toContain('convene_council');
+		expect(promptToolsWithoutTask).not.toContain('submit_council_verdicts');
 		expect(promptToolsWithoutTask).not.toContain('declare_council_criteria');
+		expect(promptToolsWithoutTask).not.toContain(
+			'submit_phase_council_verdicts',
+		);
 		expect(promptToolsWithoutTask).not.toContain('convene_general_council');
 	});
 
@@ -85,7 +89,7 @@ describe('architect prompt tool alignment', () => {
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
 		const promptTools = extractPromptTools(prompt);
-		expect(promptTools).toContain('convene_council');
+		expect(promptTools).toContain('submit_council_verdicts');
 		expect(promptTools).toContain('declare_council_criteria');
 		expect(promptTools).not.toContain('convene_general_council');
 	});

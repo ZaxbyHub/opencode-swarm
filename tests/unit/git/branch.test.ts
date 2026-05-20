@@ -447,4 +447,369 @@ describe('Git Branch Module', () => {
 			expect(branch.hasUncommittedChanges(testCwd)).toBe(false);
 		});
 	});
+
+	describe('resetToRemoteBranch()', () => {
+		// Call sequence in implementation:
+		// 1. getCurrentBranch(cwd) -> gitExec(['rev-parse', '--abbrev-ref', 'HEAD'])
+		// 2. detectDefaultRemoteBranch(cwd) -> gitExec(['symbolic-ref', 'refs/remotes/origin/HEAD'])
+		// 3. hasUncommittedChanges(cwd) -> gitExec(['status', '--porcelain'])
+		// 4. gitExec(['log', `${defaultRemoteBranch}..HEAD`, '--oneline'])
+		// 5. gitExec(['fetch', '--prune', 'origin'])
+		// 6. gitExec(['rev-parse', 'HEAD'])
+		// 7. gitExec(['rev-parse', `${defaultRemoteBranch}`])
+		// 8. gitExec(['checkout', currentBranch])
+		// 9. gitExec(['reset', '--hard', defaultRemoteBranch])
+
+		test('Happy path: symbolic-ref succeeds, clean worktree -> alignment succeeds', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty (no unpushed)
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> def456 (different)
+			// 8. checkout main
+			// 9. reset --hard main
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty = no unpushed)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 7. rev-parse origin/main (different)
+				{ status: 0, stdout: '', stderr: '' }, // 8. checkout main
+				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(true);
+			expect(result.alreadyAligned).toBe(false);
+			expect(result.localBranch).toBe('main');
+			expect(result.targetBranch).toBe('origin/main');
+			// Verify reset --hard used the origin/ prefixed ref (index 8 is the reset call)
+			expect(mockSpawnSync.mock.calls[8][1]).toContain('origin/main');
+		});
+
+		test('Already aligned: HEAD SHA matches remote -> returns alreadyAligned: true', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> abc123 (SAME = aligned!)
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty = no unpushed)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (SAME!)
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(true);
+			expect(result.alreadyAligned).toBe(true);
+			expect(result.message).toBe('Already aligned with remote');
+		});
+
+		test('Uncommitted changes detected -> returns success: false', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> DIRTY!
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: ' M modified.ts\n', stderr: '' }, // 3. hasUncommittedChanges (DIRTY)
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toBe(
+				'Cannot reset: uncommitted changes in working tree',
+			);
+		});
+
+		test('Unpushed commits detected -> returns success: false', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> has unpushed commits
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: 'abc123 feat: some commit\n', stderr: '' }, // 4. log (has unpushed)
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toBe('Cannot reset: unpushed commits');
+			// Verify log command used remote ref for range check (index 3 is the log call)
+			expect(mockSpawnSync.mock.calls[3][1][1]).toContain('origin/main');
+		});
+
+		test('Detached HEAD -> returns success: false', () => {
+			// 1. getCurrentBranch -> HEAD (detached!)
+			setupMock({ status: 0, stdout: 'HEAD', stderr: '' }); // 1. getCurrentBranch (detached)
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toBe('Cannot reset: detached HEAD state');
+		});
+
+		test('symbolic-ref fails -> fallback to git config init.defaultBranch succeeds', () => {
+			// 1. getCurrentBranch -> develop
+			// 2. symbolic-ref -> FAILS
+			// 3. config init.defaultBranch -> develop
+			// 4. hasUncommittedChanges -> clean
+			// 5. log -> empty
+			// 6. fetch --prune
+			// 7. rev-parse HEAD -> abc123
+			// 8. rev-parse origin/develop -> def456 (different)
+			// 9. checkout develop
+			// 10. reset --hard develop
+			setupMock(
+				{ status: 0, stdout: 'develop', stderr: '' }, // 1. getCurrentBranch
+				{ status: 128, stdout: '', stderr: 'not a symbolic ref' }, // 2. symbolic-ref (FAILS)
+				{ status: 0, stdout: 'develop', stderr: '' }, // 3. config init.defaultBranch (succeeds)
+				{ status: 0, stdout: '', stderr: '' }, // 4. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 5. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 6. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 8. rev-parse origin/develop (different)
+				{ status: 0, stdout: '', stderr: '' }, // 9. checkout develop
+				{ status: 0, stdout: '', stderr: '' }, // 10. reset --hard develop
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(true);
+			expect(result.localBranch).toBe('develop');
+			expect(result.targetBranch).toBe('origin/develop');
+		});
+
+		test('All detection methods fail -> returns success: false', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> FAILS
+			// 3. config init.defaultBranch -> FAILS
+			// 4. origin/main -> FAILS
+			// 5. origin/master -> FAILS
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 128, stdout: '', stderr: 'not a symbolic ref' }, // 2. symbolic-ref (FAILS)
+				{ status: 128, stdout: '', stderr: '' }, // 3. config init.defaultBranch (FAILS)
+				{ status: 128, stdout: '', stderr: "fatal: couldn't find remote ref" }, // 4. origin/main (FAILS)
+				{ status: 128, stdout: '', stderr: "fatal: couldn't find remote ref" }, // 5. origin/master (FAILS)
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toBe('Could not detect default remote branch');
+		});
+
+		test('Prune branches enabled -> prunes merged branches and gone upstream', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> def456
+			// 8. checkout main
+			// 9. reset --hard main
+			// 10. branch --merged
+			// 11. branch -d merged-branch-1
+			// 12. branch -d merged-branch-2
+			// 13. branch -vv
+			// 14. branch -d gone-branch
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 7. rev-parse origin/main
+				{ status: 0, stdout: '', stderr: '' }, // 8. checkout main
+				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
+				{
+					status: 0,
+					stdout: '  merged-branch-1\n  merged-branch-2\n* main\n',
+					stderr: '',
+				}, // 10. branch --merged
+				{ status: 0, stdout: '', stderr: '' }, // 11. branch -d merged-branch-1
+				{ status: 0, stdout: '', stderr: '' }, // 12. branch -d merged-branch-2
+				{
+					status: 0,
+					stdout: '  gone-branch abc456 [origin/gone: gone] also gone\n',
+					stderr: '',
+				}, // 13. branch -vv
+				{ status: 0, stdout: '', stderr: '' }, // 14. branch -d gone-branch
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd, {
+				pruneBranches: true,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.prunedBranches.length).toBeGreaterThan(0);
+		});
+
+		test('Prune branches disabled (default) -> no pruning occurs', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> def456
+			// 8. checkout main
+			// 9. reset --hard main
+			// NO pruning calls because pruneBranches is not set
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 7. rev-parse origin/main
+				{ status: 0, stdout: '', stderr: '' }, // 8. checkout main
+				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd); // pruneBranches defaults to undefined
+
+			expect(result.success).toBe(true);
+			// No branch --merged or branch -vv calls should be made
+			// Only 9 calls total (not 14 like with pruning)
+			expect(mockSpawnSync).toHaveBeenCalledTimes(9);
+		});
+
+		test('Windows retry: reset fails twice then succeeds on third try', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> def456
+			// 8. checkout main
+			// 9. reset --hard fail 1
+			// 10. reset --hard fail 2
+			// 11. reset --hard success 3
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 7. rev-parse origin/main
+				{ status: 0, stdout: '', stderr: '' }, // 8. checkout main
+				{ status: 1, stdout: '', stderr: 'unable to lock' }, // 9. reset --hard fail 1
+				{ status: 1, stdout: '', stderr: 'unable to lock' }, // 10. reset --hard fail 2
+				{ status: 0, stdout: '', stderr: '' }, // 11. reset --hard success 3
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(true);
+			expect(mockSpawnSync).toHaveBeenCalledTimes(11);
+		});
+
+		test('Fetch failure -> returns success: false with fetch error', () => {
+			// 1. getCurrentBranch -> main
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune -> FAILS!
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 128, stdout: '', stderr: 'fatal: unable to access' }, // 5. fetch --prune fails
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toContain('Fetch failed');
+		});
+
+		test('Feature branch scenario: user on feature branch, switches to default and resets', () => {
+			// 1. getCurrentBranch -> feature-branch
+			// 2. symbolic-ref -> refs/remotes/origin/main
+			// 3. hasUncommittedChanges -> clean
+			// 4. log -> empty
+			// 5. fetch --prune
+			// 6. rev-parse HEAD -> abc123
+			// 7. rev-parse origin/main -> def456 (different from feature branch SHA)
+			// 8. checkout feature-branch (current branch)
+			// 9. reset --hard main
+			setupMock(
+				{ status: 0, stdout: 'feature-branch', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'def456', stderr: '' }, // 7. rev-parse origin/main
+				{ status: 0, stdout: '', stderr: '' }, // 8. checkout feature-branch
+				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(true);
+			expect(result.localBranch).toBe('feature-branch');
+			expect(result.targetBranch).toBe('origin/main');
+		});
+
+		test('Handles unexpected error gracefully', () => {
+			mockSpawnSync.mockImplementation(() => {
+				throw new Error('unexpected error');
+			});
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toContain('Unexpected error');
+		});
+
+		test('Returns correct result structure on success', () => {
+			// Already aligned case - no reset needed
+			setupMock(
+				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
+				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
+				{ status: 0, stdout: '', stderr: '' }, // 3. hasUncommittedChanges (clean)
+				{ status: 0, stdout: '', stderr: '' }, // 4. log (empty)
+				{ status: 0, stdout: '', stderr: '' }, // 5. fetch --prune
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 6. rev-parse HEAD
+				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (same = aligned)
+			);
+
+			const result = branch.resetToRemoteBranch(testCwd);
+
+			expect(result).toHaveProperty('success');
+			expect(result).toHaveProperty('targetBranch');
+			expect(result).toHaveProperty('localBranch');
+			expect(result).toHaveProperty('message');
+			expect(result).toHaveProperty('alreadyAligned');
+			expect(result).toHaveProperty('prunedBranches');
+			expect(result).toHaveProperty('warnings');
+			expect(Array.isArray(result.prunedBranches)).toBe(true);
+			expect(Array.isArray(result.warnings)).toBe(true);
+		});
+	});
 });

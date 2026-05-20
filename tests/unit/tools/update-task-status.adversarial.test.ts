@@ -209,24 +209,6 @@ describe('update-task-status adversarial tests', () => {
 			expect(result).toBeDefined();
 			expect(result).toContain('Invalid task_id');
 		});
-
-		it.skip('accepts task_id with excessive numeric segments (potential DoS vector)', () => {
-			// Documented limitation: Current implementation allows this - potential security concern
-			// This test documents the vulnerability rather than enforcing a security requirement
-			const segments = Array(1000).fill('1').join('.');
-			const result = validateTaskId(segments);
-			// Should be rejected but currently passes
-			expect(result).toBeUndefined();
-		});
-
-		it.skip('accepts very long single number segment (potential DoS vector)', () => {
-			// Documented limitation: Current implementation allows this - potential security concern
-			// This test documents the vulnerability rather than enforcing a security requirement
-			const longId = '1.' + '9'.repeat(10000);
-			const result = validateTaskId(longId);
-			// Should be rejected but currently passes
-			expect(result).toBeUndefined();
-		});
 	});
 
 	// ========== GROUP 4: Malformed task IDs - Boundary Values ==========
@@ -289,14 +271,6 @@ describe('update-task-status adversarial tests', () => {
 			const result = validateTaskId('-1.1');
 			expect(result).toBeDefined();
 			expect(result).toContain('Invalid task_id');
-		});
-
-		it.skip('accepts floating point numbers (ambiguous format)', () => {
-			// Documented limitation: 1.5 passes validation but is ambiguous - is it 1.5 or segment "1" then segment "5"?
-			// This test documents the ambiguity rather than enforcing a security requirement
-			const result = validateTaskId('1.5');
-			// Currently passes - could be a security concern
-			expect(result).toBeUndefined();
 		});
 
 		it('rejects scientific notation', () => {
@@ -701,20 +675,6 @@ describe('update-task-status adversarial tests', () => {
 
 		it('accepts zero segments "0.0"', () => {
 			const result = validateTaskId('0.0');
-			expect(result).toBeUndefined();
-		});
-
-		it.skip('accepts five-segment task_id (current behavior)', () => {
-			// Documented limitation: Current implementation allows this - potential security concern
-			// This test documents the limitation rather than enforcing a security requirement
-			const result = validateTaskId('1.1.1.1.1');
-			expect(result).toBeUndefined();
-		});
-
-		it.skip('accepts many-segment task_id (potential DoS)', () => {
-			// Documented limitation: Current implementation allows this - potential security concern
-			// This test documents the limitation rather than enforcing a security requirement
-			const result = validateTaskId('1.1.1.1.1.1.1.1.1.1.1.1');
 			expect(result).toBeUndefined();
 		});
 	});

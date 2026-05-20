@@ -11,16 +11,8 @@
 import type { tool } from '@opencode-ai/plugin';
 import { computeProfileHash, getProfile } from '../db/qa-gate-profile.js';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import { createSwarmTool } from './create-tool';
-
-/**
- * Derive plan identity string matching the ledger format.
- * Must stay in sync with takeSnapshotEvent in ledger.ts and the other
- * consumers that derive plan_id (get-approved-plan.ts, write-drift-evidence.ts).
- */
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
 
 interface GetQaGateProfileResult {
 	success: boolean;

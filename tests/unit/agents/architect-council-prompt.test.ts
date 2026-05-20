@@ -18,15 +18,16 @@ import {
  */
 describe('Architect prompt — Work Complete Council workflow block', () => {
 	// Sentinel phrases that are UNIQUE to the council workflow block. These
-	// were chosen to NOT overlap with the auto-generated tool-description list
-	// (which mentions "convene_council" and "Work Complete Council" even when
-	// the workflow block is absent), so they truly identify the block itself.
+	// were chosen to NOT overlap with the auto-generated tool-description list,
+	// so they truly identify the block itself. Keep in sync with buildCouncilWorkflow().
 	const COUNCIL_SENTINELS = [
-		'## Work Complete Council (when enabled)',
-		'Phase 0 — Pre-declare criteria',
-		'Phase 1 — Parallel dispatch',
-		'Phase 2 — Synthesize',
-		'Phase 3 — Act on the result',
+		'## COUNCIL WORKFLOW (submit_phase_council_verdicts)',
+		'WHEN TO RUN COUNCIL',
+		'STEP 1 — DISPATCH',
+		'STEP 3 — CALL submit_phase_council_verdicts',
+		'STEP 5 — ACT on the verdict',
+		'ANTI-PATTERNS',
+		'ROUND 2 DELIBERATION',
 		'Retry protocol',
 		'hallucinated APIs',
 	];
@@ -44,23 +45,40 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 		it('includes a Council section heading (case-insensitive match)', () => {
 			expect(prompt.toLowerCase()).toContain('council');
 			// And specifically the dedicated section header
-			expect(prompt).toContain('## Work Complete Council');
+			expect(prompt).toContain('## COUNCIL WORKFLOW');
 		});
 
-		it('includes all four phase labels', () => {
-			expect(prompt).toContain('Phase 0');
-			expect(prompt).toContain('Phase 1');
-			expect(prompt).toContain('Phase 2');
-			expect(prompt).toContain('Phase 3');
+		it('includes WHEN TO RUN COUNCIL section and STEP 1..STEP 5', () => {
+			expect(prompt).toContain('WHEN TO RUN COUNCIL');
+			expect(prompt).toContain('STEP 1');
+			expect(prompt).toContain('STEP 2');
+			expect(prompt).toContain('STEP 3');
+			expect(prompt).toContain('STEP 4');
+			expect(prompt).toContain('STEP 5');
 		});
 
 		it('includes both council tool names', () => {
 			expect(prompt).toContain('declare_council_criteria');
-			expect(prompt).toContain('convene_council');
+			expect(prompt).toContain('submit_council_verdicts');
+		});
+
+		it('does NOT contain the old tool name (pre-rename "convene" + underscore + "council")', () => {
+			// Constructed string so the literal old identifier never appears in
+			// source — keeps the zero-tolerance grep clean.
+			const oldToolName = ['convene', 'council'].join('_');
+			expect(prompt).not.toContain(oldToolName);
+		});
+
+		it('contains the anti-bypass critical guardrail', () => {
+			expect(prompt).toContain('does NOT run council members');
+		});
+
+		it('references membersAbsent as the anti-hallucination signal', () => {
+			expect(prompt).toContain('membersAbsent');
 		});
 
 		it('mentions the explorer member (5th member)', () => {
-			// "explorer" should appear in the council Phase 1 member bullet list.
+			// "explorer" should appear in the council STEP 1 member bullet list.
 			// Use a token specific to the council block to avoid matching
 			// unrelated mentions of explorer elsewhere in the prompt.
 			expect(prompt).toContain('explorer');
@@ -82,9 +100,31 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).not.toContain('supplements — does NOT replace');
 		});
 
-		it('contains the REPLACES Stage B wording inside the council block', () => {
-			expect(prompt).toContain('REPLACES Stage B');
-			expect(prompt).toContain('Stage A (precheckbatch) still runs');
+		it('contains the ADDITIONAL verification layer wording inside the council block', () => {
+			// Council is "ADDITIONAL" verification layer, NOT a replacement for Stage B
+			expect(prompt).toContain('ADDITIONAL verification layer');
+			expect(prompt).toContain('Stage B');
+			expect(prompt).toContain('Stage A');
+			expect(prompt).toContain('pre_check_batch');
+		});
+
+		it('does NOT contain REPLACES Stage B wording anywhere in the prompt', () => {
+			// "council REPLACES Stage B" is wrong - but "council never replaces Stage B" is correct
+			// So we check for the specific pattern "council REPLACES Stage B" (with REPLACES as a verb)
+			expect(prompt).not.toMatch(/council\s+REPLACES\s+Stage\s+B/i);
+			// Also check lowercase variant
+			expect(prompt).not.toMatch(/council\s+replaces\s+Stage\s+B/);
+		});
+
+		it('contains the ANTI-PATTERNS section listing 5 council bypass violations', () => {
+			expect(prompt).toContain('ANTI-PATTERNS');
+			// Five bullet violations.
+			const antiPatternMatches = prompt.match(/✗/g) ?? [];
+			expect(antiPatternMatches.length).toBeGreaterThanOrEqual(5);
+		});
+
+		it('contains the ROUND 2 DELIBERATION rule', () => {
+			expect(prompt).toContain('ROUND 2 DELIBERATION');
 		});
 
 		describe('critic dispatch includes approved-plan baseline and drift analysis', () => {
@@ -129,19 +169,19 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).not.toContain('{{COUNCIL_WORKFLOW}}');
 		});
 
-		it('YOUR TOOLS does not contain convene_council or declare_council_criteria', () => {
+		it('YOUR TOOLS does not contain submit_council_verdicts or declare_council_criteria', () => {
 			const yourToolsLine = prompt.match(/YOUR TOOLS:\s*(.+?)(?:\n|$)/)?.[1];
 			expect(yourToolsLine).toBeDefined();
-			expect(yourToolsLine).not.toContain('convene_council');
+			expect(yourToolsLine).not.toContain('submit_council_verdicts');
 			expect(yourToolsLine).not.toContain('declare_council_criteria');
 		});
 
-		it('Available Tools does not contain convene_council or declare_council_criteria', () => {
+		it('Available Tools does not contain submit_council_verdicts or declare_council_criteria', () => {
 			const availableToolsLine = prompt.match(
 				/Available Tools:\s*([\s\S]*?)(?:\n##|$)/,
 			)?.[1];
 			expect(availableToolsLine).toBeDefined();
-			expect(availableToolsLine).not.toContain('convene_council');
+			expect(availableToolsLine).not.toContain('submit_council_verdicts');
 			expect(availableToolsLine).not.toContain('declare_council_criteria');
 		});
 	});
@@ -237,6 +277,190 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			).config.prompt!;
 
 			expect(noArg).toBe(absent);
+		});
+	});
+
+	describe('council_mode rewrite — ADDITIONAL gate semantics + phase-level council (post-patch)', () => {
+		// These tests verify the council_mode prompt rewrite:
+		// 1. Council is "ADDITIONAL" gate at PHASE LEVEL, not a replacement for Stage B
+		// 2. PHASE COUNCIL section added for phase-level holistic review
+		// Stage B parallel dispatch is covered through createAgents() in
+		// architect-parallelization-config.test.ts, where the PARALLELIZATION
+		// CONFIG placeholder is actually expanded.
+
+		describe('Council is ADDITIONAL gate at PHASE LEVEL (not replacement)', () => {
+			const agent = createArchitectAgent(
+				'test-model',
+				undefined,
+				undefined,
+				undefined,
+				{ enabled: true },
+			);
+			const prompt = agent.config.prompt!;
+
+			it('contains "ADDITIONAL gate at PHASE LEVEL" or similar wording', () => {
+				// Council runs as an ADDITIONAL gate at PHASE LEVEL
+				expect(prompt).toMatch(
+					/ADDITIONAL.*gate.*PHASE LEVEL|ADDITIONAL verification layer/i,
+				);
+			});
+
+			it('contains "council never replaces Stage B" or equivalent', () => {
+				// Stage B always runs per-task — council never replaces it
+				expect(prompt).toMatch(
+					/council.*never.*replace.*Stage B|Stage B.*always.*runs.*per-task/i,
+				);
+			});
+
+			it('contains "Stage B always runs per-task"', () => {
+				expect(prompt).toContain('Stage B always runs per-task');
+			});
+
+			it('does NOT claim council replaces Stage B', () => {
+				// Must not say "council REPLACES Stage B" - but "council never replaces" is fine
+				expect(prompt).not.toMatch(/council\s+replaces\s+Stage\s+B/i);
+				// Also check for "replaces it" in context of Stage B
+				expect(prompt).not.toMatch(/replaces\s+it.*Stage\s+B/i);
+			});
+		});
+
+		describe('PHASE COUNCIL section for phase-level holistic review', () => {
+			const agent = createArchitectAgent(
+				'test-model',
+				undefined,
+				undefined,
+				undefined,
+				{ enabled: true },
+			);
+			const prompt = agent.config.prompt!;
+
+			it('contains "PHASE COUNCIL" section header', () => {
+				expect(prompt).toContain('PHASE COUNCIL');
+			});
+
+			it('contains "phase-level council" or "phase council" description', () => {
+				expect(prompt).toMatch(/phase.level.*council|phase council/i);
+			});
+
+			it('mentions phase_complete in context of council', () => {
+				// Phase council convenes at phase_complete time
+				expect(prompt).toMatch(
+					/phase_complete.*council|council.*phase_complete/i,
+				);
+			});
+
+			it('describes cross-cutting concerns review', () => {
+				// Phase council focuses on CROSS-CUTTING concerns only
+				expect(prompt).toMatch(/cross.cutting.*concerns|CROSS.CUTTING/i);
+			});
+
+			it('describes phase dossier assembly step', () => {
+				expect(prompt).toContain('Phase Dossier Assembly');
+			});
+
+			it('describes council dispatch workflow', () => {
+				expect(prompt).toMatch(/Council Dispatch|Dispatch.*council/i);
+			});
+		});
+
+		describe('PHASE COUNCIL absent when council disabled', () => {
+			const agent = createArchitectAgent(
+				'test-model',
+				undefined,
+				undefined,
+				undefined,
+				{ enabled: false },
+			);
+			const prompt = agent.config.prompt!;
+
+			it('does NOT contain PHASE COUNCIL section', () => {
+				expect(prompt).not.toContain('PHASE COUNCIL');
+			});
+		});
+
+		describe('buildCouncilWorkflow function behavior', () => {
+			const { buildCouncilWorkflow } = require('../../../src/agents/architect');
+
+			it('returns empty string when council is undefined', () => {
+				const result = buildCouncilWorkflow(undefined);
+				expect(result).toBe('');
+			});
+
+			it('returns empty string when council.enabled is false', () => {
+				const result = buildCouncilWorkflow({ enabled: false });
+				expect(result).toBe('');
+			});
+
+			it('returns non-empty string when council.enabled is true', () => {
+				const result = buildCouncilWorkflow({ enabled: true });
+				expect(result).not.toBe('');
+			});
+
+			it('returns string containing PHASE COUNCIL when council enabled', () => {
+				const result = buildCouncilWorkflow({ enabled: true });
+				expect(result).toContain('PHASE COUNCIL');
+			});
+
+			it('returns string containing ADDITIONAL verification layer', () => {
+				const result = buildCouncilWorkflow({ enabled: true });
+				expect(result).toMatch(
+					/ADDITIONAL.*verification layer|verification layer.*ADDITIONAL/i,
+				);
+			});
+
+			it('returns string containing Stage B ALWAYS runs per-task', () => {
+				const result = buildCouncilWorkflow({ enabled: true });
+				// The actual text uses uppercase ALWAYS
+				expect(result).toMatch(/Stage B.*ALWAYS\s+runs\s+per-task/i);
+			});
+		});
+
+		describe('template variables preserved in prompt', () => {
+			const agent = createArchitectAgent(
+				'test-model',
+				undefined,
+				undefined,
+				undefined,
+				{ enabled: true },
+			);
+			const prompt = agent.config.prompt!;
+
+			it('contains {{AGENT_PREFIX}} placeholder', () => {
+				// AGENT_PREFIX should appear in the prompt multiple times
+				expect(prompt).toContain('{{AGENT_PREFIX}}');
+			});
+
+			it('renders agent names after template substitution', () => {
+				// The prompt should contain actual agent prefix references like "reviewer" after substitution
+				expect(prompt).toContain('reviewer');
+				expect(prompt).toContain('test_engineer');
+			});
+
+			it('does NOT leave {{COUNCIL_WORKFLOW}} unexpanded when council enabled', () => {
+				// COUNCIL_WORKFLOW should be replaced with the actual council block
+				expect(prompt).not.toContain('{{COUNCIL_WORKFLOW}}');
+				// And should contain the actual council content
+				expect(prompt).toContain('## COUNCIL WORKFLOW');
+			});
+		});
+
+		describe('no skip Stage B entries language', () => {
+			const agent = createArchitectAgent(
+				'test-model',
+				undefined,
+				undefined,
+				undefined,
+				{ enabled: true },
+			);
+			const prompt = agent.config.prompt!;
+
+			it('does NOT contain "skip Stage B" language anywhere', () => {
+				expect(prompt).not.toMatch(/skip.*Stage B|Stage B.*skip/i);
+			});
+
+			it('does NOT contain "bypass Stage B" language anywhere', () => {
+				expect(prompt).not.toMatch(/bypass.*Stage B|Stage B.*bypass/i);
+			});
 		});
 	});
 });

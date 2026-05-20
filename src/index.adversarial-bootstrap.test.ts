@@ -364,7 +364,9 @@ describe('ADVERSARIAL: Mixed bootstrap scenarios', () => {
 		// Final state should still be architect
 		const finalSession = swarmState.agentSessions.get(testSessionId);
 		expect(finalSession?.agentName).toBe(ORCHESTRATOR_NAME);
-		expect(finalSession?.delegationActive).toBe(false);
+		// ensureAgentSession with same agentName does NOT reset delegationActive;
+		// only a name change resets it — so delegationActive stays true here.
+		expect(finalSession?.delegationActive).toBe(true);
 	});
 
 	it('16. concurrent bootstrap calls with different directories', () => {
@@ -430,7 +432,6 @@ describe('ADVERSARIAL: Breaking deterministic takeover attempts', () => {
 						{
 							id: '1.1',
 							phase: 1,
-							// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 							description: 'Task${process.env.SECRET}',
 							status: 'pending',
 							size: 'small',

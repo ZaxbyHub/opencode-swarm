@@ -23,6 +23,14 @@ export declare function loadPluginConfigWithMeta(directory: string): {
     loadedFromFile: boolean;
 };
 /**
+ * Async variant of `loadPluginConfigWithMeta`. Used by the plugin entry
+ * (issue #704) so initialization does not perform synchronous fs reads.
+ */
+export declare function loadPluginConfigWithMetaAsync(directory: string): Promise<{
+    config: PluginConfig;
+    loadedFromFile: boolean;
+}>;
+/**
  * Load custom prompt for an agent from the prompts directory.
  * Checks for {agent}.md (replaces default) and {agent}_append.md (appends).
  */

@@ -275,6 +275,30 @@ describe('executeUpdateTaskStatus', () => {
 				JSON.stringify(completedPlan, null, 2),
 			);
 
+			// Write evidence file to satisfy hasPassedDurableGateEvidence
+			fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), {
+				recursive: true,
+			});
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
+				JSON.stringify({
+					taskId: '1.1',
+					required_gates: ['reviewer', 'test_engineer'],
+					gates: {
+						reviewer: {
+							sessionId: 'test',
+							timestamp: '2025-01-01T00:00:00.000Z',
+							agent: 'reviewer',
+						},
+						test_engineer: {
+							sessionId: 'test',
+							timestamp: '2025-01-01T00:00:00.000Z',
+							agent: 'test_engineer',
+						},
+					},
+				}),
+			);
+
 			// Create a session but keep task state at idle (simulates session restart)
 			ensureAgentSession('test-idle-session');
 			// Do NOT advance state machine — task stays at idle
@@ -290,6 +314,9 @@ describe('executeUpdateTaskStatus', () => {
 		});
 
 		test('blocks completed when plan.json shows task as in_progress (gate still enforced)', async () => {
+			// Clear session state from prior tests to ensure isolation
+			swarmState.agentSessions.clear();
+
 			// plan.json shows task 1.1 as in_progress — gate should be enforced
 			const inProgressPlan = {
 				schema_version: '1.0.0',
@@ -320,6 +347,12 @@ describe('executeUpdateTaskStatus', () => {
 				path.join(tempDir, '.swarm', 'plan.json'),
 				JSON.stringify(inProgressPlan, null, 2),
 			);
+
+			// Remove any evidence file from prior tests to avoid false gate pass
+			const evidencePath = path.join(tempDir, '.swarm', 'evidence', '1.1.json');
+			if (fs.existsSync(evidencePath)) {
+				fs.unlinkSync(evidencePath);
+			}
 
 			// Create a session but keep task state at idle
 			ensureAgentSession('test-idle-session');
@@ -1125,7 +1158,7 @@ describe('checkReviewerGate dynamic error message (Task 2.4)', () => {
 
 		// Assert the result
 		expect(result.blocked).toBe(true);
-		expect(result.reason).toContain('Current state by session:');
+		expect(result.reason).toContain('Session states:');
 		expect(result.reason).toContain('coder_delegated');
 		expect(result.reason).toContain('required state: tests_run or complete');
 	});
@@ -1590,7 +1623,7 @@ describe('checkReviewerGate — generic reviewer wording (Task 2.2)', () => {
 
 		expect(result.blocked).toBe(true);
 		expect(result.reason).toContain('QA gates');
-		expect(result.reason).toContain('Current state by session:');
+		expect(result.reason).toContain('Session states:');
 		expect(result.reason).toContain('required state: tests_run or complete');
 	});
 
@@ -1607,7 +1640,7 @@ describe('checkReviewerGate — generic reviewer wording (Task 2.2)', () => {
 		// Should use generic QA gates terminology
 		expect(result.reason).toContain('QA gates');
 		// Should include state information
-		expect(result.reason).toContain('Current state by session:');
+		expect(result.reason).toContain('Session states:');
 		expect(result.reason).toContain('required state: tests_run or complete');
 	});
 });
@@ -1725,6 +1758,28 @@ describe('checkReviewerGate — non-visible regression warning handling (Task 2.
 			JSON.stringify(plan, null, 2),
 		);
 
+		// Write evidence file to satisfy hasPassedDurableGateEvidence
+		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'evidence', '7.1.json'),
+			JSON.stringify({
+				taskId: '7.1',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'test',
+						timestamp: '2025-01-01T00:00:00.000Z',
+						agent: 'reviewer',
+					},
+					test_engineer: {
+						sessionId: 'test',
+						timestamp: '2025-01-01T00:00:00.000Z',
+						agent: 'test_engineer',
+					},
+				},
+			}),
+		);
+
 		// Sessions at idle
 		const session = createWorkflowTestSession();
 		swarmState.agentSessions.set('session-idle', session);
@@ -1838,6 +1893,30 @@ describe('checkReviewerGate — directory-aware plan resolution (Task 2.2)', () 
 		// Session at idle state - would normally be blocked
 		const session = createWorkflowTestSession();
 		swarmState.agentSessions.set('test-session', session);
+
+		// Write evidence file to satisfy hasPassedDurableGateEvidence
+		fs.mkdirSync(path.join(tempDirA, '.swarm', 'evidence'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(tempDirA, '.swarm', 'evidence', '1.1.json'),
+			JSON.stringify({
+				taskId: '1.1',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'test',
+						timestamp: '2025-01-01T00:00:00.000Z',
+						agent: 'reviewer',
+					},
+					test_engineer: {
+						sessionId: 'test',
+						timestamp: '2025-01-01T00:00:00.000Z',
+						agent: 'test_engineer',
+					},
+				},
+			}),
+		);
 
 		// Pass tempDirA where task is completed in plan.json
 		const result = checkReviewerGate('1.1', tempDirA);

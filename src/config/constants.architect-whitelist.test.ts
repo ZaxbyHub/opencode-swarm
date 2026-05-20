@@ -114,9 +114,21 @@ describe('AGENT_TOOL_MAP.architect whitelist verification', () => {
 			});
 		});
 
-		it('each role should have at least one tool', () => {
-			Object.entries(AGENT_TOOL_MAP).forEach(([_role, tools]) => {
-				expect(tools.length).toBeGreaterThan(0);
+		it('each role should have at least one tool (except synthesis-only roles)', () => {
+			const synthesisOnlyRoles = new Set([
+				'council_generalist',
+				'council_skeptic',
+				'council_domain_expert',
+			]);
+			Object.entries(AGENT_TOOL_MAP).forEach(([role, tools]) => {
+				if (synthesisOnlyRoles.has(role)) {
+					// Synthesis-only roles may have no tools (they aggregate/write from existing data)
+					return;
+				}
+				expect(
+					tools.length,
+					`${role} should have at least one tool`,
+				).toBeGreaterThan(0);
 			});
 		});
 

@@ -1,19 +1,31 @@
-import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { KnowledgeConfigSchema } from '../config/schema';
+import { loadPluginConfigWithMeta } from '../config';
+import {
+	KnowledgeConfigSchema,
+	SkillImproverConfigSchema,
+} from '../config/schema';
 import { archiveEvidence } from '../evidence/manager';
 import {
-	getCurrentBranch,
-	getDefaultBaseBranch,
-	hasUncommittedChanges,
 	isGitRepo,
+	resetToMainAfterMerge,
+	resetToRemoteBranch,
 } from '../git/branch';
+import { isHiveEligible, promoteToHive } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
+import {
+	readKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../hooks/knowledge-store';
+import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
-import { writeCheckpoint } from '../plan/checkpoint';
+
 import { clearAllScopes } from '../scope/scope-persistence';
-import { flushPendingSnapshot } from '../session/snapshot-writer';
+import {
+	runSkillImprover,
+	type SkillImproveRequest,
+	type SkillImproveResult,
+} from '../services/skill-improver';
 import { resetSwarmState, swarmState } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
@@ -24,6 +36,7 @@ interface PlanPhase {
 	tasks: Array<{
 		id: string;
 		status: string;
+		close_reason?: string;
 	}>;
 }
 
@@ -32,8 +45,65 @@ interface PlanData {
 	phases: PlanPhase[];
 }
 
+interface CloseCommandOptions {
+	sessionID?: string;
+	skillReviewTimeoutMs?: number;
+}
+
+interface CurationCounts {
+	stored: number;
+	skipped: number;
+	rejected: number;
+}
+
+interface CloseKnowledgeEntry {
+	created_at?: string;
+}
+
+const CLOSE_SKILL_REVIEW_TIMEOUT_MS = 120_000;
+
+async function runAbortableSkillReview(
+	req: SkillImproveRequest,
+	timeoutMs: number,
+): Promise<SkillImproveResult> {
+	const controller = new AbortController();
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const skillReviewPromise = runSkillImprover({
+		...req,
+		signal: controller.signal,
+	});
+	const timeoutPromise = new Promise<never>((_, reject) => {
+		timeout = setTimeout(() => {
+			reject(new Error(`skill_review exceeded ${timeoutMs}ms budget`));
+			controller.abort();
+		}, timeoutMs);
+	});
+
+	try {
+		return await Promise.race([skillReviewPromise, timeoutPromise]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+function countSessionKnowledgeEntries(
+	entries: CloseKnowledgeEntry[],
+	sessionStart: string | undefined,
+	fallbackCount: number,
+): number {
+	if (!sessionStart) return fallbackCount;
+	const sessionStartMs = Date.parse(sessionStart);
+	if (!Number.isFinite(sessionStartMs)) return fallbackCount;
+
+	return entries.filter((entry) => {
+		if (typeof entry.created_at !== 'string') return false;
+		const createdAtMs = Date.parse(entry.created_at);
+		return Number.isFinite(createdAtMs) && createdAtMs >= sessionStartMs;
+	}).length;
+}
+
 /**
- * Artifacts to include in the archive bundle.
+ * Flat-file artifacts to include in the archive bundle.
  * Each entry is a relative path under .swarm/.
  *
  * plan-ledger.jsonl is included so the archive bundle is a self-contained
@@ -52,10 +122,21 @@ const ARCHIVE_ARTIFACTS = [
 	'handoff-consumed.md',
 	'escalation-report.md',
 	'close-lessons.md',
+	'knowledge.jsonl',
+	'knowledge-rejected.jsonl',
+	'repo-graph.json',
+	'doc-manifest.json',
+	'dark-matter.md',
+	'telemetry.jsonl',
+	'swarm.db',
+	'swarm.db-shm',
+	'swarm.db-wal',
+	'close-summary.md',
+	'spec.md',
 ];
 
 /**
- * Active-state files/dirs to clean after archiving so future swarms start clean.
+ * Active-state flat files to clean after archiving so future swarms start clean.
  *
  * plan.json, plan.md, and plan-ledger.jsonl are all removed so the next /swarm
  * session starts with a clean slate. The user's original ask for /swarm close
@@ -70,6 +151,18 @@ const ARCHIVE_ARTIFACTS = [
  * leaving it behind re-enables the exact bug this cleanup is meant to fix.
  * The archive-first guard below ensures we only delete files we successfully
  * copied to the archive bundle, so the audit trail is preserved in the bundle.
+ *
+ * knowledge-rejected.jsonl, repo-graph.json, doc-manifest.json,
+ * dark-matter.md, telemetry.jsonl, swarm.db, swarm.db-shm, and swarm.db-wal are
+ * session-generated artifacts that do not persist meaningfully across sessions —
+ * they are recreated on next session init and must be removed to avoid stale-state
+ * interference.
+ *
+ * Note: knowledge.jsonl is intentionally NOT cleaned because it contains cumulative
+ * project knowledge (lessons learned) that should persist across sessions and finalize
+ * cycles. The archive step still creates a backup for safety.
+ * close-summary.md and spec.md are NOT cleaned because close-summary.md
+ * is written as the final close output after cleanup and spec.md may not exist.
  */
 const ACTIVE_STATE_TO_CLEAN = [
 	'plan.json',
@@ -80,10 +173,70 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'handoff-prompt.md',
 	'handoff-consumed.md',
 	'escalation-report.md',
+	'knowledge-rejected.jsonl',
+	'repo-graph.json',
+	'doc-manifest.json',
+	'dark-matter.md',
+	'telemetry.jsonl',
+	'swarm.db',
+	'swarm.db-shm',
+	'swarm.db-wal',
 ];
 
 /**
+ * Active-state directories to archive and clean after archiving.
+ * These contain session-generated data that must be removed so future
+ * swarms start clean. Each entry is a relative path under .swarm/.
+ */
+const ACTIVE_STATE_DIRS_TO_CLEAN = [
+	'evidence',
+	'session',
+	'scopes',
+	'locks',
+	'spec-archive',
+];
+
+/**
+ * Guarantee all phases and tasks in a plan are marked complete/closed.
+ * Mutates planData in place. Returns actual IDs of newly closed phases and
+ * tasks so the caller can track only genuinely new closures (idempotent).
+ */
+function guaranteeAllPlansComplete(planData: PlanData): {
+	closedPhaseIds: number[];
+	closedTaskIds: string[];
+} {
+	const closedPhaseIds: number[] = [];
+	const closedTaskIds: string[] = [];
+
+	for (const phase of planData.phases ?? []) {
+		const wasComplete =
+			phase.status === 'complete' ||
+			phase.status === 'completed' ||
+			phase.status === 'closed';
+		if (!wasComplete) {
+			phase.status = 'closed';
+			closedPhaseIds.push(phase.id);
+		}
+
+		for (const task of phase.tasks ?? []) {
+			const wasTaskDone =
+				task.status === 'completed' ||
+				task.status === 'complete' ||
+				task.status === 'closed';
+			if (!wasTaskDone) {
+				task.status = 'closed';
+				task.close_reason = 'session_terminated';
+				closedTaskIds.push(task.id);
+			}
+		}
+	}
+
+	return { closedPhaseIds, closedTaskIds };
+}
+
+/**
  * Handles /swarm close command - performs full terminal session finalization:
+ * 0. Guarantee: mark all incomplete phases/tasks as closed
  * 1. Finalize: write retrospectives, produce terminal summary
  * 2. Archive: create timestamped bundle of swarm artifacts
  * 3. Clean: clear active-state files that confuse future swarms
@@ -94,6 +247,7 @@ const ACTIVE_STATE_TO_CLEAN = [
 export async function handleCloseCommand(
 	directory: string,
 	args: string[],
+	options: CloseCommandOptions = {},
 ): Promise<string> {
 	const planPath = validateSwarmPath(directory, 'plan.json');
 	const swarmDir = path.join(directory, '.swarm');
@@ -125,6 +279,7 @@ export async function handleCloseCommand(
 	const phases = planData.phases ?? [];
 	const inProgressPhases = phases.filter((p) => p.status === 'in_progress');
 	const isForced = args.includes('--force');
+	const runSkillReview = args.includes('--skill-review');
 
 	// planAlreadyDone: skip retro writing and plan mutation, but still run all cleanup steps
 	let planAlreadyDone = false;
@@ -140,11 +295,14 @@ export async function handleCloseCommand(
 			);
 	}
 
-	const config = KnowledgeConfigSchema.parse({});
+	const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+	const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
 	const projectName = planData.title ?? 'Unknown Project';
 	const closedPhases: number[] = [];
 	const closedTasks: string[] = [];
 	const warnings: string[] = [];
+	let hivePromoted = 0;
+	let hiveSkipped = 0;
 
 	// ─── STAGE 1: FINALIZE ───────────────────────────────────────────
 	if (!planAlreadyDone) {
@@ -275,10 +433,46 @@ export async function handleCloseCommand(
 		// File absent or unreadable — use empty array
 	}
 
-	let curationSucceeded = false;
+	// Read lessons from retro evidence bundles
+	const retroLessons: string[] = [];
 	try {
-		await curateAndStoreSwarm(
-			explicitLessons,
+		const evidenceDir = path.join(swarmDir, 'evidence');
+		const evidenceEntries = await fs.readdir(evidenceDir);
+		const retroDirs = evidenceEntries
+			.filter((e) => e.startsWith('retro-'))
+			.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+		for (const retroDir of retroDirs) {
+			const evidencePath = path.join(evidenceDir, retroDir, 'evidence.json');
+			try {
+				const content = await fs.readFile(evidencePath, 'utf-8');
+				const parsed = JSON.parse(content);
+				// Evidence format: { entries: [{ lessons_learned: string[] }] }
+				// or flat: { lessons_learned: string[] }
+				const entries = parsed.entries ?? [parsed];
+				for (const entry of entries) {
+					if (Array.isArray(entry.lessons_learned)) {
+						for (const lesson of entry.lessons_learned) {
+							if (typeof lesson === 'string' && lesson.trim().length > 0) {
+								retroLessons.push(lesson.trim());
+							}
+						}
+					}
+				}
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+	} catch {
+		// evidence dir may not exist — non-blocking
+	}
+
+	const allLessons = [...new Set([...explicitLessons, ...retroLessons])];
+
+	let curationSucceeded = false;
+	let curationResult: CurationCounts | undefined;
+	try {
+		curationResult = await curateAndStoreSwarm(
+			allLessons,
 			projectName,
 			{ phase_number: 0 },
 			directory,
@@ -291,34 +485,156 @@ export async function handleCloseCommand(
 		console.warn('[close-command] curateAndStoreSwarm error:', error);
 	}
 
-	if (curationSucceeded && explicitLessons.length > 0) {
+	if (curationSucceeded && allLessons.length > 0) {
 		await fs.unlink(lessonsFilePath).catch(() => {});
 	}
 
-	if (planExists && !planAlreadyDone) {
-		for (const phase of phases) {
-			if (phase.status !== 'complete' && phase.status !== 'completed') {
-				phase.status = 'closed';
-				if (!closedPhases.includes(phase.id)) {
-					closedPhases.push(phase.id);
-				}
-			}
-			for (const task of phase.tasks ?? []) {
-				if (task.status !== 'completed' && task.status !== 'complete') {
-					task.status = 'closed';
-					if (!closedTasks.includes(task.id)) {
-						closedTasks.push(task.id);
+	// ─── HIVE PROMOTION ──────────────────────────────────────────────
+	// Promote swarm lessons to cross-project hive knowledge.
+	// Non-blocking: failures are logged as warnings, close still succeeds.
+	if (curationSucceeded) {
+		if (config.hive_enabled === false) {
+			// Hive disabled by configuration — skip promotion entirely
+		} else {
+			try {
+				const knowledgePath = resolveSwarmKnowledgePath(directory);
+				const entries = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
+				const autoPromoteDays = config.auto_promote_days;
+				if (entries.length > 0) {
+					for (const entry of entries) {
+						// ─── Eligibility gate (shared with checkHivePromotions) ──
+						if (!isHiveEligible(entry, autoPromoteDays)) {
+							hiveSkipped++;
+							continue;
+						}
+
+						try {
+							const result = await promoteToHive(
+								directory,
+								entry.lesson,
+								entry.category,
+							);
+							// Only count actual promotions, not near-duplicate no-ops
+							if (!result.includes('already exists')) {
+								hivePromoted++;
+							}
+						} catch (promotionErr) {
+							const msg =
+								promotionErr instanceof Error
+									? promotionErr.message
+									: String(promotionErr);
+							warnings.push(`Hive promotion skipped for lesson: ${msg}`);
+						}
+					}
+					if (hiveSkipped > 0) {
+						warnings.push(
+							`${hiveSkipped} swarm knowledge entr${hiveSkipped === 1 ? 'y' : 'ies'} not eligible for hive promotion`,
+						);
 					}
 				}
+			} catch (hiveErr) {
+				const msg =
+					hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
+				warnings.push(`Hive promotion failed: ${msg}`);
+			}
+		}
+	}
+
+	const fallbackKnowledgeCreated = curationResult?.stored ?? 0;
+	let sessionKnowledgeCreated = fallbackKnowledgeCreated;
+	try {
+		const knowledgePath = resolveSwarmKnowledgePath(directory);
+		const entries = await readKnowledge<CloseKnowledgeEntry>(knowledgePath);
+		sessionKnowledgeCreated = countSessionKnowledgeEntries(
+			entries,
+			sessionStart,
+			fallbackKnowledgeCreated,
+		);
+	} catch (knowledgeErr) {
+		const msg =
+			knowledgeErr instanceof Error
+				? knowledgeErr.message
+				: String(knowledgeErr);
+		warnings.push(`Knowledge session count failed: ${msg}`);
+	}
+
+	const knowledgeSkillHint =
+		sessionKnowledgeCreated > 0
+			? `${sessionKnowledgeCreated} knowledge entries created this session. Consider running skill_improve or skill_generate to compile mature entries into skills.`
+			: '';
+
+	let skillReviewSummary = '';
+	if (runSkillReview) {
+		try {
+			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
+			const skillImproverConfig = SkillImproverConfigSchema.parse(
+				loadedConfig.skill_improver ?? {},
+			);
+			const skillReviewResult = await runAbortableSkillReview(
+				{
+					directory,
+					config: skillImproverConfig,
+					targets: ['skills', 'knowledge'],
+					mode: 'proposal',
+					sessionId: options.sessionID,
+				},
+				options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
+			);
+			if (skillReviewResult.ran) {
+				const proposal = skillReviewResult.proposalPath
+					? ` Proposal: ${skillReviewResult.proposalPath}.`
+					: '';
+				const source = skillReviewResult.source
+					? ` Source: ${skillReviewResult.source}.`
+					: '';
+				skillReviewSummary = `Skill review proposal generated.${proposal}${source}`;
+			} else {
+				const reason = skillReviewResult.reason ?? 'unknown reason';
+				skillReviewSummary = `Skill review skipped: ${reason}`;
+				warnings.push(skillReviewSummary);
+			}
+		} catch (skillReviewErr) {
+			const msg =
+				skillReviewErr instanceof Error
+					? skillReviewErr.message
+					: String(skillReviewErr);
+			skillReviewSummary = `Skill review failed: ${msg}`;
+			warnings.push(skillReviewSummary);
+		}
+	}
+
+	// ─── ALL-PLANS-COMPLETE GUARANTEE ────────────────────────────────
+	if (planExists) {
+		const guaranteeResult = guaranteeAllPlansComplete(planData);
+		// Only track newly closed phases/tasks by identity
+		for (const phaseId of guaranteeResult.closedPhaseIds) {
+			if (!closedPhases.includes(phaseId)) {
+				closedPhases.push(phaseId);
+			}
+		}
+		for (const taskId of guaranteeResult.closedTaskIds) {
+			if (!closedTasks.includes(taskId)) {
+				closedTasks.push(taskId);
 			}
 		}
 
-		try {
-			await fs.writeFile(planPath, JSON.stringify(planData, null, 2), 'utf-8');
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			warnings.push(`Failed to persist terminal plan.json state: ${msg}`);
-			console.warn('[close-command] Failed to write plan.json:', error);
+		// Persist the terminal plan state
+		if (
+			!planAlreadyDone ||
+			guaranteeResult.closedPhaseIds.length > 0 ||
+			guaranteeResult.closedTaskIds.length > 0
+		) {
+			try {
+				await fs.writeFile(
+					planPath,
+					JSON.stringify(planData, null, 2),
+					'utf-8',
+				);
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : String(error);
+				warnings.push(`Failed to persist terminal plan.json state: ${msg}`);
+				console.warn('[close-command] Failed to write plan.json:', error);
+			}
 		}
 	}
 
@@ -335,6 +651,9 @@ export async function handleCloseCommand(
 	/** Track which active-state files were successfully backed up to the archive.
 	 *  Only these files are safe to delete in the clean stage. */
 	const archivedActiveStateFiles = new Set<string>();
+	/** Track which active-state directories were successfully backed up to the archive.
+	 *  Only these directories are safe to delete in the clean stage. */
+	const archivedActiveStateDirs = new Set<string>();
 
 	try {
 		await fs.mkdir(archiveDir, { recursive: true });
@@ -354,51 +673,43 @@ export async function handleCloseCommand(
 			}
 		}
 
-		// Archive evidence directory
-		const evidenceDir = path.join(swarmDir, 'evidence');
-		const archiveEvidenceDir = path.join(archiveDir, 'evidence');
-		try {
-			const evidenceEntries = await fs.readdir(evidenceDir);
-			if (evidenceEntries.length > 0) {
-				await fs.mkdir(archiveEvidenceDir, { recursive: true });
-				for (const entry of evidenceEntries) {
-					const srcEntry = path.join(evidenceDir, entry);
-					const destEntry = path.join(archiveEvidenceDir, entry);
-					try {
-						const stat = await fs.stat(srcEntry);
-						if (stat.isDirectory()) {
-							await fs.mkdir(destEntry, { recursive: true });
-							const subEntries = await fs.readdir(srcEntry);
-							for (const sub of subEntries) {
-								await fs
-									.copyFile(path.join(srcEntry, sub), path.join(destEntry, sub))
-									.catch(() => {});
+		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
+		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+			const srcDir = path.join(swarmDir, dirName);
+			const destDir = path.join(archiveDir, dirName);
+			try {
+				const entries = await fs.readdir(srcDir);
+				if (entries.length > 0) {
+					await fs.mkdir(destDir, { recursive: true });
+					for (const entry of entries) {
+						const srcEntry = path.join(srcDir, entry);
+						const destEntry = path.join(destDir, entry);
+						try {
+							const stat = await fs.stat(srcEntry);
+							if (stat.isDirectory()) {
+								await fs.mkdir(destEntry, { recursive: true });
+								const subEntries = await fs.readdir(srcEntry);
+								for (const sub of subEntries) {
+									await fs
+										.copyFile(
+											path.join(srcEntry, sub),
+											path.join(destEntry, sub),
+										)
+										.catch(() => {});
+								}
+							} else {
+								await fs.copyFile(srcEntry, destEntry);
 							}
-						} else {
-							await fs.copyFile(srcEntry, destEntry);
+							archivedFileCount++;
+						} catch {
+							// Per-entry failure is non-blocking
 						}
-						archivedFileCount++;
-					} catch {
-						// Per-entry failure is non-blocking
 					}
 				}
+				archivedActiveStateDirs.add(dirName);
+			} catch {
+				// Directory may not exist — skip silently
 			}
-		} catch {
-			// evidence dir may not exist
-		}
-
-		// Archive session state
-		const sessionStatePath = path.join(swarmDir, 'session', 'state.json');
-		try {
-			const archiveSessionDir = path.join(archiveDir, 'session');
-			await fs.mkdir(archiveSessionDir, { recursive: true });
-			await fs.copyFile(
-				sessionStatePath,
-				path.join(archiveSessionDir, 'state.json'),
-			);
-			archivedFileCount++;
-		} catch {
-			// session state may not exist
 		}
 
 		archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}/`;
@@ -448,6 +759,22 @@ export async function handleCloseCommand(
 		);
 	}
 
+	// Delete directories that were successfully archived
+	// Uses archive-first-guard: only delete directories we confirmed are in the archive
+	for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+		if (!archivedActiveStateDirs.has(dirName)) {
+			// Directory was NOT archived — do not delete
+			continue;
+		}
+		const dirPath = path.join(swarmDir, dirName);
+		try {
+			await fs.rm(dirPath, { recursive: true, force: true });
+			cleanedFiles.push(`${dirName}/`);
+		} catch {
+			// Per-directory failure is non-blocking
+		}
+	}
+
 	// Remove stale config-backup-*.json files AND ledger sibling files
 	// (plan-ledger.archived-*.jsonl and plan-ledger.backup-*.jsonl) that
 	// savePlan creates during identity-mismatch reinitialization. Without
@@ -486,6 +813,30 @@ export async function handleCloseCommand(
 		// readdir failure is non-blocking
 	}
 
+	// Remove SWARM_PLAN checkpoint artifacts written by writeCheckpoint().
+	// Cleans both the canonical .swarm/ location and any legacy root-level
+	// artifacts from pre-7.0 sessions. These are redundant copies of
+	// plan.json/plan.md (already archived) and should not be left behind.
+	let swarmPlanFilesRemoved = 0;
+	const candidates = [
+		path.join(directory, '.swarm', 'SWARM_PLAN.json'),
+		path.join(directory, '.swarm', 'SWARM_PLAN.md'),
+		path.join(directory, 'SWARM_PLAN.json'),
+		path.join(directory, 'SWARM_PLAN.md'),
+	];
+	for (const candidate of candidates) {
+		try {
+			await fs.unlink(candidate);
+			swarmPlanFilesRemoved++;
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+				warnings.push(
+					`Failed to remove ${path.basename(candidate)}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+	}
+
 	// #519 (v6.71.1): clear persisted declare_scope files so the next session
 	// starts without inherited scope. Scope files are ephemeral state; they are
 	// not archived because they contain no forensic signal not already captured
@@ -514,124 +865,39 @@ export async function handleCloseCommand(
 
 	// ─── STAGE 4: ALIGN ──────────────────────────────────────────────
 	const pruneBranches = args.includes('--prune-branches');
-	const prunedBranches: string[] = [];
-	const pruneErrors: string[] = [];
 	let gitAlignResult = '';
+	const prunedBranches: string[] = [];
 
 	const isGit = isGitRepo(directory);
 	if (isGit) {
-		// Safe git alignment: check for dirty worktree, detached HEAD, etc.
-		try {
-			const currentBranch = getCurrentBranch(directory);
-
-			if (currentBranch === 'HEAD') {
-				gitAlignResult = 'Skipped git alignment: detached HEAD state';
-				warnings.push(
-					'Repo is in detached HEAD state. Checkout a branch before starting a new swarm.',
-				);
-			} else if (hasUncommittedChanges(directory)) {
-				gitAlignResult =
-					'Skipped git alignment: uncommitted changes in worktree';
-				warnings.push(
-					'Uncommitted changes detected. Commit or stash before aligning to main.',
-				);
-			} else {
-				// Determine base branch
-				const baseBranch = getDefaultBaseBranch(directory);
-				const localBase = baseBranch.replace(/^origin\//, '');
-
-				if (currentBranch === localBase) {
-					// Already on main/master — try a safe pull
-					try {
-						execFileSync('git', ['fetch', 'origin', localBase], {
-							cwd: directory,
-							encoding: 'utf-8',
-							timeout: 30_000,
-							stdio: ['pipe', 'pipe', 'pipe'],
-						});
-
-						// Check if fast-forward is possible
-						const mergeBase = execFileSync(
-							'git',
-							['merge-base', 'HEAD', baseBranch],
-							{
-								cwd: directory,
-								encoding: 'utf-8',
-								timeout: 10_000,
-								stdio: ['pipe', 'pipe', 'pipe'],
-							},
-						).trim();
-
-						const headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-							cwd: directory,
-							encoding: 'utf-8',
-							timeout: 10_000,
-							stdio: ['pipe', 'pipe', 'pipe'],
-						}).trim();
-
-						if (mergeBase === headSha) {
-							// HEAD is ancestor of remote — fast-forward safe
-							execFileSync('git', ['merge', '--ff-only', baseBranch], {
-								cwd: directory,
-								encoding: 'utf-8',
-								timeout: 30_000,
-								stdio: ['pipe', 'pipe', 'pipe'],
-							});
-							gitAlignResult = `Aligned to ${baseBranch} (fast-forward)`;
-						} else {
-							gitAlignResult = `On ${localBase} but cannot fast-forward to ${baseBranch} (diverged)`;
-							warnings.push(
-								`Local ${localBase} has diverged from ${baseBranch}. Manual merge/rebase needed.`,
-							);
-						}
-					} catch (fetchErr) {
-						gitAlignResult = `Fetch from origin/${localBase} failed — remote may be unavailable`;
-						warnings.push(
-							`Git fetch failed: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`,
-						);
-					}
-				} else {
-					// On a feature branch — just report status, don't force checkout
-					gitAlignResult = `On branch ${currentBranch}. Switch to ${localBase} manually when ready for a new swarm.`;
-				}
+		// Try aggressive reset first (handles post-merge scenario with uncommitted changes)
+		const aggressiveResult = resetToMainAfterMerge(directory, {
+			pruneBranches,
+		});
+		if (aggressiveResult.success) {
+			gitAlignResult = aggressiveResult.message;
+			for (const w of aggressiveResult.warnings) {
+				warnings.push(w);
 			}
-		} catch (gitError) {
-			gitAlignResult = `Git alignment error: ${gitError instanceof Error ? gitError.message : String(gitError)}`;
-		}
+			if (aggressiveResult.changesDiscarded) {
+				warnings.push(
+					'Uncommitted changes were discarded during git alignment',
+				);
+			}
+		} else {
+			// Fallback to cautious reset (preserves uncommitted changes)
+			const alignResult = resetToRemoteBranch(directory, { pruneBranches });
+			gitAlignResult = alignResult.message;
+			prunedBranches.push(...alignResult.prunedBranches);
 
-		// Optional branch pruning
-		if (pruneBranches) {
-			try {
-				const branchOutput = execFileSync('git', ['branch', '-vv'], {
-					cwd: directory,
-					encoding: 'utf-8',
-					stdio: ['pipe', 'pipe', 'pipe'],
-				});
-				const goneBranches = branchOutput
-					.split('\n')
-					.filter((line) => line.includes(': gone]'))
-					.map(
-						(line) =>
-							line
-								.trim()
-								.replace(/^[*+]\s+/, '')
-								.split(/\s+/)[0],
-					)
-					.filter(Boolean);
-				for (const branch of goneBranches) {
-					try {
-						execFileSync('git', ['branch', '-d', branch], {
-							cwd: directory,
-							encoding: 'utf-8',
-							stdio: ['pipe', 'pipe', 'pipe'],
-						});
-						prunedBranches.push(branch);
-					} catch {
-						pruneErrors.push(branch);
-					}
-				}
-			} catch {
-				// Not a git repo or git not installed — non-blocking
+			if (!alignResult.success) {
+				warnings.push(`Git alignment: ${alignResult.message}`);
+			}
+			if (alignResult.alreadyAligned) {
+				gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
+			}
+			for (const w of alignResult.warnings) {
+				warnings.push(w);
 			}
 		}
 	} else {
@@ -647,32 +913,6 @@ export async function handleCloseCommand(
 			? 'Plan already terminal — cleanup only'
 			: 'Normal finalization';
 
-	const actionsPerformed = [
-		...(!planAlreadyDone && inProgressPhases.length > 0
-			? ['- Wrote retrospectives for in-progress phases']
-			: []),
-		`- ${archiveResult}`,
-		...(cleanedFiles.length > 0
-			? [
-					`- Cleaned ${cleanedFiles.length} active-state file(s): ${cleanedFiles.join(', ')}`,
-				]
-			: []),
-		'- Reset context.md for next session',
-		...(configBackupsRemoved > 0
-			? [`- Removed ${configBackupsRemoved} stale config backup file(s)`]
-			: []),
-		...(prunedBranches.length > 0
-			? [
-					`- Pruned ${prunedBranches.length} stale local git branch(es): ${prunedBranches.join(', ')}`,
-				]
-			: []),
-		'- Cleared agent sessions and delegation chains',
-		...(planExists && !planAlreadyDone
-			? ['- Set non-completed phases/tasks to closed status']
-			: []),
-		...(gitAlignResult ? [`- Git: ${gitAlignResult}`] : []),
-	];
-
 	const summaryContent = [
 		'# Swarm Close Summary',
 		'',
@@ -680,20 +920,64 @@ export async function handleCloseCommand(
 		`**Closed:** ${new Date().toISOString()}`,
 		`**Finalization:** ${finalizationType}`,
 		'',
-		`## Phases Closed: ${closedPhases.length}`,
+		'## Retrospective',
 		!planExists
 			? '_No plan — ad-hoc session_'
 			: closedPhases.length > 0
-				? closedPhases.map((id) => `- Phase ${id}`).join('\n')
-				: '_No phases to close_',
+				? closedPhases.map((id) => `- Phase ${id} closed`).join('\n')
+				: '_No phases closed this run_',
+		...(closedTasks.length > 0
+			? [
+					'',
+					`**Tasks marked closed:** ${closedTasks.length}`,
+					...closedTasks.map((id) => `- ${id}`),
+				]
+			: []),
 		'',
-		`## Tasks Closed: ${closedTasks.length}`,
-		closedTasks.length > 0
-			? closedTasks.map((id) => `- ${id}`).join('\n')
-			: '_No incomplete tasks_',
+		'## Lessons Committed',
+		allLessons.length > 0 ? `| # | Lesson |` : '_No lessons committed_',
+		...(allLessons.length > 0
+			? ['| --- | --- |', ...allLessons.map((l, i) => `| ${i + 1} | ${l} |`)]
+			: []),
+		...(knowledgeSkillHint ? ['', knowledgeSkillHint] : []),
+		...(runSkillReview
+			? [
+					'',
+					'## Skill Review',
+					skillReviewSummary || 'Skill review completed without details.',
+				]
+			: []),
 		'',
-		'## Actions Performed',
-		...actionsPerformed,
+		'## Local Repo State',
+		...(gitAlignResult
+			? [`- **Git:** ${gitAlignResult}`]
+			: ['- Git alignment skipped']),
+		...(prunedBranches.length > 0
+			? [`- **Pruned branches:** ${prunedBranches.join(', ')}`]
+			: []),
+		`- **Archive:** ${archiveResult}`,
+		...(cleanedFiles.length > 0
+			? [`- **Cleaned:** ${cleanedFiles.length} file(s)`]
+			: []),
+		'',
+		'## Context',
+		'- Reset context.md for next session',
+		'- Cleared agent sessions and delegation chains',
+		...(configBackupsRemoved > 0
+			? [`- Removed ${configBackupsRemoved} stale config backup file(s)`]
+			: []),
+		...(swarmPlanFilesRemoved > 0
+			? [`- Removed ${swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s)`]
+			: []),
+		...(planExists && !planAlreadyDone
+			? ['- Set non-completed phases/tasks to closed status']
+			: []),
+		...(curationSucceeded && allLessons.length > 0
+			? [`- Committed ${allLessons.length} lesson(s) to knowledge store`]
+			: []),
+		...(hivePromoted > 0
+			? [`- Promoted ${hivePromoted} lesson(s) to hive knowledge`]
+			: []),
 		'',
 		...(warnings.length > 0
 			? ['## Warnings', ...warnings.map((w) => `- ${w}`), '']
@@ -708,17 +992,10 @@ export async function handleCloseCommand(
 		console.warn('[close-command] Failed to write close-summary.md:', error);
 	}
 
-	// Flush snapshot before clearing sessions
-	try {
-		await flushPendingSnapshot(directory);
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`flushPendingSnapshot failed: ${msg}`);
-		console.warn('[close-command] flushPendingSnapshot error:', error);
-	}
-
-	// Write root-level checkpoint artifact before clearing sessions (non-blocking)
-	await writeCheckpoint(directory).catch(() => {});
+	// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
+	// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in
+	// .swarm/archive/) and should not be written to the .swarm/ directory during close.
+	// Stage 3 cleanup removes any pre-existing SWARM_PLAN artifacts from prior sessions.
 
 	// Full session reset so subsequent /swarm invocations start from a clean slate.
 	// Preserve plugin-init singletons that have no re-init path within the same
@@ -731,21 +1008,19 @@ export async function handleCloseCommand(
 	//     init from the built agent map. curator-llm-factory.ts depends on
 	//     them at every curator call; clearing them would silently break the
 	//     curator path until the plugin reloads.
+	//   - skillImproverAgentNames: same plugin-init registry contract as the
+	//     curator names, used to route prefixed multi-swarm skill reviews.
 	const preservedClient = swarmState.opencodeClient;
 	const preservedFullAutoFlag = swarmState.fullAutoEnabledInConfig;
 	const preservedCuratorInitNames = swarmState.curatorInitAgentNames;
 	const preservedCuratorPhaseNames = swarmState.curatorPhaseAgentNames;
+	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
 	resetSwarmState();
 	swarmState.opencodeClient = preservedClient;
 	swarmState.fullAutoEnabledInConfig = preservedFullAutoFlag;
 	swarmState.curatorInitAgentNames = preservedCuratorInitNames;
 	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseNames;
-
-	if (pruneErrors.length > 0) {
-		warnings.push(
-			`Could not prune ${pruneErrors.length} branch(es) (unmerged or checked out): ${pruneErrors.join(', ')}`,
-		);
-	}
+	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
 
 	// Separate retro-specific warnings for prominent display
 	const retroWarnings = warnings.filter(
@@ -768,8 +1043,24 @@ export async function handleCloseCommand(
 		warningMsg += `\n\n**Warnings:**\n${otherWarnings.map((w) => `- ${w}`).join('\n')}`;
 	}
 
+	const lessonSummary =
+		curationSucceeded && allLessons.length > 0
+			? `\n\n**Lessons Committed:** ${allLessons.length} lesson(s) committed to knowledge store`
+			: '';
+	const knowledgeHintSummary = knowledgeSkillHint
+		? `\n\n**Knowledge Review:** ${knowledgeSkillHint}`
+		: '';
+	const skillReviewOutput = skillReviewSummary
+		? `\n\n**Skill Review:** ${skillReviewSummary}`
+		: '';
+
 	if (planAlreadyDone) {
-		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${warningMsg}`;
+		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
 	}
-	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${warningMsg}`;
+	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
 }
+
+export const _internals = {
+	countSessionKnowledgeEntries,
+	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
+};

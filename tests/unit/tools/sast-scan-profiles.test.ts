@@ -83,6 +83,8 @@ describe('SAST Scan - Profile-Driven Behavior', () => {
 		if (tmpDir) {
 			rmSync(tmpDir, { recursive: true, force: true });
 		}
+		// Restore cross-module mocks to prevent contamination
+		mock.restore();
 	});
 
 	it('Scenario 1: Feature flag disabled → returns pass with 0 files scanned', async () => {

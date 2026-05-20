@@ -1,4 +1,6 @@
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
+import { createSwarmTool } from './create-tool';
 
 const DOMAIN_PATTERNS: Record<string, RegExp[]> = {
 	windows: [
@@ -159,19 +161,19 @@ const DOMAIN_PATTERNS: Record<string, RegExp[]> = {
  * Detect SME domains from text content.
  * Returns list of domains that match patterns in the input.
  */
-export const detect_domains: ToolDefinition = tool({
+export const detect_domains: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Detect which SME domains are relevant for a given text. ' +
 		'Returns a list of domain names (windows, powershell, python, oracle, ' +
 		'network, security, linux, vmware, azure, active_directory, ui_ux) ' +
 		'that match patterns in the input text.',
 	args: {
-		text: tool.schema
-			.string()
-			.describe('The text to analyze for domain patterns'),
+		text: z.string().describe('The text to analyze for domain patterns'),
 	},
 	execute: async (args) => {
-		const text = args.text.toLowerCase();
+		const text = (
+			typeof args.text === 'string' ? args.text : String(args.text)
+		).toLowerCase();
 		const detected: string[] = [];
 
 		for (const [domain, patterns] of Object.entries(DOMAIN_PATTERNS)) {

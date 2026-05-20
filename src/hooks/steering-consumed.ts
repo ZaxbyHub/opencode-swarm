@@ -6,6 +6,7 @@
  */
 
 import * as fs from 'node:fs';
+import { bunFile } from '../utils/bun-compat';
 import { safeHook, validateSwarmPath } from './utils.js';
 
 /**
@@ -54,7 +55,7 @@ export function createSteeringConsumedHook(
 	const hook = async (): Promise<void> => {
 		try {
 			const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-			const file = Bun.file(eventsPath);
+			const file = bunFile(eventsPath);
 			const content = await file.text();
 
 			if (!content.trim()) {

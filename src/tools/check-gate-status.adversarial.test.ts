@@ -11,15 +11,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { check_gate_status } from './check-gate-status';
+import type { ToolResult } from './create-tool';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Helper to call tool execute with proper context
 async function executeTool(
 	args: Record<string, unknown>,
 	directory: string,
 ): Promise<string> {
-	return check_gate_status.execute(args, {
+	const result = (await check_gate_status.execute(args, {
 		directory,
-	} as unknown as ToolContext);
+	} as unknown as ToolContext)) as unknown as ToolResult;
+	return resultToString(result);
 }
 
 let tmpDir: string;
@@ -103,24 +110,8 @@ describe('check_gate_status ADVERSARIAL', () => {
 		expect(parsed.message).toContain('Invalid task_id format');
 	});
 
-	it('rejects task_id with too many dots', async () => {
-		const result = await executeTool({ task_id: '1.2.3.4' }, tmpDir);
-		const parsed = JSON.parse(result);
-
-		expect(parsed.status).toBe('no_evidence');
-		expect(parsed.message).toContain('Invalid task_id format');
-	});
-
 	it('rejects negative numbers in task_id', async () => {
 		const result = await executeTool({ task_id: '-1.1' }, tmpDir);
-		const parsed = JSON.parse(result);
-
-		expect(parsed.status).toBe('no_evidence');
-		expect(parsed.message).toContain('Invalid task_id format');
-	});
-
-	it('rejects decimal numbers in task_id', async () => {
-		const result = await executeTool({ task_id: '1.1.1.1' }, tmpDir);
 		const parsed = JSON.parse(result);
 
 		expect(parsed.status).toBe('no_evidence');
@@ -199,7 +190,6 @@ describe('check_gate_status ADVERSARIAL', () => {
 	});
 
 	it('rejects task_id with template literal injection', async () => {
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 		const result = await executeTool({ task_id: '${process.env}' }, tmpDir);
 		const parsed = JSON.parse(result);
 

@@ -18,6 +18,45 @@ export class PlanConcurrentModificationError extends Error {
 	}
 }
 
+/**
+ * Thrown when savePlan detects that the incoming plan would silently drop one
+ * or more tasks from the prior plan without the caller acknowledging the
+ * removal (issue #853).
+ *
+ * Callers must pass `options.acknowledged_removals.ids` covering every missing
+ * task id together with a non-empty reason to proceed.
+ */
+export class PlanTaskRemovalNotAcknowledgedError extends Error {
+	readonly missingTasks: Array<{
+		id: string;
+		phase: number;
+		status: TaskStatus;
+	}>;
+	constructor(
+		missingTasks: Array<{ id: string; phase: number; status: TaskStatus }>,
+	) {
+		const idList = missingTasks.map((t) => `${t.id}(${t.status})`).join(', ');
+		super(
+			`PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED: the following tasks were present in the prior plan but missing from the new save: ${idList}. Pass acknowledged_removals.ids covering all missing task IDs with a non-empty reason to proceed.`,
+		);
+		this.name = 'PlanTaskRemovalNotAcknowledgedError';
+		this.missingTasks = missingTasks;
+	}
+}
+
+/**
+ * Caller-supplied acknowledgement that a save_plan operation is intentionally
+ * removing tasks from the prior plan (issue #853). Passed to savePlan via the
+ * `acknowledged_removals` option; `ids` must list every task id missing from
+ * the incoming plan; `reason` must be non-empty; `source` identifies the
+ * caller (e.g. 'save_plan_tool', 'phase_complete_rebuild_from_ledger').
+ */
+export interface AcknowledgedRemovals {
+	ids: string[];
+	reason: string;
+	source: string;
+}
+
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -32,6 +71,7 @@ import { readSwarmFileAsync } from '../hooks/utils';
 import { emit } from '../telemetry.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { warn } from '../utils';
+import { bunHash, bunWrite } from '../utils/bun-compat';
 import { isSpecStale } from '../utils/spec-hash';
 import {
 	appendLedgerEvent,
@@ -48,6 +88,7 @@ import {
 	replayFromLedger,
 	takeSnapshotEvent,
 } from './ledger';
+import { derivePlanId } from './utils';
 
 // Track which workspaces have already had their startup ledger integrity check.
 // Keyed by resolved workspace directory so each workspace gets exactly one check
@@ -64,6 +105,24 @@ export function resetStartupLedgerCheck(): void {
 	startupLedgerCheckedWorkspaces.clear();
 	recoveryMutexes.clear();
 }
+
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.loadPlan(...)`, `_internals.loadPlanJsonOnly(...)`, etc. so tests
+ * can replace the functions on this object without touching the real module —
+ * `mock.module` from `bun:test` leaks across files in Bun's shared test-runner
+ * process, which would corrupt unrelated suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	loadPlan: typeof loadPlan;
+	loadPlanJsonOnly: typeof loadPlanJsonOnly;
+	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
+} = {
+	loadPlan,
+	loadPlanJsonOnly,
+	regeneratePlanMarkdown,
+};
 
 // ── CAS backoff constants ─────────────────────────────────────────────────────
 const CAS_BACKOFF_START_MS = 5;
@@ -142,7 +201,7 @@ export async function loadPlanJsonOnly(
 	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
 	if (planJsonContent !== null) {
 		// SECURITY: Reject content with null bytes (injection) or invalid UTF-8 (corruption markers)
-		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
+		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
 			warn(
 				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
 			);
@@ -233,7 +292,7 @@ function computePlanContentHash(plan: Plan): string {
 	};
 	const jsonString = JSON.stringify(content);
 	// Use Bun's hash for a compact hash string
-	return Bun.hash(jsonString).toString(36);
+	return bunHash(jsonString).toString(36);
 }
 
 /**
@@ -303,7 +362,7 @@ export async function regeneratePlanMarkdown(
 		`plan.md.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
 	try {
-		await Bun.write(mdTempPath, markdownWithHash);
+		await bunWrite(mdTempPath, markdownWithHash);
 		renameSync(mdTempPath, mdPath);
 	} finally {
 		try {
@@ -332,7 +391,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
 	if (planJsonContent !== null) {
 		// SECURITY: Reject content with null bytes or invalid UTF-8
-		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
+		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
 			warn(
 				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
 			);
@@ -346,7 +405,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 				const inSync = await isPlanMdInSync(directory, validated);
 				if (!inSync) {
 					try {
-						await regeneratePlanMarkdown(directory, validated);
+						await _internals.regeneratePlanMarkdown(directory, validated);
 					} catch (regenError) {
 						// Log warning but don't fail - plan.json is valid
 						warn(
@@ -368,11 +427,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 					if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
 						startupLedgerCheckedWorkspaces.add(resolvedWorkspace);
 						if (ledgerHash !== '' && planHash !== ledgerHash) {
-							const currentPlanId =
-								`${validated.swarm}-${validated.title}`.replace(
-									/[^a-zA-Z0-9-_]/g,
-									'_',
-								);
+							const currentPlanId = derivePlanId(validated);
 							const ledgerEvents = await readLedgerEvents(directory);
 							const firstEvent =
 								ledgerEvents.length > 0 ? ledgerEvents[0] : null;
@@ -393,7 +448,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 									if (rebuilt) {
 										await rebuildPlan(directory, rebuilt);
 										warn(
-											'[loadPlan] Rebuilt plan from ledger. Checkpoint available at SWARM_PLAN.md if it exists.',
+											'[loadPlan] Rebuilt plan from ledger. Checkpoint available at .swarm/SWARM_PLAN.md if it exists.',
 										);
 										return rebuilt;
 									}
@@ -442,7 +497,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 										// Fall through to the stale-plan warning below
 									}
 									warn(
-										`[loadPlan] Ledger replay failed during hash-mismatch rebuild: ${replayError instanceof Error ? replayError.message : String(replayError)}. Returning stale plan.json. To recover: check SWARM_PLAN.md for a checkpoint, or run /swarm reset-session.`,
+										`[loadPlan] Ledger replay failed during hash-mismatch rebuild: ${replayError instanceof Error ? replayError.message : String(replayError)}. Returning stale plan.json. To recover: check .swarm/SWARM_PLAN.md for a checkpoint, or run /swarm reset-session.`,
 									);
 								}
 								// Fall through and return the validated plan.json
@@ -521,7 +576,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 			} catch (error) {
 				// Step 2: Validation failed, log warning and fall through to legacy
 				warn(
-					`[loadPlan] plan.json validation failed: ${error instanceof Error ? error.message : String(error)}. Attempting rebuild from ledger. If rebuild fails, check SWARM_PLAN.md for a checkpoint.`,
+					`[loadPlan] plan.json validation failed: ${error instanceof Error ? error.message : String(error)}. Attempting rebuild from ledger. If rebuild fails, check .swarm/SWARM_PLAN.md for a checkpoint.`,
 				);
 				// MIGRATION GUARD (catch path): Extract swarm+title from the raw JSON
 				// before schema validation even though validation failed. If we can determine
@@ -535,9 +590,8 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 						typeof rawParsed?.swarm === 'string' &&
 						typeof rawParsed?.title === 'string'
 					) {
-						rawPlanId = `${rawParsed.swarm}-${rawParsed.title}`.replace(
-							/[^a-zA-Z0-9-_]/g,
-							'_',
+						rawPlanId = derivePlanId(
+							rawParsed as { swarm: string; title: string },
 						);
 					}
 				} catch {
@@ -572,8 +626,21 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 				const planMdContent = await readSwarmFileAsync(directory, 'plan.md');
 				if (planMdContent !== null) {
 					const migrated = migrateLegacyPlan(planMdContent);
-					// savePlan writes both plan.json and plan.md
-					await savePlan(directory, migrated);
+					// savePlan writes both plan.json and plan.md. Recovery path:
+					// auto-acknowledge any tasks dropped by the legacy-md migration
+					// so Layer A can disclose the audit count to the model.
+					const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
+						directory,
+						migrated,
+						'load_plan_migration_from_md',
+						'migrate legacy plan.md to plan.json',
+					);
+					if (removedCount > 0) {
+						(migrated as RuntimePlan)._midLoadRemovals = {
+							count: removedCount,
+							source: 'load_plan_migration_from_md',
+						};
+					}
 					return migrated;
 				}
 				// If plan.md doesn't exist either, fall through to step 3
@@ -599,7 +666,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 		if (existingMutex) {
 			// Another call is already recovering — wait for it, then re-check plan.json
 			await existingMutex;
-			const postRecoveryPlan = await loadPlanJsonOnly(directory);
+			const postRecoveryPlan = await _internals.loadPlanJsonOnly(directory);
 			if (postRecoveryPlan) return postRecoveryPlan;
 		}
 
@@ -612,7 +679,18 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 		try {
 			const rebuilt = await replayFromLedger(directory);
 			if (rebuilt) {
-				await savePlan(directory, rebuilt);
+				const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
+					directory,
+					rebuilt,
+					'load_plan_rebuild_from_ledger',
+					'rebuild plan from ledger replay',
+				);
+				if (removedCount > 0) {
+					(rebuilt as RuntimePlan)._midLoadRemovals = {
+						count: removedCount,
+						source: 'load_plan_rebuild_from_ledger',
+					};
+				}
 				return rebuilt;
 			}
 
@@ -653,7 +731,19 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 					warn(
 						`[loadPlan] Ledger replay returned no plan — recovered from critic-approved snapshot seq=${approved.seq} timestamp=${approved.timestamp} (approval phase=${approvedPhase ?? 'unknown'}). This may roll the plan back to an earlier phase — verify before continuing.`,
 					);
-					await savePlan(directory, approved.plan);
+					const { removedCount: snapshotRemovedCount } =
+						await savePlanWithAutoAcknowledgedRemovals(
+							directory,
+							approved.plan,
+							'load_plan_recovery_from_approved_snapshot',
+							'restore from critic-approved snapshot',
+						);
+					if (snapshotRemovedCount > 0) {
+						(approved.plan as RuntimePlan)._midLoadRemovals = {
+							count: snapshotRemovedCount,
+							source: 'load_plan_recovery_from_approved_snapshot',
+						};
+					}
 					// Heal the ledger tail: append a fresh snapshot so the next
 					// loadPlan call doesn't re-enter this recovery path in a new
 					// process (where the startup-check cache is empty). Without this
@@ -686,13 +776,57 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 }
 
 /**
+ * Recovery-path helper for callers that legitimately need to replace the
+ * plan task set without explicit per-id acknowledgement (e.g. rebuilding
+ * from the ledger after replay, importing an external checkpoint, or
+ * recovering from a critic-approved snapshot).
+ *
+ * Diffs the on-disk plan against the incoming plan, auto-populates
+ * `acknowledged_removals` with every missing id, and delegates to savePlan.
+ * The architect-facing save_plan tool MUST NOT use this — it should fail
+ * closed and require the caller to enumerate removals explicitly.
+ *
+ * Returns the count of auto-acknowledged removals so the caller can attach
+ * `_midLoadRemovals` to the RuntimePlan for Layer A disclosure.
+ */
+export async function savePlanWithAutoAcknowledgedRemovals(
+	directory: string,
+	plan: Plan,
+	source: string,
+	reason: string,
+	options?: { preserveCompletedStatuses?: boolean },
+): Promise<{ removedCount: number }> {
+	const existing = await _internals.loadPlanJsonOnly(directory);
+	const newIds = new Set<string>();
+	for (const phase of plan.phases) {
+		for (const task of phase.tasks) newIds.add(task.id);
+	}
+	const removedIds: string[] = [];
+	if (existing) {
+		for (const phase of existing.phases) {
+			for (const task of phase.tasks) {
+				if (!newIds.has(task.id)) removedIds.push(task.id);
+			}
+		}
+	}
+	await savePlan(directory, plan, {
+		...(options ?? {}),
+		acknowledged_removals: { ids: removedIds, reason, source },
+	});
+	return { removedCount: removedIds.length };
+}
+
+/**
  * Validate against PlanSchema (throw on invalid), write to .swarm/plan.json via atomic temp+rename pattern,
  * then derive and write .swarm/plan.md
  */
 export async function savePlan(
 	directory: string,
 	plan: Plan,
-	options?: { preserveCompletedStatuses?: boolean },
+	options?: {
+		preserveCompletedStatuses?: boolean;
+		acknowledged_removals?: AcknowledgedRemovals;
+	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
 	if (
@@ -712,7 +846,7 @@ export async function savePlan(
 	// even if the incoming plan has it as 'pending'/'in_progress'/'blocked'.
 	if (options?.preserveCompletedStatuses !== false) {
 		try {
-			const currentPlan = await loadPlanJsonOnly(directory);
+			const currentPlan = await _internals.loadPlanJsonOnly(directory);
 			if (currentPlan) {
 				const completedTaskIds = new Set<string>();
 				for (const phase of currentPlan.phases) {
@@ -760,17 +894,14 @@ export async function savePlan(
 	// detector rebuilds plan.json from ledger. The plan_created event embeds
 	// the full plan so replayFromLedger can bootstrap without plan.json (#444).
 	// Load current plan for comparison and ledger initialization
-	const currentPlan = await loadPlanJsonOnly(directory);
+	const currentPlan = await _internals.loadPlanJsonOnly(directory);
 
 	// Initialize or re-initialize the ledger as needed.
 	// Re-initialization is required when the swarm identity changes (e.g., after session
 	// migration), because the existing ledger's events and hashes are keyed to the old
 	// plan identity. Continuing to append to a mismatched ledger causes the hash-mismatch
 	// guard in loadPlan() to fire and destructively rebuild plan.json from stale state.
-	const planId = `${validated.swarm}-${validated.title}`.replace(
-		/[^a-zA-Z0-9-_]/g,
-		'_',
-	);
+	const planId = derivePlanId(validated);
 	// Compute hash of the incoming plan NOW so initLedger records the correct
 	// plan_hash_after. initLedger reads from disk otherwise, but plan.json is
 	// only written later in this function — so without passing the hash here,
@@ -955,6 +1086,101 @@ export async function savePlan(
 			}
 		}
 
+		// Task-removal guard (issue #853).
+		// Detect tasks present in the prior plan but missing from the incoming
+		// plan. Reject the save unless the caller acknowledged every missing id
+		// via options.acknowledged_removals. The guard lives at the manager
+		// layer so every save-path (tool, checkpoint import, phase-complete
+		// rebuild, ledger-replay rebuild) benefits.
+		const newTaskIds = new Set<string>();
+		for (const phase of validated.phases) {
+			for (const task of phase.tasks) newTaskIds.add(task.id);
+		}
+		const missingTasks: Array<{
+			id: string;
+			phase: number;
+			status: TaskStatus;
+		}> = [];
+		for (const [id, info] of oldTaskMap.entries()) {
+			if (!newTaskIds.has(id)) {
+				missingTasks.push({ id, phase: info.phase, status: info.status });
+			}
+		}
+
+		const ack = options?.acknowledged_removals;
+		if (missingTasks.length > 0) {
+			if (!ack) {
+				throw new PlanTaskRemovalNotAcknowledgedError(missingTasks);
+			}
+			if (typeof ack.reason !== 'string' || ack.reason.trim().length === 0) {
+				throw new Error(
+					'PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals.reason must be a non-empty string.',
+				);
+			}
+			if (typeof ack.source !== 'string' || ack.source.trim().length === 0) {
+				throw new Error(
+					'PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals.source must be a non-empty string.',
+				);
+			}
+			const ackSet = new Set(ack.ids);
+			const missingIdsSet = new Set(missingTasks.map((t) => t.id));
+			const unacked = missingTasks.filter((t) => !ackSet.has(t.id));
+			if (unacked.length > 0) {
+				throw new PlanTaskRemovalNotAcknowledgedError(unacked);
+			}
+			for (const id of ack.ids) {
+				if (!missingIdsSet.has(id)) {
+					throw new Error(
+						`PLAN_ACKNOWLEDGED_REMOVAL_INVALID: acknowledged_removals contains "${id}" but that task is not missing from the plan.`,
+					);
+				}
+			}
+
+			// Emit task_removed events. Each event runs under
+			// retryCasWithBackoff so concurrent savePlan writers do not
+			// lose audit events to a single CAS collision; verifyValid
+			// makes the append idempotent when another writer has
+			// already removed the same task. The event is functional on
+			// replay (see applyEventToPlan in src/plan/ledger.ts): if a
+			// crash lands the ledger append but loses the plan.json
+			// rename, replayFromLedger must drop the task to preserve
+			// crash consistency. (#853 post-merge review.)
+			try {
+				for (const missing of missingTasks) {
+					const eventInput: LedgerEventInput = {
+						plan_id: derivePlanId(validated),
+						event_type: 'task_removed',
+						task_id: missing.id,
+						phase_id: missing.phase,
+						from_status: missing.status,
+						source: ack.source,
+						payload: { reason: ack.reason, source: ack.source },
+					};
+					const capturedTaskId = missing.id;
+					await retryCasWithBackoff(directory, eventInput, {
+						expectedHash: currentHash,
+						planHashAfter: hashAfter,
+						verifyValid: async () => {
+							const onDisk = await _internals.loadPlanJsonOnly(directory);
+							if (!onDisk) return true;
+							for (const p of onDisk.phases) {
+								if (p.tasks.some((x) => x.id === capturedTaskId)) return true;
+							}
+							// Already removed by a concurrent writer — skip idempotently.
+							return false;
+						},
+					});
+				}
+			} catch (error) {
+				if (error instanceof LedgerStaleWriterError) {
+					throw new PlanConcurrentModificationError(
+						`Concurrent plan modification detected after retries: ${error.message}. Please retry the operation.`,
+					);
+				}
+				throw error;
+			}
+		}
+
 		// Find tasks that changed status.
 		//
 		// Each change is written via retryCasWithBackoff so that concurrent
@@ -969,10 +1195,7 @@ export async function savePlan(
 					const oldTask = oldTaskMap.get(task.id);
 					if (oldTask && oldTask.status !== task.status) {
 						const eventInput: LedgerEventInput = {
-							plan_id: `${validated.swarm}-${validated.title}`.replace(
-								/[^a-zA-Z0-9-_]/g,
-								'_',
-							),
+							plan_id: derivePlanId(validated),
 							event_type: 'task_status_changed',
 							task_id: task.id,
 							phase_id: phase.id,
@@ -987,7 +1210,7 @@ export async function savePlan(
 							planHashAfter: hashAfter,
 							verifyValid: async () => {
 								// If another writer already persisted the transition, skip.
-								const onDisk = await loadPlanJsonOnly(directory);
+								const onDisk = await _internals.loadPlanJsonOnly(directory);
 								if (!onDisk) return true; // no on-disk plan — just retry
 								for (const p of onDisk.phases) {
 									const t = p.tasks.find((x) => x.id === capturedTaskId);
@@ -1038,7 +1261,7 @@ export async function savePlan(
 
 	// Write to temp and atomically rename
 	try {
-		await Bun.write(tempPath, JSON.stringify(validated, null, 2));
+		await bunWrite(tempPath, JSON.stringify(validated, null, 2));
 		renameSync(tempPath, planPath);
 	} finally {
 		try {
@@ -1060,7 +1283,7 @@ export async function savePlan(
 			`plan.md.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 		);
 		try {
-			await Bun.write(mdTempPath, markdownWithHash);
+			await bunWrite(mdTempPath, markdownWithHash);
 			renameSync(mdTempPath, mdPath);
 		} finally {
 			try {
@@ -1070,9 +1293,22 @@ export async function savePlan(
 			}
 		}
 	} catch (mdError) {
+		const message =
+			mdError instanceof Error ? mdError.message : String(mdError);
 		warn(
-			`[savePlan] plan.md write failed (non-fatal, plan.json is authoritative): ${mdError instanceof Error ? mdError.message : String(mdError)}`,
+			`[savePlan] plan.md write failed (non-fatal, plan.json is authoritative): ${message}`,
 		);
+		// Surface as telemetry so silent staleness is observable downstream
+		// (e.g., /swarm status, telemetry consumers, post-run audits).
+		try {
+			emit('plan_md_write_failed', {
+				directory,
+				error: message,
+				timestamp: new Date().toISOString(),
+			});
+		} catch {
+			/* telemetry must never fail savePlan */
+		}
 	}
 
 	// Advisory: write marker file for plan-manager write detection
@@ -1088,7 +1324,7 @@ export async function savePlan(
 			phases_count: validated.phases.length,
 			tasks_count: tasksCount,
 		});
-		await Bun.write(markerPath, marker);
+		await bunWrite(markerPath, marker);
 	} catch {
 		/* Advisory only - marker write failure does not affect plan save */
 	}
@@ -1116,7 +1352,7 @@ export async function rebuildPlan(
 
 	// Atomic write for plan.json
 	const tempPlanPath = path.join(swarmDir, `plan.json.rebuild.${Date.now()}`);
-	await Bun.write(tempPlanPath, JSON.stringify(targetPlan, null, 2));
+	await bunWrite(tempPlanPath, JSON.stringify(targetPlan, null, 2));
 	renameSync(tempPlanPath, planPath);
 
 	// Also regenerate plan.md with content hash (matches the format written by savePlan/
@@ -1126,7 +1362,7 @@ export async function rebuildPlan(
 	const markdown = derivePlanMarkdown(targetPlan);
 	const markdownWithHash = `<!-- PLAN_HASH: ${contentHash} -->\n${markdown}`;
 	const tempMdPath = path.join(swarmDir, `plan.md.rebuild.${Date.now()}`);
-	await Bun.write(tempMdPath, markdownWithHash);
+	await bunWrite(tempMdPath, markdownWithHash);
 	renameSync(tempMdPath, mdPath);
 
 	// Update write-marker so PlanSyncWorker's checkForUnauthorizedWrite() does not
@@ -1143,7 +1379,7 @@ export async function rebuildPlan(
 			phases_count: targetPlan.phases.length,
 			tasks_count: tasksCount,
 		});
-		await Bun.write(markerPath, marker);
+		await bunWrite(markerPath, marker);
 	} catch {
 		/* Advisory only */
 	}
@@ -1192,7 +1428,7 @@ export async function updateTaskStatus(
 	// refresh the plan and retry with the latest state.
 	const MAX_OUTER_RETRIES = 1;
 	for (let attempt = 0; attempt <= MAX_OUTER_RETRIES; attempt++) {
-		const plan = await loadPlan(directory);
+		const plan = await _internals.loadPlan(directory);
 		if (plan === null) {
 			throw new Error(`Plan not found in directory: ${directory}`);
 		}
@@ -1258,7 +1494,9 @@ export function derivePlanMarkdown(plan: Plan): string {
 		pending: 'PENDING',
 		in_progress: 'IN PROGRESS',
 		complete: 'COMPLETE',
+		completed: 'COMPLETE',
 		blocked: 'BLOCKED',
+		closed: 'CLOSED',
 	};
 
 	const now = new Date().toISOString();
@@ -1332,6 +1570,36 @@ export function derivePlanMarkdown(plan: Plan): string {
 	}
 
 	return `${markdown.trim()}\n`;
+}
+
+/**
+ * Return the id of the current task within the plan's current phase, or
+ * undefined if no incomplete task can be identified. PURE function — no I/O.
+ *
+ * Resolution: among tasks of the current phase, pick the first
+ * in_progress task; otherwise the first non-completed task; otherwise
+ * undefined (between phases / phase exhausted).
+ *
+ * Used by the v2 knowledge-injector to populate `taskId` in the retrieval
+ * context so action-aware ranking and shown-set keying can scope to a
+ * specific task.
+ */
+export function getCurrentTaskId(
+	plan: Plan | null | undefined,
+): string | undefined {
+	if (!plan) return undefined;
+	const currentPhase = plan.current_phase ?? 1;
+	const phase = plan.phases.find((p) => p.id === currentPhase);
+	if (!phase) return undefined;
+	const sortedTasks = [...phase.tasks].sort((a, b) =>
+		compareTaskIds(a.id, b.id),
+	);
+	const inProgress = sortedTasks.find((t) => t.status === 'in_progress');
+	if (inProgress) return inProgress.id;
+	const incomplete = sortedTasks.find(
+		(t) => t.status !== 'completed' && t.status !== 'closed',
+	);
+	return incomplete?.id;
 }
 
 /**

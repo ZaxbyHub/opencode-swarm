@@ -6,10 +6,22 @@
  * project DB (see `./project-db.ts`), not here.
  */
 
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { getPlatformConfigDir } from '../hooks/knowledge-store.js';
+
+// See `./project-db.ts` for the full rationale. Lazy-resolve `bun:sqlite` so the
+// published bundle never has a top-level static import that breaks plugin loading
+// under Node's default ESM resolver (issue #675).
+let _DatabaseCtor: typeof Database | null = null;
+function loadDatabaseCtor(): typeof Database {
+	if (_DatabaseCtor) return _DatabaseCtor;
+	const req = createRequire(import.meta.url);
+	_DatabaseCtor = (req('bun:sqlite') as { Database: typeof Database }).Database;
+	return _DatabaseCtor;
+}
 
 interface Migration {
 	version: number;
@@ -86,7 +98,8 @@ export function getGlobalDb(): Database {
 	if (_globalDb) return _globalDb;
 	const configDir = getPlatformConfigDir();
 	mkdirSync(configDir, { recursive: true });
-	const db = new Database(join(configDir, 'global-rules.db'));
+	const Db = loadDatabaseCtor();
+	const db = new Db(join(configDir, 'global-rules.db'));
 	db.run('PRAGMA journal_mode = WAL;');
 	db.run('PRAGMA synchronous = NORMAL;');
 	db.run('PRAGMA busy_timeout = 5000;');

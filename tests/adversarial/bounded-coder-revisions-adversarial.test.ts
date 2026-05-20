@@ -149,6 +149,11 @@ describe('ATTACK: max_coder_revisions boundary enforcement', () => {
 			swarmState.activeAgent.set(sessionID, 'architect');
 			const session = swarmState.agentSessions.get(sessionID)!;
 			session.lastCoderDelegationTaskId = '1.1';
+			// qaSkipCount = 1 reflects that QA gates are skipped between coder
+			// completions in this test (no reviewer runs between coder completions).
+			// Without this, the conflict-resolution guard (coderRevisions > 1 &&
+			// qaSkipCount === 0) would fire spurious CONFLICT advisories.
+			session.qaSkipCount = 1;
 
 			// Simulate 19 coder completions — no advisory should fire
 			for (let i = 1; i <= 19; i++) {
@@ -172,6 +177,10 @@ describe('ATTACK: max_coder_revisions boundary enforcement', () => {
 			swarmState.activeAgent.set(sessionID, 'architect');
 			const session = swarmState.agentSessions.get(sessionID)!;
 			session.lastCoderDelegationTaskId = '1.1';
+			// qaSkipCount = 1: QA gates skipped (no reviewer between completions).
+			// Prevents conflict-resolution advisory from firing on the 20th completion
+			// so pendingAdvisoryMessages[0] is the revision-limit advisory.
+			session.qaSkipCount = 1;
 
 			// Pre-set to 19
 			session.coderRevisions = 19;

@@ -29,9 +29,9 @@ describe('architect custom prompt override + council hardening', () => {
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
 		expect(rendered.startsWith(customPrompt)).toBe(true);
-		expect(rendered).toContain('Work Complete Council');
-		expect(rendered).toContain('declare_council_criteria');
-		expect(rendered).toContain('convene_council');
+		expect(rendered).toContain('COUNCIL WORKFLOW');
+		expect(rendered).toContain('submit_phase_council_verdicts');
+		expect(rendered).toContain('phase council');
 	});
 
 	test('custom prompt without placeholder stays clean when council disabled', () => {
@@ -46,7 +46,7 @@ describe('architect custom prompt override + council hardening', () => {
 		const rendered =
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
-		expect(rendered).not.toContain('Work Complete Council');
+		expect(rendered).not.toContain('COUNCIL WORKFLOW');
 		expect(rendered).not.toContain('{{COUNCIL_WORKFLOW}}');
 	});
 
@@ -61,7 +61,7 @@ describe('architect custom prompt override + council hardening', () => {
 		const rendered =
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
-		expect(rendered).toContain('Work Complete Council');
+		expect(rendered).toContain('COUNCIL WORKFLOW');
 		expect(rendered).not.toContain('{{COUNCIL_WORKFLOW}}');
 	});
 
@@ -76,7 +76,7 @@ describe('architect custom prompt override + council hardening', () => {
 		const rendered =
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
-		expect(rendered).toContain('Work Complete Council');
+		expect(rendered).toContain('COUNCIL WORKFLOW');
 		expect(rendered).toContain('APPENDED NOTES');
 		expect(rendered).not.toContain('{{COUNCIL_WORKFLOW}}');
 	});

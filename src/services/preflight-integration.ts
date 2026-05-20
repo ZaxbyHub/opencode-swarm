@@ -19,6 +19,7 @@ import {
 	type PreflightReport,
 	runPreflight,
 } from '../services/preflight-service';
+import * as logger from '../utils/logger';
 
 /** Integration configuration */
 export interface PreflightIntegrationConfig {
@@ -85,7 +86,7 @@ export function createPreflightIntegration(
 	const preflightHandler: PreflightHandler = async (
 		request: PreflightRequest,
 	): Promise<void> => {
-		console.log('[PreflightIntegration] Handling preflight request', {
+		logger.log('[PreflightIntegration] Handling preflight request', {
 			requestId: request.id,
 			phase: request.currentPhase,
 			source: request.source,
@@ -103,14 +104,14 @@ export function createPreflightIntegration(
 			const state = report.overall === 'pass' ? 'success' : 'failure';
 			statusArtifact.recordOutcome(state, request.currentPhase, report.message);
 
-			console.log('[PreflightIntegration] Status artifact updated', {
+			logger.log('[PreflightIntegration] Status artifact updated', {
 				state,
 				phase: request.currentPhase,
 				message: report.message,
 			});
 		}
 
-		console.log('[PreflightIntegration] Preflight complete', {
+		logger.log('[PreflightIntegration] Preflight complete', {
 			requestId: request.id,
 			overall: report.overall,
 			message: report.message,

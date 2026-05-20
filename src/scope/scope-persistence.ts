@@ -43,14 +43,16 @@
  *      leaves `scope-{id}.json.tmp.{ts}.{rand}` files. No sweeper runs today;
  *      accumulation is bounded by `/swarm close` (which rm -rf's .swarm/scopes/).
  *
- * NOT a security boundary. Bash remains unguarded at the write-authority layer.
- * The durable fix lives at the syscall layer (#520). This module closes the
- * cross-process gap and the plan-as-scope gap, both of which are mitigations.
+ * NOT a standalone security boundary. Tool-layer write interception is now
+ * implemented in shell-write-detect.ts (Phases 1-2). This module closes the
+ * cross-process gap and the plan-as-scope gap. The syscall-layer fix (#520)
+ * remains the durable long-term boundary.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { bunWrite } from '../utils/bun-compat';
 
 const SCOPE_SCHEMA_VERSION = 1 as const;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -217,7 +219,7 @@ export async function writeScopeToDisk(
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
 	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
-		await Bun.write(tempPath, content);
+		await bunWrite(tempPath, content);
 		fs.renameSync(tempPath, targetPath);
 	} finally {
 		try {

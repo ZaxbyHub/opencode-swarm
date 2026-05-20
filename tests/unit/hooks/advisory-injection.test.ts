@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	ensureAgentSession,
 	resetSwarmState,
@@ -232,5 +235,544 @@ describe('guardrails advisory injection', () => {
 		expect(textPart.text).toContain('first advisory');
 		expect(textPart.text).toContain('---');
 		expect(textPart.text).toContain('second advisory');
+	});
+
+	test('injects recovery guidance after architect provider connection loss', async () => {
+		const sessionId = 'session-openrouter-provider-loss';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text:
+								'Partial analysis before interruption.\n' +
+								'{"code":502,"message":"Network connection lost.","metadata":{"error_type":"provider_unavailable"}}',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('does not duplicate provider recovery guidance for the same interrupted transcript', async () => {
+		const sessionId = 'session-openrouter-provider-loss-dedupe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: '{"code":502,"message":"Network connection lost.","metadata":{"error_type":"provider_unavailable"}}',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		const occurrences = textPart.text.match(/TRANSIENT PROVIDER RECOVERY/g);
+		expect(occurrences).toHaveLength(1);
+	});
+
+	test('does not duplicate provider recovery guidance when OpenCode supplies fresh message arrays', async () => {
+		const sessionId = 'session-openrouter-provider-loss-fresh-dedupe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const makeOutput = () => ({
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: '{"code":502,"message":"Network connection lost.","metadata":{"error_type":"provider_unavailable"}}',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		});
+
+		const firstOutput = makeOutput();
+		await hooks.messagesTransform({}, firstOutput as any);
+		expect(firstOutput.messages[0].parts[0].text).toContain(
+			'TRANSIENT PROVIDER RECOVERY',
+		);
+
+		const secondOutput = makeOutput();
+		await hooks.messagesTransform({}, secondOutput as any);
+		expect(secondOutput.messages[0].parts[0].text).not.toContain(
+			'TRANSIENT PROVIDER RECOVERY',
+		);
+	});
+
+	test('does not treat ordinary architect prose about connection loss as provider recovery', async () => {
+		const sessionId = 'session-connection-lost-prose';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'The application should handle a generic connection lost log line in its own UI.',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+		expect(output.messages[0].parts[0].text).not.toContain(
+			'TRANSIENT PROVIDER RECOVERY',
+		);
+	});
+
+	// -------------------------------------------------------------------------
+	// FR-002 / FR-007: expanded isTransientProviderFailureText() — raw Node.js error codes
+	// ECONNRESET, ECONNREFUSED, ETIMEDOUT, EPIPE, ENOTFOUND + connection phrases
+	// -------------------------------------------------------------------------
+
+	test('injects recovery guidance after architect ECONNRESET error', async () => {
+		const sessionId = 'session-econnreset';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: ECONNRESET',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect ECONNREFUSED error', async () => {
+		const sessionId = 'session-econnrefused';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: ECONNREFUSED',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect ETIMEDOUT error', async () => {
+		const sessionId = 'session-etimedout';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: ETIMEDOUT',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect EPIPE error', async () => {
+		const sessionId = 'session-epipe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: EPIPE',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect ENOTFOUND error', async () => {
+		const sessionId = 'session-enotfound';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: ENOTFOUND',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect "connection reset by peer" phrase', async () => {
+		const sessionId = 'session-conn-reset-by-peer';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nConnection reset by peer',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('injects recovery guidance after architect "connection refused" phrase', async () => {
+		const sessionId = 'session-conn-refused';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nConnection refused',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).toContain('[ADVISORIES]');
+		expect(textPart.text).toContain('TRANSIENT PROVIDER RECOVERY');
+		expect(textPart.text).toContain('continue from the last stable step');
+	});
+
+	test('does not inject recovery advisory for "timeout" in a coding context without provider failure marker', async () => {
+		// providerFailureMarker gate prevents false positives from non-error prose
+		const sessionId = 'session-timeout-coding-context';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'The function has a 500ms timeout for the API call.',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		expect(textPart.text).not.toContain('TRANSIENT PROVIDER RECOVERY');
+	});
+
+	test('deduplicates recovery advisory for the same raw error code across two turns', async () => {
+		const sessionId = 'session-raw-code-dedupe';
+		ensureAgentSession(sessionId, 'architect');
+		swarmState.activeAgent.set(sessionId, 'architect');
+
+		const output = {
+			messages: [
+				{
+					info: { role: 'system', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'You are the architect.' }],
+				},
+				{
+					info: { role: 'assistant', sessionID: sessionId },
+					parts: [
+						{
+							type: 'text' as const,
+							text: 'Partial analysis.\nError: ECONNRESET',
+						},
+					],
+				},
+				{
+					info: { role: 'user', sessionID: sessionId },
+					parts: [{ type: 'text' as const, text: 'continue' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({}, output as any);
+		await hooks.messagesTransform({}, output as any);
+
+		const textPart = output.messages[0].parts[0] as {
+			type: string;
+			text: string;
+		};
+		const occurrences = textPart.text.match(/TRANSIENT PROVIDER RECOVERY/g);
+		expect(occurrences).toHaveLength(1);
+	});
+
+	test('does not inject provider recovery guidance for non-transient auth failures', async () => {
+		const messages = [
+			{
+				info: { role: 'assistant' },
+				parts: [{ type: 'text' as const, text: 'older assistant text' }],
+			},
+			{
+				info: { role: 'user' },
+				parts: [{ type: 'text' as const, text: 'continue' }],
+			},
+			{
+				info: { role: 'assistant' },
+				parts: [
+					{ type: 'tool_use' as const, text: 'ignored tool text' },
+					{
+						type: 'text' as const,
+						text: '{"code":502,"message":"Network connection lost.","metadata":{"error_type":"provider_unavailable"}}',
+					},
+				],
+			},
+		];
+
+		const latestAssistantText = _internals.getMostRecentAssistantText(messages);
+		expect(latestAssistantText).toContain('Network connection lost');
+		expect(latestAssistantText).not.toContain('older assistant text');
+		expect(latestAssistantText).not.toContain('ignored tool text');
+		expect(_internals.isTransientProviderFailureText(latestAssistantText)).toBe(
+			true,
+		);
+		expect(
+			_internals.isTransientProviderFailureText(
+				'{"code":401,"message":"unauthorized: invalid API key","metadata":{"error_type":"auth_error"}}',
+			),
+		).toBe(false);
+		expect(_internals.getProviderFailureFingerprint(latestAssistantText)).toBe(
+			_internals.getProviderFailureFingerprint(latestAssistantText),
+		);
+		expect(_internals.getProviderFailureFingerprint('first')).not.toBe(
+			_internals.getProviderFailureFingerprint('second'),
+		);
 	});
 });

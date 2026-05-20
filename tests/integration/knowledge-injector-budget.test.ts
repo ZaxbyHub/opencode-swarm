@@ -280,39 +280,93 @@ describe('Knowledge injector budget regression', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// Near-limit skip: headroom < 300 chars → skip with new warning message
+	// Near-limit skip: headroom < 300 chars → skip injection (logged via debug-gated warn)
 	// -----------------------------------------------------------------------
 
-	it('skips injection when headroom is below 300 chars and emits new "headroom" warning', async () => {
-		const warnSpy = spyOn(console, 'warn');
-		try {
-			// Leave only 200 chars of headroom — below the 300-char MIN_INJECT_CHARS threshold
-			const nearLimitChars = MODEL_LIMIT_CHARS - 200;
-			const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
-			const messages = makeMessages(nearLimitChars);
-			const originalLength = messages.length;
-			const output = { messages };
+	it('skips injection when headroom is below 300 chars', async () => {
+		// Leave only 200 chars of headroom — below the 300-char MIN_INJECT_CHARS threshold
+		const nearLimitChars = MODEL_LIMIT_CHARS - 200;
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(nearLimitChars);
+		const originalLength = messages.length;
+		const output = { messages };
 
-			await hook({} as Record<string, never>, output);
+		await hook({} as Record<string, never>, output);
 
-			// No injection should have happened
-			expect(output.messages.length).toBe(originalLength);
-			const injected = findInjectedMessage(output.messages);
-			expect(injected).toBeUndefined();
+		// No injection should have happened
+		expect(output.messages.length).toBe(originalLength);
+		const injected = findInjectedMessage(output.messages);
+		expect(injected).toBeUndefined();
+	});
 
-			// New warning must mention "headroom", not the old "context too large" phrasing
-			const warnMessages = warnSpy.mock.calls.map((args) => String(args[0]));
-			const hasHeadroomWarning = warnMessages.some((msg) =>
-				msg.includes('headroom'),
-			);
-			const hasOldWarning = warnMessages.some((msg) =>
-				msg.includes('context too large'),
-			);
-			expect(hasHeadroomWarning).toBe(true);
-			expect(hasOldWarning).toBe(false);
-		} finally {
-			warnSpy.mockRestore();
-		}
+	// -----------------------------------------------------------------------
+	// Boundary tests: exactly at, just below, zero, and negative headroom
+	// -----------------------------------------------------------------------
+
+	it('injects when headroom is exactly at the 300-char threshold', async () => {
+		// Exactly 300 chars of headroom — 300 < 300 is FALSE, so injection proceeds
+		const atThresholdChars = MODEL_LIMIT_CHARS - 300;
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(atThresholdChars);
+		const originalLength = messages.length;
+		const output = { messages };
+
+		await hook({} as Record<string, never>, output);
+
+		// Injection should have happened
+		expect(output.messages.length).toBeGreaterThan(originalLength);
+		const injected = findInjectedMessage(output.messages);
+		expect(injected).toBeDefined();
+		const blockLength = totalTextLength(injected!);
+		expect(blockLength).toBeLessThanOrEqual(500);
+	});
+
+	it('skips injection when headroom is 299 chars (just below threshold)', async () => {
+		// 299 chars of headroom — 299 < 300 is TRUE, so injection is skipped
+		const justBelowChars = MODEL_LIMIT_CHARS - 299;
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(justBelowChars);
+		const originalLength = messages.length;
+		const output = { messages };
+
+		await hook({} as Record<string, never>, output);
+
+		// No injection should have happened
+		expect(output.messages.length).toBe(originalLength);
+		const injected = findInjectedMessage(output.messages);
+		expect(injected).toBeUndefined();
+	});
+
+	it('skips injection when headroom is zero', async () => {
+		// Zero headroom — 0 < 300 is TRUE, so injection is skipped
+		const zeroHeadroomChars = MODEL_LIMIT_CHARS;
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(zeroHeadroomChars);
+		const originalLength = messages.length;
+		const output = { messages };
+
+		await hook({} as Record<string, never>, output);
+
+		// No injection should have happened
+		expect(output.messages.length).toBe(originalLength);
+		const injected = findInjectedMessage(output.messages);
+		expect(injected).toBeUndefined();
+	});
+
+	it('skips injection when headroom is negative', async () => {
+		// Negative headroom (over limit) — -5000 < 300 is TRUE, so injection is skipped
+		const negativeHeadroomChars = MODEL_LIMIT_CHARS + 5000;
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(negativeHeadroomChars);
+		const originalLength = messages.length;
+		const output = { messages };
+
+		await hook({} as Record<string, never>, output);
+
+		// No injection should have happened
+		expect(output.messages.length).toBe(originalLength);
+		const injected = findInjectedMessage(output.messages);
+		expect(injected).toBeUndefined();
 	});
 
 	// -----------------------------------------------------------------------

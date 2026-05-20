@@ -19,6 +19,11 @@ export type LLMJudgeCallback = (original: string, mutated: string, context: stri
  * trailing whitespace, and blank lines. Returns true if the stripped versions are identical.
  */
 export declare function isStaticallyEquivalent(originalCode: string, mutatedCode: string): boolean;
+export declare const _internals: {
+    isStaticallyEquivalent: typeof isStaticallyEquivalent;
+    checkEquivalence: typeof checkEquivalence;
+    batchCheckEquivalence: typeof batchCheckEquivalence;
+};
 /**
  * Check a single mutant for equivalence using two-stage approach.
  * Stage 1: static analysis. Stage 2: LLM judge (if provided and Stage 1 didn't determine equivalence).

@@ -36,6 +36,7 @@ function makeSynthesis(
 			'# Council Feedback\n\n- Finding: adjust edge case handling\n',
 		roundNumber: 1,
 		allCriteriaMet: verdict === 'APPROVE',
+		quorumSize: 3,
 		...overrides,
 	};
 }

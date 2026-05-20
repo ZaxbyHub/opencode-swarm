@@ -78,8 +78,78 @@ export interface CouncilSynthesis {
 	/** 1-indexed */
 	roundNumber: number;
 	allCriteriaMet: boolean;
+	/** Distinct council members that produced verdicts (deduplicated count). */
+	quorumSize: number;
 	/** true when called with an empty verdicts array — the APPROVE is vacuous */
 	emptyVerdictsWarning?: boolean;
+}
+
+/**
+ * Phase-level council synthesis result.
+ * Distinct from CouncilSynthesis — scoped to a phase number
+ * rather than a task ID, and targets .swarm/evidence/{phase}/phase-council.json
+ * for evidence-file attestation.
+ */
+export interface PhaseCouncilSynthesis {
+	phaseNumber: number;
+	/** Always 'phase' — distinguishes from task-level council */
+	scope: 'phase';
+	/** ISO 8601 */
+	timestamp: string;
+	overallVerdict: CouncilVerdict;
+	vetoedBy: CouncilAgent[] | null;
+	memberVerdicts: CouncilMemberVerdict[];
+	unresolvedConflicts: string[];
+	/** Severity HIGH + MEDIUM from veto members */
+	requiredFixes: CouncilFinding[];
+	/** Severity LOW or from non-veto members */
+	advisoryFindings: CouncilFinding[];
+	/** Phase-level advisory notes for the architect */
+	advisoryNotes: string[];
+	/** Single markdown document for phase review */
+	unifiedFeedbackMd: string;
+	/** 1-indexed */
+	roundNumber: number;
+	allCriteriaMet: boolean;
+	/** Distinct council members that produced verdicts */
+	quorumSize: number;
+	/** Path where evidence was written, e.g. .swarm/evidence/1/phase-council.json */
+	evidencePath: string;
+	/** Summary of the phase being reviewed */
+	phaseSummary?: string;
+}
+
+/**
+ * Project-level final council synthesis result.
+ * Distinct from task-level and phase-level council results: this is the
+ * final project close gate and writes to .swarm/evidence/final-council.json.
+ */
+export interface FinalCouncilSynthesis {
+	/** Always 'project' - distinguishes final council from task/phase councils */
+	scope: 'project';
+	/** ISO 8601 */
+	timestamp: string;
+	overallVerdict: CouncilVerdict;
+	vetoedBy: CouncilAgent[] | null;
+	memberVerdicts: CouncilMemberVerdict[];
+	unresolvedConflicts: string[];
+	/** Severity HIGH + MEDIUM from veto members */
+	requiredFixes: CouncilFinding[];
+	/** Severity LOW or from non-veto members */
+	advisoryFindings: CouncilFinding[];
+	/** Project-level advisory notes for the architect */
+	advisoryNotes: string[];
+	/** Single markdown document for final project review */
+	unifiedFeedbackMd: string;
+	/** 1-indexed */
+	roundNumber: number;
+	allCriteriaMet: boolean;
+	/** Distinct council members that produced verdicts */
+	quorumSize: number;
+	/** Path where evidence was written */
+	evidencePath: '.swarm/evidence/final-council.json';
+	/** Summary of the completed project being reviewed */
+	projectSummary: string;
 }
 
 export interface CouncilCriteriaItem {
@@ -104,8 +174,10 @@ export interface CouncilConfig {
 	parallelTimeoutMs: number;
 	/** Default true — any REJECT blocks */
 	vetoPriority: boolean;
-	/** Default false — when true, convene_council rejects unless all 5 member verdicts are provided */
+	/** Default false — when true, submit_council_verdicts rejects unless all 5 member verdicts are provided */
 	requireAllMembers: boolean;
+	/** Default 3 — minimum distinct council members required for quorum. requireAllMembers: true overrides this to 5. */
+	minimumMembers: number;
 	/**
 	 * Optional webhook URL or handler name for auto-escalation when maxRounds is
 	 * reached without APPROVE. Reserved for forward compatibility — NOT yet
@@ -115,6 +187,8 @@ export interface CouncilConfig {
 	 * options: critic_oversight agent, HTTP webhook, or configurable handler.
 	 */
 	escalateOnMaxRounds?: string;
+	/** Default true — CONCERNS verdict at phase-level council does NOT block completion (advisory). Set false to make CONCERNS block like REJECT. */
+	phaseConcernsAllowComplete: boolean;
 }
 
 export const COUNCIL_DEFAULTS: CouncilConfig = {
@@ -124,4 +198,6 @@ export const COUNCIL_DEFAULTS: CouncilConfig = {
 	parallelTimeoutMs: 30_000,
 	vetoPriority: true,
 	requireAllMembers: false,
+	minimumMembers: 3,
+	phaseConcernsAllowComplete: true,
 };

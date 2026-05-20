@@ -1,11 +1,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../utils/path-security';
-import { createSwarmTool } from './create-tool';
+import { createSwarmTool, type ToolResult } from './create-tool';
 
 // ============ Constants ============
 const MAX_FILE_PATH_LENGTH = 500;
@@ -771,11 +772,11 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Scan directory for potential secrets (API keys, tokens, passwords) using regex patterns and entropy heuristics. Returns metadata-only findings with redacted previews - NEVER returns raw secrets. Excludes common directories (node_modules, .git, dist, etc.) by default. Supports glob patterns (e.g. **/.svelte-kit/**, **/*.test.ts) and reads .secretscanignore at the scan root.',
 	args: {
-		directory: tool.schema
+		directory: z
 			.string()
 			.describe('Directory to scan for secrets (e.g., "." or "./src")'),
-		exclude: tool.schema
-			.array(tool.schema.string())
+		exclude: z
+			.array(z.string())
 			.optional()
 			.describe(
 				'Patterns to exclude: plain directory names (e.g. node_modules), relative paths, or globs (e.g. **/.svelte-kit/**, **/*.test.ts). Added to default exclusions.',
@@ -1047,11 +1048,12 @@ export async function runSecretscan(
 	try {
 		// Call the tool's execute function with proper args format
 		// Use type assertion to bypass strict context requirements for programmatic calls
-		const result = await secretscan.execute(
+		const result = (await _internals.secretscan.execute(
 			{ directory },
 			{} as Parameters<typeof secretscan.execute>[1],
-		);
-		return JSON.parse(result) as SecretscanResult | SecretscanErrorResult;
+		)) as unknown as ToolResult;
+		const jsonStr = typeof result === 'string' ? result : result.output;
+		return JSON.parse(jsonStr) as SecretscanResult | SecretscanErrorResult;
 	} catch (e) {
 		const errorResult: SecretscanErrorResult = {
 			error:
@@ -1067,3 +1069,15 @@ export async function runSecretscan(
 		return errorResult;
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	secretscan: typeof secretscan;
+	runSecretscan: typeof runSecretscan;
+} = {
+	secretscan,
+	runSecretscan,
+} as const;

@@ -15,9 +15,65 @@ Argument handling:
 - If the first word of `$ARGUMENTS` is a **known plugin subcommand** (see list below): do NOT treat it as a swarm task. Instead, tell the user to run it as a slash command directly (e.g., `/swarm close`, `/swarm handoff`). These are OpenCode plugin commands handled by the swarm plugin's command system, not tasks for the swarm workflow. Do NOT try to interpret or execute them yourself.
 - Otherwise: enable swarm mode, then treat `$ARGUMENTS` as the task to execute immediately.
 
-Known plugin subcommands (do NOT interpret these as tasks):
-<!-- Keep in sync with COMMAND_REGISTRY in src/commands/registry.ts -->
-`status`, `plan`, `agents`, `history`, `config`, `evidence`, `handoff`, `archive`, `diagnose`, `diagnosis`, `preflight`, `sync-plan`, `benchmark`, `export`, `reset`, `rollback`, `retrieve`, `clarify`, `analyze`, `specify`, `brainstorm`, `qa-gates`, `dark-matter`, `knowledge`, `curate`, `turbo`, `full-auto`, `write-retro`, `reset-session`, `simulate`, `promote`, `checkpoint`, `close`
+### SWARM-NAMESPACED subcommands — DO NOT confuse with Claude Code built-in commands
+
+These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`:
+
+- `/swarm status` — show current swarm status
+- `/swarm plan` — view or manage implementation plan
+- `/swarm agents` — list available swarm agents
+- `/swarm history` — view swarm execution history
+- `/swarm config` — view swarm configuration
+- `/swarm evidence` — view evidence files
+- `/swarm handoff` — hand off to another agent
+- `/swarm archive` — archive swarm sessions
+- `/swarm diagnose` / `/swarm diagnosis` — diagnose swarm issues
+- `/swarm preflight` — run preflight checks
+- `/swarm sync-plan` — sync plan with repository
+- `/swarm benchmark` — run benchmarks
+- `/swarm export` — export swarm data
+- `/swarm reset` — reset swarm state
+- `/swarm rollback` — rollback to previous state
+- `/swarm retrieve` — retrieve swarm data
+- `/swarm clarify` — clarify swarm task
+- `/swarm analyze` — analyze swarm execution
+- `/swarm specify` — specify swarm requirements
+- `/swarm brainstorm` — brainstorm swarm tasks
+- `/swarm qa-gates` — manage QA gates
+- `/swarm dark-matter` — detect hidden couplings
+- `/swarm knowledge` — manage knowledge base
+- `/swarm curate` — curate knowledge
+- `/swarm turbo` — enable turbo mode
+- `/swarm full-auto` — enable full auto mode
+- `/swarm write-retro` — write retrospective
+- `/swarm reset-session` — reset session
+- `/swarm simulate` — simulate swarm execution
+- `/swarm promote` — promote knowledge
+- `/swarm issue` — create issue
+- `/swarm pr-review` — review pull request
+- `/swarm checkpoint` — checkpoint session state
+- `/swarm close` — close swarm session
+
+### CRITICAL NAMING CONFLICTS
+
+These swarm subcommands share exact names with CC built-in commands.
+Invoking the bare form instead of `/swarm <name>` causes irreversible damage:
+
+| Swarm Command | CC Built-in | Damage |
+|---|---|---|
+| `/swarm plan` | CC `/plan` | Enters CC plan mode — blocks execution |
+| `/swarm reset` | CC `/reset` | Wipes entire conversation context |
+| `/swarm checkpoint` | CC `/checkpoint` | Reverts conversation history |
+
+All swarm commands: `/swarm <subcommand>`. Never the bare name.
+
+### COMMAND INVOCATION RULE
+
+All commands in this list are invoked as `/swarm <subcommand>`.
+Never invoke the bare subcommand as a standalone slash command.
+`/plan`, `/status`, `/reset`, `/checkpoint`, `/agents`, `/config`, `/export`, `/doctor`
+are Claude Code built-in commands with completely different behaviors.
+The `/swarm` prefix is mandatory, not optional.
 
 Examples:
 - `/swarm` — enable swarm mode only

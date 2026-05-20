@@ -6,8 +6,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { extname } from 'node:path';
-import { tool } from '@opencode-ai/plugin';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import type { PluginConfig } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
@@ -651,25 +651,25 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 	description:
 		'Static Application Security Testing (SAST) scan. Scans files for security vulnerabilities using built-in rules (Tier A) and optional Semgrep (Tier B). Supports phase-scoped baseline diffing: set capture_baseline:true before first coder delegation to snapshot pre-existing findings; subsequent scans with the same phase only fail on NEW findings.',
 	args: {
-		directory: tool.schema
+		directory: z
 			.string()
 			.describe('Directory to scan for security vulnerabilities'),
-		changed_files: tool.schema
-			.array(tool.schema.string())
+		changed_files: z
+			.array(z.string())
 			.optional()
 			.describe('List of files to scan (leave empty to scan none)'),
-		severity_threshold: tool.schema
+		severity_threshold: z
 			.enum(['low', 'medium', 'high', 'critical'])
 			.optional()
 			.default('medium')
 			.describe('Minimum severity that causes failure'),
-		capture_baseline: tool.schema
+		capture_baseline: z
 			.boolean()
 			.optional()
 			.describe(
 				'When true, capture/merge a phase-scoped baseline of pre-existing findings. Requires phase. Subsequent scans with phase only fail on NEW findings.',
 			),
-		phase: tool.schema
+		phase: z
 			.number()
 			.int()
 			.min(1)
@@ -758,7 +758,19 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			phase: safeArgs.phase,
 		};
 
-		const result = await sastScan(input, directory);
+		const result = await _internals.sastScan(input, directory);
 		return JSON.stringify(result, null, 2);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	sastScan: typeof sastScan;
+	sast_scan: typeof sast_scan;
+} = {
+	sastScan,
+	sast_scan,
+} as const;

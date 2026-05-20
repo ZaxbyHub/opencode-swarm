@@ -1,10 +1,11 @@
 /**
  * General Council Mode — architect-only synthesis tool.
  *
- * The architect spawns council_member subagents in parallel for Round 1,
- * collects their JSON responses, and calls this tool to synthesize results.
- * If the tool detects disagreements and Round 2 deliberation is configured,
- * the architect re-delegates to disputing members and calls this tool again
+ * The architect spawns council_generalist / council_skeptic /
+ * council_domain_expert subagents in parallel for Round 1, collects their
+ * JSON responses, and calls this tool to synthesize results. If the tool
+ * detects disagreements and Round 2 deliberation is configured, the
+ * architect re-delegates to disputing members and calls this tool again
  * with both round1Responses and round2Responses populated.
  *
  * Mirrors the convene-council.ts skeleton but explicitly does NOT inherit
@@ -24,7 +25,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { pushGeneralCouncilAdvisory } from '../council/general-council-advisory';
@@ -87,7 +88,6 @@ interface ConveneOk {
 	persistingDisagreements: string[];
 	allSourcesCount: number;
 	synthesis: string;
-	moderatorPrompt?: string;
 	evidencePath: string;
 }
 
@@ -97,116 +97,96 @@ interface ConveneFail {
 	message: string;
 }
 
-function buildModeratorPrompt(question: string, synthesis: string): string {
-	return [
-		'A multi-model council has deliberated on the following question. Your job is to synthesize',
-		'the council output into a single coherent answer for the user, following the rules in your',
-		'system prompt (lead with consensus, acknowledge persisting disagreement honestly, cite the',
-		'strongest sources, be concise, do not invent claims, do not run new searches).',
-		'',
-		`QUESTION:\n${question}`,
-		'',
-		'COUNCIL OUTPUT:',
-		synthesis,
-	].join('\n');
-}
-
 export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 	{
 		description:
 			'Synthesize responses from a multi-model General Council. Accepts parallel member ' +
 			'responses (Round 1, optionally Round 2), detects disagreements, and returns ' +
-			'consensus points, persisting disagreements, a structured synthesis, and an optional ' +
-			'moderator prompt. Architect-only. Config-gated on council.general.enabled.',
+			'consensus points, persisting disagreements, and a structured synthesis. ' +
+			'Architect-only. Config-gated on council.general.enabled.',
 		args: {
-			question: tool.schema
+			question: z
 				.string()
 				.min(1)
 				.max(8000)
 				.describe(
 					'The question put to the council, or the spec text to review.',
 				),
-			mode: tool.schema
+			mode: z
 				.enum(['general', 'spec_review'])
 				.optional()
 				.describe(
 					'"general" for /swarm council; "spec_review" for SPECIFY-COUNCIL-REVIEW gate.',
 				),
-			members: tool.schema
-				.array(tool.schema.string())
+			members: z
+				.array(z.string())
 				.optional()
 				.describe('Optional list of member IDs convened (for evidence/audit).'),
-			round1Responses: tool.schema
+			round1Responses: z
 				.array(
-					tool.schema.object({
-						memberId: tool.schema.string().min(1),
-						model: tool.schema.string().min(1),
-						role: tool.schema.enum([
+					z.object({
+						memberId: z.string().min(1),
+						model: z.string().min(1),
+						role: z.enum([
 							'generalist',
 							'skeptic',
 							'domain_expert',
 							'devil_advocate',
 							'synthesizer',
 						]),
-						response: tool.schema.string(),
-						sources: tool.schema
+						response: z.string(),
+						sources: z
 							.array(
-								tool.schema.object({
-									title: tool.schema.string(),
-									url: tool.schema.string(),
-									snippet: tool.schema.string(),
-									query: tool.schema.string(),
+								z.object({
+									title: z.string(),
+									url: z.string(),
+									snippet: z.string(),
+									query: z.string(),
 								}),
 							)
 							.optional(),
-						searchQueries: tool.schema.array(tool.schema.string()).optional(),
-						confidence: tool.schema.number().min(0).max(1),
-						areasOfUncertainty: tool.schema
-							.array(tool.schema.string())
-							.optional(),
-						durationMs: tool.schema.number().nonnegative().optional(),
+						searchQueries: z.array(z.string()).optional(),
+						confidence: z.number().min(0).max(1),
+						areasOfUncertainty: z.array(z.string()).optional(),
+						durationMs: z.number().nonnegative().optional(),
 					}),
 				)
 				.describe('Round 1 member responses (one per council member).'),
-			round2Responses: tool.schema
+			round2Responses: z
 				.array(
-					tool.schema.object({
-						memberId: tool.schema.string().min(1),
-						model: tool.schema.string().min(1),
-						role: tool.schema.enum([
+					z.object({
+						memberId: z.string().min(1),
+						model: z.string().min(1),
+						role: z.enum([
 							'generalist',
 							'skeptic',
 							'domain_expert',
 							'devil_advocate',
 							'synthesizer',
 						]),
-						response: tool.schema.string(),
-						sources: tool.schema
+						response: z.string(),
+						sources: z
 							.array(
-								tool.schema.object({
-									title: tool.schema.string(),
-									url: tool.schema.string(),
-									snippet: tool.schema.string(),
-									query: tool.schema.string(),
+								z.object({
+									title: z.string(),
+									url: z.string(),
+									snippet: z.string(),
+									query: z.string(),
 								}),
 							)
 							.optional(),
-						searchQueries: tool.schema.array(tool.schema.string()).optional(),
-						confidence: tool.schema.number().min(0).max(1),
-						areasOfUncertainty: tool.schema
-							.array(tool.schema.string())
-							.optional(),
-						durationMs: tool.schema.number().nonnegative().optional(),
-						disagreementTopics: tool.schema
-							.array(tool.schema.string())
-							.optional(),
+						searchQueries: z.array(z.string()).optional(),
+						confidence: z.number().min(0).max(1),
+						areasOfUncertainty: z.array(z.string()).optional(),
+						durationMs: z.number().nonnegative().optional(),
+						disagreementTopics: z.array(z.string()).optional(),
 					}),
 				)
 				.optional()
 				.describe(
 					'Round 2 deliberation responses (omit when no deliberation has occurred).',
 				),
-			working_directory: tool.schema
+			working_directory: z
 				.string()
 				.optional()
 				.describe('Project root for config + evidence path resolution.'),
@@ -298,12 +278,6 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 				// non-critical
 			}
 
-			// ── Moderator prompt (only when configured) ───────────────────────
-			const moderatorPrompt =
-				generalConfig.moderator === true
-					? buildModeratorPrompt(input.question, result.synthesis)
-					: undefined;
-
 			const ok: ConveneOk = {
 				success: true,
 				question: input.question,
@@ -314,7 +288,6 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 				persistingDisagreements: result.persistingDisagreements,
 				allSourcesCount: result.allSources.length,
 				synthesis: result.synthesis,
-				...(moderatorPrompt !== undefined && { moderatorPrompt }),
 				evidencePath,
 			};
 			return JSON.stringify(ok, null, 2);

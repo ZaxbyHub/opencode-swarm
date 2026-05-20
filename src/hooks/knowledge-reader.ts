@@ -6,6 +6,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { warn } from '../utils/logger.js';
 import {
 	jaccardBigram,
 	normalize,
@@ -20,6 +21,7 @@ import type {
 	KnowledgeCategory,
 	KnowledgeConfig,
 	KnowledgeEntryBase,
+	KnowledgeRetrievalContext,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 
@@ -281,7 +283,7 @@ async function recordLessonsShown(
 		await mkdir(path.dirname(shownFile), { recursive: true });
 		await writeFile(shownFile, JSON.stringify(shownData, null, 2), 'utf-8');
 	} catch {
-		console.warn('[swarm] Knowledge: failed to record shown lessons');
+		warn('[swarm] Knowledge: failed to record shown lessons');
 	}
 }
 
@@ -452,13 +454,15 @@ export async function readMergedKnowledge(
 	const topN = ranked.slice(0, maxInject);
 
 	// Step 7: Record lessons shown (fire-and-forget, non-critical)
+	// Note: recordLessonsShown has its own internal catch that logs via warn(),
+	// so this outer .catch() is defensive only (handles unexpected rejections).
 	if (topN.length > 0 && context?.currentPhase) {
 		recordLessonsShown(
 			directory,
 			topN.map((e) => e.id),
 			context.currentPhase,
-		).catch(() => {
-			// Swallow errors - this is fire-and-forget
+		).catch((err) => {
+			warn('[knowledge-reader] recordLessonsShown unexpected rejection:', err);
 		});
 	}
 
@@ -499,11 +503,20 @@ export async function updateRetrievalOutcome(
 
 		for (const entry of entries) {
 			if (shownIds.includes(entry.id)) {
-				entry.retrieval_outcomes.applied_count++;
+				// v2: applied_count is FROZEN — do NOT auto-increment from "shown".
+				// Use shown_count (already bumped by recordKnowledgeShown) and the
+				// new succeeded_after_shown_count / failed_after_shown_count for
+				// post-phase outcome attribution.
+				const ro = entry.retrieval_outcomes as unknown as Record<
+					string,
+					unknown
+				>;
 				if (phaseSucceeded) {
-					entry.retrieval_outcomes.succeeded_after_count++;
+					ro.succeeded_after_shown_count =
+						((ro.succeeded_after_shown_count as number) ?? 0) + 1;
 				} else {
-					entry.retrieval_outcomes.failed_after_count++;
+					ro.failed_after_shown_count =
+						((ro.failed_after_shown_count as number) ?? 0) + 1;
 				}
 				updated = true;
 				foundInSwarm.add(entry.id);
@@ -530,11 +543,16 @@ export async function updateRetrievalOutcome(
 
 		for (const entry of hiveEntries) {
 			if (remainingIds.includes(entry.id)) {
-				entry.retrieval_outcomes.applied_count++;
+				const ro = entry.retrieval_outcomes as unknown as Record<
+					string,
+					unknown
+				>;
 				if (phaseSucceeded) {
-					entry.retrieval_outcomes.succeeded_after_count++;
+					ro.succeeded_after_shown_count =
+						((ro.succeeded_after_shown_count as number) ?? 0) + 1;
 				} else {
-					entry.retrieval_outcomes.failed_after_count++;
+					ro.failed_after_shown_count =
+						((ro.failed_after_shown_count as number) ?? 0) + 1;
 				}
 				hiveUpdated = true;
 			}
@@ -548,6 +566,181 @@ export async function updateRetrievalOutcome(
 		delete shownData[phaseInfo];
 		await writeFile(shownFile, JSON.stringify(shownData, null, 2), 'utf-8');
 	} catch {
-		console.warn('[swarm] Knowledge: failed to update retrieval outcomes');
+		warn('[swarm] Knowledge: failed to update retrieval outcomes');
 	}
 }
+
+// ============================================================================
+// v2: Action-aware retrieval
+// ============================================================================
+
+/** Default min confidence for trigger/action match boost. */
+const DIRECTIVE_BOOST_MIN_CONFIDENCE = 0.75;
+
+function lc(s: string | undefined): string {
+	return (s ?? '').toLowerCase();
+}
+
+function anyMatch(haystack: string[], needles: string[]): boolean {
+	if (needles.length === 0) return false;
+	const hay = haystack.map(lc);
+	return needles.some((n) => hay.some((h) => h.includes(lc(n))));
+}
+
+function tokenizeContext(ctx: KnowledgeRetrievalContext): string[] {
+	const parts: string[] = [];
+	if (ctx.taskTitle) parts.push(ctx.taskTitle);
+	if (ctx.taskDescription) parts.push(ctx.taskDescription);
+	if (ctx.lastUserMessage) parts.push(ctx.lastUserMessage);
+	if (ctx.currentAction) parts.push(ctx.currentAction);
+	if (ctx.currentTool) parts.push(ctx.currentTool);
+	if (ctx.targetAgent) parts.push(ctx.targetAgent);
+	if (ctx.declaredScope) parts.push(ctx.declaredScope);
+	if (ctx.recentReviewerFailures) parts.push(...ctx.recentReviewerFailures);
+	if (ctx.recentTestFailures) parts.push(...ctx.recentTestFailures);
+	if (ctx.recentToolErrors) parts.push(...ctx.recentToolErrors);
+	if (ctx.planConstraints) parts.push(...ctx.planConstraints);
+	if (ctx.filePaths) parts.push(...ctx.filePaths);
+	return parts.map(lc);
+}
+
+/** Returns 0..1 score representing trigger/action match strength against the context. */
+export function scoreDirectiveAgainstContext(
+	entry: KnowledgeEntryBase,
+	ctx: KnowledgeRetrievalContext,
+): {
+	triggerHit: boolean;
+	actionHit: boolean;
+	agentHit: boolean;
+	score: number;
+} {
+	const haystack = tokenizeContext(ctx);
+	const triggerHit =
+		entry.triggers && entry.triggers.length > 0
+			? anyMatch(haystack, entry.triggers)
+			: false;
+	const actionHit =
+		entry.applies_to_tools && entry.applies_to_tools.length > 0
+			? entry.applies_to_tools
+					.map(lc)
+					.some((t) => t === lc(ctx.currentTool) || t === lc(ctx.currentAction))
+			: false;
+	const agentHit =
+		entry.applies_to_agents && entry.applies_to_agents.length > 0
+			? entry.applies_to_agents.map(lc).some((a) => a === lc(ctx.targetAgent))
+			: false;
+	let score = 0;
+	if (triggerHit) score += 0.5;
+	if (actionHit) score += 0.35;
+	if (agentHit) score += 0.25;
+	if (entry.directive_priority === 'critical') score += 0.4;
+	else if (entry.directive_priority === 'high') score += 0.2;
+	else if (entry.directive_priority === 'medium') score += 0.1;
+	return { triggerHit, actionHit, agentHit, score: Math.min(1, score) };
+}
+
+/**
+ * v2: Action-aware retrieval. Returns RankedEntry[] but uses the richer
+ * KnowledgeRetrievalContext to bias ranking toward entries whose triggers,
+ * applies_to_tools, applies_to_agents, or directive_priority match the
+ * current decision point. Falls back to readMergedKnowledge ordering for
+ * non-matching entries.
+ */
+export async function readContextualKnowledge(
+	directory: string,
+	config: KnowledgeConfig,
+	ctx: KnowledgeRetrievalContext,
+): Promise<RankedEntry[]> {
+	// Step 1: get the legacy ranked merge using the projected ProjectContext shape.
+	const projected: ProjectContext = {
+		projectName: ctx.projectName ?? 'unknown',
+		currentPhase: ctx.currentPhase ?? 'Phase 0',
+		techStack: ctx.techStack,
+		recentErrors: [
+			...(ctx.recentReviewerFailures ?? []),
+			...(ctx.recentTestFailures ?? []),
+			...(ctx.recentToolErrors ?? []),
+		],
+	};
+	// Pull a wider window than max_inject so we have headroom to re-rank.
+	const wideCfg: KnowledgeConfig = {
+		...config,
+		max_inject_count: Math.max(20, config.max_inject_count ?? 5),
+	};
+	const candidates =
+		(await readMergedKnowledge(directory, wideCfg, projected)) ?? [];
+
+	// Step 2: re-rank using directive metadata.
+	const minConf =
+		typeof (config as { directive_min_confidence?: number })
+			.directive_min_confidence === 'number'
+			? (config as { directive_min_confidence?: number })
+					.directive_min_confidence!
+			: DIRECTIVE_BOOST_MIN_CONFIDENCE;
+
+	const rescored = candidates.map((entry) => {
+		const ds = scoreDirectiveAgainstContext(entry, ctx);
+		// High-confidence + action match → strong boost
+		const confBoost =
+			entry.confidence >= minConf && (ds.actionHit || ds.agentHit) ? 0.25 : 0;
+		const generatedSkillBoost =
+			entry.generated_skill_path && entry.status !== 'archived' ? 0.05 : 0;
+		const finalScore = Math.min(
+			1,
+			entry.finalScore + ds.score + confBoost + generatedSkillBoost,
+		);
+		return {
+			...entry,
+			finalScore,
+			__directive: ds,
+		} as RankedEntry & {
+			__directive: ReturnType<typeof scoreDirectiveAgainstContext>;
+		};
+	});
+
+	// Step 3: force-include critical+matching entries even if they would otherwise drop off.
+	rescored.sort((a, b) => b.finalScore - a.finalScore);
+	const max = config.max_inject_count ?? 5;
+	const top: typeof rescored = [];
+	const seen = new Set<string>();
+
+	// Pass A: critical + trigger/action matches first
+	for (const e of rescored) {
+		if (top.length >= max) break;
+		const ds = e.__directive;
+		const isCritical =
+			e.directive_priority === 'critical' &&
+			(ds.triggerHit || ds.actionHit || ds.agentHit);
+		if (isCritical && !seen.has(e.id)) {
+			top.push(e);
+			seen.add(e.id);
+		}
+	}
+	// Pass B: remaining by score
+	for (const e of rescored) {
+		if (top.length >= max) break;
+		if (!seen.has(e.id)) {
+			top.push(e);
+			seen.add(e.id);
+		}
+	}
+
+	// Strip private fields before returning
+	return top.map(({ __directive: _d, ...rest }) => rest as RankedEntry);
+}
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals: {
+	readMergedKnowledge: typeof readMergedKnowledge;
+	readContextualKnowledge: typeof readContextualKnowledge;
+	updateRetrievalOutcome: typeof updateRetrievalOutcome;
+	scoreDirectiveAgainstContext: typeof scoreDirectiveAgainstContext;
+} = {
+	readMergedKnowledge,
+	readContextualKnowledge,
+	updateRetrievalOutcome,
+	scoreDirectiveAgainstContext,
+};

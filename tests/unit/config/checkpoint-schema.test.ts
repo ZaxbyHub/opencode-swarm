@@ -13,6 +13,7 @@ describe('CheckpointConfigSchema', () => {
 				expect(result.data).toEqual({
 					enabled: true,
 					auto_checkpoint_threshold: 3,
+					allow_empty_commits: false,
 				});
 			}
 		});
@@ -21,6 +22,7 @@ describe('CheckpointConfigSchema', () => {
 			const config = {
 				enabled: false,
 				auto_checkpoint_threshold: 5,
+				allow_empty_commits: false,
 			};
 			const result = CheckpointConfigSchema.safeParse(config);
 			expect(result.success).toBe(true);
@@ -61,6 +63,31 @@ describe('CheckpointConfigSchema', () => {
 			if (result.success) {
 				expect(result.data.auto_checkpoint_threshold).toBe(3);
 			}
+		});
+
+		it('applies default allow_empty_commits: false', () => {
+			const result = CheckpointConfigSchema.safeParse({});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.allow_empty_commits).toBe(false);
+			}
+		});
+
+		it('accepts allow_empty_commits: true opt-in', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				allow_empty_commits: true,
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.allow_empty_commits).toBe(true);
+			}
+		});
+
+		it('rejects allow_empty_commits: non-boolean', () => {
+			const result = CheckpointConfigSchema.safeParse({
+				allow_empty_commits: 'yes',
+			});
+			expect(result.success).toBe(false);
 		});
 	});
 
@@ -188,6 +215,7 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 			expect(result.data.checkpoint).toEqual({
 				enabled: false,
 				auto_checkpoint_threshold: 7,
+				allow_empty_commits: false,
 			});
 		}
 	});
@@ -210,6 +238,7 @@ describe('CheckpointConfigSchema in PluginConfigSchema', () => {
 			expect(result.data.checkpoint).toEqual({
 				enabled: true,
 				auto_checkpoint_threshold: 3,
+				allow_empty_commits: false,
 			});
 		}
 	});

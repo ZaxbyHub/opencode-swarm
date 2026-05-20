@@ -568,11 +568,13 @@ ACCEPTANCECRITERA: test passes`;
 			advanceTaskState(session, 'council-task', 'coder_delegated');
 			advanceTaskState(session, 'council-task', 'pre_check_passed');
 
-			// Simulate convene_council recording an APPROVE verdict on the session.
+			// Simulate submit_council_verdicts recording an APPROVE verdict on the session.
+			// quorumSize: 3 satisfies the default minimumMembers quorum gate.
 			session.taskCouncilApproved = new Map();
 			session.taskCouncilApproved.set('council-task', {
 				verdict: 'APPROVE',
 				roundNumber: 1,
+				quorumSize: 3,
 			});
 
 			// Council fast-path: should allow complete from pre_check_passed.
@@ -592,6 +594,7 @@ ACCEPTANCECRITERA: test passes`;
 			session.taskCouncilApproved.set('council-task', {
 				verdict: 'APPROVE',
 				roundNumber: 1,
+				quorumSize: 3,
 			});
 
 			expect(() =>
@@ -610,6 +613,7 @@ ACCEPTANCECRITERA: test passes`;
 			session.taskCouncilApproved.set('council-task', {
 				verdict: 'REJECT',
 				roundNumber: 1,
+				quorumSize: 3,
 			});
 
 			expect(() =>

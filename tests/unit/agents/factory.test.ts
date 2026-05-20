@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,9 +25,9 @@ afterEach(() => {
 
 describe('createAgents', () => {
 	describe('no config', () => {
-		it('returns 14 agents (docs enabled by default, designer opt-in)', () => {
+		it('returns 16 agents (docs enabled by default, designer opt-in)', () => {
 			const agents = createAgents();
-			expect(agents).toHaveLength(14);
+			expect(agents).toHaveLength(16);
 		});
 
 		it('agent names are correct', () => {
@@ -46,7 +46,9 @@ describe('createAgents', () => {
 				'docs',
 				'explorer',
 				'reviewer',
+				'skill_improver',
 				'sme',
+				'spec_writer',
 				'test_engineer',
 				// Note: designer is opt-in (ui_review.enabled=true), not included by default
 			]);
@@ -112,6 +114,202 @@ describe('createAgents', () => {
 			expect(coder?.config.temperature).toBe(0.5);
 		});
 
+		it('variant override applies correctly', () => {
+			const config = {
+				agents: {
+					test_engineer: {
+						model: 'grove-openai/gpt-5.3-codex',
+						variant: 'medium',
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const te = agents.find((a) => a.name === 'test_engineer');
+			expect(te?.config.model).toBe('grove-openai/gpt-5.3-codex');
+			expect((te?.config as { variant?: string } | undefined)?.variant).toBe(
+				'medium',
+			);
+		});
+
+		it('variant is omitted when not configured', () => {
+			const config = {
+				agents: {
+					coder: { model: 'custom/model' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(
+				(coder?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+		});
+
+		it('auto-splits variant from 3-segment model string', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				quiet: false,
+				agents: {
+					coder: {
+						model: 'grove-openai/gpt-5.3-codex/medium',
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(coder?.config.model).toBe('grove-openai/gpt-5.3-codex');
+			expect((coder?.config as { variant?: string } | undefined)?.variant).toBe(
+				'medium',
+			);
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('explicit variant override takes precedence over auto-split', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				quiet: false,
+				agents: {
+					coder: {
+						model: 'grove-openai/gpt-5.3-codex/medium',
+						variant: 'high',
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(coder?.config.model).toBe('grove-openai/gpt-5.3-codex');
+			expect((coder?.config as { variant?: string } | undefined)?.variant).toBe(
+				'high',
+			);
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('does not modify 2-segment model string', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				agents: {
+					coder: { model: 'custom/model' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(coder?.config.model).toBe('custom/model');
+			expect(
+				(coder?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+			expect(warnSpy).not.toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('preserves 3-segment lmstudio model ID intact (regression: bug where last segment was stripped as variant)', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				agents: {
+					reviewer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			// The full 3-segment path must be preserved — the last segment is a
+			// model name component, not a reasoning-effort variant token.
+			expect(reviewer?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(reviewer?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+			expect(warnSpy).not.toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('preserves 3-segment lmstudio model ID intact for multiple agents', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const config = {
+				agents: {
+					coder: { model: 'lmstudio/qwen/qwen3-coder-next' },
+					reviewer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+					test_engineer: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+					docs: { model: 'lmstudio/qwen/qwen3.6-35b-a3b' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(coder?.config.model).toBe('lmstudio/qwen/qwen3-coder-next');
+			expect(
+				(coder?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			expect(reviewer?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(reviewer?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			const te = agents.find((a) => a.name === 'test_engineer');
+			expect(te?.config.model).toBe('lmstudio/qwen/qwen3.6-35b-a3b');
+			expect(
+				(te?.config as { variant?: string } | undefined)?.variant,
+			).toBeUndefined();
+
+			expect(warnSpy).not.toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
+		it('still auto-splits known variant tokens: low, medium, high, max, xhigh, thinking', () => {
+			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+			const variantCases: Array<[string, string, string]> = [
+				['grove-openai/gpt-5.3-codex/low', 'grove-openai/gpt-5.3-codex', 'low'],
+				[
+					'grove-openai/gpt-5.3-codex/medium',
+					'grove-openai/gpt-5.3-codex',
+					'medium',
+				],
+				[
+					'grove-openai/gpt-5.3-codex/high',
+					'grove-openai/gpt-5.3-codex',
+					'high',
+				],
+				['grove-openai/gpt-5.3-codex/max', 'grove-openai/gpt-5.3-codex', 'max'],
+				[
+					'grove-openai/gpt-5.3-codex/xhigh',
+					'grove-openai/gpt-5.3-codex',
+					'xhigh',
+				],
+				[
+					'grove-openai/gpt-5.3-codex/thinking',
+					'grove-openai/gpt-5.3-codex',
+					'thinking',
+				],
+				[
+					'gateway/ns/gpt-5.3-codex/medium',
+					'gateway/ns/gpt-5.3-codex',
+					'medium',
+				],
+			];
+
+			for (const [fullModel, expectedModel, expectedVariant] of variantCases) {
+				const config = {
+					quiet: false,
+					agents: { coder: { model: fullModel } },
+				};
+				const agents = createAgents(config as unknown as PluginConfig);
+				const coder = agents.find((a) => a.name === 'coder');
+				expect(coder?.config.model).toBe(expectedModel);
+				expect(
+					(coder?.config as { variant?: string } | undefined)?.variant,
+				).toBe(expectedVariant);
+			}
+			expect(warnSpy).toHaveBeenCalled();
+			warnSpy.mockRestore();
+		});
+
 		it('disabled agent is filtered out', () => {
 			const config = {
 				agents: {
@@ -124,8 +322,8 @@ describe('createAgents', () => {
 			const agents = createAgents(config as unknown as PluginConfig);
 			const sme = agents.find((a) => a.name === 'sme');
 			expect(sme).toBeUndefined();
-			// 14 agents - 1 disabled = 13 agents (docs still included by default)
-			expect(agents).toHaveLength(13);
+			// 16 agents - 1 disabled = 15 agents (docs still included by default)
+			expect(agents).toHaveLength(15);
 		});
 	});
 
@@ -152,7 +350,9 @@ describe('createAgents', () => {
 				'docs',
 				'explorer',
 				'reviewer',
+				'skill_improver',
 				'sme',
+				'spec_writer',
 				'test_engineer',
 				// Note: designer is opt-in, not included by default
 			]);
@@ -182,7 +382,9 @@ describe('createAgents', () => {
 				'local_docs',
 				'local_explorer',
 				'local_reviewer',
+				'local_skill_improver',
 				'local_sme',
+				'local_spec_writer',
 				'local_test_engineer',
 				// Note: designer is opt-in, not included by default
 			]);
@@ -368,7 +570,7 @@ describe('getAgentConfigs', () => {
 
 		const configs = getAgentConfigs(config as unknown as PluginConfig);
 		expect(configs.sme).toBeUndefined();
-		// 14 agents - 1 disabled = 13 agents (docs included by default)
-		expect(Object.keys(configs)).toHaveLength(13);
+		// 16 agents - 1 disabled = 15 agents (docs included by default)
+		expect(Object.keys(configs)).toHaveLength(15);
 	});
 });

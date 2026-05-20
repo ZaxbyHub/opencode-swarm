@@ -219,7 +219,9 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 		await forceCompleteTask(tmpDir, '1.1');
 
 		// Re-save with entirely different task IDs in the same phase
-		// Task IDs must match N.M pattern — using 1.3, 1.4 as "brand new" IDs
+		// Task IDs must match N.M pattern — using 1.3, 1.4 as "brand new" IDs.
+		// Issue #853: dropping the basePlan's three tasks (1.1, 1.2, 2.1) must
+		// now be acknowledged via removed_task_ids + removal_reason.
 		const newIdsPlan: SavePlanArgs = {
 			title: 'New IDs Plan',
 			swarm_id: 'regression',
@@ -234,6 +236,8 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 				},
 			],
 			working_directory: tmpDir,
+			removed_task_ids: ['1.1', '1.2', '2.1'],
+			removal_reason: 'regression test: replace task set entirely',
 		};
 
 		const result = await executeSavePlan(newIdsPlan);

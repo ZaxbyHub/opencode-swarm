@@ -14,12 +14,12 @@ import {
 
 // Mock the checkpoint module
 jest.mock('../../../src/tools/checkpoint.js', () => ({
-	checkpoint: {
-		execute: jest.fn(),
-	},
+	saveCheckpointRecord: jest.fn(),
 }));
 
-import { checkpoint } from '../../../src/tools/checkpoint.js';
+import * as checkpointModule from '../../../src/tools/checkpoint.js';
+
+const { saveCheckpointRecord } = checkpointModule;
 
 describe('handleDebuggingSpiral', () => {
 	let tempDir: string;
@@ -61,9 +61,7 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -82,36 +80,10 @@ describe('handleDebuggingSpiral', () => {
 			);
 			expect(event.confidence).toBe('HIGH');
 		});
-
-		test.skip('continues when event logging fails (non-fatal)', async () => {
-			const match: AdversarialPatternMatch = {
-				pattern: 'DEBUGGING_SPIRAL',
-				severity: 'HIGH',
-				matchedText: 'Test spiral',
-				confidence: 'HIGH',
-			};
-
-			// Mock checkpoint to succeed
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
-
-			// Call with invalid directory - should not throw
-			const result = await handleDebuggingSpiral(
-				match,
-				'1.1',
-				'/nonexistent/path',
-			);
-
-			// Should still return valid result
-			expect(result.eventLogged).toBe(true);
-			expect(result.checkpointCreated).toBe(true);
-			expect(result.message).toBeDefined();
-		});
 	});
 
 	describe('2. handleDebuggingSpiral creates checkpoint', () => {
-		test('calls checkpoint.execute with save action', async () => {
+		test('calls saveCheckpointRecord with label and directory', async () => {
 			const match: AdversarialPatternMatch = {
 				pattern: 'DEBUGGING_SPIRAL',
 				severity: 'HIGH',
@@ -120,20 +92,19 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
-			// Verify checkpoint.execute was called
-			expect(checkpoint.execute).toHaveBeenCalledTimes(1);
+			// Verify saveCheckpointRecord was called
+			expect(saveCheckpointRecord).toHaveBeenCalledTimes(1);
 
-			const callArgs = (checkpoint.execute as jest.Mock).mock.calls[0];
-			expect(callArgs[0]).toEqual({
-				action: 'save',
-				label: expect.any(String),
-			});
+			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const label = callArgs[0];
+			const directory = callArgs[1];
+
+			expect(label).toMatch(/^spiral-1\.1-\d+$/);
+			expect(directory).toBe(tempDir);
 		});
 
 		test('sets checkpointCreated to true when checkpoint succeeds', async () => {
@@ -145,9 +116,7 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to succeed
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -163,9 +132,10 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to fail
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: false, error: 'No changes to save' }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({
+				success: false,
+				error: 'No changes to save',
+			});
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -182,9 +152,7 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -206,9 +174,7 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -223,9 +189,7 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: false }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: false });
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -240,9 +204,7 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
 
@@ -256,7 +218,7 @@ describe('handleDebuggingSpiral', () => {
 	});
 
 	describe('4. Checkpoint failure is non-fatal', () => {
-		test('does not throw when checkpoint.execute throws', async () => {
+		test('does not throw when saveCheckpointRecord throws', async () => {
 			const match: AdversarialPatternMatch = {
 				pattern: 'DEBUGGING_SPIRAL',
 				severity: 'HIGH',
@@ -265,9 +227,9 @@ describe('handleDebuggingSpiral', () => {
 			};
 
 			// Mock checkpoint to throw
-			(checkpoint.execute as jest.Mock).mockRejectedValue(
-				new Error('Checkpoint service unavailable'),
-			);
+			(saveCheckpointRecord as jest.Mock).mockImplementation(() => {
+				throw new Error('Checkpoint service unavailable');
+			});
 
 			// Should not throw
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
@@ -278,7 +240,7 @@ describe('handleDebuggingSpiral', () => {
 			expect(result.eventLogged).toBe(true);
 		});
 
-		test('does not throw when checkpoint returns invalid JSON', async () => {
+		test('does not throw when checkpoint returns invalid result', async () => {
 			const match: AdversarialPatternMatch = {
 				pattern: 'DEBUGGING_SPIRAL',
 				severity: 'HIGH',
@@ -286,8 +248,8 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			// Mock checkpoint to return invalid JSON
-			(checkpoint.execute as jest.Mock).mockResolvedValue('invalid json');
+			// Mock checkpoint to return undefined (falsy)
+			(saveCheckpointRecord as jest.Mock).mockReturnValue(null);
 
 			// Should not throw
 			const result = await handleDebuggingSpiral(match, '1.1', tempDir);
@@ -296,28 +258,6 @@ describe('handleDebuggingSpiral', () => {
 			expect(result.checkpointCreated).toBe(false);
 			expect(result.message).toBeDefined();
 			expect(result.eventLogged).toBe(true);
-		});
-
-		test.skip('continues even when both event logging and checkpoint fail', async () => {
-			const match: AdversarialPatternMatch = {
-				pattern: 'DEBUGGING_SPIRAL',
-				severity: 'HIGH',
-				matchedText: 'Test spiral',
-				confidence: 'HIGH',
-			};
-
-			// Both should fail
-			(checkpoint.execute as jest.Mock).mockRejectedValue(
-				new Error('Service unavailable'),
-			);
-
-			// Should not throw
-			const result = await handleDebuggingSpiral(match, '1.1', '/nonexistent');
-
-			// Should return valid result
-			expect(result.eventLogged).toBe(true); // Returns true even on failure
-			expect(result.checkpointCreated).toBe(false);
-			expect(result.message).toBeDefined();
 		});
 	});
 
@@ -330,14 +270,12 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			await handleDebuggingSpiral(match, '5.7.1', tempDir);
 
-			const callArgs = (checkpoint.execute as jest.Mock).mock.calls[0];
-			const label = callArgs[0].label;
+			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const label = callArgs[0];
 
 			// Check format: spiral-{taskId}-{timestamp}
 			expect(label).toMatch(/^spiral-5\.7\.1-\d+$/);
@@ -351,14 +289,12 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			await handleDebuggingSpiral(match, '1.1', tempDir);
 
-			const callArgs = (checkpoint.execute as jest.Mock).mock.calls[0];
-			const label = callArgs[0].label;
+			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const label = callArgs[0];
 			const timestampPart = label.split('-')[2];
 			const timestamp = parseInt(timestampPart, 10);
 
@@ -375,14 +311,12 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'HIGH',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '3.2', tempDir);
 
-			const callArgs = (checkpoint.execute as jest.Mock).mock.calls[0];
-			const label = callArgs[0].label;
+			const callArgs = (saveCheckpointRecord as jest.Mock).mock.calls[0];
+			const label = callArgs[0];
 
 			expect(result.message).toContain(`✓ Auto-checkpoint created: ${label}`);
 		});
@@ -397,9 +331,7 @@ describe('handleDebuggingSpiral', () => {
 				confidence: 'MEDIUM',
 			};
 
-			(checkpoint.execute as jest.Mock).mockResolvedValue(
-				JSON.stringify({ success: true }),
-			);
+			(saveCheckpointRecord as jest.Mock).mockReturnValue({ success: true });
 
 			const result = await handleDebuggingSpiral(match, '5.7', tempDir);
 
@@ -425,7 +357,7 @@ describe('handleDebuggingSpiral', () => {
 			expect(event.taskId).toBe('5.7');
 
 			// Verify checkpoint was called
-			expect(checkpoint.execute).toHaveBeenCalledTimes(1);
+			expect(saveCheckpointRecord).toHaveBeenCalledTimes(1);
 		});
 	});
 });

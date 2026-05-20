@@ -4,10 +4,12 @@
  * Discovers and runs build commands for various ecosystems in a project directory.
  */
 
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { type BuildCommand, discoverBuildCommands } from '../build/discovery';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
+import { bunSpawn } from '../utils/bun-compat';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -152,8 +154,7 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 		args = ['-c', command.command];
 	}
 
-	const result = Bun.spawn({
-		cmd: [...cmd, ...args],
+	const result = bunSpawn([...cmd, ...args], {
 		cwd: command.cwd,
 		stdout: 'pipe',
 		stderr: 'pipe',
@@ -166,8 +167,8 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 	// the process never exited.
 	const [exitCode, stdout, stderr] = await Promise.all([
 		result.exited,
-		new Response(result.stdout).text(),
-		new Response(result.stderr).text(),
+		result.stdout.text(),
+		result.stderr.text(),
 	]);
 
 	const duration_ms = Date.now() - startTime;
@@ -269,16 +270,16 @@ export const build_check: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Discover and run build commands for various ecosystems in a project directory. Supports build, typecheck, and test commands.',
 	args: {
-		scope: tool.schema
+		scope: z
 			.enum(['changed', 'all'])
 			.describe(
 				'Scope of detection: "all" for all build files, "changed" for only changed files',
 			),
-		changed_files: tool.schema
-			.array(tool.schema.string())
+		changed_files: z
+			.array(z.string())
 			.optional()
 			.describe('List of changed files when scope is "changed"'),
-		mode: tool.schema
+		mode: z
 			.enum(['build', 'typecheck', 'both'])
 			.optional()
 			.describe(

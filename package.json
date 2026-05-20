@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "6.85.3",
+	"version": "7.24.1",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -9,7 +9,7 @@
 	},
 	"type": "module",
 	"engines": {
-		"bun": ">=1.0.0"
+		"bun": ">=1.3.13"
 	},
 	"license": "MIT",
 	"repository": {
@@ -38,19 +38,21 @@
 	],
 	"scripts": {
 		"clean": "bun -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target bun --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external bash-parser && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome lint .",
 		"format": "biome format . --write",
 		"check": "biome check --write .",
 		"dev": "bun run build && opencode",
-		"prepublishOnly": "bun run build"
+		"prepublishOnly": "bun run build",
+		"repro:704": "node scripts/repro-704.mjs"
 	},
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.1.53",
 		"@opencode-ai/sdk": "^1.1.53",
 		"@vscode/tree-sitter-wasm": "^0.3.0",
+		"bash-parser": "^0.5.0",
 		"p-limit": "^7.3.0",
 		"picomatch": "^4.0.4",
 		"proper-lockfile": "^4.1.2",

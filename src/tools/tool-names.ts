@@ -23,7 +23,8 @@ export type ToolName =
 	| 'evidence_check'
 	| 'check_gate_status'
 	| 'completion_verify'
-	| 'convene_council'
+	| 'submit_council_verdicts'
+	| 'submit_phase_council_verdicts'
 	| 'declare_council_criteria'
 	| 'sbom_generate'
 	| 'checkpoint'
@@ -62,7 +63,22 @@ export type ToolName =
 	| 'get_qa_gate_profile'
 	| 'set_qa_gates'
 	| 'web_search'
-	| 'convene_general_council';
+	| 'convene_general_council'
+	| 'write_final_council_evidence'
+	| 'skill_generate'
+	| 'skill_list'
+	| 'skill_apply'
+	| 'skill_inspect'
+	| 'skill_improve'
+	| 'spec_write'
+	| 'knowledge_ack'
+	| 'swarm_command'
+	| 'lean_turbo_plan_lanes'
+	| 'lean_turbo_acquire_locks'
+	| 'lean_turbo_runner_status'
+	| 'lean_turbo_review'
+	| 'lean_turbo_run_phase'
+	| 'lean_turbo_status';
 
 /** Readonly array of all tool names */
 export const TOOL_NAMES: readonly ToolName[] = [
@@ -84,7 +100,8 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'evidence_check',
 	'check_gate_status',
 	'completion_verify',
-	'convene_council',
+	'submit_council_verdicts',
+	'submit_phase_council_verdicts',
 	'declare_council_criteria',
 	'sbom_generate',
 	'checkpoint',
@@ -124,6 +141,21 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'set_qa_gates',
 	'web_search',
 	'convene_general_council',
+	'write_final_council_evidence',
+	'skill_generate',
+	'skill_list',
+	'skill_apply',
+	'skill_inspect',
+	'skill_improve',
+	'spec_write',
+	'knowledge_ack',
+	'swarm_command',
+	'lean_turbo_plan_lanes',
+	'lean_turbo_acquire_locks',
+	'lean_turbo_runner_status',
+	'lean_turbo_review',
+	'lean_turbo_run_phase',
+	'lean_turbo_status',
 ] as const;
 
 /** Set for O(1) tool name validation */

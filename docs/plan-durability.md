@@ -11,25 +11,92 @@
 | `.swarm/plan-ledger.jsonl` | Durable runtime record of all plan events | **Authoritative** — append-only, never delete |
 | `.swarm/plan.json` | Machine-readable projection of current plan state | Derived — can be rebuilt from ledger |
 | `.swarm/plan.md` | Human-readable plan view | Derived — generated from plan.json |
-| `SWARM_PLAN.md` | Operator checkpoint artifact | Export-only — not live source of truth |
-| `SWARM_PLAN.json` | Machine-readable checkpoint artifact | Export-only — for import/export workflows |
+| `.swarm/SWARM_PLAN.md` | Operator checkpoint artifact | Export-only — not live source of truth |
+| `.swarm/SWARM_PLAN.json` | Machine-readable checkpoint artifact | Export-only — for import/export workflows |
+
+> **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/` instead of the project root. The `/swarm close` command cleans up both locations during the transition window.
 
 ### Ledger Event Types
 
 ```json
 {"type":"plan_created","phase":1,"data":{...},"ts":"ISO8601"}
 {"type":"task_added","taskId":"1.1","data":{...},"ts":"ISO8601"}
+{"type":"task_removed","taskId":"1.1","phase_id":1,"from_status":"pending","source":"save_plan_tool","payload":{"reason":"...","source":"..."},"ts":"ISO8601"}
 {"type":"task_updated","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_status_changed","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_reordered","taskId":"1.1","afterTaskId":"1.2","ts":"ISO8601"}
 {"type":"phase_completed","phase":1,"ts":"ISO8601"}
 {"type":"snapshot","data":{"plan":{...},"payload_hash":"abc123"},"ts":"ISO8601"}
 {"type":"plan_rebuilt","ts":"ISO8601"}
-{"type":"plan_exported","path":"SWARM_PLAN.json","ts":"ISO8601"}
+{"type":"plan_exported","path":".swarm/SWARM_PLAN.json","ts":"ISO8601"}
 {"type":"plan_reset","ts":"ISO8601"}
 {"type":"execution_profile_set","data":{"execution_profile":{...}},"ts":"ISO8601"}
 {"type":"execution_profile_locked","ts":"ISO8601"}
 ```
+
+### Task removal contract (v7.19.0+)
+
+As of v7.19.0 (issue #853), `savePlan` is non-destructive by default. Any
+task present in the prior plan but absent from the incoming plan must be
+acknowledged explicitly via `options.acknowledged_removals.ids` with a
+non-empty `reason`. Unacknowledged removals throw
+`PlanTaskRemovalNotAcknowledgedError`.
+
+- The architect-facing `save_plan` tool exposes three optional args:
+  `removed_task_ids`, `removal_reason`, and `confirm_destructive_reset`.
+  The tool layer rejects (`PLAN_TASK_REMOVAL_NOT_ACKNOWLEDGED`) before
+  reaching the manager when an acknowledgement is missing or invalid.
+- Recovery paths use `savePlanWithAutoAcknowledgedRemovals(dir, plan,
+  source, reason)`, which diffs on-disk vs incoming and auto-populates
+  `acknowledged_removals`. Callers: `loadPlan` migrate-from-md, ledger
+  replay rebuild, approved-snapshot recovery, `importCheckpoint`,
+  `phase-complete` rebuild.
+- Source tags identify the caller on each `task_removed` event:
+  `save_plan_tool`, `load_plan_migration_from_md`,
+  `load_plan_rebuild_from_ledger`,
+  `load_plan_recovery_from_approved_snapshot`, `import_checkpoint`,
+  `phase_complete_rebuild_from_ledger`.
+
+### Replay semantics
+
+`task_added` is audit-only on replay (the corresponding task already lives
+in the `plan_created`/`snapshot` payload). `task_removed` is **functional**
+on replay: `applyEventToPlan` splices the task out of the active phase.
+This is required for crash-window durability — the ledger event is
+committed before the atomic `plan.json` rename, so a process death between
+the two leaves `plan.json` stale. Rebuild-from-ledger therefore has to
+honour the removal; otherwise the resurrected task silently violates the
+exact durability invariant this audit chain exists to enforce. The event's
+`plan_hash_after` matches the post-removal plan, so determinism is
+preserved.
+
+### Schema version
+
+`LEDGER_SCHEMA_VERSION` was bumped from `1.0.0` → `1.1.0` with the
+addition of `task_removed`. Older plugin readers throw on unknown event
+types (the `applyEventToPlan` default branch). After upgrading, restart
+any running OpenCode session so the new in-memory reader is loaded —
+otherwise the first `task_removed` event written by the new plugin will
+break ledger replay in the legacy process.
+
+### Spec drift surfacing (v7.19.0+)
+
+Three independent layers surface `.swarm/spec-staleness.json` proactively:
+
+- **Layer A** (`src/hooks/system-enhancer.ts`,
+  `buildSpecDriftAdvisory`): injects `[spec-drift]` system-prompt
+  guidance after every `loadPlan` call inside
+  `experimental.chat.system.transform`. Survives the single-system-
+  message collapse. Discloses any `_midLoadRemovals` attached by recovery
+  paths.
+- **Layer B** (`src/hooks/guardrails.ts`, `enforceSpecDriftGate`):
+  structurally blocks the `SPEC_DRIFT_BLOCKED_TOOLS` set (`save_plan`,
+  `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
+  `lean_turbo_acquire_locks`) while the staleness file exists. No cache
+  — `/swarm acknowledge-spec-drift` is reflected immediately.
+- **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
+  a `**Spec drift detected**` line with stored/current hashes and the
+  resolution commands.
 
 ## Rebuild / Import / Export
 
@@ -45,10 +112,10 @@ loadPlan()
 
 ### Import
 
-`importCheckpoint()` reads `SWARM_PLAN.json` → validates schema → calls `savePlan()` → appends `plan_rebuilt` event to ledger.
+`importCheckpoint()` reads `.swarm/SWARM_PLAN.json` (falling back to a legacy root-level `SWARM_PLAN.json` with a deprecation warning) → validates schema → calls `savePlan()` → appends `plan_rebuilt` event to ledger.
 
 ```
-importCheckpoint(SWARM_PLAN.json)
+importCheckpoint(.swarm/SWARM_PLAN.json)
   → validateSchema()
   → savePlan(planData)
   → append {type:"plan_rebuilt"} to plan-ledger.jsonl
@@ -61,7 +128,7 @@ importCheckpoint(SWARM_PLAN.json)
 - `phase_complete` command  
 - `/swarm close` command
 
-Writes `SWARM_PLAN.md` and `SWARM_PLAN.json` to the working directory.
+Writes `.swarm/SWARM_PLAN.md` and `.swarm/SWARM_PLAN.json` inside the working directory's `.swarm/` folder.
 
 ## Snapshot System
 
@@ -129,7 +196,7 @@ once pre-check succeeds.
 - **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
 - **Hash coverage**: `execution_profile` is included in `computePlanHash`, so profile changes are always reflected in the ledger's `plan_hash_after` chain.
-- **All surfaces carry the profile**: snapshot events, checkpoint export (`SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
+- **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
 
 ### Lifecycle
 
@@ -149,7 +216,7 @@ once pre-check succeeds.
 | `plan.json` | ✅ Persisted in schema |
 | Ledger replay | ✅ Via `execution_profile_set` events |
 | Snapshot events | ✅ Embedded in Plan payload |
-| `SWARM_PLAN.json` checkpoint | ✅ Via full Plan payload |
+| `.swarm/SWARM_PLAN.json` checkpoint | ✅ Via full Plan payload |
 | `get_approved_plan` tool | ✅ Explicit `execution_profile` field |
 | Handoff data | ✅ In `HandoffData.execution_profile` |
 | Export data | ✅ In `ExportData.execution_profile` |

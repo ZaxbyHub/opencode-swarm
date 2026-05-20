@@ -1,6 +1,6 @@
 /**
  * Checkpoint artifact writer.
- * Writes SWARM_PLAN.md and SWARM_PLAN.json at the project root (not inside .swarm/).
+ * Writes SWARM_PLAN.md and SWARM_PLAN.json inside .swarm/.
  * Export-only — not a live runtime source of truth.
  * Called on: save_plan, phase completion, /swarm close.
  * NOT called on every task update.
@@ -9,10 +9,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { appendLedgerEvent } from '../plan/ledger';
-import { derivePlanMarkdown, loadPlan, savePlan } from './manager';
+import { derivePlanId } from '../plan/utils.js';
+import {
+	derivePlanMarkdown,
+	loadPlan,
+	savePlanWithAutoAcknowledgedRemovals,
+} from './manager';
 
 /**
- * Write SWARM_PLAN.json and SWARM_PLAN.md to the project root directory.
+ * Write SWARM_PLAN.json and SWARM_PLAN.md inside the .swarm/ directory under the project root.
  * Non-blocking: logs a warning on failure but never throws.
  * @param directory - The working directory (project root)
  */
@@ -21,8 +26,10 @@ export async function writeCheckpoint(directory: string): Promise<void> {
 		const plan = await loadPlan(directory);
 		if (!plan) return;
 
-		const jsonPath = path.join(directory, 'SWARM_PLAN.json');
-		const mdPath = path.join(directory, 'SWARM_PLAN.md');
+		const swarmDir = path.join(directory, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		const jsonPath = path.join(swarmDir, 'SWARM_PLAN.json');
+		const mdPath = path.join(swarmDir, 'SWARM_PLAN.md');
 
 		// Write JSON checkpoint
 		fs.writeFileSync(jsonPath, JSON.stringify(plan, null, 2), 'utf8');
@@ -48,7 +55,7 @@ export interface ImportCheckpointResult {
 }
 
 /**
- * Import a checkpoint from SWARM_PLAN.json at the project root.
+ * Import a checkpoint from .swarm/SWARM_PLAN.json (with backward-compat fallback to project root).
  * Validates the checkpoint against PlanSchema, persists it as the live plan
  * via savePlan, and appends a 'plan_rebuilt' ledger event.
  *
@@ -61,17 +68,39 @@ export async function importCheckpoint(
 	source?: string,
 ): Promise<ImportCheckpointResult> {
 	try {
-		const checkpointPath = path.join(directory, 'SWARM_PLAN.json');
-		const rawContent = fs.readFileSync(checkpointPath, 'utf8');
+		const swarmDirPath = path.join(directory, '.swarm', 'SWARM_PLAN.json');
+		const rootPath = path.join(directory, 'SWARM_PLAN.json');
+		let checkpointPath: string;
+		let rawContent: string;
+		if (fs.existsSync(swarmDirPath)) {
+			checkpointPath = swarmDirPath;
+			rawContent = fs.readFileSync(checkpointPath, 'utf8');
+		} else if (fs.existsSync(rootPath)) {
+			checkpointPath = rootPath;
+			rawContent = fs.readFileSync(checkpointPath, 'utf8');
+			console.warn(
+				'[checkpoint] importCheckpoint: using legacy root-level SWARM_PLAN.json. Consider running /swarm close to migrate.',
+			);
+		} else {
+			return {
+				success: false,
+				error: 'SWARM_PLAN.json not found in .swarm/ or project root',
+			};
+		}
 		const parsed = JSON.parse(rawContent);
 		const plan = PlanSchema.parse(parsed) as Plan;
 
-		await savePlan(directory, plan);
+		await savePlanWithAutoAcknowledgedRemovals(
+			directory,
+			plan,
+			'import_checkpoint',
+			'import external checkpoint',
+		);
 
 		await appendLedgerEvent(directory, {
 			event_type: 'plan_rebuilt',
 			source: source ?? 'external_reseed',
-			plan_id: `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_'),
+			plan_id: derivePlanId(plan),
 		});
 
 		return { success: true, plan };
@@ -82,3 +111,12 @@ export async function importCheckpoint(
 		};
 	}
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals = {
+	writeCheckpoint,
+	importCheckpoint,
+};

@@ -2,18 +2,24 @@ import * as child_process from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import packageJson from '../../package.json' with { type: 'json' };
+import { getPluginCachePaths } from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { compareVersions, readVersionCache } from './version-check.js';
+import { deferredWarnings } from './warning-buffer.js';
+
+const { version } = packageJson;
 
 /**
  * A single health check result.
  */
 export interface HealthCheck {
 	name: string;
-	status: '✅' | '❌';
+	status: '✅' | '❌' | '⚠️' | '⬜';
 	detail: string;
 }
 
@@ -782,6 +788,30 @@ export async function getDiagnoseData(
 ): Promise<DiagnoseData> {
 	const checks: HealthCheck[] = [];
 
+	// Check: Version (running) — surface npm staleness so users notice when
+	// opencode is loading a stale cached copy from ~/.cache/opencode/packages
+	// (issue #675). Pulls last-checked value from version-check cache file.
+	const versionCache = readVersionCache();
+	let versionDetail = version;
+	let versionStatus: HealthCheck['status'] = '✅';
+	if (versionCache?.npmLatest) {
+		const ageMs = Date.now() - versionCache.checkedAt;
+		const ageMin = Math.max(0, Math.round(ageMs / 60_000));
+		if (compareVersions(versionCache.npmLatest, version) > 0) {
+			versionStatus = '⚠️';
+			versionDetail =
+				`${version} (npm latest: ${versionCache.npmLatest}, checked ${ageMin}m ago) ` +
+				'— run `bunx opencode-swarm update` to refresh';
+		} else {
+			versionDetail = `${version} (npm latest: ${versionCache.npmLatest}, checked ${ageMin}m ago)`;
+		}
+	}
+	checks.push({
+		name: 'Version',
+		status: versionStatus,
+		detail: versionDetail,
+	});
+
 	// Check 1: Try structured plan (only if plan.json exists, no auto-migration)
 	const plan = await loadPlanJsonOnly(directory);
 
@@ -956,7 +986,56 @@ export async function getDiagnoseData(
 		});
 	}
 
-	const passCount = checks.filter((c) => c.status === '✅').length;
+	// Deferred Warnings check
+	if (deferredWarnings.length > 0) {
+		checks.push({
+			name: 'Deferred Warnings',
+			status: '⚠️',
+			detail: `${deferredWarnings.length} warning(s) deferred from init (run with verbose logs for details)`,
+		});
+	}
+
+	// Check: Plugin Caches — inventory of known OpenCode plugin cache locations.
+	// Shows which caches are present, what version is installed there, and which
+	// are absent. Helps users diagnose stale-cache issues (issue #675).
+	const cachePaths = getPluginCachePaths();
+	const cacheRows: string[] = [];
+	for (const cachePath of cachePaths) {
+		try {
+			if (!existsSync(cachePath)) {
+				cacheRows.push(`⬜ ${cachePath} — absent`);
+				continue;
+			}
+			const pkgJsonPath = path.join(cachePath, 'package.json');
+			try {
+				const raw = readFileSync(pkgJsonPath, 'utf-8');
+				const parsed = JSON.parse(raw) as { version?: unknown };
+				const installedVersion =
+					typeof parsed.version === 'string' ? parsed.version : '?';
+				cacheRows.push(`✅ ${cachePath} — v${installedVersion}`);
+			} catch {
+				cacheRows.push(`⚠️ ${cachePath} — present (package.json unreadable)`);
+			}
+		} catch {
+			cacheRows.push(`⚠️ ${cachePath} — status unknown (read error)`);
+		}
+	}
+	const hasCacheEntry = cacheRows.some((r) => r.startsWith('✅'));
+	const hasCacheWarning = cacheRows.some((r) => r.startsWith('⚠️'));
+	const cacheStatus: HealthCheck['status'] = hasCacheWarning
+		? '⚠️'
+		: hasCacheEntry
+			? '✅'
+			: '⬜';
+	checks.push({
+		name: 'Plugin Caches',
+		status: cacheStatus,
+		detail: cacheRows.join(' | '),
+	});
+
+	const passCount = checks.filter(
+		(c) => c.status === '✅' || c.status === '⬜',
+	).length;
 	const totalCount = checks.length;
 	const allPassed = passCount === totalCount;
 
@@ -979,6 +1058,16 @@ export function formatDiagnoseMarkdown(diagnose: DiagnoseData): string {
 		'',
 		`**Result**: ${diagnose.allPassed ? '✅ All checks passed' : `⚠️ ${diagnose.passCount}/${diagnose.totalCount} checks passed`}`,
 	];
+
+	// Add Deferred Warnings section if any
+	if (deferredWarnings.length > 0) {
+		lines.push('');
+		lines.push('## Deferred Warnings');
+		lines.push('');
+		for (const warning of deferredWarnings) {
+			lines.push(`- ${warning}`);
+		}
+	}
 
 	return lines.join('\n');
 }

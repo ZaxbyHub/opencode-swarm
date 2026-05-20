@@ -1,6 +1,7 @@
 import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { checkpoint } from '../tools/checkpoint.js';
+import type { ToolResult } from '../tools/create-tool';
 
 const CheckpointResultSchema = z
 	.object({
@@ -12,9 +13,10 @@ const CheckpointResultSchema = z
 	.passthrough();
 
 function safeParseResult(
-	result: string,
+	result: ToolResult,
 ): z.infer<typeof CheckpointResultSchema> {
-	const parsed = CheckpointResultSchema.safeParse(JSON.parse(result));
+	const jsonStr = typeof result === 'string' ? result : result.output;
+	const parsed = CheckpointResultSchema.safeParse(JSON.parse(jsonStr));
 	if (!parsed.success) {
 		return {
 			success: false,

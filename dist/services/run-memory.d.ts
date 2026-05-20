@@ -58,9 +58,31 @@ export declare function getTaskHistory(directory: string, taskId: string): Promi
  */
 export declare function getFailures(directory: string): Promise<RunMemoryEntry[]>;
 /**
+ * Group entries by taskId
+ */
+declare function groupByTaskId(entries: RunMemoryEntry[]): Map<string, RunMemoryEntry[]>;
+/**
+ * Build a summary line for a single task
+ */
+declare function summarizeTask(taskId: string, entries: RunMemoryEntry[]): string | null;
+/**
  * Generate a compact summary of task failures for context injection
  *
  * @param directory - The swarm workspace directory
  * @returns Formatted summary string (≤500 tokens) or null if no failures
  */
 export declare function getRunMemorySummary(directory: string): Promise<string | null>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    generateTaskFingerprint: typeof generateTaskFingerprint;
+    recordOutcome: typeof recordOutcome;
+    getTaskHistory: typeof getTaskHistory;
+    getFailures: typeof getFailures;
+    getRunMemorySummary: typeof getRunMemorySummary;
+    groupByTaskId: typeof groupByTaskId;
+    summarizeTask: typeof summarizeTask;
+};
+export {};

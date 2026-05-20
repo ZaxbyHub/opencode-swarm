@@ -71,6 +71,23 @@ mock.module('../../../src/git/branch.js', () => ({
 	getCurrentBranch: () => 'main',
 	getDefaultBaseBranch: () => 'origin/main',
 	hasUncommittedChanges: () => false,
+	resetToRemoteBranch: () => ({
+		success: true,
+		targetBranch: 'main',
+		localBranch: 'main',
+		message: 'Already aligned with remote',
+		alreadyAligned: true,
+		prunedBranches: [],
+		warnings: [],
+	}),
+	resetToMainAfterMerge: () => ({
+		success: true,
+		targetBranch: 'origin/main',
+		previousBranch: 'main',
+		message: 'Already on main',
+		branchDeleted: false,
+		warnings: [],
+	}),
 }));
 
 mock.module('../../../src/plan/checkpoint.js', () => ({
@@ -79,6 +96,28 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand } = await import('../../../src/commands/close.js');
+
+// ── DI Conversion Summary ────────────────────────────────────────────
+//
+// WITHIN-MODULE MOCKS: NONE POSSIBLE
+// close.ts imports all functions directly (flushPendingSnapshot, swarmState,
+// resetSwarmState, archiveEvidence, executeWriteRetro, curateAndStoreSwarm) and
+// does NOT route any through _internals. The _internals DI seam only works when
+// the consuming module uses _internals (e.g., full-auto-intercept.ts imports
+// state._internals directly). Since close.ts has no _internals usage, none of
+// its imports can be intercepted via _internals.
+//
+// CROSS-MODULE MOCKS: All mocks remain as mock.module
+// - executeWriteRetro (tools/write-retro.ts)
+// - curateAndStoreSwarm (hooks/knowledge-curator.ts)
+// - archiveEvidence (evidence/manager.ts) — not in manager._internals
+// - flushPendingSnapshot (session/snapshot-writer.ts) — close.ts imports directly
+// - swarmState + resetSwarmState (state.ts) — close.ts imports directly
+// - isGitRepo + resetToRemoteBranch (git/branch.ts)
+// - writeCheckpoint (plan/checkpoint.ts)
+//
+// All mock.module calls require afterEach(mock.restore()) cleanup.
+// ─────────────────────────────────────────────────────────────────────
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -127,6 +166,8 @@ describe('handleCloseCommand — finalizer stages', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		// Restore all mock.module mocks to prevent cross-test pollution
+		mock.restore();
 	});
 
 	// ── STAGE 2: ARCHIVE ─────────────────────────────────────────────
@@ -220,6 +261,46 @@ describe('handleCloseCommand — finalizer stages', () => {
 			for (const f of activeFilesRemoved) {
 				expect(existsSync(path.join(swarmDir(), f))).toBe(false);
 			}
+		});
+
+		it('removes root-level SWARM_PLAN.json and SWARM_PLAN.md after close', async () => {
+			writePlan();
+			// Create root-level SWARM_PLAN checkpoint artifacts (legacy
+			// location — close still cleans these for backward compatibility
+			// during the transition window).
+			writeFileSync(path.join(testDir, 'SWARM_PLAN.json'), '{"title":"Test"}');
+			writeFileSync(path.join(testDir, 'SWARM_PLAN.md'), '# Test Plan');
+
+			await handleCloseCommand(testDir, []);
+
+			// Root-level SWARM_PLAN artifacts must be removed
+			expect(existsSync(path.join(testDir, 'SWARM_PLAN.json'))).toBe(false);
+			expect(existsSync(path.join(testDir, 'SWARM_PLAN.md'))).toBe(false);
+		});
+
+		it('removes .swarm/SWARM_PLAN.json and .swarm/SWARM_PLAN.md after close', async () => {
+			writePlan();
+			// Create canonical .swarm/-level SWARM_PLAN checkpoint artifacts
+			writeFileSync(
+				path.join(swarmDir(), 'SWARM_PLAN.json'),
+				'{"title":"Test"}',
+			);
+			writeFileSync(path.join(swarmDir(), 'SWARM_PLAN.md'), '# Test Plan');
+
+			await handleCloseCommand(testDir, []);
+
+			// .swarm/-level SWARM_PLAN artifacts must be removed
+			expect(existsSync(path.join(swarmDir(), 'SWARM_PLAN.json'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'SWARM_PLAN.md'))).toBe(false);
+		});
+
+		it('SWARM_PLAN cleanup is non-blocking — close succeeds even if removal fails', async () => {
+			writePlan();
+
+			const result = await handleCloseCommand(testDir, []);
+
+			// Close should succeed even if no SWARM_PLAN files exist to clean
+			expect(result).toContain('finalized');
 		});
 
 		it('future swarms start from clean state — no stale plan.json or events.jsonl', async () => {

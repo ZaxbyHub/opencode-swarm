@@ -103,6 +103,16 @@ export function isStaticallyEquivalent(
 	return strippedOriginal === strippedMutated;
 }
 
+export const _internals: {
+	isStaticallyEquivalent: typeof isStaticallyEquivalent;
+	checkEquivalence: typeof checkEquivalence;
+	batchCheckEquivalence: typeof batchCheckEquivalence;
+} = {
+	isStaticallyEquivalent,
+	checkEquivalence,
+	batchCheckEquivalence,
+} as const;
+
 /**
  * Check a single mutant for equivalence using two-stage approach.
  * Stage 1: static analysis. Stage 2: LLM judge (if provided and Stage 1 didn't determine equivalence).
@@ -164,7 +174,7 @@ export async function batchCheckEquivalence(
 
 	for (const { patch, originalCode, mutatedCode } of patches) {
 		try {
-			const result = await checkEquivalence(
+			const result = await _internals.checkEquivalence(
 				patch,
 				originalCode,
 				mutatedCode,

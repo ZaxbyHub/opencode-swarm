@@ -12,6 +12,11 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../state';
+import {
+	addTelemetryListener,
+	initTelemetry,
+	resetTelemetryForTesting,
+} from '../telemetry';
 import { createDelegationGateHook } from './delegation-gate';
 
 function makeConfig(): PluginConfig {
@@ -34,15 +39,22 @@ function makeConfig(): PluginConfig {
 describe('delegation-gate: cross-session seed-state fix', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		resetTelemetryForTesting();
+		initTelemetry(process.cwd());
 	});
 
 	afterEach(() => {
 		resetSwarmState();
+		resetTelemetryForTesting();
 	});
 
 	it('reviewer delegation seeds task state in new sessions with empty Maps', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
+		const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+		addTelemetryListener((event, data) => {
+			events.push({ event, data });
+		});
 
 		// Session-1 is the originating (architect) session that knows about the task
 		const session1 = ensureAgentSession('session-1');
@@ -72,6 +84,12 @@ describe('delegation-gate: cross-session seed-state fix', () => {
 		// Session-2 should have been seeded and then advanced to reviewer_run
 		const session2 = swarmState.agentSessions.get('session-2')!;
 		expect(getTaskState(session2, '1.1')).toBe('reviewer_run');
+		const mirroredSessionEvents = events.filter(
+			(entry) =>
+				entry.event === 'task_state_changed' &&
+				entry.data.sessionId === 'session-2',
+		);
+		expect(mirroredSessionEvents).toHaveLength(0);
 	});
 
 	it('test_engineer delegation seeds task state in new sessions with empty Maps', async () => {

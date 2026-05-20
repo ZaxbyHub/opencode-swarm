@@ -29,15 +29,20 @@ describe('/swarm promote Command Registration', () => {
 	// Saved env vars for hive path isolation
 	let savedLocalAppData: string | undefined;
 	let savedXdgDataHome: string | undefined;
+	let savedHome: string | undefined;
 
 	beforeEach(() => {
 		tempDir = createTempDir();
 		// Redirect hive knowledge path to tempDir to isolate from global state.
-		// resolveHiveKnowledgePath() reads LOCALAPPDATA (win32) or XDG_DATA_HOME (linux) at call time.
+		// resolveHiveKnowledgePath() reads LOCALAPPDATA (win32), XDG_DATA_HOME (linux),
+		// or os.homedir() (darwin) at call time.
 		if (process.platform === 'win32') {
 			savedLocalAppData = process.env.LOCALAPPDATA;
 			process.env.LOCALAPPDATA = tempDir;
-		} else if (process.platform !== 'darwin') {
+		} else if (process.platform === 'darwin') {
+			savedHome = process.env.HOME;
+			process.env.HOME = tempDir;
+		} else {
 			savedXdgDataHome = process.env.XDG_DATA_HOME;
 			process.env.XDG_DATA_HOME = tempDir;
 		}
@@ -59,7 +64,13 @@ describe('/swarm promote Command Registration', () => {
 			} else {
 				delete process.env.LOCALAPPDATA;
 			}
-		} else if (process.platform !== 'darwin') {
+		} else if (process.platform === 'darwin') {
+			if (savedHome !== undefined) {
+				process.env.HOME = savedHome;
+			} else {
+				delete process.env.HOME;
+			}
+		} else {
 			if (savedXdgDataHome !== undefined) {
 				process.env.XDG_DATA_HOME = savedXdgDataHome;
 			} else {

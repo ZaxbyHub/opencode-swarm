@@ -40,11 +40,30 @@ export {
 	ReviewEvidenceSchema,
 	TestEvidenceSchema,
 } from './evidence-schema';
+
+// Re-export loaders for DI seam
 export {
 	loadAgentPrompt,
 	loadPluginConfig,
 	loadPluginConfigWithMeta,
+	loadPluginConfigWithMetaAsync,
 } from './loader';
+
+// Import for local use (required for _internals)
+import { loadPluginConfigWithMeta } from './loader';
+
+/**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ *
+ * Note: functions are re-exported from ./loader so tests mocking index.js
+ * can substitute at this level without touching the loader module directly.
+ */
+export const _internals: {
+	loadPluginConfigWithMeta: typeof loadPluginConfigWithMeta;
+} = { loadPluginConfigWithMeta };
 export type {
 	MigrationStatus,
 	Phase,
@@ -68,20 +87,24 @@ export type {
 	AutomationCapabilities,
 	AutomationConfig,
 	AutomationMode,
+	LeanTurboConfig,
 	PhaseCompleteConfig,
 	PipelineConfig,
 	PluginConfig,
 	SwarmConfig,
+	TurboConfig,
 } from './schema';
 export {
 	AgentOverrideConfigSchema,
 	AutomationCapabilitiesSchema,
 	AutomationConfigSchema,
 	AutomationModeSchema,
+	LeanTurboConfigSchema,
 	PhaseCompleteConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
 	SwarmConfigSchema,
+	TurboConfigSchema,
 } from './schema';
 export type {
 	DeltaSpec,

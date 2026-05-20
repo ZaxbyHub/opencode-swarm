@@ -15,8 +15,11 @@ export const ALL_SUBAGENT_NAMES = [
 	'critic_hallucination_verifier',
 	'curator_init',
 	'curator_phase',
-	'council_member',
-	'council_moderator',
+	'council_generalist',
+	'council_skeptic',
+	'council_domain_expert',
+	'skill_improver',
+	'spec_writer',
 	...QA_AGENTS,
 	...PIPELINE_AGENTS,
 ] as const;
@@ -39,6 +42,171 @@ export const OPENCODE_NATIVE_AGENTS = new Set([
 	'summary',
 ] as const);
 
+/**
+ * Claude Code built-in slash commands (without leading slash).
+ * Used by the cc-command-intercept hook to detect accidental CC command invocations
+ * inside swarm agent message streams.
+ *
+ * Source: https://code.claude.com/docs/en/commands (verified April 2026)
+ * Keep in sync with Claude Code releases. When adding a command here, check
+ * src/commands/conflict-registry.ts and update CLAUDE_CODE_CONFLICTS if the
+ * command also matches a swarm subcommand.
+ */
+function freezeSet<T>(items: readonly T[]): ReadonlySet<T> {
+	const set = new Set(items);
+	const proxy = new Proxy(set, {
+		get(target, prop) {
+			if (prop === 'add' || prop === 'delete' || prop === 'clear') {
+				return () => {
+					throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+				};
+			}
+			// Wrap forEach to prevent exposing the raw Set as callback's 3rd arg
+			if (prop === 'forEach') {
+				return (
+					callback: (value: T, key: T, set: ReadonlySet<T>) => void,
+					thisArg?: unknown,
+				) => {
+					const wrapped = (v: T, k: T) =>
+						callback.call(thisArg ?? (undefined as unknown), v, k, proxy);
+					return set.forEach(wrapped);
+				};
+			}
+			const value = Reflect.get(target, prop);
+			return typeof value === 'function' ? value.bind(target) : value;
+		},
+		set() {
+			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+		},
+		deleteProperty() {
+			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+		},
+		defineProperty() {
+			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+		},
+		setPrototypeOf() {
+			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+		},
+	});
+	return proxy;
+}
+
+export const CLAUDE_CODE_NATIVE_COMMANDS: ReadonlySet<string> = freezeSet([
+	// Session management
+	'clear',
+	'new',
+	'reset', // aliases for /clear
+	'resume',
+	'continue', // alias for /resume
+	'exit',
+	'quit', // aliases
+	'compact',
+	'fork',
+	'branch', // alias for /fork
+	'undo',
+	'checkpoint',
+	'rewind', // aliases for /rewind
+	'rename',
+	// Diagnostics & info
+	'doctor',
+	'help',
+	'status',
+	'statusline',
+	'cost',
+	'usage', // aliases
+	'stats',
+	'context',
+	'debug',
+	'insights',
+	'recap',
+	'release-notes',
+	'heapdump',
+	'powerup',
+	// Config & settings
+	'config',
+	'settings', // aliases
+	'model',
+	'effort',
+	'fast',
+	'theme',
+	'color',
+	'keybindings',
+	'privacy-settings',
+	'init',
+	'focus',
+	'sandbox',
+	'terminal-setup',
+	// Permissions & security
+	'permissions',
+	'allowed-tools', // aliases
+	'security-review',
+	'fewer-permission-prompts', // skill
+	// Plugins & integrations
+	'plugin',
+	'reload-plugins',
+	'hooks',
+	'mcp',
+	'ide',
+	'chrome',
+	'desktop',
+	'app', // alias for /desktop
+	'mobile',
+	'ios',
+	'android', // aliases for /mobile
+	'remote-control',
+	'rc', // aliases
+	'remote-env',
+	'login',
+	'logout',
+	// Skills & workflows
+	'review',
+	'pr-comments',
+	'agents',
+	'batch', // skill
+	'loop',
+	'proactive', // alias for /loop
+	'claude-api', // skill
+	'schedule',
+	'routines', // alias for /schedule
+	'autofix-pr',
+	// Plan & execution
+	'plan',
+	'diff',
+	'export',
+	'copy',
+	'feedback',
+	'bug', // aliases
+	'btw',
+	'add-dir',
+	// Memory & knowledge
+	'memory',
+	'skills',
+	'upgrade',
+	'vim',
+	'voice',
+	'extra-usage',
+	'install-github-app',
+	'install-slack-app',
+	'passes',
+	'setup-bedrock',
+	'install', // alias
+	'tasks',
+	'history',
+	'term',
+	'teleport',
+	'ultrareview',
+	'ultraplan',
+	'web-setup',
+	'setup-vertex',
+	'tui',
+	'simplify',
+	'summary',
+	'stickers',
+	'tp', // alias for /teleport
+	'team-onboarding',
+	'bashes', // alias for /tasks
+]);
+
 // Type definitions
 export type QAAgentName = (typeof QA_AGENTS)[number];
 export type PipelineAgentName = (typeof PIPELINE_AGENTS)[number];
@@ -51,7 +219,8 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'check_gate_status',
 		'completion_verify',
 		'complexity_hotspots',
-		'convene_council',
+		'submit_council_verdicts',
+		'submit_phase_council_verdicts',
 		'declare_council_criteria',
 		'detect_domains',
 		'evidence_check',
@@ -102,6 +271,21 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'get_qa_gate_profile',
 		'set_qa_gates',
 		'convene_general_council',
+		'web_search',
+		'write_final_council_evidence',
+		'skill_generate',
+		'skill_list',
+		'skill_apply',
+		'skill_inspect',
+		'skill_improve',
+		'knowledge_ack',
+		'swarm_command',
+		'lean_turbo_plan_lanes',
+		'lean_turbo_acquire_locks',
+		'lean_turbo_runner_status',
+		'lean_turbo_review',
+		'lean_turbo_run_phase',
+		'lean_turbo_status',
 	],
 	explorer: [
 		'complexity_hotspots',
@@ -118,6 +302,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'doc_scan',
 		'knowledge_recall',
 		'repo_map',
+		'swarm_command',
 	],
 	coder: [
 		'diff',
@@ -132,6 +317,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'knowledge_add',
 		'knowledge_recall',
 		'repo_map',
+		'swarm_command',
 	],
 	test_engineer: [
 		'test_runner',
@@ -147,6 +333,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'build_check',
 		'syntax_check',
 		'search',
+		'swarm_command',
 	],
 	sme: [
 		'complexity_hotspots',
@@ -155,8 +342,10 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'imports',
 		'retrieve_summary',
 		'schema_drift',
+		'search',
 		'symbols',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	reviewer: [
 		'diff',
@@ -179,6 +368,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'batch_symbols',
 		'suggest_patch',
 		'repo_map',
+		'swarm_command',
 	],
 	critic: [
 		'complexity_hotspots',
@@ -190,6 +380,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'req_coverage',
 		'get_approved_plan',
 		'repo_map',
+		'swarm_command',
 	],
 	critic_sounding_board: [
 		'complexity_hotspots',
@@ -226,12 +417,28 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'repo_map',
 	],
 	critic_oversight: [
+		// Read-only verification tools only. critic_oversight must never write,
+		// edit, patch, or mutate plan/evidence/gates — its output is a verdict.
+		'diff',
+		'diff_summary',
+		'evidence_check',
+		'check_gate_status',
+		'completion_verify',
+		'get_approved_plan',
+		'req_coverage',
+		'test_impact',
+		'pkg_audit',
+		'secretscan',
+		'sast_scan',
+		'repo_map',
+		'retrieve_summary',
+		'knowledge_recall',
+		'symbols',
+		'batch_symbols',
+		'search',
+		'imports',
 		'complexity_hotspots',
 		'detect_domains',
-		'imports',
-		'retrieve_summary',
-		'symbols',
-		'knowledge_recall',
 	],
 	docs: [
 		'detect_domains',
@@ -240,27 +447,60 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'imports',
 		'retrieve_summary',
 		'schema_drift',
+		'search',
 		'symbols',
 		'todo_extract',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	designer: [
 		'extract_code_blocks',
 		'retrieve_summary',
+		'search',
 		'symbols',
 		'knowledge_recall',
+		'swarm_command',
 	],
 	// Curator agents are read-only analysis roles — knowledge recall only
 	curator_init: ['knowledge_recall'],
 	curator_phase: ['knowledge_recall'],
-	// General Council member: web_search ONLY — no write tools, no orchestration tools.
-	// Member runs Round 1 independent search and Round 2 deliberation; the architect
-	// synthesizes via convene_general_council.
-	council_member: ['web_search'],
-	// General Council moderator: empty — synthesizes already-gathered member content.
-	// Does NOT need web_search; the moderator's job is to write the user-facing answer
-	// from the council's existing research, not to fact-check it with new searches.
-	council_moderator: [],
+	// General Council agents — synthesis-only voices that reason from the
+	// architect-supplied RESEARCH CONTEXT block. No tools at all: web_search
+	// is owned by the architect (one curated pre-search pass for all three
+	// agents), and synthesis is the architect's responsibility post-tool.
+	council_generalist: [],
+	council_skeptic: [],
+	council_domain_expert: [],
+	// v2: skill_improver — reviews knowledge/skills/spec/architect-prompt under
+	// daily quota. Default mode is proposal-only (no source mutation). May draft
+	// SKILL.md proposals when explicitly invoked with mode='draft_skills'.
+	skill_improver: [
+		'knowledge_recall',
+		'knowledge_query',
+		'skill_list',
+		'skill_inspect',
+		'skill_generate',
+		'skill_improve',
+		'search',
+		'doc_scan',
+		'doc_extract',
+		'web_search',
+	],
+	// v2: spec_writer — independent agent for authoring .swarm/spec.md. Has
+	// read tools and the safe spec_write tool only.
+	spec_writer: [
+		'search',
+		'knowledge_recall',
+		'knowledge_query',
+		'doc_scan',
+		'doc_extract',
+		'req_coverage',
+		'lint_spec',
+		'retrieve_summary',
+		'symbols',
+		'extract_code_blocks',
+		'spec_write',
+	],
 };
 
 /**
@@ -325,6 +565,8 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 		'write drift verification evidence for a completed phase',
 	write_hallucination_evidence:
 		'write hallucination verification evidence for a completed phase',
+	write_final_council_evidence:
+		'write final council evidence for project completion',
 	declare_scope: 'declare file scope for next coder delegation',
 	phase_complete: 'mark a phase as complete and track dispatched agents',
 	save_plan: 'save a structured implementation plan',
@@ -334,13 +576,16 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 		'run curator phase analysis and optionally apply knowledge recommendations',
 	knowledge_add: 'store a new lesson in the knowledge base',
 	knowledge_recall: 'search the knowledge base for relevant past decisions',
-	knowledge_remove: 'delete an outdated knowledge entry by ID',
+	knowledge_remove:
+		'delete an outdated swarm knowledge entry by ID (swarm tier only)',
 	knowledge_query: 'query swarm or hive knowledge with optional filters',
 	co_change_analyzer: 'detect hidden couplings by analyzing git history',
 	check_gate_status: 'check the gate status of a specific task',
 	completion_verify: 'verify completed tasks have required evidence',
-	convene_council:
-		'convene the Work Complete Council — parallel veto-aware verification gate across critic, reviewer, sme, test_engineer, and explorer verdicts',
+	submit_council_verdicts:
+		'submit pre-collected council member verdicts for synthesis (architect MUST dispatch critic/reviewer/sme/test_engineer/explorer as Agent tasks first; this tool synthesizes only, it does not contact members)',
+	submit_phase_council_verdicts:
+		'submit pre-collected phase-level council member verdicts for holistic phase synthesis (architect MUST dispatch all 5 council members with phase-scoped context first; this tool synthesizes only, it does not contact members)',
 	declare_council_criteria:
 		'pre-declare acceptance criteria for a task before the coder starts work; criteria are read back during council evaluation',
 	detect_domains: 'detect which SME domains are relevant for a given text',
@@ -351,9 +596,9 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	search:
 		'Workspace-scoped ripgrep-style text search with structured JSON output. Supports literal and regex modes, glob filtering, and result limits. NOTE: This is text search, not structural AST search — use symbols and imports tools for structural queries.',
 	web_search:
-		'External web search (Tavily or Brave) for General Council member agents. Returns titled results with snippets and URLs. Restricted to council_member agents via AGENT_TOOL_MAP. Config-gated on council.general.enabled; requires a search API key.',
+		'External web search (Tavily or Brave) for architect-driven council research. Returns titled results with snippets and URLs. Config-gated on council.general.enabled; requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents.',
 	convene_general_council:
-		'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, a structured synthesis, and an optional moderator prompt. Architect-only. Config-gated on council.general.enabled.',
+		'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled.',
 	batch_symbols:
 		'Batched symbol extraction across multiple files. Returns per-file symbol summaries with isolated error handling.',
 	suggest_patch:
@@ -364,11 +609,35 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	repo_map:
 		'query the repo code graph: importers, dependencies, blast radius, and localization context for structural awareness before refactoring',
 	get_qa_gate_profile:
-		'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review), lock state, and profile hash. Read-only.',
+		'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council), lock state, and profile hash. Read-only.',
 	set_qa_gates:
-		'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review.',
+		'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council.',
 	req_coverage:
 		'query requirement coverage status for tracked functional requirements',
+	skill_generate: 'compile knowledge entries into a structured SKILL.md draft',
+	skill_list: 'list generated skill files and their status',
+	skill_apply: 'activate a draft skill proposal',
+	skill_inspect: 'inspect the content and source entries of a skill file',
+	skill_improve: 'run the skill_improver agent to review and refine skills',
+	spec_write: 'author or update .swarm/spec.md for the current project',
+	knowledge_ack:
+		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
+	swarm_command:
+		'run supported /swarm commands through the canonical command registry',
+	lean_turbo_plan_lanes:
+		'partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution',
+	lean_turbo_acquire_locks:
+		'acquire file locks for all files in a lane (all-or-nothing) before lane execution',
+	lean_turbo_runner_status:
+		'read Lean Turbo run state from .swarm/turbo-state.json',
+	lean_turbo_review:
+		'dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase',
+	lean_turbo_run_phase:
+		'Execute a phase using Lean Turbo parallel lane execution. ' +
+		'Plans lanes, acquires file locks, and dispatches coder agents concurrently. ' +
+		'Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.',
+	lean_turbo_status:
+		'returns Lean Turbo configuration and active status for the current session',
 };
 
 // Runtime validation: ensure all tool names in AGENT_TOOL_MAP are registered
@@ -399,25 +668,101 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// SME, Critic variants, Docs, Designer — reasoning/general tasks
 	sme: 'opencode/big-pickle',
 	critic: 'opencode/big-pickle',
-	critic_sounding_board: 'opencode/big-pickle',
-	critic_drift_verifier: 'opencode/big-pickle',
-	critic_hallucination_verifier: 'opencode/big-pickle',
-	critic_oversight: 'opencode/big-pickle',
+	critic_sounding_board: 'opencode/gpt-5-nano',
+	critic_drift_verifier: 'opencode/gpt-5-nano',
+	critic_hallucination_verifier: 'opencode/gpt-5-nano',
+	critic_oversight: 'opencode/gpt-5-nano',
 	docs: 'opencode/big-pickle',
 	designer: 'opencode/big-pickle',
 
 	// Curator agents — lightweight read-only analysis (same model family as explorer)
-	curator_init: 'opencode/big-pickle',
-	curator_phase: 'opencode/big-pickle',
+	curator_init: 'opencode/gpt-5-nano',
+	curator_phase: 'opencode/gpt-5-nano',
 
-	// General Council agents — runtime model is overridden per-member by
-	// council.general.members[*].model and council.general.moderatorModel; these
-	// defaults are fallbacks only.
-	council_member: 'opencode/big-pickle',
-	council_moderator: 'opencode/big-pickle',
+	// v2: Skill improver — defaults to a strong reasoning model, but is gated
+	// behind skill_improver.enabled and a daily quota (issue #629).
+	skill_improver: 'opencode/big-pickle',
+
+	// v2: Spec writer — independent from architect so users can run a
+	// high-capability model on spec while keeping architect cheaper.
+	spec_writer: 'opencode/big-pickle',
 
 	// Fallback
 	default: 'opencode/big-pickle',
+};
+
+// Full agent configuration with model and fallback_models chains.
+// Used by install() and writeProjectConfigIfMissing() to populate default configs.
+// General Council agents (council_generalist, council_skeptic, council_domain_expert)
+// derive their models from reviewer/critic/sme entries and don't need separate entries.
+export const DEFAULT_AGENT_CONFIGS: Record<
+	string,
+	{ model: string; fallback_models: string[] }
+> = {
+	coder: {
+		model: 'opencode/minimax-m2.5-free',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	reviewer: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	test_engineer: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	explorer: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	sme: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	critic: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	docs: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	designer: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	critic_sounding_board: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	critic_drift_verifier: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	critic_hallucination_verifier: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	critic_oversight: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	curator_init: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	curator_phase: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	skill_improver: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
+	},
+	spec_writer: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
+	},
 };
 
 // Check if agent is in QA category
@@ -431,7 +776,7 @@ export function isSubagent(name: string): boolean {
 }
 
 import { deepMerge } from '../utils/merge';
-import type { ScoringConfig } from './schema';
+import type { LeanTurboConfig, ScoringConfig } from './schema';
 
 // Default scoring configuration
 export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
@@ -553,4 +898,41 @@ Behavioral changes:
 - The critic defaults to REJECT. Do not attempt to pressure, negotiate, or shortcut. Complete the evidence trail.
 - If the critic returns ESCALATE_TO_HUMAN, the session will pause or terminate. Only the critic can trigger this.
 - Do NOT ask "Ready for Phase N+1?" — call phase_complete directly. The critic reviews automatically.
+`;
+
+/**
+ * Canonical default Lean Turbo configuration.
+ *
+ * This is the single source of truth for all 9 LeanTurboConfig fields.
+ * Consumers MUST reference this constant instead of hardcoding their own
+ * defaults — see v7.4.x config-drift fix (3 of 9 fields disagreed across
+ * runner.ts, lean-turbo-plan-lanes.ts, lean-turbo-status.ts, and the
+ * Zod schema in schema.ts).
+ */
+export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
+	max_parallel_coders: 4,
+	require_declared_scope: true,
+	conflict_policy: 'serialize',
+	degrade_on_risk: true,
+	phase_reviewer: true,
+	phase_critic: true,
+	integrated_diff_required: true,
+	allow_docs_only_without_reviewer: false,
+	worktree_isolation: false,
+};
+
+export const LEAN_TURBO_BANNER = `## 🛤️ LEAN TURBO ACTIVE
+
+Lane-based parallel execution is enabled for this phase.
+
+Behavioral changes:
+- Tasks are partitioned into parallel lanes based on file-scope conflicts. Tasks in the same lane run sequentially; tasks in different lanes run concurrently (up to max_parallel_coders).
+- **Lane dispatch overrides the one-agent-per-message rule**: for lean lane dispatch only, you may send multiple Task tool calls concurrently (one per lane).
+- **Lane tasks skip per-task Stage B** (reviewer + test_engineer). Quality is enforced at phase-end via phase reviewer and critic gates instead.
+- **Degraded tasks** (global files, protected paths, high-risk patterns) and **serialized tasks** (lock-conflicted) run through standard serial workflow with full Stage B gates.
+- **Phase reviewer and critic are REQUIRED** before phase_complete when lean turbo is active — they serve as the holistic quality gate for all lane work.
+- **Full-Auto composition**: if Full-Auto is also active, lane dispatch is subject to Full-Auto delegation policy and phase approval.
+- Use the lean_turbo_run_phase tool to execute a phase with parallel lanes
+
+Do NOT skip phase reviewer/critic when configured. Degraded and serialized tasks MUST still go through full Stage B.
 `;

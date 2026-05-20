@@ -25,7 +25,6 @@ describe('6 Tools Registration Verification', () => {
 			it(`should export ${toolName} from tools/index.ts`, async () => {
 				const toolsIndex = await import('./index');
 				expect(toolsIndex).toHaveProperty(toolName);
-				// biome-ignore lint/suspicious/noExplicitAny: dynamic tool lookup
 				const tool = (toolsIndex as any)[toolName];
 				expect(tool).toBeDefined();
 			});
@@ -42,7 +41,6 @@ describe('6 Tools Registration Verification', () => {
 	describe('Tool structure verification', () => {
 		for (const toolName of SIX_TOOLS) {
 			it(`${toolName} should be callable (function or object with execute)`, async () => {
-				// biome-ignore lint/suspicious/noExplicitAny: dynamic tool lookup
 				const { [toolName]: tool } = (await import('./index')) as any;
 				expect(tool).toBeDefined();
 				const isCallable =

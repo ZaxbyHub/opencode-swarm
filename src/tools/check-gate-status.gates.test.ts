@@ -10,15 +10,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { check_gate_status } from './check-gate-status';
+import type { ToolResult } from './create-tool';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Helper to call tool execute with proper context (bypasses strict type requirements for testing)
 async function executeTool(
 	args: Record<string, unknown>,
 	directory: string,
 ): Promise<string> {
-	return check_gate_status.execute(args, {
+	const result = (await check_gate_status.execute(args, {
 		directory,
-	} as unknown as ToolContext);
+	} as unknown as ToolContext)) as unknown as ToolResult;
+	return resultToString(result);
 }
 
 let tmpDir: string;

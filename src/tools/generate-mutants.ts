@@ -5,7 +5,8 @@
  * On LLM failure, emits a SKIP verdict with a diagnostic message.
  */
 
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import type { MutationPatch } from '../mutation/engine.js';
 import { generateMutants } from '../mutation/generator.js';
 import { createSwarmTool } from './create-tool';
@@ -22,8 +23,8 @@ export const generate_mutants: ReturnType<typeof createSwarmTool> =
 		description:
 			'Generate LLM-based mutation testing patches for the specified source files. Returns MutationPatch[] for direct consumption by the mutation_test tool. On LLM failure or when no patches can be generated, returns a SKIP verdict with a diagnostic message rather than throwing.',
 		args: {
-			files: tool.schema
-				.array(tool.schema.string())
+			files: z
+				.array(z.string())
 				.describe(
 					'Array of source file paths to generate mutation patches for',
 				),

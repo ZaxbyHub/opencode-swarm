@@ -20,13 +20,14 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	checkFileAuthority,
 	isOnDifferentFilesystemRoot,
 } from '../../../src/hooks/guardrails';
 
-const TEST_CWD = '/test/project';
+const TEST_CWD = path.join(os.tmpdir(), 'test-project');
 
 describe('Codex P1 fix: declaredScope gated to coder agents only', () => {
 	const declaredScope = ['src/foo.ts'];

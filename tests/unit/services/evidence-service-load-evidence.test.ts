@@ -1,31 +1,22 @@
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
 	Evidence,
 	EvidenceBundle,
 } from '../../../src/config/evidence-schema';
 import type { LoadEvidenceResult } from '../../../src/evidence/manager';
 import {
+	_internals,
 	getEvidenceListData,
 	getTaskEvidenceData,
 } from '../../../src/services/evidence-service';
 
-// Mock the evidence manager
-vi.mock('../../../src/evidence/manager', () => ({
-	loadEvidence: vi.fn(),
-	listEvidenceTaskIds: vi.fn(),
-}));
-
-import {
-	listEvidenceTaskIds,
-	loadEvidence,
-} from '../../../src/evidence/manager';
-
-// Local mock variables (vi.mocked() is not available in Bun/Vitest)
-const mockLoadEvidence = loadEvidence as ReturnType<typeof vi.fn>;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
+let mockLoadEvidence: ReturnType<typeof mock>;
+let mockListEvidenceTaskIds: ReturnType<typeof mock>;
+let originalLoadEvidence: typeof _internals.loadEvidence;
+let originalListEvidenceTaskIds: typeof _internals.listEvidenceTaskIds;
 
 let testDir: string;
 
@@ -55,23 +46,29 @@ function createMockEvidence(overrides: Partial<Evidence> = {}): Evidence {
 }
 
 beforeEach(() => {
+	originalLoadEvidence = _internals.loadEvidence;
+	originalListEvidenceTaskIds = _internals.listEvidenceTaskIds;
+	mockLoadEvidence = mock();
+	mockListEvidenceTaskIds = mock();
+	_internals.loadEvidence = mockLoadEvidence;
+	_internals.listEvidenceTaskIds = mockListEvidenceTaskIds;
+
 	testDir = join(
 		tmpdir(),
 		`evidence-service-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 	);
 	mkdirSync(testDir, { recursive: true });
-
-	// Reset mocks
-	vi.clearAllMocks();
 });
 
 afterEach(() => {
+	_internals.loadEvidence = originalLoadEvidence;
+	_internals.listEvidenceTaskIds = originalListEvidenceTaskIds;
 	rmSync(testDir, { recursive: true, force: true });
 });
 
 describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 	describe('when loadEvidence returns "found" status', () => {
-		it('should return hasEvidence: true with bundle data', async () => {
+		test('should return hasEvidence: true with bundle data', async () => {
 			const mockBundle = createMockEvidenceBundle({
 				task_id: '1.1',
 				entries: [
@@ -103,7 +100,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 			expect(result.entries[0].summary).toBe('Code review passed');
 		});
 
-		it('should format multiple evidence entries correctly', async () => {
+		test('should format multiple evidence entries correctly', async () => {
 			const mockBundle = createMockEvidenceBundle({
 				entries: [
 					createMockEvidence({
@@ -144,7 +141,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 			expect(result.entries[2].type).toBe('diff');
 		});
 
-		it('should handle empty entries array', async () => {
+		test('should handle empty entries array', async () => {
 			const mockBundle = createMockEvidenceBundle({
 				entries: [],
 			});
@@ -163,7 +160,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 	});
 
 	describe('when loadEvidence returns "not_found" status', () => {
-		it('should return hasEvidence: false with empty entries', async () => {
+		test('should return hasEvidence: false with empty entries', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'not_found',
 			} as LoadEvidenceResult);
@@ -179,7 +176,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 	});
 
 	describe('when loadEvidence returns "invalid_schema" status', () => {
-		it('should return hasEvidence: false with empty entries', async () => {
+		test('should return hasEvidence: false with empty entries', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'invalid_schema',
 				errors: ['schema_version: Invalid enum value', 'task_id: Required'],
@@ -194,7 +191,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 			expect(result.entries).toHaveLength(0);
 		});
 
-		it('should ignore error details and just return default structure', async () => {
+		test('should ignore error details and just return default structure', async () => {
 			mockLoadEvidence.mockResolvedValue({
 				status: 'invalid_schema',
 				errors: ['Multiple validation errors'],
@@ -209,7 +206,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 	});
 
 	describe('type-specific evidence formatting', () => {
-		it('should format review evidence with details', async () => {
+		test('should format review evidence with details', async () => {
 			const reviewEvidence = createMockEvidence({
 				type: 'review',
 				verdict: 'fail',
@@ -240,7 +237,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 			expect(result.entries[0].details.issues).toBe(1);
 		});
 
-		it('should format test evidence with details', async () => {
+		test('should format test evidence with details', async () => {
 			const testEvidence = createMockEvidence({
 				type: 'test',
 				verdict: 'fail',
@@ -265,7 +262,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 			expect(result.entries[0].details.tests_failed).toBe(3);
 		});
 
-		it('should handle evidence without type-specific details', async () => {
+		test('should handle evidence without type-specific details', async () => {
 			const noteEvidence = createMockEvidence({
 				type: 'note',
 				verdict: 'info',
@@ -291,7 +288,7 @@ describe('getTaskEvidenceData with discriminated union loadEvidence', () => {
 
 describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	describe('when no task IDs exist', () => {
-		it('should return hasEvidence: false with empty tasks array', async () => {
+		test('should return hasEvidence: false with empty tasks array', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue([]);
 
 			const result = await getEvidenceListData(testDir);
@@ -303,7 +300,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	});
 
 	describe('when loadEvidence returns "found" status for tasks', () => {
-		it('should populate tasks with entryCount and lastUpdated from bundle', async () => {
+		test('should populate tasks with entryCount and lastUpdated from bundle', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['1.1', '1.2', '2.1']);
 
 			mockLoadEvidence
@@ -355,7 +352,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	});
 
 	describe('when loadEvidence returns "not_found" status', () => {
-		it('should fallback to entryCount: 0 and lastUpdated: "unknown"', async () => {
+		test('should fallback to entryCount: 0 and lastUpdated: "unknown"', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['1.1', 'missing-task']);
 
 			mockLoadEvidence
@@ -389,7 +386,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	});
 
 	describe('when loadEvidence returns "invalid_schema" status', () => {
-		it('should fallback to entryCount: 0 and lastUpdated: "unknown"', async () => {
+		test('should fallback to entryCount: 0 and lastUpdated: "unknown"', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['valid-task', 'invalid-task']);
 
 			mockLoadEvidence
@@ -424,7 +421,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	});
 
 	describe('mixed status scenarios', () => {
-		it('should handle mix of found, not_found, and invalid_schema', async () => {
+		test('should handle mix of found, not_found, and invalid_schema', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2', 'task-3']);
 
 			mockLoadEvidence
@@ -465,7 +462,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 			});
 		});
 
-		it('should set hasEvidence to true even if all tasks have errors', async () => {
+		test('should set hasEvidence to true even if all tasks have errors', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['task-1', 'task-2']);
 
 			mockLoadEvidence
@@ -488,7 +485,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 	});
 
 	describe('call verification', () => {
-		it('should call listEvidenceTaskIds once', async () => {
+		test('should call listEvidenceTaskIds once', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['1.1']);
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',
@@ -501,7 +498,7 @@ describe('getEvidenceListData with discriminated union loadEvidence', () => {
 			expect(mockListEvidenceTaskIds).toHaveBeenCalledWith(testDir);
 		});
 
-		it('should call loadEvidence once per task ID', async () => {
+		test('should call loadEvidence once per task ID', async () => {
 			mockListEvidenceTaskIds.mockResolvedValue(['1.1', '1.2', '2.1']);
 			mockLoadEvidence.mockResolvedValue({
 				status: 'found',

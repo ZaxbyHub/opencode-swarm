@@ -73,8 +73,8 @@ describe('Rollback Command Integration Tests', () => {
 				output,
 			);
 			const outputText = (output.parts[0] as any).text;
-			expect(outputText).toContain('## Swarm Commands');
-			expect(outputText).toContain('/swarm rollback');
+			expect(outputText).toContain('not found');
+			expect(outputText).toContain('/swarm help');
 		});
 
 		it('should have rollback description in COMMAND_REGISTRY', () => {
@@ -117,8 +117,8 @@ describe('Rollback Command Integration Tests', () => {
 				},
 				output,
 			);
-			// Should return help text for unknown subcommand
-			expect((output.parts[0] as any).text).toContain('## Swarm Commands');
+			// Should return command-not-found text for unknown subcommand.
+			expect((output.parts[0] as any).text).toContain('not found');
 		});
 
 		it('should handle rollback subcommand case-sensitively (ROLLBACK → help text)', async () => {
@@ -131,8 +131,8 @@ describe('Rollback Command Integration Tests', () => {
 				},
 				output,
 			);
-			// Should return help text for unknown subcommand
-			expect((output.parts[0] as any).text).toContain('## Swarm Commands');
+			// Should return command-not-found text for unknown subcommand.
+			expect((output.parts[0] as any).text).toContain('not found');
 		});
 	});
 

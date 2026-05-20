@@ -22,7 +22,8 @@ interface SlopFinding {
 		| 'dead_export'
 		| 'comment_strip'
 		| 'boilerplate_explosion'
-		| 'stale_import';
+		| 'stale_import'
+		| 'duplicate_utility';
 	detail: string;
 }
 
@@ -251,6 +252,71 @@ function checkStaleImports(
 	};
 }
 
+/**
+ * Heuristic 6: Duplicate utility — new export name already exists in utility directories.
+ * Checks src/utils/, src/hooks/, src/tools/, src/services/ for name collisions.
+ */
+function checkDuplicateUtility(
+	content: string,
+	projectDir: string,
+	startTime: number,
+	targetFile?: string,
+): SlopFinding | null {
+	// Parse new export names using the same regex as checkDeadExports
+	const exportMatches = content.matchAll(
+		/^\+(?:export)\s+(?:function|class|const|type|interface)\s+(\w{3,})/gm,
+	);
+	const newExports: string[] = [];
+	for (const match of exportMatches) {
+		if (match[1]) newExports.push(match[1]);
+	}
+	if (newExports.length === 0) return null;
+
+	// Time budget: 480ms max
+	const deadline = startTime + 480;
+
+	// Walk utility directories for name collision
+	const utilityDirs = [
+		'src/utils/',
+		'src/hooks/',
+		'src/tools/',
+		'src/services/',
+	];
+	for (const utilDir of utilityDirs) {
+		if (Date.now() > deadline) break;
+		const utilPath = path.join(projectDir, utilDir);
+		if (!fs.existsSync(utilPath)) continue;
+
+		const files = walkFiles(utilPath, ['.ts', '.tsx', '.js', '.jsx'], deadline);
+		for (const file of files) {
+			if (Date.now() > deadline) break;
+			// Skip the file currently being written/edited to avoid false positives
+			if (targetFile && path.resolve(file) === path.resolve(targetFile))
+				continue;
+			try {
+				const text = fs.readFileSync(file, 'utf-8');
+				// Check if file exports something with the same name
+				for (const name of newExports) {
+					// Look for export declaration with this name
+					const exportPattern = new RegExp(
+						`\\bexport\\s+(?:function|class|const|type|interface)\\s+${name}\\b`,
+					);
+					if (exportPattern.test(text)) {
+						return {
+							type: 'duplicate_utility',
+							detail: `New export "${name}" already exists in ${utilDir}. Reuse the existing utility instead of duplicating it.`,
+						};
+					}
+				}
+			} catch {
+				// skip unreadable files
+			}
+		}
+	}
+
+	return null;
+}
+
 export interface SlopDetectorHook {
 	toolAfter: (
 		input: { tool: string; sessionID: string },
@@ -278,6 +344,10 @@ export function createSlopDetectorHook(
 				return '';
 			})();
 			if (!content || content.length < 10) return;
+
+			// Get target file path for self-exclusion in duplicate utility check
+			const targetFilePath =
+				typeof args?.filePath === 'string' ? args.filePath : undefined;
 
 			// Get task description from args for boilerplate check
 			const taskDescription =
@@ -313,6 +383,19 @@ export function createSlopDetectorHook(
 					if (dead) findings.push(dead);
 				} catch {
 					// dead export check is best-effort
+				}
+
+				// heuristic 6: duplicate utility check
+				try {
+					const dupUtil = checkDuplicateUtility(
+						content,
+						projectDir,
+						startTime,
+						targetFilePath,
+					);
+					if (dupUtil) findings.push(dupUtil);
+				} catch {
+					// duplicate utility check is best-effort
 				}
 			}
 

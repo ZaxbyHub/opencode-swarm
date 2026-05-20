@@ -1,4 +1,4 @@
-export type TelemetryEvent = 'session_started' | 'session_ended' | 'agent_activated' | 'delegation_begin' | 'delegation_end' | 'task_state_changed' | 'gate_passed' | 'gate_failed' | 'phase_changed' | 'budget_updated' | 'model_fallback' | 'hard_limit_hit' | 'revision_limit_hit' | 'loop_detected' | 'scope_violation' | 'qa_skip_violation' | 'heartbeat' | 'turbo_mode_changed' | 'auto_oversight_escalation' | 'environment_detected' | 'evidence_lock_acquired' | 'evidence_lock_contended' | 'evidence_lock_stale_recovered' | 'plan_ledger_cas_retry' | 'prm_pattern_detected' | 'prm_course_correction_injected' | 'prm_escalation_triggered' | 'prm_hard_stop';
+export type TelemetryEvent = 'session_started' | 'session_ended' | 'agent_activated' | 'delegation_begin' | 'delegation_end' | 'task_state_changed' | 'gate_passed' | 'gate_failed' | 'phase_changed' | 'budget_updated' | 'model_fallback' | 'hard_limit_hit' | 'revision_limit_hit' | 'loop_detected' | 'scope_violation' | 'qa_skip_violation' | 'heartbeat' | 'turbo_mode_changed' | 'auto_oversight_escalation' | 'environment_detected' | 'evidence_lock_acquired' | 'evidence_lock_contended' | 'evidence_lock_stale_recovered' | 'plan_ledger_cas_retry' | 'plan_md_write_failed' | 'prm_pattern_detected' | 'prm_course_correction_injected' | 'prm_escalation_triggered' | 'prm_hard_stop';
 export type TelemetryListener = (event: TelemetryEvent, data: Record<string, unknown>) => void;
 /** @internal - For testing only */
 export declare function resetTelemetryForTesting(): void;
@@ -56,4 +56,16 @@ export declare const telemetry: {
     prmCourseCorrectionInjected(sessionId: string, pattern: string, level: number): void;
     prmEscalationTriggered(sessionId: string, pattern: string, level: number, occurrenceCount: number): void;
     prmHardStop(sessionId: string, pattern: string, level: number, occurrenceCount: number): void;
+};
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.telemetry` and `_internals.emit` so tests can replace the
+ * underlying implementations without using `mock.module` — `mock.module` from
+ * `bun:test` leaks across files in Bun's shared test-runner process, which
+ * would corrupt unrelated test suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    telemetry: typeof telemetry;
+    emit: typeof emit;
 };

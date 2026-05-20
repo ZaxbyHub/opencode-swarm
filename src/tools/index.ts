@@ -6,7 +6,7 @@ export { co_change_analyzer } from './co-change-analyzer';
 export { completion_verify } from './completion-verify';
 // v6.5
 export { complexity_hotspots } from './complexity-hotspots';
-export { convene_council } from './convene-council';
+export { submit_council_verdicts } from './convene-council';
 export { convene_general_council } from './convene-general-council';
 export { curator_analyze } from './curator-analyze';
 export { declare_council_criteria } from './declare-council-criteria';
@@ -21,6 +21,7 @@ export { get_approved_plan } from './get-approved-plan';
 export { get_qa_gate_profile } from './get-qa-gate-profile';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
+export { knowledge_ack } from './knowledge-ack';
 export { knowledge_add } from './knowledge-add';
 export { knowledge_query } from './knowledge-query';
 export { knowledge_recall } from './knowledge-recall';
@@ -86,6 +87,14 @@ export {
 	secretscan,
 } from './secretscan';
 export { set_qa_gates } from './set-qa-gates';
+export { skill_apply } from './skill-apply';
+export { skill_generate } from './skill-generate';
+export { skill_improve } from './skill-improve';
+export { skill_inspect } from './skill-inspect';
+export { skill_list } from './skill-list';
+export { spec_write } from './spec-write';
+export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
+export { createSwarmCommandTool } from './swarm-command';
 
 import { suggestPatch } from './suggest-patch';
 
@@ -111,6 +120,12 @@ export {
 	isTestQuarantined,
 } from '../test-impact/flaky-detector.js';
 export { generate_mutants } from './generate-mutants';
+export { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
+export { lean_turbo_plan_lanes } from './lean-turbo-plan-lanes';
+export { lean_turbo_review } from './lean-turbo-review';
+export { lean_turbo_run_phase } from './lean-turbo-run-phase';
+export { lean_turbo_runner_status } from './lean-turbo-runner-status';
+export { lean_turbo_status } from './lean-turbo-status';
 export { lint_spec } from './lint-spec';
 export { mutation_test } from './mutation-test';
 export { symbols } from './symbols';
@@ -132,6 +147,7 @@ export {
 } from './update-task-status';
 export { web_search } from './web-search';
 export { write_drift_evidence } from './write-drift-evidence';
+export { write_final_council_evidence } from './write-final-council-evidence';
 export { write_hallucination_evidence } from './write-hallucination-evidence';
 export { write_mutation_evidence } from './write-mutation-evidence';
 export { executeWriteRetro, write_retro } from './write-retro';

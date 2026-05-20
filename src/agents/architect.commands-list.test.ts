@@ -34,15 +34,15 @@ describe('buildSlashCommandsList (via createArchitectAgent)', () => {
 
 	it('commands appear in /swarm <name> format with description', () => {
 		// Check a known command appears in proper format
-		expect(prompt).toContain('`/swarm close`');
+		expect(prompt).toContain('`/swarm finalize`');
 		expect(prompt).toContain('`/swarm status`');
-		expect(prompt).toContain('`/swarm plan`');
+		expect(prompt).toContain('`/swarm show-plan`');
 	});
 
 	// ============ SIDE-EFFECT vs READ-ONLY ============
 
-	it('side-effect command "close" includes details text', () => {
-		// The "close" command has details about its 4-stage terminal finalization
+	it('side-effect command "finalize" includes details text', () => {
+		// The "finalize" command has details about its 4-stage terminal finalization
 		expect(prompt).toContain('Idempotent 4-stage terminal finalization');
 	});
 
@@ -114,6 +114,28 @@ describe('buildSlashCommandsList (via createArchitectAgent)', () => {
 	});
 
 	// ============ SUBCOMMAND PARENT ENTRY ============
+
+	// ============ REUSE_RE_VERIFICATION IN ANTI-EXEMPTION ============
+
+	it('contains REUSE_RE_VERIFICATION check in ANTI-RATIONALIZATION GATE', () => {
+		expect(prompt).toContain(
+			"Reviewer APPROVED so I'll skip checking the REUSE_RE_VERIFICATION field",
+		);
+		expect(prompt).toContain(
+			"I verified that the reviewer's verdict includes REUSE_RE_VERIFICATION before accepting the APPROVED",
+		);
+	});
+
+	it('contains REUSE_RE_VERIFICATION required field note in Stage B', () => {
+		// Verify the Stage B sentence specifically, not just a generic substring
+		expect(prompt).toContain(
+			"reviewer's verdict MUST include a REUSE_RE_VERIFICATION field",
+		);
+	});
+
+	it('contains REUSE_RE_VERIFICATION required field note in Stage B', () => {
+		expect(prompt).toContain('REUSE_RE_VERIFICATION field');
+	});
 
 	it('knowledge parent command appears before subcommands', () => {
 		const knowledgeIndex = prompt.indexOf('`/swarm knowledge`');

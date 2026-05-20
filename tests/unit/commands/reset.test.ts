@@ -38,9 +38,7 @@ describe('handleResetCommand', () => {
 		const result = await handleResetCommand(tempDir, []);
 
 		expect(result).toContain('## Swarm Reset');
-		expect(result).toContain(
-			'⚠️ This will delete plan.md and context.md from .swarm/',
-		);
+		expect(result).toContain('⚠️ This will delete all swarm state from .swarm/');
 		expect(result).toContain(
 			'Tip**: Run `/swarm export` first to backup your state.',
 		);
@@ -156,5 +154,62 @@ describe('handleResetCommand', () => {
 		expect(result).toContain('## Swarm Reset Complete');
 		expect(result).toContain('✅ Deleted plan.md');
 		expect(result).toContain('✅ Deleted context.md');
+	});
+
+	test('With --confirm - also deletes plan.json when present', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify({ swarm: 'test', title: 'Test Plan', phases: [] }),
+		);
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted plan.json');
+		expect(existsSync(join(tempDir, '.swarm', 'plan.json'))).toBe(false);
+	});
+
+	test('With --confirm - deletes SWARM_PLAN artifacts from .swarm/', async () => {
+		await writeFile(join(tempDir, '.swarm', 'SWARM_PLAN.json'), '{}');
+		await writeFile(join(tempDir, '.swarm', 'SWARM_PLAN.md'), '# Plan');
+		await writeFile(join(tempDir, '.swarm', 'checkpoints.json'), '[]');
+		await writeFile(join(tempDir, '.swarm', 'events.jsonl'), '');
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted SWARM_PLAN.json');
+		expect(result).toContain('✅ Deleted SWARM_PLAN.md');
+		expect(result).toContain('✅ Deleted checkpoints.json');
+		expect(result).toContain('✅ Deleted events.jsonl');
+		expect(existsSync(join(tempDir, '.swarm', 'SWARM_PLAN.json'))).toBe(false);
+		expect(existsSync(join(tempDir, '.swarm', 'SWARM_PLAN.md'))).toBe(false);
+	});
+
+	test('With --confirm - deletes legacy root-level SWARM_PLAN artifacts', async () => {
+		await writeFile(join(tempDir, 'SWARM_PLAN.json'), '{}');
+		await writeFile(join(tempDir, 'SWARM_PLAN.md'), '# Plan');
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted SWARM_PLAN.json (root)');
+		expect(result).toContain('✅ Deleted SWARM_PLAN.md (root)');
+		expect(existsSync(join(tempDir, 'SWARM_PLAN.json'))).toBe(false);
+		expect(existsSync(join(tempDir, 'SWARM_PLAN.md'))).toBe(false);
+	});
+
+	test('With --confirm - skips missing optional artifacts silently', async () => {
+		// Only create plan.md; all other files absent
+		await writeFile(join(tempDir, '.swarm', 'plan.md'), '# Plan');
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted plan.md');
+		expect(result).toContain('⏭️ plan.json not found (skipped)');
+		expect(result).toContain('⏭️ SWARM_PLAN.json not found (skipped)');
+		expect(result).toContain('⏭️ checkpoints.json not found (skipped)');
+		expect(result).toContain('⏭️ events.jsonl not found (skipped)');
 	});
 });

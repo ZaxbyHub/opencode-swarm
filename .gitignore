@@ -59,8 +59,7 @@ perplexity.log
 # Generated repo graph (contains absolute workspace paths — local artifact)
 repo-graph.json
 
+# Claude Code session artifacts (investigation traces, event logs, local settings)
+events.jsonl
+.claude/issue-traces/
 
-# Test artifacts from Windows-path unit tests
-C:\\/
-C:\\projects\\myworkspace/
-\\\\server\\share/

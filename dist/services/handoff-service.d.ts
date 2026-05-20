@@ -4,6 +4,33 @@
  * Provides structured handoff data for agent transitions between swarm sessions.
  * Reads from .swarm files to gather current state for context-efficient handoffs.
  */
+import { loadPlanJsonOnly } from '../plan/manager';
+/**
+ * Escape HTML special characters to prevent XSS attacks
+ */
+declare function escapeHtml(str: string): string;
+/**
+ * Sanitize string by removing RTL override characters and truncating to max length
+ */
+declare function sanitizeString(str: string | null | undefined, maxLength: number): string;
+/**
+ * Validated plan type
+ */
+interface ValidPlan {
+    phases: Array<{
+        id: number;
+        name: string;
+        tasks: Array<{
+            id: string;
+            status: string;
+        }>;
+    }>;
+    current_phase: number | null;
+}
+/**
+ * Validate that plan.phases is a proper array with valid phase objects
+ */
+declare function validatePlanPhases(plan: unknown): plan is ValidPlan;
 /**
  * Pending QA state from agent sessions
  */
@@ -57,6 +84,30 @@ export interface HandoffData {
     } | null;
 }
 /**
+ * Extract current phase and task from plan
+ */
+declare function extractCurrentPhaseFromPlan(plan: Awaited<ReturnType<typeof loadPlanJsonOnly>>): {
+    currentPhase: string | null;
+    currentTask: string | null;
+    incompleteTasks: string[];
+};
+/**
+ * Parse session state JSON
+ */
+declare function parseSessionState(content: string | null): {
+    activeAgent: string | null;
+    delegationState: DelegationState | null;
+    pendingQA: PendingQA | null;
+} | null;
+/**
+ * Extract decisions from context.md content
+ */
+declare function extractDecisions(content: string | null): string[];
+/**
+ * Extract last 5 lines of Phase Metrics section from context.md
+ */
+declare function extractPhaseMetrics(content: string | null): string;
+/**
  * Get handoff data from the swarm directory.
  * Reads session state, plan, and context to build comprehensive handoff info.
  */
@@ -72,3 +123,20 @@ export declare function formatHandoffMarkdown(data: HandoffData): string;
  * resumption instructions. Designed to be copy-pasted into a new session.
  */
 export declare function formatContinuationPrompt(data: HandoffData): string;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    getHandoffData: typeof getHandoffData;
+    formatHandoffMarkdown: typeof formatHandoffMarkdown;
+    formatContinuationPrompt: typeof formatContinuationPrompt;
+    escapeHtml: typeof escapeHtml;
+    sanitizeString: typeof sanitizeString;
+    validatePlanPhases: typeof validatePlanPhases;
+    extractCurrentPhaseFromPlan: typeof extractCurrentPhaseFromPlan;
+    parseSessionState: typeof parseSessionState;
+    extractDecisions: typeof extractDecisions;
+    extractPhaseMetrics: typeof extractPhaseMetrics;
+};
+export {};

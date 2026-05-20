@@ -15,7 +15,8 @@
  * @see https://github.com/zaxbysauce/opencode-swarm/issues/449
  */
 
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { computeProfileHash, getProfile } from '../db/qa-gate-profile.js';
 import {
 	type ApprovedSnapshotInfo,
@@ -23,6 +24,7 @@ import {
 	loadLastApprovedPlan,
 } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { derivePlanId } from '../plan/utils.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -101,14 +103,6 @@ function summarizePlan(plan: {
 			task_count: p.tasks.length,
 		})),
 	};
-}
-
-/**
- * Derive plan identity string matching the ledger format.
- * Must stay in sync with takeSnapshotEvent in ledger.ts.
- */
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
 }
 
 /**
@@ -220,7 +214,7 @@ export const get_approved_plan: ReturnType<typeof tool> = createSwarmTool({
 		'Returns the approved plan, its approval metadata, and optionally compares against ' +
 		'the current plan.json to detect silent mutations. Read-only.',
 	args: {
-		summary_only: tool.schema
+		summary_only: z
 			.boolean()
 			.optional()
 			.describe(

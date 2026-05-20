@@ -3,7 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import type { ToolResult } from './create-tool';
 import { suggestPatch } from './suggest-patch';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 describe('suggest-patch tool', () => {
 	let workspaceDir: string;
@@ -23,9 +29,10 @@ describe('suggest-patch tool', () => {
 	});
 
 	async function callTool(args: Record<string, unknown>): Promise<string> {
-		return suggestPatch.execute(args, {
+		const result = await suggestPatch.execute(args, {
 			directory: workspaceDir,
 		} as unknown as ToolContext);
+		return resultToString(result);
 	}
 
 	function createFile(relativePath: string, content: string): void {
@@ -486,7 +493,7 @@ describe('suggest-patch tool', () => {
 				{ directory: workspaceDir } as unknown as ToolContext,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			expect(parsed.success).toBe(false);
 			expect(parsed.type).toBe('parse-error');
 		});
@@ -497,7 +504,7 @@ describe('suggest-patch tool', () => {
 				directory: badWorkspace,
 			} as unknown as ToolContext);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			expect(parsed.success).toBe(false);
 			expect(parsed.type).toBe('parse-error');
 		});

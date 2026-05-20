@@ -221,6 +221,8 @@ describe('phase_complete - curator pipeline adversarial tests', () => {
 		}
 		// Reset state after each test
 		resetSwarmState();
+		// Restore cross-module mocks per two-tier DI convention
+		mock.restore();
 	});
 
 	// ============================================================

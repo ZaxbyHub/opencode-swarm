@@ -6,7 +6,7 @@
  * Unlike write_drift_evidence, this tool does NOT lock the QA gate profile or
  * write a plan snapshot — those side-effects belong to drift verification only.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the write_mutation_evidence tool
  */

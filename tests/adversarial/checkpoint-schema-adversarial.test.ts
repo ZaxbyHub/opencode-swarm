@@ -177,20 +177,18 @@ describe('ADVERSARIAL: CheckpointConfigSchema security tests', () => {
 			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: decimal value (1.5) passes - needs .int() refinement', () => {
-			// SECURITY ISSUE: Zod's .number() accepts decimals, schema should use .int()
+		it('rejects decimal value (1.5) - .int() refinement applied', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				auto_checkpoint_threshold: 1.5,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: fractional decimal (3.14) passes - needs .int() refinement', () => {
-			// SECURITY ISSUE: Schema should enforce integer only
+		it('rejects fractional decimal (3.14) - .int() refinement applied', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				auto_checkpoint_threshold: 3.14,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
 		it('rejects decimal value at boundary (0.5)', () => {
@@ -200,12 +198,11 @@ describe('ADVERSARIAL: CheckpointConfigSchema security tests', () => {
 			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: fractional decimal (3.14) passes - needs .int() refinement', () => {
-			// SECURITY ISSUE: Schema should enforce integer only
+		it('rejects fractional decimal (3.14) - duplicate test', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				auto_checkpoint_threshold: 3.14,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
 		it('rejects Infinity', () => {
@@ -262,54 +259,52 @@ describe('ADVERSARIAL: CheckpointConfigSchema security tests', () => {
 	// ATTACK VECTOR: Unknown/extra fields
 	// ============================================
 	describe('ATTACK VECTOR: Unknown fields injection', () => {
-		it('VULNERABILITY: extra unknown string field passes - needs strict mode', () => {
-			// SECURITY ISSUE: Schema allows unknown keys - should use .strict() or .passthrough(false)
+		it('rejects extra unknown string field - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				malicious_field: 'injection',
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: extra unknown number field passes', () => {
+		it('rejects extra unknown number field - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				hacked_value: 999,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: extra unknown object field passes', () => {
+		it('rejects extra unknown object field - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				config: { exploit: true },
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: extra unknown boolean field passes', () => {
+		it('rejects extra unknown boolean field - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				is_admin: true,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: __proto__ injection passes', () => {
-			// SECURITY ISSUE: Unknown keys are accepted
+		it('rejects __proto__ injection - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				['__proto__']: { evil: true },
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
-		it('VULNERABILITY: constructor injection passes', () => {
+		it('rejects constructor injection - strict mode enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				enabled: true,
 				constructor: { malicious: true },
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 	});
 
@@ -416,12 +411,11 @@ describe('ADVERSARIAL: CheckpointConfigSchema security tests', () => {
 	// ATTACK VECTOR: Floating point precision attacks
 	// ============================================
 	describe('ATTACK VECTOR: Floating point precision attacks', () => {
-		it('VULNERABILITY: 1.0000000001 passes - needs .int() refinement', () => {
-			// SECURITY ISSUE: Near-boundary float values pass validation
+		it('rejects 1.0000000001 - .int() refinement enforced', () => {
 			const result = CheckpointConfigSchema.safeParse({
 				auto_checkpoint_threshold: 1.0000000001,
 			});
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		});
 
 		it('rejects 20.9999999999 (precision attack)', () => {

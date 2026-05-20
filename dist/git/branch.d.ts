@@ -1,4 +1,8 @@
 /**
+ * Execute git command safely
+ */
+declare function gitExec(args: string[], cwd: string): string;
+/**
  * Check if we're in a git repository
  */
 export declare function isGitRepo(cwd: string): boolean;
@@ -48,3 +52,57 @@ export declare function getCurrentSha(cwd: string): string;
  * Check if there are uncommitted changes
  */
 export declare function hasUncommittedChanges(cwd: string): boolean;
+export interface ResetToRemoteBranchResult {
+    success: boolean;
+    targetBranch: string;
+    localBranch: string;
+    message: string;
+    alreadyAligned: boolean;
+    prunedBranches: string[];
+    warnings: string[];
+}
+/**
+ * Detect the default remote branch using multiple fallback methods
+ */
+declare function detectDefaultRemoteBranch(cwd: string): string | null;
+/**
+ * Reset local branch to align with its remote counterpart.
+ * Safely handles uncommitted changes, unpushed commits, and detached HEAD states.
+ *
+ * @param cwd - Working directory
+ * @param options - Options including pruneBranches flag
+ * @returns Result object with success status and details
+ */
+export declare function resetToRemoteBranch(cwd: string, options?: {
+    pruneBranches?: boolean;
+}): ResetToRemoteBranchResult;
+export interface ResetToMainAfterMergeResult {
+    success: boolean;
+    targetBranch: string;
+    previousBranch: string;
+    message: string;
+    branchDeleted: boolean;
+    changesDiscarded: boolean;
+    warnings: string[];
+}
+/**
+ * Aggressive git reset for post-merge cleanup.
+ * Handles the common scenario: feature branch PR merged, local has uncommitted artifacts.
+ * Steps: detect default branch → safety check → fetch → checkout → discard changes → reset → delete branch.
+ * Safety guard: refuses if current branch has commits not on any remote tracking branch.
+ */
+export declare function resetToMainAfterMerge(cwd: string, options?: {
+    pruneBranches?: boolean;
+}): ResetToMainAfterMergeResult;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    gitExec: typeof gitExec;
+    detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
+    getDefaultBaseBranch: typeof getDefaultBaseBranch;
+    resetToRemoteBranch: typeof resetToRemoteBranch;
+    resetToMainAfterMerge: typeof resetToMainAfterMerge;
+};
+export {};

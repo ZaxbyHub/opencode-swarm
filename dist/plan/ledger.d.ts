@@ -6,13 +6,18 @@
  */
 import { type Plan } from '../config/plan-schema';
 /**
- * Ledger schema version
+ * Ledger schema version.
+ *
+ * v7.19.0: bumped from 1.0.0 → 1.1.0 with the addition of `task_removed`.
+ * Older plugin readers throw on unknown event types (applyEventToPlan default
+ * branch); restart any running OpenCode session after upgrade so the new
+ * reader is loaded in-process.
  */
-export declare const LEDGER_SCHEMA_VERSION = "1.0.0";
+export declare const LEDGER_SCHEMA_VERSION = "1.1.0";
 /**
  * Valid ledger event types
  */
-export declare const LEDGER_EVENT_TYPES: readonly ["plan_created", "task_added", "task_updated", "task_status_changed", "task_reordered", "phase_completed", "plan_rebuilt", "plan_exported", "plan_reset", "snapshot", "execution_profile_set", "execution_profile_locked"];
+export declare const LEDGER_EVENT_TYPES: readonly ["plan_created", "task_added", "task_removed", "task_updated", "task_status_changed", "task_reordered", "phase_completed", "plan_rebuilt", "plan_exported", "plan_reset", "snapshot", "execution_profile_set", "execution_profile_locked"];
 export type LedgerEventType = (typeof LEDGER_EVENT_TYPES)[number];
 /**
  * A ledger event representing a plan mutation.
@@ -65,6 +70,14 @@ export interface SnapshotEventPayload {
 export declare class LedgerStaleWriterError extends Error {
     constructor(message: string);
 }
+/**
+ * Get the path to the ledger file
+ */
+declare function getLedgerPath(directory: string): string;
+/**
+ * Get the path to plan.json
+ */
+declare function getPlanJsonPath(directory: string): string;
 /**
  * Compute a SHA-256 hash of the plan state.
  * Uses deterministic JSON serialization for consistent hashing.
@@ -208,6 +221,15 @@ interface ReplayOptions {
  */
 export declare function replayFromLedger(directory: string, _options?: ReplayOptions): Promise<Plan | null>;
 /**
+ * Apply a single ledger event to the plan state.
+ * Returns null if the event indicates a full reset (plan_reset).
+ *
+ * @param plan - Current plan state
+ * @param event - Event to apply
+ * @returns Updated plan state, or null if plan should be reset
+ */
+declare function applyEventToPlan(plan: Plan, event: LedgerEvent): Plan | null;
+/**
  * Result type for readLedgerEventsWithIntegrity
  */
 export interface LedgerIntegrityResult {
@@ -283,4 +305,23 @@ export interface ApprovedSnapshotInfo {
  * @returns The most recent approved snapshot info, or null if none exists
  */
 export declare function loadLastApprovedPlan(directory: string, expectedPlanId?: string): Promise<ApprovedSnapshotInfo | null>;
+export declare const _internals: {
+    computePlanHash: typeof computePlanHash;
+    computeCurrentPlanHash: typeof computeCurrentPlanHash;
+    ledgerExists: typeof ledgerExists;
+    getLatestLedgerSeq: typeof getLatestLedgerSeq;
+    readLedgerEvents: typeof readLedgerEvents;
+    initLedger: typeof initLedger;
+    appendLedgerEvent: typeof appendLedgerEvent;
+    appendLedgerEventWithRetry: typeof appendLedgerEventWithRetry;
+    takeSnapshotEvent: typeof takeSnapshotEvent;
+    replayFromLedger: typeof replayFromLedger;
+    applyEventToPlan: typeof applyEventToPlan;
+    readLedgerEventsWithIntegrity: typeof readLedgerEventsWithIntegrity;
+    quarantineLedgerSuffix: typeof quarantineLedgerSuffix;
+    replayWithIntegrity: typeof replayWithIntegrity;
+    loadLastApprovedPlan: typeof loadLastApprovedPlan;
+    getLedgerPath: typeof getLedgerPath;
+    getPlanJsonPath: typeof getPlanJsonPath;
+};
 export {};

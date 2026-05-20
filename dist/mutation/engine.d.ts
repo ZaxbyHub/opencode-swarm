@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+type SpawnSyncFn = typeof spawnSync;
 export type MutationOutcome = 'killed' | 'survived' | 'timeout' | 'error' | 'equivalent' | 'skipped';
 export interface MutationPatch {
     id: string;
@@ -42,6 +44,13 @@ export interface MutationReport {
     timestamp: string;
 }
 export declare const MAX_MUTATIONS_PER_FUNCTION = 10;
+export declare const _internals: {
+    executeMutation: typeof executeMutation;
+    computeReport: typeof computeReport;
+    executeMutationSuite: typeof executeMutationSuite;
+    spawnSync: SpawnSyncFn;
+};
 export declare function executeMutation(patch: MutationPatch, testCommand: string[], _testFiles: string[], workingDir: string): Promise<MutationResult>;
 export declare function computeReport(results: MutationResult[], durationMs: number, budgetMs?: number): MutationReport;
 export declare function executeMutationSuite(patches: MutationPatch[], testCommand: string[], testFiles: string[], workingDir: string, budgetMs?: number, onProgress?: (completed: number, total: number, result: MutationResult) => void, sourceFiles?: Map<string, string>): Promise<MutationReport>;
+export {};

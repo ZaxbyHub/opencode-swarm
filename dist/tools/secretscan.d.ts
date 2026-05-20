@@ -32,4 +32,12 @@ export declare const secretscan: ReturnType<typeof createSwarmTool>;
  * Run secretscan programmatically
  */
 export declare function runSecretscan(directory: string): Promise<SecretscanResult | SecretscanErrorResult>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    secretscan: typeof secretscan;
+    runSecretscan: typeof runSecretscan;
+};
 export {};

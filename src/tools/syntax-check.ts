@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import type { PluginConfig } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
@@ -276,22 +277,22 @@ export const syntax_check: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Check syntax of source files using tree-sitter parsers. Supports JS/TS, Python, Go, Rust, Java, C/C++, C#, PHP, Ruby. Returns JSON with syntax errors found per file.',
 	args: {
-		changed_files: tool.schema
+		changed_files: z
 			.array(
-				tool.schema.object({
-					path: tool.schema.string(),
-					additions: tool.schema.number(),
+				z.object({
+					path: z.string(),
+					additions: z.number(),
 				}),
 			)
 			.describe('Files to check (from diff gate)'),
-		mode: tool.schema
+		mode: z
 			.enum(['changed', 'all'])
 			.optional()
 			.describe(
 				"Check mode: 'changed' = only changed files, 'all' = all files in repo",
 			),
-		languages: tool.schema
-			.array(tool.schema.string())
+		languages: z
+			.array(z.string())
 			.optional()
 			.describe('Optional: restrict to specific languages'),
 	},

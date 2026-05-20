@@ -20,37 +20,52 @@ export const parserCache = new Map<string, ParserType>();
 const initializedLanguages = new Set<string>();
 
 /**
- * Track if tree-sitter has been initialized
+ * In-flight or completed init promise. All concurrent callers share this single
+ * promise so Parser.init() is called exactly once. Nulled on failure to allow retry.
  */
-let treeSitterInitialized = false;
+let treeSitterInitPromise: Promise<void> | null = null;
+
+/**
+ * DI seam for testing — overridable reference to TreeSitterParser.init.
+ * Tests can replace this with a spy/mock to observe init calls without
+ * mock.module leakage. Restore the original reference in afterEach.
+ */
+export const _internals = {
+	parserInit: TreeSitterParser.init as (opts?: {
+		locateFile: (scriptName: string) => string;
+	}) => Promise<void>,
+};
 
 /**
  * Initialize the tree-sitter WASM runtime
  * Must be called before creating any parsers
  */
 async function initTreeSitter(): Promise<void> {
-	if (treeSitterInitialized) {
-		return;
-	}
+	if (!treeSitterInitPromise) {
+		treeSitterInitPromise = (async () => {
+			const thisDir = path.dirname(fileURLToPath(import.meta.url));
+			const isSource = thisDir.replace(/\\/g, '/').endsWith('/src/lang');
 
-	const thisDir = path.dirname(fileURLToPath(import.meta.url));
-	const isSource = thisDir.replace(/\\/g, '/').endsWith('/src/lang');
-
-	if (isSource) {
-		// In dev, web-tree-sitter's own import.meta.url resolves tree-sitter.wasm
-		// correctly from node_modules/web-tree-sitter/
-		await TreeSitterParser.init();
-	} else {
-		// In bundle, import.meta.url points to dist/index.js so web-tree-sitter
-		// looks for dist/tree-sitter.wasm — redirect to dist/lang/grammars/
-		const grammarsDir = getGrammarsDirAbsolute();
-		await TreeSitterParser.init({
-			locateFile(scriptName: string) {
-				return path.join(grammarsDir, scriptName);
-			},
+			if (isSource) {
+				// In dev, web-tree-sitter's own import.meta.url resolves tree-sitter.wasm
+				// correctly from node_modules/web-tree-sitter/
+				await _internals.parserInit();
+			} else {
+				// In bundle, import.meta.url points to dist/index.js so web-tree-sitter
+				// looks for dist/tree-sitter.wasm — redirect to dist/lang/grammars/
+				const grammarsDir = getGrammarsDirAbsolute();
+				await _internals.parserInit({
+					locateFile(scriptName: string) {
+						return path.join(grammarsDir, scriptName);
+					},
+				});
+			}
+		})().catch((err) => {
+			treeSitterInitPromise = null; // allow retry after transient failure
+			throw err;
 		});
 	}
-	treeSitterInitialized = true;
+	return treeSitterInitPromise;
 }
 
 /**
@@ -228,7 +243,7 @@ export async function isGrammarAvailable(languageId: string): Promise<boolean> {
 export function clearParserCache(): void {
 	parserCache.clear();
 	initializedLanguages.clear();
-	treeSitterInitialized = false;
+	treeSitterInitPromise = null;
 }
 
 /**

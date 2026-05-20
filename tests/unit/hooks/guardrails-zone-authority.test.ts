@@ -453,4 +453,147 @@ describe('guardrails-zone-authority - Zone Authority Integration', () => {
 			}
 		});
 	});
+
+	describe('Architect config zone blocking (#894)', () => {
+		// v7.x (#894): architect now blocked from config zone to prevent bypassing
+		// lint gates by editing config files instead of fixing source code.
+
+		it('blocks architect from writing biome.json (config zone)', () => {
+			const result = checkFileAuthority('architect', 'biome.json', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing biome.jsonc (blocked by glob, not zone)', () => {
+			// biome.jsonc is in blockedGlobs (Step 3), not config zone classification
+			// So it should be blocked with glob reason, not zone reason
+			const result = checkFileAuthority('architect', 'biome.jsonc', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('blocked (glob');
+			}
+		});
+
+		it('blocks architect from writing package.json (config zone)', () => {
+			const result = checkFileAuthority('architect', 'package.json', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing tsconfig.json (config zone)', () => {
+			const result = checkFileAuthority('architect', 'tsconfig.json', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing .env files (config zone)', () => {
+			const result = checkFileAuthority('architect', '.env', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing config.yaml (config zone)', () => {
+			const result = checkFileAuthority('architect', 'config.yaml', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing config.yml (config zone)', () => {
+			const result = checkFileAuthority('architect', 'config.yml', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing config.toml (config zone)', () => {
+			const result = checkFileAuthority('architect', 'config.toml', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('blocks architect from writing nested config files (config zone)', () => {
+			// Config files in subdirectories are still config zone
+			const result = checkFileAuthority(
+				'architect',
+				'src/config/settings.json',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('config');
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('allows architect to write to src/ files (production zone — no overblocking)', () => {
+			// Non-config files should NOT be blocked for architect
+			const result = checkFileAuthority(
+				'architect',
+				'src/utils/helper.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows architect to write to docs/ files (docs zone — no overblocking)', () => {
+			const result = checkFileAuthority('architect', 'docs/guide.md', tempDir);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows architect to write to tests/ files (test zone — no overblocking)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'tests/unit/api.test.ts',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows architect to write to scripts/ files (scripts zone — no overblocking)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'scripts/build.sh',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('architect config zone block reason includes "config" and zone name', () => {
+			const result = checkFileAuthority('architect', 'package.json', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toMatch(/config/i);
+				expect(result.zone).toBe('config');
+			}
+		});
+
+		it('regression: coder is still blocked from config zone writes', () => {
+			// Ensure we did not accidentally remove config-zone blocking from coder
+			const result = checkFileAuthority('coder', 'src/package.json', tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.zone).toBe('config');
+			}
+		});
+	});
 });

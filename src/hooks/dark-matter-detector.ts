@@ -7,6 +7,7 @@
  */
 
 import { log } from '../utils';
+import { bunFile } from '../utils/bun-compat';
 import { safeHook, validateSwarmPath } from './utils';
 
 /**
@@ -52,7 +53,7 @@ export async function readDarkMatterMd(
 ): Promise<{ unresolved: string[]; resolved: string[] } | null> {
 	const filePath = validateSwarmPath(directory, 'dark-matter.md');
 
-	const file = Bun.file(filePath);
+	const file = bunFile(filePath);
 
 	try {
 		const content = await file.text();

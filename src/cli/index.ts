@@ -2,24 +2,103 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
+import packageJson from '../../package.json' with { type: 'json' };
 import { resolveCommand, VALID_COMMANDS } from '../commands/registry.js';
+import {
+	getPluginCachePaths,
+	getPluginConfigDir,
+	getPluginLockFilePaths,
+} from '../config/cache-paths.js';
+import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
 
-const CONFIG_DIR = path.join(
-	process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-	'opencode',
-);
+const { version } = packageJson;
+
+const CONFIG_DIR = getPluginConfigDir();
 
 const OPENCODE_CONFIG_PATH = path.join(CONFIG_DIR, 'opencode.json');
 const PLUGIN_CONFIG_PATH = path.join(CONFIG_DIR, 'opencode-swarm.json');
 const PROMPTS_DIR = path.join(CONFIG_DIR, 'opencode-swarm');
 
-const OPENCODE_PLUGIN_CACHE_PATH = path.join(
-	process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'),
-	'opencode',
-	'packages',
-	'opencode-swarm@latest',
-);
+const OPENCODE_PLUGIN_CACHE_PATHS = getPluginCachePaths();
+const OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
+
+// Safety floor: refuse to recursively delete a path that could catastrophically
+// damage the user's filesystem if XDG_CACHE_HOME or XDG_CONFIG_HOME are
+// pathologically set (e.g., XDG_CACHE_HOME='/'). Defense in depth, four checks:
+//   1. Refuse root, home, or shorter-than-home paths.
+//   2. Require ≥ 4 path components from root (the canonical cache layout has
+//      AT LEAST: <root>/opencode/{packages|node_modules}/<leaf> = 3 segments,
+//      so any LEGITIMATE cache lives at least one segment deeper. This rejects
+//      XDG_CACHE_HOME='/' which produces '/opencode/node_modules/opencode-swarm'
+//      (3 segments) while accepting XDG_CACHE_HOME='/var/cache' (5+ segments)
+//      AND tmpdir-based test paths on every CI platform.
+//   3. Require a recognized leaf name ('opencode-swarm' or 'opencode-swarm@latest').
+//   4. Require the canonical OpenCode plugin structure as the parent chain:
+//      .../opencode/{packages|node_modules}/<leaf>. This prevents any pattern
+//      that happens to have a recognized leaf but isn't the actual cache.
+// Issue #675 hardening — round 3 (depth-based guard replaces home-containment
+// after critic's cross-platform CI regression finding).
+export function isSafeCachePath(p: string): boolean {
+	const resolved = path.resolve(p);
+	const home = path.resolve(os.homedir());
+	// 1. Catastrophic-path floor.
+	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+		return false;
+	}
+	// 2. Require ≥ 4 path components from root. This rejects pathological
+	// XDG_CACHE_HOME='/' (3 components) while accepting any legitimate cache
+	// layout including non-default XDG_CACHE_HOME=/var/cache and tmpdir paths.
+	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
+	if (segments.length < 4) {
+		return false;
+	}
+	// 3. Must end in a known cache leaf.
+	const leaf = path.basename(resolved);
+	if (leaf !== 'opencode-swarm@latest' && leaf !== 'opencode-swarm') {
+		return false;
+	}
+	// 4. Must match the canonical .../opencode/{packages|node_modules}/<leaf> shape.
+	const parent = path.basename(path.dirname(resolved));
+	if (parent !== 'packages' && parent !== 'node_modules') {
+		return false;
+	}
+	const grandparent = path.basename(path.dirname(path.dirname(resolved)));
+	if (grandparent !== 'opencode') {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Safety guard for lock file deletion. Lock files have different basenames
+ * than cache directories so they need a separate check. Mirrors
+ * isSafeCachePath()'s defense-in-depth: minimum segment depth, recognized
+ * basename, and parent directory must be 'opencode'.
+ */
+export function isSafeLockFilePath(p: string): boolean {
+	const resolved = path.resolve(p);
+	const home = path.resolve(os.homedir());
+	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+		return false;
+	}
+	const segments = resolved.split(path.sep).filter((s) => s.length > 0);
+	if (segments.length < 4) {
+		return false;
+	}
+	const leaf = path.basename(resolved);
+	if (
+		leaf !== 'bun.lock' &&
+		leaf !== 'bun.lockb' &&
+		leaf !== 'package-lock.json'
+	) {
+		return false;
+	}
+	const parent = path.basename(path.dirname(resolved));
+	if (parent !== 'opencode') {
+		return false;
+	}
+	return true;
+}
 
 interface OpenCodeConfig {
 	plugin?: string[];
@@ -51,6 +130,29 @@ function loadJson<T>(filepath: string): T | null {
 
 function saveJson(filepath: string, data: unknown): void {
 	fs.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
+}
+
+function writeProjectConfigIfMissing(cwd: string): void {
+	try {
+		const opencodeDir = path.join(cwd, '.opencode');
+		const projectConfigPath = path.join(opencodeDir, 'opencode-swarm.json');
+
+		// Only write if file doesn't already exist
+		if (fs.existsSync(projectConfigPath)) {
+			return;
+		}
+
+		// Create .opencode/ directory if it doesn't exist
+		ensureDir(opencodeDir);
+
+		saveJson(projectConfigPath, { agents: {} });
+		console.log('✓ Created project config at:', projectConfigPath);
+	} catch (error) {
+		console.warn(
+			'⚠ Could not create project config — installation will continue:',
+		);
+		console.warn(`  ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 async function install(): Promise<number> {
@@ -123,18 +225,27 @@ async function install(): Promise<number> {
 	// the directory exists it is returned verbatim on every subsequent start,
 	// ignoring all npm updates. Clearing it here ensures `bunx opencode-swarm install`
 	// actually upgrades the running version, not just the config registration.
-	try {
-		if (fs.existsSync(OPENCODE_PLUGIN_CACHE_PATH)) {
-			fs.rmSync(OPENCODE_PLUGIN_CACHE_PATH, { recursive: true, force: true });
-			console.log(
-				'✓ Cleared opencode plugin cache (next start will fetch latest)',
-			);
-		}
-	} catch {
-		console.warn(
-			'⚠ Could not clear opencode plugin cache — you may need to delete it manually:',
+	const evicted = evictPluginCaches();
+	if (evicted.cleared.length > 0) {
+		console.log(
+			`✓ Cleared opencode plugin cache (next start will fetch latest): ${evicted.cleared.join(', ')}`,
 		);
-		console.warn(`  ${OPENCODE_PLUGIN_CACHE_PATH}`);
+	}
+	for (const failed of evicted.failed) {
+		console.warn(
+			`⚠ Could not clear opencode plugin cache — you may need to delete it manually:\n  ${failed}`,
+		);
+	}
+	const lockEvicted = evictLockFiles();
+	if (lockEvicted.cleared.length > 0) {
+		console.log(
+			`✓ Cleared opencode lock file(s) (next start will fetch latest): ${lockEvicted.cleared.join(', ')}`,
+		);
+	}
+	for (const failed of lockEvicted.failed) {
+		console.warn(
+			`⚠ Could not clear opencode lock file — you may need to delete it manually:\n  ${failed}`,
+		);
 	}
 
 	// Create default plugin config if not exists
@@ -143,72 +254,11 @@ async function install(): Promise<number> {
 			// Must match PluginConfigSchema in src/config/schema.ts
 			// v6.14: free OpenCode Zen models; v6.73+ switched to big-pickle with gpt-5-nano fallback; architect inherits OpenCode UI selection
 			// v6.85+: Multi-level fallback chains - only big-pickle and gpt-5-nano are consistently available in free tier
-			agents: {
-				coder: {
-					model: 'opencode/minimax-m2.5-free',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				reviewer: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				test_engineer: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				explorer: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				sme: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				critic: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				docs: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				designer: {
-					model: 'opencode/big-pickle',
-					fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-				},
-				critic_sounding_board: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				critic_drift_verifier: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				critic_hallucination_verifier: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				critic_oversight: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				curator_init: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				curator_phase: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				council_member: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-				council_moderator: {
-					model: 'opencode/gpt-5-nano',
-					fallback_models: ['opencode/big-pickle'],
-				},
-			},
+			// General Council agents (council_generalist, council_skeptic, council_domain_expert)
+			// derive their models from reviewer/critic/sme entries above. No separate config
+			// entries are needed; if you want to override per-council-agent, set
+			// temperature/variant on council_generalist / council_skeptic / council_domain_expert.
+			agents: { ...DEFAULT_AGENT_CONFIGS },
 			max_iterations: 5,
 		};
 		saveJson(PLUGIN_CONFIG_PATH, defaultConfig);
@@ -216,6 +266,9 @@ async function install(): Promise<number> {
 	} else {
 		console.log('✓ Plugin config already exists at:', PLUGIN_CONFIG_PATH);
 	}
+
+	// Create project-level config if not exists
+	writeProjectConfigIfMissing(process.cwd());
 
 	console.log('\n📁 Configuration files:');
 	console.log(`   OpenCode config: ${OPENCODE_CONFIG_PATH}`);
@@ -226,13 +279,10 @@ async function install(): Promise<number> {
 	console.log('\nNext steps:');
 	console.log('1. Run "opencode" in your project directory');
 	console.log(
-		'2. Select the Architect agent in the OpenCode agent/mode dropdown',
+		'2. Ask the Architect anything — it coordinates all other agents automatically',
 	);
 	console.log(
-		'3. Ask it anything — the Architect coordinates all other agents automatically',
-	);
-	console.log(
-		'4. Run /swarm diagnose inside OpenCode to confirm the plugin loaded',
+		'3. Run /swarm diagnose inside OpenCode to confirm the plugin loaded',
 	);
 	console.log('   (also try: /swarm agents  /swarm config)');
 
@@ -247,6 +297,125 @@ async function install(): Promise<number> {
 	console.log('   — use it as a reference for customizing model assignments.');
 
 	return 0;
+}
+
+/**
+ * Cache-only refresh: deletes opencode's cached copy of opencode-swarm@latest so
+ * the next opencode startup re-fetches from npm. Lighter than `install` — does
+ * not touch opencode.json, plugin config, or custom prompts.
+ *
+ * Motivation: opencode's Npm.add() is cache-first with no staleness check on
+ * `@latest`-tagged plugins (see comment in install()). Users who never re-run
+ * `install` silently keep running an old version forever (issue #675).
+ */
+async function update(): Promise<number> {
+	console.log('🐝 Refreshing OpenCode Swarm plugin cache...\n');
+	const result = evictPluginCaches();
+	const lockResult = evictLockFiles();
+	if (result.cleared.length > 0) {
+		for (const cleared of result.cleared) {
+			console.log(`✓ Cleared: ${cleared}`);
+		}
+		console.log('\nRestart OpenCode to fetch the latest version from npm.');
+	}
+	if (lockResult.cleared.length > 0) {
+		for (const cleared of lockResult.cleared) {
+			console.log(`✓ Cleared lock file: ${cleared}`);
+		}
+	}
+	if (lockResult.failed.length > 0) {
+		for (const failed of lockResult.failed) {
+			console.error(`✗ Could not clear lock file: ${failed}`);
+		}
+	}
+	if (
+		result.cleared.length === 0 &&
+		result.failed.length === 0 &&
+		lockResult.cleared.length === 0 &&
+		lockResult.failed.length === 0
+	) {
+		console.log(
+			'No cached plugin found. Restart OpenCode to fetch the latest version from npm.',
+		);
+		console.log('Checked locations:');
+		for (const p of OPENCODE_PLUGIN_CACHE_PATHS) {
+			console.log(`  - ${p}`);
+		}
+		console.log('Lock files checked:');
+		for (const p of OPENCODE_PLUGIN_LOCK_FILE_PATHS) {
+			console.log(`  - ${p}`);
+		}
+	}
+	if (result.failed.length > 0) {
+		for (const failed of result.failed) {
+			console.error(`✗ Could not clear: ${failed}`);
+		}
+	}
+	if (result.failed.length > 0 || lockResult.failed.length > 0) {
+		return 1;
+	}
+	return 0;
+}
+
+/**
+ * Recursively delete every known opencode plugin cache location for
+ * opencode-swarm. Returns paths actually cleared and paths that errored.
+ * Skips paths that don't exist or fail the safety guard.
+ */
+export function evictPluginCaches(): { cleared: string[]; failed: string[] } {
+	const cleared: string[] = [];
+	const failed: string[] = [];
+	for (const cachePath of OPENCODE_PLUGIN_CACHE_PATHS) {
+		if (!fs.existsSync(cachePath)) continue;
+		if (!isSafeCachePath(cachePath)) {
+			failed.push(`${cachePath} (refused: failed safety check)`);
+			continue;
+		}
+		try {
+			fs.rmSync(cachePath, { recursive: true, force: true });
+			cleared.push(cachePath);
+		} catch (err) {
+			failed.push(
+				`${cachePath} (${err instanceof Error ? err.message : String(err)})`,
+			);
+		}
+	}
+	return { cleared, failed };
+}
+
+/**
+ * Delete every known opencode plugin lock file (bun.lock, bun.lockb,
+ * package-lock.json). Returns paths actually cleared and paths that
+ * errored. Skips paths that don't exist or fail the safety guard.
+ *
+ * Why: opencode runs `bun install` at startup; bun.lock pins the
+ * installed plugin version. Deleting the lock forces re-resolution
+ * from npm so users actually receive the @latest version after `update`.
+ */
+export function evictLockFiles(): { cleared: string[]; failed: string[] } {
+	const cleared: string[] = [];
+	const failed: string[] = [];
+	for (const lockPath of OPENCODE_PLUGIN_LOCK_FILE_PATHS) {
+		if (!fs.existsSync(lockPath)) continue;
+		if (!isSafeLockFilePath(lockPath)) {
+			failed.push(`${lockPath} (refused: failed safety check)`);
+			continue;
+		}
+		try {
+			fs.unlinkSync(lockPath);
+			cleared.push(lockPath);
+		} catch (err: unknown) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code === 'EISDIR') {
+				failed.push(`${lockPath} (path is a directory, not a file)`);
+			} else {
+				failed.push(
+					`${lockPath} (${err instanceof Error ? err.message : String(err)})`,
+				);
+			}
+		}
+	}
+	return { cleared, failed };
 }
 
 async function uninstall(): Promise<number> {
@@ -356,6 +525,7 @@ Usage: bunx opencode-swarm [command] [OPTIONS]
 
 Commands:
   install     Install and configure the plugin (default)
+  update      Refresh OpenCode's plugin cache so the next start fetches latest from npm
   uninstall   Remove the plugin from OpenCode config
   run         Run a plugin command directly (for use outside OpenCode)
 
@@ -380,6 +550,7 @@ Custom Prompts:
 
 Examples:
   bunx opencode-swarm install
+  bunx opencode-swarm update
   bunx opencode-swarm uninstall
   bunx opencode-swarm uninstall --clean
   bunx opencode-swarm --help
@@ -395,6 +566,11 @@ Examples:
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 
+	if (args.includes('-v') || args.includes('--version')) {
+		console.log(`opencode-swarm ${version}`);
+		process.exit(0);
+	}
+
 	if (args.includes('-h') || args.includes('--help')) {
 		printHelp();
 		process.exit(0);
@@ -405,6 +581,9 @@ async function main(): Promise<void> {
 
 	if (command === 'install') {
 		const exitCode = await install();
+		process.exit(exitCode);
+	} else if (command === 'update') {
+		const exitCode = await update();
 		process.exit(exitCode);
 	} else if (command === 'uninstall') {
 		const exitCode = await uninstall();
@@ -461,6 +640,7 @@ export async function run(args: string[]): Promise<number> {
 		args: resolved.remainingArgs,
 		sessionID: '',
 		agents: {},
+		source: 'cli',
 	});
 
 	console.log(result);

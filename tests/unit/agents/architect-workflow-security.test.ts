@@ -43,7 +43,8 @@ describe('ARCHITECT WORKFLOW: Sequence Bypass Prevention', () => {
 		);
 		const stripped = between45and5
 			.replace(/SWARM_SKIP_SPEC_GATE/gi, '')
-			.replace(/env var bypass/gi, '');
+			.replace(/env var bypass/gi, '')
+			.replace(/control-bypass/gi, '');
 		const lowerStripped = stripped.toLowerCase();
 		expect(lowerStripped).not.toContain('skip');
 		expect(lowerStripped).not.toContain('bypass');
@@ -239,7 +240,16 @@ describe('ARCHITECT WORKFLOW: Reviewer Order Manipulation Prevention', () => {
 });
 
 describe('ARCHITECT WORKFLOW: UI Gate Bypass Prevention', () => {
-	const prompt = createArchitectAgent('test-model').config.prompt;
+	const prompt = createArchitectAgent(
+		'test-model',
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{
+			enabled: true,
+		},
+	).config.prompt;
 
 	test('SECURITY: Designer must run BEFORE coder for UI tasks', () => {
 		expect(prompt).toContain('**UI/UX DESIGN GATE**');
@@ -336,13 +346,25 @@ describe('ARCHITECT WORKFLOW: Delegation Safety', () => {
 		expect(prompt).toContain('Send, STOP, wait for response');
 	});
 
+	test('SECURITY: Stage B parallel exception is narrow and does not weaken coder task isolation', () => {
+		expect(prompt).toContain(
+			'Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task',
+		);
+		expect(prompt).toContain(
+			'This exception NEVER applies to coder delegations',
+		);
+		expect(prompt).toContain('ONE task per {{AGENT_PREFIX}}coder call');
+		expect(prompt).toContain('Never batch');
+	});
+
 	test('SECURITY: One task per coder call (Rule 3)', () => {
 		expect(prompt).toContain('ONE task per {{AGENT_PREFIX}}coder call');
 		expect(prompt).toContain('Never batch');
 	});
 
 	test('SECURITY: CONSTRAINT field enforces restrictions in delegation', () => {
-		expect(prompt).toContain('CONSTRAINT: [what NOT to do]');
+		// CONSTRAINT appears in actual delegation examples, not as a format template
+		// (format template was refactored to [agent-specific fields required by INPUT FORMAT])
 		expect(prompt).toContain('CONSTRAINT: Focus on auth only');
 		expect(prompt).toContain('CONSTRAINT: Do not modify other functions');
 	});

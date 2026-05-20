@@ -1,4 +1,5 @@
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import {
 	analyzeImpact,
 	type TestImpactResult,
@@ -9,10 +10,10 @@ export const test_impact: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Analyze which test files are impacted by changes to the given source files. Returns TestImpactResult with impactedTests, untestedFiles, and the full impact map.',
 	args: {
-		changedFiles: tool.schema
-			.array(tool.schema.string())
+		changedFiles: z
+			.array(z.string())
 			.describe('Array of source file paths to analyze for test impact'),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe(

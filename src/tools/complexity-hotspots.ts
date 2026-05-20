@@ -1,7 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { estimateCyclomaticComplexity } from '../quality/metrics';
+import { bunSpawn } from '../utils/bun-compat';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -145,7 +147,7 @@ async function getGitChurn(
 ): Promise<Map<string, number>> {
 	const churnMap = new Map<string, number>();
 
-	const proc = Bun.spawn(
+	const proc = bunSpawn(
 		[
 			'git',
 			'log',
@@ -162,10 +164,7 @@ async function getGitChurn(
 
 	// Read stdout concurrently with process exit to avoid pipe deadlock.
 	// git log output can be very large for repos with extensive history.
-	const [stdout] = await Promise.all([
-		new Response(proc.stdout).text(),
-		proc.exited,
-	]);
+	const [stdout] = await Promise.all([proc.stdout.text(), proc.exited]);
 
 	// Split on CRLF for cross-platform handling
 	const lines = stdout.split(/\r?\n/);
@@ -320,19 +319,19 @@ export const complexity_hotspots: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Identify high-risk code hotspots by combining git churn frequency with cyclomatic complexity estimates. Returns files with their churn count, complexity score, risk score, and recommended review level.',
 	args: {
-		days: tool.schema
+		days: z
 			.number()
 			.optional()
 			.describe(
 				'Number of days of git history to analyze (default: 90, valid range: 1-365)',
 			),
-		top_n: tool.schema
+		top_n: z
 			.number()
 			.optional()
 			.describe(
 				'Number of top hotspots to return (default: 20, valid range: 1-100)',
 			),
-		extensions: tool.schema
+		extensions: z
 			.string()
 			.optional()
 			.describe(

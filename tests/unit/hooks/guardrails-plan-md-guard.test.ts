@@ -43,6 +43,11 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 	describe('attack vector 1: absolute paths to plan.md', () => {
 		it('absolute Windows path C:\\project\\.swarm\\plan.md → NOT blocked (bypass gap)', async () => {
+			// On Windows, C:\project\... is an absolute path outside the working
+			// directory, so the containment check (#496) correctly blocks it.
+			// The bypass gap only exists on Linux/Mac where C:\... is relative.
+			if (process.platform === 'win32') return;
+
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -75,6 +80,11 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 		});
 
 		it('absolute path with forward slashes on Windows → NOT blocked (bypass gap)', async () => {
+			// On Windows, C:/project/... is an absolute path outside the working
+			// directory, so the containment check (#496) correctly blocks it.
+			// The bypass gap only exists on Linux/Mac where C:/... is relative.
+			if (process.platform === 'win32') return;
+
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
@@ -219,7 +229,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 		});
 
 		it.skipIf(process.platform !== 'win32')(
-			'..\\.swarm\\plan.md Windows backslash → NOT blocked (outside project)',
+			'..\\.swarm\\plan.md Windows backslash → blocked (traversal caught by containment)',
 			async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(config);
@@ -228,8 +238,12 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 				const input = makeInput('test-session', 'write', 'call-1');
 				const output = makeOutput({ filePath: '..\\.swarm\\plan.md' });
 
-				// This resolves to parent directory, which is outside project - not blocked
-				await hooks.toolBefore(input, output);
+				// On Windows backslash is a path separator, so ..\.swarm\plan.md is a
+				// traversal to the parent directory. The containment check (#496) catches
+				// it as "resolves outside the working directory" — the bypass gap is closed.
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/resolves outside the working directory/,
+				);
 			},
 		);
 	});
@@ -454,18 +468,6 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 			const input = makeInput('test-session', 'write', 'call-1');
 			const output = makeOutput({ filePath: '.swarm/plan.md.old' });
 
-			await hooks.toolBefore(input, output);
-		});
-
-		it.skip('.swarm/plan.json (not plan.md) → should NOT throw', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
-			startAgentSession('test-session', ORCHESTRATOR_NAME);
-
-			const input = makeInput('test-session', 'write', 'call-1');
-			const output = makeOutput({ filePath: '.swarm/plan.json' });
-
-			// Only .swarm/plan.md is blocked, not plan.json
 			await hooks.toolBefore(input, output);
 		});
 

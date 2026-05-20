@@ -4,6 +4,7 @@ import {
 	listEvidenceTaskIds,
 	loadEvidence,
 } from '../evidence/manager';
+import { warn } from '../utils';
 
 /**
  * Handles the /swarm archive command.
@@ -37,7 +38,16 @@ export async function handleArchiveCommand(
 		const wouldArchiveAge: string[] = [];
 		const remainingBundles: Array<{ taskId: string; updatedAt: string }> = [];
 		for (const taskId of beforeTaskIds) {
-			const result = await loadEvidence(directory, taskId);
+			let result: Awaited<ReturnType<typeof loadEvidence>>;
+			try {
+				result = await loadEvidence(directory, taskId);
+			} catch (_evidenceErr) {
+				warn(
+					'archive: skipping corrupt or unreadable evidence for task',
+					taskId,
+				);
+				continue;
+			}
 			if (result.status !== 'found') {
 				continue;
 			}

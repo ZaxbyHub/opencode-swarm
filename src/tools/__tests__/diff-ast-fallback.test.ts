@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import type { ToolResult } from '../create-tool';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Mock only execFileSync while preserving every other export (#330).
 const mockExecFileSync = mock(() => '');
@@ -50,7 +56,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'staged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert: fallback entry should be present in astDiffs
 			expect(parsed.astDiffs).toBeDefined();
@@ -71,7 +77,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'staged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert
 			const fallback = parsed.astDiffs![0];
@@ -103,7 +109,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'unstaged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert
 			expect(parsed.error).toBeUndefined();
@@ -124,7 +130,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'unstaged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert
 			expect(parsed.files).toHaveLength(2);
@@ -143,7 +149,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'staged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert - astDiffs should be present with fallback entry
 			expect(parsed.astDiffs).toBeDefined();
@@ -199,7 +205,7 @@ describe('AST diff fallback — regression: error results were silently dropped'
 			// Act
 			// @ts-expect-error — test bypasses createSwarmTool wrapper
 			const result = await diff.execute({ base: 'staged' });
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Assert - verify the fallback entry has the correct structure
 			const entry = parsed.astDiffs![0];

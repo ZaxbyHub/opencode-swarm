@@ -1,6 +1,5 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { ToolContext } from '@opencode-ai/plugin';
 import type { PluginConfig } from '../config';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
@@ -440,17 +439,9 @@ export async function handleDebuggingSpiral(
 
 	const checkpointLabel = `spiral-${taskId}-${Date.now()}`;
 	try {
-		const { checkpoint } = await import('../tools/checkpoint.js');
-		const result = await checkpoint.execute(
-			{ action: 'save', label: checkpointLabel },
-			{ directory } as ToolContext,
-		);
-		try {
-			const parsed = JSON.parse(result as string) as { success?: boolean };
-			checkpointCreated = parsed.success === true;
-		} catch {
-			checkpointCreated = false;
-		}
+		const { saveCheckpointRecord } = await import('../tools/checkpoint.js');
+		const result = saveCheckpointRecord(checkpointLabel, directory);
+		checkpointCreated = result.success === true;
 	} catch {
 		checkpointCreated = false;
 	}

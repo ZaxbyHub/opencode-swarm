@@ -14,7 +14,7 @@
  *
  * @see https://github.com/zaxbysauce/opencode-swarm/issues/449
  */
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 interface GetApprovedPlanResult {
     success: boolean;
     reason?: string;

@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import { createSwarmTool } from './create-tool';
 
 interface SymbolInfo {
@@ -410,12 +411,12 @@ export const symbols: ToolDefinition = createSwarmTool({
 		'Supports TypeScript/JavaScript and Python. Use for architect planning, ' +
 		'designer scaffolding, and understanding module public API surface.',
 	args: {
-		file: tool.schema
+		file: z
 			.string()
 			.describe(
 				'File path to extract symbols from (e.g., "src/auth/login.ts")',
 			),
-		exported_only: tool.schema
+		exported_only: z
 			.boolean()
 			.default(true)
 			.describe(

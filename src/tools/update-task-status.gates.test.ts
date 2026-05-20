@@ -365,4 +365,95 @@ describe('checkReviewerGate', () => {
 		const result = checkReviewerGate('4.4', tmpDir);
 		expect(result.blocked).toBe(true);
 	});
+
+	// ── regression tests for the gate-system blocking bug ──────────────────
+	// Issue: evidence file created at in_progress time (with gates: {}) caused checkReviewerGate
+	// to return blocked:true even when the delegation hook correctly advanced session state to
+	// tests_run. Fix: fall through to session state when evidence is incomplete.
+
+	it('allows completion when evidence file is empty (from in_progress) but session state is tests_run', () => {
+		// Scenario: update_task_status("in_progress") creates evidence with gates: {}
+		// Then reviewer and test_engineer are delegated — the hook advances session state
+		// to tests_run but evidence recording fails silently (lock timeout, etc.)
+		// Expected: checkReviewerGate should NOT block — session state wins.
+
+		startAgentSession('session-1', 'architect');
+		const session = swarmState.agentSessions.get('session-1')!;
+		advanceTaskState(session, '5.1', 'coder_delegated');
+		advanceTaskState(session, '5.1', 'pre_check_passed');
+		advanceTaskState(session, '5.1', 'reviewer_run');
+		advanceTaskState(session, '5.1', 'tests_run');
+
+		// Create the evidence file with empty gates (simulates what in_progress creates)
+		mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			path.join(tmpDir, '.swarm', 'evidence', '5.1.json'),
+			JSON.stringify({
+				taskId: '5.1',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {},
+			}),
+		);
+
+		// Session state says tests_run — this should allow completion
+		const result = checkReviewerGate('5.1', tmpDir);
+		expect(result.blocked).toBe(false);
+	});
+
+	it('blocks when evidence is empty and session state is also idle (no delegations occurred)', () => {
+		// Scenario: Evidence file created at in_progress but NO delegations ran.
+		// Session state: idle. Expected: blocked with clear message about missing gates.
+
+		startAgentSession('session-1', 'architect');
+		// session state is idle (no task state advancement)
+
+		mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			path.join(tmpDir, '.swarm', 'evidence', '5.2.json'),
+			JSON.stringify({
+				taskId: '5.2',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {},
+			}),
+		);
+
+		const result = checkReviewerGate('5.2', tmpDir);
+		expect(result.blocked).toBe(true);
+		// The reason should reference the missing gates from the evidence file (more specific)
+		expect(result.reason).toContain('reviewer');
+		expect(result.reason).toContain('test_engineer');
+	});
+
+	it('allows completion when evidence is partially complete and session state is tests_run', () => {
+		// Scenario: Evidence has reviewer but not test_engineer; session state is tests_run.
+		// Expected: session state wins, completion allowed.
+
+		startAgentSession('session-1', 'architect');
+		const session = swarmState.agentSessions.get('session-1')!;
+		advanceTaskState(session, '5.3', 'coder_delegated');
+		advanceTaskState(session, '5.3', 'pre_check_passed');
+		advanceTaskState(session, '5.3', 'reviewer_run');
+		advanceTaskState(session, '5.3', 'tests_run');
+
+		// Evidence only has reviewer, not test_engineer
+		mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			path.join(tmpDir, '.swarm', 'evidence', '5.3.json'),
+			JSON.stringify({
+				taskId: '5.3',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'sess-r',
+						timestamp: new Date().toISOString(),
+						agent: 'reviewer',
+					},
+				},
+			}),
+		);
+
+		// Session state says tests_run — should still allow completion
+		const result = checkReviewerGate('5.3', tmpDir);
+		expect(result.blocked).toBe(false);
+	});
 });

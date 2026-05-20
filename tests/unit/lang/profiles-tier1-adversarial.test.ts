@@ -3,7 +3,7 @@
  * Tests edge cases, invalid inputs, and mutation safety
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	LANGUAGE_REGISTRY,
 	type LanguageProfile,
@@ -110,14 +110,25 @@ describe('LanguageRegistry Adversarial Tests', () => {
 	});
 
 	describe('register - Extension Collision', () => {
-		it('should override existing profile when extension collides (last-register-wins)', () => {
-			// Register first profile with .ts
+		// Behavior change (Phase 1 of language-agnostic refactor): the registry
+		// now THROWS on extension collision between two non-parserOnly profiles.
+		// The old "last-register-wins" silent override allowed an aux profile
+		// to silently steal an extension from a primary profile, masking real
+		// configuration drift. See src/lang/profiles.ts:LanguageRegistry.register.
+		// Note: beforeEach already registers a "test" profile with .ts and .py.
+		// These tests use distinct extensions (.alpha, .beta, .gamma, .delta) to
+		// isolate collision-detection from the setup.
+		it('should THROW when extension collides between non-parserOnly profiles', () => {
 			const profile1: LanguageProfile = {
 				id: 'first',
 				displayName: 'First Profile',
 				tier: 1,
-				extensions: ['.ts'],
-				treeSitter: { grammarId: 'first', wasmFile: 'first.wasm' },
+				extensions: ['.alpha'],
+				treeSitter: {
+					grammarId: 'first',
+					wasmFile: 'first.wasm',
+					commentNodes: ['comment'],
+				},
 				build: { detectFiles: [], commands: [] },
 				test: { detectFiles: [], frameworks: [] },
 				lint: { detectFiles: [], linters: [] },
@@ -126,18 +137,18 @@ describe('LanguageRegistry Adversarial Tests', () => {
 				prompts: { coderConstraints: [], reviewerChecklist: [] },
 			};
 			registry.register(profile1);
+			expect(registry.getByExtension('.alpha')?.id).toBe('first');
 
-			// Verify first profile is registered
-			let result = registry.getByExtension('.ts');
-			expect(result?.id).toBe('first');
-
-			// Register second profile with same .ts extension
 			const profile2: LanguageProfile = {
 				id: 'second',
 				displayName: 'Second Profile',
 				tier: 1,
-				extensions: ['.ts'],
-				treeSitter: { grammarId: 'second', wasmFile: 'second.wasm' },
+				extensions: ['.alpha'],
+				treeSitter: {
+					grammarId: 'second',
+					wasmFile: 'second.wasm',
+					commentNodes: ['comment'],
+				},
 				build: { detectFiles: [], commands: [] },
 				test: { detectFiles: [], frameworks: [] },
 				lint: { detectFiles: [], linters: [] },
@@ -145,25 +156,27 @@ describe('LanguageRegistry Adversarial Tests', () => {
 				sast: { nativeRuleSet: null, semgrepSupport: 'none' },
 				prompts: { coderConstraints: [], reviewerChecklist: [] },
 			};
-			registry.register(profile2);
+			expect(() => registry.register(profile2)).toThrow(
+				/extension ".alpha" registered by both/,
+			);
 
-			// Verify second profile overrides the first
-			result = registry.getByExtension('.ts');
-			expect(result?.id).toBe('second');
-			expect(result?.displayName).toBe('Second Profile');
-
-			// First profile should still be accessible by id
-			const byId = registry.getById('first');
-			expect(byId?.id).toBe('first');
+			// First profile remains intact — collision is rejected, not silently overwritten.
+			expect(registry.getByExtension('.alpha')?.id).toBe('first');
+			expect(registry.getById('first')?.id).toBe('first');
+			expect(registry.getById('second')).toBeUndefined();
 		});
 
-		it('should handle multiple extension collisions correctly', () => {
+		it('should THROW on first collision when registering profiles with multiple overlapping extensions', () => {
 			const profile1: LanguageProfile = {
 				id: 'p1',
 				displayName: 'P1',
 				tier: 1,
-				extensions: ['.ts', '.py'],
-				treeSitter: { grammarId: 'p1', wasmFile: 'p1.wasm' },
+				extensions: ['.beta', '.gamma'],
+				treeSitter: {
+					grammarId: 'p1',
+					wasmFile: 'p1.wasm',
+					commentNodes: ['comment'],
+				},
 				build: { detectFiles: [], commands: [] },
 				test: { detectFiles: [], frameworks: [] },
 				lint: { detectFiles: [], linters: [] },
@@ -176,22 +189,12 @@ describe('LanguageRegistry Adversarial Tests', () => {
 				id: 'p2',
 				displayName: 'P2',
 				tier: 2,
-				extensions: ['.ts', '.rs'],
-				treeSitter: { grammarId: 'p2', wasmFile: 'p2.wasm' },
-				build: { detectFiles: [], commands: [] },
-				test: { detectFiles: [], frameworks: [] },
-				lint: { detectFiles: [], linters: [] },
-				audit: { detectFiles: [], command: null, outputFormat: 'json' },
-				sast: { nativeRuleSet: null, semgrepSupport: 'none' },
-				prompts: { coderConstraints: [], reviewerChecklist: [] },
-			};
-
-			const profile3: LanguageProfile = {
-				id: 'p3',
-				displayName: 'P3',
-				tier: 3,
-				extensions: ['.py', '.go'],
-				treeSitter: { grammarId: 'p3', wasmFile: 'p3.wasm' },
+				extensions: ['.beta', '.delta'],
+				treeSitter: {
+					grammarId: 'p2',
+					wasmFile: 'p2.wasm',
+					commentNodes: ['comment'],
+				},
 				build: { detectFiles: [], commands: [] },
 				test: { detectFiles: [], frameworks: [] },
 				lint: { detectFiles: [], linters: [] },
@@ -201,18 +204,35 @@ describe('LanguageRegistry Adversarial Tests', () => {
 			};
 
 			registry.register(profile1);
-			registry.register(profile2);
-			registry.register(profile3);
+			expect(() => registry.register(profile2)).toThrow(
+				/extension ".beta" registered by both/,
+			);
 
-			// Last registration wins for each extension
-			expect(registry.getByExtension('.ts')?.id).toBe('p2');
-			expect(registry.getByExtension('.py')?.id).toBe('p3');
-			expect(registry.getByExtension('.rs')?.id).toBe('p2');
-			expect(registry.getByExtension('.go')?.id).toBe('p3');
+			// p1's extensions remain intact.
+			expect(registry.getByExtension('.beta')?.id).toBe('p1');
+			expect(registry.getByExtension('.gamma')?.id).toBe('p1');
+			// p2 was rejected before .delta could be claimed.
+			expect(registry.getByExtension('.delta')).toBeUndefined();
 		});
 	});
 
 	describe('Singleton Pattern - LANGUAGE_REGISTRY', () => {
+		// These tests deliberately mutate the shared LANGUAGE_REGISTRY singleton
+		// to verify cross-import sharing. We unregister the fixture ids in
+		// afterEach so the mutations do not leak into other test files in
+		// Bun's per-file-but-shared-process test runner — without this, the
+		// parity test's `expect(getAll().length).toBe(12)` becomes order-
+		// dependent on whichever file runs first.
+		const SINGLETON_FIXTURE_IDS = [
+			'singleton-test',
+			'singleton-ref-test',
+		] as const;
+		afterEach(() => {
+			for (const id of SINGLETON_FIXTURE_IDS) {
+				LANGUAGE_REGISTRY.unregister(id);
+			}
+		});
+
 		it('should be shared across imports - mutations affect all importers', () => {
 			// Get current count of profiles in the singleton
 			const initialCount = LANGUAGE_REGISTRY.getAll().length;

@@ -11,6 +11,12 @@ export declare function readPriorDriftReports(directory: string): Promise<DriftR
  * Returns the absolute path of the written file.
  */
 export declare function writeDriftReport(directory: string, report: DriftReport): Promise<string>;
+export declare const _internals: {
+    readPriorDriftReports: typeof readPriorDriftReports;
+    writeDriftReport: typeof writeDriftReport;
+    runDeterministicDriftCheck: typeof runDeterministicDriftCheck;
+    buildDriftInjectionText: typeof buildDriftInjectionText;
+};
 /**
  * Deterministic drift check for the given phase.
  * Builds a structured DriftReport from curator data, plan, spec, and prior reports.

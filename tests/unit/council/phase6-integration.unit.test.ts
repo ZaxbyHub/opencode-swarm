@@ -2,7 +2,7 @@
  * Phase 6 end-to-end composition tests.
  *
  * Proves the components compose correctly:
- *   declare_council_criteria → convene_council (writes evidence.gates.council)
+ *   declare_council_criteria → submit_council_verdicts (writes evidence.gates.council)
  *     → checkCouncilGate (reads evidence.gates.council and blocks/allows)
  *     → pushCouncilAdvisory (pushes into architect session advisory queue)
  *
@@ -69,7 +69,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		const { declare_council_criteria } = await import(
 			'../../../src/tools/declare-council-criteria'
 		);
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 		const { checkCouncilGate } = await import(
@@ -110,7 +110,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 			criteriaUnmet: [],
 			durationMs: 10,
 		}));
-		const conveneResult = await convene_council.execute(
+		const conveneResult = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
 				swarmId: 'swarm-1',
@@ -139,7 +139,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		const { declare_council_criteria } = await import(
 			'../../../src/tools/declare-council-criteria'
 		);
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 		const { checkCouncilGate } = await import(
@@ -158,7 +158,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		);
 
 		// explorer REJECTs — veto under default vetoPriority=true
-		const conveneResult = await convene_council.execute(
+		const conveneResult = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
 				swarmId: 'swarm-1',
@@ -237,7 +237,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		const { declare_council_criteria } = await import(
 			'../../../src/tools/declare-council-criteria'
 		);
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 
@@ -263,7 +263,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		);
 
 		// Convene — critic marks C1 unmet. allCriteriaMet should be false.
-		const result = await convene_council.execute(
+		const result = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
 				swarmId: 'swarm-1',
@@ -324,10 +324,10 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 	});
 });
 
-describe('Phase 6 integration — convene_council pushes architect advisory', () => {
+describe('Phase 6 integration — submit_council_verdicts pushes architect advisory', () => {
 	test('REJECT verdict with sessionID pushes to architect session queue', async () => {
 		seedEnabledConfig();
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 		const { startAgentSession, getAgentSession, resetSwarmState } =
@@ -337,11 +337,12 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 		const sessionID = 'test-arch-session-1';
 		startAgentSession(sessionID, 'architect', tempDir);
 
-		await convene_council.execute(
+		await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
 				swarmId: 'swarm-1',
 				roundNumber: 1,
+				// 3 distinct verdicts to satisfy default minimumMembers=3.
 				verdicts: [
 					{
 						agent: 'critic',
@@ -356,6 +357,24 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 								evidence: '.',
 							},
 						],
+						criteriaAssessed: [],
+						criteriaUnmet: [],
+						durationMs: 10,
+					},
+					{
+						agent: 'reviewer',
+						verdict: 'APPROVE',
+						confidence: 1,
+						findings: [],
+						criteriaAssessed: [],
+						criteriaUnmet: [],
+						durationMs: 10,
+					},
+					{
+						agent: 'sme',
+						verdict: 'APPROVE',
+						confidence: 1,
+						findings: [],
 						criteriaAssessed: [],
 						criteriaUnmet: [],
 						durationMs: 10,
@@ -377,7 +396,7 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 
 	test('APPROVE with no findings does not push (no-op)', async () => {
 		seedEnabledConfig();
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 		const { startAgentSession, getAgentSession, resetSwarmState } =
@@ -394,7 +413,7 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 			'test_engineer',
 			'explorer',
 		] as const;
-		await convene_council.execute(
+		await submit_council_verdicts.execute(
 			{
 				taskId: '2.1',
 				swarmId: 'swarm-1',
@@ -420,27 +439,27 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 
 	test('missing sessionID does not throw (best-effort advisory)', async () => {
 		seedEnabledConfig();
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 
 		// No sessionID in ctx — advisory is skipped, tool still succeeds.
-		const result = await convene_council.execute(
+		// Provide 3 distinct verdicts to satisfy default quorum (minimumMembers=3).
+		const quorumAgents = ['critic', 'reviewer', 'sme'] as const;
+		const result = await submit_council_verdicts.execute(
 			{
 				taskId: '3.1',
 				swarmId: 'swarm-1',
 				roundNumber: 1,
-				verdicts: [
-					{
-						agent: 'critic',
-						verdict: 'REJECT',
-						confidence: 1,
-						findings: [],
-						criteriaAssessed: [],
-						criteriaUnmet: [],
-						durationMs: 10,
-					},
-				],
+				verdicts: quorumAgents.map((agent) => ({
+					agent,
+					verdict: 'REJECT' as const,
+					confidence: 1,
+					findings: [],
+					criteriaAssessed: [],
+					criteriaUnmet: [],
+					durationMs: 10,
+				})),
 				working_directory: tempDir,
 			},
 			{ directory: tempDir },
@@ -450,28 +469,28 @@ describe('Phase 6 integration — convene_council pushes architect advisory', ()
 
 	test('sessionID pointing to non-existent session does not throw', async () => {
 		seedEnabledConfig();
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
 		const { resetSwarmState } = await import('../../../src/state');
 		resetSwarmState();
 
-		const result = await convene_council.execute(
+		// Provide 3 distinct verdicts to satisfy default quorum (minimumMembers=3).
+		const quorumAgents = ['critic', 'reviewer', 'sme'] as const;
+		const result = await submit_council_verdicts.execute(
 			{
 				taskId: '4.1',
 				swarmId: 'swarm-1',
 				roundNumber: 1,
-				verdicts: [
-					{
-						agent: 'critic',
-						verdict: 'REJECT',
-						confidence: 1,
-						findings: [],
-						criteriaAssessed: [],
-						criteriaUnmet: [],
-						durationMs: 10,
-					},
-				],
+				verdicts: quorumAgents.map((agent) => ({
+					agent,
+					verdict: 'REJECT' as const,
+					confidence: 1,
+					findings: [],
+					criteriaAssessed: [],
+					criteriaUnmet: [],
+					durationMs: 10,
+				})),
 				working_directory: tempDir,
 			},
 			{ directory: tempDir, sessionID: 'nonexistent-session-id' },
@@ -523,7 +542,7 @@ describe('Phase 6 integration — index.ts wire-up', () => {
 			{ enabled: true },
 		);
 		const prompt = agent.config.prompt ?? '';
-		expect(prompt).toContain('Work Complete Council');
+		expect(prompt).toContain('COUNCIL WORKFLOW');
 	});
 
 	test('createArchitectAgent with undefined council renders no workflow block', async () => {
@@ -533,9 +552,9 @@ describe('Phase 6 integration — index.ts wire-up', () => {
 		const agent = createArchitectAgent('test-model');
 		const prompt = agent.config.prompt ?? '';
 		// The prompt should not contain the workflow block's unique sentinel.
-		// AVAILABLE_TOOLS may still mention the string "Work Complete Council"
-		// via the convene_council TOOL_DESCRIPTIONS entry, so we pick a
-		// sentinel that only appears in the workflow block itself.
+		// AVAILABLE_TOOLS may still mention council-related strings via the
+		// submit_council_verdicts TOOL_DESCRIPTIONS entry, so we pick a sentinel
+		// that only appears in the workflow block itself.
 		expect(prompt).not.toContain('Phase 0 — Pre-declare criteria');
 	});
 

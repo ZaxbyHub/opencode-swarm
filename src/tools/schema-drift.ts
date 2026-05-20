@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { createSwarmTool } from './create-tool';
 
 // Note: Complex YAML constructs (multi-line strings, anchors) are out of scope for v6.5
@@ -395,7 +396,7 @@ export const schema_drift: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Compare OpenAPI spec against actual route implementations to find drift. Detects undocumented routes in code and phantom routes in spec.',
 	args: {
-		spec_file: tool.schema
+		spec_file: z
 			.string()
 			.optional()
 			.describe(

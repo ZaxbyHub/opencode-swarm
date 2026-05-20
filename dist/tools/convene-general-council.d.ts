@@ -1,10 +1,11 @@
 /**
  * General Council Mode — architect-only synthesis tool.
  *
- * The architect spawns council_member subagents in parallel for Round 1,
- * collects their JSON responses, and calls this tool to synthesize results.
- * If the tool detects disagreements and Round 2 deliberation is configured,
- * the architect re-delegates to disputing members and calls this tool again
+ * The architect spawns council_generalist / council_skeptic /
+ * council_domain_expert subagents in parallel for Round 1, collects their
+ * JSON responses, and calls this tool to synthesize results. If the tool
+ * detects disagreements and Round 2 deliberation is configured, the
+ * architect re-delegates to disputing members and calls this tool again
  * with both round1Responses and round2Responses populated.
  *
  * Mirrors the convene-council.ts skeleton but explicitly does NOT inherit
@@ -21,5 +22,5 @@
  * Evidence path is .swarm/council/general/ (subdirectory; never writes to
  * .swarm/council/ root, where the QA council stores its files).
  */
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 export declare const convene_general_council: ReturnType<typeof tool>;

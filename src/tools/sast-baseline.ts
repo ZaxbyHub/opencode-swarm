@@ -209,7 +209,7 @@ export function assignOccurrenceIndices(
 		const occIdx = countMap.get(baseKey) ?? 0;
 		countMap.set(baseKey, occIdx + 1);
 
-		const fp = fingerprintFinding(finding, directory, occIdx);
+		const fp = _internals.fingerprintFinding(finding, directory, occIdx);
 		return {
 			finding,
 			index: occIdx,
@@ -329,7 +329,7 @@ export async function captureOrMergeBaseline(
 		);
 
 		// Compute fingerprints for current scan's findings
-		const indexed = assignOccurrenceIndices(findings, directory);
+		const indexed = _internals.assignOccurrenceIndices(findings, directory);
 
 		if (existing && !opts?.force) {
 			// Full prune: drop ALL prior fingerprints for rescanned files (engine-agnostic).
@@ -513,3 +513,19 @@ export function loadBaseline(
 		};
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	fingerprintFinding: typeof fingerprintFinding;
+	assignOccurrenceIndices: typeof assignOccurrenceIndices;
+	captureOrMergeBaseline: typeof captureOrMergeBaseline;
+	loadBaseline: typeof loadBaseline;
+} = {
+	fingerprintFinding,
+	assignOccurrenceIndices,
+	captureOrMergeBaseline,
+	loadBaseline,
+} as const;

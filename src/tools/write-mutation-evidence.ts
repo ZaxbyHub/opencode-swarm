@@ -9,7 +9,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
 import { createSwarmTool } from './create-tool';
 
@@ -217,30 +218,27 @@ export const write_mutation_evidence: ToolDefinition = createSwarmTool({
 	description:
 		'Write mutation gate evidence for a completed phase. Accepts phase, verdict (PASS/WARN/FAIL/SKIP), killRate, adjustedKillRate, summary, and optional survivedMutants. Normalizes uppercase verdicts to lowercase (PASS→pass, WARN→warn, FAIL→fail, SKIP→skip) and writes entries[0].type="mutation-gate" to .swarm/evidence/{phase}/mutation-gate.json using atomic temp+rename write. Use this after mutation_test tool returns to persist the gate verdict.',
 	args: {
-		phase: tool.schema
+		phase: z
 			.number()
 			.int()
 			.min(1)
 			.describe('The phase number for the mutation gate (e.g., 1, 2, 3)'),
-		verdict: tool.schema
+		verdict: z
 			.enum(['PASS', 'WARN', 'FAIL', 'SKIP'])
 			.describe(
 				"Verdict of the mutation gate: 'PASS', 'WARN', 'FAIL', or 'SKIP'",
 			),
-		killRate: tool.schema
-			.number()
-			.optional()
-			.describe('The raw kill rate (e.g., 0.85)'),
-		adjustedKillRate: tool.schema
+		killRate: z.number().optional().describe('The raw kill rate (e.g., 0.85)'),
+		adjustedKillRate: z
 			.number()
 			.optional()
 			.describe(
 				'The adjusted kill rate accounting for timeout survived mutants (e.g., 0.87)',
 			),
-		summary: tool.schema
+		summary: z
 			.string()
 			.describe('Human-readable summary of the mutation gate result'),
-		survivedMutants: tool.schema
+		survivedMutants: z
 			.string()
 			.optional()
 			.describe('Optional JSON-serialized list of survived mutants'),

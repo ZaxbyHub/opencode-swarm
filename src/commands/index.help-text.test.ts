@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { buildHelpText } from './index';
 import type { CommandEntry, RegisteredCommand } from './registry';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from './registry';
@@ -13,6 +13,12 @@ describe('buildHelpText()', () => {
 		test('starts with "## Swarm Commands"', () => {
 			expect(helpText.startsWith('## Swarm Commands')).toBe(true);
 		});
+
+		test('describes the tool-mediated chat routing path', () => {
+			expect(helpText).toContain('Chat routing note');
+			expect(helpText).toContain('swarm_command');
+			expect(helpText).toContain('bunx opencode-swarm run <subcommand>');
+		});
 	});
 
 	describe('command entries', () => {
@@ -22,19 +28,19 @@ describe('buildHelpText()', () => {
 			expect(helpText).toContain(statusEntry.description);
 		});
 
-		test('contains /swarm close with its description', () => {
-			const closeEntry = COMMAND_REGISTRY.close;
-			expect(helpText).toContain(`/swarm close`);
-			expect(helpText).toContain(closeEntry.description);
+		test('contains /swarm finalize with its description', () => {
+			const finalizeEntry = COMMAND_REGISTRY.finalize;
+			expect(helpText).toContain(`/swarm finalize`);
+			expect(helpText).toContain(finalizeEntry.description);
 		});
 	});
 
 	describe('Args: for commands with args', () => {
-		test('close command includes Args: with --prune-branches', () => {
-			const closeEntry = COMMAND_REGISTRY.close;
-			expect(closeEntry.args).toBe('--prune-branches');
-			// The help text should have Args: indented under the close command
-			expect(helpText).toContain('Args: `--prune-branches`');
+		test('finalize command includes Args: with close flags', () => {
+			const finalizeEntry = COMMAND_REGISTRY.finalize;
+			expect(finalizeEntry.args).toBe('--prune-branches, --skill-review');
+			// The help text should have Args: indented under the finalize command
+			expect(helpText).toContain('Args: `--prune-branches, --skill-review`');
 		});
 
 		test('benchmark command includes Args:', () => {
@@ -45,9 +51,9 @@ describe('buildHelpText()', () => {
 	});
 
 	describe('details text for commands with details', () => {
-		test('close command includes "Idempotent 4-stage" details', () => {
-			const closeEntry = COMMAND_REGISTRY.close;
-			expect(closeEntry.details).toContain('Idempotent 4-stage');
+		test('finalize command includes "Idempotent 4-stage" details', () => {
+			const finalizeEntry = COMMAND_REGISTRY.finalize;
+			expect(finalizeEntry.details).toContain('Idempotent 4-stage');
 			expect(helpText).toContain('Idempotent 4-stage');
 		});
 
@@ -145,16 +151,24 @@ describe('buildHelpText()', () => {
 			}
 		});
 
-		test('no top-level entry for compound commands that have a parent in VALID_COMMANDS', () => {
+		test('no top-level entry for compound commands that have a non-alias parent in VALID_COMMANDS', () => {
 			// Commands like "knowledge migrate" should NOT appear as top-level
 			// They should appear as subcommands under "knowledge"
-			const compoundWithParent = VALID_COMMANDS.filter((cmd) => {
+			// But if the parent is an alias (like "doctor" which is aliasOf: 'config doctor'),
+			// the compound command HAS no parent to appear under, so it CAN appear as top-level
+			const compoundWithNonAliasParent = VALID_COMMANDS.filter((cmd) => {
 				if (!cmd.includes(' ')) return false;
-				const parent = cmd.split(' ')[0];
-				return VALID_COMMANDS.includes(parent as RegisteredCommand);
+				const parentKey = cmd.split(' ')[0];
+				if (!VALID_COMMANDS.includes(parentKey as RegisteredCommand))
+					return false;
+				const parentEntry = (COMMAND_REGISTRY as Record<string, CommandEntry>)[
+					parentKey
+				];
+				const parentIsAlias = parentEntry?.aliasOf !== undefined;
+				return !parentIsAlias;
 			});
 
-			for (const cmd of compoundWithParent) {
+			for (const cmd of compoundWithNonAliasParent) {
 				// The compound command should NOT appear as a top-level entry
 				const topLevelPattern = new RegExp(
 					`^- \`/swarm ${cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\``,
@@ -194,5 +208,20 @@ describe('buildHelpText()', () => {
 			expect(positions[2]).toBeLessThan(positions[3]); // evidence < summary
 			expect(positions[4]).toBeLessThan(positions[5]); // config < doctor
 		});
+	});
+});
+
+describe('turbo command registry', () => {
+	it('description mentions lean turbo', () => {
+		expect(COMMAND_REGISTRY.turbo.description).toMatch(/lean/i);
+	});
+
+	it('args include lean and status subcommands', () => {
+		expect(COMMAND_REGISTRY.turbo.args).toContain('lean');
+		expect(COMMAND_REGISTRY.turbo.args).toContain('status');
+	});
+
+	it('details document lean turbo subcommands', () => {
+		expect(COMMAND_REGISTRY.turbo.details).toMatch(/lean/i);
 	});
 });

@@ -4,13 +4,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { handleTurboCommand } from '../commands/turbo';
+import { _internals, handleTurboCommand } from '../commands/turbo';
 import { getAgentSession, swarmState } from '../state';
 
 describe('handleTurboCommand', () => {
 	let testSessionId: string;
+	let originalLoadPluginConfigWithMeta: typeof _internals.loadPluginConfigWithMeta;
 
 	beforeEach(() => {
+		// Stub _internals DI seam so tests get standard turbo config
+		// instead of whatever the real project's .swarm/ settings contain.
+		originalLoadPluginConfigWithMeta = _internals.loadPluginConfigWithMeta;
+		_internals.loadPluginConfigWithMeta = () => ({
+			config: { turbo: { strategy: 'standard' } },
+			loadedFromFile: false,
+		});
 		// Create a test session
 		testSessionId = `turbo-test-${Date.now()}`;
 		swarmState.agentSessions.set(testSessionId, {
@@ -62,6 +70,8 @@ describe('handleTurboCommand', () => {
 	});
 
 	afterEach(() => {
+		// Restore the original _internals seam
+		_internals.loadPluginConfigWithMeta = originalLoadPluginConfigWithMeta;
 		// Clean up test session
 		swarmState.agentSessions.delete(testSessionId);
 	});

@@ -5,6 +5,16 @@ export type Parser = ParserType;
  */
 export declare const parserCache: Map<string, ParserType>;
 /**
+ * DI seam for testing — overridable reference to TreeSitterParser.init.
+ * Tests can replace this with a spy/mock to observe init calls without
+ * mock.module leakage. Restore the original reference in afterEach.
+ */
+export declare const _internals: {
+    parserInit: (opts?: {
+        locateFile: (scriptName: string) => string;
+    }) => Promise<void>;
+};
+/**
  * Initialize a parser for the given language
  * Loads WASM from dist/lang/grammars/ (copied during build)
  *

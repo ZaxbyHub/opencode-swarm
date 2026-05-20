@@ -14,12 +14,26 @@ interface SpecStalenessPayload {
 }
 
 /**
+ * Caller identification for spec-drift acknowledgment audit trail.
+ * Previously hardcoded as 'architect' — see issue #890, where the architect
+ * could shell out to `bunx opencode-swarm run acknowledge-spec-drift` and
+ * the resulting event mis-attributed the action. Callers now pass an
+ * explicit actor so events.jsonl can distinguish the legitimate paths
+ * ('user' from chat slash command, 'cli' from a real terminal) from any
+ * unidentified caller ('unknown'). The Bash guardrail
+ * (`src/hooks/guardrails.ts` section 23) blocks the agent-shell bypass at
+ * the runtime layer; this parameter exists for forensic clarity.
+ */
+export type SpecDriftAcknowledgedBy = 'user' | 'cli' | 'unknown';
+
+/**
  * Handle /swarm acknowledge-spec-drift command
  * Acknowledges and clears a previously detected spec drift staleness warning
  */
 export async function handleAcknowledgeSpecDriftCommand(
 	directory: string,
 	_args: string[],
+	acknowledgedBy: SpecDriftAcknowledgedBy = 'unknown',
 ): Promise<string> {
 	const specStalenessPath = validateSwarmPath(directory, 'spec-staleness.json');
 
@@ -44,9 +58,6 @@ export async function handleAcknowledgeSpecDriftCommand(
 
 	const { planTitle, phase } = stalenessData;
 
-	// Delete the spec-staleness.json file
-	await fsPromises.unlink(specStalenessPath);
-
 	// Update plan.specHash to current spec hash after acknowledgment
 	let currentHash: string | null = null;
 	let planUpdateSkipped = false;
@@ -67,6 +78,11 @@ export async function handleAcknowledgeSpecDriftCommand(
 		planUpdateSkipped = true;
 	}
 
+	// Only delete spec-staleness.json after plan.specHash update succeeds
+	if (!planUpdateSkipped) {
+		await fsPromises.unlink(specStalenessPath);
+	}
+
 	// Append acknowledgment event to events.jsonl
 	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 	const acknowledgmentEvent: SpecDriftAcknowledgedEvent = {
@@ -74,7 +90,7 @@ export async function handleAcknowledgeSpecDriftCommand(
 		timestamp: new Date().toISOString(),
 		phase,
 		planTitle,
-		acknowledgedBy: 'architect',
+		acknowledgedBy,
 		previousHash: stalenessData.specHash_plan,
 		newHash: currentHash,
 	};

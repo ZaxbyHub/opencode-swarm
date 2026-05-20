@@ -64,6 +64,7 @@ describe('curator-drift advisory injection', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		cleanupDir(tempDir);
 	});
 

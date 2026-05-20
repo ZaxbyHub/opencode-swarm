@@ -4,17 +4,29 @@
  * Startup hook that builds or refreshes the repo dependency graph when a session starts.
  * Write-trigger hook that incrementally updates the graph when write tools are called.
  * Wrapped in try/catch — failures are logged but never block plugin initialization.
+ *
+ * Issue #704: the previous implementation called the synchronous
+ * `buildWorkspaceGraph` from inside an `async init()`. JS executes async
+ * function bodies synchronously up to the first `await`, so calling
+ * `init()` blocked the entire event loop on the recursive workspace scan,
+ * preventing the plugin host's `await server(...)` from ever resolving and
+ * hanging the OpenCode Desktop loading screen indefinitely. The fix wires
+ * the async builder, yields to the event loop before doing any work, and
+ * exposes the init promise so `toolAfter` can serialize incremental
+ * updates after the initial scan completes.
  */
 
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../config/constants';
 import {
-	buildWorkspaceGraph,
+	buildWorkspaceGraphAsync,
 	type RepoGraph,
 	saveGraph,
 	updateGraphForFiles,
 } from '../tools/repo-graph';
 import * as logger from '../utils/logger';
+import { yieldToEventLoop } from '../utils/timeout';
 
 export interface RepoGraphBuilderHook {
 	init(): Promise<void>;
@@ -27,8 +39,13 @@ export interface RepoGraphBuilderHook {
 export interface RepoGraphDeps {
 	buildWorkspaceGraph: (
 		workspace: string,
-		options?: { maxFileSizeBytes?: number; maxFiles?: number },
-	) => RepoGraph;
+		options?: {
+			maxFileSizeBytes?: number;
+			maxFiles?: number;
+			walkBudgetMs?: number;
+			followSymlinks?: boolean;
+		},
+	) => Promise<RepoGraph>;
 	saveGraph: (
 		workspace: string,
 		graph: RepoGraph,
@@ -41,9 +58,6 @@ export interface RepoGraphDeps {
 	) => Promise<RepoGraph>;
 }
 
-/**
- * Supported source file extensions for graph updates.
- */
 const SUPPORTED_EXTENSIONS = [
 	'.ts',
 	'.tsx',
@@ -54,26 +68,32 @@ const SUPPORTED_EXTENSIONS = [
 	'.py',
 ];
 
-/**
- * Extract file path from tool args, checking common field names.
- *
- * @param args - Tool arguments object
- * @returns File path string or null if not found
- */
 function extractFilePath(args: unknown): string | null {
 	if (!args || typeof args !== 'object') return null;
 	const a = args as Record<string, unknown>;
-	const filePath = (a.file_path ?? a.path ?? a.filePath) as string | undefined;
+	let filePath = (a.file_path ?? a.path ?? a.filePath) as string | undefined;
 	if (!filePath || typeof filePath !== 'string') return null;
+
+	// Decode URL-encoded paths (up to 3 iterations for double-encoded paths)
+	for (let i = 0; i < 3; i++) {
+		try {
+			const decoded = decodeURIComponent(filePath);
+			if (decoded === filePath) break;
+			filePath = decoded;
+		} catch {
+			break;
+		}
+	}
+
+	// Normalize Unicode lookalike characters to ASCII equivalents
+	filePath = filePath
+		.replace(/．/g, '.')
+		.replace(/／/g, '/')
+		.replace(/․/g, '.');
+
 	return filePath;
 }
 
-/**
- * Check if a file path has a supported source extension.
- *
- * @param filePath - File path to check
- * @returns True if the file has a supported extension
- */
 function isSupportedSourceFile(filePath: string): boolean {
 	const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
 	return SUPPORTED_EXTENSIONS.includes(ext);
@@ -83,81 +103,117 @@ export function createRepoGraphBuilderHook(
 	workspaceRoot: string,
 	deps?: Partial<RepoGraphDeps>,
 ): RepoGraphBuilderHook {
-	const _buildWorkspaceGraph = deps?.buildWorkspaceGraph ?? buildWorkspaceGraph;
+	const _buildWorkspaceGraph =
+		deps?.buildWorkspaceGraph ?? buildWorkspaceGraphAsync;
 	const _saveGraph = deps?.saveGraph ?? saveGraph;
 	const _updateGraphForFiles = deps?.updateGraphForFiles ?? updateGraphForFiles;
 
-	return {
-		async init(): Promise<void> {
-			try {
-				const graph = _buildWorkspaceGraph(workspaceRoot);
-				await _saveGraph(workspaceRoot, graph);
-				logger.log(
-					`[repo-graph] Built graph: ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
-				);
-			} catch (error) {
-				// Don't block startup on graph build failure
-				const message = error instanceof Error ? error.message : String(error);
-				if (message.includes('does not exist')) {
-					return; // Workspace not found — skip silently
-				}
-				logger.error(`[repo-graph] Failed to build graph: ${message}`);
+	let initStarted = false;
+	let initPromise: Promise<void> = Promise.resolve();
+	let consecutiveFailures = 0;
+	const FAILURE_ADVISORY_THRESHOLD = 3;
+
+	async function doInit(): Promise<void> {
+		// Yield once before any scan work so the caller's promise chain has
+		// a chance to settle. Combined with the bounded async walker, this
+		// guarantees the plugin host's `await server(...)` resolves promptly
+		// even if the scan itself takes seconds.
+		await yieldToEventLoop();
+		try {
+			const graph = await _buildWorkspaceGraph(workspaceRoot);
+			await _saveGraph(workspaceRoot, graph);
+			logger.log(
+				`[repo-graph] Built graph: ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (
+				message.includes('does not exist') ||
+				message.includes('Refusing to scan')
+			) {
+				// Workspace not present, or the homedir-refusal guard fired.
+				// Both are expected non-fatal outcomes — log once at info
+				// level and keep the plugin functional.
+				logger.log(`[repo-graph] Skipping scan: ${message}`);
+				return;
 			}
+			logger.error(`[repo-graph] Failed to build graph: ${message}`);
+		}
+	}
+
+	return {
+		init(): Promise<void> {
+			if (!initStarted) {
+				initStarted = true;
+				initPromise = doInit();
+			}
+			return initPromise;
 		},
 
 		async toolAfter(
 			input: { tool: string; sessionID: string; args?: unknown },
 			_output: { output?: unknown; args?: unknown },
 		): Promise<void> {
-			// Only process write tools
+			// Wait for the initial scan before applying incremental updates.
+			// Without this gate, an early write tool could race the initial
+			// scan and stomp the saved graph with a partial update. The
+			// `.catch(()=>{})` swallows any init error so a failed initial
+			// scan does not poison every subsequent tool call.
+			await initPromise.catch(() => {
+				/* init failure is already logged */
+			});
+
 			if (!(WRITE_TOOL_NAMES as readonly string[]).includes(input.tool)) {
 				return;
 			}
+			const filePath = extractFilePath(input.args);
+			if (!filePath) return;
+			if (filePath.includes('\0')) return;
 
-			// Extract file path from tool args
-			const rawFilePath = extractFilePath(input.args);
-			if (!rawFilePath) {
-				return;
-			}
+			if (!isSupportedSourceFile(filePath)) return;
 
-			// Normalize path to prevent traversal via encoding tricks:
-			// 1. Reject null bytes outright (null byte injection — never valid in a file path)
-			// 2. Decode URL-encoding repeatedly until stable (handles %2e%2e, %252e, etc.)
-			// 3. Normalize Unicode fullwidth dots/slashes to ASCII equivalents
-			if (rawFilePath.includes('\0')) {
-				return;
-			}
-			let filePath = rawFilePath;
-			// Decode URL percent-encoding in a loop (max 3 passes) to handle double-encoding
-			for (let i = 0; i < 3; i++) {
-				try {
-					const decoded = decodeURIComponent(filePath);
-					if (decoded === filePath) break;
-					filePath = decoded;
-				} catch {
-					break;
-				}
-			}
-			// Normalize Unicode fullwidth characters used for dot/slash obfuscation
-			filePath = filePath
-				.replace(/\uff0e/g, '.') // fullwidth full stop → ASCII dot
-				.replace(/\uff0f/g, '/') // fullwidth solidus → ASCII slash
-				.replace(/\u2024/g, '.'); // one dot leader → ASCII dot
-
-			// Only process supported source files
-			if (!isSupportedSourceFile(filePath)) {
-				return;
-			}
-
-			// Get absolute path if relative
 			const absoluteFilePath = path.isAbsolute(filePath)
 				? filePath
 				: path.resolve(workspaceRoot, filePath);
 
-			// Reject paths outside workspace boundary
-			// Normalize to forward slashes for cross-platform comparison
-			const normalizedAbsolute = absoluteFilePath.replace(/\\/g, '/');
-			const normalizedWorkspace = workspaceRoot.replace(/\\/g, '/');
+			// SECURITY: Resolve symlinks to get the real path, then verify the
+			// real path is still within the workspace boundary. This prevents
+			// symlink-based workspace escape attacks (mirrors the approach used
+			// in resolveModuleSpecifier in repo-graph.ts).
+			let realFilePath: string;
+			try {
+				realFilePath = realpathSync(absoluteFilePath);
+			} catch (error) {
+				// Only fall back to unresolved path for ENOENT (file doesn't exist yet).
+				// Reject all other errors (EACCES, ELOOP, etc.) to prevent symlink-based
+				// workspace escape attacks.
+				if (
+					!(error instanceof Error) ||
+					(error as NodeJS.ErrnoException).code !== 'ENOENT'
+				) {
+					return; // Reject path - security boundary check failed
+				}
+				realFilePath = absoluteFilePath;
+			}
+
+			let realWorkspace: string;
+			try {
+				realWorkspace = realpathSync(workspaceRoot);
+			} catch (error) {
+				// Only fall back to unresolved path for ENOENT.
+				// Reject all other errors (EACCES, ELOOP, etc.) to prevent symlink-based
+				// workspace escape attacks.
+				if (
+					!(error instanceof Error) ||
+					(error as NodeJS.ErrnoException).code !== 'ENOENT'
+				) {
+					return; // Reject path - security boundary check failed
+				}
+				realWorkspace = workspaceRoot;
+			}
+
+			const normalizedAbsolute = realFilePath.replace(/\\/g, '/');
+			const normalizedWorkspace = realWorkspace.replace(/\\/g, '/');
 			if (
 				!normalizedAbsolute.startsWith(`${normalizedWorkspace}/`) &&
 				normalizedAbsolute !== normalizedWorkspace
@@ -167,12 +223,20 @@ export function createRepoGraphBuilderHook(
 
 			try {
 				await _updateGraphForFiles(workspaceRoot, [absoluteFilePath]);
+				consecutiveFailures = 0;
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				consecutiveFailures++;
 				logger.error(`[repo-graph] Incremental update failed: ${message}`);
+				if (consecutiveFailures >= FAILURE_ADVISORY_THRESHOLD) {
+					logger.warn(
+						`[repo-graph] ${consecutiveFailures} consecutive incremental update failures. ` +
+							`The dependency graph may be stale. Consider reloading the workspace.`,
+					);
+				}
 			}
 		},
 	};

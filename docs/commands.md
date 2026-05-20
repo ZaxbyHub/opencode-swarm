@@ -6,6 +6,34 @@ Commands are grouped by function. Compound commands (e.g., `/swarm config doctor
 
 ---
 
+## Claude Code Command Conflicts
+
+Several swarm subcommands share exact names with Claude Code built-in slash commands.
+This is a known source of model confusion — AI agents trained on Claude Code may try
+to invoke the CC built-in instead of the swarm subcommand.
+
+All swarm commands must use the full `/swarm <subcommand>` form. Never reference a
+conflicting swarm subcommand by its bare name when inside a swarm agent context.
+
+| Swarm Command | Conflicts With | Severity | CC Behavior |
+|---|---|---|---|
+| `/swarm show-plan` | `/plan` | 🔴 CRITICAL | Enters plan mode — Claude proposes before executing |
+| `/swarm reset` | `/reset` | 🔴 CRITICAL | Alias for `/clear` — wipes entire conversation |
+| `/swarm checkpoint` | `/checkpoint` | 🔴 CRITICAL | Alias for `/rewind` — restores prior conversation state |
+| `/swarm status` | `/status` | 🟠 HIGH | Shows Claude version, model, account info |
+| `/swarm agents` | `/agents` | 🟠 HIGH | Manages Claude subagent configurations |
+| `/swarm config` | `/config` | 🟠 HIGH | Opens Claude Code settings interface |
+| `/swarm export` | `/export` | 🟠 HIGH | Exports conversation as plain text |
+| `/swarm config doctor` | `/doctor` | 🟠 HIGH | Diagnoses Claude Code installation |
+| `/swarm history` | `/history` | 🟡 MEDIUM | Shows Claude Code session history |
+
+For contributors: Adding a new swarm command that matches a CC built-in requires
+updating `src/commands/conflict-registry.ts` with an explicit severity and
+disambiguation note. The CI test in `src/commands/conflict-registry.test.ts` will
+fail until this is done.
+
+---
+
 ## Status and Health
 
 ### `/swarm status`
@@ -38,14 +66,16 @@ List all registered agents with their model, temperature, read-only status, and 
 
 ## Plan Management
 
-### `/swarm plan [N]`
+### `/swarm show-plan [N]`
 
 Display the full `.swarm/plan.md`. With a phase number, show only that phase.
 
 ```text
-/swarm plan          # full plan
-/swarm plan 2        # Phase 2 tasks only
+/swarm show-plan      # full plan
+/swarm show-plan 2    # Phase 2 tasks only
 ```
+
+`/swarm plan [N]` remains available as a deprecated alias.
 
 ### `/swarm specify [description]`
 
@@ -76,6 +106,103 @@ Enter architect MODE: COUNCIL — convene a configurable multi-model General Cou
 
 **No-args behavior:** prints a usage string. The command never throws on bad input — invalid preset names and injected `[MODE: ...]` headers are silently dropped.
 
+### `/swarm pr-review <pr-url|owner/repo#N|N> [--council]`
+
+Launch a structured deep PR review using multi-lane parallel analysis with independent confirmation and critic challenge.
+
+| Argument | Description |
+|----------|-------------|
+| `<pr-url>` | Full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/42`) |
+| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
+| `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
+| `--council` | Enable adversarial multi-model council review variant |
+
+**URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames.
+
+**Workflow:**
+1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
+2. **Parallel Explorer Lanes** — 6 lanes: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+3. **Independent Reviewer Confirmation** — Validate each finding with file:line evidence
+4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
+5. **Synthesis** — Obligation assessment, findings table, merge recommendation
+
+**Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
+
+**No-args behavior:** prints a usage string. The command never throws on bad input.
+
+### `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>] [--json] [--skip-update] [--allow-dirty]`
+
+Read-only codebase audit using parallel explorer waves with independent reviewer verification and sequential critic challenge.
+
+| Alias |
+|-------|
+| `/swarm deep dive` |
+
+**Command forms:**
+- `/swarm deep-dive auth` — standard profile (default)
+- `/swarm deep-dive src/security --profile security` — security-focused audit
+- `/swarm deep-dive "settings page" --profile full --json` — full audit with machine-readable output
+- `/swarm deep dive src/hooks --max-explorers 4` — alias form with reduced parallelism
+
+**Workflow:**
+1. **Repo Readiness** — verify clean git state (unless `--allow-dirty`)
+2. **Scope Resolution** — import proximity grouping with 8-file cap per mission
+3. **Explorer Waves** — parallel explorer lanes covering scope mapping, data flow, runtime behavior, UX, security, testing, performance, and documentation
+4. **Reviewer Verification** — always 2 parallel reviewers confirm each finding with file:line evidence
+5. **Critic Challenge** — sequential adversarial pass on HIGH/CRITICAL findings only
+6. **Final Report** — synthesized findings table with severity, category, and remediation guidance
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--profile <name>` | `standard` | Audit profile: `standard`, `security`, `ux`, `architecture`, `full` |
+| `--max-explorers <n>` | `6` | Parallel explorer lanes (range: 1–8) |
+| `--json` | — | Emit machine-readable JSON output |
+| `--skip-update` | — | Skip OpenCode update check before audit |
+| `--allow-dirty` | — | Allow audit on dirty git state (uncommitted changes) |
+
+**Profiles:**
+
+| Profile | Focus areas |
+|---------|-------------|
+| `standard` | General code quality, correctness, and maintainability |
+| `security` | Vulnerability patterns, injection risks, secrets exposure |
+| `ux` | User experience, accessibility, API ergonomics |
+| `architecture` | System design, coupling, extensibility |
+| `full` | All focus areas combined |
+
+**Note:** This is a read-only audit. It does not modify source code, create branches, or write to the codebase.
+
+**No-args behavior:** prints a usage string. The command never throws on bad input.
+
+### `/swarm issue <issue-url|owner/repo#N|N> [--plan] [--trace] [--no-repro]`
+
+Ingest a GitHub issue into the swarm workflow for root-cause localization and resolution spec generation.
+
+| Argument | Description |
+|----------|-------------|
+| `<issue-url>` | Full GitHub issue URL (e.g., `https://github.com/owner/repo/issues/42`) |
+| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
+| `N` | Bare issue number — resolves owner and repo from the git remote `origin` |
+| `--plan` | Transition to plan creation after spec generation |
+| `--trace` | Run full fix-and-PR workflow (implies `--plan`) |
+| `--no-repro` | Skip reproduction verification step |
+
+**URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames.
+
+**Workflow:**
+1. **Intake** — Fetch issue body via GitHub CLI, normalize into structured intake note (observed behavior, expected behavior, repro steps, environment)
+2. **Localization** — Build 2–5 root-cause hypotheses with composite scoring (stack-trace 0.4, recency 0.25, call-graph 0.2, test-failure 0.15), validate top-3 in parallel, prune to single root cause
+3. **Spec Generation** — Output resolution spec with root cause, fix strategy, FR/SC numbering, Given/When/Then scenarios
+4. **Transition** — Based on flags: report spec (`no flags`), create plan (`--plan`), or run full fix workflow (`--trace`)
+
+**Flag interactions:** `--trace` implies `--plan`. Both flags can be combined with `--no-repro`.
+
+**No-args behavior:** prints a usage string. The command never throws on bad input.
+
+**Output signal:** Successful execution emits `[MODE: ISSUE_INGEST issue="<sanitized-url>" plan=true trace=true noRepro=true]` with only the flags that were set.
+
 ### `/swarm sync-plan`
 
 Force `plan.md` regeneration from canonical `plan-ledger.jsonl`. Safe, read-only.
@@ -88,15 +215,28 @@ Run preflight automation checks before starting a phase. Validates plan complete
 
 ## Execution Modes
 
-### `/swarm turbo [on|off]`
+### `/swarm turbo [on|off|lean|standard|status]`
 
-Toggle Turbo Mode for the current session. Skips non-critical QA gates for faster iteration. Session-scoped; resets on new session.
+Toggle Turbo Mode for the current session. Supports two strategies:
+
+- **Standard** — skips non-critical QA gates for faster iteration
+- **Lean** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection
+
+Session-scoped; resets on new session.
 
 ```text
-/swarm turbo         # toggle
-/swarm turbo on      # enable
-/swarm turbo off     # disable
+/swarm turbo              # toggle standard turbo
+/swarm turbo on           # enable turbo (uses lean when config strategy is lean, otherwise standard)
+/swarm turbo off          # disable turbo
+/swarm turbo lean on      # enable Lean Turbo explicitly
+/swarm turbo lean off     # disable Lean Turbo
+/swarm turbo lean         # toggle Lean Turbo explicitly
+/swarm turbo standard on  # force standard turbo
+/swarm turbo standard off # disable standard turbo
+/swarm turbo status       # show detailed status
 ```
+
+Note: `/swarm turbo lean [on|off]` explicitly controls Lean Turbo regardless of the config `turbo.strategy`. Only `/swarm turbo on` consults the config strategy default.
 
 See [Modes Guide](modes.md) for tradeoffs.
 
@@ -131,8 +271,14 @@ View or modify QA gate profile for the current plan.
 - `enable`: persist gate(s) into the locked profile. Architect-only. Rejected after critic approval lock.
 - `override`: session-only ratchet-tighter enable.
 
-Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `council_general_review`.
+Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `council_general_review`, `final_council`.
 
+**Gate descriptions:**
+
+- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
+
+
+- `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry
@@ -217,15 +363,37 @@ Named snapshots of `.swarm/` state.
 
 Restore `.swarm/` to a phase checkpoint (`checkpoints/phase-<N>`). Writes a rollback event to `events.jsonl`. Without a phase argument, lists available checkpoints.
 
-### `/swarm close [--prune-branches]`
+### `/swarm finalize [--prune-branches] [--skill-review]`
 
 Idempotent 4-stage project finalization:
 1. **Finalize** — write retrospectives for in-progress phases.
 2. **Archive** — timestamped bundle of swarm artifacts and evidence.
-3. **Clean** — remove active-state files.
+3. **Clean** — remove active-state files (see below).
 4. **Align** — safe git `ff-only` to `main`.
 
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
+When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
+Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
+
+**Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
+cycles — cumulative project knowledge survives and is not deleted. Deleted files
+include `plan.json`, `plan.md`, `plan-ledger.jsonl`, `events.jsonl`, `handoff.*`,
+`escalation-report.md`, `knowledge-rejected.jsonl`, `repo-graph.json`,
+`doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db` (and
+shm/wal variants), and the `evidence/`, `session/`, `scopes/`, `locks/`,
+`spec-archive/` directories.
+
+**Hive promotion:** During finalize, lessons in `knowledge.jsonl` are evaluated
+against a three-route eligibility gate before promotion to hive:
+- **Explicit** — `hive_eligible=true` AND ≥3 distinct phases confirmed
+- **Fast-track** — entry tagged `hive-fast-track` (bypasses phase count)
+- **Age-based** — entry age ≥ `auto_promote_days` (default 90, configurable via
+  `knowledge.auto_promote_days` in your project config)
+
+Entries failing all routes are skipped. The `auto_promote_days` threshold is read
+from your project's `knowledge.*` config.
+
+`/swarm close [--prune-branches] [--skill-review]` remains available as a deprecated alias.
 
 ---
 
@@ -278,6 +446,38 @@ When you type a two-word command like `/swarm config doctor`, Swarm tries the co
 
 ---
 
+## Command Conflicts
+
+Nine swarm commands share names with Claude Code built-in slash commands. Using the bare CC command instead of `/swarm <command>` has different — sometimes destructive — behavior. Swarm shows a ⚠️ warning in help output for these commands, and a CI gate test (`src/commands/conflict-registry.test.ts`) prevents new CRITICAL conflicts from being added without explicit acknowledgment.
+
+### Conflict Registry
+
+| Swarm Command | CC Built-in | Severity | CC Behavior | Swarm Behavior |
+|---|---|---|---|---|
+| `/swarm show-plan` | `/plan` | CRITICAL | Enters Claude Code plan mode — Claude proposes all actions before executing | Displays the current `.swarm/plan.md` task list |
+| `/swarm reset` | `/reset` | CRITICAL | Alias for `/clear` — wipes the entire conversation context window | Clears `.swarm` state files (requires `--confirm` flag) |
+| `/swarm checkpoint` | `/checkpoint` | CRITICAL | Alias for `/rewind` — restores conversation and code to a prior state | Manages named swarm project snapshots (save\|restore\|delete\|list) |
+| `/swarm status` | `/status` | HIGH | Shows CC version, model, account, and API connectivity | Shows current swarm state: active phase, task counts, registered agents |
+| `/swarm agents` | `/agents` | HIGH | Manages Claude Code subagent configurations and teams | Lists registered swarm plugin agents with model, temperature, and guardrail info |
+| `/swarm config` | `/config` | HIGH | Opens Claude Code settings interface | Shows the current resolved opencode-swarm plugin configuration |
+| `/swarm export` | `/export` | HIGH | Exports the current CC conversation as plain text to a file | Exports the swarm plan and context as JSON to stdout |
+| `/swarm doctor` | `/doctor` | HIGH | Diagnoses the CC installation (version, auth, permissions) | Runs health checks on swarm configuration and state files |
+| `/swarm history` | `/history` | MEDIUM | Shows CC session history | Shows completed swarm phases with status icons |
+
+### Severity Levels
+
+| Level | Meaning |
+|-------|---------|
+| **CRITICAL** | Bare CC invocation causes destructive behavior (context wipe, conversation rewind, plan mode block). Always use `/swarm`. |
+| **HIGH** | CC invocation does something unrelated to swarm. Confusing but recoverable. |
+| **MEDIUM** | CC invocation does something tangentially related. Low risk of confusion. |
+
+### CI Gate
+
+`src/commands/conflict-registry.test.ts` enforces a hard gate: new CRITICAL conflict entries fail the test suite unless the entry is added to an explicit allow-list array in the test. This prevents accidental CRITICAL conflicts from being merged without review.
+
+---
+
 ## CLI Invocation
 
 ### Inside an OpenCode session
@@ -290,7 +490,7 @@ The standalone binary accepts three top-level commands: `install`, `uninstall`, 
 
 ```bash
 opencode-swarm run status
-opencode-swarm run plan 2
+opencode-swarm run show-plan 2
 opencode-swarm run evidence 2.1
 ```
 

@@ -135,20 +135,27 @@ describe('v6.12 Guardrails — ADVERSARIAL PATH TRAVERSAL SECURITY TESTS', () =>
 
 			const longPath = generateLongString('a', 10000);
 
-			// PR #501: oversized paths fail the lstat guard with ENAMETOOLONG
-			// and the hook fails closed with WRITE BLOCKED. The original
-			// test intent (no DoS / returns quickly) is preserved by the
-			// fast fail-closed rejection.
+			// PR #501: oversized paths fail the lstat guard with ENAMETOOLONG on
+			// Linux/Mac, causing a fail-closed WRITE BLOCKED rejection.
+			// On Windows, lstat returns ENOENT (not ENAMETOOLONG) for long paths,
+			// so the guard does not block — the test validates timing only.
 			const startTime = Date.now();
-			await expect(
-				hooks.toolBefore(
+			if (process.platform === 'win32') {
+				await hooks.toolBefore(
 					{ tool: 'write', sessionID: 'long-path-test', callID: 'c1' },
 					{ args: { filePath: longPath } },
-				),
-			).rejects.toThrow('WRITE BLOCKED');
+				);
+			} else {
+				await expect(
+					hooks.toolBefore(
+						{ tool: 'write', sessionID: 'long-path-test', callID: 'c1' },
+						{ args: { filePath: longPath } },
+					),
+				).rejects.toThrow('WRITE BLOCKED');
+			}
 			const elapsed = Date.now() - startTime;
 
-			// Should complete in reasonable time (< 1000ms) — fast fail-closed
+			// Should complete in reasonable time (< 1000ms) regardless of platform
 			expect(elapsed).toBeLessThan(1000);
 		});
 

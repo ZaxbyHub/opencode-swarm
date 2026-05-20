@@ -7,8 +7,58 @@
  * - Layer 2 (Hard Block @ 100%): Throws error in toolBefore to block further calls, injects STOP message
  */
 import * as path from 'node:path';
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
 import { type AuthorityConfig, type GuardrailsConfig } from '../config/schema';
 import { type FileZone } from '../context/zone-classifier';
+export declare const _internals: {
+    getSwarmAgents: typeof getSwarmAgents;
+    getMostRecentAssistantText: typeof getMostRecentAssistantText;
+    getProviderFailureFingerprint: typeof getProviderFailureFingerprint;
+    isTransientProviderFailureText: typeof isTransientProviderFailureText;
+    resolveFallbackModel: typeof resolveFallbackModel;
+    dcCheckJunctionCreation: typeof dcCheckJunctionCreation;
+    extractErrorSignal: typeof extractErrorSignal;
+};
+/**
+ * Issue #853 Layer B: tools that are structurally blocked while
+ * `.swarm/spec-staleness.json` exists. Every blocked tool mutates plan
+ * state (save_plan, update_task_status, phase_complete) or proceeds with
+ * lean-turbo execution (lean_turbo_run_phase, lean_turbo_acquire_locks).
+ * The architect must run /swarm clarify or /swarm acknowledge-spec-drift
+ * before any of these will succeed.
+ *
+ * Read tools (get_approved_plan, lint_spec, set_qa_gates, convene_*,
+ * lean_turbo_plan_lanes, lean_turbo_runner_status, lean_turbo_review) are
+ * intentionally NOT blocked — drift surfacing should not block exploration.
+ */
+export declare const SPEC_DRIFT_BLOCKED_TOOLS: Set<string>;
+/**
+ * Throw SPEC_DRIFT_BLOCK if the tool is on the block-list and the
+ * spec-staleness marker file exists. Layer B is structural (not a
+ * retryable error) — deterministic disk read every call, no cache, so
+ * /swarm acknowledge-spec-drift (which removes the marker) is reflected
+ * immediately on the next tool call.
+ */
+export declare function enforceSpecDriftGate(directory: string | undefined, toolName: string): void;
+/**
+ * Extracts bounded provider/error signal from unknown hook error payloads.
+ * Do not stringify arbitrary objects here: unrelated fields like `phase: 502`
+ * must not accidentally become transient provider errors.
+ */
+declare function extractErrorSignal(errorContent: unknown): string;
+type ChatMessageLike = {
+    info?: {
+        role?: string;
+        sessionID?: string;
+    };
+    parts?: Array<{
+        type?: string;
+        text?: unknown;
+    }>;
+};
+declare function getMostRecentAssistantText(messages: ChatMessageLike[]): string;
+declare function isTransientProviderFailureText(text: string): boolean;
+declare function getProviderFailureFingerprint(text: string): string;
 /**
  * Retrieves stored input args for a given callID.
  * Used by other hooks (e.g., delegation-gate) to access tool input args.
@@ -28,6 +78,20 @@ export declare function setStoredInputArgs(callID: string, args: unknown): void;
  * @param callID The callID to delete
  */
 export declare function deleteStoredInputArgs(callID: string): void;
+/**
+ * Detect Windows junction or symlink CREATION commands.
+ * Junction creation followed by recursive deletion of the junction is the
+ * exact mechanism of the K2.6 data-loss incident.
+ * Block junction/symlink creation where the target resolves outside cwd.
+ *
+ * Patterns covered:
+ *   mklink /J <link> <target>
+ *   mklink /D <link> <target>
+ *   New-Item -ItemType Junction -Path <link> -Target <target>
+ *   New-Item -ItemType SymbolicLink -Path <link> -Target <target>
+ *   ln -s <target> <link>  (when target is outside cwd)
+ */
+declare function dcCheckJunctionCreation(segment: string, cwd: string): string | null;
 /**
  * Redacts sensitive values from a shell command string before audit logging.
  * Covers env-var assignments, CLI flags, Bearer/Basic auth, and -H header flags.

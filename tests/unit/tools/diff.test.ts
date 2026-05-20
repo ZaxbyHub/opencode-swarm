@@ -829,4 +829,28 @@ index 1234567..abcdefg 100644
 			expect(parsed.error).toContain('maximum length');
 		});
 	});
+
+	describe('subprocess stdio options — regression: Windows stdin block (Invariant #3)', () => {
+		test('numstat call passes stdio: ["ignore","pipe","pipe"] to prevent Windows stdin block', async () => {
+			mockExecFileSync.mockReturnValueOnce('5\t2\tsrc/foo.ts');
+			mockExecFileSync.mockReturnValueOnce('');
+
+			await diff.execute({ base: 'HEAD' }, '/fake/dir');
+
+			// First call is numstat — assert stdio option
+			const [, , numstatOpts] = mockExecFileSync.mock.calls[0];
+			expect(numstatOpts.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+		});
+
+		test('full diff call passes stdio: ["ignore","pipe","pipe"] to prevent Windows stdin block', async () => {
+			mockExecFileSync.mockReturnValueOnce('5\t2\tsrc/foo.ts');
+			mockExecFileSync.mockReturnValueOnce('');
+
+			await diff.execute({ base: 'HEAD' }, '/fake/dir');
+
+			// Second call is full diff — assert stdio option
+			const [, , fullDiffOpts] = mockExecFileSync.mock.calls[1];
+			expect(fullDiffOpts.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+		});
+	});
 });

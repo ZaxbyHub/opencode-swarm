@@ -9,7 +9,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
 import { createSwarmTool } from './create-tool';
 
@@ -169,22 +170,22 @@ export const write_hallucination_evidence: ToolDefinition = createSwarmTool({
 		'Use this after critic_hallucination_verifier delegation to persist the verification result. ' +
 		'Unlike write_drift_evidence, this tool does NOT lock the QA gate profile.',
 	args: {
-		phase: tool.schema
+		phase: z
 			.number()
 			.int()
 			.min(1)
 			.describe(
 				'The phase number for the hallucination verification (e.g., 1, 2, 3)',
 			),
-		verdict: tool.schema
+		verdict: z
 			.enum(['APPROVED', 'NEEDS_REVISION'])
 			.describe(
 				"Verdict of the hallucination verification: 'APPROVED' or 'NEEDS_REVISION'",
 			),
-		summary: tool.schema
+		summary: z
 			.string()
 			.describe('Human-readable summary of the hallucination verification'),
-		findings: tool.schema
+		findings: z
 			.string()
 			.optional()
 			.describe(

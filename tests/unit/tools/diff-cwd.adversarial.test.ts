@@ -434,20 +434,6 @@ describe('diff tool - adversarial security tests', () => {
 			expect(parsed.error).toContain('null bytes');
 		});
 
-		it.skip('should reject undefined directory', async () => {
-			// createSwarmTool wrapper falls back to process.cwd() when directory is undefined
-			const result = await diff.execute({}, { directory: undefined } as any);
-			const parsed = JSON.parse(result);
-			expect(parsed.error).toContain('not provided');
-		});
-
-		it.skip('should reject null directory', async () => {
-			// createSwarmTool wrapper falls back to process.cwd() when directory is null
-			const result = await diff.execute({}, { directory: null } as any);
-			const parsed = JSON.parse(result);
-			expect(parsed.error).toContain('not provided');
-		});
-
 		it('should reject whitespace-only directory', async () => {
 			const result = await diff.execute({}, getMockContext('   '));
 			const parsed = JSON.parse(result);

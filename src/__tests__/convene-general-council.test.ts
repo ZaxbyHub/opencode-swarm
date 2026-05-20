@@ -2,8 +2,10 @@
  * Tests for src/tools/convene-general-council.ts.
  *
  * Covers config gating, evidence path isolation (.swarm/council/general/),
- * roundsCompleted derivation, moderatorPrompt presence/absence, and
- * structured-error responses for invalid args + disabled-config paths.
+ * roundsCompleted derivation, and structured-error responses for invalid
+ * args + disabled-config paths. The moderatorPrompt field has been removed
+ * from ConveneOk — the architect now synthesizes the final answer directly
+ * via the inline output rules in MODE: COUNCIL.
  *
  * Real filesystem (tmp dir) for evidence-path assertions; no real HTTP.
  */
@@ -108,7 +110,7 @@ describe('convene_general_council — config gate', () => {
 	});
 
 	test('blocks when council.general is absent', async () => {
-		writeConfig({});
+		writeConfig({ council: { general: { enabled: false } } });
 		const { parsed } = await callTool(
 			{
 				question: 'q',
@@ -124,9 +126,9 @@ describe('convene_general_council — config gate', () => {
 });
 
 describe('convene_general_council — happy paths', () => {
-	test('Round 1 only: roundsCompleted = 1, no moderatorPrompt when moderator: false', async () => {
+	test('Round 1 only: roundsCompleted = 1, no moderatorPrompt field on result', async () => {
 		writeConfig({
-			council: { general: { enabled: true, moderator: false } },
+			council: { general: { enabled: true } },
 		});
 		const { parsed } = await callTool(
 			{
@@ -144,7 +146,7 @@ describe('convene_general_council — happy paths', () => {
 	});
 
 	test('Round 1 + Round 2: roundsCompleted = 2', async () => {
-		writeConfig({ council: { general: { enabled: true, moderator: false } } });
+		writeConfig({ council: { general: { enabled: true } } });
 		const round2 = [
 			{
 				...validRound1[0],
@@ -166,7 +168,10 @@ describe('convene_general_council — happy paths', () => {
 		expect(parsed.roundsCompleted).toBe(2);
 	});
 
-	test('moderator: true → moderatorPrompt populated', async () => {
+	test('moderator: true in config is ignored (no moderatorPrompt on result)', async () => {
+		// The moderator config field is deprecated and ignored at runtime — the
+		// architect synthesizes the final answer directly. This test pins the
+		// new behavior so a regression that resurrects moderatorPrompt would fail.
 		writeConfig({ council: { general: { enabled: true, moderator: true } } });
 		const { parsed } = await callTool(
 			{
@@ -178,8 +183,7 @@ describe('convene_general_council — happy paths', () => {
 			tmpDir,
 		);
 		expect(parsed.success).toBe(true);
-		expect(typeof parsed.moderatorPrompt).toBe('string');
-		expect((parsed.moderatorPrompt as string).length).toBeGreaterThan(0);
+		expect(parsed.moderatorPrompt).toBeUndefined();
 	});
 });
 

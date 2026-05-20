@@ -15,6 +15,11 @@ export interface MutationGateResult {
     /** Prompt for targeted test improvement (non-empty when verdict is 'warn' or 'fail') */
     testImprovementPrompt: string;
 }
+export declare const _internals: {
+    evaluateMutationGate: typeof evaluateMutationGate;
+    buildTestImprovementPrompt: typeof buildTestImprovementPrompt;
+    buildMessage: typeof buildMessage;
+};
 /** Default thresholds */
 export declare const PASS_THRESHOLD = 0.8;
 export declare const WARN_THRESHOLD = 0.6;
@@ -26,3 +31,6 @@ export declare const WARN_THRESHOLD = 0.6;
  * @returns MutationGateResult with verdict and details
  */
 export declare function evaluateMutationGate(report: MutationReport, passThreshold?: number, warnThreshold?: number): MutationGateResult;
+declare function buildTestImprovementPrompt(report: MutationReport, passThreshold: number, verdict: MutationGateVerdict): string;
+declare function buildMessage(verdict: MutationGateVerdict, adjustedKillRate: number, killed: number, totalMutants: number, equivalent: number, warnThreshold: number): string;
+export {};

@@ -2,6 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { ASTChange, ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
+import type { ToolResult } from '../create-tool';
+
+/**
+ * Helper to extract string from ToolResult
+ */
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 interface MockASTDiffResult extends ASTDiffResult {
 	changes: ASTChange[];
@@ -127,11 +135,11 @@ describe('diff_summary ADVERSARIAL security tests', () => {
 		);
 		let parsed: Record<string, unknown>;
 		try {
-			parsed = JSON.parse(result);
+			parsed = JSON.parse(resultToString(result));
 		} catch {
-			parsed = { _parseError: result };
+			parsed = { _parseError: resultToString(result) };
 		}
-		return { parsed, raw: result };
+		return { parsed, raw: resultToString(result) };
 	}
 
 	// Default happy path mock setup

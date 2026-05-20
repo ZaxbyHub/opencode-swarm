@@ -14,11 +14,17 @@ import {
 	PlanSchema,
 	TaskStatusSchema,
 } from '../config/plan-schema';
+import { derivePlanId } from './utils';
 
 /**
- * Ledger schema version
+ * Ledger schema version.
+ *
+ * v7.19.0: bumped from 1.0.0 → 1.1.0 with the addition of `task_removed`.
+ * Older plugin readers throw on unknown event types (applyEventToPlan default
+ * branch); restart any running OpenCode session after upgrade so the new
+ * reader is loaded in-process.
  */
-export const LEDGER_SCHEMA_VERSION = '1.0.0';
+export const LEDGER_SCHEMA_VERSION = '1.1.0';
 
 /**
  * Valid ledger event types
@@ -26,6 +32,7 @@ export const LEDGER_SCHEMA_VERSION = '1.0.0';
 export const LEDGER_EVENT_TYPES = [
 	'plan_created',
 	'task_added',
+	'task_removed',
 	'task_updated',
 	'task_status_changed',
 	'task_reordered',
@@ -265,13 +272,19 @@ export async function readLedgerEvents(
 			.filter((line) => line.trim() !== '');
 
 		const events: LedgerEvent[] = [];
+		let skippedCount = 0;
 		for (const line of lines) {
 			try {
 				const event = JSON.parse(line) as LedgerEvent;
 				events.push(event);
 			} catch {
-				// Skip malformed lines
+				skippedCount++;
 			}
+		}
+		if (skippedCount > 0) {
+			console.warn(
+				`[ledger] Skipped ${skippedCount} malformed line(s) in plan-ledger.jsonl`,
+			);
 		}
 
 		// Sort by seq ascending
@@ -544,7 +557,7 @@ export async function takeSnapshotEvent(
 	if (options?.approvalMetadata) {
 		snapshotPayload.approval = options.approvalMetadata;
 	}
-	const planId = `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+	const planId = derivePlanId(plan);
 	return appendLedgerEvent(
 		directory,
 		{
@@ -583,18 +596,20 @@ export async function replayFromLedger(
 	directory: string,
 	_options?: ReplayOptions,
 ): Promise<Plan | null> {
-	const events = await readLedgerEvents(directory);
+	const { events, truncated, badSuffix } =
+		await readLedgerEventsWithIntegrity(directory);
 
 	// If no events, nothing to replay
 	if (events.length === 0) {
 		return null;
 	}
 
-	// Filter to the identity of the first event (the plan_created anchor).
-	// In a mixed-identity ledger — created before savePlan's archive+reinit fix —
-	// events from multiple swarm identities may coexist. Replaying all of them
-	// would corrupt task state. Filtering to the first event's plan_id is safe:
-	// the plan_created event is always the canonical identity anchor.
+	// Handle corruption: quarantine bad suffix, then continue with clean prefix
+	if (truncated && badSuffix !== null) {
+		await quarantineLedgerSuffix(directory, badSuffix);
+	}
+
+	// Filter to the identity of the first event...
 	const targetPlanId = events[0].plan_id;
 	const relevantEvents = events.filter((e) => e.plan_id === targetPlanId);
 
@@ -744,6 +759,23 @@ function applyEventToPlan(plan: Plan, event: LedgerEvent): Plan | null {
 
 		case 'task_added':
 			// Audit-only: task was added but is already in plan.json
+			return plan;
+
+		case 'task_removed':
+			// Functional on replay (issue #853 post-merge): the ledger commit
+			// precedes the plan.json rename, so a crash between the two leaves
+			// plan.json stale. Rebuild-from-ledger must drop the task or the
+			// removal silently resurrects. Symmetric with task_status_changed;
+			// the post-removal planHashAfter matches replayed state.
+			if (event.task_id) {
+				for (const phase of plan.phases) {
+					const idx = phase.tasks.findIndex((t) => t.id === event.task_id);
+					if (idx !== -1) {
+						phase.tasks.splice(idx, 1);
+						break;
+					}
+				}
+			}
 			return plan;
 
 		case 'task_updated':
@@ -1086,11 +1118,7 @@ export async function loadLastApprovedPlan(
 		// the event's plan_id. Guards against a snapshot whose payload was
 		// mutated on disk out-of-band from the event metadata.
 		if (expectedPlanId !== undefined) {
-			const payloadPlanId =
-				`${payload.plan.swarm}-${payload.plan.title}`.replace(
-					/[^a-zA-Z0-9-_]/g,
-					'_',
-				);
+			const payloadPlanId = derivePlanId(payload.plan);
 			if (payloadPlanId !== expectedPlanId) {
 				continue;
 			}
@@ -1107,3 +1135,27 @@ export async function loadLastApprovedPlan(
 
 	return null;
 }
+
+// ============================================================================
+// DI Seam — _internals
+// ============================================================================
+
+export const _internals = {
+	computePlanHash,
+	computeCurrentPlanHash,
+	ledgerExists,
+	getLatestLedgerSeq,
+	readLedgerEvents,
+	initLedger,
+	appendLedgerEvent,
+	appendLedgerEventWithRetry,
+	takeSnapshotEvent,
+	replayFromLedger,
+	applyEventToPlan,
+	readLedgerEventsWithIntegrity,
+	quarantineLedgerSuffix,
+	replayWithIntegrity,
+	loadLastApprovedPlan,
+	getLedgerPath,
+	getPlanJsonPath,
+};

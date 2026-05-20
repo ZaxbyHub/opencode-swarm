@@ -89,6 +89,8 @@ describe('SAST Scan - Adversarial Tests', () => {
 		if (tmpDir) {
 			rmSync(tmpDir, { recursive: true, force: true });
 		}
+		// Restore cross-module mocks to prevent contamination
+		mock.restore();
 	});
 
 	it('Adversarial 1: Oversized file list → cap at MAX_FILES_SCANNED (1000) + warn', async () => {

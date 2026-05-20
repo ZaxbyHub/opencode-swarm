@@ -2065,3 +2065,55 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 		expect(sess2.architectWriteCount).toBe(1);
 	});
 });
+
+describe('SELF-CODING DETECTED warning contains time-pressure anti-rationalization patterns', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+	});
+
+	async function triggerSelfCodingWarning(sessionId: string) {
+		const config = makeGuardrailsConfig();
+		const hook = createGuardrailsHooks(config);
+		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
+		startAgentSession(sessionId, ORCHESTRATOR_NAME);
+
+		await hook.toolBefore(
+			{ tool: 'write', sessionID: sessionId, callID: 'call-1' } as any,
+			{ args: { filePath: 'src/foo.ts', content: 'x' } } as any,
+		);
+
+		const messages = makeMessages('TASK: do something', 'architect', sessionId);
+		await hook.messagesTransform({}, messages as any);
+		return messages.messages[0].parts[0].text as string;
+	}
+
+	it('warning tells architect it has no deadlines (counters time-pressure hallucination)', async () => {
+		const warning = await triggerSelfCodingWarning('test-tp-1');
+		expect(warning).toContain('SELF-CODING DETECTED');
+		expect(warning).toContain('no deadlines');
+	});
+
+	it('warning states no urgency is real', async () => {
+		const warning = await triggerSelfCodingWarning('test-tp-2');
+		expect(warning).toContain('No urgency is real');
+	});
+
+	it('warning rejects "small / trivial / obvious" rationalization', async () => {
+		const warning = await triggerSelfCodingWarning('test-tp-3');
+		expect(warning).toContain('size is not a QA exemption');
+	});
+
+	it('warning rejects "explaining to coder takes more effort" rationalization', async () => {
+		const warning = await triggerSelfCodingWarning('test-tp-4');
+		expect(warning).toContain('writing the task spec is your job');
+	});
+
+	it('warning rejects "user needs this quickly" rationalization', async () => {
+		const warning = await triggerSelfCodingWarning('test-tp-5');
+		expect(warning).toContain('Skipping QA gates ships bugs');
+	});
+});

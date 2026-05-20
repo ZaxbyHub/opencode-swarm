@@ -1,6 +1,6 @@
 /**
  * Handles the /swarm reset command.
- * Clears plan.md and context.md from .swarm/ directory.
+ * Clears all swarm state files from .swarm/ and project root.
  * Stops background automation and resets in-memory queues.
  * Requires --confirm flag as a safety gate.
  */

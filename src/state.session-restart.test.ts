@@ -370,7 +370,6 @@ describe('ADVERSARIAL: Session restart rehydration security tests', () => {
 
 		it('handles template literal injection attempt', async () => {
 			// Arrange: ${...} injection in data
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test string
 			const injection = '${process.exit(1)}';
 			const plan = {
 				schema_version: '1.0.0' as const,

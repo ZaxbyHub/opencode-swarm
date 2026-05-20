@@ -3,7 +3,7 @@
  * Implements FR-010: Declare coder scope before delegation.
  * This tool must be called before delegating to coder to enable scope containment checking.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the declare_scope tool
  */

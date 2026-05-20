@@ -2,6 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { ASTChange, ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
+import type { ToolResult } from '../create-tool';
+
+/**
+ * Helper to extract string from ToolResult
+ */
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // =============================================================================
 // Helper types & factories
@@ -187,7 +195,7 @@ describe('diff tool — generateSummaryMarkdown wiring', () => {
 
 		const result = await diff.execute({}, makeToolContext('/fake/project'));
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.markdownSummary).toBeDefined();
 		expect(parsed.markdownSummary).toContain('## Change Summary');
 		expect(parsed.markdownSummary).toContain('src/api.ts');
@@ -224,7 +232,7 @@ describe('diff tool — generateSummaryMarkdown wiring', () => {
 
 		const result = await diff.execute({}, makeToolContext('/fake/project'));
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.markdownSummary).toBeUndefined();
 	});
 
@@ -264,7 +272,7 @@ describe('diff tool — generateSummaryMarkdown wiring', () => {
 
 		const result = await diff.execute({}, makeToolContext('/fake/project'));
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.markdownSummary).toBeUndefined();
 	});
 
@@ -321,7 +329,7 @@ describe('diff tool — generateSummaryMarkdown wiring', () => {
 
 		const result = await diff.execute({}, makeToolContext('/fake/project'));
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.markdownSummary).toBeUndefined();
 		// semanticSummary should still be present because classifyChanges/generateSummary succeeded
 		expect(parsed.semanticSummary).toBeDefined();
@@ -363,7 +371,7 @@ describe('diff tool — generateSummaryMarkdown wiring', () => {
 
 		const result = await diff.execute({}, makeToolContext('/fake/project'));
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.markdownSummary).toBeUndefined();
 		expect(parsed.semanticSummary).toBeUndefined();
 	});

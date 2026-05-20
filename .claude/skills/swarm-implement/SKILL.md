@@ -24,6 +24,18 @@ Use this execution ladder:
 This is not a slow full-swarm recreation.
 This is a speed-preserving, quality-maximizing workflow.
 
+## Command Namespace
+
+Swarm commands: always /swarm <subcommand> — never bare subcommand names.
+
+CRITICAL — these CC built-ins share names with swarm commands and MUST be avoided:
+  /plan → use /swarm plan (reading) or do not invoke (entering plan mode)
+  /reset → NEVER invoke — wipes conversation context
+  /checkpoint → NEVER invoke bare — use /swarm checkpoint <action>
+
+HIGH — these CC built-ins produce wrong output:
+  /status → use /swarm status (not CC /status)
+
 ## Quality and speed policy
 - Quality and pre-ship defect detection are paramount.
 - Speed still matters.

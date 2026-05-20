@@ -1,5 +1,7 @@
 import type { AgentDefinition } from '../agents';
+import { ALL_SUBAGENT_NAMES } from '../config/constants.js';
 import type { GuardrailsConfig } from '../config/schema';
+import { stripKnownSwarmPrefix } from '../config/schema.js';
 
 export function handleAgentsCommand(
 	agents: Record<string, AgentDefinition>,
@@ -11,7 +13,27 @@ export function handleAgentsCommand(
 		return 'No agents registered.';
 	}
 
-	const lines = [`## Registered Agents (${entries.length} total)`, ''];
+	// Compute registered subagent base names by extracting the canonical
+	// role suffix from each generated agent name. Generated names have an
+	// arbitrary user-defined swarm prefix (e.g. "bananaSwarm_coder",
+	// "acme-prod_reviewer"); the plugin extracts just the canonical role.
+	const allAgentKeys = entries.map(([key]) => key);
+	const registeredBaseNames = allAgentKeys
+		.map((key) => stripKnownSwarmPrefix(key))
+		.filter((stripped) =>
+			(ALL_SUBAGENT_NAMES as readonly string[]).includes(stripped),
+		);
+
+	const unregistered = ALL_SUBAGENT_NAMES.filter(
+		(name) => !registeredBaseNames.includes(name),
+	);
+
+	const hasUnregistered = unregistered.length > 0;
+	const headerLabel = hasUnregistered
+		? `${entries.length} registered + ${unregistered.length} unregistered`
+		: `${entries.length} total`;
+
+	const lines = [`## Registered Agents (${headerLabel})`, ''];
 
 	for (const [key, agent] of entries) {
 		const model = agent.config.model || 'default';
@@ -36,6 +58,14 @@ export function handleAgentsCommand(
 		);
 		if (desc) {
 			lines.push(`  ${desc}`);
+		}
+	}
+
+	// Add unregistered subagents section when any subagents are missing
+	if (hasUnregistered) {
+		lines.push('', '### Unregistered Subagents');
+		for (const name of unregistered) {
+			lines.push(`- **${name}** (requires configuration)`);
 		}
 	}
 

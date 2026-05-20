@@ -72,6 +72,12 @@ vi.mock('node:fs/promises', () => ({
 	writeFile: vi.fn(async () => {}),
 }));
 
+// Mock logger
+const mockWarn = vi.fn();
+vi.mock('../../../src/utils/logger.js', () => ({
+	warn: mockWarn,
+}));
+
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 // Import mocked modules
@@ -355,7 +361,12 @@ describe('readMergedKnowledge — ranking', () => {
 		expect(result.length).toBe(3);
 	});
 
-	it.skip('Test 8: context-less call still returns entries (relevanceScore defaults to 0.5 base)', async () => {
+	// NOTE: This test verifies baseline behavior when no phase context is available.
+	// The original assertion `e.relevanceScore >= 0` compares an object to a number
+	// and always fails in JS. The scoring itself is correct: categoryScore defaults
+	// to 0.5, keywordsScore to 0.5 (no tags), confidenceScore to entry.confidence (0.5).
+	// finalScore ends up >= 0.325 for these entries.
+	it('Test 8: context-less call still returns entries (relevanceScore defaults to 0.5 base)', async () => {
 		const swarmEntries = [
 			makeSwarmEntry({
 				lesson: 'First global lesson',
@@ -379,8 +390,8 @@ describe('readMergedKnowledge — ranking', () => {
 		const result = await readMergedKnowledge('/proj', config); // No context
 
 		expect(result.length).toBe(2);
-		// All entries should have relevanceScore >= 0
-		expect(result.every((e) => e.relevanceScore >= 0)).toBe(true);
+		// All entries have non-negative component scores: category=0.5, confidence=0.5, keywords=0.5
+		expect(result.every((e) => e.finalScore >= 0)).toBe(true);
 	});
 
 	it('Test 9: same-project hive entry penalized in ranking', async () => {
@@ -421,6 +432,49 @@ describe('readMergedKnowledge — ranking', () => {
 		expect(result[1].id).toBe(hiveEntrySameProject.id);
 		expect(result[0].finalScore).toBeGreaterThan(result[1].finalScore);
 	});
+
+	// FR-E1: warn is called when recordLessonsShown fails
+	// NOTE: recordLessonsShown has internal try-catch that calls warn without re-throwing,
+	// so the .catch() at line 462-464 in readMergedKnowledge is unreachable.
+	// The warn IS called, but via recordLessonsShown' internal catch (line 286).
+	it('Test 9b: warn called when recordLessonsShown fails (FR-E1)', async () => {
+		const swarmEntry = makeSwarmEntry({
+			lesson: 'Test lesson that will fail to record',
+			scope: 'global',
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [swarmEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		// Make mkdir reject so recordLessonsShown fails
+		(mkdir as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+			new Error('mkdir failed'),
+		);
+
+		const config = makeConfig();
+		const context: ProjectContext = {
+			projectName: 'test-project',
+			currentPhase: 'Phase 1',
+		};
+
+		// Call readMergedKnowledge - should not throw, but warn should be called
+		const result = await readMergedKnowledge('/proj', config, context);
+
+		// Should still return results despite recordLessonsShown failing
+		expect(result.length).toBe(1);
+		// warn IS called when recordLessonsShown' mkdir fails - via internal catch
+		expect(mockWarn).toHaveBeenCalledWith(
+			'[swarm] Knowledge: failed to record shown lessons',
+		);
+
+		// Reset mkdir to default success behavior for other tests
+		(mkdir as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+	});
 });
 
 // ============================================================================
@@ -448,7 +502,7 @@ describe('updateRetrievalOutcome', () => {
 		expect(rewriteKnowledge).not.toHaveBeenCalled();
 	});
 
-	it('Test 11: increments applied_count and succeeded_after_count on success', async () => {
+	it('Test 11: increments succeeded_after_shown_count on success', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
@@ -459,8 +513,8 @@ describe('updateRetrievalOutcome', () => {
 			lesson: 'Test lesson',
 			retrieval_outcomes: {
 				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 0,
+				failed_after_shown_count: 0,
 			},
 		});
 
@@ -487,12 +541,19 @@ describe('updateRetrievalOutcome', () => {
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.succeeded_after_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.failed_after_count).toBe(0);
+		// v2: applied_count is FROZEN (not auto-incremented from shown)
+		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.succeeded_after_shown_count,
+		).toBe(1);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.failed_after_shown_count,
+		).toBe(0);
 	});
 
-	it('Test 12: increments failed_after_count on failure', async () => {
+	it('Test 12: increments failed_after_shown_count on failure', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
@@ -503,8 +564,8 @@ describe('updateRetrievalOutcome', () => {
 			lesson: 'Test lesson',
 			retrieval_outcomes: {
 				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
+				succeeded_after_shown_count: 0,
+				failed_after_shown_count: 0,
 			},
 		});
 
@@ -531,9 +592,16 @@ describe('updateRetrievalOutcome', () => {
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(1);
-		expect(updatedEntry?.retrieval_outcomes.succeeded_after_count).toBe(0);
-		expect(updatedEntry?.retrieval_outcomes.failed_after_count).toBe(1);
+		// v2: applied_count is FROZEN (not auto-incremented from shown)
+		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.succeeded_after_shown_count,
+		).toBe(0);
+		expect(
+			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
+				.failed_after_shown_count,
+		).toBe(1);
 	});
 
 	it('Test 13: cleans up phase key from shown file after update', async () => {

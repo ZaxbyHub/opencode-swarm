@@ -320,7 +320,7 @@ Agents: 11 registered
 **View the full plan and per-task status:**
 
 ```
-/swarm plan
+/swarm show-plan
 ```
 
 ```
@@ -424,9 +424,9 @@ No. "Plan mode" in OpenCode is a built-in OpenCode feature that has nothing to d
 
 No. `.claude/skills/` is Claude Code's skill system, not OpenCode's. OpenCode Swarm does not read it. Swarm reads your project's source code, `package.json`, and other config files automatically during CONTEXT SCAN. If you want to give Swarm custom instructions — for example, to prefer a specific library or enforce a naming convention — put them in your project config at `.opencode/opencode-swarm.json` under the relevant agent's `instructions` field.
 
-**Do I need to run `/swarm plan` manually?**
+**Do I need to run `/swarm show-plan` manually?**
 
-No. `/swarm brainstorm` generates and writes the plan automatically. Running `/swarm plan` after the fact is just a way to read the plan that was already written. You would only write a plan manually if you wanted to skip brainstorm entirely and hand-author `.swarm/plan.md`.
+No. `/swarm brainstorm` generates and writes the plan automatically. Running `/swarm show-plan` after the fact is just a way to read the plan that was already written. You would only write a plan manually if you wanted to skip brainstorm entirely and hand-author `.swarm/plan.md`.
 
 **How autonomous is it really?**
 
@@ -451,7 +451,7 @@ The coder receives structured failure feedback from the reviewer and test engine
 ```
 /swarm brainstorm <topic>   Start the seven-phase planning workflow
 /swarm status               Current phase, active task, task count
-/swarm plan [N]             Full plan, or only phase N
+/swarm show-plan [N]        Full plan, or only phase N
 /swarm evidence             Per-task test results and review findings
 /swarm agents               List all registered agents and their models
 /swarm config               Show resolved config (global + project merged)

@@ -71,8 +71,8 @@ export declare const ReviewEvidenceSchema: z.ZodObject<{
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     type: z.ZodLiteral<"review">;
     risk: z.ZodEnum<{
-        medium: "medium";
         low: "low";
+        medium: "medium";
         high: "high";
         critical: "critical";
     }>;
@@ -205,9 +205,9 @@ export declare const RetrospectiveEvidenceSchema: z.ZodObject<{
             other: "other";
         }>;
         scope: z.ZodEnum<{
-            project: "project";
             global: "global";
             session: "session";
+            project: "project";
         }>;
     }, z.core.$strip>>>;
     approaches_tried: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -292,8 +292,8 @@ export type PlaceholderEvidence = z.infer<typeof PlaceholderEvidenceSchema>;
 export declare const SastFindingSchema: z.ZodObject<{
     rule_id: z.ZodString;
     severity: z.ZodEnum<{
-        medium: "medium";
         low: "low";
+        medium: "medium";
         high: "high";
         critical: "critical";
     }>;
@@ -322,8 +322,8 @@ export declare const SastEvidenceSchema: z.ZodObject<{
     findings: z.ZodDefault<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -350,8 +350,8 @@ export declare const SastEvidenceSchema: z.ZodObject<{
     new_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -366,8 +366,8 @@ export declare const SastEvidenceSchema: z.ZodObject<{
     pre_existing_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -527,8 +527,8 @@ export declare const EvidenceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     type: z.ZodLiteral<"review">;
     risk: z.ZodEnum<{
-        medium: "medium";
         low: "low";
+        medium: "medium";
         high: "high";
         critical: "critical";
     }>;
@@ -651,9 +651,9 @@ export declare const EvidenceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
             other: "other";
         }>;
         scope: z.ZodEnum<{
-            project: "project";
             global: "global";
             session: "session";
+            project: "project";
         }>;
     }, z.core.$strip>>>;
     approaches_tried: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -746,8 +746,8 @@ export declare const EvidenceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     findings: z.ZodDefault<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -774,8 +774,8 @@ export declare const EvidenceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     new_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -790,8 +790,8 @@ export declare const EvidenceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     pre_existing_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rule_id: z.ZodString;
         severity: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -946,8 +946,8 @@ export declare const EvidenceBundleSchema: z.ZodObject<{
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
         type: z.ZodLiteral<"review">;
         risk: z.ZodEnum<{
-            medium: "medium";
             low: "low";
+            medium: "medium";
             high: "high";
             critical: "critical";
         }>;
@@ -1070,9 +1070,9 @@ export declare const EvidenceBundleSchema: z.ZodObject<{
                 other: "other";
             }>;
             scope: z.ZodEnum<{
-                project: "project";
                 global: "global";
                 session: "session";
+                project: "project";
             }>;
         }, z.core.$strip>>>;
         approaches_tried: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -1165,8 +1165,8 @@ export declare const EvidenceBundleSchema: z.ZodObject<{
         findings: z.ZodDefault<z.ZodArray<z.ZodObject<{
             rule_id: z.ZodString;
             severity: z.ZodEnum<{
-                medium: "medium";
                 low: "low";
+                medium: "medium";
                 high: "high";
                 critical: "critical";
             }>;
@@ -1193,8 +1193,8 @@ export declare const EvidenceBundleSchema: z.ZodObject<{
         new_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
             rule_id: z.ZodString;
             severity: z.ZodEnum<{
-                medium: "medium";
                 low: "low";
+                medium: "medium";
                 high: "high";
                 critical: "critical";
             }>;
@@ -1209,8 +1209,8 @@ export declare const EvidenceBundleSchema: z.ZodObject<{
         pre_existing_findings: z.ZodOptional<z.ZodArray<z.ZodObject<{
             rule_id: z.ZodString;
             severity: z.ZodEnum<{
-                medium: "medium";
                 low: "low";
+                medium: "medium";
                 high: "high";
                 critical: "critical";
             }>;

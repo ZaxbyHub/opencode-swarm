@@ -11,6 +11,7 @@ type CouncilGate = {
 	sessionId?: string;
 	timestamp?: string;
 	agent?: string;
+	quorumSize?: number;
 };
 
 type CouncilEnabledValue = boolean | undefined;
@@ -126,26 +127,52 @@ describe('checkCouncilGate — council.enabled=true AND council_mode=true (fully
 		expect(result.reason).toMatch(/council gate blocked/);
 	});
 
-	test('gates.council.verdict=APPROVE → allowed', () => {
+	test('gates.council.verdict=APPROVE with quorumSize=3 (default minimum) → allowed', () => {
 		writeFixture({
 			councilEnabled: true,
 			councilModeEnabled: true,
-			councilGate: { verdict: 'APPROVE' },
+			councilGate: { verdict: 'APPROVE', quorumSize: 3 },
 		});
 		const result = checkCouncilGate(tempDir, TASK_ID);
 		expect(result.blocked).toBe(false);
 		expect(result.reason).toBe('');
 	});
 
-	test('gates.council.verdict=CONCERNS → allowed', () => {
+	test('gates.council.verdict=CONCERNS with quorumSize=5 → allowed', () => {
 		writeFixture({
 			councilEnabled: true,
 			councilModeEnabled: true,
-			councilGate: { verdict: 'CONCERNS' },
+			councilGate: { verdict: 'CONCERNS', quorumSize: 5 },
 		});
 		const result = checkCouncilGate(tempDir, TASK_ID);
 		expect(result.blocked).toBe(false);
 		expect(result.reason).toBe('');
+	});
+
+	test('gates.council.verdict=APPROVE without quorumSize (legacy evidence) → blocked (quorum gate)', () => {
+		// Pre-fix bad evidence: APPROVE recorded without quorumSize. Treated as
+		// quorumSize: 1 — fails the default minimumMembers=3 quorum gate.
+		writeFixture({
+			councilEnabled: true,
+			councilModeEnabled: true,
+			councilGate: { verdict: 'APPROVE' },
+		});
+		const result = checkCouncilGate(tempDir, TASK_ID);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toMatch(/insufficient quorum/);
+	});
+
+	test('gates.council.verdict=APPROVE with quorumSize=1 → blocked (quorum gate)', () => {
+		// Single-member APPROVE — does not satisfy default minimumMembers=3.
+		writeFixture({
+			councilEnabled: true,
+			councilModeEnabled: true,
+			councilGate: { verdict: 'APPROVE', quorumSize: 1 },
+		});
+		const result = checkCouncilGate(tempDir, TASK_ID);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toMatch(/insufficient quorum/);
+		expect(result.reason).toContain('1 of 3');
 	});
 });
 

@@ -1,7 +1,8 @@
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { type ASTDiffResult, computeASTDiff } from '../diff/ast-diff.js';
 import { classifyChanges } from '../diff/semantic-classifier.js';
 import {
@@ -84,14 +85,14 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Analyze git diff for changed files, exports, interfaces, and function signatures. Returns structured output with contract change detection.',
 	args: {
-		base: tool.schema
+		base: z
 			.string()
 			.optional()
 			.describe(
 				'Base ref to diff against (default: HEAD). Use "staged" for staged changes, "unstaged" for working tree changes.',
 			),
-		paths: tool.schema
-			.array(tool.schema.string())
+		paths: z
+			.array(z.string())
 			.optional()
 			.describe('Optional file paths to restrict diff scope.'),
 	},
@@ -161,6 +162,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				timeout: DIFF_TIMEOUT_MS,
 				maxBuffer: MAX_BUFFER_BYTES,
 				cwd: directory,
+				stdio: ['ignore', 'pipe', 'pipe'],
 			});
 
 			const fullDiffOutput = child_process.execFileSync('git', fullDiffArgs, {
@@ -168,6 +170,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				timeout: DIFF_TIMEOUT_MS,
 				maxBuffer: MAX_BUFFER_BYTES,
 				cwd: directory,
+				stdio: ['ignore', 'pipe', 'pipe'],
 			});
 
 			const files: Array<{
@@ -226,7 +229,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 						encoding: 'utf-8',
 						timeout: 3000,
 						cwd: directory,
-						stdio: 'pipe',
+						stdio: ['ignore', 'pipe', 'pipe'],
 					});
 					return true;
 				} catch (e: unknown) {
@@ -243,9 +246,9 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			function getContentFromRef(refPath: string): string {
 				return child_process.execFileSync('git', ['show', refPath], {
 					encoding: 'utf-8',
-					timeout: 5000,
+					timeout: 15_000,
 					cwd: directory,
-					stdio: 'pipe',
+					stdio: ['ignore', 'pipe', 'pipe'],
 				});
 			}
 

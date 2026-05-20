@@ -13,9 +13,21 @@ import * as fs from 'node:fs';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	type FullAutoOversightEvent as V2FullAutoOversightEvent,
+	writeFullAutoOversightEvent as v2WriteOversightEvent,
+	writeFullAutoOversightEvidence as v2WriteOversightEvidence,
+} from '../full-auto/oversight';
+import {
+	loadFullAutoRunState,
+	pauseFullAutoRun,
+	recordFullAutoOversight,
+	terminateFullAutoRun,
+} from '../full-auto/state';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { hasActiveFullAuto, swarmState } from '../state.js';
+import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
+import * as logger from '../utils/logger';
 import { validateSwarmPath } from './utils';
 
 // Pattern for detecting end-of-sentence question marks (not mid-sentence like "v1?")
@@ -246,7 +258,7 @@ export function parseCriticResponse(rawResponse: string): CriticDispatchResult {
 				if (validVerdicts.includes(normalized)) {
 					res.verdict = normalized;
 				} else {
-					console.warn(
+					logger.warn(
 						`[full-auto-intercept] Unknown verdict '${value}' — defaulting to NEEDS_REVISION`,
 					);
 					res.verdict = 'NEEDS_REVISION';
@@ -368,12 +380,12 @@ async function writeAutoOversightEvent(
 			lockTaskId,
 		);
 	} catch (error) {
-		console.warn(
+		logger.warn(
 			`[full-auto-intercept] Warning: failed to acquire lock for auto_oversight event: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
 	if (!lockResult?.acquired) {
-		console.warn(
+		logger.warn(
 			`[full-auto-intercept] Warning: could not acquire lock for events.jsonl write — proceeding without lock`,
 		);
 	}
@@ -381,7 +393,7 @@ async function writeAutoOversightEvent(
 		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
 		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
 	} catch (writeError) {
-		console.error(
+		logger.error(
 			`[full-auto-intercept] Warning: failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
 	} finally {
@@ -389,7 +401,7 @@ async function writeAutoOversightEvent(
 			try {
 				await lockResult.lock._release();
 			} catch (releaseError) {
-				console.error(
+				logger.error(
 					`[full-auto-intercept] Lock release failed:`,
 					releaseError,
 				);
@@ -544,12 +556,15 @@ export async function dispatchCriticAndWriteEvent(
 	interactionCount: number,
 	deadlockCount: number,
 	oversightAgentName: string,
+	// H4 fix: optional sessionID so the v2 mirror binds the verdict to the
+	// correct architect session in multi-architect / multi-swarm setups.
+	sessionID?: string,
 ): Promise<CriticDispatchResult> {
-	const client = swarmState.opencodeClient;
+	const client = stateInternals.swarmState.opencodeClient;
 
 	// If no client (e.g., in tests), fall back to PENDING
 	if (!client) {
-		console.warn(
+		logger.warn(
 			'[full-auto-intercept] No opencodeClient — critic dispatch skipped (fallback to PENDING)',
 		);
 		const result: CriticDispatchResult = {
@@ -577,7 +592,7 @@ export async function dispatchCriticAndWriteEvent(
 		criticModel,
 		criticContext,
 	);
-	console.log(
+	logger.log(
 		`[full-auto-intercept] Dispatching critic: ${oversightAgent.name} using model ${criticModel}`,
 	);
 
@@ -604,7 +619,7 @@ export async function dispatchCriticAndWriteEvent(
 			);
 		}
 		ephemeralSessionId = createResult.data.id;
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Created ephemeral session: ${ephemeralSessionId}`,
 		);
 
@@ -629,13 +644,13 @@ export async function dispatchCriticAndWriteEvent(
 			(p): p is typeof p & { text: string } => p.type === 'text',
 		);
 		criticResponse = textParts.map((p) => p.text).join('\n');
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Critic response received (${criticResponse.length} chars)`,
 		);
 
 		// 3b. Handle empty response
 		if (!criticResponse.trim()) {
-			console.warn(
+			logger.warn(
 				'[full-auto-intercept] Critic returned empty response — using fallback verdict',
 			);
 			criticResponse =
@@ -649,11 +664,11 @@ export async function dispatchCriticAndWriteEvent(
 	let parsed: CriticDispatchResult;
 	try {
 		parsed = parseCriticResponse(criticResponse);
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Critic verdict: ${parsed.verdict} | escalation: ${parsed.escalationNeeded}`,
 		);
 	} catch (parseError) {
-		console.error(
+		logger.error(
 			`[full-auto-intercept] Failed to parse critic response: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
 		);
 		parsed = {
@@ -680,10 +695,29 @@ export async function dispatchCriticAndWriteEvent(
 			escalationType,
 		);
 	} catch (writeError) {
-		console.error(
+		logger.error(
 			`[full-auto-intercept] Failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
 		// Don't rethrow — event write failure shouldn't crash the hook
+	}
+
+	// v2: Mirror the verdict into the shared oversight pipeline so that phase
+	// approval evidence and durable run-state stay coherent with reactive
+	// intercept verdicts. Best-effort — never throw.
+	try {
+		await mirrorReactiveVerdictToV2({
+			directory,
+			parsed,
+			architectOutput,
+			escalationType,
+			oversightAgentName,
+			criticModel,
+			sessionID,
+		});
+	} catch (mirrorError) {
+		logger.error(
+			`[full-auto-intercept] v2 mirror failed: ${mirrorError instanceof Error ? mirrorError.message : String(mirrorError)}`,
+		);
 	}
 
 	return parsed;
@@ -768,16 +802,14 @@ export function createFullAutoInterceptHook(
 		const sessionID = architectMessage.info?.sessionID;
 
 		// Check if full-auto is active for this session
-		if (!hasActiveFullAuto(sessionID)) return;
+		if (!stateInternals.hasActiveFullAuto(sessionID)) return;
 
 		// Get or create session state for tracking
-		let session: ReturnType<
-			typeof import('../state').ensureAgentSession
-		> | null = null;
+		let session: ReturnType<typeof stateInternals.ensureAgentSession> | null =
+			null;
 		if (sessionID) {
 			// Only import and use ensureAgentSession if we have a sessionID
-			const { ensureAgentSession } = await import('../state');
-			session = ensureAgentSession(sessionID);
+			session = stateInternals.ensureAgentSession(sessionID);
 		}
 
 		// Check interaction limit — escalate if threshold reached
@@ -817,7 +849,7 @@ export function createFullAutoInterceptHook(
 					// Same question detected — increment deadlock count
 					session.fullAutoDeadlockCount =
 						(session.fullAutoDeadlockCount ?? 0) + 1;
-					console.warn(
+					logger.warn(
 						`[full-auto-intercept] Potential deadlock detected (count: ${session.fullAutoDeadlockCount}/${deadlockThreshold}) — identical question repeated`,
 					);
 
@@ -842,7 +874,7 @@ export function createFullAutoInterceptHook(
 		}
 
 		// Trigger autonomous oversight
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Escalation detected (${escalationType}) — triggering autonomous oversight`,
 		);
 
@@ -873,7 +905,7 @@ export function createFullAutoInterceptHook(
 				: 'critic_oversight';
 
 		// Log the oversight agent that was created (for debugging)
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Created autonomous oversight agent: ${oversightAgent.name} using model ${criticModel} (dispatch as: ${dispatchAgentName})`,
 		);
 
@@ -887,6 +919,7 @@ export function createFullAutoInterceptHook(
 			session?.fullAutoInteractionCount ?? 0,
 			session?.fullAutoDeadlockCount ?? 0,
 			dispatchAgentName,
+			sessionID,
 		);
 
 		// Inject verdict into message stream
@@ -1005,11 +1038,11 @@ Please review the architect's output above and provide guidance.
 `;
 
 		fs.writeFileSync(reportPath, reportContent, 'utf-8');
-		console.log(
+		logger.log(
 			`[full-auto-intercept] Escalation report written to: ${reportPath}`,
 		);
 	} catch (error) {
-		console.error(
+		logger.error(
 			`[full-auto-intercept] Failed to write escalation report:`,
 			error instanceof Error ? error.message : String(error),
 		);
@@ -1050,16 +1083,192 @@ async function handleEscalation(
 	);
 
 	if (escalationMode === 'terminate') {
-		console.error(
+		logger.error(
 			`[full-auto-intercept] ESCALATION (terminate mode) — reason: ${reason}, session: ${sessionID}`,
 		);
-		process.exit(1);
+		// State-based termination (v2 pattern): mark the run as terminated in
+		// durable state so subsequent tool calls are blocked by the permission
+		// hook.  Do NOT use process.exit(1) — that kills the entire OpenCode
+		// host process, violating Invariant #1 (fast, bounded, fail-open).
+		if (sessionID) {
+			terminateFullAutoRun(directory, sessionID, reason);
+		}
+		return true;
 	}
 
 	// In pause mode, return true to signal that escalation was triggered
 	// The message will still go through to the user, but critic dispatch should be skipped
-	console.warn(
+	logger.warn(
 		`[full-auto-intercept] ESCALATION (pause mode) — reason: ${reason}, session: ${sessionID}`,
 	);
 	return true;
+}
+
+// ---------------------------------------------------------------------------
+// v2 mirror — write a full_auto_oversight event/evidence record alongside the
+// legacy auto_oversight event when reactive intercept fires. The mirror is a
+// best-effort augmentation: failures must not affect legacy behavior.
+// ---------------------------------------------------------------------------
+
+let reactiveOversightSequence = 0;
+
+interface MirrorParams {
+	directory: string;
+	parsed: CriticDispatchResult;
+	architectOutput: string;
+	escalationType: 'phase_completion' | 'question';
+	oversightAgentName: string;
+	criticModel: string;
+	sessionID?: string;
+}
+
+async function mirrorReactiveVerdictToV2(params: MirrorParams): Promise<void> {
+	reactiveOversightSequence += 1;
+	const triggerSource: V2FullAutoOversightEvent['trigger_source'] =
+		params.escalationType === 'phase_completion'
+			? 'phase_boundary'
+			: 'text_pattern';
+
+	// H4 fix: prefer the actual sessionID propagated from the message
+	// transform. Fall back to walking the persisted state ONLY when the
+	// caller did not supply one — which happens for legacy direct callers
+	// of `dispatchCriticAndWriteEvent` that were written before sessionID
+	// was threaded through. The mirror only fires when we end up with a
+	// session that has a durable RUNNING record; otherwise it is a no-op
+	// so the legacy `auto_oversight` event remains the canonical record.
+	let sessionID = '';
+	let phase: number | undefined;
+	let planID: string | undefined;
+	try {
+		const filePath = validateSwarmPath(
+			params.directory,
+			'full-auto-state.json',
+		);
+		if (fs.existsSync(filePath)) {
+			const raw = fs.readFileSync(filePath, 'utf-8');
+			const persisted = JSON.parse(raw) as {
+				sessions?: Record<
+					string,
+					{
+						status?: string;
+						sessionID?: string;
+						currentPhase?: number;
+						planID?: string;
+					}
+				>;
+			};
+			if (persisted.sessions) {
+				const callerSid = params.sessionID;
+				if (callerSid && persisted.sessions[callerSid]) {
+					const rec = persisted.sessions[callerSid];
+					if (rec.status === 'running') {
+						sessionID = callerSid;
+						phase = rec.currentPhase;
+						planID = rec.planID;
+					}
+					// Caller's sessionID exists but is not running — drop the
+					// binding so we don't write evidence to a paused/terminated
+					// session. sessionID stays empty -> mirror skips below.
+				} else if (!callerSid) {
+					// Legacy callers that did not thread sessionID — fall back to
+					// the first running record. Multi-architect runs are imperfect
+					// here but documented as a known limitation.
+					for (const sid of Object.keys(persisted.sessions)) {
+						const rec = persisted.sessions[sid];
+						if (rec?.status === 'running') {
+							sessionID = sid;
+							phase = rec.currentPhase;
+							planID = rec.planID;
+							break;
+						}
+					}
+				}
+			}
+		}
+	} catch {
+		// No durable state — fall through; we'll skip the mirror below.
+	}
+
+	// Skip the mirror entirely when no durable v2 run is active. The legacy
+	// auto_oversight event is the canonical record for v1 reactive intercept;
+	// duplicating it as full_auto_oversight only adds value when there is a
+	// durable run for phase_complete to consult.
+	if (!sessionID) {
+		return;
+	}
+
+	const decision: V2FullAutoOversightEvent['decision'] = (() => {
+		if (
+			params.parsed.escalationNeeded ||
+			params.parsed.verdict === 'ESCALATE_TO_HUMAN'
+		)
+			return 'escalate_human';
+		if (
+			params.parsed.verdict === 'APPROVED' ||
+			params.parsed.verdict === 'ANSWER'
+		)
+			return 'allow';
+		if (params.parsed.verdict === 'BLOCKED') return 'pause';
+		if (params.parsed.verdict === 'PENDING') return 'pending';
+		return 'deny';
+	})();
+
+	const beforeStatus = sessionID
+		? loadFullAutoRunState(params.directory, sessionID)?.status
+		: undefined;
+
+	const event: V2FullAutoOversightEvent = {
+		type: 'full_auto_oversight',
+		timestamp: new Date().toISOString(),
+		session_id: sessionID,
+		plan_id: planID,
+		phase,
+		trigger_source: triggerSource,
+		trigger_reason: `reactive intercept (${params.escalationType})`,
+		critic_agent: params.oversightAgentName,
+		critic_model: params.criticModel,
+		verdict: params.parsed.verdict,
+		reasoning: params.parsed.reasoning,
+		evidence_checked: params.parsed.evidenceChecked,
+		anti_patterns_detected: params.parsed.antiPatternsDetected,
+		escalation_needed: params.parsed.escalationNeeded,
+		decision,
+		full_auto_status_before: beforeStatus,
+		full_auto_status_after: beforeStatus,
+		oversight_sequence: reactiveOversightSequence,
+	};
+
+	// React to verdict on durable state.
+	if (sessionID) {
+		if (decision === 'pause') {
+			pauseFullAutoRun(
+				params.directory,
+				sessionID,
+				`reactive verdict ${params.parsed.verdict}`,
+			);
+			event.full_auto_status_after = 'paused';
+		} else if (decision === 'escalate_human') {
+			terminateFullAutoRun(
+				params.directory,
+				sessionID,
+				'reactive ESCALATE_TO_HUMAN',
+			);
+			event.full_auto_status_after = 'terminated';
+		}
+		recordFullAutoOversight(
+			params.directory,
+			sessionID,
+			params.parsed.verdict,
+			`reactive ${params.escalationType}`,
+		);
+	}
+
+	await v2WriteOversightEvent(params.directory, event);
+	if (
+		params.escalationType === 'phase_completion' &&
+		params.parsed.verdict === 'APPROVED' &&
+		typeof phase === 'number'
+	) {
+		await v2WriteOversightEvidence(params.directory, phase, event);
+	}
 }

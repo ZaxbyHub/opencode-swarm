@@ -11,7 +11,12 @@ import {
 	buildRehydrationCache,
 	swarmState,
 } from '../state';
-import type { SerializedAgentSession, SnapshotData } from './snapshot-writer';
+import { bunFile } from '../utils/bun-compat';
+import type {
+	SerializedAgentSession,
+	SerializedInvocationWindow,
+	SnapshotData,
+} from './snapshot-writer';
 
 /**
  * Transient session fields that must be reset on rehydration.
@@ -104,6 +109,30 @@ export function deserializeAgentSession(
 		s.lastCompletedPhaseAgentsDispatched ?? [],
 	);
 
+	// Convert stageBCompletion: Record<string, string[]> -> Map<string, Set<'reviewer' | 'test_engineer'>>
+	const stageBCompletion = new Map<string, Set<'reviewer' | 'test_engineer'>>();
+	if (s.stageBCompletion) {
+		for (const [taskId, agents] of Object.entries(s.stageBCompletion)) {
+			stageBCompletion.set(
+				taskId,
+				new Set(agents as Array<'reviewer' | 'test_engineer'>),
+			);
+		}
+	}
+
+	// Migration: ensure transientRetryCount exists on all windows (v6.86.14)
+	const windows: Record<string, SerializedInvocationWindow> = {};
+	for (const [key, win] of Object.entries(s.windows ?? {})) {
+		windows[key] = {
+			...win,
+			transientRetryCount:
+				'transientRetryCount' in win
+					? (((win as unknown as Record<string, unknown>)
+							.transientRetryCount as number) ?? 0)
+					: 0,
+		} as SerializedInvocationWindow;
+	}
+
 	return {
 		agentName: s.agentName,
 		lastToolCallTime: s.lastToolCallTime,
@@ -111,7 +140,7 @@ export function deserializeAgentSession(
 		delegationActive: s.delegationActive,
 		activeInvocationId: s.activeInvocationId,
 		lastInvocationIdByAgent: s.lastInvocationIdByAgent ?? {},
-		windows: s.windows ?? {},
+		windows,
 		lastCompactionHint: s.lastCompactionHint ?? 0,
 		architectWriteCount: s.architectWriteCount ?? 0,
 		lastCoderDelegationTaskId: s.lastCoderDelegationTaskId ?? null,
@@ -152,6 +181,7 @@ export function deserializeAgentSession(
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
+		stageBCompletion,
 	};
 }
 
@@ -165,7 +195,7 @@ export async function readSnapshot(
 ): Promise<SnapshotData | null> {
 	try {
 		const resolvedPath = validateSwarmPath(directory, 'session/state.json');
-		const file = Bun.file(resolvedPath);
+		const file = bunFile(resolvedPath);
 		const content = await file.text();
 
 		// Check if file is empty or just whitespace

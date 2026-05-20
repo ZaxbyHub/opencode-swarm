@@ -33,6 +33,111 @@ You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
 
+## Per-agent override fields
+
+Each entry under `agents` accepts the following optional fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | `"<provider>/<model>"` | Model id. **Do not** include a third `/<variant>` segment — see `variant` below. |
+| `variant` | `string` | Reasoning-effort variant for models that support it (e.g. `"low"`, `"medium"`, `"high"`, `"max"`, `"xhigh"`, `"thinking"` for `gpt-5.x` / `gpt-5.x-codex`). |
+| `temperature` | `0–2` | Sampling temperature override. |
+| `disabled` | `boolean` | Skip this agent entirely (it will not be registered). |
+| `fallback_models` | `string[]` (max 3) | Models to retry on transient errors (429/503/timeout). |
+
+### Why `variant` is its own field
+
+OpenCode's TUI accepts the shorthand `provider/model/variant` (e.g. `grove-openai/gpt-5.3-codex/medium`) in its model picker — the picker rewrites that input through a variant-aware resolver before applying it to the session. The agent loader, by contrast, uses a basic 2-segment parser, so embedding the variant into `model` resolves to a non-existent model id (`gpt-5.3-codex/medium`) and produces `ProviderModelNotFoundError`. Use the `variant` field instead:
+
+```json
+{
+  "agents": {
+    "test_engineer": {
+      "model": "grove-openai/gpt-5.3-codex",
+      "variant": "medium"
+    },
+    "designer": {
+      "model": "grove-openai/gpt-5.4",
+      "variant": "high"
+    }
+  }
+}
+```
+
+### Backward compatibility
+
+If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medium" }`, it will still work — the variant is automatically extracted and a deprecation warning is logged.
+
+**Before** (deprecated — produces a warning):
+
+```json
+{
+  "agents": {
+    "coder": {
+      "model": "grove-openai/gpt-5.3-codex/medium"
+    }
+  }
+}
+```
+
+**After** (recommended — silences the warning):
+
+```json
+{
+  "agents": {
+    "coder": {
+      "model": "grove-openai/gpt-5.3-codex",
+      "variant": "medium"
+    }
+  }
+}
+```
+
+## `default_agent` — selecting which agents are exposed as primary
+
+`default_agent` (top-level, optional `string`) controls which generated agents OpenCode treats as **primary** (selectable as the session's default agent and given `task: allow` permission). All other generated agents become `subagent`s.
+
+| Value | Effect |
+|---|---|
+| _(omitted)_ | Every architect-role agent is primary. In a legacy single-swarm config that means `architect`. In a multi-swarm config it means `architect` (if a `default` swarm is defined) plus every `*_architect` (`local_architect`, `mega_architect`, `paid_architect`, `modelrelay_architect`, …). This restores v7.0.0 behavior. |
+| `"architect"` _(or any other base role)_ | Every generated agent whose canonical base role matches becomes primary. `default_agent: "coder"` exposes `coder` in legacy mode and every `*_coder` in multi-swarm mode. |
+| `"local_architect"` _(or any other exact generated name)_ | Only that exact generated agent becomes primary. Useful for pinning a single swarm. |
+| Unknown / invalid value | A one-time warning is logged and the resolver falls back to architect-role primaries (or, if all architect roles are disabled, the first generated agent). The plugin never produces zero primaries when at least one agent exists. |
+
+Empty or whitespace-only values are treated as omitted.
+
+> Why this matters: in v7.3.x the schema applied an implicit `.default("architect")`. In a multi-swarm config there is no agent literally named `architect` — they are all prefixed — so every architect was demoted to subagent and OpenCode showed only the native `build`/`plan` agents. The omitted-vs-explicit distinction is now load-bearing; do not re-introduce a schema default.
+
+## `auto_select_architect` — auto-select swarm architect on launch
+
+`auto_select_architect` (top-level, optional `boolean | string`) controls whether OpenCode's built-in `build` and `plan` agents are disabled so the swarm architect is automatically selected as the active agent on launch.
+
+| Value | Effect |
+|-------|--------|
+| `false` (default) | No auto-select — `build`/`plan` remain enabled; user manually picks the architect |
+| `true` | Disable `build` and `plan` so the swarm architect is the only selectable primary agent; emit a warning if multiple architect agents are primary |
+| `"<architect_name>"` | Same as `true`, but target a specific architect by its generated name (e.g. `"mega_architect"`) — all other architects are demoted to subagent |
+
+**Behavior details:**
+- Only `build` and `plan` are disabled. `general` and `explore` are always preserved.
+- If the user has already set `disable: true` on `build` or `plan` in their own config, the plugin respects that override.
+- If no architect agent exists in the generated set, a warning is emitted and the option has no effect.
+- If the string value does not match a known architect name, a warning is emitted and no demotion is applied.
+
+**Example — enable for any architect:**
+```json
+{
+  "auto_select_architect": true
+}
+```
+
+**Example — target a specific architect in a multi-swarm config:**
+```json
+{
+  "auto_select_architect": "mega_architect"
+}
+```
+
 ## How to verify the resolved config
 
 Run:
@@ -151,10 +256,11 @@ Opt-in verification gate that runs five specialized reviewers in parallel before
 | `maxRounds` | number | `3` | Maximum REJECT-retry rounds before architect must escalate to user (1–10) |
 | `parallelTimeoutMs` | number | `30000` | Per-member dispatch timeout in milliseconds (5000–120000) |
 | `vetoPriority` | boolean | `true` | When `true`, any single REJECT blocks advancement |
-| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided |
+| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. |
+| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5). Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
 | `escalateOnMaxRounds` | string? | undefined | Reserved for future use — no runtime behavior today |
 
-When `enabled: false`, the council gate is completely inert. When enabled, `convene_council` must be called before a task can transition to `completed`. See the [Council guide](council/README.md) for the full workflow.
+When `enabled: false`, the council gate is completely inert. When enabled, `submit_council_verdicts` must be called before a task can transition to `completed`. See the [Council guide](council/README.md) for the full workflow.
 
 **Example** — Enable the council gate:
 
@@ -164,7 +270,8 @@ When `enabled: false`, the council gate is completely inert. When enabled, `conv
     "enabled": true,
     "maxRounds": 3,
     "vetoPriority": true,
-    "requireAllMembers": false
+    "requireAllMembers": false,
+    "minimumMembers": 3
   }
 }
 ```
@@ -173,32 +280,30 @@ For a full configuration reference, see the [Full Configuration Reference](../RE
 
 ### `council.general` — General Council Mode (advisory)
 
-Distinct from the Work Complete Council above. Where the Work Complete Council is a **verdict-based QA gate** that blocks task completion, the General Council is an **advisory deliberation system**: user-selected models each independently web-search and answer a question, then engage in one structured deliberation round on disagreements. An optional moderator agent synthesizes the final answer.
+Distinct from the Work Complete Council above. Where the Work Complete Council is a **verdict-based QA gate** that blocks task completion, the General Council is an **advisory deliberation system**: a fixed three-agent council (`council_generalist`, `council_skeptic`, `council_domain_expert`) reviews a question using an architect-supplied RESEARCH CONTEXT block, with one optional disagreement-targeted reconciliation round. The architect synthesizes the final answer directly using inline output rules.
 
-Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---preset-name---spec-review)) or by enabling the `council_general_review` QA gate (which runs the council on a draft spec during MODE: SPECIFY).
+The three agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — the architect runs `web_search` 1–3 times before dispatch and passes the results in.
+
+Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or by enabling the `council_general_review` QA gate (which runs the council on a draft spec during MODE: SPECIFY).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the General Council feature |
-| `searchProvider` | `'tavily' \| 'brave'` | `'tavily'` | Web search backend used by council members |
+| `searchProvider` | `'tavily' \| 'brave'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
 | `searchApiKey` | string? | undefined | API key for the chosen provider. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` env vars when unset. |
-| `members` | array | `[]` | Default member configs (see structure below) |
-| `presets` | record | `{}` | Named member groups for `/swarm council --preset <name>` |
-| `deliberate` | boolean | `true` | When `true`, the architect routes Round 1 disagreements back to disputing members for a single Round 2 reconciliation |
-| `moderator` | boolean | `true` | When `true`, the architect delegates the final synthesis to the `council_moderator` agent |
-| `moderatorModel` | string? | undefined | Model identifier for the `council_moderator` agent. Required when `moderator: true` to override the default. |
+| `deliberate` | boolean | `true` | When `true`, the architect routes Round 1 disagreements back to disputing agents for a single Round 2 reconciliation |
 | `maxSourcesPerMember` | number | `5` | Hard cap on results per `web_search` call (1–20) |
 
-**Member shape** (each entry in `members` and `presets`):
+**Deprecated fields** (retained on the strict schema for backward compatibility; ignored at runtime):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `memberId` | string | Stable identifier (e.g. `"m1"`, `"security-skeptic"`) |
-| `model` | string | Model identifier (e.g. `"opencode/big-pickle"`) |
-| `role` | enum | One of `generalist`, `skeptic`, `domain_expert`, `devil_advocate`, `synthesizer` |
-| `persona` | string? | Optional free-form persona instructions appended to the member prompt |
+| Field | Type | Notes |
+|-------|------|-------|
+| `members` | array | No longer used — the council is a fixed three-agent set. |
+| `presets` | record | No longer used — preset-based member selection has been removed. |
+| `moderator` | boolean | No longer used — the architect synthesizes the final answer directly. |
+| `moderatorModel` | string? | No longer used — setting this triggers a deferred deprecation warning. |
 
-**Example** — Enable a 3-member general council with a moderator:
+**Example** — Enable the general council and customize the underlying models via the regular agent config:
 
 ```json
 {
@@ -209,19 +314,64 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
       "searchProvider": "tavily",
       "searchApiKey": "tvly-xxxxxxxx",
       "deliberate": true,
-      "moderator": true,
-      "moderatorModel": "anthropic/claude-sonnet-4-6",
-      "members": [
-        { "memberId": "m1", "model": "anthropic/claude-opus-4-7", "role": "generalist" },
-        { "memberId": "m2", "model": "openai/gpt-5", "role": "skeptic", "persona": "Default to scepticism. Demand evidence before accepting claims." },
-        { "memberId": "m3", "model": "google/gemini-2.5-pro", "role": "domain_expert" }
-      ]
+      "maxSourcesPerMember": 5
     }
+  },
+  "agents": {
+    "reviewer": { "model": "anthropic/claude-opus-4-7" },
+    "critic": { "model": "openai/gpt-5" },
+    "sme": { "model": "google/gemini-2.5-pro" }
   }
 }
 ```
 
 > ⚠️ **Strict-validation warning.** `CouncilConfigSchema` is `.strict()`. A typo in any `council.general.*` key (e.g. `searchProvder`) causes the *entire* user config to fail Zod validation. The loader (`src/config/loader.ts`) then falls back to **guardrail-only defaults** — silently losing every setting in `opencode-swarm.json`, not just the misspelled field. Validate with `/swarm config` after editing, and watch for the `[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults` warning in the console.
+
+## Turbo Configuration
+
+Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | `"standard" \| "lean"` | `"standard"` | Execution strategy. `"lean"` enables Lean Turbo lane planning; `"standard"` uses single-coder Turbo. |
+| `lean` | object | _(see below)_ | Lean-mode configuration. Only used when `strategy` is `"lean"`. |
+
+### `turbo.lean` — Lean Turbo settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_parallel_coders` | number | `4` | Maximum number of parallel coders in lean mode (1–6). Set to `1` for serial execution. |
+| `require_declared_scope` | boolean | `true` | When `true`, all tasks must have a declared file scope to be eligible for parallel lanes. Tasks without scope are serialized. |
+| `conflict_policy` | `"serialize" \| "degrade"` | `"serialize"` | How to handle file-scope conflicts between parallel tasks. `"serialize"` queues conflicting tasks; `"degrade"` falls back to standard serial flow. |
+| `degrade_on_risk` | boolean | `true` | When `true`, Lean Turbo degrades to serial execution if risk conditions are detected (e.g., protected paths, cross-lane dependencies). |
+| `phase_reviewer` | boolean | `true` | Dispatch an additive phase-level reviewer gate at `phase_complete`. This is in addition to per-task Stage B review — it does NOT skip Stage B. |
+| `phase_critic` | boolean | `true` | Dispatch an additive phase-level critic gate at `phase_complete`. This is in addition to per-task Stage B review — it does NOT skip Stage B. |
+| `integrated_diff_required` | boolean | `true` | Require an integrated diff before accepting changes from a lane. Ensures cross-lane file changes are coherent. |
+| `allow_docs_only_without_reviewer` | boolean | `false` | Allow docs-only phases to complete when the reviewer agent is not available. |
+| `worktree_isolation` | boolean | `false` | Use git worktree isolation for parallel coders to enable true file-system-level parallelism. |
+
+**Example** — Enable Lean Turbo with defaults:
+
+```json
+{
+  "turbo": {
+    "strategy": "lean",
+    "lean": {
+      "max_parallel_coders": 4,
+      "require_declared_scope": true,
+      "conflict_policy": "serialize",
+      "degrade_on_risk": true,
+      "phase_reviewer": true,
+      "phase_critic": true,
+      "integrated_diff_required": true,
+      "allow_docs_only_without_reviewer": false,
+      "worktree_isolation": false
+    }
+  }
+}
+```
+
+See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Turbo lane planning algorithm and conflict resolution rules.
 
 ## QA gates reference
 

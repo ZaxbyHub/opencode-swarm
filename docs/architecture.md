@@ -646,7 +646,7 @@ project/
 │       └── phase-2.md
 │
 ├── src/
-│   ├── index.ts           # Plugin entry — registers 7 hook types
+│   ├── index.ts           # Plugin entry — registers 8 hook types
 │   ├── state.ts           # Shared swarm state singleton (zero imports)
 │   ├── agents/            # Agent definitions and factory
 │   ├── config/            # Schema, constants, loader
@@ -667,7 +667,8 @@ project/
 │   │   ├── system-enhancer.ts       # System prompt transform + cross-agent context
 │   │   ├── compaction-customizer.ts # Session compaction enrichment
 │   │   ├── agent-activity.ts        # Tool hooks (activity tracking + flush)
-│   │   └── delegation-tracker.ts    # Chat message hook (active agent tracking)
+│   │   ├── delegation-tracker.ts    # Chat message hook (active agent tracking)
+│   │   └── cc-command-intercept.ts  # CC command interception (hard-block /reset, soft-correct /plan)
 │   ├── lang/             # Language profiles, framework detector (PHP, Laravel, etc.)
 │   ├── tools/             # Domain detector, file extractor, gitingest, diff, retrieve-summary
 │   ├── plan/              # Plan management
@@ -676,7 +677,7 @@ project/
 │       ├── index.ts       # Barrel exports
 │       └── manager.ts     # CRUD: save/load/list/delete/archive evidence
 │
-├── tests/unit/            # 1188 tests across 53+ files (bun test)
+├── tests/unit/            # 1211 tests across 54+ files (bun test)
 │   ├── agents/            # creation (64), factory (20), architect-v6-prompt (15),
 │   │                      # security-categories (12)
 │   ├── config/            # constants (14), schema (35), loader (17), plan-schema (40),
@@ -685,7 +686,7 @@ project/
 │   ├── hooks/             # pipeline-tracker (16), utils (25), system-enhancer (58),
 │   │                      # compaction-customizer (26), context-budget (23),
 │   │                      # extractors (32), agent-activity (14), delegation-tracker (16),
-│   │                      # guardrails (39), system-enhancer-v6 (18)
+│   │                      # guardrails (39), system-enhancer-v6 (18), cc-command-intercept (23 unit + 22 adversarial)
 │   ├── commands/          # status (6), plan (9), agents (28), index (11),
 │   │                      # archive (8), benchmark (5)
 │   ├── evidence/          # manager (25)
@@ -695,6 +696,7 @@ project/
 │   ├── smoke/             # packaging (8)
 │   └── state.test.ts      # Shared state (31)
 │
+├── tests/adversarial/     # 22 adversarial tests for cc-command-intercept (bun test)
 └── dist/                  # Build output (ESM)
 ```
 
@@ -1017,7 +1019,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 
 | Hook Type | Handler | Purpose |
 |-----------|---------|---------|
-| `experimental.chat.messages.transform` | `composeHandlers(pipelineTracker, contextBudget)` | Pipeline logging + token budget warnings; progressive task disclosure; deliberation preamble injection; tier-based behavioral prompt trimming |
+| `experimental.chat.messages.transform` | `composeHandlers(pipelineTracker, contextBudget, ccCommandInterceptHook)` | Pipeline logging + token budget warnings; progressive task disclosure; deliberation preamble injection; tier-based behavioral prompt trimming; CC command interception (hard-block /reset, soft-correct /plan, log HIGH severity) |
 | `experimental.chat.system.transform` | `systemEnhancerHook` | Inject phase/task/decisions + cross-agent context; reviewer receives semantic AST diff summary with blast radius (consumers count) from `buildSemanticDiffBlock()` |
 | `experimental.session.compacting` | `compactionHook` | Enrich compaction with plan.md + context.md data |
 | `command.execute.before` | `safeHook(commandHandler)` | Handle `/swarm` slash commands |

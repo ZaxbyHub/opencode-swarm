@@ -15,7 +15,6 @@ function execRegex(regex: RegExp, content: string): string[] {
 	const results: string[] = [];
 	regex.lastIndex = 0;
 	let match: RegExpExecArray | null;
-	// biome-ignore lint/suspicious/noAssignInExpressions: regex exec requires assignment in while condition
 	while ((match = regex.exec(content)) !== null) {
 		results.push(match[1]);
 	}

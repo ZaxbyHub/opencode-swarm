@@ -4,6 +4,7 @@ import { type ToolContext, tool } from '@opencode-ai/plugin';
 import { detectProjectLanguages } from '../lang/detector';
 import { LANGUAGE_REGISTRY } from '../lang/profiles';
 import { simpleGlobToRegex, warn } from '../utils';
+import { bunSpawnSync } from '../utils/bun-compat';
 
 // ============ Types ============
 
@@ -160,11 +161,25 @@ const toolchainCache: Map<string, boolean> = new Map();
 // ============ Helper Functions ============
 
 /**
- * Check if a command exists on PATH
- * Uses 'where' on Windows, 'which' on Unix
+ * Check if a command exists on PATH.
+ * Uses 'where' on Windows, 'which' on Unix.
+ *
+ * Invariant 3 (subprocesses, AGENTS.md): every subprocess call must set
+ * `cwd` explicitly, `stdin: 'ignore'` (non-interactive), `timeout`, and
+ * bounded or ignored stdio. Cache hits skip the spawn entirely.
+ *
+ * `cwd` is set to `process.cwd()` for invariant compliance; for PATH probes
+ * cwd is functionally irrelevant (`which`/`where` resolve via env PATH only),
+ * but the invariant requires the option to be set explicitly so an inherited
+ * cwd anomaly cannot affect later subprocess work in this tree.
+ *
+ * 3000ms timeout chosen to tolerate slow Windows `where` invocations under
+ * corporate AV / locked-down PATH layouts (single PATH probe is amortized
+ * across many calls via toolchainCache).
  */
+const IS_COMMAND_AVAILABLE_TIMEOUT_MS = 3000;
+
 export function isCommandAvailable(command: string): boolean {
-	// Check cache first
 	if (toolchainCache.has(command)) {
 		return toolchainCache.get(command)!;
 	}
@@ -173,12 +188,16 @@ export function isCommandAvailable(command: string): boolean {
 	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
-		const result = Bun.spawnSync({
-			cmd: isWindows ? ['where', cmd] : ['which', cmd],
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
-
+		const result = _internals.spawnSyncImpl(
+			isWindows ? ['where', cmd] : ['which', cmd],
+			{
+				cwd: process.cwd(),
+				stdin: 'ignore',
+				stdout: 'ignore',
+				stderr: 'ignore',
+				timeout: IS_COMMAND_AVAILABLE_TIMEOUT_MS,
+			},
+		);
 		const available = result.success;
 		toolchainCache.set(command, available);
 		return available;
@@ -345,6 +364,27 @@ function findFilesRecursive(
 /**
  * Discover build commands using language profiles (primary detection path)
  */
+// `spawnSyncImpl` is a DI seam used by `isCommandAvailable`; tests override it
+// to spy on the spawn options and verify Invariant 3 (subprocess) properties
+// without spawning a real process. Restore in afterEach. See
+// .claude/skills/engineering-conventions/SKILL.md for the rationale (mock.module
+// leaks across test files in Bun's shared test-runner process; DI is preferred).
+export const _internals: {
+	isCommandAvailable: typeof isCommandAvailable;
+	discoverBuildCommandsFromProfiles: typeof discoverBuildCommandsFromProfiles;
+	discoverBuildCommands: typeof discoverBuildCommands;
+	clearToolchainCache: typeof clearToolchainCache;
+	getEcosystems: typeof getEcosystems;
+	spawnSyncImpl: typeof bunSpawnSync;
+} = {
+	isCommandAvailable,
+	discoverBuildCommandsFromProfiles,
+	discoverBuildCommands,
+	clearToolchainCache,
+	getEcosystems,
+	spawnSyncImpl: bunSpawnSync,
+};
+
 export async function discoverBuildCommandsFromProfiles(
 	workingDir: string,
 ): Promise<BuildDiscoveryResult> {
@@ -428,7 +468,8 @@ export async function discoverBuildCommands(
 	const _filesToCheck = filterByScope(workingDir, scope, changedFiles);
 
 	// ============ Profile-driven detection (primary path) ============
-	const profileResult = await discoverBuildCommandsFromProfiles(workingDir);
+	const profileResult =
+		await _internals.discoverBuildCommandsFromProfiles(workingDir);
 	const profileCommands = profileResult.commands;
 	const profileSkipped = profileResult.skipped;
 

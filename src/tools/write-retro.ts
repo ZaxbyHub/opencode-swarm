@@ -5,7 +5,8 @@
  * This fixes the bug where Architect was writing flat JSON that failed EvidenceBundleSchema.parse().
  */
 
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import {
 	type RetrospectiveEvidence,
 	RetrospectiveEvidenceSchema,
@@ -601,89 +602,87 @@ export const write_retro: ToolDefinition = createSwarmTool({
 		'.swarm/evidence/retro-{phase}/evidence.json. ' +
 		'Use this instead of manually writing retro JSON to avoid schema validation failures in phase_complete.',
 	args: {
-		phase: tool.schema
+		phase: z
 			.number()
 			.int()
 			.min(1)
 			.max(99)
 			.describe('The phase number being completed (e.g., 1, 2, 3)'),
-		summary: tool.schema
-			.string()
-			.describe('Human-readable summary of the phase'),
-		task_count: tool.schema
+		summary: z.string().describe('Human-readable summary of the phase'),
+		task_count: z
 			.number()
 			.int()
 			.min(1)
 			.max(9999)
 			.describe('Count of tasks completed in this phase'),
-		task_complexity: tool.schema
+		task_complexity: z
 			.enum(['trivial', 'simple', 'moderate', 'complex'])
 			.describe('Complexity level of the completed tasks'),
-		total_tool_calls: tool.schema
+		total_tool_calls: z
 			.number()
 			.int()
 			.min(0)
 			.max(9999)
 			.describe('Total number of tool calls in this phase'),
-		coder_revisions: tool.schema
+		coder_revisions: z
 			.number()
 			.int()
 			.min(0)
 			.max(999)
 			.describe('Number of coder revisions made'),
-		reviewer_rejections: tool.schema
+		reviewer_rejections: z
 			.number()
 			.int()
 			.min(0)
 			.max(999)
 			.describe('Number of reviewer rejections received'),
-		loop_detections: tool.schema
+		loop_detections: z
 			.number()
 			.int()
 			.min(0)
 			.max(9999)
 			.optional()
 			.describe('Number of loop detection events in this phase'),
-		circuit_breaker_trips: tool.schema
+		circuit_breaker_trips: z
 			.number()
 			.int()
 			.min(0)
 			.max(9999)
 			.optional()
 			.describe('Number of circuit breaker trips in this phase'),
-		test_failures: tool.schema
+		test_failures: z
 			.number()
 			.int()
 			.min(0)
 			.max(9999)
 			.describe('Number of test failures encountered'),
-		security_findings: tool.schema
+		security_findings: z
 			.number()
 			.int()
 			.min(0)
 			.max(999)
 			.describe('Number of security findings'),
-		integration_issues: tool.schema
+		integration_issues: z
 			.number()
 			.int()
 			.min(0)
 			.max(999)
 			.describe('Number of integration issues'),
-		lessons_learned: tool.schema
-			.array(tool.schema.string())
+		lessons_learned: z
+			.array(z.string())
 			.max(5)
 			.optional()
 			.describe('Key lessons learned from this phase (max 5)'),
-		top_rejection_reasons: tool.schema
-			.array(tool.schema.string())
+		top_rejection_reasons: z
+			.array(z.string())
 			.optional()
 			.describe('Top reasons for reviewer rejections'),
-		task_id: tool.schema
+		task_id: z
 			.string()
 			.optional()
 			.describe('Optional custom task ID (defaults to retro-{phase})'),
-		metadata: tool.schema
-			.record(tool.schema.string(), tool.schema.unknown())
+		metadata: z
+			.record(z.string(), z.unknown())
 			.optional()
 			.describe('Optional additional metadata'),
 	},
@@ -724,7 +723,7 @@ export const write_retro: ToolDefinition = createSwarmTool({
 					| Record<string, unknown>
 					| undefined,
 			};
-			return await executeWriteRetro(writeRetroArgs, directory);
+			return await _internals.executeWriteRetro(writeRetroArgs, directory);
 		} catch {
 			return JSON.stringify(
 				{ success: false, phase: rawPhase, message: 'Invalid arguments' },
@@ -734,3 +733,16 @@ export const write_retro: ToolDefinition = createSwarmTool({
 		}
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ * Uses getter for write_retro to avoid circular reference at module load time.
+ */
+export const _internals: {
+	executeWriteRetro: typeof executeWriteRetro;
+	write_retro: typeof write_retro;
+} = {
+	executeWriteRetro: executeWriteRetro,
+	write_retro: write_retro,
+} as const;

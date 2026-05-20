@@ -8,7 +8,7 @@
  * leaking a partial mock that strips SwarmError from later test files.
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLog = mock(() => {});
 const mockWarn = mock(() => {});
@@ -27,6 +27,11 @@ describe('log-level-reclassification', () => {
 		mockLog.mockClear();
 		mockWarn.mockClear();
 		mockError.mockClear();
+	});
+
+	afterEach(() => {
+		// CROSS-MODULE mock cleanup — no _internals seams in model-limits.ts or context-budget.ts
+		mock.restore();
 	});
 
 	describe('model-limits', () => {

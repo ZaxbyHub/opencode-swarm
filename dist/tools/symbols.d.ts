@@ -1,4 +1,4 @@
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 interface SymbolInfo {
     name: string;
     kind: 'function' | 'class' | 'interface' | 'type' | 'enum' | 'const' | 'variable' | 'method' | 'property';

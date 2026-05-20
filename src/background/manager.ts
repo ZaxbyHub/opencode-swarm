@@ -358,3 +358,17 @@ export function resetAutomationManager(): void {
 		managerInstance = null;
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	getAutomationManager: typeof getAutomationManager;
+	createAutomationManager: typeof createAutomationManager;
+	resetAutomationManager: typeof resetAutomationManager;
+} = {
+	getAutomationManager,
+	createAutomationManager,
+	resetAutomationManager,
+} as const;

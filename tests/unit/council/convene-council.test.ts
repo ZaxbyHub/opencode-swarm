@@ -2,56 +2,56 @@ import { describe, expect, test } from 'bun:test';
 import { AGENT_TOOL_MAP } from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
 
-describe('convene_council — registration', () => {
-	test('convene_council is in TOOL_NAMES', () => {
-		expect(TOOL_NAMES).toContain('convene_council');
+describe('submit_council_verdicts — registration', () => {
+	test('submit_council_verdicts is in TOOL_NAMES', () => {
+		expect(TOOL_NAMES).toContain('submit_council_verdicts');
 	});
 
-	test('convene_council is in TOOL_NAME_SET (derived from TOOL_NAMES)', () => {
-		expect(TOOL_NAME_SET.has('convene_council')).toBe(true);
+	test('submit_council_verdicts is in TOOL_NAME_SET (derived from TOOL_NAMES)', () => {
+		expect(TOOL_NAME_SET.has('submit_council_verdicts')).toBe(true);
 	});
 
-	test('convene_council is in AGENT_TOOL_MAP.architect', () => {
-		expect(AGENT_TOOL_MAP.architect).toContain('convene_council');
+	test('submit_council_verdicts is in AGENT_TOOL_MAP.architect', () => {
+		expect(AGENT_TOOL_MAP.architect).toContain('submit_council_verdicts');
 	});
 
-	test('convene_council is architect-only — no other agent has it', () => {
+	test('submit_council_verdicts is architect-only — no other agent has it', () => {
 		const otherAgents = Object.keys(AGENT_TOOL_MAP).filter(
 			(a) => a !== 'architect',
 		) as Array<keyof typeof AGENT_TOOL_MAP>;
 		for (const agent of otherAgents) {
-			expect(AGENT_TOOL_MAP[agent]).not.toContain('convene_council');
+			expect(AGENT_TOOL_MAP[agent]).not.toContain('submit_council_verdicts');
 		}
 	});
 
-	test('convene_council is exported from src/tools/index.ts', async () => {
+	test('submit_council_verdicts is exported from src/tools/index.ts', async () => {
 		const tools = await import('../../../src/tools/index');
-		expect('convene_council' in tools).toBe(true);
+		expect('submit_council_verdicts' in tools).toBe(true);
 	});
 
-	test('convene_council module exports a valid tool with description + execute', async () => {
-		const { convene_council } = await import(
+	test('submit_council_verdicts module exports a valid tool with description + execute', async () => {
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
-		expect(convene_council).toBeDefined();
-		expect(convene_council).toHaveProperty('description');
-		expect(convene_council).toHaveProperty('execute');
-		expect(typeof convene_council.execute).toBe('function');
+		expect(submit_council_verdicts).toBeDefined();
+		expect(submit_council_verdicts).toHaveProperty('description');
+		expect(submit_council_verdicts).toHaveProperty('execute');
+		expect(typeof submit_council_verdicts.execute).toBe('function');
 	});
 
-	test('convene_council declares required args surface', async () => {
-		const { convene_council } = await import(
+	test('submit_council_verdicts declares required args surface', async () => {
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
-		expect(convene_council.args).toBeDefined();
-		expect(convene_council.args).toHaveProperty('taskId');
-		expect(convene_council.args).toHaveProperty('swarmId');
-		expect(convene_council.args).toHaveProperty('verdicts');
-		expect(convene_council.args).toHaveProperty('working_directory');
+		expect(submit_council_verdicts.args).toBeDefined();
+		expect(submit_council_verdicts.args).toHaveProperty('taskId');
+		expect(submit_council_verdicts.args).toHaveProperty('swarmId');
+		expect(submit_council_verdicts.args).toHaveProperty('verdicts');
+		expect(submit_council_verdicts.args).toHaveProperty('working_directory');
 	});
 });
 
-describe('convene_council — config gate', () => {
+describe('submit_council_verdicts — config gate', () => {
 	test('returns disabled message when council.enabled is not set (default)', async () => {
 		const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = await import(
 			'node:fs'
@@ -67,10 +67,10 @@ describe('convene_council — config gate', () => {
 				join(tempDir, '.opencode', 'opencode-swarm.json'),
 				JSON.stringify({ council: { enabled: false } }),
 			);
-			const { convene_council } = await import(
+			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
-			const result = await convene_council.execute(
+			const result = await submit_council_verdicts.execute(
 				{
 					taskId: '1.1',
 					swarmId: 'swarm-1',
@@ -99,10 +99,10 @@ describe('convene_council — config gate', () => {
 	});
 
 	test('invalid arguments return structured error without throwing', async () => {
-		const { convene_council } = await import(
+		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
-		const result = await convene_council.execute(
+		const result = await submit_council_verdicts.execute(
 			{
 				// missing required fields
 				taskId: 'not-a-valid-task-id',
@@ -116,7 +116,7 @@ describe('convene_council — config gate', () => {
 	});
 });
 
-describe('convene_council — happy path with enabled config', () => {
+describe('submit_council_verdicts — happy path with enabled config', () => {
 	test('writes council evidence and returns APPROVE when enabled', async () => {
 		const { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } =
 			await import('node:fs');
@@ -131,10 +131,10 @@ describe('convene_council — happy path with enabled config', () => {
 				JSON.stringify({ council: { enabled: true } }),
 			);
 
-			const { convene_council } = await import(
+			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
-			const result = await convene_council.execute(
+			const result = await submit_council_verdicts.execute(
 				{
 					taskId: '1.1',
 					swarmId: 'swarm-1',

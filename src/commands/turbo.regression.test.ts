@@ -22,11 +22,12 @@ import {
 } from '../services/status-service';
 import { getAgentSession, hasActiveTurboMode, swarmState } from '../state';
 import { checkReviewerGate } from '../tools/update-task-status';
-import { handleTurboCommand } from './turbo';
+import { _internals, handleTurboCommand } from './turbo';
 
 describe('Task 4: Turbo Mode Regression Tests', () => {
 	let testSessionId: string;
 	let tmpDir: string;
+	let originalLoadPluginConfigWithMeta: typeof _internals.loadPluginConfigWithMeta;
 
 	beforeEach(() => {
 		// Create a test session
@@ -80,6 +81,15 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 
 		// Create temp directory for plan.json
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turbo-regression-'));
+
+		// Mock loadPluginConfigWithMeta to return standard turbo strategy,
+		// preventing handleTurboCommand from reading the project's lean turbo config
+		// and returning "Lean Turbo enabled..." instead of "Turbo Mode enabled".
+		originalLoadPluginConfigWithMeta = _internals.loadPluginConfigWithMeta;
+		_internals.loadPluginConfigWithMeta = () => ({
+			config: { turbo: { strategy: 'standard' } },
+			loadedFromFile: false,
+		});
 	});
 
 	afterEach(() => {
@@ -92,6 +102,9 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+
+		// Restore original loadPluginConfigWithMeta
+		_internals.loadPluginConfigWithMeta = originalLoadPluginConfigWithMeta;
 	});
 
 	// ============================================

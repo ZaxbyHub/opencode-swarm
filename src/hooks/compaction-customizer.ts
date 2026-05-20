@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import { join } from 'node:path';
 import type { PluginConfig } from '../config';
 import { loadPlan } from '../plan/manager';
+import { buildRehydrationCache } from '../state.js';
 import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
@@ -106,6 +107,10 @@ export function createCompactionCustomizerHook(
 				output.context.push(
 					'[KNOWLEDGE TOOLS] You have persistent knowledge tools: knowledge_recall (search for relevant past decisions), knowledge_add (store a new lesson), knowledge_remove (delete outdated entries). Use knowledge_recall when past context would help.',
 				);
+
+				// Refresh rehydration cache so sessions created after compaction
+				// start with current disk state, not stale startup snapshot.
+				await buildRehydrationCache(directory);
 
 				// Note: Do not modify output.prompt - let OpenCode use its default compaction prompt
 			},

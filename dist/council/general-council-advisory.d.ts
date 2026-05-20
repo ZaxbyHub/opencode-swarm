@@ -20,7 +20,7 @@ import type { AgentSessionState } from '../state';
 import type { GeneralCouncilResult } from './general-council-types.js';
 /**
  * Push a GeneralCouncilResult into the architect's advisory queue. The body
- * is the synthesis markdown plus the moderator output when present.
+ * is the structural synthesis markdown returned by `convene_general_council`.
  *
  * Safe to call: missing session or empty advisory body silently skips.
  * Always idempotent at the architect-prompt level (no duplicate-suppression

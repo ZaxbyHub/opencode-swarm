@@ -2,7 +2,7 @@
  * Update task status tool for changing the status of individual tasks in a plan.
  * Allows agents to mark tasks as pending, in_progress, completed, or blocked.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the update_task_status tool
  */
@@ -50,29 +50,35 @@ export interface ReviewerGateResult {
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param stageBParallelEnabled - When true, also accept both-markers-present as passing (PR 2 barrier)
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
-export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean): ReviewerGateResult;
+export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean, sessionID?: string): ReviewerGateResult;
 /**
  * Wrapper around checkReviewerGate that appends a diff-scope advisory warning.
  * Keeps checkReviewerGate synchronous for backward compatibility.
- * Also resolves the PR 2 stageB.parallel.enabled flag from config.
+ * Stage B parallel is hardcoded (not config-driven).
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
+ * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult with optional scope warning appended to reason
  */
-export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string): Promise<ReviewerGateResult>;
+export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string, sessionID?: string): Promise<ReviewerGateResult>;
 /**
  * Recovery mechanism: reconcile task state with delegation history.
- * When reviewer/test_engineer delegations occurred but the state machine
- * was not advanced (e.g., toolAfter didn't fire, subagent_type missing,
- * cross-session gaps, or pure verification tasks without coder delegation),
- * this function walks all delegation chains and advances the task state
- * so that checkReviewerGate can make an accurate decision.
+ * When task-scoped reviewer/test_engineer delegations occurred but the state
+ * machine was not advanced (e.g., toolAfter didn't fire or subagent_type was
+ * missing), this function advances the task state so that checkReviewerGate can
+ * make an accurate decision without attributing unrelated delegation activity.
+ *
+ * Falls back to reading durable evidence files when delegation chains are empty
+ * (e.g., after a crash or session restart without snapshot). This ensures
+ * recovery works even when no in-memory delegation history exists.
  *
  * @param taskId - The task ID to recover state for
+ * @param directory - Optional project directory for evidence file fallback
  */
-export declare function recoverTaskStateFromDelegations(taskId: string): void;
+export declare function recoverTaskStateFromDelegations(taskId: string, directory?: string): void;
 /**
  * Result of the council-gate check used when transitioning to 'completed'.
  *
@@ -105,9 +111,10 @@ export declare function checkCouncilGate(workingDirectory: string, taskId: strin
  * Only one concurrent call wins the lock; others return success: false with recovery_guidance: "retry".
  * @param args - The update task status arguments
  * @param fallbackDir - Fallback working directory if args.working_directory is not provided
+ * @param ctx - Optional ToolContext providing sessionID for Lean Turbo cross-session bypass prevention
  * @returns UpdateTaskStatusResult with success status and details
  */
-export declare function executeUpdateTaskStatus(args: UpdateTaskStatusArgs, fallbackDir?: string): Promise<UpdateTaskStatusResult>;
+export declare function executeUpdateTaskStatus(args: UpdateTaskStatusArgs, fallbackDir?: string, ctx?: ToolContext): Promise<UpdateTaskStatusResult>;
 /**
  * Tool definition for update_task_status
  */

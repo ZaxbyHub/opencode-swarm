@@ -1,5 +1,610 @@
 # Changelog
 
+## [7.24.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.24.0...v7.24.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **knowledge:** null-safety, hive eligibility gate, knowledge preservation ([#914](https://github.com/zaxbysauce/opencode-swarm/issues/914) [#916](https://github.com/zaxbysauce/opencode-swarm/issues/916)) ([#919](https://github.com/zaxbysauce/opencode-swarm/issues/919)) ([6616a77](https://github.com/zaxbysauce/opencode-swarm/commit/6616a77019f26859b4d073a4083f00b3bf29bb74))
+
+## [7.24.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.23.1...v7.24.0) (2026-05-18)
+
+
+### Features
+
+* **architect:** add optional per-task checkpoint commit policy ([#913](https://github.com/zaxbysauce/opencode-swarm/issues/913)) ([8fe36b9](https://github.com/zaxbysauce/opencode-swarm/commit/8fe36b93aaee8a37a669ae9ae29a896ea4ffe0ef))
+
+## [7.23.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.23.0...v7.23.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **gate:** harden delegation chain persistence and gate recovery for crash resilience ([#912](https://github.com/zaxbysauce/opencode-swarm/issues/912)) ([958edf2](https://github.com/zaxbysauce/opencode-swarm/commit/958edf23b98ad627b450c13dd6f503156f4f3c77))
+
+## [7.23.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.22.1...v7.23.0) (2026-05-18)
+
+
+### Features
+
+* auto-populate skill context and enforce skill propagation to sub-agents ([#909](https://github.com/zaxbysauce/opencode-swarm/issues/909)) ([275fd2f](https://github.com/zaxbysauce/opencode-swarm/commit/275fd2fcb53c791951aa840de92aba3ccf484a29))
+
+## [7.22.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.22.0...v7.22.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **architect:** honor parallel execution profiles ([#905](https://github.com/zaxbysauce/opencode-swarm/issues/905)) ([87667ce](https://github.com/zaxbysauce/opencode-swarm/commit/87667ce25e680105643ece4e40e4376a8a407cab))
+
+## [7.22.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.5...v7.22.0) (2026-05-18)
+
+
+### Features
+
+* **config:** add auto_select_architect option to auto-select swarm architect on launch ([#903](https://github.com/zaxbysauce/opencode-swarm/issues/903)) ([6e27009](https://github.com/zaxbysauce/opencode-swarm/commit/6e27009d4b941198ab36ed63cc57af5cee2c1614)), closes [#889](https://github.com/zaxbysauce/opencode-swarm/issues/889)
+
+## [Unreleased]
+
+### Features
+
+* **config:** add `auto_select_architect` option to automatically select swarm architect and disable competing built-in agents ([#887](https://github.com/zaxbysauce/opencode-swarm/issues/887))
+
+## [7.21.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.4...v7.21.5) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** prevent agents from editing verifier config files to bypass lint/test gates ([#899](https://github.com/zaxbysauce/opencode-swarm/issues/899)) ([b94be92](https://github.com/zaxbysauce/opencode-swarm/commit/b94be9213f177d5a2fc75047068f3874619366a4))
+
+## [7.21.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.3...v7.21.4) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** block agent self-acknowledgment of spec drift ([#890](https://github.com/zaxbysauce/opencode-swarm/issues/890)) ([#896](https://github.com/zaxbysauce/opencode-swarm/issues/896)) ([670829b](https://github.com/zaxbysauce/opencode-swarm/commit/670829b6e1a96c408fc7b8f795eeaa710d4fcd97))
+
+## [7.21.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.2...v7.21.3) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** expand transient network error detection for Node.js raw error codes ([#886](https://github.com/zaxbysauce/opencode-swarm/issues/886)) ([8bfdff1](https://github.com/zaxbysauce/opencode-swarm/commit/8bfdff1e7f0582adc7165c95105f1389550fded2))
+
+## [7.21.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.1...v7.21.2) (2026-05-17)
+
+
+### Bug Fixes
+
+* **guardrails:** block rm bypass via mv/move/ren/Move-Item on .swarm/ paths ([#885](https://github.com/zaxbysauce/opencode-swarm/issues/885)) ([64d77cb](https://github.com/zaxbysauce/opencode-swarm/commit/64d77cb0d2ed57f91b40730e443084f16b3e79f6))
+
+## [7.21.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.21.0...v7.21.1) (2026-05-17)
+
+
+### Bug Fixes
+
+* **phase-complete:** require durable gate proof ([#883](https://github.com/zaxbysauce/opencode-swarm/issues/883)) ([0d76429](https://github.com/zaxbysauce/opencode-swarm/commit/0d764296c95160ec574731e7a583216b6a3f9011))
+
+## [7.21.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.2...v7.21.0) (2026-05-16)
+
+
+### Features
+
+* **skill-propagation:** intelligent skill tracking, validation, and scoring pipeline ([#880](https://github.com/zaxbysauce/opencode-swarm/issues/880)) ([bbba04b](https://github.com/zaxbysauce/opencode-swarm/commit/bbba04b6567af170fcd7b7da93f196e2ca6af9c2))
+
+## [7.20.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.1...v7.20.2) (2026-05-16)
+
+
+### Bug Fixes
+
+* **phase-complete:** keep internal phase diagnostics out of chat-visible output ([#876](https://github.com/zaxbysauce/opencode-swarm/issues/876)) ([9ab7664](https://github.com/zaxbysauce/opencode-swarm/commit/9ab7664047d2810d2a5020798c08b6aa7e550d73))
+
+## [7.20.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.20.0...v7.20.1) (2026-05-16)
+
+
+### Bug Fixes
+
+* **guardrails:** recover from provider outages ([#875](https://github.com/zaxbysauce/opencode-swarm/issues/875)) ([a15e3a2](https://github.com/zaxbysauce/opencode-swarm/commit/a15e3a271fad14f92b3ca0c7261697a275583d50))
+
+## [7.20.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.3...v7.20.0) (2026-05-16)
+
+
+### Features
+
+* **test-runner:** three-layer defense against session-blocking fan-out ([#870](https://github.com/zaxbysauce/opencode-swarm/issues/870)) ([ee9af91](https://github.com/zaxbysauce/opencode-swarm/commit/ee9af91fa801c62bb4bc0ba35ad63e968ed4de78))
+
+## [7.19.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.2...v7.19.3) (2026-05-16)
+
+
+### Bug Fixes
+
+* **guardrails:** classify structured provider errors as transient ([#871](https://github.com/zaxbysauce/opencode-swarm/issues/871)) ([2f6a2d6](https://github.com/zaxbysauce/opencode-swarm/commit/2f6a2d6e5ae1b65c35930f771994356b7c2d3d12))
+
+## [7.19.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.1...v7.19.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **test-runner:** add pre-discovery source-file guard to prevent session-killing cascade ([#867](https://github.com/zaxbysauce/opencode-swarm/issues/867)) ([c1ee8eb](https://github.com/zaxbysauce/opencode-swarm/commit/c1ee8eb24b987f1d7c705549f5930fa14342d875)), closes [#864](https://github.com/zaxbysauce/opencode-swarm/issues/864)
+
+## [7.19.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.19.0...v7.19.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **plan:** make save_plan task removal explicit + surface spec drift ([#853](https://github.com/zaxbysauce/opencode-swarm/issues/853)) ([#855](https://github.com/zaxbysauce/opencode-swarm/issues/855)) ([6c70889](https://github.com/zaxbysauce/opencode-swarm/commit/6c708898fc10215e061eb92418bf7447c8dc2d0c))
+
+## [7.19.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.18.0...v7.19.0) (2026-05-14)
+
+
+### Features
+
+* **commands:** add native swarm command tool ([#851](https://github.com/zaxbysauce/opencode-swarm/issues/851)) ([001a6dc](https://github.com/zaxbysauce/opencode-swarm/commit/001a6dc77c4230593b81757e003ae4827478ae32))
+
+
+### Bug Fixes
+
+* **commands:** mutate output.parts in place + document LLM-mediation gap ([#845](https://github.com/zaxbysauce/opencode-swarm/issues/845)) ([dbf3891](https://github.com/zaxbysauce/opencode-swarm/commit/dbf3891c90dfeebeadb1ce577fa28f130be4bae5))
+* **gate-tracking:** close cross-phase evidence-routing and state leaks ([#839](https://github.com/zaxbysauce/opencode-swarm/issues/839)) ([76ce20f](https://github.com/zaxbysauce/opencode-swarm/commit/76ce20fd65ff91beb0772ea0cc6d62616f54c166))
+* **onboarding:** validate configured swarm models ([#841](https://github.com/zaxbysauce/opencode-swarm/issues/841)) ([bf6afe9](https://github.com/zaxbysauce/opencode-swarm/commit/bf6afe93977ccfae73c7b25d8c092e8700a74e86))
+
+## [7.18.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.3...v7.18.0) (2026-05-14)
+
+
+### Features
+
+* **parallelization:** wire standard stage b gate groups ([#837](https://github.com/zaxbysauce/opencode-swarm/issues/837)) ([c5c706b](https://github.com/zaxbysauce/opencode-swarm/commit/c5c706b8fc3faa87ffe8a9306eb0f24941e2aa83))
+
+
+### Bug Fixes
+
+* **commands:** mutate output.parts in place + document LLM-mediation gap ([#845](https://github.com/zaxbysauce/opencode-swarm/issues/845)) ([dbf3891](https://github.com/zaxbysauce/opencode-swarm/commit/dbf3891c90dfeebeadb1ce577fa28f130be4bae5))
+* **gate-tracking:** close cross-phase evidence-routing and state leaks ([#839](https://github.com/zaxbysauce/opencode-swarm/issues/839)) ([76ce20f](https://github.com/zaxbysauce/opencode-swarm/commit/76ce20fd65ff91beb0772ea0cc6d62616f54c166))
+* **onboarding:** validate configured swarm models ([#841](https://github.com/zaxbysauce/opencode-swarm/issues/841)) ([bf6afe9](https://github.com/zaxbysauce/opencode-swarm/commit/bf6afe93977ccfae73c7b25d8c092e8700a74e86))
+* **qa-gate:** harden final council evidence writes ([#834](https://github.com/zaxbysauce/opencode-swarm/issues/834)) ([5ce1a6b](https://github.com/zaxbysauce/opencode-swarm/commit/5ce1a6b7b6d882b5428ff37ae7eb7647711969ac))
+
+## [7.17.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.2...v7.17.3) (2026-05-12)
+
+
+### Bug Fixes
+
+* **turbo:** update registry metadata and fix 5 pre-existing test failures via _internals DI seam ([#830](https://github.com/zaxbysauce/opencode-swarm/issues/830)) ([4aa6540](https://github.com/zaxbysauce/opencode-swarm/commit/4aa6540f60322f0033a765771d8b29a2ac7ccd1c))
+
+## [7.17.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.1...v7.17.2) (2026-05-12)
+
+
+### Bug Fixes
+
+* **qa-gate:** run final council as project-scoped 5-member council ([#831](https://github.com/zaxbysauce/opencode-swarm/issues/831)) ([713f22c](https://github.com/zaxbysauce/opencode-swarm/commit/713f22c3cf355797ec8352eaf22a8d2da95a3bda))
+
+## [7.17.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.17.0...v7.17.1) (2026-05-12)
+
+
+### Bug Fixes
+
+* **knowledge:** harden knowledge system and resolve full-auto deadlock ([#827](https://github.com/zaxbysauce/opencode-swarm/issues/827)) ([a986e3a](https://github.com/zaxbysauce/opencode-swarm/commit/a986e3afda8da3767af9cb7a27d847773858e122))
+
+## [7.17.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.16.0...v7.17.0) (2026-05-11)
+
+
+### Features
+
+* **lang:** language-agnostic plugin via LanguageBackend dispatch ([#825](https://github.com/zaxbysauce/opencode-swarm/issues/825)) ([95c8861](https://github.com/zaxbysauce/opencode-swarm/commit/95c886143a14184c7b9d6980cc0f0edb40b52f84))
+
+## [7.16.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.15.0...v7.16.0) (2026-05-11)
+
+
+### Features
+
+* **close:** add skill review on finalize ([#821](https://github.com/zaxbysauce/opencode-swarm/issues/821)) ([1aa0eba](https://github.com/zaxbysauce/opencode-swarm/commit/1aa0eba71d77e930f30d58a319250527e4947939))
+
+## [7.15.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.14.0...v7.15.0) (2026-05-11)
+
+
+### Features
+
+* **turbo:** add Lean Turbo parallel lane execution strategy ([#820](https://github.com/zaxbysauce/opencode-swarm/issues/820)) ([#820](https://github.com/zaxbysauce/opencode-swarm/issues/820)) ([ecdafc0](https://github.com/zaxbysauce/opencode-swarm/commit/ecdafc0a8e64cc56b898d0d7a80131ed7fda28b5))
+
+## [7.14.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.2...v7.14.0) (2026-05-10)
+
+
+### Features
+
+* **commands:** add /swarm deep-dive read-only audit command ([#816](https://github.com/zaxbysauce/opencode-swarm/issues/816)) ([2d37304](https://github.com/zaxbysauce/opencode-swarm/commit/2d373044317e45f6eee0b9b94203281027d89048))
+
+## [7.13.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.1...v7.13.2) (2026-05-10)
+
+
+### Bug Fixes
+
+* **doc-scan:** replace blocking readdirSync with async pruning walk to prevent event-loop hang ([#814](https://github.com/zaxbysauce/opencode-swarm/issues/814)) ([4268c2d](https://github.com/zaxbysauce/opencode-swarm/commit/4268c2dda0244ba7f99cfd6fbf56b18cc6d7b575))
+
+## [7.13.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.13.0...v7.13.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* **install:** write minimal project config instead of DEFAULT_AGENT_CONFIGS ([#811](https://github.com/zaxbysauce/opencode-swarm/issues/811)) ([8534996](https://github.com/zaxbysauce/opencode-swarm/commit/8534996749f62ebdcb6ee61b8ceb67c6faf88ac4)), closes [#797](https://github.com/zaxbysauce/opencode-swarm/issues/797)
+
+## [7.13.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.12.0...v7.13.0) (2026-05-10)
+
+
+### Features
+
+* canonical command renames, command-name registry, and phase-council mutation_gap emission ([#807](https://github.com/zaxbysauce/opencode-swarm/issues/807)) ([e9bd5af](https://github.com/zaxbysauce/opencode-swarm/commit/e9bd5af3c08cba94cf49e3e726f8edda0c6a8238))
+
+## [7.12.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.11.1...v7.12.0) (2026-05-10)
+
+
+### Features
+
+* **guardrails:** add three-tier error classification for provider error resilience (closes [#756](https://github.com/zaxbysauce/opencode-swarm/issues/756)) ([4d3691b](https://github.com/zaxbysauce/opencode-swarm/commit/4d3691b8ec70318161d40d62a4ad6a227480aef9))
+
+## [7.11.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.11.0...v7.11.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **architect:** harden anti-rationalization against time-pressure self-coding patterns ([#804](https://github.com/zaxbysauce/opencode-swarm/issues/804)) ([7d968f3](https://github.com/zaxbysauce/opencode-swarm/commit/7d968f36d06ee0c09558deb198bd7d32d06d5fdc))
+
+## [7.11.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.10.0...v7.11.0) (2026-05-08)
+
+
+### Features
+
+* **knowledge:** actionable directives, skill compiler, real-LLM skill_improver, spec_writer (closes [#629](https://github.com/zaxbysauce/opencode-swarm/issues/629)) ([#799](https://github.com/zaxbysauce/opencode-swarm/issues/799)) ([6e68db1](https://github.com/zaxbysauce/opencode-swarm/commit/6e68db1599879e7b160e93d85e4166e9481451dc))
+
+## [7.10.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.9.0...v7.10.0) (2026-05-08)
+
+
+### Features
+
+* **close:** full artifact cleanup, aggressive git reset, and hive promotion ([#800](https://github.com/zaxbysauce/opencode-swarm/issues/800)) ([02dae18](https://github.com/zaxbysauce/opencode-swarm/commit/02dae1812d0521b28831bb1fa8e7ff46e1044b4b))
+
+## [7.9.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.8.1...v7.9.0) (2026-05-08)
+
+
+### Features
+
+* **commands:** audit remediation — registration, UX, error handling, and observability ([#796](https://github.com/zaxbysauce/opencode-swarm/issues/796)) ([9d2d194](https://github.com/zaxbysauce/opencode-swarm/commit/9d2d194eb425966e35c2d35dce9b8f8f9191246a))
+
+## [7.8.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.8.0...v7.8.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* **curator:** suppress unhandled NotFoundError when curator LLM times out ([#793](https://github.com/zaxbysauce/opencode-swarm/issues/793)) ([44058bd](https://github.com/zaxbysauce/opencode-swarm/commit/44058bde3b224012f029d97e890a3015357ddf68))
+* **lang:** prevent concurrent Parser.init() calls with promise memoization ([#794](https://github.com/zaxbysauce/opencode-swarm/issues/794)) ([d05065e](https://github.com/zaxbysauce/opencode-swarm/commit/d05065e8e182d15f3ce15720d548914055058bd7))
+
+## [7.8.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.7.0...v7.8.0) (2026-05-07)
+
+
+### Features
+
+* **full-auto:** v2 autonomy control plane with deterministic policy + critic oversight ([#789](https://github.com/zaxbysauce/opencode-swarm/issues/789)) ([1255264](https://github.com/zaxbysauce/opencode-swarm/commit/12552648b4527c13029a80fe849c807462549908))
+
+## [7.7.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.6.1...v7.7.0) (2026-05-07)
+
+
+### Features
+
+* **qa-gate:** add final_council gate + derivePlanId utility + dead code removal ([#786](https://github.com/zaxbysauce/opencode-swarm/issues/786)) ([669fcbd](https://github.com/zaxbysauce/opencode-swarm/commit/669fcbdeecd4164e103eb97b7e0beac6535cd6db))
+
+
+### Bug Fixes
+
+* **gate:** evidence-incomplete no longer hard-blocks task completion when session state confirms gates passed ([#780](https://github.com/zaxbysauce/opencode-swarm/issues/780)) ([7d7d3e1](https://github.com/zaxbysauce/opencode-swarm/commit/7d7d3e19190866d391dcaebcd5b10ca52c530261))
+
+## [7.6.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.6.0...v7.6.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* **gate:** evidence-incomplete no longer hard-blocks task completion when session state confirms gates passed ([#780](https://github.com/zaxbysauce/opencode-swarm/issues/780)) ([7d7d3e1](https://github.com/zaxbysauce/opencode-swarm/commit/7d7d3e19190866d391dcaebcd5b10ca52c530261))
+* **tools:** add stdin:ignore to all diff tool execFileSync calls (Invariant [#3](https://github.com/zaxbysauce/opencode-swarm/issues/3)) ([#784](https://github.com/zaxbysauce/opencode-swarm/issues/784)) ([3b6c873](https://github.com/zaxbysauce/opencode-swarm/commit/3b6c8732e6d9018d40e304ee5300db54943a86c3))
+
+## [7.6.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.4...v7.6.0) (2026-05-07)
+
+
+### Features
+
+* **agents:** propagate project skills from architect to subagents ([#778](https://github.com/zaxbysauce/opencode-swarm/issues/778)) ([05b6984](https://github.com/zaxbysauce/opencode-swarm/commit/05b6984e740a9cc1f0f557c0c250fabd40ef9625))
+
+## [7.5.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.3...v7.5.4) (2026-05-06)
+
+
+### Bug Fixes
+
+* **delegation-gate:** stop internal warn messages leaking into chat stream ([#776](https://github.com/zaxbysauce/opencode-swarm/issues/776)) ([d40015c](https://github.com/zaxbysauce/opencode-swarm/commit/d40015cfb625e0b68bddd8cae99fc7f8aa11f9ee))
+
+## [7.5.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.2...v7.5.3) (2026-05-06)
+
+
+### Bug Fixes
+
+* **agents:** preserve 3-segment model IDs (lmstudio/qwen/model-name) ([#772](https://github.com/zaxbysauce/opencode-swarm/issues/772)) ([8664008](https://github.com/zaxbysauce/opencode-swarm/commit/86640080d0e2572ee140831707e0d9e1cbb14358))
+
+## [7.5.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.1...v7.5.2) (2026-05-06)
+
+
+### Bug Fixes
+
+* **testing:** eliminate mock.module cross-test contamination and register submit_phase_council_verdicts tool ([#769](https://github.com/zaxbysauce/opencode-swarm/issues/769)) ([2106c19](https://github.com/zaxbysauce/opencode-swarm/commit/2106c19f1458da4ffc30dff261010941238b3cea))
+
+## [7.5.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.5.0...v7.5.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **guardrails:** allow test_engineer, docs, and designer to write to nested directories at any depth ([#768](https://github.com/zaxbysauce/opencode-swarm/issues/768)) ([1fdeaed](https://github.com/zaxbysauce/opencode-swarm/commit/1fdeaedb2b33e9dbb75f51a2a9a62048483ad352))
+
+## [7.5.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.4.3...v7.5.0) (2026-05-05)
+
+
+### Features
+
+* repo graph post-hardening improvements (module split, symlink safety, concurrency, escalation) ([#754](https://github.com/zaxbysauce/opencode-swarm/issues/754)) ([3713d05](https://github.com/zaxbysauce/opencode-swarm/commit/3713d05b58d9321bd5a2f7223a9105ec8fe08034))
+
+## [7.4.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.4.2...v7.4.3) (2026-05-04)
+
+
+### Bug Fixes
+
+* **plan-sync:** ← CURRENT marker in extractIncompleteTasksFromPlan + refresh rehydration cache after compaction ([#751](https://github.com/zaxbysauce/opencode-swarm/issues/751)) ([dbcd0be](https://github.com/zaxbysauce/opencode-swarm/commit/dbcd0be55279e278aaf8bbe21e9ccb38462d283f))
+
+## [7.4.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.4.1...v7.4.2) (2026-05-03)
+
+
+### Bug Fixes
+
+* **test-quality:** address PR [#732](https://github.com/zaxbysauce/opencode-swarm/issues/732) follow-up — temp leaks, missing coverage, parallelization, docs ([#749](https://github.com/zaxbysauce/opencode-swarm/issues/749)) ([86ee386](https://github.com/zaxbysauce/opencode-swarm/commit/86ee38691fbcb3423028b4c2aa5921141b5de4e3))
+
+## [7.4.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.4.0...v7.4.1) (2026-05-03)
+
+
+### Bug Fixes
+
+* **cc-command-intercept:** hard-block /checkpoint like /reset and /clear ([#747](https://github.com/zaxbysauce/opencode-swarm/issues/747)) ([0cece27](https://github.com/zaxbysauce/opencode-swarm/commit/0cece277ff4e8367866e33939352067b8bce83e8))
+
+## [7.4.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.7...v7.4.0) (2026-05-03)
+
+
+### Features
+
+* add three-layer swarm command conflict prevention system ([563f314](https://github.com/zaxbysauce/opencode-swarm/commit/563f31474804b03f8611c3538f02f7fb7ef9a8b4))
+* add three-layer swarm command conflict prevention system ([522e67c](https://github.com/zaxbysauce/opencode-swarm/commit/522e67ce877b12ef5adc46c47f5bab70260de473))
+
+
+### Bug Fixes
+
+* **cc-command-intercept:** fix tautological assertion; add /checkpoint test coverage ([f30a4cf](https://github.com/zaxbysauce/opencode-swarm/commit/f30a4cff9ce19abc914001c1fcc86ea6e6a6f821))
+* **ci:** remove push trigger to prevent dual workflow runs and stale checks ([ae53078](https://github.com/zaxbysauce/opencode-swarm/commit/ae53078be719ffe125205bf9630c03d8b83d37d3))
+
+## [Unreleased]
+
+### Features
+
+* **conflict-registry:** add pure-data module mapping 9 swarm commands to their CC built-in counterparts with severity ratings (CRITICAL/HIGH/MEDIUM); commands with conflicts display a ⚠️ warning in `/swarm help` output
+* **ci-gate:** add `src/commands/conflict-registry.test.ts` CI gate that prevents new CRITICAL conflicts from being merged without explicit acknowledgment in the test allow-list
+* **constants:** add `CLAUDE_CODE_NATIVE_COMMANDS` frozen set (115 CC built-in commands) to `src/config/constants.ts` for runtime intercept hook; includes `freezeSet()` helper that throws on mutation attempts
+* **skill-scoring:** add `src/hooks/skill-scoring.ts` with 5-component relevance scoring (frequency 0.3, compliance 0.3, recency 0.15, taskID diversity 0.05, context matching 0.20) based on historical usage data from `.swarm/skill-usage.jsonl`; exports `rankSkillsForContext`, `getSkillStats`, `formatSkillIndexWithContext`
+* **skill-usage:** add `.swarm/skill-usage.jsonl` audit log tracking skill delegations and reviewer compliance outcomes; `skill-propagation-gate.ts` now records delegation entries and compliance verdicts for auditability
+* **architect:** enrich delegation prompt with skill usage/compliance metadata at delegation time via auto-enrichment prompt step
+
+### Changed
+
+* **skill-propagation-gate:** `parseSkillPaths` now preserves case for accurate skill discovery matching
+* **skill-propagation-gate:** `COMPLIANCE_PATTERN` regex updated to handle both notes-full (`— notes`) and notes-less verdict forms
+* **registry:** add optional `clashesWithNativeCcCommand` field to `CommandEntry` type; populated on 9 commands (`plan`, `reset`, `checkpoint`, `status`, `agents`, `config`, `export`, `doctor`, `history`)
+* **index:** `buildHelpText()` now renders a ⚠️ conflict warning line for every command that has `clashesWithNativeCcCommand` set
+
+## [7.3.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.4...v7.3.5) (2026-05-03)
+
+
+### Bug Fixes
+
+* **agents:** restore multi-swarm primary architects after v7.3.x regression ([#737](https://github.com/zaxbysauce/opencode-swarm/issues/737)) ([0c8d94e](https://github.com/zaxbysauce/opencode-swarm/commit/0c8d94e2cbd40ceb72b2f3a7210e2ce028f5bccf))
+
+## [7.3.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.3...v7.3.4) (2026-05-02)
+
+
+### Bug Fixes
+
+* **plugin-init:** bound ensureSwarmGitExcluded to prevent cross-platform load hang ([#735](https://github.com/zaxbysauce/opencode-swarm/issues/735)) ([8672cb1](https://github.com/zaxbysauce/opencode-swarm/commit/8672cb155648a628b23ce9edeffa9544b0898587))
+
+## [7.3.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.2...v7.3.3) (2026-05-01)
+
+
+### Bug Fixes
+
+* **git-hygiene:** auto-protect .swarm/ from Git pollution before any write ([#732](https://github.com/zaxbysauce/opencode-swarm/issues/732)) ([17fc49f](https://github.com/zaxbysauce/opencode-swarm/commit/17fc49f585931256654bdbb506b3f50b4891e673))
+
+## [7.3.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.1...v7.3.2) (2026-05-01)
+
+
+### Bug Fixes
+
+* **council:** make council additive at phase-level, never suppress per-task Stage B gates ([#728](https://github.com/zaxbysauce/opencode-swarm/issues/728)) ([aa96c74](https://github.com/zaxbysauce/opencode-swarm/commit/aa96c7487e5d80b4fd1cd709bc141ecbad50e4a8))
+
+## [7.3.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.3.0...v7.3.1) (2026-05-01)
+
+
+### Bug Fixes
+
+* reduce false telemetry failures and mirrored state spam ([#727](https://github.com/zaxbysauce/opencode-swarm/issues/727)) ([079d8cc](https://github.com/zaxbysauce/opencode-swarm/commit/079d8cc0d312f6c78e8f41ed26775804e25102e0))
+
+## [7.3.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.2.0...v7.3.0) (2026-05-01)
+
+
+### Features
+
+* add first-run UX, categorized help, and deprecation aliases ([#723](https://github.com/zaxbysauce/opencode-swarm/issues/723)) ([0e2ed93](https://github.com/zaxbysauce/opencode-swarm/commit/0e2ed930f7050dfb979995139ee1129a32a9a264))
+
+## [7.2.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.1.1...v7.2.0) (2026-05-01)
+
+
+### Features
+
+* **config:** auto-create .opencode/opencode-swarm.json on plugin init ([#657](https://github.com/zaxbysauce/opencode-swarm/issues/657)) ([#719](https://github.com/zaxbysauce/opencode-swarm/issues/719)) ([6c60d4d](https://github.com/zaxbysauce/opencode-swarm/commit/6c60d4df5ef486ce11aa89c4f4124c2aa2e93cec))
+
+## [7.1.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.1.0...v7.1.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* suppress knowledge-injector headroom warning from chat UI ([#715](https://github.com/zaxbysauce/opencode-swarm/issues/715)) ([db63336](https://github.com/zaxbysauce/opencode-swarm/commit/db633360573e34d0698d77702fb0a7bacb8aacd0))
+
+## [7.1.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.3...v7.1.0) (2026-04-30)
+
+
+### Features
+
+* **agents:** add mandatory reuse scan and duplicate prevention gate ([#712](https://github.com/zaxbysauce/opencode-swarm/issues/712)) ([733681f](https://github.com/zaxbysauce/opencode-swarm/commit/733681f23e1e81e55d6d293846d63f27ab9c1934))
+
+## [7.0.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.2...v7.0.3) (2026-04-30)
+
+
+### Bug Fixes
+
+* **#704:** unblock OpenCode Desktop plugin init across macOS/Linux/Windows ([#707](https://github.com/zaxbysauce/opencode-swarm/issues/707)) ([68cb660](https://github.com/zaxbysauce/opencode-swarm/commit/68cb66023ba02a48558ef1a9780a89d373b77924))
+
+## [7.0.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.1...v7.0.2) (2026-04-30)
+
+
+### Bug Fixes
+
+* **council:** replace council_member/moderator with role-framed dispatch + architect synthesis ([#703](https://github.com/zaxbysauce/opencode-swarm/issues/703)) ([f800c1a](https://github.com/zaxbysauce/opencode-swarm/commit/f800c1aa12dc6359ab945fcc0c49c7ab9f77249b))
+
+## [7.0.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.0...v7.0.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* **#583,#698:** confine SWARM_PLAN to .swarm/, prevent spiral commits, fix update across platforms ([#700](https://github.com/zaxbysauce/opencode-swarm/issues/700)) ([c371c26](https://github.com/zaxbysauce/opencode-swarm/commit/c371c26f9b4976fe1a87cb24739ffd60fd156123))
+
+## [7.0.0](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.14...v7.0.0) (2026-04-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* council_mode semantics rewritten — Stage B (reviewer + test_engineer) now always runs per-task regardless of council_mode setting; council convenes at phase_complete for holistic phase-level review only. Users with council_mode enabled will see both per-task gates AND phase-level council where previously council replaced per-task gates.
+
+### Features
+
+* Swarm Plugin Enhancements v7.0.0 ([#697](https://github.com/zaxbysauce/opencode-swarm/issues/697)) ([6563271](https://github.com/zaxbysauce/opencode-swarm/commit/65632712a4f326ea363c92baa05441a83e105f89))
+
+## [6.86.14](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.13...v6.86.14) (2026-04-29)
+
+
+### Bug Fixes
+
+* **guardrails:** enforce continuation on transient LLM errors (issue [#691](https://github.com/zaxbysauce/opencode-swarm/issues/691)) ([#694](https://github.com/zaxbysauce/opencode-swarm/issues/694)) ([89b479f](https://github.com/zaxbysauce/opencode-swarm/commit/89b479f5669d318c5add8f6056e9d0427a8d2f16))
+
+## [6.86.13](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.12...v6.86.13) (2026-04-29)
+
+
+### Bug Fixes
+
+* **#686,#687:** default quiet mode and eliminate empty checkpoint commits ([#689](https://github.com/zaxbysauce/opencode-swarm/issues/689)) ([90ae113](https://github.com/zaxbysauce/opencode-swarm/commit/90ae1131542e4399646c1e18c66a4a2622d07bd9))
+* **skills:** harden swarm-pr-review with anti-self-review gate, council opt-in guard, and pre-synthesis checkpoint ([3f2766e](https://github.com/zaxbysauce/opencode-swarm/commit/3f2766e0b981dcd7c83604daaabfd28b326fff9c))
+
+## [6.86.12](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.11...v6.86.12) (2026-04-29)
+
+
+### Bug Fixes
+
+* **knowledge:** repair hive promotion path, align todo category, fix list/quarantine ergonomics ([#685](https://github.com/zaxbysauce/opencode-swarm/issues/685)) ([0f2aaa3](https://github.com/zaxbysauce/opencode-swarm/commit/0f2aaa3e8eb677dfbe0bc25288cf11bb7527c5da))
+
+## [6.86.11](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.10...v6.86.11) (2026-04-29)
+
+
+### Bug Fixes
+
+* **tui:** eliminate per-agent advisory spam from fallback_models warning ([#683](https://github.com/zaxbysauce/opencode-swarm/issues/683)) ([6e8f4c9](https://github.com/zaxbysauce/opencode-swarm/commit/6e8f4c9268a2115840e38f5db5fd13cc9677f407))
+
+## [6.86.10](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.9...v6.86.10) (2026-04-28)
+
+
+### Bug Fixes
+
+* **hooks:** route unguarded console output through debug-gated logger to suppress chat area noise ([#681](https://github.com/zaxbysauce/opencode-swarm/issues/681)) ([7b555e0](https://github.com/zaxbysauce/opencode-swarm/commit/7b555e00352d3ab77e9413e80d61e88615a6de53))
+
+## [6.86.9](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.8...v6.86.9) (2026-04-28)
+
+
+### Bug Fixes
+
+* **plugin:** migrate to v1 export shape for OpenCode plugin loader compatibility ([#675](https://github.com/zaxbysauce/opencode-swarm/issues/675)) ([#679](https://github.com/zaxbysauce/opencode-swarm/issues/679)) ([d696631](https://github.com/zaxbysauce/opencode-swarm/commit/d696631e49e77b5fd81dd3478a22b6d3e126030d))
+
+## [6.86.8](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.7...v6.86.8) (2026-04-28)
+
+
+### Bug Fixes
+
+* **plugin:** make bundle portable to Node ESM hosts + cache refresh ([#675](https://github.com/zaxbysauce/opencode-swarm/issues/675)) ([#676](https://github.com/zaxbysauce/opencode-swarm/issues/676)) ([db9b5e2](https://github.com/zaxbysauce/opencode-swarm/commit/db9b5e2ca750f201690aa25411c663a4c8e3dddf))
+
+## [6.86.7](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.6...v6.86.7) (2026-04-28)
+
+
+### Bug Fixes
+
+* **council:** close 4 council bypass paths via rename + quorum gate + quorumSize docs ([#673](https://github.com/zaxbysauce/opencode-swarm/issues/673)) ([fa4f9ff](https://github.com/zaxbysauce/opencode-swarm/commit/fa4f9ffbf140a19501d9d987e5350473c5e2d7fc))
+
+## [6.86.6](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.5...v6.86.6) (2026-04-28)
+
+
+### Bug Fixes
+
+* version flag, startup noise, README, agent listing, checkpoint cleanup, and CI fixes ([#669](https://github.com/zaxbysauce/opencode-swarm/issues/669)) ([0de72a5](https://github.com/zaxbysauce/opencode-swarm/commit/0de72a532f6c640d8c67d5ad5f682f7ae0395ed2))
+
+## [6.86.5](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.4...v6.86.5) (2026-04-27)
+
+
+### Bug Fixes
+
+* **mutation:** extract JSON from LLM responses containing markdown or prose preamble ([#664](https://github.com/zaxbysauce/opencode-swarm/issues/664)) ([1793cf6](https://github.com/zaxbysauce/opencode-swarm/commit/1793cf6a9f11d878e7104e83b616cc0349c9d686))
+
+## [6.86.4](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.3...v6.86.4) (2026-04-27)
+
+
+### Bug Fixes
+
+* **plan:** resolve ledger corruption handling and rollback ledger bypass audit findings ([#659](https://github.com/zaxbysauce/opencode-swarm/issues/659)) ([afce191](https://github.com/zaxbysauce/opencode-swarm/commit/afce1914557bab11349a0c6b81d74d7dc676e4af))
+
+## [6.86.3](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.2...v6.86.3) (2026-04-27)
+
+
+### Bug Fixes
+
+* **plan:** bridge in-memory task state to plan.json so plan.md updates ([#654](https://github.com/zaxbysauce/opencode-swarm/issues/654)) ([ad45a99](https://github.com/zaxbysauce/opencode-swarm/commit/ad45a99b8ed1ae8db7c3dd1fc9583d095be2c168))
+
+## [6.86.2](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.1...v6.86.2) (2026-04-27)
+
+
+### Bug Fixes
+
+* **ci:** make Windows bun test runner resilient to process crashes ([a9abbed](https://github.com/zaxbysauce/opencode-swarm/commit/a9abbedda696b26dfdb0779986d92c6b6a145a22))
+* **ci:** replace $() command substitution in run steps to pass security scan ([7aa8d8a](https://github.com/zaxbysauce/opencode-swarm/commit/7aa8d8adcd284ecf1ef3faa6daa92436fc828a92))
+
+## [6.86.1](https://github.com/zaxbysauce/opencode-swarm/compare/v6.86.0...v6.86.1) (2026-04-27)
+
+
+### Bug Fixes
+
+* **agents:** strip designer from architect prompt when ui_review is disabled ([#651](https://github.com/zaxbysauce/opencode-swarm/issues/651)) ([3ee7242](https://github.com/zaxbysauce/opencode-swarm/commit/3ee724283e6c178e0f1fd999bf98971d989e9ff8))
+
+## [6.86.0](https://github.com/zaxbysauce/opencode-swarm/compare/v6.85.4...v6.86.0) (2026-04-27)
+
+
+### Features
+
+* **config:** add variant field with backward-compatible auto-split ([035c4c3](https://github.com/zaxbysauce/opencode-swarm/commit/035c4c352da42adacef0474bf29cbc0028e7ef3f))
+
+## [6.85.4](https://github.com/zaxbysauce/opencode-swarm/compare/v6.85.3...v6.85.4) (2026-04-27)
+
+
+### Bug Fixes
+
+* **knowledge:** consolidate hive promoter, add dedup to knowledge_add, fix injector budget default ([#641](https://github.com/zaxbysauce/opencode-swarm/issues/641)) ([446ac98](https://github.com/zaxbysauce/opencode-swarm/commit/446ac982f7d084fa2c56080fda1a10370942c7d2))
+
 ## [6.85.3](https://github.com/zaxbysauce/opencode-swarm/compare/v6.85.2...v6.85.3) (2026-04-26)
 
 

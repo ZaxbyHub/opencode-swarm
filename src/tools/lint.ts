@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { isCommandAvailable } from '../build/discovery';
 import { warn } from '../utils';
+import { bunSpawn } from '../utils/bun-compat';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -468,7 +470,7 @@ export async function _detectAvailableLinter(
 
 	// Try biome first (fastest, recommended)
 	try {
-		const biomeProc = Bun.spawn([biomeBin, '--version'], {
+		const biomeProc = bunSpawn([biomeBin, '--version'], {
 			stdout: 'pipe',
 			stderr: 'pipe',
 		});
@@ -492,7 +494,7 @@ export async function _detectAvailableLinter(
 
 	// Try eslint
 	try {
-		const eslintProc = Bun.spawn([eslintBin, '--version'], {
+		const eslintProc = bunSpawn([eslintBin, '--version'], {
 			stdout: 'pipe',
 			stderr: 'pipe',
 		});
@@ -538,15 +540,15 @@ export async function runLint(
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
 		});
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		const exitCode = await proc.exited;
@@ -618,15 +620,15 @@ export async function runAdditionalLint(
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd,
 		});
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		const exitCode = await proc.exited;
@@ -677,7 +679,7 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Run project linter in check or fix mode. Supports biome, eslint (JS/TS), ruff (Python), clippy (Rust), golangci-lint (Go), checkstyle (Java), ktlint (Kotlin), dotnet-format (C#), cppcheck (C/C++), swiftlint (Swift), dart analyze (Dart), and rubocop (Ruby). Returns JSON with success status, exit code, and output for architect pre-reviewer gate. Use check mode for CI/linting and fix mode to automatically apply fixes.',
 	args: {
-		mode: tool.schema
+		mode: z
 			.enum(['fix', 'check'])
 			.describe(
 				'Linting mode: "check" for read-only lint check, "fix" to automatically apply fixes',
@@ -711,17 +713,21 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
 		const cwd = directory;
 
 		// Primary: detect Biome or ESLint (JS/TS projects)
-		const linter = await detectAvailableLinter(directory);
+		const linter = await _internals.detectAvailableLinter(directory);
 		if (linter) {
-			const result = await runLint(linter, mode, directory);
+			const result = await _internals.runLint(linter, mode, directory);
 			return JSON.stringify(result, null, 2);
 		}
 
 		// Fallback: detect additional language linters (Python, Rust, Go, Java, Kotlin, C#, C/C++, Swift, Dart, Ruby)
-		const additionalLinter = detectAdditionalLinter(cwd);
+		const additionalLinter = _internals.detectAdditionalLinter(cwd);
 		if (additionalLinter) {
 			warn(`[lint] Using ${additionalLinter} linter for this project`);
-			const result = await runAdditionalLint(additionalLinter, mode, cwd);
+			const result = await _internals.runAdditionalLint(
+				additionalLinter,
+				mode,
+				cwd,
+			);
 			return JSON.stringify(result, null, 2);
 		}
 
@@ -737,3 +743,19 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(errorResult, null, 2);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	detectAvailableLinter: typeof detectAvailableLinter;
+	runLint: typeof runLint;
+	detectAdditionalLinter: typeof detectAdditionalLinter;
+	runAdditionalLint: typeof runAdditionalLint;
+} = {
+	detectAvailableLinter,
+	runLint,
+	detectAdditionalLinter,
+	runAdditionalLint,
+} as const;

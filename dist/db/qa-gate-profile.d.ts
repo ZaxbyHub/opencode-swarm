@@ -7,7 +7,20 @@
  * Sessions can only ratchet gates tighter (enable more), never disable them.
  */
 /**
- * QA gate flags. All nine gates are tracked explicitly.
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    getProfile: typeof getProfile;
+    getOrCreateProfile: typeof getOrCreateProfile;
+    setGates: typeof setGates;
+    getEffectiveGates: typeof getEffectiveGates;
+    computeProfileHash: typeof computeProfileHash;
+};
+/**
+ * QA gate flags. All eleven gates are tracked explicitly.
  */
 export interface QaGates {
     reviewer: boolean;
@@ -19,6 +32,8 @@ export interface QaGates {
     sast_enabled: boolean;
     mutation_test: boolean;
     council_general_review: boolean;
+    drift_check: boolean;
+    final_council: boolean;
 }
 /**
  * Default QA gate configuration for newly-created profiles.
@@ -85,7 +100,7 @@ export declare function computeProfileHash(profile: QaGateProfile): string;
  *   machine; blocks coder→next-coder advancement until reviewer + test_engineer
  *   delegations observed).
  * - council_mode — src/state.ts isCouncilGateActive + src/hooks/delegation-gate.ts
- *   (Stage B replaced by convene_council verdict).
+ *   (Stage B replaced by submit_council_verdicts verdict).
  * - sme_enabled — consumed during MODE: BRAINSTORM/SPECIFY architect dialogue.
  * - critic_pre_plan — consumed by MODE: PLAN critic delegation before save_plan.
  * - sast_enabled — consumed inside pre_check_batch tool.
@@ -96,6 +111,8 @@ export declare function computeProfileHash(profile: QaGateProfile): string;
  * - council_general_review — src/agents/architect.ts SPECIFY-COUNCIL-REVIEW
  *   (fires when gate is true; runs convene_general_council on draft spec before
  *   critic-gate to fold multi-model deliberation into the spec).
+ * - drift_check — src/tools/phase-complete.ts Gate 2 (blocks phase_complete when
+ *   drift-verifier.json missing or rejected)
  *
  * Session overrides are intentionally ephemeral — they live only in
  * in-memory `AgentSessionState.qaGateSessionOverrides` and are NOT

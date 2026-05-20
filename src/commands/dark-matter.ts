@@ -5,8 +5,8 @@ import {
 } from '../hooks/knowledge-store.js';
 import type { DarkMatterOptions } from '../tools/co-change-analyzer.js';
 import {
+	_internals as coChangeAnalyzer,
 	darkMatterToKnowledgeEntries,
-	detectDarkMatter,
 	formatDarkMatterOutput,
 } from '../tools/co-change-analyzer.js';
 
@@ -37,7 +37,13 @@ export async function handleDarkMatterCommand(
 		}
 	}
 
-	const pairs = await detectDarkMatter(directory, options);
+	let pairs: Awaited<ReturnType<typeof coChangeAnalyzer.detectDarkMatter>>;
+	try {
+		pairs = await coChangeAnalyzer.detectDarkMatter(directory, options);
+	} catch (err) {
+		const errMsg = err instanceof Error ? err.message : String(err);
+		return `## Dark Matter Analysis Failed\n\nError analyzing git history: ${errMsg}\n\nEnsure this is a git repository with commit history.`;
+	}
 	const output = formatDarkMatterOutput(pairs);
 
 	// Persist dark matter findings as swarm knowledge entries

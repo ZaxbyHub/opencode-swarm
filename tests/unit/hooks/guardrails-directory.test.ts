@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'bun:test';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
@@ -46,7 +47,7 @@ describe('guardrails directory parameter injection', () => {
 	describe('factory receives directory parameter', () => {
 		it('creates hooks with injected directory parameter', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/test/project';
+			const testDirectory = path.join(os.tmpdir(), 'test-project');
 
 			// Should not throw - factory accepts directory parameter
 			const hooks = createGuardrailsHooks(testDirectory, config);
@@ -114,7 +115,7 @@ describe('guardrails directory parameter injection', () => {
 	describe('isOutsideSwarmDir uses injected directory', () => {
 		it('correctly identifies files outside .swarm/ using injected directory', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/test/project';
+			const testDirectory = path.join(os.tmpdir(), 'test-project');
 			const hooks = createGuardrailsHooks(testDirectory, config);
 
 			// Start a non-architect session (to bypass architect exemption)
@@ -134,7 +135,7 @@ describe('guardrails directory parameter injection', () => {
 
 		it('correctly identifies files inside .swarm/ using injected directory', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/test/project';
+			const testDirectory = path.join(os.tmpdir(), 'test-project');
 			const hooks = createGuardrailsHooks(testDirectory, config);
 
 			// Use an architect session writing to an allowed .swarm/ path.
@@ -159,7 +160,7 @@ describe('guardrails directory parameter injection', () => {
 
 		it('respects path.join(directory, ".swarm") for validation', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/test/project';
+			const testDirectory = path.join(os.tmpdir(), 'test-project');
 			const hooks = createGuardrailsHooks(testDirectory, config);
 
 			// Start an architect session (self-coding detection)
@@ -187,7 +188,7 @@ describe('guardrails directory parameter injection', () => {
 	describe('loadPlan uses injected directory', () => {
 		it('loads plan from injected directory in toolAfter', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/test/project';
+			const testDirectory = path.join(os.tmpdir(), 'test-project');
 			const hooks = createGuardrailsHooks(testDirectory, config);
 
 			// Mock loadPlan to verify the directory parameter
@@ -278,7 +279,7 @@ describe('guardrails directory parameter injection', () => {
 	describe('no process.cwd() fallback in hooks', () => {
 		it('toolBefore does not use process.cwd() for path validation', async () => {
 			const config = defaultConfig();
-			const testDirectory = '/custom/project';
+			const testDirectory = path.join(os.tmpdir(), 'custom-project');
 			const hooks = createGuardrailsHooks(testDirectory, config);
 
 			// Start architect session for self-coding detection

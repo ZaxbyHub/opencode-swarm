@@ -1,4 +1,4 @@
-/**
+﻿/**
  * System Enhancer Hook
  *
  * Enhances the system prompt with current phase information from the plan
@@ -12,20 +12,110 @@ import type { PluginConfig } from '../config';
 import {
 	DEFAULT_SCORING_CONFIG,
 	FULL_AUTO_BANNER,
+	LEAN_TURBO_BANNER,
+	OPENCODE_NATIVE_AGENTS,
 	TURBO_MODE_BANNER,
 } from '../config/constants';
 import type { RetrospectiveEvidence } from '../config/evidence-schema';
+import type { RuntimePlan } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
+
+/**
+ * Build the [spec-drift] advisory injected into the model's system prompt
+ * after every loadPlan whenever spec staleness is detected (issue #853
+ * Layer A). The text is appended to `output.system` and survives the
+ * single-system-message collapse at `experimental.chat.system.transform`.
+ *
+ * The "Do NOT proceed" line enumerates every tool in SPEC_DRIFT_BLOCKED_TOOLS
+ * so the architect knows exactly which calls will return SPEC_DRIFT_BLOCK
+ * from Layer B.
+ */
+export function buildSpecDriftAdvisory(args: {
+	reason: string;
+	currentHash: string | null;
+	storedHash: string;
+	midLoadRemovals?: { count: number; source: string };
+}): string {
+	const lines = [
+		'[spec-drift]',
+		`Reason: ${args.reason}`,
+		`Stored spec hash: ${args.storedHash}`,
+		`Current spec hash: ${args.currentHash ?? '(spec.md missing)'}`,
+		'Action: surface this warning to the user at your next user-facing reply. ' +
+			'Do NOT proceed with destructive plan operations (save_plan with removals, ' +
+			'update_task_status, phase_complete, lean_turbo_run_phase, ' +
+			'lean_turbo_acquire_locks) until the user runs /swarm clarify or ' +
+			'/swarm acknowledge-spec-drift.',
+	];
+	if (args.midLoadRemovals) {
+		lines.push(
+			`Auto-removed during recovery: ${args.midLoadRemovals.count} task(s) ` +
+				`(source: ${args.midLoadRemovals.source}). See ` +
+				'.swarm/plan-ledger.jsonl for IDs.',
+		);
+	}
+	return lines.join('\n');
+}
+
+function readSpecStalenessSnapshot(
+	directory: string,
+): { specHash_plan: string; specHash_current: string | null } | null {
+	try {
+		const p = path.join(directory, '.swarm', 'spec-staleness.json');
+		if (!fs.existsSync(p)) return null;
+		const raw = fs.readFileSync(p, 'utf-8');
+		const parsed = JSON.parse(raw);
+		if (
+			typeof parsed?.specHash_plan === 'string' &&
+			(typeof parsed?.specHash_current === 'string' ||
+				parsed?.specHash_current === null)
+		) {
+			return {
+				specHash_plan: parsed.specHash_plan,
+				specHash_current: parsed.specHash_current,
+			};
+		}
+	} catch {
+		/* malformed — fall through */
+	}
+	return null;
+}
+
+function maybeAppendSpecDriftAdvisory(
+	output: { system: string[] },
+	directory: string,
+	plan: RuntimePlan | null,
+): void {
+	if (!plan?._specStale) return;
+	const snap = readSpecStalenessSnapshot(directory);
+	const storedHash =
+		snap?.specHash_plan ?? plan.specHash ?? '(unknown — plan missing specHash)';
+	const currentHash = snap?.specHash_current ?? null;
+	output.system.push(
+		buildSpecDriftAdvisory({
+			reason: plan._specStaleReason ?? 'spec.md changed since plan was saved',
+			currentHash,
+			storedHash,
+			midLoadRemovals: plan._midLoadRemovals,
+		}),
+	);
+}
+
 import {
 	analyzeDecisionDrift,
 	formatBudgetWarning,
 	formatDriftForContext,
 	getContextBudgetReport,
 } from '../services';
-import { hasActiveFullAuto, hasActiveTurboMode, swarmState } from '../state';
+import {
+	hasActiveFullAuto,
+	hasActiveLeanTurbo,
+	hasActiveTurboMode,
+	swarmState,
+} from '../state';
 import { telemetry } from '../telemetry';
 import { warn } from '../utils';
 import {
@@ -451,9 +541,30 @@ export function createSystemEnhancerHook(
 				output: { system: string[] },
 			): Promise<void> => {
 				try {
+					// Skip swarm context injection for native opencode agents (build,
+					// plan, general, explore, compaction, title, summary). These agents
+					// have no use for phase/task/knowledge injection and must not trigger
+					// scanDocIndex or the dark-matter scan unnecessarily.
+					//
+					// Limitation: activeAgent is populated lazily by the chat.message
+					// hook, which fires after system.transform. On the very first prompt
+					// of any new session the guard cannot fire because activeAgent has no
+					// entry yet. The hang risk is still mitigated by the async pruning
+					// walk in scanDocIndex (see doc-scan.ts), which makes the worst-case
+					// cost proportional to the number of matching doc files, not the
+					// total number of files in the repo.
+					if (_input.sessionID) {
+						const sessionAgent = swarmState.activeAgent.get(_input.sessionID);
+						if (
+							sessionAgent &&
+							OPENCODE_NATIVE_AGENTS.has(sessionAgent.toLowerCase() as never)
+						) {
+							return;
+						}
+					}
+
 					const maxInjectionTokens =
-						config.context_budget?.max_injection_tokens ??
-						Number.POSITIVE_INFINITY;
+						config.context_budget?.max_injection_tokens ?? 4000;
 					let injectedTokens = 0;
 
 					function tryInject(text: string): void {
@@ -530,20 +641,20 @@ export function createSystemEnhancerHook(
 										(e) => !existingLessons.has(e.lesson),
 									);
 									if (newEntries.length === 0) {
-										console.warn(
+										warn(
 											`[system-enhancer] No new knowledge entries (all duplicates)`,
 										);
 									} else {
 										for (const entry of newEntries) {
 											await appendKnowledge(knowledgePath, entry);
 										}
-										console.warn(
+										warn(
 											`[system-enhancer] Created ${newEntries.length} new knowledge entries (${knowledgeEntries.length - newEntries.length} duplicates skipped)`,
 										);
 									}
 								} catch (e) {
 									// Non-blocking: knowledge is supplementary
-									console.warn(
+									warn(
 										`[system-enhancer] Failed to create knowledge entries: ${e}`,
 									);
 								}
@@ -596,6 +707,8 @@ export function createSystemEnhancerHook(
 								`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
 							);
 						}
+						// Issue #853 Layer A: surface spec drift to the model.
+						maybeAppendSpecDriftAdvisory(output, directory, plan);
 						const mode = await detectArchitectMode(directory);
 						let planContent: string | null = null;
 						let phaseHeader = '';
@@ -864,6 +977,7 @@ ${handoffContent}`;
 									const rawResult = await knowledge_recall.execute(
 										{ query: primaryFile },
 										// Pass minimal context so createSwarmTool extracts directory correctly
+										// biome-ignore lint/suspicious/noExplicitAny: knowledge_recall.execute expects a narrow internal context; directory is the only needed field
 										{ directory } as any,
 									);
 									if (rawResult && typeof rawResult === 'string') {
@@ -1054,17 +1168,21 @@ ${handoffContent}`;
 							stripKnownSwarmPrefix(activeAgent_retro) === 'architect';
 
 						if (isArchitect) {
-							// v6.x: Turbo/Full-Auto banner injection for architect
+							// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect
 							const sessionIdBanner = _input.sessionID;
 							if (
 								hasActiveTurboMode(sessionIdBanner) ||
-								hasActiveFullAuto(sessionIdBanner)
+								hasActiveFullAuto(sessionIdBanner) ||
+								hasActiveLeanTurbo(sessionIdBanner)
 							) {
 								if (hasActiveTurboMode(sessionIdBanner)) {
 									tryInject(TURBO_MODE_BANNER);
 								}
 								if (hasActiveFullAuto(sessionIdBanner)) {
 									tryInject(FULL_AUTO_BANNER);
+								}
+								if (hasActiveLeanTurbo(sessionIdBanner)) {
+									tryInject(LEAN_TURBO_BANNER);
 								}
 							}
 
@@ -1296,6 +1414,8 @@ ${handoffContent}`;
 							`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
+					// Issue #853 Layer A: surface spec drift to the model.
+					maybeAppendSpecDriftAdvisory(output, directory, plan);
 					let currentPhase: string | null = null;
 					let currentTask: string | null = null;
 
@@ -1606,11 +1726,12 @@ ${handoffContent}`;
 						stripKnownSwarmPrefix(activeAgent_retro_b) === 'architect';
 
 					if (isArchitect_b) {
-						// v6.x: Turbo/Full-Auto banner injection for architect (Path B)
+						// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect (Path B)
 						const sessionIdBanner_b = _input.sessionID;
 						if (
 							hasActiveTurboMode(sessionIdBanner_b) ||
-							hasActiveFullAuto(sessionIdBanner_b)
+							hasActiveFullAuto(sessionIdBanner_b) ||
+							hasActiveLeanTurbo(sessionIdBanner_b)
 						) {
 							if (hasActiveTurboMode(sessionIdBanner_b)) {
 								candidates.push({
@@ -1628,6 +1749,16 @@ ${handoffContent}`;
 									kind: 'agent_context' as ContextCandidate['kind'],
 									text: FULL_AUTO_BANNER,
 									tokens: estimateTokens(FULL_AUTO_BANNER),
+									priority: 1,
+									metadata: { contentType: 'prose' as ContentType },
+								});
+							}
+							if (hasActiveLeanTurbo(sessionIdBanner_b)) {
+								candidates.push({
+									id: `candidate-${idCounter++}`,
+									kind: 'agent_context' as ContextCandidate['kind'],
+									text: LEAN_TURBO_BANNER,
+									tokens: estimateTokens(LEAN_TURBO_BANNER),
 									priority: 1,
 									metadata: { contentType: 'prose' as ContentType },
 								});

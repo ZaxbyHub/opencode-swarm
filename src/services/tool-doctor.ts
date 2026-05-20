@@ -78,7 +78,7 @@ function extractRegisteredToolKeys(indexPath: string): Set<string> {
  * means the agent's system prompt will instruct the model to call a
  * tool that opencode never exposes to the runtime, which silently
  * breaks the agent's workflow (this is how the council feature shipped
- * broken in 6.66.0 — convene_council and declare_council_criteria were
+ * broken in 6.66.0 — submit_council_verdicts and declare_council_criteria were
  * in AGENT_TOOL_MAP.architect but never registered). Findings are
  * emitted at severity 'error' so `config doctor` / `/swarm preflight`
  * treats this class of drift as fatal rather than advisory.

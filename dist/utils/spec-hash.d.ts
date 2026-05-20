@@ -13,3 +13,11 @@ export declare function isSpecStale(directory: string, plan: Plan): Promise<{
     reason?: string;
     currentHash?: string | null;
 }>;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    computeSpecHash: typeof computeSpecHash;
+    isSpecStale: typeof isSpecStale;
+};

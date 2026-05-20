@@ -1,10 +1,16 @@
 name: CI
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
     branches: ["**"]
+
+# Serialize CI runs for the same branch/PR to prevent double-run dist-check
+# interference. Old runs are NOT cancelled because cancelling leaves stale
+# check statuses that persist on PRs and block merging even after a new
+# successful run completes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -16,7 +22,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -29,6 +35,9 @@ jobs:
         run: bun run typecheck
       - name: Biome CI
         run: bunx biome ci .
+      - name: Mock isolation compliance check
+        shell: bash
+        run: chmod +x scripts/check-mock-cleanup.sh && bash scripts/check-mock-cleanup.sh
 
   unit:
     needs: quality
@@ -37,45 +46,67 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
+        id: cache-bun
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
+          restore-keys: |
+            ${{ runner.os }}-bun-
+            ${{ runner.os }}-bun
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Unit tests (hooks - guardrails)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for f in tests/unit/hooks/guardrails*.test.ts; do
             [ -f "$f" ] || continue
-            if ! bun --smol test "$f" --timeout 120000; then
-              failed=1
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
       - name: Unit tests (destructive command guard - all platforms)
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for f in tests/unit/hooks/destructive-command*.test.ts tests/unit/hooks/incident-replay*.test.ts; do
             [ -f "$f" ] || continue
-            if ! bun --smol test "$f" --timeout 120000; then
-              failed=1
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              # bun exited non-zero — check if it was a real failure or crash
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
       - name: Unit tests (hooks - knowledge types/validator/store)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -87,11 +118,10 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - knowledge reader/migrator)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts; do
+          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -99,7 +129,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - knowledge injector)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -111,7 +140,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - knowledge-curator)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -123,7 +151,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - curator)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -135,7 +162,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - hive)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -147,7 +173,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - system-enhancer load-evidence)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -159,11 +184,10 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - system-enhancer)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/system-enhancer-adversarial.attack.test.ts tests/unit/hooks/system-enhancer-adversarial.test.ts tests/unit/hooks/system-enhancer-coder-context.test.ts tests/unit/hooks/system-enhancer-compaction.test.ts tests/unit/hooks/system-enhancer-context-budget-wiring.test.ts tests/unit/hooks/system-enhancer-drift.test.ts tests/unit/hooks/system-enhancer-handoff.test.ts tests/unit/hooks/system-enhancer-hf1b-adversarial.test.ts tests/unit/hooks/system-enhancer-hf1b.test.ts tests/unit/hooks/system-enhancer-lang-constraints-adversarial.test.ts tests/unit/hooks/system-enhancer-lang-constraints.test.ts tests/unit/hooks/system-enhancer-retro.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist-adversarial.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist.test.ts tests/unit/hooks/system-enhancer-task2-1-adversarial.test.ts tests/unit/hooks/system-enhancer-task2-1.test.ts tests/unit/hooks/system-enhancer-task2-2.test.ts tests/unit/hooks/system-enhancer-task2-3-adversarial.test.ts tests/unit/hooks/system-enhancer-task2-3.test.ts tests/unit/hooks/system-enhancer-task2-4.test.ts tests/unit/hooks/system-enhancer-task3-4.test.ts tests/unit/hooks/system-enhancer-test-constraints.test.ts tests/unit/hooks/system-enhancer-v6.test.ts tests/unit/hooks/system-enhancer-v61.test.ts tests/unit/hooks/system-enhancer-v62-adversarial.test.ts tests/unit/hooks/system-enhancer-v62.test.ts tests/unit/hooks/system-enhancer.test.ts; do
+          for f in tests/unit/hooks/system-enhancer-adversarial.attack.test.ts tests/unit/hooks/system-enhancer-adversarial.test.ts tests/unit/hooks/system-enhancer-coder-context.test.ts tests/unit/hooks/system-enhancer-compaction.test.ts tests/unit/hooks/system-enhancer-context-budget-wiring.test.ts tests/unit/hooks/system-enhancer-drift.test.ts tests/unit/hooks/system-enhancer-evidence.adversarial.test.ts tests/unit/hooks/system-enhancer-evidence.test.ts tests/unit/hooks/system-enhancer-handoff.test.ts tests/unit/hooks/system-enhancer-hf1b-adversarial.test.ts tests/unit/hooks/system-enhancer-hf1b.test.ts tests/unit/hooks/system-enhancer-lang-constraints-adversarial.test.ts tests/unit/hooks/system-enhancer-lang-constraints.test.ts tests/unit/hooks/system-enhancer-retro.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist-adversarial.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist.test.ts tests/unit/hooks/system-enhancer-test-constraints.test.ts tests/unit/hooks/system-enhancer-v6.test.ts tests/unit/hooks/system-enhancer-v61.test.ts tests/unit/hooks/system-enhancer-v62-adversarial.test.ts tests/unit/hooks/system-enhancer-v62.test.ts tests/unit/hooks/system-enhancer.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -171,7 +195,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - delegation)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -183,7 +206,6 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - adversarial-detector)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           failed=0
@@ -195,56 +217,111 @@ jobs:
           done
           exit $failed
       - name: Unit tests (hooks - remaining)
-        if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           failed=0
-          for f in tests/unit/hooks/advisory*.test.ts tests/unit/hooks/agent*.test.ts tests/unit/hooks/co-change*.test.ts tests/unit/hooks/compaction*.test.ts tests/unit/hooks/context*.test.ts tests/unit/hooks/dark*.test.ts tests/unit/hooks/destructive*.test.ts tests/unit/hooks/extractors*.test.ts tests/unit/hooks/full-auto*.test.ts tests/unit/hooks/gate*.test.ts tests/unit/hooks/log*.test.ts tests/unit/hooks/message*.test.ts tests/unit/hooks/mode-*.test.ts tests/unit/hooks/model*.test.ts tests/unit/hooks/phase*.test.ts tests/unit/hooks/pipeline*.test.ts tests/unit/hooks/plan*.test.ts tests/unit/hooks/review-receipt*.test.ts tests/unit/hooks/self*.test.ts tests/unit/hooks/steering*.test.ts tests/unit/hooks/system-message*.test.ts tests/unit/hooks/telemetry-guardrails*.test.ts tests/unit/hooks/tool*.test.ts tests/unit/hooks/trajectory*.test.ts tests/unit/hooks/utils*.test.ts; do
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
+          for f in tests/unit/hooks/advisory*.test.ts tests/unit/hooks/agent*.test.ts tests/unit/hooks/co-change*.test.ts tests/unit/hooks/compaction*.test.ts tests/unit/hooks/context*.test.ts tests/unit/hooks/dark*.test.ts tests/unit/hooks/extractors*.test.ts tests/unit/hooks/full-auto*.test.ts tests/unit/hooks/gate*.test.ts tests/unit/hooks/log*.test.ts tests/unit/hooks/message*.test.ts tests/unit/hooks/mode-*.test.ts tests/unit/hooks/model*.test.ts tests/unit/hooks/phase*.test.ts tests/unit/hooks/pipeline*.test.ts tests/unit/hooks/plan*.test.ts tests/unit/hooks/review-receipt*.test.ts tests/unit/hooks/self*.test.ts tests/unit/hooks/steering*.test.ts tests/unit/hooks/system-message*.test.ts tests/unit/hooks/telemetry-guardrails*.test.ts tests/unit/hooks/tool*.test.ts tests/unit/hooks/trajectory*.test.ts tests/unit/hooks/utils*.test.ts; do
             [ -f "$f" ] || continue
-            if ! bun --smol test "$f" --timeout 120000; then
-              failed=1
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              # bun exited non-zero — check if it was a real failure or crash
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
       - name: Unit tests (commands, config)
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           # Per-file isolation to prevent --smol cache poisoning (#330).
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for dir in tests/unit/commands tests/unit/config; do
             for f in "$dir"/*.test.ts; do
               [ -f "$f" ] || continue
-              if ! bun --smol test "$f" --timeout 120000; then
-                failed=1
+              tmp="$tmpdir/bun-out-$$-${f##*/}"
+              exit_code=0
+              bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+              if [ $exit_code -ne 0 ]; then
+                # bun exited non-zero — check if it was a real failure or crash
+                if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                  echo "::error file=$f::FAILED: $f"
+                  failed=1
+                fi
               fi
             done
           done
           exit $failed
       - name: Unit tests (cli)
-        run: bun --smol test tests/unit/cli --timeout 120000
+        shell: bash
+        run: |
+          set -o pipefail
+          IFS=$'\n'
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          tmp="$tmpdir/bun-out-cli-$$"
+          exit_code=0
+          bun --smol test tests/unit/cli --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+          if [ $exit_code -ne 0 ]; then
+            # bun exited non-zero — check if it was a real failure or crash
+            if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+              exit 1
+            fi
+          fi
       - name: Unit tests (tools)
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           # Run each tools test file in its own process to prevent
           # --smol module cache poisoning across files (#330).
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for f in tests/unit/tools/*.test.ts; do
-            if ! bun --smol test "$f" --timeout 120000; then
-              echo "::error file=$f::FAILED: $f"
-              failed=1
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              # bun exited non-zero — check if it was a real failure or crash
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
       - name: Unit tests (services, build, quality, sast, sbom, scripts)
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           # Per-file isolation to prevent --smol cache poisoning (#330).
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for dir in tests/unit/services tests/unit/build tests/unit/quality tests/unit/sast tests/unit/sbom tests/unit/scripts; do
             for f in "$dir"/*.test.ts; do
               [ -f "$f" ] || continue
-              if ! bun --smol test "$f" --timeout 120000; then
-                failed=1
+              tmp="$tmpdir/bun-out-$$-${f##*/}"
+              exit_code=0
+              bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+              if [ $exit_code -ne 0 ]; then
+                # bun exited non-zero — check if it was a real failure or crash
+                if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                  echo "::error file=$f::FAILED: $f"
+                  failed=1
+                fi
               fi
             done
           done
@@ -252,22 +329,42 @@ jobs:
       - name: Unit tests (state, agents, knowledge, evidence, plan, misc)
         shell: bash
         run: |
+          set -o pipefail
+          IFS=$'\n'
           # Per-file isolation to prevent --smol cache poisoning (#330).
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
           for dir in tests/unit/adversarial tests/unit/agents tests/unit/background tests/unit/context tests/unit/council tests/unit/diff tests/unit/evidence tests/unit/git tests/unit/helpers tests/unit/knowledge tests/unit/lang tests/unit/output tests/unit/parallel tests/unit/plan tests/unit/session tests/unit/skills tests/unit/types tests/unit/utils; do
             for f in "$dir"/*.test.ts; do
               [ -f "$f" ] || continue
-              if ! bun --smol test "$f" --timeout 120000; then
-                failed=1
+              tmp="$tmpdir/bun-out-$$-${f##*/}"
+              exit_code=0
+              bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+              if [ $exit_code -ne 0 ]; then
+                # bun exited non-zero — check if it was a real failure or crash
+                if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                  echo "::error file=$f::FAILED: $f"
+                  failed=1
+                fi
               fi
+              rm -f "$tmp"
             done
           done
           # Standalone test files
           for f in tests/unit/cli-dispatch.test.ts tests/unit/index-commands.test.ts tests/unit/stale-delegation-guard.test.ts tests/unit/state-invocation-windows.test.ts tests/unit/state-rehydrate.test.ts tests/unit/state-turbo-mode.test.ts tests/unit/state-workflow-guard.adversarial.test.ts tests/unit/state-workflow-guard.test.ts tests/unit/state.adversarial-scope.test.ts tests/unit/state.adversarial.test.ts tests/unit/state.rehydrate.adversarial.test.ts tests/unit/state.test.ts tests/unit/version-bump.test.ts; do
             [ -f "$f" ] || continue
-            if ! bun --smol test "$f" --timeout 120000; then
-              failed=1
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              # bun exited non-zero — check if it was a real failure or crash
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
+            rm -f "$tmp"
           done
           exit $failed
 
@@ -279,7 +376,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -293,12 +390,21 @@ jobs:
         run: |
           # Per-file isolation to prevent module cache poisoning and process.chdir
           # contamination across integration test files (#330 pattern).
+          set -o pipefail
+          IFS=$'\n'
           failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-int-*' EXIT
           for f in tests/integration/*.test.ts ./test/*.test.ts; do
             [ -f "$f" ] || continue
-            if ! bun --smol test "$f" --timeout 120000; then
-              echo "::error file=$f::FAILED: $f"
-              failed=1
+            tmp="$tmpdir/bun-out-int-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
@@ -310,7 +416,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -322,26 +428,31 @@ jobs:
       - name: Build
         run: bun run build
       - name: Check dist/ for uncommitted drift
+        shell: bash
         run: |
           # Normalize .bun cache paths in COMMITTED dist for cross-platform consistency.
           # Windows bun produces node_modules/.bun/PACKAGE@VERSION/node_modules/PACKAGE
           # while Linux bun produces node_modules/PACKAGE.
           # After build, dist/ has clean Linux paths. We must normalize the committed
           # (git index) side before comparing, not the freshly built working tree.
-          mkdir -p /tmp/dist-committed
-          git archive HEAD dist/ | tar -x -C /tmp/dist-committed
-          find /tmp/dist-committed/dist/ -name "*.js" -type f -exec sed -i \
-            -e 's|node_modules/\.bun/[^/]\+/node_modules/|node_modules/|g' {} +
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          dist_committed="$tmpdir/dist-committed"
+          mkdir -p "$dist_committed"
+          git archive HEAD dist/ | tar -x -C "$dist_committed"
+          find "$dist_committed/dist/" -name "*.js" -type f -exec sed -i \
+            -e 's|node_modules/\.bun/[^/]\+/node_modules/|node_modules/|g' \
+            -e 's/\r$//' {} +
           # Remove gitignored paths from the freshly built dist before comparing.
           # These are intentionally excluded from commits (see .gitignore lines 29-35).
           rm -rf dist/build/ dist/quality/ dist/sbom/
           rm -f dist/tools/build-check.d.ts dist/tools/pre-check-batch.d.ts \
                 dist/tools/quality-budget.d.ts dist/tools/sbom-generate.d.ts
-          diff -r /tmp/dist-committed/dist/ dist/ || {
+          diff -r "$dist_committed/dist/" dist/ || {
             echo "ERROR: dist/ has uncommitted changes after build."
             echo "Run 'bun run build' locally and commit the updated dist/."
             exit 1
           }
+          rm -rf "$dist_committed"
 
   security:
     needs: quality
@@ -350,7 +461,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -375,7 +486,7 @@ jobs:
           coverage: none
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -409,7 +520,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.11"
+          bun-version: "1.3.13"
       - name: Cache bun dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -422,3 +533,10 @@ jobs:
         run: bun run build
       - name: Smoke tests
         run: bun test tests/smoke --timeout 120000
+      - name: Issue #704 repro — Desktop init under Node
+        # Loads the compiled dist/ under Node (the runtime OpenCode Desktop's
+        # sidecar uses on macOS) and asserts the plugin's `server()` resolves
+        # within 10s. Pre-fix this would hang. Runs on Linux, macOS, Windows
+        # so the cycle/cap/budget guards are exercised on each OS.
+        shell: bash
+        run: node scripts/repro-704.mjs

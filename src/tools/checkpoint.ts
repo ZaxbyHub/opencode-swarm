@@ -1,7 +1,8 @@
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { createSwarmTool } from './create-tool';
 
@@ -27,6 +28,13 @@ interface CheckpointEntry {
 interface CheckpointLog {
 	version: number;
 	checkpoints: CheckpointEntry[];
+}
+
+interface RetentionEvent {
+	event: 'checkpoint_retention_applied';
+	evicted_labels: string[];
+	evicted_count: number;
+	remaining_count: number;
 }
 
 // ============ Validation ============
@@ -162,6 +170,16 @@ function gitExec(args: string[]): string {
 	return result.stdout;
 }
 
+function appendRetentionEvent(directory: string, event: RetentionEvent): void {
+	try {
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		const line = `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}\n`;
+		fs.appendFileSync(eventsPath, line);
+	} catch {
+		// Event logging is best-effort — failures are silently ignored.
+	}
+}
+
 /**
  * Get current git SHA
  */
@@ -189,12 +207,14 @@ function isGitRepo(): boolean {
  */
 function handleSave(label: string, directory: string): string {
 	try {
-		// Read checkpoint config for limits
+		// Read checkpoint config
 		let maxCheckpoints = 20; // sensible default
+		let allowEmptyCommits = false;
 		try {
 			const { config } = loadPluginConfigWithMeta(directory);
 			maxCheckpoints =
 				config.checkpoint?.auto_checkpoint_threshold ?? maxCheckpoints;
+			allowEmptyCommits = config.checkpoint?.allow_empty_commits === true;
 		} catch {
 			// Config load failure — use defaults
 		}
@@ -214,14 +234,35 @@ function handleSave(label: string, directory: string): string {
 			);
 		}
 
-		// Get current SHA before creating commit
-		const _sha = getCurrentSha();
 		const timestamp = new Date().toISOString();
 
-		// Create a checkpoint commit with the label (label with spaces works correctly)
-		gitExec(['commit', '--allow-empty', '-m', `checkpoint: ${label}`]);
+		// Stage all changes, excluding .swarm/ to avoid committing checkpoint metadata
+		// into project history. On timeout or permission error this throws, which
+		// propagates to the outer catch — safer than committing a partially-staged tree.
+		gitExec(['add', '--all', '--', ':!.swarm/']);
 
-		// Get the new SHA after commit
+		// Check whether anything was staged (exit 0 = nothing staged, non-zero = changes)
+		const hasStagedChanges = (() => {
+			try {
+				gitExec(['diff', '--cached', '--quiet']);
+				return false;
+			} catch {
+				return true;
+			}
+		})();
+
+		if (hasStagedChanges) {
+			gitExec(['commit', '-m', `checkpoint: ${label}`]);
+		} else if (allowEmptyCommits) {
+			// Explicit opt-in: preserve legacy behaviour of creating a commit even
+			// when the working tree is clean.
+			gitExec(['commit', '--allow-empty', '-m', `checkpoint: ${label}`]);
+		}
+		// Otherwise: nothing to commit — checkpoint records current HEAD SHA without
+		// creating a new git commit. Two consecutive clean-tree saves will share the
+		// same SHA in the log; both restore correctly to the same HEAD position.
+
+		// Get SHA (equals _sha when no commit was made)
 		const newSha = getCurrentSha();
 
 		// Append to log
@@ -230,6 +271,25 @@ function handleSave(label: string, directory: string): string {
 			sha: newSha,
 			timestamp,
 		});
+
+		// Enforce checkpoint retention limit — evict oldest checkpoints
+		if (log.checkpoints.length > maxCheckpoints) {
+			const evicted = log.checkpoints.splice(
+				0,
+				log.checkpoints.length - maxCheckpoints,
+			);
+			try {
+				appendRetentionEvent(directory, {
+					event: 'checkpoint_retention_applied',
+					evicted_labels: evicted.map((e) => e.label),
+					evicted_count: evicted.length,
+					remaining_count: log.checkpoints.length,
+				});
+			} catch {
+				// Event logging is best-effort, don't fail the save
+			}
+		}
+
 		writeCheckpointLog(log, directory);
 
 		return JSON.stringify(
@@ -257,6 +317,47 @@ function handleSave(label: string, directory: string): string {
 			null,
 			2,
 		);
+	}
+}
+
+/**
+ * Record a checkpoint without staging or committing changes.
+ * Writes only to .swarm/checkpoints.json with the current HEAD SHA.
+ * Used by spiral detection to avoid silently committing mid-flight user work.
+ */
+export function saveCheckpointRecord(
+	label: string,
+	directory: string,
+): { success: boolean; sha?: string; error?: string } {
+	const labelError = validateLabel(label);
+	if (labelError) {
+		return { success: false, error: labelError };
+	}
+	try {
+		const log = readCheckpointLog(directory);
+		if (log.checkpoints.find((c) => c.label === label)) {
+			return { success: false, error: `duplicate label: "${label}"` };
+		}
+		let sha = '';
+		if (isGitRepo()) {
+			try {
+				sha = getCurrentSha();
+			} catch {
+				sha = '';
+			}
+		}
+		log.checkpoints.push({
+			label,
+			sha,
+			timestamp: new Date().toISOString(),
+		});
+		writeCheckpointLog(log, directory);
+		return { success: true, sha };
+	} catch (e) {
+		return {
+			success: false,
+			error: e instanceof Error ? e.message : 'unknown error',
+		};
 	}
 }
 
@@ -366,7 +467,7 @@ function handleDelete(label: string, directory: string): string {
 				action: 'delete',
 				success: true,
 				label,
-				message: `Checkpoint deleted: "${label}" (git commit preserved)`,
+				message: `Checkpoint deleted: "${label}"`,
 			},
 			null,
 			2,
@@ -397,10 +498,10 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 		'list to see all checkpoints, and delete to remove a checkpoint from the log. ' +
 		'Git commits are preserved on delete.',
 	args: {
-		action: tool.schema
+		action: z
 			.string()
 			.describe('Action to perform: save, restore, list, or delete'),
-		label: tool.schema
+		label: z
 			.string()
 			.optional()
 			.describe('Checkpoint label (required for save, restore, delete)'),

@@ -5,7 +5,7 @@
  * constraints and QA gate profiles. One cached instance per normalized
  * directory path.
  */
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 /**
  * Run all pending migrations on the provided database.
  * Idempotent: existing migrations are not re-applied.

@@ -17,24 +17,22 @@ describe('packaging smoke tests', () => {
 		expect(existsSync(path.join(ROOT, 'dist/cli/index.js'))).toBe(true);
 	});
 
-	test('dist/index.js is importable and exports a default function', async () => {
+	test('dist/index.js is importable and exports a v1 plugin object', async () => {
 		const mod = await import(path.join(ROOT, 'dist/index.js'));
-		expect(typeof mod.default).toBe('function');
+		expect(typeof mod.default).toBe('object');
+		expect(mod.default).toHaveProperty('id');
+		expect(mod.default).toHaveProperty('server');
 	});
 
-	test('plugin factory returns object with name property', async () => {
+	test('v1 plugin object has correct id and server properties', async () => {
 		const mod = await import(path.join(ROOT, 'dist/index.js'));
-		// Call the plugin factory with a minimal context
-		const plugin = await mod.default({ directory: ROOT });
-		expect(plugin).toBeDefined();
-		expect(typeof plugin.name).toBe('string');
-		expect(plugin.name).toBe('opencode-swarm');
+		expect(mod.default.id).toBe('opencode-swarm');
+		expect(typeof mod.default.server).toBe('function');
 	});
 
-	test('plugin factory returns object with hooks', async () => {
+	test('server function returns plugin object with config hook', async () => {
 		const mod = await import(path.join(ROOT, 'dist/index.js'));
-		const plugin = await mod.default({ directory: ROOT });
-		// Plugin should have config and agent properties
+		const plugin = await mod.default.server({ directory: ROOT });
 		expect(plugin.config).toBeDefined();
 		expect(typeof plugin.config).toBe('function');
 	});

@@ -1,4 +1,5 @@
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import type { QualityBudgetConfig } from '../config/schema';
 import { saveEvidence } from '../evidence/manager';
 import {
@@ -180,22 +181,22 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Enforce maintainability budgets for changed files. Computes quality metrics (complexity, API surface, duplication, test coverage) and compares against configured thresholds. Returns JSON with metrics, violations, and verdict.',
 	args: {
-		changed_files: tool.schema
-			.array(tool.schema.string())
+		changed_files: z
+			.array(z.string())
 			.describe('Files to check against quality budgets'),
-		config: tool.schema
+		config: z
 			.object({
-				enabled: tool.schema.boolean().optional(),
-				max_complexity_delta: tool.schema.number().optional(),
-				max_public_api_delta: tool.schema.number().optional(),
-				max_duplication_ratio: tool.schema.number().optional(),
-				min_test_to_code_ratio: tool.schema.number().optional(),
+				enabled: z.boolean().optional(),
+				max_complexity_delta: z.number().optional(),
+				max_public_api_delta: z.number().optional(),
+				max_duplication_ratio: z.number().optional(),
+				min_test_to_code_ratio: z.number().optional(),
 			})
 			.optional()
 			.describe('Quality budget thresholds'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
-		const result = await qualityBudget(
+		const result = await _internals.qualityBudget(
 			args as {
 				changed_files: string[];
 				config?: {
@@ -211,3 +212,13 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(result);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	qualityBudget: typeof qualityBudget;
+} = {
+	qualityBudget,
+} as const;

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 /**
- * Tool visibility sync — council-only tools (convene_council and
+ * Tool visibility sync — council-only tools (submit_council_verdicts and
  * declare_council_criteria) must only appear in YOUR TOOLS and Available
  * Tools when council.enabled === true. Otherwise the runtime gate at
  * src/hooks/convene-council.ts will reject any model attempt to call them.
@@ -23,8 +23,10 @@ describe('architect prompt — council tool visibility', () => {
 		const agent = createArchitectAgent('test-model');
 		const prompt = (agent.config as Record<string, unknown>).prompt as string;
 
-		test('YOUR TOOLS does not contain convene_council', () => {
-			expect(getYourToolsSection(prompt)).not.toContain('convene_council');
+		test('YOUR TOOLS does not contain submit_council_verdicts', () => {
+			expect(getYourToolsSection(prompt)).not.toContain(
+				'submit_council_verdicts',
+			);
 		});
 
 		test('YOUR TOOLS does not contain declare_council_criteria', () => {
@@ -33,8 +35,10 @@ describe('architect prompt — council tool visibility', () => {
 			);
 		});
 
-		test('Available Tools does not contain convene_council', () => {
-			expect(getAvailableToolsSection(prompt)).not.toContain('convene_council');
+		test('Available Tools does not contain submit_council_verdicts', () => {
+			expect(getAvailableToolsSection(prompt)).not.toContain(
+				'submit_council_verdicts',
+			);
 		});
 
 		test('Available Tools does not contain declare_council_criteria', () => {
@@ -54,8 +58,10 @@ describe('architect prompt — council tool visibility', () => {
 		);
 		const prompt = (agent.config as Record<string, unknown>).prompt as string;
 
-		test('YOUR TOOLS does not contain convene_council', () => {
-			expect(getYourToolsSection(prompt)).not.toContain('convene_council');
+		test('YOUR TOOLS does not contain submit_council_verdicts', () => {
+			expect(getYourToolsSection(prompt)).not.toContain(
+				'submit_council_verdicts',
+			);
 		});
 
 		test('YOUR TOOLS does not contain declare_council_criteria', () => {
@@ -64,8 +70,10 @@ describe('architect prompt — council tool visibility', () => {
 			);
 		});
 
-		test('Available Tools does not contain convene_council', () => {
-			expect(getAvailableToolsSection(prompt)).not.toContain('convene_council');
+		test('Available Tools does not contain submit_council_verdicts', () => {
+			expect(getAvailableToolsSection(prompt)).not.toContain(
+				'submit_council_verdicts',
+			);
 		});
 
 		test('Available Tools does not contain declare_council_criteria', () => {
@@ -85,16 +93,18 @@ describe('architect prompt — council tool visibility', () => {
 		);
 		const prompt = (agent.config as Record<string, unknown>).prompt as string;
 
-		test('YOUR TOOLS contains convene_council', () => {
-			expect(getYourToolsSection(prompt)).toContain('convene_council');
+		test('YOUR TOOLS contains submit_council_verdicts', () => {
+			expect(getYourToolsSection(prompt)).toContain('submit_council_verdicts');
 		});
 
 		test('YOUR TOOLS contains declare_council_criteria', () => {
 			expect(getYourToolsSection(prompt)).toContain('declare_council_criteria');
 		});
 
-		test('Available Tools contains convene_council', () => {
-			expect(getAvailableToolsSection(prompt)).toContain('convene_council');
+		test('Available Tools contains submit_council_verdicts', () => {
+			expect(getAvailableToolsSection(prompt)).toContain(
+				'submit_council_verdicts',
+			);
 		});
 
 		test('Available Tools contains declare_council_criteria', () => {

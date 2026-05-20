@@ -32,6 +32,14 @@ import type { KnowledgeConfig } from './knowledge-types.js';
  * Used to delegate analysis to the explorer agent in CURATOR mode.
  */
 export type CuratorLLMDelegate = (systemPrompt: string, userInput: string, signal?: AbortSignal) => Promise<string>;
+export declare const _internals: {
+    parseKnowledgeRecommendations: typeof parseKnowledgeRecommendations;
+    readCuratorSummary: typeof readCuratorSummary;
+    writeCuratorSummary: typeof writeCuratorSummary;
+    filterPhaseEvents: typeof filterPhaseEvents;
+    checkPhaseCompliance: typeof checkPhaseCompliance;
+    normalizeAgentName: typeof normalizeAgentName;
+};
 /**
  * Parse OBSERVATIONS section from curator LLM output.
  * Expected format per line: "- entry <uuid> (<observable>): [text]"
@@ -40,6 +48,26 @@ export type CuratorLLMDelegate = (systemPrompt: string, userInput: string, signa
  * Action hints are extracted from parenthetical directives like "(suggests boost confidence, mark hive_eligible)"
  */
 export declare function parseKnowledgeRecommendations(llmOutput: string): KnowledgeRecommendation[];
+/**
+ * v2: Strict-JSON parser for the new curator output blocks.
+ *
+ * Curator prompts may now emit JSON-fenced blocks like:
+ *
+ * ```json knowledge_application_findings
+ * [{ "knowledge_id": "...", "expected_behavior": "...", ... }]
+ * ```
+ *
+ * ```json skill_candidates
+ * [{ "slug": "...", "title": "...", ... }]
+ * ```
+ *
+ * Malformed JSON or unexpected types are silently dropped: no knowledge or
+ * skill writes happen when curator output is malformed.
+ */
+export declare function parseStructuredCuratorBlocks(llmOutput: string): {
+    findings: import('./curator-types.js').KnowledgeApplicationFinding[];
+    candidates: import('./curator-types.js').SkillCandidate[];
+};
 /**
  * Read curator summary from .swarm/curator-summary.json
  * @param directory - The workspace directory
@@ -52,6 +80,22 @@ export declare function readCuratorSummary(directory: string): Promise<CuratorSu
  * @param summary - The curator summary to write
  */
 export declare function writeCuratorSummary(directory: string, summary: CuratorSummary): Promise<void>;
+/**
+ * Normalize an agent name to its canonical role.
+ *
+ * v2 (Phase F′ remediation): use the repository's canonical resolver
+ * `getCanonicalAgentRole`, registry-aware. When the generated-agent registry
+ * is populated (post plugin-init), an arbitrary swarm id like
+ * `banana_coder` resolves to `coder` IFF it appears in the registry.
+ * Pre-init (registry empty), the resolver falls back to a permissive
+ * suffix-match against ALL_AGENT_NAMES — preserving today's behaviour for
+ * arbitrary user prefixes without the hard-coded
+ * `(mega|paid|local|lowtier|modelrelay)_` whitelist.
+ *
+ * Lower-casing is preserved for backwards compatibility with the prior
+ * comparator code paths in this file.
+ */
+declare function normalizeAgentName(name: string): string;
 /**
  * Filter events from JSONL by phase or timestamp.
  * @param eventsJsonl - Raw JSONL string of events
@@ -106,3 +150,4 @@ export declare function applyCuratorKnowledgeUpdates(directory: string, recommen
     applied: number;
     skipped: number;
 }>;
+export {};

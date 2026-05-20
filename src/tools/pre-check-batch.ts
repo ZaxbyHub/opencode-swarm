@@ -6,12 +6,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 import pLimit from 'p-limit';
+import { z } from 'zod';
 import type { PluginConfig } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
+import { bunSpawn } from '../utils/bun-compat';
 import { createSwarmTool } from './create-tool';
 import type { LintResult, LintSuccessResult, SupportedLinter } from './lint';
 import { detectAvailableLinter, resolveLinterBinPath, runLint } from './lint';
@@ -298,15 +300,15 @@ async function runLintOnFiles(
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: workspaceDir,
 		});
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		const exitCode = await proc.exited;
@@ -717,7 +719,7 @@ async function runGitDiff(
 	directory: string,
 ): Promise<string | null> {
 	try {
-		const proc = Bun.spawn(['git', 'diff', ...args], {
+		const proc = bunSpawn(['git', 'diff', ...args], {
 			cwd: directory,
 			stdout: 'pipe',
 			stderr: 'pipe',
@@ -725,7 +727,7 @@ async function runGitDiff(
 
 		const [exitCode, stdout] = await Promise.all([
 			proc.exited,
-			new Response(proc.stdout).text(),
+			proc.stdout.text(),
 		]);
 
 		if (exitCode !== 0) return null;
@@ -792,13 +794,13 @@ export async function getChangedLineRanges(
 			'main',
 			'master',
 		]) {
-			const mergeBaseProc = Bun.spawn(
+			const mergeBaseProc = bunSpawn(
 				['git', 'merge-base', baseBranch, 'HEAD'],
 				{ cwd: directory, stdout: 'pipe', stderr: 'pipe' },
 			);
 			const [mbExit, mbOut] = await Promise.all([
 				mergeBaseProc.exited,
-				new Response(mergeBaseProc.stdout).text(),
+				mergeBaseProc.stdout.text(),
 			]);
 			if (mbExit === 0 && mbOut.trim()) {
 				const mergeBase = mbOut.trim();
@@ -1160,22 +1162,22 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security tools (secretscan, sast_scan) are HARD GATES - failures block merging.',
 	args: {
-		files: tool.schema
-			.array(tool.schema.string())
+		files: z
+			.array(z.string())
 			.optional()
 			.describe(
 				'Specific files to check (optional, scans directory if not provided)',
 			),
-		directory: tool.schema
+		directory: z
 			.string()
 			.describe('Directory to run checks in (e.g., "." or "./src")'),
-		sast_threshold: tool.schema
+		sast_threshold: z
 			.enum(['low', 'medium', 'high', 'critical'])
 			.optional()
 			.describe(
 				'Minimum severity for SAST findings to cause failure (default: medium)',
 			),
-		phase: tool.schema
+		phase: z
 			.number()
 			.int()
 			.min(1)

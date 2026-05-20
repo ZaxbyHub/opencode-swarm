@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { ASTChange, ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
+import type { ToolResult } from '../create-tool';
+
+// Helper to convert ToolResult to string
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Helper types for mocking
 interface MockASTDiffResult extends ASTDiffResult {
@@ -133,7 +139,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.success).toBe(false);
 		expect(parsed.error).toBe('files must be a non-empty array of file paths');
 	});
@@ -149,7 +155,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.success).toBe(false);
 		expect(parsed.error).toBe('files must be a non-empty array of file paths');
 	});
@@ -165,7 +171,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.success).toBe(false);
 		expect(parsed.error).toBe('files must be a non-empty array of file paths');
 	});
@@ -195,7 +201,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.totalFiles).toBe(0);
 		expect(parsed.totalChanges).toBe(0);
 		expect(parsed.criticalItems).toEqual([]);
@@ -253,7 +259,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.totalFiles).toBe(1);
 		expect(parsed.totalChanges).toBe(1);
 		expect(parsed.criticalItems.length).toBe(1);
@@ -518,7 +524,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// Should produce changes for the untracked file
 		expect(parsed.totalFiles).toBe(1);
 		expect(parsed.totalChanges).toBe(1);
@@ -596,7 +602,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.totalFiles).toBe(1);
 		expect(parsed.totalChanges).toBe(1);
 	});
@@ -620,7 +626,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.success).toBe(false);
 		expect(parsed.error).toContain('diff_summary failed');
 	});
@@ -651,7 +657,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// Should return empty summary since the file was skipped
 		expect(parsed.totalFiles).toBe(0);
 		expect(parsed.totalChanges).toBe(0);
@@ -677,7 +683,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// Should return empty summary since the file was skipped
 		expect(parsed.totalFiles).toBe(0);
 		expect(parsed.totalChanges).toBe(0);
@@ -709,7 +715,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// File should be silently skipped, returning empty summary (not crash)
 		expect(parsed.totalFiles).toBe(0);
 		expect(parsed.totalChanges).toBe(0);
@@ -760,7 +766,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// Should NOT return an error result — the file was processed (even though it had a parse error)
 		expect(parsed.success).not.toBe(false);
 		// The error-only result was NOT silently dropped — it passed the guard
@@ -826,7 +832,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		// Only file1 processed successfully
 		expect(parsed.totalFiles).toBe(1);
 		expect(parsed.totalChanges).toBe(1);
@@ -855,7 +861,7 @@ describe('diff_summary tool', () => {
 			createToolContext('/fake/dir'),
 		);
 
-		const parsed = JSON.parse(result);
+		const parsed = JSON.parse(resultToString(result));
 		expect(parsed.success).toBe(false);
 		expect(parsed.error).toContain('diff_summary failed');
 		expect(parsed.error).toContain('Unexpected classification error');

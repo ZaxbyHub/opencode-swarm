@@ -1,4 +1,12 @@
 import type { Evidence } from '../config/evidence-schema';
+import { listEvidenceTaskIds as _listEvidenceTaskIds, loadEvidence as _loadEvidence } from '../evidence/manager';
+/**
+ * _internals — DI seam for testing async I/O without cross-module mocks.
+ */
+export declare const _internals: {
+    loadEvidence: typeof _loadEvidence;
+    listEvidenceTaskIds: typeof _listEvidenceTaskIds;
+};
 /**
  * Structured evidence entry for a task.
  */

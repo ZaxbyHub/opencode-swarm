@@ -507,4 +507,85 @@ describe('slop-detector', () => {
 		expect(injectSystemMessageCalls.length).toBe(1);
 		expect(injectSystemMessageCalls[0][1]).toContain('abstraction_bloat');
 	});
+
+	// ============ DUPLICATE_UTILITY heuristic tests ============
+
+	it('detects duplicate utility — new export name matches existing utility', async () => {
+		// Create a utility file with a known export
+		mkdirSync(join(projectDir, 'src', 'utils'), { recursive: true });
+		writeFileSync(
+			join(projectDir, 'src', 'utils', 'normalize.ts'),
+			'export function normalizePath(path: string): string { return path; }\n',
+		);
+
+		const hook = createSlopDetectorHook(
+			config,
+			projectDir,
+			injectSystemMessage,
+		);
+
+		const content = `+export function normalizePath(input: string): string {\n+  return input.trim();\n+}\n`;
+
+		await hook.toolAfter(
+			{ tool: 'write', sessionID: 's-dup1' },
+			{ args: { content } },
+		);
+
+		expect(injectSystemMessageCalls.length).toBe(1);
+		expect(injectSystemMessageCalls[0][1]).toContain('duplicate_utility');
+		expect(injectSystemMessageCalls[0][1]).toContain('normalizePath');
+	});
+
+	it('does not flag duplicate when targetFile is the same file', async () => {
+		mkdirSync(join(projectDir, 'src', 'utils'), { recursive: true });
+		writeFileSync(
+			join(projectDir, 'src', 'utils', 'helpers.ts'),
+			'export function formatDate(d: Date): string { return d.toISOString(); }\n',
+		);
+
+		const hook = createSlopDetectorHook(
+			config,
+			projectDir,
+			injectSystemMessage,
+		);
+
+		const content = `+export function formatDate(date: Date): string {\n+  return date.toISOString().split('T')[0];\n+}\n`;
+
+		await hook.toolAfter(
+			{ tool: 'edit', sessionID: 's-dup2' },
+			{
+				args: {
+					filePath: join(projectDir, 'src', 'utils', 'helpers.ts'),
+					newString: content,
+				},
+			},
+		);
+
+		// Should NOT fire — targetFile matches the utility file
+		expect(injectSystemMessageCalls.length).toBe(0);
+	});
+
+	it('does not flag genuinely new export names', async () => {
+		mkdirSync(join(projectDir, 'src', 'utils'), { recursive: true });
+		writeFileSync(
+			join(projectDir, 'src', 'utils', 'existing.ts'),
+			'export function existingUtil(): void {}\n',
+		);
+
+		const hook = createSlopDetectorHook(
+			config,
+			projectDir,
+			injectSystemMessage,
+		);
+
+		const content = `+export function brandNewFunction(): number {\n+  return 42;\n+}\n`;
+
+		await hook.toolAfter(
+			{ tool: 'write', sessionID: 's-dup3' },
+			{ args: { content } },
+		);
+
+		// No duplicate_utility finding expected
+		expect(injectSystemMessageCalls.length).toBe(0);
+	});
 });

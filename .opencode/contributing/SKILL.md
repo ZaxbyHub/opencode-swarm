@@ -49,11 +49,12 @@ Valid examples:
 Invalid (rejected by CI):
 - `WIP`, `fix stuff`, `Update README`, `feat: Add feature.` (trailing period), `Feat:` (uppercase)
 
-## 3. Release Notes (MANDATORY — every PR, no exceptions)
+## 3. Release Notes (MANDATORY — every user-visible PR, no exceptions)
 
-1. Read current version: `cat .release-please-manifest.json`
-2. Compute next version based on commit types (feat = minor, fix/perf = patch)
-3. Create file: `docs/releases/v{NEXT_VERSION}.md`
+⛔ Do NOT compute the next version. ⛔ Do NOT create `docs/releases/vX.Y.Z.md`. ⛔ Do NOT write to a shared `docs/releases/unreleased.md`. release-please owns the version; the release workflow aggregates fragments at release time.
+
+1. Choose a short, kebab-case slug describing your change. Pick one unlikely to collide with concurrent PRs.
+2. Create `docs/releases/pending/<your-slug>.md`.
 
 Include:
 - What changed (grouped by theme)
@@ -62,7 +63,7 @@ Include:
 - Breaking changes (if any)
 - Known caveats
 
-Even one-line changes need release notes explaining why it matters.
+Use a descriptive heading (`# <topic>`), not a version prefix. Even one-line changes need a fragment explaining why it matters. Aggregation is done by `scripts/release-notes-fragments.mjs` via `.github/workflows/release-and-publish.yml` — each PR owning its own unique file is what eliminates the merge-conflict hotspot.
 
 ## 4. Run All Checks Locally (5 tiers, all must pass)
 
@@ -146,7 +147,7 @@ Find SHA: `gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'`
 - [ ] Every commit follows `<type>(<scope>): <description>`
 - [ ] PR title follows same format
 - [ ] No manual edits to `package.json` version, `CHANGELOG.md`, or `.release-please-manifest.json`
-- [ ] `docs/releases/v{NEXT_VERSION}.md` exists with release notes
+- [ ] `docs/releases/pending/<unique-slug>.md` exists with release notes (NOT a `docs/releases/vX.Y.Z.md` file)
 - [ ] New tests in correct `tests/` subdirectory
 - [ ] Tests updated for any changed behavior
 - [ ] If modifying workflows, all `uses:` are SHA-pinned

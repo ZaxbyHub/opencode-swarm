@@ -287,8 +287,8 @@ malformed json line that should be skipped
 			consoleWarnSpy.mockRestore();
 		});
 
-		test('when DEBUG_SWARM is set, malformed lines produce console.warn output', () => {
-			process.env.DEBUG_SWARM = '1';
+		test('when OPENCODE_SWARM_DEBUG is set, malformed lines produce console.warn output', () => {
+			process.env.OPENCODE_SWARM_DEBUG = '1';
 
 			const consoleWarnSpy = spyOn(console, 'warn');
 
@@ -301,10 +301,11 @@ malformed json line that should be skipped
 			// Should still parse valid events
 			expect(result).toHaveLength(2);
 
-			// Should have called console.warn since DEBUG_SWARM is set
+			// Should have called console.warn since OPENCODE_SWARM_DEBUG is set
 			expect(consoleWarnSpy).toHaveBeenCalled();
 
 			consoleWarnSpy.mockRestore();
+			delete process.env.OPENCODE_SWARM_DEBUG;
 		});
 
 		test('valid events are returned regardless of DEBUG_SWARM setting', () => {

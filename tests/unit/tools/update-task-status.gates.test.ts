@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { recordGateEvidence } from '../../../src/gate-evidence';
-import { resetSwarmState } from '../../../src/state';
+import { resetSwarmState, swarmState } from '../../../src/state';
 import {
 	checkReviewerGate,
 	executeUpdateTaskStatus,
@@ -116,6 +116,12 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		// Record only reviewer — test_engineer is still absent from gates
 		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-reviewer');
 		resetSwarmState();
+		// Establish minimal session so gate bypass doesn't trigger
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+			currentTaskId: '1.1',
+		});
 
 		const result = checkReviewerGate('1.1', tmpDir);
 		expect(result.blocked).toBe(true);
@@ -131,6 +137,12 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		// Record only test_engineer — reviewer is still absent from gates
 		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-te');
 		resetSwarmState();
+		// Establish minimal session so gate bypass doesn't trigger
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+			currentTaskId: '1.1',
+		});
 
 		const result = checkReviewerGate('1.1', tmpDir);
 		expect(result.blocked).toBe(true);
@@ -149,6 +161,62 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		// No evidence file, no active sessions → allow-through (documented test-context behavior)
 		const result = checkReviewerGate('1.1', tmpDir);
 		expect(result.blocked).toBe(false);
+	});
+
+	it('gate check blocks when plan.json says completed but durable gate evidence is absent', () => {
+		const completedPlan = JSON.parse(PLAN_JSON);
+		completedPlan.phases[0].tasks[0].status = 'completed';
+		fs.writeFileSync(
+			path.join(tmpDir, '.swarm', 'plan.json'),
+			JSON.stringify(completedPlan),
+		);
+		resetSwarmState();
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+			currentTaskId: '1.1',
+		});
+
+		const result = checkReviewerGate('1.1', tmpDir);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('has not passed QA gates');
+		expect(result.reason).toContain('1.1');
+	});
+
+	it('gate check blocks when evidence has no required gates', () => {
+		fs.mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		fs.writeFileSync(
+			evidencePath(tmpDir, '1.1'),
+			JSON.stringify({ taskId: '1.1', required_gates: [], gates: {} }),
+		);
+		resetSwarmState();
+
+		const result = checkReviewerGate('1.1', tmpDir);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('no required gates');
+	});
+
+	it('executeUpdateTaskStatus does not recover completion from unscoped delegation chains', async () => {
+		resetSwarmState();
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+		});
+		swarmState.delegationChains.set('test-session', [
+			{ from: 'architect', to: 'reviewer', timestamp: Date.now() - 1000 },
+			{
+				from: 'reviewer',
+				to: 'test_engineer',
+				timestamp: Date.now() - 500,
+			},
+		]);
+
+		const result = await executeUpdateTaskStatus(
+			{ task_id: '1.1', status: 'completed' },
+			tmpDir,
+		);
+		expect(result.success).toBe(false);
+		expect(result.errors?.join('\n')).toContain('has not passed QA gates');
 	});
 
 	// -----------------------------------------------------------------------
@@ -252,6 +320,12 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 
 		// Restart without recording any gates
 		resetSwarmState();
+		// Establish minimal session so gate bypass doesn't trigger
+		swarmState.agentSessions.set('test-session', {
+			id: 'test-session',
+			taskWorkflowStates: new Map([['1.1', 'idle']]),
+			currentTaskId: '1.1',
+		});
 
 		// Evidence file exists but gates are empty → blocked
 		const result = checkReviewerGate('1.1', tmpDir);

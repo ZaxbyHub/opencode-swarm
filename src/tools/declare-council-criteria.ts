@@ -3,7 +3,7 @@
  *
  * Lets the architect declare acceptance criteria at plan time, before the
  * coder starts work. Criteria are persisted to .swarm/council/{safeId}.json
- * and later read back during council evaluation (convene_council) so that
+ * and later read back during council evaluation (submit_council_verdicts) so that
  * reviewers assess a stable, pre-committed contract rather than whatever
  * criteria happen to be invented at review time.
  *
@@ -11,7 +11,7 @@
  * AGENT_TOOL_MAP. Follows the convene-council.ts pattern.
  */
 
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { readCriteria, writeCriteria } from '../council/criteria-store';
@@ -19,7 +19,7 @@ import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
 // ============ Internal validation schema ============
-// tool.schema declares the public args surface for the plugin host.
+// z declares the public args surface for the plugin host.
 // We additionally validate with zod for strict runtime safety and clear errors.
 const CriteriaItemSchema = z.object({
 	id: z
@@ -50,28 +50,28 @@ export const declare_council_criteria: ReturnType<typeof tool> =
 			'evaluation so reviewers assess a stable, pre-committed contract. ' +
 			'Architect-only. Config-gated via council.enabled.',
 		args: {
-			taskId: tool.schema
+			taskId: z
 				.string()
 				.min(1)
 				.regex(/^\d+\.\d+(\.\d+)*$/, 'Task ID must be in N.M or N.M.P format')
 				.describe(
 					'Task ID for which criteria are declared, e.g. "1.1", "1.2.3"',
 				),
-			criteria: tool.schema
+			criteria: z
 				.array(
-					tool.schema.object({
-						id: tool.schema
+					z.object({
+						id: z
 							.string()
 							.min(1)
 							.max(20)
 							.regex(/^C\d+$/, 'Criterion id must match C\\d+')
 							.describe('Criterion identifier, e.g. "C1", "C12"'),
-						description: tool.schema
+						description: z
 							.string()
 							.min(10)
 							.max(500)
 							.describe('Human-readable description of the criterion'),
-						mandatory: tool.schema
+						mandatory: z
 							.boolean()
 							.describe(
 								'Whether the criterion is mandatory. Mandatory criteria block APPROVE when unmet.',
@@ -83,7 +83,7 @@ export const declare_council_criteria: ReturnType<typeof tool> =
 				.describe(
 					'Array of acceptance criteria items. Must contain between 1 and 20 entries with unique ids.',
 				),
-			working_directory: tool.schema
+			working_directory: z
 				.string()
 				.optional()
 				.describe(

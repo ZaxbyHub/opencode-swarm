@@ -17,6 +17,7 @@ import {
 } from '../config/evidence-schema';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 import { withEvidenceLock } from './lock.js';
 
 /**
@@ -201,7 +202,7 @@ export async function saveEvidence(
 				`evidence.json.tmp.${Date.now()}.${process.pid}`,
 			);
 			try {
-				await Bun.write(tempPath, bundleJson);
+				await bunWrite(tempPath, bundleJson);
 				await fs.rename(tempPath, evidencePath);
 			} catch (error) {
 				// Clean up temp file on failure
@@ -311,7 +312,10 @@ export async function loadEvidence(
 
 	// Check for flat retrospective format and transform if needed
 	if (isFlatRetrospective(parsed)) {
-		const wrappedBundle = wrapFlatRetrospective(parsed, sanitizedTaskId);
+		const wrappedBundle = _internals.wrapFlatRetrospective(
+			parsed,
+			sanitizedTaskId,
+		);
 		// Validate the wrapped bundle
 		try {
 			const validated = EvidenceBundleSchema.parse(wrappedBundle);
@@ -332,7 +336,7 @@ export async function loadEvidence(
 							`evidence.json.tmp.${Date.now()}.${process.pid}`,
 						);
 						try {
-							await Bun.write(tempPath, bundleJson);
+							await bunWrite(tempPath, bundleJson);
 							await fs.rename(tempPath, evidencePath);
 						} catch (writeError) {
 							try {
@@ -504,7 +508,7 @@ export async function archiveEvidence(
 	maxAgeDays: number,
 	maxBundles?: number,
 ): Promise<string[]> {
-	const taskIds = await listEvidenceTaskIds(directory);
+	const taskIds = await _internals.listEvidenceTaskIds(directory);
 	const cutoffDate = new Date();
 	cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
 	const cutoffIso = cutoffDate.toISOString();
@@ -513,7 +517,7 @@ export async function archiveEvidence(
 	const remainingBundles: Array<{ taskId: string; updatedAt: string }> = [];
 
 	for (const taskId of taskIds) {
-		const result = await loadEvidence(directory, taskId);
+		const result = await _internals.loadEvidence(directory, taskId);
 		if (result.status !== 'found') {
 			continue;
 		}
@@ -553,3 +557,17 @@ export async function archiveEvidence(
 
 	return archived;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	wrapFlatRetrospective: typeof wrapFlatRetrospective;
+	loadEvidence: typeof loadEvidence;
+	listEvidenceTaskIds: typeof listEvidenceTaskIds;
+} = {
+	wrapFlatRetrospective,
+	loadEvidence,
+	listEvidenceTaskIds,
+} as const;

@@ -124,6 +124,11 @@ export function writeCouncilEvidence(
 		vetoedBy: synthesis.vetoedBy,
 		roundNumber: synthesis.roundNumber,
 		allCriteriaMet: synthesis.allCriteriaMet,
+		// Quorum metadata — read by applyRehydrationCache and the council
+		// fast-path to validate the APPROVE was recorded with sufficient
+		// distinct members. Old evidence files (pre-quorum) lack this field
+		// and are conservatively rehydrated as quorumSize: 1.
+		quorumSize: synthesis.quorumSize,
 	};
 
 	const updated: Record<string, unknown> = Object.create(null);

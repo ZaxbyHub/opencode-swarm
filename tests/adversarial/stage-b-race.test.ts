@@ -10,6 +10,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import {
 	hasBothStageBCompletions,
 	recordStageBCompletion,
@@ -25,6 +27,17 @@ import { checkReviewerGate } from '../../src/tools/update-task-status';
 
 beforeEach(() => {
 	resetSwarmState();
+
+	// Clear stale evidence files from previous sessions that would cause
+	// checkReviewerGate to return blocked:false via the evidence-first path.
+	// Evidence files in the project root are artifacts of prior work, not
+	// controlled by these tests. Using path.join(join(...), ...) to guard
+	// against null/undefined working_directory in the gate check.
+	const evidenceDir = join(process.cwd(), '.swarm', 'evidence');
+	for (const taskId of ['1.1', '1.2', '9.6', '9.7', '9.8']) {
+		const ep = join(evidenceDir, `${taskId}.json`);
+		if (existsSync(ep)) rmSync(ep);
+	}
 });
 
 afterEach(() => {

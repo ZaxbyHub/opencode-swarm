@@ -1,4 +1,5 @@
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { createSwarmTool } from './create-tool';
 
 interface GitingestResponse {
@@ -126,18 +127,18 @@ export const gitingest: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		"Fetch a GitHub repository's full content via gitingest.com. Returns summary, directory tree, and file contents optimized for LLM analysis. Use when you need to understand an external repository's structure or code.",
 	args: {
-		url: tool.schema
+		url: z
 			.string()
 			.describe('GitHub repository URL (e.g., https://github.com/owner/repo)'),
-		maxFileSize: tool.schema
+		maxFileSize: z
 			.number()
 			.optional()
 			.describe('Maximum file size in bytes to include (default: 50000)'),
-		pattern: tool.schema
+		pattern: z
 			.string()
 			.optional()
 			.describe("Glob pattern to filter files (e.g., '*.ts' or 'src/**/*.py')"),
-		patternType: tool.schema
+		patternType: z
 			.enum(['include', 'exclude'])
 			.optional()
 			.describe(

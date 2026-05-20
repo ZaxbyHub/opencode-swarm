@@ -291,7 +291,8 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 			expect(event.newHash).not.toBeNull();
 			expect(event.planTitle).toBe('Test Plan');
 			expect(event.phase).toBe(1);
-			expect(event.acknowledgedBy).toBe('architect');
+			// Issue #890: actor is caller-supplied; default (no arg) is 'unknown'.
+			expect(event.acknowledgedBy).toBe('unknown');
 		});
 
 		test('should return success message with plan title and phase', async () => {

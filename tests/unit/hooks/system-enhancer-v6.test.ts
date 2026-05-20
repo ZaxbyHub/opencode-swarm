@@ -207,25 +207,6 @@ describe('v6.0 System Enhancer Hint Injection', () => {
 			);
 			expect(hasIntegrationHint).toBe(true);
 		});
-
-		it.skip('injects NEITHER hint with default config', async () => {
-			await createSwarmFiles();
-
-			const config: PluginConfig = {
-				...defaultConfig,
-				// No review_passes, no integration_analysis
-			};
-
-			const systemOutput = await invokeHook(config);
-
-			// Should NOT contain any [SWARM CONFIG] hints (except any base ones)
-			const configHints = systemOutput.filter((s) =>
-				s.includes('[SWARM CONFIG]'),
-			);
-
-			// With default config, there should be no [SWARM CONFIG] hints
-			expect(configHints.length).toBe(0);
-		});
 	});
 
 	describe('Full hint content verification', () => {

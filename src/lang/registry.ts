@@ -1,6 +1,18 @@
 import { extname } from 'node:path';
 import { loadGrammar, type Parser } from './runtime';
 
+export const _internals: {
+	getLanguageForExtension: typeof getLanguageForExtension;
+	listSupportedLanguages: typeof listSupportedLanguages;
+	getParserForFile: typeof getParserForFile;
+	isSupportedFile: typeof isSupportedFile;
+} = {
+	getLanguageForExtension,
+	listSupportedLanguages,
+	getParserForFile,
+	isSupportedFile,
+} as const;
+
 export interface LanguageDefinition {
 	id: string;
 	extensions: string[];

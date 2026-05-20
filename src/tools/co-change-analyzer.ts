@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -385,11 +386,14 @@ export async function detectDarkMatter(
 	}
 
 	// Parse git log and build matrix
-	const commitMap = await parseGitLog(directory, maxCommitsToAnalyze);
-	const matrix = buildCoChangeMatrix(commitMap);
+	const commitMap = await _internals.parseGitLog(
+		directory,
+		maxCommitsToAnalyze,
+	);
+	const matrix = _internals.buildCoChangeMatrix(commitMap);
 
 	// Get static edges
-	const staticEdges = await getStaticEdges(directory);
+	const staticEdges = await _internals.getStaticEdges(directory);
 
 	// Filter and annotate entries
 	const results: CoChangeEntry[] = [];
@@ -509,19 +513,19 @@ export const co_change_analyzer: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Detects hidden couplings (dark matter) by analyzing git history to find file pairs that frequently co-change but have no import relationship. Useful for identifying architectural concerns that are not explicitly documented.',
 	args: {
-		min_commits: tool.schema
+		min_commits: z
 			.number()
 			.optional()
 			.describe('Minimum commit count to analyze (default: 20)'),
-		min_co_changes: tool.schema
+		min_co_changes: z
 			.number()
 			.optional()
 			.describe('Minimum co-change count to consider (default: 3)'),
-		threshold: tool.schema
+		threshold: z
 			.number()
 			.optional()
 			.describe('NPMI threshold for filtering (default: 0.5)'),
-		max_commits: tool.schema
+		max_commits: z
 			.number()
 			.optional()
 			.describe('Maximum commits to analyze (default: 500)'),
@@ -557,7 +561,27 @@ export const co_change_analyzer: ReturnType<typeof tool> = createSwarmTool({
 			maxCommitsToAnalyze,
 		};
 
-		const pairs = await detectDarkMatter(directory, options);
-		return formatDarkMatterOutput(pairs);
+		const pairs = await _internals.detectDarkMatter(directory, options);
+		return _internals.formatDarkMatterOutput(pairs);
 	},
 });
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	parseGitLog: typeof parseGitLog;
+	buildCoChangeMatrix: typeof buildCoChangeMatrix;
+	getStaticEdges: typeof getStaticEdges;
+	detectDarkMatter: typeof detectDarkMatter;
+	darkMatterToKnowledgeEntries: typeof darkMatterToKnowledgeEntries;
+	formatDarkMatterOutput: typeof formatDarkMatterOutput;
+} = {
+	parseGitLog,
+	buildCoChangeMatrix,
+	getStaticEdges,
+	detectDarkMatter,
+	darkMatterToKnowledgeEntries,
+	formatDarkMatterOutput,
+} as const;

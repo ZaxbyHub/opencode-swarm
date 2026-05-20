@@ -237,7 +237,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface
@@ -255,7 +254,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = false;
 
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface
@@ -273,7 +271,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface
@@ -337,7 +334,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 			});
 
 			// First session has fullAutoMode: false; call hook without sessionID
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface
@@ -352,7 +348,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 		it('3.5 does NOT inject banner when no sessions exist', async () => {
 			swarmState.agentSessions.clear();
 
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface
@@ -415,7 +410,6 @@ describe('Full-Auto Mode Regression Tests', () => {
 			session!.fullAutoMode = true;
 			session!.turboMode = false; // only full-auto active
 
-			// biome-ignore lint/suspicious/noExplicitAny: mirrors turbo.regression.test.ts pattern for hook interface
 			const hook = createSystemEnhancerHook({} as any, tmpDir);
 			const output = { system: [] as string[], messages: [] as string[] };
 			// @ts-expect-error - testing internal hook interface

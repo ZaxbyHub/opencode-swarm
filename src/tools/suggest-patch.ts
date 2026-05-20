@@ -2,7 +2,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -284,31 +285,27 @@ export const suggestPatch: ToolDefinition = createSwarmTool({
 		'Returns context-based patch proposals with anchors for reviewer use. ' +
 		'This is a read-only tool — it does not modify any files.',
 	args: {
-		targetFiles: tool.schema
-			.array(tool.schema.string())
+		targetFiles: z
+			.array(z.string())
 			.describe('Array of file paths to patch')
 			.min(1),
-		changes: tool.schema
+		changes: z
 			.array(
-				tool.schema.object({
-					file: tool.schema
-						.string()
-						.describe('Path to the file this change applies to'),
-					contextBefore: tool.schema
-						.array(tool.schema.string())
+				z.object({
+					file: z.string().describe('Path to the file this change applies to'),
+					contextBefore: z
+						.array(z.string())
 						.optional()
 						.describe('Lines before the change region (anchor)'),
-					contextAfter: tool.schema
-						.array(tool.schema.string())
+					contextAfter: z
+						.array(z.string())
 						.optional()
 						.describe('Lines after the change region (anchor)'),
-					oldContent: tool.schema
+					oldContent: z
 						.string()
 						.optional()
 						.describe('Current content to be replaced'),
-					newContent: tool.schema
-						.string()
-						.describe('New content to replace with'),
+					newContent: z.string().describe('New content to replace with'),
 				}),
 			)
 			.describe('Array of change descriptions with context anchors')

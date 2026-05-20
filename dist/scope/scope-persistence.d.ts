@@ -43,9 +43,10 @@
  *      leaves `scope-{id}.json.tmp.{ts}.{rand}` files. No sweeper runs today;
  *      accumulation is bounded by `/swarm close` (which rm -rf's .swarm/scopes/).
  *
- * NOT a security boundary. Bash remains unguarded at the write-authority layer.
- * The durable fix lives at the syscall layer (#520). This module closes the
- * cross-process gap and the plan-as-scope gap, both of which are mitigations.
+ * NOT a standalone security boundary. Tool-layer write interception is now
+ * implemented in shell-write-detect.ts (Phases 1-2). This module closes the
+ * cross-process gap and the plan-as-scope gap. The syscall-layer fix (#520)
+ * remains the durable long-term boundary.
  */
 declare const SCOPE_SCHEMA_VERSION: 1;
 export interface PersistedScope {

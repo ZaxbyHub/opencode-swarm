@@ -279,11 +279,8 @@ describe('safeAssignOwnProps - Adversarial Security Tests', () => {
 			largeObj[`key${i}`] = `value${i}`;
 		}
 		// Add exact forbidden keys interspersed
-		// biome-ignore lint/complexity/useLiteralKeys: must use bracket notation to set own property, not prototype chain
 		largeObj['__proto__'] = { attack: 1 };
-		// biome-ignore lint/complexity/useLiteralKeys: must use bracket notation to set own property, not prototype chain
 		largeObj['constructor'] = { attack: 2 };
-		// biome-ignore lint/complexity/useLiteralKeys: must use bracket notation to set own property, not prototype chain
 		largeObj['prototype'] = { attack: 3 };
 		largeObj.key500 = 'modified';
 		// Note: __proto__nested and constructor_nested are NOT exact matches
@@ -583,11 +580,8 @@ describe('safeAssignOwnProps - Adversarial Security Tests', () => {
 		expect(result.prototype).toBeUndefined();
 
 		// Unicode variants preserved (they are different strings)
-		// biome-ignore lint/complexity/useLiteralKeys: unicode key
 		expect(result['__proto̶']).toBe('safe1');
-		// biome-ignore lint/complexity/useLiteralKeys: unicode key
 		expect(result['c̶onstructor']).toBe('safe2');
-		// biome-ignore lint/complexity/useLiteralKeys: unicode key
 		expect(result['prototyp̶e']).toBe('safe3');
 	});
 

@@ -1,4 +1,4 @@
-import { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import {
 	jaccardBigram,
 	normalize,
@@ -31,18 +31,15 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 		description:
 			'Search the knowledge base for relevant past decisions, patterns, and lessons learned. Returns ranked results by semantic similarity.',
 		args: {
-			query: tool.schema
-				.string()
-				.min(3)
-				.describe('Natural language search query'),
-			top_n: tool.schema
+			query: z.string().min(3).describe('Natural language search query'),
+			top_n: z
 				.number()
 				.int()
 				.min(1)
 				.max(20)
 				.optional()
 				.describe('Maximum results to return (default: 5)'),
-			tier: tool.schema
+			tier: z
 				.enum(['all', 'swarm', 'hive'])
 				.optional()
 				.describe("Knowledge tier to search (default: 'all')"),
@@ -107,7 +104,10 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				entries = entries.concat(hiveEntries);
 			}
 
-			// Step 3: Empty store check
+			// Step 3: Filter out archived entries
+			entries = entries.filter((entry) => entry.status !== 'archived');
+
+			// Step 3b: Empty store check
 			if (entries.length === 0) {
 				const result: KnowledgeRecallResult = { results: [], total: 0 };
 				return JSON.stringify(result);
@@ -154,3 +154,13 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 			return JSON.stringify(result);
 		},
 	});
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	knowledge_recall: typeof knowledge_recall;
+} = {
+	knowledge_recall,
+} as const;

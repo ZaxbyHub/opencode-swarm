@@ -116,7 +116,16 @@ export async function handleBenchmarkCommand(
 		let totalTestToCodeRatio = 0;
 		let qualityEvidenceCount = 0;
 		for (const tid of await listEvidenceTaskIds(directory)) {
-			const result = await loadEvidence(directory, tid);
+			let result: Awaited<ReturnType<typeof loadEvidence>>;
+			try {
+				result = await loadEvidence(directory, tid);
+			} catch (_evidenceErr) {
+				warn(
+					'benchmark: skipping corrupt or unreadable evidence for task',
+					tid,
+				);
+				continue;
+			}
 			if (result.status !== 'found') continue;
 			for (const e of result.bundle.entries) {
 				// Skip unknown evidence types gracefully with warning

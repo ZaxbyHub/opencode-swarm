@@ -2,7 +2,16 @@ import { describe, expect, it } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 describe('architect prompt: declare_scope instruction at every coder delegation site (#493)', () => {
-	const prompt = createArchitectAgent('gpt-4').config.prompt!;
+	const prompt = createArchitectAgent(
+		'gpt-4',
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{
+			enabled: true,
+		},
+	).config.prompt!;
 
 	it('ARCHITECT_PROMPT mentions declare_scope (canonical Rule 1a check)', () => {
 		expect(prompt).toContain('declare_scope');

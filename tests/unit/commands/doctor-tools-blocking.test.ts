@@ -17,13 +17,13 @@ describe('formatToolDoctorMarkdown BLOCKING footer', () => {
 		const result: ConfigDoctorResult = {
 			findings: [
 				{
-					id: 'agent-tool-map-mismatch-architect-convene_council',
+					id: 'agent-tool-map-mismatch-architect-submit_council_verdicts',
 					title: 'AGENT_TOOL_MAP alignment gap',
 					description:
-						'Tool "convene_council" is assigned to agent "architect" in AGENT_TOOL_MAP but is not registered in the plugin\'s tool: {} block.',
+						'Tool "submit_council_verdicts" is assigned to agent "architect" in AGENT_TOOL_MAP but is not registered in the plugin\'s tool: {} block.',
 					severity: 'error',
 					path: 'AGENT_TOOL_MAP.architect',
-					currentValue: 'convene_council',
+					currentValue: 'submit_council_verdicts',
 					autoFixable: false,
 				},
 			],
@@ -36,7 +36,7 @@ describe('formatToolDoctorMarkdown BLOCKING footer', () => {
 		const output = formatToolDoctorMarkdown(result);
 		expect(output).toContain('**BLOCKING**');
 		expect(output).toContain('AGENT_TOOL_MAP alignment errors');
-		expect(output).toContain('convene_council');
+		expect(output).toContain('submit_council_verdicts');
 	});
 
 	test('does NOT emit BLOCKING marker when only warnings or infos exist', () => {

@@ -162,14 +162,27 @@ export function createCuratorLLMDelegate(
 			const agentName = resolveCuratorAgentName(mode, sessionId);
 
 			// 3. Prompt using the registered curator agent.
-			const promptResult = await client.session.prompt({
-				path: { id: ephemeralSessionId },
-				body: {
-					agent: agentName,
-					tools: { write: false, edit: false, patch: false },
-					parts: [{ type: 'text', text: userInput }],
-				},
-			});
+			let promptResult: Awaited<ReturnType<typeof client.session.prompt>>;
+			try {
+				promptResult = await client.session.prompt({
+					path: { id: ephemeralSessionId },
+					body: {
+						agent: agentName,
+						tools: { write: false, edit: false, patch: false },
+						parts: [{ type: 'text', text: userInput }],
+					},
+				});
+			} catch (promptErr) {
+				// When the abort signal has fired, the abort handler already
+				// deleted the ephemeral session. The SDK will throw a
+				// NotFoundError ("Session not found") for the now-deleted
+				// session. Translate that into CURATOR_LLM_TIMEOUT so the
+				// caller sees a clean timeout rather than an unexpected error.
+				if (signal?.aborted) {
+					throw new Error('CURATOR_LLM_TIMEOUT');
+				}
+				throw promptErr;
+			}
 
 			if (!promptResult.data) {
 				throw new Error(

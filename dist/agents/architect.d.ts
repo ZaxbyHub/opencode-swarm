@@ -1,4 +1,5 @@
 import type { AgentConfig } from '@opencode-ai/sdk';
+export type { AgentConfig };
 export interface AgentDefinition {
     name: string;
     description?: string;
@@ -27,6 +28,16 @@ export interface CouncilWorkflowConfig {
     };
 }
 /**
+ * Subset of PluginConfig.ui_review needed to gate the designer agent
+ * references in the architect prompt. Only `enabled` is consumed here —
+ * runtime agent creation is handled separately in agents/index.ts.
+ * Keeping this shape narrow avoids pulling the full PluginConfig type
+ * into the agent-prompt layer.
+ */
+export interface UIReviewConfig {
+    enabled?: boolean;
+}
+/**
  * Build the Work Complete Council four-phase workflow block. Returns the full
  * block text when council.enabled === true, otherwise the empty string. The
  * empty-string return path guarantees byte-for-byte non-regression when the
@@ -39,9 +50,9 @@ export declare function buildCouncilWorkflow(council?: CouncilWorkflowConfig): s
  * inline path). The dialogue is dialogue-only — persistence happens during
  * MODE: PLAN after `save_plan` creates `plan.json`.
  *
- * The lead-in sentence varies per mode, but the body (nine gates with
+ * The lead-in sentence varies per mode, but the body (ten gates with
  * defaults, one-shot accept-or-customize prompt) is shared so SPECIFY,
  * BRAINSTORM, and PLAN inline paths stay in lockstep.
  */
 export declare function buildQaGateSelectionDialogue(modeLabel: 'BRAINSTORM' | 'SPECIFY' | 'PLAN'): string;
-export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig): AgentDefinition;
+export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig, uiReview?: UIReviewConfig): AgentDefinition;

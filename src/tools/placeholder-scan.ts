@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getParserForFile } from '../lang/registry';
@@ -750,15 +751,15 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Scan source files for placeholder content (TODO/FIXME comments, stub implementations, unimplemented functions). Returns JSON with findings grouped by file and rule.',
 	args: {
-		changed_files: tool.schema
-			.array(tool.schema.string())
+		changed_files: z
+			.array(z.string())
 			.describe('Files to scan for placeholders'),
-		allow_globs: tool.schema
-			.array(tool.schema.string())
+		allow_globs: z
+			.array(z.string())
 			.optional()
 			.describe('Globs to allow (skip scanning)'),
-		deny_patterns: tool.schema
-			.array(tool.schema.string())
+		deny_patterns: z
+			.array(z.string())
 			.optional()
 			.describe('Custom deny patterns to search for'),
 	},

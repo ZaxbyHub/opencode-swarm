@@ -1,14 +1,16 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { isCommandAvailable } from '../build/discovery';
-import { analyzeImpact } from '../test-impact/analyzer.js';
+import { analyzeImpact, loadImpactMap } from '../test-impact/analyzer.js';
 import { classifyAndCluster } from '../test-impact/failure-classifier.js';
 import {
 	detectFlakyTests,
 	type FlakyTestEntry,
 } from '../test-impact/flaky-detector.js';
 import { appendTestRun, getAllHistory } from '../test-impact/history-store.js';
+import { bunSpawn } from '../utils/bun-compat';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -22,6 +24,43 @@ export const MAX_COMMAND_LENGTH = 500;
 export const DEFAULT_TIMEOUT_MS = 60_000; // 60 seconds default
 export const MAX_TIMEOUT_MS = 300_000; // 5 minutes max
 export const MAX_SAFE_TEST_FILES = 50; // Maximum resolved test files allowed in interactive session
+export const MAX_SAFE_SOURCE_FILES = 1; // Maximum source files allowed for graph/impact scopes (>1 fans out to too many test files)
+
+/**
+ * Estimate the fan-out (number of unique test files) for given source files
+ * by reading the cached impact map without spawning a subprocess.
+ * This is a pre-resolution check to prevent session blocking.
+ *
+ * Completes in <100ms by design — reads only the cached JSON and performs
+ * in-memory Set collection.
+ */
+export async function estimateFanOut(
+	sourceFiles: string[],
+	cwd: string,
+): Promise<{ estimatedCount: number }> {
+	try {
+		const impactMap = await loadImpactMap(cwd, { skipRebuild: true });
+		const uniqueTestFiles = new Set<string>();
+
+		for (const sourceFile of sourceFiles) {
+			// Resolve to absolute path matching how the impact map keys are stored
+			const resolvedPath = path.resolve(cwd, sourceFile);
+			// Impact map keys use forward-slash normalization
+			const normalizedPath = resolvedPath.replace(/\\/g, '/');
+			const testFiles = impactMap[normalizedPath];
+			if (testFiles) {
+				for (const testFile of testFiles) {
+					uniqueTestFiles.add(testFile);
+				}
+			}
+		}
+
+		return { estimatedCount: uniqueTestFiles.size };
+	} catch {
+		// Impact map unavailable or corrupted — fail gracefully
+		return { estimatedCount: 0 };
+	}
+}
 
 // Supported test frameworks
 export const SUPPORTED_FRAMEWORKS = [
@@ -279,6 +318,136 @@ function detectMinitest(cwd: string): boolean {
 			fs.existsSync(path.join(cwd, 'Rakefile'))) &&
 		isCommandAvailable('ruby')
 	);
+}
+
+/**
+ * Phase 3 dispatch path: detect the test framework via the
+ * `LanguageBackend` registry from `src/lang/dispatch.ts`. Currently
+ * opt-in via `SWARM_LANG_BACKEND=dispatch`; default remains the legacy
+ * `detectTestFramework` switch below. A future Phase 3b will flip the
+ * default and the env var becomes `SWARM_LANG_BACKEND=legacy` for
+ * one-release rollback.
+ *
+ * Maps `TestFrameworkSelection.name` (which mirrors the names in each
+ * profile's `test.frameworks[*].name`) back to the legacy `TestFramework`
+ * union string this function exists to produce. Names not in the
+ * union (e.g. PHP's "Pest"/"PHPUnit") collapse to `'none'`, preserving
+ * pre-Phase-3 behavior for languages whose tests the legacy path
+ * couldn't detect either.
+ */
+const DISPATCH_FRAMEWORK_MAP: Record<string, TestFramework> = {
+	'bun:test': 'bun',
+	bun: 'bun',
+	vitest: 'vitest',
+	jest: 'jest',
+	mocha: 'mocha',
+	pytest: 'pytest',
+	'cargo test': 'cargo',
+	cargo: 'cargo',
+	pester: 'pester',
+	'go test': 'go-test',
+	'maven-test': 'maven',
+	'gradle-test': 'gradle',
+	'gradle-test-groovy': 'gradle',
+	'gradle-kts': 'gradle',
+	'dotnet test': 'dotnet-test',
+	ctest: 'ctest',
+	'swift test': 'swift-test',
+	'xcodebuild-test': 'swift-test',
+	'flutter test': 'dart-test',
+	'dart test': 'dart-test',
+	rspec: 'rspec',
+	minitest: 'minitest',
+};
+
+export async function detectTestFrameworkViaDispatch(
+	cwd: string,
+): Promise<TestFramework> {
+	try {
+		// Lazy-load dispatch to keep the legacy code path import-graph small.
+		const { pickBackend } = await import('../lang/dispatch');
+		const backend = await pickBackend(cwd);
+		if (!backend?.selectTestFramework) return 'none';
+		const sel = await backend.selectTestFramework(cwd);
+		if (!sel) return 'none';
+		return DISPATCH_FRAMEWORK_MAP[sel.name] ?? 'none';
+	} catch {
+		// Defensive: dispatch failures must never break the test runner. Fall
+		// through to 'none' so the caller surfaces "no test framework
+		// detected" with the existing message.
+		return 'none';
+	}
+}
+
+/**
+ * Build a test command via the LanguageBackend dispatch path. Reverse-maps
+ * the union TestFramework string back to the profile name and asks the
+ * matching backend to produce a command. Falls back to the legacy switch
+ * (via `defaultBuildTestCommand` import) when no backend is registered or
+ * the backend has no `buildTestCommand` hook.
+ *
+ * Returns null on framework=`none` or when dispatch fails — callers (the
+ * test-runner) then surface "no test command available".
+ */
+export async function buildTestCommandViaDispatch(
+	framework: TestFramework,
+	scope: 'all' | 'convention' | 'graph' | 'impact',
+	files: string[],
+	coverage: boolean,
+	baseDir: string,
+): Promise<string[] | null> {
+	if (framework === 'none') return null;
+	try {
+		const { pickBackend } = await import('../lang/dispatch');
+		const backend = await pickBackend(baseDir);
+		if (backend?.buildTestCommand) {
+			const cmd = backend.buildTestCommand(framework, files, baseDir, {
+				scope,
+				coverage,
+			});
+			if (cmd) return cmd;
+		}
+		// No backend or hook → fall back to the registry-driven default with
+		// a synthesized profile lookup. Importing the default directly avoids
+		// the legacy-switch ping-pong: backend.buildTestCommand IS the legacy
+		// switch logic when the dispatch returns the default backend.
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Parse test output via the LanguageBackend dispatch path. Calls
+ * `backend.parseTestOutput` for the directory's resolved backend and
+ * returns the legacy-shaped `{ totals, coveragePercent? }` for the
+ * test-runner. Returns null when dispatch fails.
+ */
+export async function parseTestOutputViaDispatch(
+	framework: TestFramework,
+	output: string,
+	baseDir: string,
+): Promise<{ totals: TestTotals; coveragePercent?: number } | null> {
+	if (framework === 'none') return null;
+	try {
+		const { pickBackend } = await import('../lang/dispatch');
+		const backend = await pickBackend(baseDir);
+		if (!backend?.parseTestOutput) return null;
+		const summary = backend.parseTestOutput(framework, output, '', 0);
+		const passed = summary.passed ?? 0;
+		const failed = summary.failed ?? 0;
+		const skipped = summary.skipped ?? 0;
+		const total = summary.total ?? passed + failed + skipped;
+		const result: { totals: TestTotals; coveragePercent?: number } = {
+			totals: { passed, failed, skipped, total },
+		};
+		if (summary.coveragePercent !== undefined) {
+			result.coveragePercent = summary.coveragePercent;
+		}
+		return result;
+	} catch {
+		return null;
+	}
 }
 
 export async function detectTestFramework(cwd: string): Promise<TestFramework> {
@@ -1288,7 +1457,7 @@ function parseTestOutput(
  * This is critical for scope "all" where test output can be many MB/GB.
  */
 async function readBoundedStream(
-	stream: ReadableStream<Uint8Array>,
+	stream: { getReader(): ReadableStreamDefaultReader<Uint8Array> },
 	maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
 	const reader = stream.getReader();
@@ -1360,8 +1529,21 @@ export async function runTests(
 		}
 	}
 
-	// Build the command
-	const command = buildTestCommand(framework, scope, files, coverage, cwd);
+	// Build the command. Phase 3b: route through dispatch by default; the
+	// resolved backend's `buildTestCommand` is the SAME logic as the legacy
+	// switch below (both delegate to `defaultBuildTestCommand` in
+	// `src/lang/default-backend.ts`). `SWARM_LANG_BACKEND=legacy` falls back
+	// to the inline switch for rollback parity.
+	const useDispatchBuild = process.env.SWARM_LANG_BACKEND !== 'legacy';
+	const command = useDispatchBuild
+		? ((await buildTestCommandViaDispatch(
+				framework,
+				scope,
+				files,
+				coverage,
+				cwd,
+			)) ?? buildTestCommand(framework, scope, files, coverage, cwd))
+		: buildTestCommand(framework, scope, files, coverage, cwd);
 
 	if (!command) {
 		return {
@@ -1390,7 +1572,7 @@ export async function runTests(
 	const startTime = Date.now();
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: cwd,
@@ -1414,14 +1596,8 @@ export async function runTests(
 
 		const [exitCode, stdoutResult, stderrResult] = await Promise.all([
 			Promise.race([proc.exited, timeoutPromise]),
-			readBoundedStream(
-				proc.stdout as ReadableStream<Uint8Array>,
-				MAX_OUTPUT_BYTES,
-			),
-			readBoundedStream(
-				proc.stderr as ReadableStream<Uint8Array>,
-				MAX_OUTPUT_BYTES,
-			),
+			readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES),
+			readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES),
 		]);
 
 		const duration_ms = Date.now() - startTime;
@@ -1437,8 +1613,15 @@ export async function runTests(
 			output += '\n... (output truncated at stream read limit)';
 		}
 
-		// Parse the output
-		const { totals, coveragePercent } = parseTestOutput(framework, output);
+		// Parse the output. Phase 3b: route through dispatch by default. The
+		// dispatch path delegates to the same `defaultParseTestOutput` switch
+		// the legacy path uses, so totals/coveragePercent shape is identical.
+		const useDispatchParse = process.env.SWARM_LANG_BACKEND !== 'legacy';
+		const parsed = useDispatchParse
+			? ((await parseTestOutputViaDispatch(framework, output, cwd)) ??
+				parseTestOutput(framework, output))
+			: parseTestOutput(framework, output);
+		const { totals, coveragePercent } = parsed;
 
 		// Determine success based on exit code and failures
 		const isTimeout = exitCode === -1;
@@ -1693,33 +1876,33 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Run project tests with framework detection. Supports bun, vitest, jest, mocha, pytest, cargo, pester, go-test, maven, gradle, dotnet-test, ctest, swift-test, dart-test, rspec, and minitest. Returns deterministic normalized JSON with framework, scope, command, totals, coverage, duration, success status, and failures. Use scope "all" for full suite, "convention" to accept direct test files or map source files to test files, "graph" to find related tests via imports from source files, or "impact" to find tests covering changed source files using test-impact analysis.',
 	args: {
-		scope: tool.schema
+		scope: z
 			.enum(['all', 'convention', 'graph', 'impact'])
 			.optional()
 			.describe(
 				'Test scope: "all" runs full suite, "convention" accepts direct test files or maps source files to tests by naming, "graph" finds related tests via imports from source files, "impact" finds tests covering changed source files via test-impact analysis',
 			),
-		files: tool.schema
-			.array(tool.schema.string())
+		files: z
+			.array(z.string())
 			.optional()
 			.describe(
 				'Specific files to test. For "convention", pass source files or direct test files. For "graph" and "impact", pass source files only.',
 			),
-		coverage: tool.schema
+		coverage: z
 			.boolean()
 			.optional()
 			.describe('Enable coverage reporting if supported'),
-		timeout_ms: tool.schema
+		timeout_ms: z
 			.number()
 			.optional()
 			.describe('Timeout in milliseconds (default 60000, max 300000)'),
-		allow_full_suite: tool.schema
+		allow_full_suite: z
 			.boolean()
 			.optional()
 			.describe(
 				'Explicit opt-in for scope "all". Required because full-suite output can destabilize SSE streaming.',
 			),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe(
@@ -1823,9 +2006,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					framework: 'none',
 					scope: 'all',
 					error:
-						'scope "all" is not allowed without explicit files. Use scope "convention" or "graph" with a files array to run targeted tests.',
+						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with exactly one source file.',
 					message:
-						'Running the full test suite without file targeting is blocked. Provide scope "convention" or "graph" with specific source files in the files array. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
+						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with exactly one source file. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
 					outcome: 'error',
 				};
 				return JSON.stringify(errorResult, null, 2);
@@ -1858,8 +2041,37 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			MAX_TIMEOUT_MS,
 		);
 
-		// Detect the test framework
-		const framework = await detectTestFramework(workingDir);
+		// Detect the test framework. Phase 3b of language-agnostic refactor:
+		// DISPATCH IS THE DEFAULT. `SWARM_LANG_BACKEND=legacy` opts out for
+		// one release as a rollback path. The dispatch + legacy paths share
+		// the same buildTestCommand and parseTestOutput logic (the legacy
+		// switches in this file delegate to `defaultBuildTestCommand` /
+		// `defaultParseTestOutput` in `src/lang/default-backend.ts` — single
+		// source of truth).
+		//
+		// Dispatch+legacy composition: when dispatch returns `'none'`, fall
+		// through to the legacy switch as a backstop. This:
+		//   - Covers languages with no profile (PowerShell/Pester).
+		//   - Recovers the legacy permissive behavior for Python projects
+		//     where pytest is declared in pyproject.toml but not on PATH at
+		//     plugin-load time (venv not activated).
+		//   - Recovers Rust projects where Cargo.toml lacks
+		//     `[dev-dependencies]` content but the manifest still warrants
+		//     cargo test.
+		// The parity test
+		// (`tests/unit/tools/test-runner-dispatch-parity.test.ts`) asserts
+		// no FALSE POSITIVES — dispatch never returns a non-'none' framework
+		// the legacy detection disagrees with.
+		const useDispatch = process.env.SWARM_LANG_BACKEND !== 'legacy';
+		let framework: TestFramework;
+		if (useDispatch) {
+			framework = await detectTestFrameworkViaDispatch(workingDir);
+			if (framework === 'none') {
+				framework = await detectTestFramework(workingDir);
+			}
+		} else {
+			framework = await detectTestFramework(workingDir);
+		}
 
 		if (framework === 'none') {
 			const result: TestErrorResult = {
@@ -1935,6 +2147,20 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
+			// Guard: Reject when too many source files would cause fan-out to many test files.
+			// Direct test files are exempt — they are explicitly named and don't fan out.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "convention" accepts at most ${MAX_SAFE_SOURCE_FILES} source file for discovery (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "convention" discovery (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or pass direct test file paths instead of source files.`,
+					outcome: 'scope_exceeded',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
 			testFiles = [
 				...directTestFiles,
 				...getTestFilesFromConvention(sourceFiles, workingDir),
@@ -1961,6 +2187,37 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					message:
 						'The files array for scope "graph" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
 					outcome: 'error',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
+			// Layer 1: Reject before any I/O when too many source files are provided.
+			// graph discovery fans out: each source file can match many test files, easily
+			// exceeding MAX_SAFE_TEST_FILES and triggering a scope_exceeded cascade that
+			// causes LLMs to retry with scope "all", freezing the OpenCode SSE session.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "graph" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					outcome: 'scope_exceeded',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
+			// Layer 2: Even with a single source file, estimate fan-out before import-graph traversal.
+			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
+			const estimate = await estimateFanOut(sourceFiles, workingDir);
+			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: 'Estimated test file count exceeds safe maximum',
+					message: `Scope "graph" resolution would produce approximately ${estimate.estimatedCount} test files, which exceeds the safe limit of ${MAX_SAFE_TEST_FILES}. Break the source files into smaller batches and retry.`,
+					outcome: 'scope_exceeded',
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
@@ -2004,8 +2261,54 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
+			// Layer 1: Reject before any I/O when too many source files are provided.
+			// impact analysis fans out through the import graph, then may fall back to graph
+			// discovery; either path can exceed MAX_SAFE_TEST_FILES and cause LLMs to cascade
+			// to scope "all", freezing the OpenCode SSE session.
+			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: `scope "impact" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					outcome: 'scope_exceeded',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
+			// Layer 2: Even with a single source file, estimate fan-out before impact analysis.
+			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
+			const estimate = await estimateFanOut(sourceFiles, workingDir);
+			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
+				const errorResult: TestErrorResult = {
+					success: false,
+					framework,
+					scope,
+					error: 'Estimated test file count exceeds safe maximum',
+					message: `Scope "impact" resolution would produce approximately ${estimate.estimatedCount} test files, which exceeds the safe limit of ${MAX_SAFE_TEST_FILES}. Break the source files into smaller batches and retry.`,
+					outcome: 'scope_exceeded',
+				};
+				return JSON.stringify(errorResult, null, 2);
+			}
+
 			try {
-				const impactResult = await analyzeImpact(sourceFiles, workingDir);
+				const impactResult = await analyzeImpact(
+					sourceFiles,
+					workingDir,
+					MAX_SAFE_TEST_FILES,
+				);
+				if (impactResult.budgetExceeded) {
+					const errorResult: TestErrorResult = {
+						success: false,
+						framework,
+						scope,
+						error: 'Budget exceeded during impact analysis',
+						message: `Impact analysis exceeded safe budget of ${MAX_SAFE_TEST_FILES} test files.`,
+						outcome: 'scope_exceeded',
+					};
+					return JSON.stringify(errorResult, null, 2);
+				}
 				if (impactResult.impactedTests.length > 0) {
 					// Convert absolute paths from impact map to relative paths for test framework
 					testFiles = impactResult.impactedTests.map((absPath) => {

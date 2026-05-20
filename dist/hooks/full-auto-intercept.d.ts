@@ -58,7 +58,7 @@ export declare function injectVerdictIntoMessages(messages: MessageWithParts[], 
  * This function encapsulates the critic invocation and event writing flow.
  * The critic response is awaited before writing the event to events.jsonl.
  */
-export declare function dispatchCriticAndWriteEvent(directory: string, architectOutput: string, criticContext: string, criticModel: string, escalationType: 'phase_completion' | 'question', interactionCount: number, deadlockCount: number, oversightAgentName: string): Promise<CriticDispatchResult>;
+export declare function dispatchCriticAndWriteEvent(directory: string, architectOutput: string, criticContext: string, criticModel: string, escalationType: 'phase_completion' | 'question', interactionCount: number, deadlockCount: number, oversightAgentName: string, sessionID?: string): Promise<CriticDispatchResult>;
 /**
  * Creates the full-auto intercept hook factory.
  *

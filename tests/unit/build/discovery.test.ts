@@ -13,6 +13,7 @@ const {
 	clearToolchainCache,
 	getEcosystems,
 	build_discovery,
+	_internals: discoveryInternals,
 } = discoveryModule;
 
 // Re-export types for testing
@@ -143,6 +144,98 @@ describe('build/discovery.ts - Toolchain Detection', () => {
 				'this-command-definitely-does-not-exist-xyz',
 			);
 			expect(result).toBe(false);
+		});
+
+		describe('Invariant 3 — subprocess properties', () => {
+			// Spy on the `_internals.spawnSyncImpl` DI seam. Per AGENTS.md
+			// invariant 3, every subprocess call must set: explicit cwd,
+			// stdin: 'ignore' (non-interactive), a timeout, and bounded or
+			// ignored stdio. Pre-fix `isCommandAvailable` set only stdout/stderr
+			// and was the proximate cause of the v7.3.x init-path concern.
+			const realSpawnSync = discoveryInternals.spawnSyncImpl;
+			let lastArgs: unknown[] | undefined;
+			let lastOpts: Record<string, unknown> | undefined;
+
+			beforeEach(() => {
+				lastArgs = undefined;
+				lastOpts = undefined;
+				discoveryInternals.spawnSyncImpl = ((
+					argv: string[],
+					opts: Record<string, unknown>,
+				) => {
+					lastArgs = argv;
+					lastOpts = opts;
+					return {
+						stdout: new Uint8Array(0),
+						stderr: new Uint8Array(0),
+						exitCode: 1,
+						success: false,
+					};
+				}) as typeof realSpawnSync;
+				clearToolchainCache();
+			});
+
+			afterEach(() => {
+				discoveryInternals.spawnSyncImpl = realSpawnSync;
+				clearToolchainCache();
+			});
+
+			test('passes explicit cwd (not inherited)', () => {
+				isCommandAvailable('any-cmd-for-spy');
+				expect(lastOpts).toBeDefined();
+				expect(lastOpts).toHaveProperty('cwd');
+				expect(typeof lastOpts!.cwd).toBe('string');
+				expect((lastOpts!.cwd as string).length).toBeGreaterThan(0);
+			});
+
+			test("passes stdin: 'ignore' (non-interactive)", () => {
+				isCommandAvailable('any-cmd-for-spy');
+				expect(lastOpts!.stdin).toBe('ignore');
+			});
+
+			test('passes a positive numeric timeout', () => {
+				isCommandAvailable('any-cmd-for-spy');
+				expect(typeof lastOpts!.timeout).toBe('number');
+				expect(lastOpts!.timeout).toBeGreaterThan(0);
+			});
+
+			test("stdout and stderr are 'ignore' (we only need exit code)", () => {
+				// Tightened from `['ignore','pipe']`: the pre-fix code set
+				// `stdout: 'pipe'` and `stderr: 'pipe'`, so the looser assertion
+				// would have passed against the broken state. We bound stdio
+				// strictly to `'ignore'` because the function only consults
+				// `result.success` (exit code); piping stdout would buffer
+				// `which`/`where` output for no reason.
+				isCommandAvailable('any-cmd-for-spy');
+				expect(lastOpts!.stdout).toBe('ignore');
+				expect(lastOpts!.stderr).toBe('ignore');
+			});
+
+			test('uses platform-appropriate probe binary', () => {
+				isCommandAvailable('xyz123');
+				expect(lastArgs).toBeDefined();
+				const isWindows = process.platform === 'win32';
+				expect((lastArgs as string[])[0]).toBe(isWindows ? 'where' : 'which');
+			});
+
+			test('catch block returns false and caches when spawn throws', () => {
+				// Force the seam to throw to exercise the
+				// `catch { toolchainCache.set(...false); return false; }` branch.
+				discoveryInternals.spawnSyncImpl = (() => {
+					throw new Error('simulated spawn failure');
+				}) as typeof realSpawnSync;
+				const r1 = isCommandAvailable('throw-cmd');
+				expect(r1).toBe(false);
+				// Second call must hit the cache, not the throwing seam.
+				let secondCallReached = false;
+				discoveryInternals.spawnSyncImpl = (() => {
+					secondCallReached = true;
+					throw new Error('should not be called');
+				}) as typeof realSpawnSync;
+				const r2 = isCommandAvailable('throw-cmd');
+				expect(r2).toBe(false);
+				expect(secondCallReached).toBe(false);
+			});
 		});
 	});
 

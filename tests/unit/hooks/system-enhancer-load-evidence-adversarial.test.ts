@@ -35,6 +35,7 @@ vi.mock('../../../src/plan/manager.js', () => ({
 	savePlan: vi.fn(),
 	updateTaskStatus: vi.fn(),
 	migrateLegacyPlan: vi.fn(),
+	regeneratePlanMarkdown: vi.fn(),
 }));
 
 // Import the function under test

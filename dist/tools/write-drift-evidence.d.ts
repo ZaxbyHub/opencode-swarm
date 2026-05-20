@@ -3,7 +3,7 @@
  * Accepts phase, verdict, and summary from the Architect and writes
  * a gate-contract formatted evidence file.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the write_drift_evidence tool
  */

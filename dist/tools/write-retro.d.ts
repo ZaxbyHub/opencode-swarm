@@ -4,7 +4,7 @@
  * in a RetrospectiveEvidence entry before calling saveEvidence().
  * This fixes the bug where Architect was writing flat JSON that failed EvidenceBundleSchema.parse().
  */
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 /**
  * Arguments for the write_retro tool
  * User-supplied fields (the Architect provides these)
@@ -53,3 +53,12 @@ export declare function executeWriteRetro(args: WriteRetroArgs, directory: strin
  * Tool definition for write_retro
  */
 export declare const write_retro: ToolDefinition;
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ * Uses getter for write_retro to avoid circular reference at module load time.
+ */
+export declare const _internals: {
+    executeWriteRetro: typeof executeWriteRetro;
+    write_retro: typeof write_retro;
+};

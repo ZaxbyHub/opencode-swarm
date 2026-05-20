@@ -5,3 +5,4 @@ export {
 	savePlan,
 	updateTaskStatus,
 } from './manager';
+export { derivePlanId } from './utils';

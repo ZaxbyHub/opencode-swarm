@@ -107,7 +107,7 @@ describe('synthesizeCouncilVerdicts — explorer member', () => {
 	});
 });
 
-describe('convene_council ArgsSchema — explorer + new categories', () => {
+describe('submit_council_verdicts ArgsSchema — explorer + new categories', () => {
 	const baseValidArgs = {
 		taskId: '1.1',
 		swarmId: 'swarm-1',
@@ -189,7 +189,7 @@ describe('convene_council ArgsSchema — explorer + new categories', () => {
 	});
 });
 
-describe('convene_council — requireAllMembers config enforcement', () => {
+describe('submit_council_verdicts — requireAllMembers config enforcement', () => {
 	const writeConfig = (dir: string, council: Record<string, unknown>): void => {
 		mkdirSync(join(dir, '.opencode'), { recursive: true });
 		writeFileSync(
@@ -213,10 +213,10 @@ describe('convene_council — requireAllMembers config enforcement', () => {
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
 
-			const { convene_council } = await import(
+			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
-			const result = await convene_council.execute(
+			const result = await submit_council_verdicts.execute(
 				{
 					taskId: '1.1',
 					swarmId: 'swarm-1',
@@ -233,7 +233,11 @@ describe('convene_council — requireAllMembers config enforcement', () => {
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.reason).toMatch(/requireAllMembers/);
+			// requireAllMembers: true overrides minimumMembers to 5, so 4 verdicts
+			// fail the unified quorum guard with reason='insufficient_quorum'.
+			expect(parsed.reason).toBe('insufficient_quorum');
+			expect(parsed.quorumRequired).toBe(5);
+			expect(parsed.membersAbsent).toContain('explorer');
 
 			// No evidence should have been written
 			const { existsSync } = await import('node:fs');
@@ -249,10 +253,10 @@ describe('convene_council — requireAllMembers config enforcement', () => {
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
 
-			const { convene_council } = await import(
+			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
-			const result = await convene_council.execute(
+			const result = await submit_council_verdicts.execute(
 				{
 					taskId: '1.1',
 					swarmId: 'swarm-1',

@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { withEvidenceLock } from './evidence/lock.js';
 import { telemetry } from './telemetry.js';
+import { bunWrite } from './utils/bun-compat';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
 
 export interface GateEvidence {
@@ -122,7 +123,7 @@ function readExisting(evidencePath: string): TaskEvidence | null {
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
 	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
-		await Bun.write(tempPath, content);
+		await bunWrite(tempPath, content);
 		renameSync(tempPath, targetPath);
 	} finally {
 		try {

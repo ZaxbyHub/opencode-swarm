@@ -10,16 +10,23 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import type { ToolResult } from './create-tool';
 import { search } from './search';
+
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Helper to call tool execute with proper context
 async function executeSearch(
 	args: Record<string, unknown>,
 	directory: string,
 ): Promise<string> {
-	return search.execute(args, {
+	const result = await search.execute(args, {
 		directory,
 	} as unknown as ToolContext);
+	return resultToString(result);
 }
 
 let tmpDir: string;
@@ -631,7 +638,6 @@ describe('search ADVERSARIAL - Injection attacks', () => {
 		createTestFile('src/tpl.ts', 'content\n');
 
 		const result = await executeSearch(
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional injection test
 			{ query: '${process.env.SECRET}', mode: 'literal' },
 			tmpDir,
 		);

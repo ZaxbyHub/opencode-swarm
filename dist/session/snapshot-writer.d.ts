@@ -59,11 +59,13 @@ export interface SerializedAgentSession {
     fullAutoLastQuestionHash?: string | null;
     /** Timestamp when session was rehydrated from snapshot (0 if never rehydrated) */
     sessionRehydratedAt?: number;
+    /** Stage B completion tracking: per-task set of completed Stage B agents. Optional for backward compat with old snapshots. */
+    stageBCompletion?: Record<string, string[]>;
 }
 /**
  * Minimal interface for serialized InvocationWindow
  */
-interface SerializedInvocationWindow {
+export interface SerializedInvocationWindow {
     id: number;
     agentName: string;
     startedAtMs: number;
@@ -78,6 +80,7 @@ interface SerializedInvocationWindow {
     }>;
     warningIssued: boolean;
     warningReason: string;
+    transientRetryCount: number;
 }
 /**
  * Snapshot data structure written to disk
@@ -112,4 +115,12 @@ export declare function createSnapshotWriterHook(directory: string): (input: unk
  * are persisted before returning.
  */
 export declare function flushPendingSnapshot(directory: string): Promise<void>;
-export {};
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export declare const _internals: {
+    writeSnapshot: typeof writeSnapshot;
+    createSnapshotWriterHook: typeof createSnapshotWriterHook;
+    flushPendingSnapshot: typeof flushPendingSnapshot;
+};

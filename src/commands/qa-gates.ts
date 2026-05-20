@@ -23,6 +23,7 @@ import {
 	setGates,
 } from '../db/qa-gate-profile.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import { derivePlanId } from '../plan/utils.js';
 import { getAgentSession } from '../state.js';
 
 const ALL_GATE_NAMES: ReadonlyArray<keyof QaGates> = [
@@ -35,11 +36,9 @@ const ALL_GATE_NAMES: ReadonlyArray<keyof QaGates> = [
 	'sast_enabled',
 	'mutation_test',
 	'council_general_review',
+	'drift_check',
+	'final_council',
 ];
-
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
 
 function isGateName(name: string): name is keyof QaGates {
 	return (ALL_GATE_NAMES as readonly string[]).includes(name);

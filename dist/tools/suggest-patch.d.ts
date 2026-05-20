@@ -1,4 +1,4 @@
-import { type ToolDefinition } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 export interface PatchHunk {
     file: string;
     originalContext: string[];

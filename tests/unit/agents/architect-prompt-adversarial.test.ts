@@ -1132,3 +1132,49 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 		});
 	});
 });
+
+describe('architect prompt: time-pressure anti-rationalization coverage in Rule 4', () => {
+	let prompt: string;
+
+	it('setup: extract prompt from architect agent', () => {
+		const { createArchitectAgent } = require('../../../src/agents/architect');
+		const agent = createArchitectAgent('gpt-4');
+		expect(agent).toBeDefined();
+		prompt = agent.config.prompt!;
+		expect(typeof prompt).toBe('string');
+	});
+
+	it('Rule 4 addresses time-critical / urgent / blocking rationalization', () => {
+		expect(prompt).toContain('time-critical / urgent / blocking');
+	});
+
+	it('Rule 4 states architect is an AI with no deadlines', () => {
+		expect(prompt).toContain('AI with no deadlines');
+	});
+
+	it('Rule 4 addresses "fix is obvious — explaining takes more effort" rationalization', () => {
+		expect(prompt).toContain('fix is obvious');
+	});
+
+	it('Rule 4 addresses "quick fix to unblock next task" rationalization', () => {
+		expect(prompt).toContain('quick fix to unblock');
+	});
+
+	it('Rule 4 addresses "user needs this quickly" rationalization', () => {
+		expect(prompt).toContain('user needs this quickly');
+	});
+
+	it('Rule 4 clarifies users want correct code, not fast code', () => {
+		expect(prompt).toContain('correct code, not fast code');
+	});
+
+	it('section 6h EDIT AUTHORITY addresses urgency rationalization', () => {
+		expect(prompt).toContain(
+			'This is urgent / time-critical / the user is waiting',
+		);
+	});
+
+	it('section 6h EDIT AUTHORITY addresses "fix so obvious it does not need a coder" rationalization', () => {
+		expect(prompt).toContain("fix is so obvious it doesn't need a coder");
+	});
+});

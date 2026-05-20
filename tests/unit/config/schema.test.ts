@@ -6,9 +6,11 @@ import {
 import {
 	AgentOverrideConfigSchema,
 	ContextBudgetConfigSchema,
+	CouncilConfigSchema,
 	DecisionDecaySchema,
 	GeneralCouncilConfigSchema,
 	GuardrailsConfigSchema,
+	LeanTurboConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
 	ScoringConfigSchema,
@@ -28,7 +30,10 @@ describe('AgentOverrideConfigSchema', () => {
 	});
 
 	it('accepts valid model string', () => {
+		const originalWarn = console.warn;
+		console.warn = () => {};
 		const result = AgentOverrideConfigSchema.safeParse({ model: 'gpt-4' });
+		console.warn = originalWarn;
 		expect(result.success).toBe(true);
 		if (result.success) {
 			expect(result.data).toEqual({ model: 'gpt-4' });
@@ -95,7 +100,9 @@ describe('AgentOverrideConfigSchema', () => {
 	});
 
 	// Fallback models validation tests
-	it('warns when model is set without fallback_models', () => {
+	it('parses without side effects when model is set without fallback_models', () => {
+		// The schema no longer emits console.warn itself; the advisory is collected
+		// and emitted once at plugin initialization to avoid per-agent spam.
 		const originalWarn = console.warn;
 		const warnings: string[] = [];
 		console.warn = (...args: unknown[]) => {
@@ -109,8 +116,10 @@ describe('AgentOverrideConfigSchema', () => {
 		console.warn = originalWarn;
 
 		expect(result.success).toBe(true);
-		expect(warnings.some((w) => w.includes('custom-model'))).toBe(true);
-		expect(warnings.some((w) => w.includes('fallback_models'))).toBe(true);
+		expect(result.data?.model).toBe('custom-model');
+		expect(result.data?.fallback_models).toBeUndefined();
+		// Schema itself must not emit any warnings — advisory lives in initializeOpenCodeSwarm
+		expect(warnings.length).toBe(0);
 	});
 
 	it('does not warn when model is set with fallback_models', () => {
@@ -163,6 +172,59 @@ describe('AgentOverrideConfigSchema', () => {
 
 		expect(result.success).toBe(true);
 		expect(warnings.some((w) => w.includes('fallback_models'))).toBe(false);
+	});
+
+	it('accepts empty fallback_models array (schema-valid; plugin-init warning catches it)', () => {
+		// fallback_models:[] is schema-valid but provides no runtime protection.
+		// The consolidated warning in initializeOpenCodeSwarm checks length===0
+		// and treats it identically to undefined.
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'custom-model',
+			fallback_models: [],
+		});
+		expect(result.success).toBe(true);
+		expect(result.data?.fallback_models).toEqual([]);
+	});
+
+	// Variant (reasoning-effort) field tests
+	it('accepts variant field with model', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'grove-openai/gpt-5.3-codex',
+			variant: 'medium',
+			fallback_models: ['fallback-1'],
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.variant).toBe('medium');
+			expect(result.data.model).toBe('grove-openai/gpt-5.3-codex');
+		}
+	});
+
+	it('accepts variant field without model', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ variant: 'high' });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.variant).toBe('high');
+			expect(result.data.model).toBeUndefined();
+		}
+	});
+
+	it('rejects empty-string variant', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ variant: '' });
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects non-string variant', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ variant: 5 });
+		expect(result.success).toBe(false);
+	});
+
+	it('omits variant when not set', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ model: 'm' });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.variant).toBeUndefined();
+		}
 	});
 
 	it('accepts valid fallback_models array with up to 3 items', () => {
@@ -237,21 +299,34 @@ describe('PluginConfigSchema', () => {
 		const result = PluginConfigSchema.safeParse({});
 		expect(result.success).toBe(true);
 		if (result.success) {
-			// adversarial_testing has a schema-level default so it appears in the output
-			expect(result.data).toEqual({
-				max_iterations: 5,
-				qa_retry_limit: 3,
-				inject_phase_reminders: true,
-				execution_mode: 'balanced',
-				turbo_mode: false,
-				adversarial_testing: { enabled: true, scope: 'all' },
-				full_auto: {
-					enabled: false,
-					max_interactions_per_phase: 50,
-					deadlock_threshold: 3,
-					escalation_mode: 'pause',
-				},
+			// adversarial_testing has a schema-level default so it appears in the output.
+			// default_agent is intentionally optional with NO schema default — see
+			// src/config/schema.ts for the full rationale (issue: multi-swarm
+			// prefixed architects disappearing from OpenCode after v7.3.x).
+			// Top-level non-full_auto fields stay strict; full_auto is asserted by
+			// shape (legacy v1 fields exact, v2 fields presence-checked) so future
+			// v2 additions don't break this test.
+			expect(result.data.max_iterations).toBe(5);
+			expect(result.data.qa_retry_limit).toBe(3);
+			expect(result.data.inject_phase_reminders).toBe(true);
+			expect(result.data.execution_mode).toBe('balanced');
+			expect(result.data.turbo_mode).toBe(false);
+			expect(result.data.quiet).toBe(true);
+			expect(result.data.version_check).toBe(true);
+			expect(result.data.adversarial_testing).toEqual({
+				enabled: true,
+				scope: 'all',
 			});
+			expect(result.data.full_auto?.enabled).toBe(false);
+			expect(result.data.full_auto?.max_interactions_per_phase).toBe(50);
+			expect(result.data.full_auto?.deadlock_threshold).toBe(3);
+			expect(result.data.full_auto?.escalation_mode).toBe('pause');
+			expect(result.data.full_auto?.mode).toBe('supervised');
+			expect(result.data.full_auto?.fail_closed).toBe(true);
+			// default_agent is omitted from the output because no schema default
+			// applies — distinguishing omitted from explicit "architect" is a
+			// load-bearing semantic.
+			expect(result.data.default_agent).toBeUndefined();
 		}
 	});
 
@@ -355,12 +430,18 @@ describe('PluginConfigSchema', () => {
 		const result = PluginConfigSchema.safeParse({});
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.data.full_auto).toEqual({
-				enabled: false,
-				max_interactions_per_phase: 50,
-				deadlock_threshold: 3,
-				escalation_mode: 'pause',
-			});
+			// Legacy v1 fields preserved exactly.
+			expect(result.data.full_auto?.enabled).toBe(false);
+			expect(result.data.full_auto?.max_interactions_per_phase).toBe(50);
+			expect(result.data.full_auto?.deadlock_threshold).toBe(3);
+			expect(result.data.full_auto?.escalation_mode).toBe('pause');
+			// v2 fields added: shape exists with safe defaults; do not lock the
+			// full nested object so future v2 additions don't break this test.
+			expect(result.data.full_auto?.mode).toBe('supervised');
+			expect(result.data.full_auto?.fail_closed).toBe(true);
+			expect(result.data.full_auto?.permission_policy?.enabled).toBe(true);
+			expect(result.data.full_auto?.denials?.max_consecutive).toBe(3);
+			expect(result.data.full_auto?.denials?.max_total).toBe(20);
 		}
 	});
 
@@ -1301,6 +1382,92 @@ describe('CouncilConfigSchema with general council', () => {
 	it('rejects unknown key directly under council (.strict)', () => {
 		const result = PluginConfigSchema.safeParse({
 			council: { enabled: true, generel: {} },
+		});
+		expect(result.success).toBe(false);
+	});
+});
+
+describe('LeanTurboConfigSchema', () => {
+	it('accepts defaults when empty object provided', () => {
+		const result = LeanTurboConfigSchema.safeParse({});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.max_parallel_coders).toBe(4);
+			expect(result.data.worktree_isolation).toBe(false);
+			expect(result.data.integrated_diff_required).toBe(true);
+			expect(result.data.phase_reviewer).toBe(true);
+			expect(result.data.phase_critic).toBe(true);
+		}
+	});
+
+	it('accepts valid lean turbo config', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 2,
+			require_declared_scope: true,
+			conflict_policy: 'serialize',
+			phase_reviewer: true,
+			phase_critic: false,
+			worktree_isolation: false,
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.max_parallel_coders).toBe(2);
+			expect(result.data.phase_critic).toBe(false);
+		}
+	});
+
+	it('rejects max_parallel_coders below 1', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 0,
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects max_parallel_coders above 6', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 7,
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts max_parallel_coders at boundary values (1 and 6)', () => {
+		expect(
+			LeanTurboConfigSchema.safeParse({ max_parallel_coders: 1 }).success,
+		).toBe(true);
+		expect(
+			LeanTurboConfigSchema.safeParse({ max_parallel_coders: 6 }).success,
+		).toBe(true);
+	});
+
+	it('rejects worktree_isolation: true (not yet implemented)', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			worktree_isolation: true,
+		});
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			const msg = JSON.stringify(result.error.issues);
+			expect(msg).toContain('worktree_isolation');
+			expect(msg).toContain('not yet implemented');
+		}
+	});
+
+	it('accepts worktree_isolation: false', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			worktree_isolation: false,
+		});
+		expect(result.success).toBe(true);
+	});
+
+	it('rejects invalid conflict_policy', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			conflict_policy: 'invalid',
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects non-integer max_parallel_coders', () => {
+		const result = LeanTurboConfigSchema.safeParse({
+			max_parallel_coders: 3.5,
 		});
 		expect(result.success).toBe(false);
 	});

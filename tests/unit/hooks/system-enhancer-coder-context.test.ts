@@ -63,6 +63,8 @@ describe('Coder Context Pack (system-enhancer.ts lines 690-799)', () => {
 	});
 
 	afterEach(async () => {
+		// CROSS-MODULE mock cleanup — no _internals seam in system-enhancer.ts for knowledge-recall
+		mock.restore();
 		try {
 			await rm(tempDir, { recursive: true, force: true });
 		} catch {

@@ -1,109 +1,166 @@
 import { z } from 'zod';
-import { ALL_AGENT_NAMES } from './constants';
-
-// Known Swarm prefixes for multi-tenant/variant agent names
-// These are stripped to get the canonical agent name
-const KNOWN_SWARM_PREFIXES = [
-	'paid',
-	'local',
-	'cloud',
-	'enterprise',
-	'mega',
-	'default',
-	'custom',
-	'team',
-	'project',
-	'swarm',
-	'synthetic',
-];
-
-// Supported separators between prefix and agent name
-const SEPARATORS = ['_', '-', ' '];
+import { type AgentName, ALL_AGENT_NAMES } from './constants';
 
 /**
- * Strips known Swarm prefixes from agent names to get the canonical agent name.
- *
- * Strategy:
- * 1. First try stripping known prefixes from the front (e.g., 'paid_architect' -> 'architect')
- * 2. If that doesn't yield a known agent, check if the name ENDS with a known agent name
- *    (e.g., 'not-an-architect' -> 'architect', 'team-alpha-reviewer' -> 'reviewer')
- *
- * Supports underscore, hyphen, and space separators.
- * Case-insensitive matching, but returns the canonical lowercase agent name.
- *
- * @param agentName - The potentially prefixed agent name
- * @returns The canonical agent name, or the original if no known agent found
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
  */
-export function stripKnownSwarmPrefix(agentName: string): string {
-	if (!agentName) return agentName;
+export const _internals: {
+	stripKnownSwarmPrefix: typeof stripKnownSwarmPrefix;
+	getCanonicalAgentRole: typeof getCanonicalAgentRole;
+	resolveGuardrailsConfig: typeof resolveGuardrailsConfig;
+} = {
+	stripKnownSwarmPrefix,
+	getCanonicalAgentRole,
+	resolveGuardrailsConfig,
+};
 
+// Supported separators between an arbitrary, user-defined swarm ID prefix
+// and the canonical role suffix that the plugin understands. Generated
+// agent names are produced by the swarm registry; the plugin must not make
+// assumptions about which prefix strings users choose.
+const SEPARATORS = ['_', '-', ' '] as const;
+
+/**
+ * Pre-sorted canonical roles, longest first. This is mandatory so compound
+ * roles like `critic_oversight` win over `critic`, and `test_engineer` wins
+ * over `engineer`/etc. when matched as a suffix. Computed once at module
+ * load — `ALL_AGENT_NAMES` is `as const`-readonly so this is safe.
+ */
+const CANONICAL_ROLES_LONGEST_FIRST: readonly string[] = [
+	...(ALL_AGENT_NAMES as readonly string[]),
+].sort((a, b) => b.length - a.length);
+
+const CANONICAL_ROLES_SET: ReadonlySet<string> = new Set(
+	ALL_AGENT_NAMES as readonly string[],
+);
+
+/**
+ * Type guard: returns true when `role` is a canonical agent role recognized
+ * by the plugin (e.g. "architect", "coder", "critic_oversight"). User-defined
+ * swarm IDs must NOT be treated as canonical roles.
+ */
+export function isKnownCanonicalRole(role: string): role is AgentName {
+	if (!role) return false;
+	return CANONICAL_ROLES_SET.has(role);
+}
+
+/**
+ * Extract the canonical agent role from a generated agent name, using
+ * suffix-based matching with longest-suffix-wins.
+ *
+ * Generated agent names have the shape `<arbitrary user-defined swarm ID>
+ * <separator> <canonical role>`. The swarm ID is opaque to the plugin —
+ * it can be anything the user configures (e.g. `banana`, `acme-prod`,
+ * `customer123`). Only the canonical role suffix is plugin-defined.
+ *
+ * Behavior:
+ *   - If `agentName` is itself a canonical role, return it unchanged.
+ *   - Else, find the longest canonical role `R` such that `agentName`
+ *     ends with `<sep><R>` for some separator in {"_", "-", " "}; return `R`.
+ *   - Else, return `agentName` unchanged (caller can detect "no role found"
+ *     by comparing the result to `agentName`, or by passing the result
+ *     through `isKnownCanonicalRole`).
+ *
+ * Optional `generatedAgentNames` argument: when supplied (e.g. from
+ * `getAgentConfigs` output at plugin init), the function ONLY infers a role
+ * for names actually present in that registry. Bare user-supplied strings
+ * like `not_an_architect` are NOT treated as roles unless they appear in
+ * the generated-name set. Callers that need this strict behavior should
+ * use `resolveGeneratedAgentRole` instead.
+ *
+ * Case-insensitive on the input; the returned role is the canonical
+ * lowercase form from `ALL_AGENT_NAMES`.
+ */
+export function getCanonicalAgentRole(
+	agentName: string,
+	generatedAgentNames?: Iterable<string>,
+): AgentName | string {
+	if (!agentName) return agentName;
 	const normalized = agentName.toLowerCase();
 
-	// Strategy 1: Strip known prefixes from the front
-	let stripped = normalized;
-	let previous = '';
+	// 1. Exact canonical match always wins, regardless of registry.
+	if (CANONICAL_ROLES_SET.has(normalized)) {
+		return normalized as AgentName;
+	}
 
-	while (stripped !== previous) {
-		previous = stripped;
-		for (const prefix of KNOWN_SWARM_PREFIXES) {
-			for (const sep of SEPARATORS) {
-				const prefixWithSep = prefix + sep;
-				if (stripped.startsWith(prefixWithSep)) {
-					stripped = stripped.slice(prefixWithSep.length);
-					break;
-				}
-			}
-			if (stripped !== previous) break;
+	// 2. If a registry was supplied, the strict path: only infer role for
+	//    names actually generated by the swarm registry.
+	if (generatedAgentNames) {
+		const registry = new Set<string>();
+		for (const n of generatedAgentNames) registry.add(n.toLowerCase());
+		if (!registry.has(normalized)) {
+			return agentName;
 		}
 	}
 
-	// Check if stripped result is a known agent name
-	if ((ALL_AGENT_NAMES as readonly string[]).includes(stripped)) {
-		return stripped;
-	}
-
-	// Strategy 2: Check if the name ENDS with a known agent name (with separator)
-	for (const agent of ALL_AGENT_NAMES) {
+	// 3. Suffix scan: longest canonical role wins. We require a separator
+	//    BEFORE the role so unrelated prose like `oversight` (the word) does
+	//    not collapse arbitrary names to canonical roles.
+	for (const role of CANONICAL_ROLES_LONGEST_FIRST) {
 		for (const sep of SEPARATORS) {
-			const suffix = sep + agent;
+			const suffix = sep + role;
 			if (normalized.endsWith(suffix)) {
-				return agent;
+				return role as AgentName;
 			}
-		}
-		// Also check if it exactly equals an agent name (already handled but for completeness)
-		if (normalized === agent) {
-			return agent;
 		}
 	}
 
-	// Return original if no known agent found
 	return agentName;
 }
 
+/**
+ * Strict variant of {@link getCanonicalAgentRole}: only infers a canonical
+ * role when the agent name is actually present in the supplied generated-
+ * name registry, OR is itself a canonical role. Use this from callers that
+ * must avoid treating arbitrary user-supplied strings as roles.
+ */
+export function resolveGeneratedAgentRole(
+	agentName: string,
+	generatedAgentNames: Iterable<string>,
+): AgentName | string {
+	return _internals.getCanonicalAgentRole(agentName, generatedAgentNames);
+}
+
+/**
+ * Backward-compatible alias for {@link getCanonicalAgentRole}. The previous
+ * implementation stripped a hardcoded list of "known swarm prefixes" from
+ * the front of the agent name. That approach was wrong by design: swarm
+ * IDs are arbitrary user-defined strings — the plugin cannot enumerate
+ * them. The new implementation does suffix-based canonical role extraction
+ * (see `getCanonicalAgentRole`) which works for ANY user-defined swarm ID.
+ *
+ * Existing tests that pass `synthetic_reviewer` / `mega_architect` /
+ * `cloud_critic_oversight` / etc. continue to pass because those names
+ * end with `<sep><canonical role>`, which is exactly what the suffix
+ * extractor matches.
+ */
+export function stripKnownSwarmPrefix(agentName: string): string {
+	return getCanonicalAgentRole(agentName);
+}
+
 // Agent override configuration
-export const AgentOverrideConfigSchema = z
-	.object({
-		model: z.string().optional(),
-		temperature: z.number().min(0).max(2).optional(),
-		disabled: z.boolean().optional(),
-		fallback_models: z.array(z.string()).max(3).optional(),
-	})
-	.refine(
-		(data) => {
-			// If model is explicitly set but fallback_models is not, warn about potential loss of protection
-			if (data.model && !data.fallback_models) {
-				console.warn(
-					`[opencode-swarm] WARNING: Agent configured with custom model "${data.model}" but no fallback_models. This means if the custom model fails, there is no fallback protection. Consider adding fallback_models for reliability.`,
-				);
-			}
-			// Always pass validation — this is a warning, not a block
-			return true;
-		},
-		{
-			message:
-				'Agent configuration warning: Custom model without fallback protection',
-		},
-	);
+export const AgentOverrideConfigSchema = z.object({
+	model: z.string().optional(),
+	// Reasoning-effort / model variant (e.g. "low" | "medium" | "high" for
+	// gpt-5.x-codex or gpt-5.x, or "thinking" for extended-thinking models).
+	// OpenCode treats variants as a separate field from the model id at the
+	// registry level — it is NOT a third "provider/model/variant" segment in
+	// the model string.  We surface it as its own override field so users can
+	// pin reasoning effort per agent without encoding it into `model`.
+	//
+	// Note: swarm will auto-split the last segment of a 3+ part model string
+	// ONLY when that last segment is one of the known variant tokens
+	// ("low", "medium", "high", "max", "xhigh", "thinking").  Model IDs that genuinely have
+	// three path components (e.g. "lmstudio/qwen/qwen3.6-35b-a3b") are
+	// preserved unchanged.
+	variant: z.string().min(1).optional(),
+	temperature: z.number().min(0).max(2).optional(),
+	disabled: z.boolean().optional(),
+	fallback_models: z.array(z.string()).max(3).optional(),
+});
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
 
@@ -537,6 +594,7 @@ export const GuardrailsProfileSchema = z.object({
 	max_consecutive_errors: z.number().min(2).max(20).optional(),
 	warning_threshold: z.number().min(0.1).max(0.9).optional(),
 	idle_timeout_minutes: z.number().min(5).max(240).optional(),
+	max_transient_retries: z.number().min(0).max(20).optional(),
 });
 
 export type GuardrailsProfile = z.infer<typeof GuardrailsProfileSchema>;
@@ -604,6 +662,7 @@ export const GuardrailsConfigSchema = z.object({
 	max_duration_minutes: z.number().min(0).max(480).default(30),
 	max_repetitions: z.number().min(3).max(50).default(10),
 	max_consecutive_errors: z.number().min(2).max(20).default(5),
+	max_transient_retries: z.number().min(0).max(20).default(5),
 	warning_threshold: z.number().min(0.1).max(0.9).default(0.75),
 	idle_timeout_minutes: z.number().min(5).max(240).default(60),
 	no_op_warning_threshold: z.number().min(1).max(100).default(15),
@@ -696,7 +755,7 @@ export function resolveGuardrailsConfig(
 	}
 
 	// Strip prefixes to get canonical agent name
-	const canonicalName = stripKnownSwarmPrefix(agentName);
+	const canonicalName = _internals.stripKnownSwarmPrefix(agentName);
 
 	// Check if this is a known agent (has built-in profile)
 	const hasBuiltInProfile = canonicalName in DEFAULT_AGENT_PROFILES;
@@ -766,6 +825,10 @@ export const CheckpointConfigSchema = z
 	.object({
 		enabled: z.boolean().default(true),
 		auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
+		// When false (default), checkpoint save skips the git commit if the working
+		// tree is clean, recording only the current HEAD SHA. Set to true to restore
+		// the previous behaviour of creating a git commit even with no file changes.
+		allow_empty_commits: z.boolean().default(false),
 	})
 	.strict();
 
@@ -858,6 +921,8 @@ export const KnowledgeConfigSchema = z.object({
 	min_retrievals_for_utility: z.number().min(1).max(100).default(3),
 	/** Schema version for the knowledge store format */
 	schema_version: z.number().int().min(1).default(1),
+	/** v2: Confidence threshold above which a tool/agent match strongly boosts ranking. Default: 0.75 */
+	directive_min_confidence: z.number().min(0).max(1).default(0.75),
 	/** Weighted scoring: multiplier for encounters from the source project */
 	same_project_weight: z.number().min(0).max(5).default(1.0),
 	/** Weighted scoring: multiplier for encounters from other projects */
@@ -902,9 +967,89 @@ export const CuratorConfigSchema = z.object({
 	 *  Must cover ephemeral session creation overhead plus full model response time.
 	 *  Default: 300000 (5 minutes). Increase for slower models; decrease for fast local models. */
 	llm_timeout_ms: z.number().int().min(5000).max(600000).default(300_000),
+	/** v2: Allow curator to propose generated skill candidates from mature knowledge. Default: true */
+	skill_generation_enabled: z.boolean().default(true),
+	/** v2: Skill generation mode: 'draft' writes only proposals; 'active' compiles directly into .opencode/skills/generated. Default: 'draft' */
+	skill_generation_mode: z.enum(['draft', 'active']).default('draft'),
+	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.85 */
+	min_skill_confidence: z.number().min(0).max(1).default(0.85),
+	/** v2: Minimum number of phase confirmations for a skill candidate cluster. Default: 2 */
+	min_skill_confirmations: z.number().int().min(1).max(50).default(2),
 });
 
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
+
+// Knowledge-application enforcement configuration (v2)
+export const KnowledgeApplicationConfigSchema = z.object({
+	/** Enable application tracking + acknowledgment contract. Default: true */
+	enabled: z.boolean().default(true),
+	/** 'warn' = advisory; 'enforce' = block critical-directive violations on high-risk actions. Default: warn */
+	mode: z.enum(['warn', 'enforce']).default('warn'),
+	/** Confidence floor for which directives are subject to enforcement. */
+	min_confidence: z.number().min(0).max(1).default(0.85),
+	/** Critical-priority directives must receive an explicit ack. */
+	critical_requires_ack: z.boolean().default(true),
+	/** Critical directives that reference a generated skill must include the skill via SKILLS:. */
+	require_skill_refs: z.boolean().default(true),
+});
+
+export type KnowledgeApplicationConfig = z.infer<
+	typeof KnowledgeApplicationConfigSchema
+>;
+
+// Skill-improver agent configuration (issue #629)
+export const SkillImproverConfigSchema = z.object({
+	/** Default: false. Must be explicitly enabled. */
+	enabled: z.boolean().default(false),
+	/** @deprecated Setting `skill_improver.model` at the top level no longer
+	 *  drives the actual agent model. Use `agents.skill_improver.model`
+	 *  (or `swarms.<id>.agents.skill_improver.model`) instead. This field is
+	 *  preserved purely for proposal-frontmatter tagging. config-doctor will
+	 *  warn when only the top-level value is set. */
+	model: z.string().nullable().default(null),
+	/** @deprecated Same precedence rule as `model` — set
+	 *  `agents.skill_improver.fallback_models` instead. */
+	fallback_models: z.array(z.string()).default([]),
+	/** Hard daily quota. Default: 10. */
+	max_calls_per_day: z.number().int().min(1).max(1000).default(10),
+	/** 'manual' is the only supported trigger today; 'scheduled' is reserved. */
+	trigger: z.enum(['manual', 'scheduled']).default('manual'),
+	/** Targets the skill_improver may inspect/improve. */
+	targets: z
+		.array(z.enum(['skills', 'spec', 'architect_prompt', 'knowledge']))
+		.default(['skills', 'spec', 'architect_prompt', 'knowledge']),
+	/** 'proposal' = write only to .swarm/skill-improver/proposals; 'draft_skills' = also draft into .swarm/skills/proposals. */
+	write_mode: z.enum(['proposal', 'draft_skills']).default('proposal'),
+	/** When true, Architect must ask user before invoking skill_improve (matches full-auto user-approval pattern). */
+	require_user_approval: z.boolean().default(true),
+	/** Quota window. 'utc' resets at 00:00 UTC; 'local' resets at local midnight. Default: 'utc'. */
+	quota_window: z.enum(['utc', 'local']).default('utc'),
+	/** Allow falling back to the offline deterministic proposal when no
+	 *  OpenCode client is wired. Default true for one minor (deprecation
+	 *  window); will flip to false in the next minor. The proposal frontmatter
+	 *  is tagged `source: deterministic_fallback` so reviewers can tell.
+	 *  Set to false to make `skill_improve` refuse with `no_llm_client` when
+	 *  no delegate is available. */
+	allow_deterministic_fallback: z.boolean().default(true),
+});
+
+export type SkillImproverConfig = z.infer<typeof SkillImproverConfigSchema>;
+
+// Spec-writer agent configuration
+export const SpecWriterConfigSchema = z.object({
+	/** Default: true (cheap on demand from architect). */
+	enabled: z.boolean().default(true),
+	/** @deprecated Setting `spec_writer.model` at the top level does NOT
+	 *  drive the spec_writer agent model — use `agents.spec_writer.model`
+	 *  instead. This field is retained only so config-doctor can warn. */
+	model: z.string().nullable().default(null),
+	/** @deprecated Use `agents.spec_writer.fallback_models`. */
+	fallback_models: z.array(z.string()).default([]),
+	/** Allow writing .swarm/spec.md directly via the safe spec_write tool. */
+	allow_spec_write: z.boolean().default(true),
+});
+
+export type SpecWriterConfig = z.infer<typeof SpecWriterConfigSchema>;
 
 // Slop detector configuration (v6.29)
 export const SlopDetectorConfigSchema = z.object({
@@ -994,6 +1139,12 @@ export const AuthorityConfigSchema = z.object({
 	// Applied before per-agent authority checks and cannot be overridden.
 	// Example: [".env", ".git/config", "secrets/"]
 	universal_deny_prefixes: z.array(z.string().min(1)).default([]),
+	verifier_config_paths: z
+		.array(z.string())
+		.optional()
+		.describe(
+			"Additional glob patterns for verifier config files that are merged into the architect agent's blockedGlobs at plugin init. Writes to matching files are blocked by the authority layer.",
+		),
 });
 
 export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;
@@ -1001,10 +1152,18 @@ export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;
 // General Council Mode configuration (advisory deliberation — distinct from the
 // verdict-based Work Complete Council below). Off by default. When enabled,
 // `/swarm council <question>` and the SPECIFY-COUNCIL-REVIEW gate convene a
-// configurable multi-model council where each member independently web-searches
-// and answers, then the architect routes any disagreements back for one
-// reconciliation round, after which a `council_moderator` agent (synthesis-only,
-// no web_search) produces the final answer.
+// fixed three-agent council (council_generalist / council_skeptic /
+// council_domain_expert). The architect runs a curated pre-search pass via
+// `web_search`, dispatches the three agents in parallel with the gathered
+// RESEARCH CONTEXT, routes disagreements back for one reconciliation round,
+// and synthesizes the final answer directly via inline output rules.
+//
+// Backward compatibility: `members`, `presets`, `moderator`, and
+// `moderatorModel` are retained on the schema but are no longer used at
+// runtime — the strict schema would otherwise reject existing user configs
+// that still carry these fields. The agent registration code in
+// src/agents/index.ts surfaces a deferred deprecation warning when the
+// moderator fields are set.
 //
 // IMPORTANT: this schema is `.strict()`. A typo in any nested key will fail
 // validation and the loader (config/loader.ts:186-207) will fall back to
@@ -1058,13 +1217,28 @@ export const CouncilConfigSchema = z
 			.boolean()
 			.default(false)
 			.describe(
-				'When true, convene_council rejects if fewer than 5 member verdicts are provided.',
+				'When true, submit_council_verdicts rejects if fewer than 5 member verdicts are provided. Equivalent to minimumMembers: 5.',
+			),
+		minimumMembers: z
+			.number()
+			.int()
+			.min(1)
+			.max(5)
+			.default(3)
+			.describe(
+				'Minimum distinct council member verdicts required for synthesis. Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).',
 			),
 		escalateOnMaxRounds: z
 			.string()
 			.optional()
 			.describe(
 				'Optional webhook URL or handler name invoked when maxRounds is reached without APPROVE. Declared for forward compatibility; no behavior is implemented yet.',
+			),
+		phaseConcernsAllowComplete: z
+			.boolean()
+			.default(true)
+			.describe(
+				'When true, a phase-level council CONCERNS verdict does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Default: true (CONCERNS is advisory).',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -1085,29 +1259,125 @@ export const ParallelizationConfigSchema = z.object({
 	maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
 	/** Timeout in ms for evidence file locks before throwing EvidenceLockTimeoutError. */
 	evidenceLockTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
-	/**
-	 * Stage B (reviewer + test_engineer) parallelization settings.
-	 * PR 2 runtime gating — defaults to disabled so no production path activates
-	 * order-independent barrier semantics until explicitly opted in.
-	 */
-	stageB: z
-		.object({
-			parallel: z
-				.object({
-					/** When true, reviewer and test_engineer run order-independently (barrier). Default: false. */
-					enabled: z.boolean().default(false),
-				})
-				.default({ enabled: false }),
-		})
-		.default({ parallel: { enabled: false } }),
+	/** Maximum concurrent coder dispatches. Controls agent-type concurrency limit. */
+	max_coders: z.number().int().min(1).max(16).default(3),
+	/** Maximum concurrent reviewer dispatches. Controls agent-type concurrency limit. */
+	max_reviewers: z.number().int().min(1).max(16).default(2),
 });
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
+
+// Turbo configuration schema (Phase 1 Task 1.1)
+export const LeanTurboConfigSchema = z.object({
+	/** Maximum parallel coders in lean mode. 1 = serial. */
+	max_parallel_coders: z.number().int().min(1).max(6).default(4),
+	/** Require declared scope for all tasks in lean mode. */
+	require_declared_scope: z.boolean().default(true),
+	/** Conflict resolution policy when parallel coders access same files. */
+	conflict_policy: z.enum(['serialize', 'degrade']).default('serialize'),
+	/** Degrade to serial if risk conditions detected. */
+	degrade_on_risk: z.boolean().default(true),
+	/** Run reviewer phase between lean coder turns. */
+	phase_reviewer: z.boolean().default(true),
+	/** Run critic phase between lean coder turns. */
+	phase_critic: z.boolean().default(true),
+	/** Require integrated diff before accepting changes. */
+	integrated_diff_required: z.boolean().default(true),
+	/** Allow docs-only phases when reviewer is not available. */
+	allow_docs_only_without_reviewer: z.boolean().default(false),
+	/** Use worktree isolation for parallel coders. NOT YET IMPLEMENTED — must be false. */
+	worktree_isolation: z
+		.boolean()
+		.default(false)
+		.refine((val) => val === false, {
+			message:
+				'worktree_isolation: true is not yet implemented. Use false (the default) for in-repo parallel execution. Full worktree isolation will be available in a future release.',
+		}),
+});
+
+export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
+
+export const StandardTurboConfigSchema = z.object({
+	/** Turbo execution strategy. standard = current behavior, lean = constrained parallel. */
+	strategy: z.literal('standard'),
+	/** Lean-mode configuration. Only used when strategy is 'lean'. */
+	lean: LeanTurboConfigSchema.optional(),
+});
+
+export const LeanTurboStrategyConfigSchema = z.object({
+	/** Turbo execution strategy. standard = current behavior, lean = constrained parallel. */
+	strategy: z.literal('lean'),
+	/** Lean-mode configuration. Only used when strategy is 'lean'. */
+	lean: LeanTurboConfigSchema,
+});
+
+export const TurboConfigSchema = z.discriminatedUnion('strategy', [
+	StandardTurboConfigSchema,
+	LeanTurboStrategyConfigSchema,
+]);
+
+export type TurboConfig = z.infer<typeof TurboConfigSchema>;
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	// Legacy: Per-agent overrides (default swarm)
 	agents: z.record(z.string(), AgentOverrideConfigSchema).optional(),
+
+	// Default agent — specifies which agent is set as primary mode.
+	//
+	// Semantics (resolved by resolvePrimaryAgentNames in src/agents/index.ts):
+	//   - Omitted: every generated *_architect role is primary (multi-swarm-aware,
+	//     restores v7.0.0 behavior — see #735 follow-up / v7.3.5).
+	//   - Exact generated name (e.g. "local_architect"): only that agent is primary.
+	//   - Base role name in ALL_AGENT_NAMES (e.g. "coder"): every generated agent
+	//     whose canonical base role matches is primary.
+	//   - Unknown / invalid string: warns once and falls back to architect-role
+	//     primaries (or the first generated agent if architects are disabled).
+	//
+	// Schema-level rules:
+	//   - The field MUST stay optional (no `.default(...)`) so omitted vs explicit
+	//     "architect" are distinguishable. The previous `.default("architect")` was
+	//     the root cause of all *_architect agents being demoted to subagents in
+	//     multi-swarm configs (issue: GUI/TUI showed plugin loaded but no swarm
+	//     architect agents).
+	//   - Accepts arbitrary strings here. Validation against the generated agent
+	//     set happens semantically at agent-generation time so an unknown value
+	//     does not invalidate the entire plugin config and trigger a fallback to
+	//     safe defaults.
+	//   - Empty / whitespace-only strings are normalized to `undefined`.
+	default_agent: z
+		.string()
+		.optional()
+		.transform((v) => {
+			if (v === undefined) return undefined;
+			const trimmed = v.trim();
+			return trimmed === '' ? undefined : trimmed;
+		}),
+
+	// Auto-select architect — controls whether the swarm architect is automatically
+	// chosen instead of OpenCode's built-in agents for new sessions.
+	//
+	// Three modes:
+	//   - `false` (default / omitted): no auto-select — user picks manually.
+	//   - `true`: enable auto-select and disable build/plan built-in agents so
+	//     only swarm architect agents are available.
+	//   - `"<architect_name>"` (e.g. "mega_architect"): same as `true`, but
+	//     targets a specific architect by name when multiple swarms are configured.
+	//
+	// Schema-level rules:
+	//   - Accepts boolean or string via Zod union.
+	//   - Empty / whitespace-only strings are normalized to `false`.
+	//   - Non-empty strings are trimmed.
+	//   - Omitted stays omitted (no `.default(...)` — fully backward compatible).
+	auto_select_architect: z
+		.union([z.boolean(), z.string()])
+		.optional()
+		.transform((v) => {
+			if (v === undefined) return undefined;
+			if (typeof v === 'boolean') return v;
+			const trimmed = v.trim();
+			return trimmed === '' ? false : trimmed;
+		}),
 
 	// Multiple swarms support
 	// Keys are swarm IDs (e.g., "cloud", "local", "fast")
@@ -1203,6 +1473,15 @@ export const PluginConfigSchema = z.object({
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),
 
+	// v2: Knowledge-application contract (warn|enforce, ack tracking)
+	knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+
+	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
+	skill_improver: SkillImproverConfigSchema.optional(),
+
+	// v2: Spec writer agent — independent model for .swarm/spec.md authorship
+	spec_writer: SpecWriterConfigSchema.optional(),
+
 	// Tool output truncation configuration
 	tool_output: z
 		.object({
@@ -1258,10 +1537,29 @@ export const PluginConfigSchema = z.object({
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
 
+	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
+	// Backward compatible: no turbo key means current behavior unchanged.
+	turbo: TurboConfigSchema.optional(),
+
 	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40)
 	turbo_mode: z.boolean().default(false).optional(),
 
+	// Quiet mode — suppress non-critical startup warnings. Defaults to true so
+	// console output does not bleed into the OpenCode TUI as overlay notifications.
+	// Set to false to restore verbose warnings (e.g. for debugging startup issues).
+	quiet: z.boolean().default(true).optional(),
+
+	// Background staleness check against npm. When a newer version of
+	// opencode-swarm has been published, emit a single deferred warning so
+	// users notice opencode is running a stale cached copy (issue #675).
+	// Throttled to once per 24h via a small on-disk cache. Set to false to
+	// fully disable the network call.
+	version_check: z.boolean().default(true).optional(),
+
 	// Full-auto mode — autonomous multi-agent orchestration with critic oversight
+	// v2: adds permission policy, denial accounting, and oversight cadence triggers
+	// while preserving the legacy v1 fields (max_interactions_per_phase, deadlock_threshold,
+	// escalation_mode, critic_model) so existing configs continue to load unchanged.
 	full_auto: z
 		.object({
 			enabled: z.boolean().default(false),
@@ -1269,14 +1567,155 @@ export const PluginConfigSchema = z.object({
 			max_interactions_per_phase: z.number().int().min(5).max(200).default(50),
 			deadlock_threshold: z.number().int().min(2).max(10).default(3),
 			escalation_mode: z.enum(['pause', 'terminate']).default('pause'),
+			// v2 additions — all optional with safe defaults so legacy configs are unaffected.
+			mode: z.enum(['assisted', 'supervised', 'strict']).default('supervised'),
+			fail_closed: z.boolean().default(true),
+			permission_policy: z
+				.object({
+					enabled: z.boolean().default(true),
+					trusted_roots: z.array(z.string()).default(['.']),
+					trusted_domains: z.array(z.string()).default([]),
+					protected_paths: z
+						.array(z.string())
+						.default([
+							'.git',
+							'.github/workflows',
+							'.swarm',
+							'package.json',
+							'package-lock.json',
+							'bun.lock',
+							'CHANGELOG.md',
+							'.release-please-manifest.json',
+							'release-please-config.json',
+							'src/index.ts',
+							'src/hooks/guardrails.ts',
+							'src/hooks/delegation-gate.ts',
+							'src/hooks/scope-guard.ts',
+							'src/hooks/full-auto-permission.ts',
+							'src/hooks/full-auto-intercept.ts',
+							'src/full-auto',
+							'src/config/schema.ts',
+							'src/config/constants.ts',
+							'src/tools/phase-complete.ts',
+							'dist',
+						]),
+					allow_defaults: z.boolean().default(true),
+				})
+				.default(() => ({
+					enabled: true,
+					trusted_roots: ['.'],
+					trusted_domains: [],
+					protected_paths: [
+						'.git',
+						'.github/workflows',
+						'.swarm',
+						'package.json',
+						'package-lock.json',
+						'bun.lock',
+						'CHANGELOG.md',
+						'.release-please-manifest.json',
+						'release-please-config.json',
+						'src/index.ts',
+						'src/hooks/guardrails.ts',
+						'src/hooks/delegation-gate.ts',
+						'src/hooks/scope-guard.ts',
+						'src/hooks/full-auto-permission.ts',
+						'src/hooks/full-auto-intercept.ts',
+						'src/full-auto',
+						'src/config/schema.ts',
+						'src/config/constants.ts',
+						'src/tools/phase-complete.ts',
+						'dist',
+					],
+					allow_defaults: true,
+				})),
+			denials: z
+				.object({
+					max_consecutive: z.number().int().min(1).max(50).default(3),
+					max_total: z.number().int().min(1).max(500).default(20),
+					on_limit: z.enum(['pause', 'terminate']).default('pause'),
+				})
+				.default(() => ({
+					max_consecutive: 3,
+					max_total: 20,
+					on_limit: 'pause' as const,
+				})),
+			oversight: z
+				.object({
+					on_plan_change: z.boolean().default(true),
+					// strict mode flips this to true automatically at runtime; default
+					// supervised stays false unless the action is high-risk.
+					on_task_completion: z.boolean().default(false),
+					on_phase_boundary: z.boolean().default(true),
+					on_high_risk_action: z.boolean().default(true),
+					on_subagent_return_warning: z.boolean().default(true),
+					every_tool_calls: z.number().int().min(0).max(10000).default(25),
+					every_architect_turns: z.number().int().min(0).max(1000).default(5),
+					every_minutes: z.number().int().min(0).max(1440).default(20),
+				})
+				.default(() => ({
+					on_plan_change: true,
+					on_task_completion: false,
+					on_phase_boundary: true,
+					on_high_risk_action: true,
+					on_subagent_return_warning: true,
+					every_tool_calls: 25,
+					every_architect_turns: 5,
+					every_minutes: 20,
+				})),
 		})
 		.optional()
-		.default({
+		.default(() => ({
 			enabled: false,
 			max_interactions_per_phase: 50,
 			deadlock_threshold: 3,
-			escalation_mode: 'pause',
-		}),
+			escalation_mode: 'pause' as const,
+			mode: 'supervised' as const,
+			fail_closed: true,
+			permission_policy: {
+				enabled: true,
+				trusted_roots: ['.'],
+				trusted_domains: [],
+				protected_paths: [
+					'.git',
+					'.github/workflows',
+					'.swarm',
+					'package.json',
+					'package-lock.json',
+					'bun.lock',
+					'CHANGELOG.md',
+					'.release-please-manifest.json',
+					'release-please-config.json',
+					'src/index.ts',
+					'src/hooks/guardrails.ts',
+					'src/hooks/delegation-gate.ts',
+					'src/hooks/scope-guard.ts',
+					'src/hooks/full-auto-permission.ts',
+					'src/hooks/full-auto-intercept.ts',
+					'src/full-auto',
+					'src/config/schema.ts',
+					'src/config/constants.ts',
+					'src/tools/phase-complete.ts',
+					'dist',
+				],
+				allow_defaults: true,
+			},
+			denials: {
+				max_consecutive: 3,
+				max_total: 20,
+				on_limit: 'pause' as const,
+			},
+			oversight: {
+				on_plan_change: true,
+				on_task_completion: false,
+				on_phase_boundary: true,
+				on_high_risk_action: true,
+				on_subagent_return_warning: true,
+				every_tool_calls: 25,
+				every_architect_turns: 5,
+				every_minutes: 20,
+			},
+		})),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

@@ -9,6 +9,18 @@ export interface HivePromotionSummary {
     total_hive_entries: number;
 }
 /**
+ * Check whether a swarm knowledge entry is eligible for hive promotion.
+ * Three routes to eligibility:
+ *   Route 1: hive_eligible flag + 3+ distinct phases
+ *   Route 2: 'hive-fast-track' tag
+ *   Route 3: age exceeds auto_promote_days threshold
+ *
+ * @param entry - The swarm knowledge entry to check
+ * @param autoPromoteDays - Number of days before age-based promotion kicks in
+ * @returns true if the entry is eligible for hive promotion
+ */
+export declare function isHiveEligible(entry: SwarmKnowledgeEntry, autoPromoteDays: number): boolean;
+/**
  * Main promotion logic: checks swarm entries and promotes eligible ones to hive.
  * Also updates existing hive entries with new project confirmations.
  * Returns a summary of the promotion activity for curator state.

@@ -42,6 +42,7 @@ describe('phase_complete E2E — drift evidence → phase_complete reads it and 
 					required_agents: ['coder'],
 					require_docs: false,
 					policy: 'enforce',
+					regression_sweep: { enforce: false },
 				},
 				curator: {
 					enabled: false,

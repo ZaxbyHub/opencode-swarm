@@ -24,9 +24,11 @@ export declare function createAgentActivityHooks(config: PluginConfig, directory
         sessionID: string;
         callID: string;
     }, output: {
-        title: string;
-        output: string;
-        metadata: unknown;
+        title?: string;
+        output?: unknown;
+        metadata?: unknown;
+        error?: unknown;
+        success?: boolean;
     }) => Promise<void>;
 };
 /**

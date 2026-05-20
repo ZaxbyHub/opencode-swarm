@@ -287,6 +287,93 @@ describe('knowledge-validator', () => {
 			);
 			expect(matches).toBe(true);
 		});
+
+		it('blocks "rm -rf /" (root deletion)', () => {
+			const lesson = 'Be careful with rm -rf / as it deletes everything';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks "format C:" (Windows disk format)', () => {
+			const lesson = 'Never run format C: on a production machine';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks "mkfs.ext4 /dev/sda" (filesystem creation)', () => {
+			const lesson = 'Use mkfs.ext4 /dev/sda to format the disk';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks "dd if=/dev/zero of=/dev/sda" (raw disk write)', () => {
+			const lesson = 'Run dd if=/dev/zero of=/dev/sda to wipe the drive';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks ":(){ :|:& };:" (fork bomb)', () => {
+			const lesson = 'The fork bomb :(){ :|:& };: will crash any Unix system';
+			const result = validateLesson(lesson, [], {
+				category: 'security',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('passes safe commands like "git commit"', () => {
+			const lesson =
+				'Use git commit to save your changes with a descriptive message';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(2);
+		});
 	});
 
 	describe('Layer 2 - Content Safety - SECURITY_DEGRADING_PATTERNS', () => {

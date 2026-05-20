@@ -288,11 +288,15 @@ The path ../../../etc/shadow contains sensitive data.`;
 			const output = { system: [] as string[] };
 			await transformFn({ sessionID: 'test-session' }, output);
 
-			// Large content IS injected - no size limit exists
+			// Large content is rejected by the token budget guard in tryInject().
+			// estimateTokens() estimates ~3.8M tokens for 11MB; the default budget
+			// is 4000 tokens, so the handoff block is dropped entirely.
+			// Only the phase header (~953 bytes) is injected.
 			const injectedContent = output.system.join('\n');
-			expect(injectedContent.length).toBeGreaterThan(10 * 1024 * 1024);
+			expect(injectedContent.length).toBeLessThan(4096);
 
-			// This documents the DoS vulnerability - no content size limiting
+			// This documents that the DoS vulnerability is mitigated: content is
+			// budget-gated via token estimation in tryInject() (system-enhancer.ts).
 		}, 30000); // Increase timeout for large file handling
 
 		it('should handle moderately large content with context budget', async () => {

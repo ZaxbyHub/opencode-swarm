@@ -6,7 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import { isStrictTaskId } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
@@ -97,7 +98,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Read-only tool to check the gate status of a specific task. Reads .swarm/evidence/{taskId}.json and returns structured JSON describing required, passed, and missing gates.',
 	args: {
-		task_id: tool.schema
+		task_id: z
 			.string()
 			.min(1)
 			.regex(
@@ -105,7 +106,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				'Task ID must be in N.M or N.M.P format (e.g., "1.1", "1.2.3", "1.2.3.4")',
 			)
 			.describe('The task ID to check gate status for (e.g., "1.1", "2.3.1")'),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe(

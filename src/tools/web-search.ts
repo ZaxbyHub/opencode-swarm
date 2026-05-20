@@ -1,5 +1,5 @@
 /**
- * web_search tool — restricted to council_member agents.
+ * web_search tool — owned by the architect for MODE: COUNCIL pre-search.
  *
  * Thin wrapper around `src/council/web-search-provider.ts`. Returns structured
  * results on success and structured errors on failure (never throws). Config-
@@ -10,7 +10,7 @@
  * Hard cap on max_results = 10 (clamped silently). Default sourced from council.general.maxSourcesPerMember.
  */
 
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import {
@@ -44,16 +44,16 @@ interface WebSearchFail {
 
 export const web_search: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'External web search for council member agents. Returns titled results with snippets and URLs. ' +
-		'Restricted to council_member agents via AGENT_TOOL_MAP. Requires council.general.enabled and a ' +
-		'configured search API key (Tavily or Brave). max_results is capped at 10 with default from council.general.maxSourcesPerMember.',
+		'External web search for architect-driven council research. Returns titled results with snippets and URLs. ' +
+		'Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents. ' +
+		'Requires council.general.enabled and a configured search API key (Tavily or Brave). max_results is capped at 10 with default from council.general.maxSourcesPerMember.',
 	args: {
-		query: tool.schema
+		query: z
 			.string()
 			.min(1)
 			.max(500)
 			.describe('Search query string (1–500 characters).'),
-		max_results: tool.schema
+		max_results: z
 			.number()
 			.int()
 			.min(1)
@@ -62,7 +62,7 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 			.describe(
 				`Number of results to request (1–20). Hard-capped at ${MAX_RESULTS_HARD_CAP}. Defaults to council.general.maxSourcesPerMember.`,
 			),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe('Project root for config resolution. Optional.'),

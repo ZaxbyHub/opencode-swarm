@@ -1,11 +1,13 @@
 /**
  * Handles /swarm knowledge quarantine <id> [reason] command.
  * Moves a knowledge entry to quarantine with optional reason.
+ * Accepts a full ID or a unique prefix.
  */
 export declare function handleKnowledgeQuarantineCommand(directory: string, args: string[]): Promise<string>;
 /**
  * Handles /swarm knowledge restore <id> command.
  * Restores a quarantined knowledge entry.
+ * Accepts a full ID or a unique prefix.
  */
 export declare function handleKnowledgeRestoreCommand(directory: string, args: string[]): Promise<string>;
 /**

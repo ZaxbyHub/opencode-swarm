@@ -54,7 +54,7 @@ export function pushCouncilAdvisory(
 	// APPROVE with no advisoryFindings → nothing useful to surface.
 	// Design choice: silently skip rather than pushing a "looks good" note,
 	// because the architect already received the APPROVE verdict via the
-	// convene_council tool return value.
+	// submit_council_verdicts tool return value.
 	if (
 		synthesis.overallVerdict === 'APPROVE' &&
 		synthesis.advisoryFindings.length === 0

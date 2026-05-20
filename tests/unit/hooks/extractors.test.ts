@@ -978,7 +978,7 @@ describe('extractIncompleteTasksFromPlan', () => {
 		const plan = createTestPlan();
 		const result = extractIncompleteTasksFromPlan(plan);
 		expect(result).toBe(
-			'- [ ] 1.2: Task two [MEDIUM] (depends: 1.1)\n- [ ] 1.3: Task three [LARGE] (depends: 1.2)',
+			'- [ ] 1.2: Task two [MEDIUM] (depends: 1.1) ← CURRENT\n- [ ] 1.3: Task three [LARGE] (depends: 1.2)',
 		);
 	});
 
@@ -1081,5 +1081,68 @@ describe('extractIncompleteTasksFromPlan', () => {
 		});
 		const result = extractIncompleteTasksFromPlan(plan);
 		expect(result).toBeNull();
+	});
+
+	it('Emits ← CURRENT marker for in_progress task', () => {
+		const plan = createTestPlan({
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress' as const,
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'in_progress' as const,
+							size: 'small' as const,
+							description: 'Active task',
+							depends: [],
+							files_touched: [],
+						},
+						{
+							id: '1.2',
+							phase: 1,
+							status: 'pending' as const,
+							size: 'medium' as const,
+							description: 'Pending task',
+							depends: ['1.1'],
+							files_touched: [],
+						},
+					],
+				},
+			],
+		});
+		const result = extractIncompleteTasksFromPlan(plan);
+		expect(result).toContain('← CURRENT');
+		expect(result).toBe(
+			'- [ ] 1.1: Active task [SMALL] ← CURRENT\n- [ ] 1.2: Pending task [MEDIUM] (depends: 1.1)',
+		);
+	});
+
+	it('Does NOT emit ← CURRENT for pending tasks', () => {
+		const plan = createTestPlan({
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress' as const,
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending' as const,
+							size: 'small' as const,
+							description: 'Pending task',
+							depends: [],
+							files_touched: [],
+						},
+					],
+				},
+			],
+		});
+		const result = extractIncompleteTasksFromPlan(plan);
+		expect(result).not.toContain('← CURRENT');
+		expect(result).toBe('- [ ] 1.1: Pending task [SMALL]');
 	});
 });

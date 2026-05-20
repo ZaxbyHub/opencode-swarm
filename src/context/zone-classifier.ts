@@ -29,7 +29,9 @@ export function classifyFile(filePath: string): ZoneClassification {
 	// 1. GENERATED (most specific) - .wasm, dist/, build/, .swarm/checkpoints/
 	if (
 		normalized.endsWith('.wasm') ||
+		normalized.startsWith('dist/') ||
 		normalized.includes('/dist/') ||
+		normalized.startsWith('build/') ||
 		normalized.includes('/build/') ||
 		normalized.includes('.swarm/checkpoints/')
 	) {

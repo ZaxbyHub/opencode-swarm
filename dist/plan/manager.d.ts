@@ -6,10 +6,55 @@
 export declare class PlanConcurrentModificationError extends Error {
     constructor(message: string);
 }
+/**
+ * Thrown when savePlan detects that the incoming plan would silently drop one
+ * or more tasks from the prior plan without the caller acknowledging the
+ * removal (issue #853).
+ *
+ * Callers must pass `options.acknowledged_removals.ids` covering every missing
+ * task id together with a non-empty reason to proceed.
+ */
+export declare class PlanTaskRemovalNotAcknowledgedError extends Error {
+    readonly missingTasks: Array<{
+        id: string;
+        phase: number;
+        status: TaskStatus;
+    }>;
+    constructor(missingTasks: Array<{
+        id: string;
+        phase: number;
+        status: TaskStatus;
+    }>);
+}
+/**
+ * Caller-supplied acknowledgement that a save_plan operation is intentionally
+ * removing tasks from the prior plan (issue #853). Passed to savePlan via the
+ * `acknowledged_removals` option; `ids` must list every task id missing from
+ * the incoming plan; `reason` must be non-empty; `source` identifies the
+ * caller (e.g. 'save_plan_tool', 'phase_complete_rebuild_from_ledger').
+ */
+export interface AcknowledgedRemovals {
+    ids: string[];
+    reason: string;
+    source: string;
+}
 import { type Plan, type RuntimePlan, type TaskStatus } from '../config/plan-schema';
 import { type LedgerEvent, type LedgerEventInput } from './ledger';
 /** Reset the startup ledger check flag. For testing only. */
 export declare function resetStartupLedgerCheck(): void;
+/**
+ * Test-only dependency-injection seam. Production code calls
+ * `_internals.loadPlan(...)`, `_internals.loadPlanJsonOnly(...)`, etc. so tests
+ * can replace the functions on this object without touching the real module —
+ * `mock.module` from `bun:test` leaks across files in Bun's shared test-runner
+ * process, which would corrupt unrelated suites. Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export declare const _internals: {
+    loadPlan: typeof loadPlan;
+    loadPlanJsonOnly: typeof loadPlanJsonOnly;
+    regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
+};
 /**
  * Append a ledger event with exponential-backoff retry on stale-writer conflicts.
  *
@@ -51,11 +96,31 @@ export declare function regeneratePlanMarkdown(directory: string, plan: Plan): P
  */
 export declare function loadPlan(directory: string): Promise<RuntimePlan | null>;
 /**
+ * Recovery-path helper for callers that legitimately need to replace the
+ * plan task set without explicit per-id acknowledgement (e.g. rebuilding
+ * from the ledger after replay, importing an external checkpoint, or
+ * recovering from a critic-approved snapshot).
+ *
+ * Diffs the on-disk plan against the incoming plan, auto-populates
+ * `acknowledged_removals` with every missing id, and delegates to savePlan.
+ * The architect-facing save_plan tool MUST NOT use this — it should fail
+ * closed and require the caller to enumerate removals explicitly.
+ *
+ * Returns the count of auto-acknowledged removals so the caller can attach
+ * `_midLoadRemovals` to the RuntimePlan for Layer A disclosure.
+ */
+export declare function savePlanWithAutoAcknowledgedRemovals(directory: string, plan: Plan, source: string, reason: string, options?: {
+    preserveCompletedStatuses?: boolean;
+}): Promise<{
+    removedCount: number;
+}>;
+/**
  * Validate against PlanSchema (throw on invalid), write to .swarm/plan.json via atomic temp+rename pattern,
  * then derive and write .swarm/plan.md
  */
 export declare function savePlan(directory: string, plan: Plan, options?: {
     preserveCompletedStatuses?: boolean;
+    acknowledged_removals?: AcknowledgedRemovals;
 }): Promise<void>;
 /**
  * Rebuild plan from ledger events.
@@ -84,6 +149,19 @@ export declare function updateTaskStatus(directory: string, taskId: string, stat
  * Ensures stable ordering: phases by ID (ascending), tasks by ID (natural numeric).
  */
 export declare function derivePlanMarkdown(plan: Plan): string;
+/**
+ * Return the id of the current task within the plan's current phase, or
+ * undefined if no incomplete task can be identified. PURE function — no I/O.
+ *
+ * Resolution: among tasks of the current phase, pick the first
+ * in_progress task; otherwise the first non-completed task; otherwise
+ * undefined (between phases / phase exhausted).
+ *
+ * Used by the v2 knowledge-injector to populate `taskId` in the retrieval
+ * context so action-aware ranking and shown-set keying can scope to a
+ * specific task.
+ */
+export declare function getCurrentTaskId(plan: Plan | null | undefined): string | undefined;
 /**
  * Convert existing plan.md to plan.json. PURE function — no I/O.
  */

@@ -33,6 +33,14 @@ export interface SemgrepResult {
     /** Engine label for the findings */
     engine: 'tier_a' | 'tier_a+tier_b';
 }
+export declare const _internals: {
+    isSemgrepAvailable: typeof isSemgrepAvailable;
+    checkSemgrepAvailable: typeof checkSemgrepAvailable;
+    resetSemgrepCache: typeof resetSemgrepCache;
+    runSemgrep: typeof runSemgrep;
+    getRulesDirectory: typeof getRulesDirectory;
+    hasBundledRules: typeof hasBundledRules;
+};
 /**
  * Check if Semgrep CLI is available on the system
  * Uses caching to avoid shelling out on every check

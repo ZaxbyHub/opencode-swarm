@@ -7,6 +7,8 @@ mock.module('../../../src/utils/path-security', () => ({
 	validateDirectory: () => {},
 }));
 
+afterEach(() => mock.restore());
+
 // Re-import for each test to get fresh module state
 describe('context-budget-service', () => {
 	describe('estimateTokens', () => {

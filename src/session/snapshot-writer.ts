@@ -3,7 +3,7 @@
  * Serializes swarmState to .swarm/session/state.json using atomic write (temp-file + rename).
  */
 
-import { mkdirSync, renameSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync } from 'node:fs';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import type {
@@ -13,6 +13,7 @@ import type {
 } from '../state';
 import { swarmState } from '../state';
 import { log } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 
 /**
  * v6.35.4: In-flight write guard.
@@ -73,12 +74,14 @@ export interface SerializedAgentSession {
 	fullAutoLastQuestionHash?: string | null;
 	/** Timestamp when session was rehydrated from snapshot (0 if never rehydrated) */
 	sessionRehydratedAt?: number;
+	/** Stage B completion tracking: per-task set of completed Stage B agents. Optional for backward compat with old snapshots. */
+	stageBCompletion?: Record<string, string[]>;
 }
 
 /**
  * Minimal interface for serialized InvocationWindow
  */
-interface SerializedInvocationWindow {
+export interface SerializedInvocationWindow {
 	id: number;
 	agentName: string;
 	startedAtMs: number;
@@ -89,6 +92,7 @@ interface SerializedInvocationWindow {
 	recentToolCalls: Array<{ tool: string; argsHash: number; timestamp: number }>;
 	warningIssued: boolean;
 	warningReason: string;
+	transientRetryCount: number;
 }
 
 /**
@@ -144,6 +148,14 @@ export function serializeAgentSession(
 		s.lastCompletedPhaseAgentsDispatched ?? new Set(),
 	);
 
+	// Convert stageBCompletion: Map<string, Set<string>> -> Record<string, string[]>
+	const stageBCompletion: Record<string, string[]> = {};
+	if (s.stageBCompletion) {
+		for (const [taskId, agents] of s.stageBCompletion) {
+			stageBCompletion[taskId] = Array.from(agents);
+		}
+	}
+
 	// Convert windows: Record<string, InvocationWindow> (already serializable)
 	const windows: Record<string, SerializedInvocationWindow> = {};
 	const rawWindows = s.windows ?? {};
@@ -159,6 +171,7 @@ export function serializeAgentSession(
 			recentToolCalls: win.recentToolCalls,
 			warningIssued: win.warningIssued,
 			warningReason: win.warningReason,
+			transientRetryCount: win.transientRetryCount ?? 0,
 		};
 	}
 
@@ -202,6 +215,7 @@ export function serializeAgentSession(
 		fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
 		fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
+		...(Object.keys(stageBCompletion).length > 0 && { stageBCompletion }),
 	};
 }
 
@@ -241,7 +255,20 @@ export async function writeSnapshot(
 
 		// Atomic write: write to temp file then rename
 		const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-		await Bun.write(tempPath, content);
+		await bunWrite(tempPath, content);
+		// FR-004: fsync the temp file so the rename below cannot leave us with
+		// an empty or partial canonical file on power-loss / kill -9.
+		try {
+			const fd = openSync(tempPath, 'r+');
+			try {
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+		} catch {
+			// fsync is best-effort; OSes / filesystems that don't support it
+			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
+		}
 		renameSync(tempPath, resolvedPath);
 	} catch (error) {
 		log('[snapshot-writer] write failed', {
@@ -262,8 +289,8 @@ export function createSnapshotWriterHook(
 		// Chain writes so concurrent calls don't race on the temp-rename sequence.
 		// Each write sees the latest swarmState snapshot at the moment it runs.
 		_writeInFlight = _writeInFlight.then(
-			() => writeSnapshot(directory, swarmState),
-			() => writeSnapshot(directory, swarmState),
+			() => _internals.writeSnapshot(directory, swarmState),
+			() => _internals.writeSnapshot(directory, swarmState),
 		);
 		return _writeInFlight;
 	};
@@ -277,8 +304,22 @@ export function createSnapshotWriterHook(
 export async function flushPendingSnapshot(directory: string): Promise<void> {
 	// Trigger a fresh write and wait for it (and any already-in-flight write) to finish.
 	_writeInFlight = _writeInFlight.then(
-		() => writeSnapshot(directory, swarmState),
-		() => writeSnapshot(directory, swarmState),
+		() => _internals.writeSnapshot(directory, swarmState),
+		() => _internals.writeSnapshot(directory, swarmState),
 	);
 	await _writeInFlight;
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	writeSnapshot: typeof writeSnapshot;
+	createSnapshotWriterHook: typeof createSnapshotWriterHook;
+	flushPendingSnapshot: typeof flushPendingSnapshot;
+} = {
+	writeSnapshot,
+	createSnapshotWriterHook,
+	flushPendingSnapshot,
+} as const;

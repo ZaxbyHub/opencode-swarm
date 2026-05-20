@@ -6,7 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
 import { checkWriteTargetForSymlink } from '../hooks/guardrails';
 import { writeScopeToDisk } from '../scope/scope-persistence';
 import { swarmState } from '../state';
@@ -360,22 +361,22 @@ export const declare_scope: ToolDefinition = createSwarmTool({
 		'Sets the list of files the coder is permitted to modify for a specific task. ' +
 		'Must be called before delegating to coder to enable scope containment checking.',
 	args: {
-		taskId: tool.schema
+		taskId: z
 			.string()
 			.min(1)
 			.regex(/^\d+\.\d+(\.\d+)*$/, 'Task ID must be in N.M or N.M.P format')
 			.describe(
 				'Task ID for which scope is being declared, e.g. "1.1", "1.2.3"',
 			),
-		files: tool.schema
-			.array(tool.schema.string().min(1).max(4096))
+		files: z
+			.array(z.string().min(1).max(4096))
 			.min(1)
 			.describe('Array of file paths the coder is permitted to modify'),
-		whitelist: tool.schema
-			.array(tool.schema.string().min(1).max(4096))
+		whitelist: z
+			.array(z.string().min(1).max(4096))
 			.optional()
 			.describe('Additional file paths to whitelist (merged with files)'),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe('Working directory where the plan is located'),

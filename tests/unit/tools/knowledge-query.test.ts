@@ -44,6 +44,8 @@ describe('knowledge-query tool verification tests', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		// Restore cross-module mocks to prevent contamination
+		mock.restore();
 	});
 
 	// Mock resolveHiveKnowledgePath to return a path inside tmpDir so hive knowledge
@@ -417,6 +419,7 @@ describe('knowledge-query tool verification tests', () => {
 				'debugging',
 				'performance',
 				'integration',
+				'todo',
 				'other',
 			] as const;
 

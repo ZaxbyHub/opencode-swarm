@@ -8,6 +8,7 @@ import {
 } from '../../../src/hooks/utils';
 
 // Mock logger module at file scope so warn() bypasses DEBUG gate
+// NOTE: This is a CROSS-MODULE mock — no _internals seam available in utils.ts for logger
 mock.module('../../../src/utils/logger', () => ({
 	warn: (...args: any[]) => console.warn(...args),
 	log: (...args: any[]) => console.log(...args),
@@ -19,6 +20,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 describe('Hook Utilities', () => {
+	afterEach(() => {
+		mock.restore();
+	});
+
 	describe('safeHook', () => {
 		it('calls the wrapped function with correct input and output args', async () => {
 			let callArgs: any[] = [];

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone *)",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git config *)",
+      "Bash(git -C \"C:\\\\ClaudeCode\\\\opencode-swarm\" log --oneline -5)"
+    ]
+  }
+}

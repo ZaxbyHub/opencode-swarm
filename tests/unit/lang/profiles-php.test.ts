@@ -65,16 +65,18 @@ describe('PHP Language Profile', () => {
 			expect(pest!.detect).toBe('Pest.php');
 		});
 
-		// Drift: Pest priority 1 < PHPUnit priority 3+ ensures Pest wins in mixed repos.
+		// Drift: Pest priority > PHPUnit priority ensures Pest wins in mixed
+		// repos (PR #825: profile priorities now use HIGH-IS-HIGHER convention
+		// project-wide; PHP was previously the lone low-is-higher holdout).
 		// If priority ordering changes, update test and docs/releases/v6.49.0.md.
-		it('Pest has lower priority number than PHPUnit (Pest preferred in mixed repos)', () => {
+		it('Pest has higher priority number than PHPUnit (Pest preferred in mixed repos)', () => {
 			const pest = phpProfile!.test.frameworks.find((f) => f.name === 'Pest');
 			const phpunit = phpProfile!.test.frameworks.find(
 				(f) => f.name === 'PHPUnit',
 			);
 			expect(pest).toBeDefined();
 			expect(phpunit).toBeDefined();
-			expect(pest!.priority).toBeLessThan(phpunit!.priority);
+			expect(pest!.priority).toBeGreaterThan(phpunit!.priority);
 		});
 
 		it('test.detectFiles includes Pest.php detection signal', () => {
@@ -107,12 +109,12 @@ describe('PHP Language Profile', () => {
 	});
 
 	describe('lint tool precedence', () => {
-		it('lint.linters contains PHPStan entry (phpstan.neon) at priority 1', () => {
+		it('lint.linters contains PHPStan entry (phpstan.neon) at priority 10 (highest)', () => {
 			const phpstanNeon = phpProfile!.lint.linters.find(
 				(l) => l.name === 'PHPStan' && l.detect === 'phpstan.neon',
 			);
 			expect(phpstanNeon).toBeDefined();
-			expect(phpstanNeon!.priority).toBe(1);
+			expect(phpstanNeon!.priority).toBe(10);
 			expect(phpstanNeon!.cmd).toContain('phpstan');
 		});
 
@@ -123,9 +125,9 @@ describe('PHP Language Profile', () => {
 			expect(pint!.cmd).toContain('pint');
 		});
 
-		// Drift: phpstan.neon (priority 1) < phpstan.neon.dist (priority 2) — .neon preferred over .neon.dist.
+		// Drift: phpstan.neon (priority 10) > phpstan.neon.dist (priority 9) — .neon preferred over .neon.dist.
 		// If precedence changes, update framework-detector.ts getLaravelCommandOverlay() and this test.
-		it('phpstan.neon preferred over phpstan.neon.dist (lower priority number wins)', () => {
+		it('phpstan.neon preferred over phpstan.neon.dist (higher priority number wins)', () => {
 			const phpstanNeon = phpProfile!.lint.linters.find(
 				(l) => l.name === 'PHPStan' && l.detect === 'phpstan.neon',
 			);
@@ -134,19 +136,19 @@ describe('PHP Language Profile', () => {
 			);
 			expect(phpstanNeon).toBeDefined();
 			expect(phpstanDist).toBeDefined();
-			expect(phpstanNeon!.priority).toBeLessThan(phpstanDist!.priority);
+			expect(phpstanNeon!.priority).toBeGreaterThan(phpstanDist!.priority);
 		});
 
-		// Drift: Pint priority 3 < PHP-CS-Fixer priority 4 ensures Pint wins when pint.json present.
+		// Drift: Pint priority 8 > PHP-CS-Fixer priority 7 ensures Pint wins when pint.json present.
 		// If Pint detectFile ('pint.json') or priority changes, update getLaravelCommandOverlay() to match.
-		it('Pint has lower priority number than PHP-CS-Fixer (Pint preferred when present)', () => {
+		it('Pint has higher priority number than PHP-CS-Fixer (Pint preferred when present)', () => {
 			const pint = phpProfile!.lint.linters.find((l) => l.name === 'Pint');
 			const fixer = phpProfile!.lint.linters.find(
 				(l) => l.name === 'PHP-CS-Fixer',
 			);
 			expect(pint).toBeDefined();
 			expect(fixer).toBeDefined();
-			expect(pint!.priority).toBeLessThan(fixer!.priority);
+			expect(pint!.priority).toBeGreaterThan(fixer!.priority);
 		});
 
 		it('lint.linters has exactly 4 entries (PHPStan x2, Pint, PHP-CS-Fixer)', () => {

@@ -24,12 +24,15 @@ describe('context-budget log reclassification', () => {
 		mockError.mockClear();
 	});
 
+	afterEach(() => {
+		// CROSS-MODULE mock cleanup — no _internals seam in context-budget.ts
+		mock.restore();
+	});
+
 	const getCreateContextBudgetHandler = () => {
 		return require('../../../src/hooks/context-budget.js')
 			.createContextBudgetHandler;
 	};
-
-	afterEach(() => {});
 
 	it('first call with model/provider uses log() not warn() for startup diagnostic', async () => {
 		const config = {

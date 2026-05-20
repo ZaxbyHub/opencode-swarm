@@ -1,6 +1,19 @@
-﻿import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mock the knowledge-validator module with factory functions
+// Mock knowledge-store — required because quarantine/restore handlers now call readKnowledge
+// to resolve prefix matches before delegating to the backend.
+const mockReadKnowledge = vi.fn().mockResolvedValue([]);
+const mockResolveSwarmKnowledgePath = vi
+	.fn()
+	.mockImplementation((dir: string) => `${dir}/.swarm/knowledge.jsonl`);
+
+vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+	readKnowledge: (path: string) => mockReadKnowledge(path),
+	resolveSwarmKnowledgePath: (dir: string) =>
+		mockResolveSwarmKnowledgePath(dir),
+}));
+
+// Mock knowledge-validator module
 const mockQuarantineEntry = vi.fn();
 const mockRestoreEntry = vi.fn();
 
@@ -9,7 +22,7 @@ vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
 	restoreEntry: mockRestoreEntry,
 }));
 
-// Mock the knowledge-migrator module with factory functions
+// Mock knowledge-migrator module
 const mockMigrate = vi.fn();
 
 vi.mock('../../../src/hooks/knowledge-migrator.js', () => ({
@@ -18,10 +31,38 @@ vi.mock('../../../src/hooks/knowledge-migrator.js', () => ({
 
 // Import AFTER mocking, with .js extension
 import {
+	handleKnowledgeListCommand,
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
 } from '../../../src/commands/knowledge.js';
+
+// Build a minimal SwarmKnowledgeEntry for mocking
+function makeEntry(id: string, overrides?: Record<string, unknown>) {
+	return {
+		id,
+		tier: 'swarm' as const,
+		lesson: 'A test lesson that is long enough for testing',
+		category: 'process' as const,
+		tags: [],
+		scope: 'global',
+		confidence: 0.75,
+		status: 'candidate' as const,
+		confirmed_by: [],
+		project_name: 'test',
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 1,
+		created_at: '2026-01-01T00:00:00Z',
+		updated_at: '2026-01-01T00:00:00Z',
+		auto_generated: false,
+		hive_eligible: false,
+		...overrides,
+	};
+}
 
 describe('handleKnowledgeQuarantineCommand', () => {
 	beforeEach(() => {
@@ -66,6 +107,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('calls quarantineEntry with correct args when valid', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockResolvedValueOnce(undefined);
 		await handleKnowledgeQuarantineCommand('/test/dir', [
 			'test-id',
@@ -84,6 +126,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('returns success message with entryId on successful quarantine', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeQuarantineCommand('/test/dir', [
 			'test-id',
@@ -92,6 +135,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('uses default reason when no reason args provided', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockResolvedValueOnce(undefined);
 		await handleKnowledgeQuarantineCommand('/test/dir', ['test-id']);
 		expect(mockQuarantineEntry).toHaveBeenCalledWith(
@@ -103,6 +147,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('joins multi-word reason args correctly', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('abc')]);
 		mockQuarantineEntry.mockResolvedValueOnce(undefined);
 		const args = ['abc', 'bad', 'rule'];
 		await handleKnowledgeQuarantineCommand('/test/dir', args);
@@ -115,6 +160,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('returns generic error message (not raw error) when quarantineEntry throws', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockRejectedValueOnce(
 			new Error('Internal database error'),
 		);
@@ -127,6 +173,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 	});
 
 	it('does NOT expose error message content in return value when quarantineEntry throws', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockRejectedValueOnce(
 			new Error('Sensitive information leaked'),
 		);
@@ -138,6 +185,44 @@ describe('handleKnowledgeQuarantineCommand', () => {
 		expect(result).toBe(
 			'❌ Failed to quarantine entry. Check the entry ID and try again.',
 		);
+	});
+
+	it('resolves by unique prefix and quarantines the matched entry (test 7)', async () => {
+		const fullId = 'abc123def456-1234-5678-abcd-ef0123456789';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(fullId)]);
+		mockQuarantineEntry.mockResolvedValueOnce(undefined);
+		const result = await handleKnowledgeQuarantineCommand('/test/dir', [
+			'abc123def456',
+		]);
+		expect(mockQuarantineEntry).toHaveBeenCalledWith(
+			'/test/dir',
+			fullId,
+			'Quarantined via /swarm knowledge quarantine command',
+			'user',
+		);
+		expect(result).toBe(`✅ Entry ${fullId} quarantined successfully.`);
+	});
+
+	it('returns not-found error when prefix matches no entries', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('xyz999-some-uuid')]);
+		const result = await handleKnowledgeQuarantineCommand('/test/dir', [
+			'abc123',
+		]);
+		expect(mockQuarantineEntry).not.toHaveBeenCalled();
+		expect(result).toContain("No entry found matching 'abc123'");
+	});
+
+	it('rejects ambiguous prefix and lists all matching candidates (test 8)', async () => {
+		const id1 = 'abcd1111-entry-one-long-enough';
+		const id2 = 'abcd2222-entry-two-long-enough';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(id1), makeEntry(id2)]);
+		const result = await handleKnowledgeQuarantineCommand('/test/dir', [
+			'abcd',
+		]);
+		expect(mockQuarantineEntry).not.toHaveBeenCalled();
+		expect(result).toContain("Ambiguous prefix 'abcd'");
+		expect(result).toContain(id1);
+		expect(result).toContain(id2);
 	});
 });
 
@@ -163,6 +248,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 	});
 
 	it('calls restoreEntry with correct args when valid', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		await handleKnowledgeRestoreCommand('/test/dir', ['test-id']);
 		expect(mockRestoreEntry).toHaveBeenCalledTimes(1);
@@ -170,6 +256,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 	});
 
 	it('returns success message with entryId on successful restore', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
 			'test-id',
@@ -178,6 +265,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 	});
 
 	it('returns generic error message when restoreEntry throws', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockRejectedValueOnce(new Error('Entry not found'));
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
 			'test-id',
@@ -185,6 +273,85 @@ describe('handleKnowledgeRestoreCommand', () => {
 		expect(result).toBe(
 			'❌ Failed to restore entry. Check the entry ID and try again.',
 		);
+	});
+
+	it('resolves by unique prefix and restores the matched entry', async () => {
+		const fullId = 'abc123def456-quarantined-uuid';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(fullId)]);
+		mockRestoreEntry.mockResolvedValueOnce(undefined);
+		const result = await handleKnowledgeRestoreCommand('/test/dir', [
+			'abc123def456',
+		]);
+		expect(mockRestoreEntry).toHaveBeenCalledWith('/test/dir', fullId);
+		expect(result).toBe(`✅ Entry ${fullId} restored successfully.`);
+	});
+
+	it('rejects ambiguous prefix for restore and lists matching candidates', async () => {
+		const id1 = 'abcd1111-quarantined-one';
+		const id2 = 'abcd2222-quarantined-two';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(id1), makeEntry(id2)]);
+		const result = await handleKnowledgeRestoreCommand('/test/dir', ['abcd']);
+		expect(mockRestoreEntry).not.toHaveBeenCalled();
+		expect(result).toContain("Ambiguous prefix 'abcd'");
+		expect(result).toContain(id1);
+		expect(result).toContain(id2);
+	});
+});
+
+describe('handleKnowledgeListCommand', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	it('returns no-entries message when knowledge store is empty', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([]);
+		const result = await handleKnowledgeListCommand('/test/dir', []);
+		expect(result).toContain('No knowledge entries found');
+	});
+
+	it('shows 12-char ID prefix in list output (test 7 — enables quarantine workflow)', async () => {
+		const fullId = 'abc123def456-1234-5678-abcd-ef0123456789';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(fullId)]);
+		const result = await handleKnowledgeListCommand('/test/dir', []);
+		expect(result).toContain('abc123def456');
+		expect(result).toContain('…');
+	});
+
+	it('list output includes prefix-matching usage hint', async () => {
+		const fullId = 'abc123def456-1234-5678-abcd-ef0123456789';
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry(fullId)]);
+		const result = await handleKnowledgeListCommand('/test/dir', []);
+		expect(result).toContain('quarantine');
+		expect(result).toContain('Prefix matching is supported');
+	});
+
+	it('12-char prefix from list output can be used to quarantine the entry (test 7 round-trip)', async () => {
+		const fullId = 'abc123def456-1234-5678-abcd-ef0123456789';
+		const entry = makeEntry(fullId);
+
+		// Step 1: list — get the prefix shown
+		mockReadKnowledge.mockResolvedValueOnce([entry]);
+		const listResult = await handleKnowledgeListCommand('/test/dir', []);
+		const shownPrefix = fullId.slice(0, 12);
+		expect(listResult).toContain(shownPrefix);
+
+		// Step 2: quarantine using only that prefix
+		mockReadKnowledge.mockResolvedValueOnce([entry]);
+		mockQuarantineEntry.mockResolvedValueOnce(undefined);
+		const quarantineResult = await handleKnowledgeQuarantineCommand(
+			'/test/dir',
+			[shownPrefix],
+		);
+		expect(quarantineResult).toBe(
+			`✅ Entry ${fullId} quarantined successfully.`,
+		);
+	});
+
+	it('returns error message when readKnowledge throws', async () => {
+		mockReadKnowledge.mockRejectedValueOnce(new Error('File not readable'));
+		const result = await handleKnowledgeListCommand('/test/dir', []);
+		expect(result).toContain('Failed to list knowledge entries');
+		expect(result).not.toContain('File not readable');
 	});
 });
 
@@ -194,6 +361,7 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	});
 
 	it('knowledge quarantine <id> routes to quarantine handler', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockQuarantineEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeQuarantineCommand('/test/dir', [
 			'test-id',
@@ -209,6 +377,7 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	});
 
 	it('knowledge restore <id> routes to restore handler', async () => {
+		mockReadKnowledge.mockResolvedValueOnce([makeEntry('test-id')]);
 		mockRestoreEntry.mockResolvedValueOnce(undefined);
 		const result = await handleKnowledgeRestoreCommand('/test/dir', [
 			'test-id',
@@ -293,7 +462,7 @@ describe('handleKnowledgeMigrateCommand', () => {
 			entriesMigrated: 0,
 			entriesDropped: 0,
 			entriesTotal: 0,
-			skippedReason: 'some-unknown-reason' as any,
+			skippedReason: 'some-unknown-reason' as never,
 		});
 		const result = await handleKnowledgeMigrateCommand('/test/dir', []);
 		expect(result).toContain('unknown reason');

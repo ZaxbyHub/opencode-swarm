@@ -3,7 +3,7 @@
  * identifiers exist in their target source files before phase completion.
  * Blocks if obviously incomplete.
  */
-import { type ToolDefinition } from '@opencode-ai/plugin';
+import type { ToolDefinition } from '@opencode-ai/plugin';
 /**
  * Arguments for the completion_verify tool
  */

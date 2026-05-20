@@ -3,15 +3,22 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { batch_symbols } from './batch-symbols';
+import type { ToolResult } from './create-tool';
+
+// Helper to convert ToolResult to string
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
 
 // Helper to call tool execute with proper context
 async function executeBatchSymbols(
 	args: Record<string, unknown>,
 	directory: string,
 ): Promise<string> {
-	return batch_symbols.execute(args, {
+	const result = await batch_symbols.execute(args, {
 		directory,
 	} as unknown as ToolContext);
+	return resultToString(result);
 }
 
 // Helper to create temp dir
@@ -74,7 +81,7 @@ export interface Config {
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.totalFiles).toBe(2);
 			expect(parsed.successCount).toBe(2);
@@ -121,7 +128,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.totalFiles).toBe(2);
 			expect(parsed.successCount).toBe(2);
@@ -138,7 +145,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].file).toBe('ccc.ts');
 			expect(parsed.results[1].file).toBe('aaa.ts');
@@ -159,7 +166,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.totalFiles).toBe(3);
 			expect(parsed.results).toHaveLength(3);
@@ -180,7 +187,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.totalFiles).toBe(2);
 			expect(parsed.successCount).toBe(1);
@@ -197,7 +204,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Non-existent files are processed and counted
 			expect(parsed.totalFiles).toBe(2);
@@ -220,7 +227,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.totalFiles).toBe(1);
 			expect(parsed.successCount).toBe(1);
@@ -239,7 +246,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(true);
 			expect(parsed.results[0].symbols).toEqual([]);
@@ -259,7 +266,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Files with only comments and no exports return empty
 			expect(parsed.results[0].success).toBe(true);
@@ -276,7 +283,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('unsupported-language');
@@ -291,7 +298,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('unsupported-language');
@@ -305,7 +312,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('unsupported-language');
@@ -319,7 +326,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('unsupported-language');
@@ -335,7 +342,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Verify structure has all required fields
 			expect(parsed).toHaveProperty('results');
@@ -356,7 +363,7 @@ class MyClass:
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			const fileResult = parsed.results[0];
 
 			expect(fileResult).toHaveProperty('file');
@@ -384,7 +391,7 @@ export class MyClass {
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			const fileResult = parsed.results[0];
 
 			expect(fileResult.success).toBe(true);
@@ -409,7 +416,7 @@ export class MyClass {
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 			const fileResult = parsed.results[0];
 
 			expect(fileResult.success).toBe(false);
@@ -459,7 +466,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('path-traversal');
@@ -472,7 +479,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('path-traversal');
@@ -484,7 +491,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('invalid-path');
@@ -496,7 +503,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('invalid-path');
@@ -508,7 +515,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('invalid-path');
@@ -520,7 +527,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results[0].success).toBe(false);
 			expect(parsed.results[0].errorType).toBe('invalid-path');
@@ -534,7 +541,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results).toEqual([]);
 			expect(parsed.totalFiles).toBe(0);
@@ -544,7 +551,7 @@ export function publicFunc() {}
 		test('handles missing files argument', async () => {
 			const result = await executeBatchSymbols({} as any, tempDir);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.results).toEqual([]);
 			expect(parsed.totalFiles).toBe(0);
@@ -556,7 +563,7 @@ export function publicFunc() {}
 				tempDir,
 			);
 
-			const parsed = JSON.parse(result);
+			const parsed = JSON.parse(resultToString(result));
 
 			// Should process both - null gets converted to string "null"
 			expect(parsed.totalFiles).toBe(2);

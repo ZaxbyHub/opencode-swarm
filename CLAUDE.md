@@ -1,5 +1,7 @@
 # Claude Code Swarm Mode
 
+> **For this repository, [AGENTS.md](./AGENTS.md) is the root engineering contract. Read it before any code change.** The long-form rationale and historical failure map live in [`docs/engineering-invariants.md`](./docs/engineering-invariants.md). When swarm mode is enabled, `AGENTS.md` still applies; swarm-mode instructions add workflow structure, not exceptions to the engineering invariants.
+
 Normal behavior is the default.
 
 If `.claude/session/swarm-mode.md` exists, swarm mode is enabled for the current session and you must read that file before starting complex work.

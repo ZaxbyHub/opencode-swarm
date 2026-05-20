@@ -1,21 +1,21 @@
 /**
- * Tests for the convene_council branch in delegation-gate.ts toolAfter, plus
- * Stage B suppression when council is authoritative for the current plan.
+ * Tests for the submit_council_verdicts branch in delegation-gate.ts toolAfter.
+ * Council mode is additive at phase level — it never suppresses per-task Stage B gates.
  *
- * v6.71+ — covers:
- *   - council disabled (default): reviewer/test_engineer Stage B advancement still works.
+ * Covers:
+ *   - council disabled (default): reviewer/test_engineer Stage B advancement works.
  *   - council active (config.enabled=true AND QaGates.council_mode=true):
- *     Stage B advancement is REPLACED by the council; reviewer/test_engineer
- *     Task delegations remain observable but do NOT advance task state.
- *   - convene_council APPROVE + allCriteriaMet + zero required fixes from
+ *     Stage B advancement still runs unconditionally — council does NOT replace it.
+ *     reviewer/test_engineer Task delegations advance task state regardless.
+ *   - submit_council_verdicts APPROVE + allCriteriaMet + zero required fixes from
  *     pre_check_passed → state advances to 'complete'.
- *   - convene_council REJECT → no advancement; verdict still recorded.
- *   - convene_council APPROVE but allCriteriaMet=false → no advancement.
+ *   - submit_council_verdicts REJECT → no advancement; verdict still recorded.
+ *   - submit_council_verdicts APPROVE but allCriteriaMet=false → no advancement.
  *   - Disagreement (config.enabled=false, council_mode=true) → councilActive=false,
  *     Stage B path runs.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,6 +29,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import * as logger from '../../../src/utils/logger';
 
 // Match the planId derivation used by set-qa-gates.ts / get-qa-gate-profile.ts
 function derivePlanId(plan: { swarm: string; title: string }): string {
@@ -165,8 +166,8 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 		});
 	});
 
-	describe('council active (config + profile both true): Stage B is REPLACED', () => {
-		it('reviewer Task delegation does NOT advance state when council is authoritative', async () => {
+	describe('council active (config + profile both true): Stage B still runs per-task', () => {
+		it('reviewer Task delegation still advances state when council is active', async () => {
 			writePlan();
 			enableCouncilGate();
 
@@ -188,11 +189,11 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 				{},
 			);
 
-			// State should NOT advance — council Phase 1 is the sole review pass.
-			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
+			// State MUST advance — council is additive at phase level, never suppresses Stage B.
+			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 		});
 
-		it('test_engineer Task delegation does NOT advance state when council is authoritative', async () => {
+		it('test_engineer Task delegation still advances state when council is active', async () => {
 			writePlan();
 			enableCouncilGate();
 
@@ -214,11 +215,12 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 				{},
 			);
 
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+			// State MUST advance — Stage B always runs per-task regardless of council mode.
+			expect(getTaskState(session, '1.1')).toBe('tests_run');
 		});
 	});
 
-	describe('convene_council APPROVE fast-path advances to complete', () => {
+	describe('submit_council_verdicts APPROVE fast-path advances to complete', () => {
 		it('APPROVE + allCriteriaMet + zero required fixes from pre_check_passed → complete', async () => {
 			writePlan();
 			enableCouncilGate();
@@ -233,7 +235,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-approve',
 					callID: 'call-cc-1',
 					args: { taskId: '1.1' },
@@ -244,6 +246,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					allCriteriaMet: true,
 					requiredFixesCount: 0,
 					roundNumber: 1,
+					quorumSize: 3,
 				},
 			);
 
@@ -251,6 +254,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			expect(session.taskCouncilApproved?.get('1.1')).toEqual({
 				verdict: 'APPROVE',
 				roundNumber: 1,
+				quorumSize: 3,
 			});
 		});
 
@@ -268,7 +272,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-approve-str',
 					callID: 'call-cc-1b',
 					args: { taskId: '1.1' },
@@ -279,15 +283,17 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					allCriteriaMet: true,
 					requiredFixesCount: 0,
 					roundNumber: 2,
+					quorumSize: 5,
 				}),
 			);
 
 			expect(getTaskState(session, '1.1')).toBe('complete');
 			expect(session.taskCouncilApproved?.get('1.1')?.roundNumber).toBe(2);
+			expect(session.taskCouncilApproved?.get('1.1')?.quorumSize).toBe(5);
 		});
 	});
 
-	describe('convene_council non-APPROVE outcomes do NOT advance state', () => {
+	describe('submit_council_verdicts non-APPROVE outcomes do NOT advance state', () => {
 		it('REJECT records verdict but does NOT advance state', async () => {
 			writePlan();
 			enableCouncilGate();
@@ -302,7 +308,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-reject',
 					callID: 'call-cc-rej',
 					args: { taskId: '1.1' },
@@ -318,9 +324,12 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			// State must remain at pre_check_passed; verdict recorded.
 			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
+			// The mock output omits quorumSize → delegation-gate stores 1 as
+			// the conservative fallback (intentional design — see Task 3.1).
 			expect(session.taskCouncilApproved?.get('1.1')).toEqual({
 				verdict: 'REJECT',
 				roundNumber: 1,
+				quorumSize: 1,
 			});
 		});
 
@@ -338,7 +347,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-partial',
 					callID: 'call-cc-partial',
 					args: { taskId: '1.1' },
@@ -371,7 +380,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-concerns',
 					callID: 'call-cc-con',
 					args: { taskId: '1.1' },
@@ -406,10 +415,11 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			// Capture warnings to assert the disagreement notice surfaces once.
 			const warnings: string[] = [];
-			const origWarn = console.warn;
-			console.warn = (...args: unknown[]) => {
-				warnings.push(args.map(String).join(' '));
-			};
+			const warnSpy = spyOn(logger, 'warn').mockImplementation(
+				(msg: string) => {
+					warnings.push(msg);
+				},
+			);
 
 			try {
 				await hook.toolAfter(
@@ -432,7 +442,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					{},
 				);
 			} finally {
-				console.warn = origWarn;
+				warnSpy.mockRestore();
 			}
 
 			// Stage B path ran — state advanced.
@@ -445,7 +455,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 		});
 	});
 
-	describe('convene_council malformed output is non-fatal', () => {
+	describe('submit_council_verdicts malformed output is non-fatal', () => {
 		it('logs a warn for unparseable string output and does not throw', async () => {
 			writePlan();
 			enableCouncilGate();
@@ -467,7 +477,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			try {
 				await hook.toolAfter(
 					{
-						tool: 'convene_council',
+						tool: 'submit_council_verdicts',
 						sessionID: 'sess-malformed',
 						callID: 'call-cc-bad',
 						args: { taskId: '1.1' },
@@ -481,7 +491,9 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 			expect(
 				warnings.some((m) =>
-					m.includes('toolAfter convene_council: failed to parse output'),
+					m.includes(
+						'toolAfter submit_council_verdicts: failed to parse output',
+					),
 				),
 			).toBe(true);
 		});
@@ -501,9 +513,10 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			advanceTaskState(session, '1.1', 'pre_check_passed');
 
 			// Step 1: council APPROVE — should advance to complete.
+			// quorumSize: 3 satisfies the default minimumMembers quorum gate.
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-race',
 					callID: 'call-cc-race',
 					args: { taskId: '1.1' },
@@ -514,13 +527,15 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					allCriteriaMet: true,
 					requiredFixesCount: 0,
 					roundNumber: 1,
+					quorumSize: 3,
 				},
 			);
 
 			expect(getTaskState(session, '1.1')).toBe('complete');
 
 			// Step 2: a reviewer Task delegation arrives immediately after (late dispatch).
-			// With councilActive=true the reviewer branch is suppressed — state must remain complete.
+			// Advancing a task already at 'complete' is an invalid transition (caught and logged).
+			// State must remain complete regardless.
 			await hook.toolAfter(
 				{
 					tool: 'Task',
@@ -556,7 +571,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			try {
 				await hook.toolAfter(
 					{
-						tool: 'convene_council',
+						tool: 'submit_council_verdicts',
 						sessionID: 'sess-early',
 						callID: 'call-cc-early',
 						args: { taskId: '1.1' },
@@ -601,10 +616,11 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			sessionB.taskWorkflowStates.set('1.2', 'coder_delegated');
 
 			const warnings: string[] = [];
-			const origWarn = console.warn;
-			console.warn = (...args: unknown[]) => {
-				warnings.push(args.map(String).join(' '));
-			};
+			const warnSpy = spyOn(logger, 'warn').mockImplementation(
+				(msg: string) => {
+					warnings.push(msg);
+				},
+			);
 
 			try {
 				// Session A reviewer: triggers disagreement check.
@@ -628,7 +644,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 					{},
 				);
 			} finally {
-				console.warn = origWarn;
+				warnSpy.mockRestore();
 			}
 
 			// Disagreement: both sessions fell back to Stage B (council disabled).
@@ -670,7 +686,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 		});
 
-		it('convene_council with missing plan.json logs warn and does not advance', async () => {
+		it('submit_council_verdicts with missing plan.json logs warn and does not advance', async () => {
 			// No plan written — isCouncilGateActive returns false.
 			const config = makeConfig(undefined, { enabled: true });
 			const hook = createDelegationGateHook(config, tmpDir);
@@ -682,7 +698,7 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 
 			await hook.toolAfter(
 				{
-					tool: 'convene_council',
+					tool: 'submit_council_verdicts',
 					sessionID: 'sess-no-plan-cc',
 					callID: 'call-no-plan-cc',
 					args: { taskId: '1.1' },

@@ -2,7 +2,9 @@
 
 <div align="center">
 
-**Your AI writes the code. Swarm makes sure it actually works.**
+# Your AI writes the code. Swarm proves it works.
+
+**Closing the trust gap between "the model said it's done" and "this actually works in production."**
 
 [![npm version](https://img.shields.io/npm/v/opencode-swarm?color=brightgreen&label=npm)](https://www.npmjs.com/package/opencode-swarm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -14,7 +16,7 @@
 
 ---
 
-OpenCode Swarm is a plugin for [OpenCode](https://opencode.ai) that turns a single AI coding session into an **architect-led team of 11 specialized agents**. One agent writes the code. A different agent reviews it. Another writes and runs tests. Another checks security. **Nothing ships until every required gate passes.**
+OpenCode Swarm is a plugin for [OpenCode](https://opencode.ai) that turns a single AI coding session into an **architect-led team of specialized core, optional, and conditional agents** — see `/swarm agents` for the live roster. One agent writes the code. A different agent reviews it. Another writes and runs tests. Another checks security. **Nothing ships until every required gate passes.**
 
 ```bash
 bunx opencode-swarm install
@@ -22,22 +24,67 @@ bunx opencode-swarm install
 
 > This single command installs the package, registers it as an OpenCode plugin, disables conflicting default agents, and creates a ready-to-edit config at `~/.config/opencode/opencode-swarm.json`. Requires [Bun](https://bun.sh) (`bun --version` to check). If you must use npm: `npm install -g opencode-swarm && opencode-swarm install`.
 
+> ⚠️ **On first run, Swarm auto-selects the architect and shows a welcome message.** The default OpenCode `Build` and `Plan` modes **bypass this plugin entirely** — none of the gates, reviewers, or test agents below run. If you ever need to switch architect manually, open the OpenCode mode/agent picker and choose the Swarm architect; it then coordinates every other agent automatically. If you ever see Swarm "do nothing," this is almost always the cause.
+
 ### Why Swarm?
 
 Most AI coding tools let one model write code and ask that same model whether the code is good. That misses too much. Swarm separates planning, implementation, review, testing, and documentation into specialized internal roles — and enforces gated execution so agents never mutate the codebase in parallel.
 
 ### Key Features
 
-- 🏗️ **11 specialized agents** — architect, coder, reviewer, test engineer, critic, critic_sounding_board, critic_drift_verifier, explorer, SME, docs, designer
+- 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
 - 🔒 **Gated pipeline** — code never ships without reviewer + test engineer approval
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
-- 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex
+- 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex (extending: see [docs/adding-a-language.md](docs/adding-a-language.md))
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
+- 📝 **Shell write detection** — Static analysis of POSIX/PowerShell/cmd commands to detect file writes (redirects, builtins, in-place editors, network downloads, archive extraction, git destructive ops) before execution
+- 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence and TTL expiry
 - 🆓 **Free tier** — works with OpenCode Zen's free model roster
 - ⚙️ **Fully configurable** — override any agent's model, disable agents, tune guardrails
 
-> **You select a Swarm architect once in the OpenCode GUI.** The architect coordinates all other agents automatically — you never manually switch between internal roles. If you use the default OpenCode `Build` / `Plan` modes, the plugin is bypassed entirely.
+> **The Swarm architect is auto-selected on first run and coordinates all other agents automatically.** You never manually switch between internal roles. If you use the default OpenCode `Build` / `Plan` modes, the plugin is bypassed entirely (see the install warning above).
+
+---
+
+## Shell Write Detection
+
+Swarm includes comprehensive static analysis for shell commands to detect and intercept file write operations before execution.
+
+### Shell Write Detection Features
+
+- **POSIX shell detection** — Parses commands with `bash-parser` AST for accurate detection of:
+  - Redirect operators (`>`, `>>`, `>|`, `<<`, `<<-`)
+  - Here-documents and here-strings
+  - Write-effect builtins (`cp`, `mv`, `install`, `ln`, `truncate`, `dd`)
+  - In-place editors (`sed -i`, `perl -i`, `awk -i`)
+  - Interpreter eval (`python -c`, `node -e`, `bun -e`, `ruby -e`, `php -r`)
+  - Network downloaders (`curl -o`, `wget -O`, `scp`)
+  - Archive extraction (`tar -x`, `unzip`, `gunzip`)
+  - Git destructive operations (`git clean -fd`, `git reset --hard`)
+
+- **Windows shell detection** — Uses regex heuristics for PowerShell and cmd.exe:
+  - PowerShell cmdlets: `Out-File`, `Set-Content`, `Add-Content`, `Copy-Item`, `Move-Item`
+  - cmd.exe builtins: `copy`, `move`, `ren`, `del`, `rd`, `md`
+  - Redirect operators (`>`, `>>`)
+
+- **Interactive session denial** — Blocks commands that create persistent or open-ended sessions:
+  - POSIX: `watch`, `screen`, `tmux new-session`
+  - PowerShell: `Start-Process`
+
+- **Cross-process scope enforcement** — Declared scope is persisted to `.swarm/scopes/scope-{taskId}.json` with:
+  - TTL expiry (default 24 hours)
+  - Symlink guards (O_NOFOLLOW + realpath containment)
+  - Schema versioning and fail-closed validation
+
+### Security Patterns
+
+The guardrails system blocks destructive shell commands targeting:
+- System paths (`/root`, `/etc`, `C:\Windows`, etc.)
+- Symlink/junction creation with external targets
+- File operations under `.swarm/` directory
+- Fork bombs and infinite loops
+- Disk wiping and ransomware-grade operations
 
 ---
 
@@ -81,7 +128,10 @@ Swarm has two independent mode systems:
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
 | **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
-| **Full-Auto** | Depends on critic | Fast | Unattended multi-interaction runs |
+| **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
+| **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
+
+Full-Auto reduces approval friction by deterministically allowing safe operations (read-only tools, in-scope writes, safe shell) and routing every ambiguous or high-risk action (writes to plugin/build/guardrail paths, network, dependency changes, plan/phase mutations, subagent delegation) through the read-only `critic_oversight` agent before it executes. Denials are returned to the agent as structured signals so it can choose a safer path; repeated denials pause the run; phase completion requires an APPROVED oversight record. See [docs/modes.md](docs/modes.md#full-auto) for `mode`, `permission_policy`, `denials`, and `oversight` config keys, fail-closed semantics, and recovery from a paused run.
 
 **Project mode** — persistent via `execution_mode` config key:
 
@@ -91,7 +141,7 @@ Swarm has two independent mode systems:
 | `balanced` (default) | Standard hooks |
 | `fast` | Skips compaction service — for short sessions under context pressure |
 
-Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Set project mode in config. The two systems compose independently — see [docs/modes.md](docs/modes.md).
+Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
 
 ---
 
@@ -101,48 +151,223 @@ Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`
 
 The 15-minute guide covers:
 - Installation (`bunx opencode-swarm install`)
-- Selecting the architect in OpenCode
+- First-run auto-configuration (architect selected automatically)
 - Running your first task
 - Troubleshooting common issues
+
+On first run, Swarm automatically:
+- Creates project config at `.opencode/opencode-swarm.json` with all agents enabled
+- Selects the Swarm architect as the default
+- Shows a welcome message with next steps
+
+---
+
+## 30-Second Demo
+
+No animated GIF is shipped in the repo — instead, here is the exact terminal session you can record yourself with `asciinema rec demo.cast` (or any screen recorder). Every command below is real and runs against this repo as published.
+
+**Recording script (copy/paste-able, ~30 seconds):**
+
+```bash
+# 1. Install the plugin (5s)
+bunx opencode-swarm install
+
+# 2. Open opencode — Swarm auto-selects architect on first run
+#    (the architect is auto-selected; manual selection is only needed to override)
+opencode
+
+# 3. Inside the OpenCode session, verify Swarm is live (5s)
+/swarm help
+/swarm agents
+
+# 4. Kick off a task — the architect plans, then gates fire automatically (15s)
+Build me a JWT auth helper with tests.
+
+# 5. Watch the gates land in real time (5s)
+/swarm status
+/swarm evidence
+```
+
+**ASCII storyboard** of what a viewer should see:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ $ bunx opencode-swarm install                                │
+│ ✓ installed opencode-swarm                                   │
+│ ✓ created .opencode/opencode-swarm.json                     │
+│                                                              │
+│ $ opencode                                                   │
+│ [Swarm] Welcome! Architect auto-selected. Type /swarm help  │
+│                                                              │
+│ > /swarm help                                                │
+│ Available commands: status, plan, agents, help, diagnose... │
+│                                                              │
+│ > Build me a JWT auth helper with tests.                     │
+│ [architect]  PLAN → critic gate → APPROVED                   │
+│ [coder]      task 1.1 implementing…                          │
+│ [reviewer]   correctness OK                                  │
+│ [test_eng.]  3 tests written, 3 pass                         │
+│ [architect]  regression sweep clean → phase_complete         │
+│                                                              │
+│ > /swarm evidence                                            │
+│ task 1.1: review ✓  tests ✓  sast ✓  secrets ✓  drift ✓      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Each row corresponds to a real gate documented further down this README — none are simulated.
+
+---
+
+## Upgrading
+
+**OpenCode caches plugins indefinitely.** A normal OpenCode restart does **not**
+pull newer versions from npm — once a plugin is cached, OpenCode keeps using
+that exact copy on every subsequent launch (issue #675). The cache lives in
+one of two places depending on your platform:
+
+- Linux / devcontainers / GitHub Codespaces:
+  `~/.config/opencode/node_modules/opencode-swarm/`
+- Some macOS / Windows installs:
+  `~/.cache/opencode/packages/opencode-swarm@latest/`
+
+To upgrade to the latest published version (clears both layouts automatically):
+
+```bash
+bunx opencode-swarm update     # cache-only refresh, then restart opencode
+# or
+bunx opencode-swarm install    # full reinstall (re-asserts config), then restart opencode
+```
+
+`/swarm diagnose` shows the running version and, when available, the latest
+version on npm so you can tell at a glance whether your cache is stale.
+
+To disable the background staleness check entirely, set `version_check: false`
+in your `opencode-swarm.json`.
 
 ---
 
 ## Commands
 
-All 41 subcommands at a glance:
+All 43 subcommands at a glance:
 
 ```bash
+/swarm help [command]      # List all commands or get detailed help for a specific command
 /swarm status              # Current phase and task
-/swarm plan [N]            # Full plan or filtered by phase
+/swarm show-plan [N]       # Full plan or filtered by phase
 /swarm agents              # Registered agents and models
 /swarm diagnose            # Health check
 /swarm evidence [task]     # Test and review results
 /swarm reset --confirm     # Clear swarm state
 ```
 
-See [docs/commands.md](docs/commands.md) for the full reference (41 commands).
+Use `/swarm help` to see all available commands categorized by function. Use `/swarm help <command>` for detailed usage information on a specific command.
+
+Nine commands display a ⚠️ warning in help output because they share names with Claude Code built-in slash commands (e.g., `/plan`, `/reset`, `/status`). The warning reminds you to always use `/swarm <command>` — the bare CC command does something different and sometimes destructive. See [docs/commands.md#claude-code-command-conflicts](docs/commands.md#claude-code-command-conflicts) for the full conflict registry.
+
+See [docs/commands.md](docs/commands.md) for the full reference (43 commands).
+
+## Command Aliases
+
+Some commands are available under deprecated names for backwards compatibility. Using the canonical name is recommended:
+
+| Alias (deprecated) | Canonical command |
+|--------------------|-------------------|
+| `/swarm config-doctor` | `/swarm config doctor` |
+| `/swarm diagnosis` | `/swarm diagnose` |
+| `/swarm evidence-summary` | `/swarm evidence summary` |
+| `/swarm doctor` | `/swarm config doctor` |
+| `/swarm info` | `/swarm status` |
+| `/swarm list-agents` | `/swarm agents` |
+| `/swarm health` | `/swarm diagnose` |
+| `/swarm plan` | `/swarm show-plan` |
+| `/swarm close` | `/swarm finalize` |
+| `/swarm check` | `/swarm preflight` |
+| `/swarm clear` | `/swarm reset-session` |
+
+Aliases are hidden from help output but still function. The canonical command should be used in scripts and documentation.
 
 ---
 
 ## The Agents
 
-Swarm has 11 specialized agents. You don't manually switch between them — the architect coordinates automatically.
+Swarm registers a roster of specialized core, optional, and conditional agents. The exact count shifts as agents are added or feature-flagged, so treat `/swarm agents` as the live source of truth — that command lists what is actually registered in your session. You don't manually switch between them — the architect coordinates automatically.
 
-| Agent | Role |
-|---|---|
-| **architect** | Orchestrates workflow, writes plans, enforces gates |
-| **coder** | Implements one task at a time |
-| **reviewer** | Checks correctness and security |
-| **test_engineer** | Writes and runs tests |
-| **critic** | Reviews plans and challenges findings |
-| **explorer** | Scans codebase and gathers context |
-| **sme** | Provides domain expertise guidance |
-| **docs** | Updates documentation to match implementation |
-| **designer** | Generates UI scaffolds and design tokens |
-| **critic_sounding_board** | Pre-escalation pushback to the architect |
-| **critic_drift_verifier** | Verifies implementation matches plan |
+| Agent | Role | Badge |
+|---|---|---|
+| **architect** | Orchestrates workflow, writes plans, enforces gates | Core |
+| **explorer** | Scans codebase, gathers context, maps facts | Core |
+| **coder** | Implements one task at a time | Core |
+| **reviewer** | Checks correctness and security | Core |
+| **test_engineer** | Writes and runs tests, adversarial testing | Core |
+| **critic** | Reviews plans before implementation begins | Core |
+| **critic_oversight** | Sole quality gate in full-auto autonomous mode | Core |
+| **sme** | Provides domain expertise guidance | Core |
+| **docs** | Updates documentation to match implementation | Core |
+| **designer** | Generates UI scaffolds and design tokens | Conditional |
+| **critic_sounding_board** | Pre-escalation pushback to the architect | Optional |
+| **critic_drift_verifier** | Verifies implementation matches spec | Optional |
+| **critic_hallucination_verifier** | Verifies APIs and citations against real sources | Optional |
+| **curator_init** | Consolidates prior knowledge at session start | Optional |
+| **curator_phase** | Consolidates phase outcomes, detects workflow drift | Optional |
+| **council_generalist** | Broad analytical voice in the General Council (uses reviewer model) | Conditional |
+| **council_skeptic** | Adversarial stress-tester voice in the General Council (uses critic model) | Conditional |
+| **council_domain_expert** | Technical-depth voice in the General Council (uses SME model) | Conditional |
+
+Legend: Core = always available, Optional = available by default (can be disabled), Conditional = requires specific feature config (ui_review or council)
 
 Run `/swarm status` and `/swarm agents` to see what's active.
+
+```mermaid
+graph TB
+    subgraph Orchestration
+        A[Architect]
+    end
+
+    subgraph Discovery
+        E[Explorer]
+    end
+
+    subgraph Execution
+        C[Coder]
+        T[Test Engineer]
+        D[Designer]
+    end
+
+    subgraph Quality
+        R[Reviewer]
+        CR[Critic]
+        CO[Critic Oversight]
+        CSB[Critic Sounding Board]
+        CDV[Critic Drift Verifier]
+        CHV[Critic Hallucination Verifier]
+    end
+
+    subgraph Support
+        S[SME]
+        DOC[Docs]
+        CI[Curator Init]
+        CP[Curator Phase]
+    end
+
+    subgraph Council
+        CM[Council Member]
+        CMO[Council Moderator]
+    end
+
+    A -->|Discover| E
+    E -->|Context| A
+    A -->|Consult| S
+    S -->|Guidance| A
+    A -->|Design| D
+    D -->|Scaffold| C
+    A -->|Implement| C
+    C -->|Review| R
+    R -->|Verify| A
+    C -->|Test| T
+    T -->|Results| A
+    A -->|Deliberate| CM
+    CM -->|Verdict| A
+```
 
 ---
 
@@ -150,10 +375,13 @@ Run `/swarm status` and `/swarm agents` to see what's active.
 
 | Feature | Swarm | oh-my-opencode | get-shit-done |
 |---|:-:|:-:|:-:|
-| Multiple specialized agents | ✅ 11 agents | ❌ | ❌ |
+| Multiple specialized agents | ✅ Core + optional + conditional roster (`/swarm agents`) | ❌ | ❌ |
 | Plan reviewed before coding | ✅ | ❌ | ❌ |
 | Every task reviewed + tested | ✅ | ❌ | ❌ |
 | Different model for review vs. code | ✅ | ❌ | ❌ |
+| Shell write detection (POSIX/PowerShell/cmd) | ✅ | ❌ | ❌ |
+| Scope enforcement with cross-process persistence | ✅ | ❌ | ❌ |
+| Interactive session detection and blocking | ✅ | ❌ | ❌ |
 | Resumable sessions | ✅ | ❌ | ❌ |
 | Built-in security scanning | ✅ | ❌ | ❌ |
 | Learns from mistakes | ✅ | ❌ | ❌ |
@@ -599,6 +827,17 @@ Prefixed agents (e.g., `paid_coder`, `mega_reviewer`, `local_architect`) inherit
 ```
 
 In this example, `paid_coder` gets its own explicit rule, while other prefixed coders (e.g., `mega_coder`) fall back to `coder`.
+
+#### Selecting the primary agent in multi-swarm configs (`default_agent`)
+
+The top-level `default_agent` field controls which generated agents OpenCode treats as primary. **It is optional.** Behavior:
+
+- **Omitted** — every architect-role agent is primary. In a multi-swarm config that means each swarm exposes its own architect (`local_architect`, `mega_architect`, `paid_architect`, `modelrelay_architect`, …) as a selectable session default. This is the v7.0.0-compatible behavior and the recommended setup.
+- **Base role** (e.g. `"coder"`) — every generated agent whose canonical base role matches becomes primary (`local_coder`, `mega_coder`, …).
+- **Exact generated name** (e.g. `"local_architect"`) — only that agent is primary.
+- **Unknown / invalid value** — a one-time warning is logged and the resolver falls back to architect-role primaries (or the first generated agent if architects are disabled). The plugin never produces zero primaries when at least one agent exists.
+
+See [`docs/configuration.md`](docs/configuration.md) for the full table.
 
 ### Runtime Enforcement
 
@@ -1116,8 +1355,10 @@ Control how tool outputs are summarized for LLM context.
 
 | Command | Description |
 |---------|-------------|
+| `/swarm help [command]` | List all commands or get detailed help for a specific command |
 | `/swarm status` | Current phase, task progress, agent count |
-| `/swarm plan [N]` | Full plan or filtered by phase |
+| `/swarm show-plan [N]` | Full plan or filtered by phase |
+| `/swarm plan [N]` | Deprecated alias for `/swarm show-plan [N]` |
 | `/swarm agents` | Registered agents with models and permissions |
 | `/swarm history` | Completed phases with status |
 | `/swarm config` | Current resolved configuration |
@@ -1136,7 +1377,8 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm specify [description]` | Generate or import a feature specification |
 | `/swarm clarify [topic]` | Clarify and refine an existing feature specification |
 | `/swarm analyze` | Analyze spec.md vs plan.md for requirement coverage gaps |
-| `/swarm close [--prune-branches]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, context.md reset, config-backup cleanup, optional branch pruning |
+| `/swarm finalize [--prune-branches] [--skill-review]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, context.md reset, config-backup cleanup, optional branch pruning, optional skill-improver proposal |
+| `/swarm close [--prune-branches] [--skill-review]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review]` |
 | `/swarm write-retro` | Write a phase retrospective manually |
 | `/swarm handoff` | Generate a handoff summary for context-budget-critical sessions |
 | `/swarm simulate` | Simulate plan execution without writing code |

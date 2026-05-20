@@ -9,6 +9,7 @@ import * as path from 'node:path';
 
 import {
 	appendLedgerEvent,
+	computePlanHash,
 	replayFromLedger,
 	takeSnapshotEvent,
 } from './ledger';
@@ -91,13 +92,37 @@ describe('in-ledger snapshot adversarial tests', () => {
 		}
 	});
 
-	test('replayFromLedger returns null when neither plan.json nor snapshot event exists', async () => {
+	test('replayFromLedger returns null when neither plan.json, embedded plan, nor snapshot event exists', async () => {
 		const testDir = createTempDir();
 		try {
-			await savePlan(testDir, initialPlan);
+			// Write plan.json first
+			const swarmDir = path.join(testDir, '.swarm');
+			const planJsonPath = path.join(swarmDir, 'plan.json');
+			fs.writeFileSync(planJsonPath, JSON.stringify(initialPlan), 'utf8');
 
-			// Delete plan.json, no snapshot event
-			fs.unlinkSync(path.join(testDir, '.swarm', 'plan.json'));
+			// Write a legacy-format ledger manually (no embedded plan payload)
+			// to simulate the scenario where neither plan.json, snapshot event, nor
+			// embedded plan is available (pre-#444 legacy ledger format).
+			const ledgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
+			const planHash = computePlanHash(initialPlan);
+			const legacyEvent = {
+				seq: 1,
+				timestamp: new Date().toISOString(),
+				plan_id: `${initialPlan.swarm}-${initialPlan.title}`.replace(
+					/[^a-zA-Z0-9-_]/g,
+					'_',
+				),
+				event_type: 'plan_created',
+				source: 'initLedger',
+				plan_hash_before: '',
+				plan_hash_after: planHash,
+				schema_version: '1.0.0',
+				// No 'payload' field — no embedded plan
+			};
+			fs.writeFileSync(ledgerPath, JSON.stringify(legacyEvent) + '\n', 'utf8');
+
+			// Delete plan.json
+			fs.unlinkSync(planJsonPath);
 
 			const rebuilt = await replayFromLedger(testDir);
 			expect(rebuilt).toBeNull();

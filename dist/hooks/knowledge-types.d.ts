@@ -11,12 +11,69 @@ export interface ProjectConfirmationRecord {
     phase_number?: number;
 }
 export interface RetrievalOutcome {
+    /** @deprecated v1 LEGACY field — frozen in v2.
+     *  v1 callers incremented this for every "shown" event (i.e. it conflated
+     *  shown with applied). v2 stops auto-incrementing it. Existing v1 entries
+     *  still load their historical value; the v1→v2 normalizer copies it into
+     *  `shown_count` so downstream consumers can keep working. New code MUST
+     *  read `applied_explicit_count` for explicit application or
+     *  `succeeded_after_shown_count` / `failed_after_shown_count` for outcome
+     *  attribution. */
     applied_count: number;
+    /** @deprecated v1 LEGACY: succeeded_after_count was bumped after
+     *  applied_count. Frozen in v2; new equivalent is succeeded_after_shown_count. */
     succeeded_after_count: number;
+    /** @deprecated v1 LEGACY: failed_after_count was bumped after
+     *  applied_count. Frozen in v2; new equivalent is failed_after_shown_count. */
     failed_after_count: number;
     last_applied_at?: string;
+    /** v2: number of times this entry was injected/shown to architect. */
+    shown_count?: number;
+    /** v2: explicit acknowledgment ("I see directive X") count. */
+    acknowledged_count?: number;
+    /** v2: explicit application count (KNOWLEDGE_APPLIED: id). */
+    applied_explicit_count?: number;
+    /** v2: explicit ignore count (KNOWLEDGE_IGNORED: id reason=...). */
+    ignored_count?: number;
+    /** v2: explicit/inferred violation count (KNOWLEDGE_VIOLATED: id reason=...). */
+    violated_count?: number;
+    /** v2: phase-success count after a "shown" (replaces succeeded_after_count). */
+    succeeded_after_shown_count?: number;
+    /** v2: phase-failure count after a "shown" (replaces failed_after_count). */
+    failed_after_shown_count?: number;
 }
-export interface KnowledgeEntryBase {
+/** v2: priority used by retrieval ranking and enforcement. */
+export type DirectivePriority = 'low' | 'medium' | 'high' | 'critical';
+/** v2: optional actionable-directive metadata attached to a knowledge entry. */
+export interface ActionableDirectiveFields {
+    /** Trigger phrases that surface this entry (e.g. "coder delegation modifying source"). */
+    triggers?: string[];
+    /** Required actions when the trigger matches. */
+    required_actions?: string[];
+    /** Forbidden actions when the trigger matches. */
+    forbidden_actions?: string[];
+    /** Agent role names this directive applies to. */
+    applies_to_agents?: string[];
+    /** Tool names this directive applies to. */
+    applies_to_tools?: string[];
+    /** Reviewer/test-engineer/runtime checks the directive expects. */
+    verification_checks?: string[];
+    /** Source pointers (file:line, plan section, etc.). Sanitized. */
+    source_refs?: string[];
+    /** UUIDs of source knowledge entries (for derived/clustered entries). */
+    source_knowledge_ids?: string[];
+    /** Slug of generated skill, if a SKILL.md was compiled from this entry. */
+    generated_skill_slug?: string;
+    /** Repo-local path to generated SKILL.md. */
+    generated_skill_path?: string;
+    /** Directive priority for ranking/enforcement. */
+    directive_priority?: DirectivePriority;
+    /** ISO 8601 timestamp of last explicit application. */
+    last_applied_at?: string;
+    /** ISO 8601 timestamp of last explicit acknowledgment. */
+    last_acknowledged_at?: string;
+}
+export interface KnowledgeEntryBase extends ActionableDirectiveFields {
     id: string;
     tier: 'swarm' | 'hive';
     lesson: string;
@@ -24,7 +81,7 @@ export interface KnowledgeEntryBase {
     tags: string[];
     scope: string;
     confidence: number;
-    status: 'candidate' | 'established' | 'promoted' | 'archived';
+    status: 'candidate' | 'established' | 'promoted' | 'archived' | 'quarantined';
     confirmed_by: PhaseConfirmationRecord[] | ProjectConfirmationRecord[];
     retrieval_outcomes: RetrievalOutcome;
     schema_version: number;
@@ -35,6 +92,8 @@ export interface KnowledgeEntryBase {
     phases_alive?: number;
     max_phases?: number;
 }
+/** v2 schema marker. v1 entries are still parseable and normalized in-memory by knowledge-store.normalizeEntry. */
+export declare const KNOWLEDGE_SCHEMA_VERSION = 2;
 export interface SwarmKnowledgeEntry extends KnowledgeEntryBase {
     tier: 'swarm';
     confirmed_by: PhaseConfirmationRecord[];
@@ -128,4 +187,40 @@ export interface MessagePart {
 export interface MessageWithParts {
     info: MessageInfo;
     parts: MessagePart[];
+}
+export type RetrievalMode = 'phase_start' | 'delegation' | 'tool_before' | 'phase_complete' | 'manual_recall' | 'curator';
+/** Decision-point context passed to action-aware retrieval. */
+export interface KnowledgeRetrievalContext {
+    projectName?: string;
+    currentPhase?: string;
+    taskId?: string;
+    taskTitle?: string;
+    taskDescription?: string;
+    lastUserMessage?: string;
+    currentTool?: string;
+    currentAction?: string;
+    targetAgent?: string;
+    filePaths?: string[];
+    recentReviewerFailures?: string[];
+    recentTestFailures?: string[];
+    recentToolErrors?: string[];
+    declaredScope?: string;
+    techStack?: string[];
+    planConstraints?: string[];
+    mode?: RetrievalMode;
+}
+export type KnowledgeApplicationResult = 'shown' | 'acknowledged' | 'applied' | 'ignored' | 'violated';
+/** One line of .swarm/knowledge-application.jsonl. */
+export interface KnowledgeApplicationRecord {
+    timestamp: string;
+    phase?: string;
+    taskId?: string;
+    action?: string;
+    tool?: string;
+    targetAgent?: string;
+    knowledgeId: string;
+    result: KnowledgeApplicationResult;
+    reason?: string;
+    generatedSkillPath?: string;
+    sessionId?: string;
 }

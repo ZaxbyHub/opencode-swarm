@@ -935,3 +935,106 @@ describe('ADVERSARIAL: summariesDir filesystem attack vectors', () => {
 		}
 	});
 });
+
+describe('Post-compaction rehydration cache refresh', () => {
+	let tempDir: string;
+
+	const defaultConfig: PluginConfig = {
+		max_iterations: 5,
+		qa_retry_limit: 3,
+		inject_phase_reminders: true,
+	};
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), 'swarm-rehydration-'));
+		const swarmDir = join(tempDir, '.swarm');
+		await mkdir(swarmDir, { recursive: true });
+		writeFileSync(join(swarmDir, 'plan.md'), '');
+		writeFileSync(join(swarmDir, 'context.md'), '');
+	});
+
+	afterEach(async () => {
+		const { resetSwarmState } = await import('../../../src/state');
+		resetSwarmState();
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	it('buildRehydrationCache is called after compaction handler runs', async () => {
+		const { buildRehydrationCache, ensureAgentSession, resetSwarmState } =
+			await import('../../../src/state');
+
+		resetSwarmState();
+
+		// Write an initial plan.json with one pending task
+		const swarmDir = join(tempDir, '.swarm');
+		const initialPlan = {
+			schema_version: '1.0.0',
+			title: 'Test Plan',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending',
+							size: 'small',
+							description: 'Task one',
+							depends: [],
+							files_touched: [],
+						},
+					],
+				},
+			],
+		};
+		writeFileSync(join(swarmDir, 'plan.json'), JSON.stringify(initialPlan));
+
+		// Build the initial rehydration cache (task 1.1 is pending → idle)
+		await buildRehydrationCache(tempDir);
+
+		// Verify: session created now should have task 1.1 as idle
+		const sessionBefore = ensureAgentSession(
+			'session-before',
+			'architect',
+			tempDir,
+		);
+		expect(sessionBefore.taskWorkflowStates?.get('1.1')).toBe('idle');
+
+		resetSwarmState();
+
+		// Simulate plan update on disk: task 1.1 completed
+		const updatedPlan = {
+			...initialPlan,
+			phases: [
+				{
+					...initialPlan.phases[0],
+					tasks: [
+						{
+							...initialPlan.phases[0].tasks[0],
+							status: 'completed',
+						},
+					],
+				},
+			],
+		};
+		writeFileSync(join(swarmDir, 'plan.json'), JSON.stringify(updatedPlan));
+
+		// Invoke the compaction hook
+		const hook = createCompactionCustomizerHook(defaultConfig, tempDir);
+		const handler = hook['experimental.session.compacting'] as Function;
+		const output = { context: [] as string[] };
+		await handler({ sessionID: 'test-session' }, output);
+
+		// The hook must have refreshed the cache. A new session should see task 1.1 as complete.
+		const sessionAfter = ensureAgentSession(
+			'session-after',
+			'architect',
+			tempDir,
+		);
+		expect(sessionAfter.taskWorkflowStates?.get('1.1')).toBe('complete');
+	});
+});

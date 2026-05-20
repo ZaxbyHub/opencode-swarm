@@ -165,7 +165,10 @@ export function createIncrementalVerifyHook(
 			const subagentType =
 				typeof args?.subagent_type === 'string' ? args.subagent_type : '';
 
-			// Normalise: strip known swarm prefix (e.g. 'mega_coder' → 'coder')
+			// Normalise: extract the canonical role suffix from arbitrary,
+			// user-defined swarm IDs (e.g. 'banana_coder' or 'acme-prod_coder'
+			// → 'coder'). Swarm IDs are not predetermined — strip the leading
+			// user-defined prefix segment up to the first underscore.
 			const agentName = subagentType.replace(/^[^_]+_/, '');
 			if (
 				!config.triggerAgents.includes(agentName) &&

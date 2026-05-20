@@ -38,6 +38,7 @@ const makeSynthesis = (
 	unifiedFeedbackMd: '',
 	roundNumber: 1,
 	allCriteriaMet: true,
+	quorumSize: 3,
 	...overrides,
 });
 
@@ -46,6 +47,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	mock.restore();
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -61,6 +63,8 @@ describe('evidence writer — gates.council integration', () => {
 		expect(evidence.gates.council.timestamp).toBe('2026-04-13T00:00:00.000Z');
 		expect(evidence.gates.council.agent).toBe('architect');
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
+		// quorumSize must be persisted for rehydration validation (Task 3.3)
+		expect(evidence.gates.council.quorumSize).toBe(3);
 	});
 
 	test('does NOT write council at top-level (must be under gates)', () => {
@@ -635,6 +639,7 @@ describe('evidence writer — round-history audit log', () => {
 		unifiedFeedbackMd: '',
 		roundNumber: 1,
 		allCriteriaMet: true,
+		quorumSize: 3,
 		...overrides,
 	});
 

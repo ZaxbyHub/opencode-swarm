@@ -360,11 +360,8 @@ describe('Adversarial: Tool Registration Security', () => {
 		});
 
 		test('should handle Unicode tool names', () => {
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: regex intentionally tests ASCII range
 			expect(/[^\x00-\x7F]/.test('diff_summary')).toBe(false);
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: regex intentionally tests ASCII range
 			expect(/[^\x00-\x7F]/.test('test_impact')).toBe(false);
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: regex intentionally tests ASCII range
 			expect(/[^\x00-\x7F]/.test('mutation_test')).toBe(false);
 		});
 

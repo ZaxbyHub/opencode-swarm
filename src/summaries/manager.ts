@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 
 /**
  * Summary ID validation regex: S followed by one or more digits
@@ -120,7 +121,7 @@ export async function storeSummary(
 		`${sanitizedId}.json.tmp.${Date.now()}.${process.pid}`,
 	);
 	try {
-		await Bun.write(tempPath, entryJson);
+		await bunWrite(tempPath, entryJson);
 		renameSync(tempPath, summaryPath);
 	} catch (error) {
 		// Clean up temp file on failure

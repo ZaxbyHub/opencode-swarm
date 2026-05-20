@@ -6,7 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin';
+import type { ToolDefinition } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
 import { hasActiveTurboMode } from '../state';
 import { createSwarmTool } from './create-tool';
@@ -500,14 +501,14 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 	description:
 		'Deterministic pre-check verifying that plan task identifiers exist in their target source files before phase completion. Blocks if obviously incomplete.',
 	args: {
-		phase: tool.schema.number().describe('The phase number to check'),
-		sessionID: tool.schema
+		phase: z.number().describe('The phase number to check'),
+		sessionID: z
 			.string()
 			.optional()
 			.describe(
 				'Session ID for tracking state (auto-provided by plugin context)',
 			),
-		working_directory: tool.schema
+		working_directory: z
 			.string()
 			.optional()
 			.describe(

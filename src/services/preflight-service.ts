@@ -216,9 +216,9 @@ async function runVersionCheck(
 	const startTime = Date.now();
 
 	try {
-		const packageVersion = getPackageVersion(dir);
-		const changelogVersion = getChangelogVersion(dir);
-		const versionFileVersion = getVersionFileVersion(dir);
+		const packageVersion = _internals.getPackageVersion(dir);
+		const changelogVersion = _internals.getChangelogVersion(dir);
+		const versionFileVersion = _internals.getVersionFileVersion(dir);
 
 		const versions: string[] = [];
 		if (packageVersion) versions.push(`package.json: ${packageVersion}`);
@@ -684,7 +684,7 @@ export async function runPreflight(
 	// Validate directory path to prevent path traversal
 	let validatedDir: string;
 	try {
-		validatedDir = validateDirectoryPath(dir);
+		validatedDir = _internals.validateDirectoryPath(dir);
 	} catch (error) {
 		return {
 			id: reportId,
@@ -706,7 +706,7 @@ export async function runPreflight(
 	// Validate timeout configuration
 	let validatedTimeout: number;
 	try {
-		validatedTimeout = validateTimeout(
+		validatedTimeout = _internals.validateTimeout(
 			config?.checkTimeoutMs,
 			DEFAULT_CONFIG.checkTimeoutMs,
 		);
@@ -758,7 +758,7 @@ export async function runPreflight(
 
 	// Run lint check
 	log('[Preflight] Running lint check...');
-	const lintResult = await runLintCheck(
+	const lintResult = await _internals.runLintCheck(
 		validatedDir,
 		cfg.linter,
 		cfg.checkTimeoutMs,
@@ -769,7 +769,7 @@ export async function runPreflight(
 	// Run tests check (unless skipped)
 	if (!cfg.skipTests) {
 		log('[Preflight] Running tests check...');
-		const testsResult = await runTestsCheck(
+		const testsResult = await _internals.runTestsCheck(
 			validatedDir,
 			cfg.testScope,
 			cfg.checkTimeoutMs,
@@ -789,7 +789,7 @@ export async function runPreflight(
 	// Run secrets check (unless skipped)
 	if (!cfg.skipSecrets) {
 		log('[Preflight] Running secrets check...');
-		const secretsResult = await runSecretsCheck(
+		const secretsResult = await _internals.runSecretsCheck(
 			validatedDir,
 			cfg.checkTimeoutMs,
 		);
@@ -808,7 +808,7 @@ export async function runPreflight(
 	// Run evidence check (unless skipped)
 	if (!cfg.skipEvidence) {
 		log('[Preflight] Running evidence check...');
-		const evidenceResult = await runEvidenceCheck(validatedDir);
+		const evidenceResult = await _internals.runEvidenceCheck(validatedDir);
 		checks.push(evidenceResult);
 		log(
 			`[Preflight] Evidence check: ${evidenceResult.status} ${evidenceResult.message}`,
@@ -823,7 +823,7 @@ export async function runPreflight(
 
 	// Run requirement coverage check
 	log('[Preflight] Running requirement coverage check...');
-	const reqCoverageResult = await runRequirementCoverageCheck(
+	const reqCoverageResult = await _internals.runRequirementCoverageCheck(
 		validatedDir,
 		phase,
 	);
@@ -835,7 +835,7 @@ export async function runPreflight(
 	// Run version check (unless skipped)
 	if (!cfg.skipVersion) {
 		log('[Preflight] Running version check...');
-		const versionResult = await runVersionCheck(
+		const versionResult = await _internals.runVersionCheck(
 			validatedDir,
 			cfg.checkTimeoutMs,
 		);
@@ -929,6 +929,42 @@ export async function handlePreflightCommand(
 ): Promise<string> {
 	const plan = await loadPlan(directory);
 	const phase = plan?.current_phase ?? 1;
-	const report = await runPreflight(directory, phase);
-	return formatPreflightMarkdown(report);
+	const report = await _internals.runPreflight(directory, phase);
+	return _internals.formatPreflightMarkdown(report);
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	runPreflight: typeof runPreflight;
+	formatPreflightMarkdown: typeof formatPreflightMarkdown;
+	handlePreflightCommand: typeof handlePreflightCommand;
+	validateDirectoryPath: typeof validateDirectoryPath;
+	validateTimeout: typeof validateTimeout;
+	getPackageVersion: typeof getPackageVersion;
+	getChangelogVersion: typeof getChangelogVersion;
+	getVersionFileVersion: typeof getVersionFileVersion;
+	runVersionCheck: typeof runVersionCheck;
+	runLintCheck: typeof runLintCheck;
+	runTestsCheck: typeof runTestsCheck;
+	runSecretsCheck: typeof runSecretsCheck;
+	runEvidenceCheck: typeof runEvidenceCheck;
+	runRequirementCoverageCheck: typeof runRequirementCoverageCheck;
+} = {
+	runPreflight,
+	formatPreflightMarkdown,
+	handlePreflightCommand,
+	validateDirectoryPath,
+	validateTimeout,
+	getPackageVersion,
+	getChangelogVersion,
+	getVersionFileVersion,
+	runVersionCheck,
+	runLintCheck,
+	runTestsCheck,
+	runSecretsCheck,
+	runEvidenceCheck,
+	runRequirementCoverageCheck,
+} as const;

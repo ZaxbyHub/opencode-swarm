@@ -46,16 +46,45 @@ function isAlreadyInHive(
 }
 
 /**
- * Count distinct phase numbers in a swarm entry's confirmed_by array.
+ * Check whether a swarm knowledge entry is eligible for hive promotion.
+ * Three routes to eligibility:
+ *   Route 1: hive_eligible flag + 3+ distinct phases
+ *   Route 2: 'hive-fast-track' tag
+ *   Route 3: age exceeds auto_promote_days threshold
+ *
+ * @param entry - The swarm knowledge entry to check
+ * @param autoPromoteDays - Number of days before age-based promotion kicks in
+ * @returns true if the entry is eligible for hive promotion
  */
-function countDistinctPhases(
-	confirmedBy: SwarmKnowledgeEntry['confirmed_by'],
-): number {
+export function isHiveEligible(
+	entry: SwarmKnowledgeEntry,
+	autoPromoteDays: number,
+): boolean {
+	// Route 1: hive_eligible flag + 3+ distinct phases
 	const phaseNumbers = new Set<number>();
-	for (const record of confirmedBy) {
-		phaseNumbers.add(record.phase_number);
+	for (const record of entry.confirmed_by ?? []) {
+		if (record && typeof record.phase_number === 'number') {
+			phaseNumbers.add(record.phase_number);
+		}
 	}
-	return phaseNumbers.size;
+	if (entry.hive_eligible === true && phaseNumbers.size >= 3) {
+		return true;
+	}
+
+	// Route 2: fast-track tag bypasses count requirement
+	if ((entry.tags ?? []).includes('hive-fast-track')) {
+		return true;
+	}
+
+	// Route 3: age-based promotion
+	const createdMs = Date.parse(entry.created_at);
+	const ageMs = Number.isFinite(createdMs) ? Date.now() - createdMs : 0;
+	const ageThresholdMs = autoPromoteDays * 86400000;
+	if (ageMs >= ageThresholdMs) {
+		return true;
+	}
+
+	return false;
 }
 
 /**
@@ -105,15 +134,6 @@ function calculateEncounterScore(
 }
 
 /**
- * Get the age of an entry in milliseconds.
- */
-function getEntryAgeMs(createdAt: string): number {
-	const createdTime = new Date(createdAt).getTime();
-	if (Number.isNaN(createdTime)) return 0;
-	return Date.now() - createdTime;
-}
-
-/**
  * Main promotion logic: checks swarm entries and promotes eligible ones to hive.
  * Also updates existing hive entries with new project confirmations.
  * Returns a summary of the promotion activity for curator state.
@@ -158,30 +178,8 @@ export async function checkHivePromotions(
 			continue;
 		}
 
-		// Determine promotion eligibility via three routes
-		let shouldPromote = false;
-
-		// Route 1: hive_eligible flag + 3+ distinct phases
-		if (
-			swarmEntry.hive_eligible === true &&
-			countDistinctPhases(swarmEntry.confirmed_by) >= 3
-		) {
-			shouldPromote = true;
-		}
-
-		// Route 2: fast-track tag bypasses count requirement
-		if (swarmEntry.tags.includes('hive-fast-track')) {
-			shouldPromote = true;
-		}
-
-		// Route 3: age-based promotion
-		const ageMs = getEntryAgeMs(swarmEntry.created_at);
-		const ageThresholdMs = config.auto_promote_days * 86400000; // days to ms
-		if (ageMs >= ageThresholdMs) {
-			shouldPromote = true;
-		}
-
-		if (!shouldPromote) {
+		// Determine promotion eligibility via shared helper
+		if (!isHiveEligible(swarmEntry, config.auto_promote_days)) {
 			continue;
 		}
 

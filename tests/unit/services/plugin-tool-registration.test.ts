@@ -7,7 +7,7 @@ import { AGENT_TOOL_MAP } from '../../../src/config/constants';
  * Regression guard for the council-tools-missing-from-plugin bug.
  *
  * Commit 62faff3 ("feat(council): add Work Complete Council verification gate")
- * added convene_council and declare_council_criteria to AGENT_TOOL_MAP.architect,
+ * added submit_council_verdicts and declare_council_criteria to AGENT_TOOL_MAP.architect,
  * implemented the tool modules, and exported them from src/tools/index.ts — but
  * forgot to import them in src/index.ts and register them in the plugin's
  * `tool: { … }` block. Result: the architect system prompt told the model to
@@ -68,8 +68,12 @@ describe('plugin tool registration alignment', () => {
 	const registered = extractRegisteredToolKeys(source);
 
 	test('council tools are registered in plugin tool block', () => {
-		expect(registered.has('convene_council')).toBe(true);
+		expect(registered.has('submit_council_verdicts')).toBe(true);
 		expect(registered.has('declare_council_criteria')).toBe(true);
+	});
+
+	test('swarm_command is registered in plugin tool block', () => {
+		expect(registered.has('swarm_command')).toBe(true);
 	});
 
 	test('every AGENT_TOOL_MAP tool is registered in plugin tool block', () => {

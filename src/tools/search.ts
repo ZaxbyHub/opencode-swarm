@@ -2,7 +2,9 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ToolDefinition, tool } from '@opencode-ai/plugin/tool';
+import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { z } from 'zod';
+import { bunSpawn } from '../utils/bun-compat';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -157,7 +159,7 @@ async function isRipgrepAvailable(): Promise<boolean> {
 	if (!rgPath) return false;
 
 	try {
-		const proc = Bun.spawn([rgPath, '--version'], {
+		const proc = bunSpawn([rgPath, '--version'], {
 			stdout: 'pipe',
 			stderr: 'pipe',
 		});
@@ -224,7 +226,7 @@ async function ripgrepSearch(
 	args.push(opts.workspace);
 
 	try {
-		const proc = Bun.spawn([rgPath, ...args], {
+		const proc = bunSpawn([rgPath, ...args], {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: opts.workspace,
@@ -247,8 +249,8 @@ async function ripgrepSearch(
 			};
 		}
 
-		const stdout = await new Response(proc.stdout).text();
-		const stderr = await new Response(proc.stderr).text();
+		const stdout = await proc.stdout.text();
+		const stderr = await proc.stderr.text();
 
 		// If ripgrep exited with non-zero and has stderr, it might be an invalid regex
 		if (proc.exitCode !== 0 && stderr) {
@@ -507,32 +509,32 @@ export const search: ToolDefinition = createSwarmTool({
 		'Supports literal and regex search modes with glob include/exclude filtering. ' +
 		'Returns structured JSON output with file paths, line numbers, and line content.',
 	args: {
-		query: tool.schema
+		query: z
 			.string()
 			.describe('Search query string (literal or regex depending on mode)'),
-		mode: tool.schema
+		mode: z
 			.enum(['literal', 'regex'])
 			.default('literal')
 			.describe(
 				'Search mode: literal for exact string match, regex for regular expression',
 			),
-		include: tool.schema
+		include: z
 			.string()
 			.optional()
 			.describe(
 				'Glob pattern for files to include (e.g., "*.ts", "src/**/*.js")',
 			),
-		exclude: tool.schema
+		exclude: z
 			.string()
 			.optional()
 			.describe(
 				'Glob pattern for files to exclude (e.g., "node_modules/**", "*.test.ts")',
 			),
-		max_results: tool.schema
+		max_results: z
 			.number()
 			.default(DEFAULT_MAX_RESULTS)
 			.describe('Maximum number of matches to return'),
-		max_lines: tool.schema
+		max_lines: z
 			.number()
 			.default(DEFAULT_MAX_LINES)
 			.describe('Maximum characters per line in results'),

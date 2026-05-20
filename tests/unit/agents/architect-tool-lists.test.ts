@@ -53,13 +53,13 @@ function extractAvailableToolsNames(prompt: string): string[] {
 }
 
 // Render with council.enabled=true so the full AGENT_TOOL_MAP.architect
-// surface (including `convene_council` and `declare_council_criteria`)
+// surface (including `submit_council_verdicts` and `declare_council_criteria`)
 // appears in YOUR TOOLS and Available Tools. Without council enabled,
 // those tools are filtered out of the prompt — see
 // architect-tool-visibility-council.test.ts for the council-off behavior.
 beforeAll(() => {
 	// Both councils enabled so the full AGENT_TOOL_MAP.architect surface
-	// (convene_council, declare_council_criteria, AND convene_general_council)
+	// (submit_council_verdicts, declare_council_criteria, AND convene_general_council)
 	// renders into YOUR TOOLS and Available Tools.
 	const agent = createArchitectAgent(
 		'test-model',

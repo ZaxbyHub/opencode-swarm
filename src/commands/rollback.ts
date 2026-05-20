@@ -1,6 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { type Plan, PlanSchema } from '../config/plan-schema';
 import { validateSwarmPath } from '../hooks/utils';
+import { appendLedgerEvent, computePlanHash, initLedger } from '../plan/ledger';
+import { derivePlanId } from '../plan/utils.js';
 
 /**
  * Handle /swarm rollback command
@@ -98,10 +101,20 @@ export async function handleRollbackCommand(
 	const swarmDir = validateSwarmPath(directory, '');
 
 	// Copy files directly from checkpoint to .swarm/
+	const EXCLUDE_FILES = new Set([
+		'plan-ledger.jsonl',
+		'plan-ledger.quarantine',
+	]);
+
 	const successes: string[] = [];
 	const failures: { file: string; error: string }[] = [];
 
 	for (const file of checkpointFiles) {
+		// Skip ledger files — we'll reinitialize the ledger fresh
+		if (EXCLUDE_FILES.has(file) || file.startsWith('plan-ledger.archived-')) {
+			continue;
+		}
+
 		const src = path.join(checkpointDir, file);
 		const dest = path.join(swarmDir, file);
 
@@ -110,12 +123,52 @@ export async function handleRollbackCommand(
 			successes.push(file);
 		} catch (error) {
 			failures.push({ file, error: (error as Error).message });
-			// Continue processing remaining files
 		}
 	}
 
 	if (failures.length > 0) {
-		return `Rollback partially completed. Successfully restored ${successes.length} files: ${successes.join(', ') || 'none'}. Failed on ${failures.length} files: ${failures.map((f) => f.file).join(', ')}. Check permissions and disk space.`;
+		return [
+			`Rollback partially completed. Successfully restored ${successes.length} files.`,
+			`Failed on ${failures.length} files:`,
+			...failures.map((f) => `  - ${f.file}: ${f.error}`),
+			'',
+			'Some files could not be restored. The .swarm/ directory may be in an inconsistent state.',
+			'Check permissions and disk space, then retry the rollback.',
+		].join('\n');
+	}
+
+	// Delete any existing ledger unconditionally — we're rolling back to a
+	// checkpoint state and the old ledger belongs to the pre-rollback state.
+	const existingLedgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
+	if (fs.existsSync(existingLedgerPath)) {
+		fs.unlinkSync(existingLedgerPath);
+	}
+
+	// Initialize a fresh ledger with the restored plan (if available)
+	// We excluded plan-ledger.jsonl from the checkpoint copy above and
+	// create a brand-new ledger here so the ledger matches the restored state.
+	try {
+		const planJsonPath = path.join(swarmDir, 'plan.json');
+		if (fs.existsSync(planJsonPath)) {
+			const planRaw = fs.readFileSync(planJsonPath, 'utf-8');
+			const plan = PlanSchema.parse(JSON.parse(planRaw) as Plan);
+			const planId = derivePlanId(plan);
+
+			const planHash = computePlanHash(plan);
+			await initLedger(directory, planId, planHash, plan);
+
+			await appendLedgerEvent(directory, {
+				event_type: 'plan_rebuilt',
+				source: 'rollback',
+				plan_id: planId,
+			});
+		}
+	} catch (initError) {
+		return [
+			`Rollback restored files but failed to initialize ledger: ${initError instanceof Error ? initError.message : String(initError)}`,
+			'The .swarm/plan.json has been restored but the ledger may be out of sync.',
+			'Run /swarm reset-session to reinitialize the ledger.',
+		].join('\n');
 	}
 
 	// Write rollback event to JSONL

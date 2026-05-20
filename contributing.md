@@ -1,6 +1,15 @@
 # Contributing to OpenCode Swarm
 
 > **This file is the authoritative reference for any automated agent (LLM, Copilot, CI bot) or human contributor submitting a PR to this repository. Read it fully before making any commit.**
+>
+> **Required reading before code changes:**
+> 1. [`AGENTS.md`](./AGENTS.md) — root engineering contract (12 non-negotiable invariants).
+> 2. [`docs/engineering-invariants.md`](./docs/engineering-invariants.md) — long-form rationale and historical failure map (skim, deep-dive on touched invariants).
+> 3. This file (`contributing.md`) — release-please workflow and CI pipeline.
+> 4. The `writing-tests` skill — for any test changes (`.opencode/skills/writing-tests/SKILL.md` or `.claude/skills/writing-tests/SKILL.md`).
+> 5. The `commit-pr` skill — before committing or opening a PR (`.claude/skills/commit-pr/SKILL.md`). It enforces the invariant audit gate.
+>
+> When this file conflicts with `AGENTS.md`, `AGENTS.md` wins.
 
 ---
 
@@ -23,9 +32,9 @@ bun install --frozen-lockfile
 - Follow the test rules in `.opencode/writing-tests/SKILL.md` (bun:test only, mock isolation, cross-platform paths)
 - If you change behavior guarded by existing tests, **update those tests in the same PR**
 
-### 3. Write release notes
+### 3. Write a pending release-note fragment
 
-**Every PR MUST include a release notes file at `docs/releases/v{NEXT_VERSION}.md`.** No exceptions — even for one-line fixes. See the "Release notes" section below for how to determine the version number and what to include.
+**Every PR with a user-visible change MUST add a unique fragment at `docs/releases/pending/<descriptive-slug>.md`.** Do NOT compute the next version, do NOT create `docs/releases/vX.Y.Z.md`, and do NOT write to a shared `unreleased.md` — release-please picks the version and the release workflow aggregates pending fragments at release time. See the "Release notes" section below for what each fragment should contain.
 
 ### 4. Run all checks locally
 
@@ -103,7 +112,7 @@ When a PR is merged to `main`:
 
 ### Critical: release-please PR body markers
 
-release-please identifies its own PRs by parsing markers in the PR body (the `:robot: I have created a release` header and structured changelog). **Never replace the entire body of a release PR.** The `update-pr-notes` CI job prepends custom release notes above the markers — if the markers are destroyed, release-please cannot recognize the PR and the entire automated release pipeline breaks (no tag, no release, no npm publish).
+release-please identifies its own PRs by parsing markers in the PR body (the `:robot: I have created a release` header and structured changelog). **Never replace the entire body of a release PR.** The `update-pr-notes` CI job aggregates pending release-note fragments from every PR referenced in the release-please PR body and inserts the combined content inside a stable `<!-- custom-release-notes:start -->` … `<!-- custom-release-notes:end -->` marker block — release-please's own markers must remain intact below it. Same flow runs against the GitHub Release body after a tag is cut via `update-release-notes`. The implementation is `scripts/release-notes-fragments.mjs`.
 
 ### What release-please manages automatically — do not touch manually
 
@@ -246,29 +255,33 @@ If your code change alters the behavior of an existing function (new error messa
 
 ## Release notes (mandatory — no exceptions)
 
-**Every PR MUST include a release notes file at `docs/releases/v{NEXT_VERSION}.md`.** This is not optional. This is not conditional on "user-facing changes." This is not a "nice to have." If your PR is merged without it, release-please publishes a generic changelog with no explanation of what changed or how to migrate.
+**Every PR with a user-visible change MUST add a pending fragment at `docs/releases/pending/<descriptive-slug>.md`.** This is not optional. This is not conditional on "user-facing changes" being polished. If your PR is merged without it, release-please publishes a generic changelog with no explanation of what changed or how to migrate.
 
-The release pipeline prepends this file to the release PR body after merge, and later uses it as the GitHub Release body. If the file is missing, users see a bare list of commit messages — which is useless for anyone upgrading.
+> **Do NOT** calculate the next version, create `docs/releases/vX.Y.Z.md`, or write to a shared `unreleased.md`. release-please picks the version. The release workflow (`scripts/release-notes-fragments.mjs`) gathers every pending fragment from every PR included in the release-please release PR and inserts the combined content into a stable marker block in the release PR / GitHub Release body. Each PR owning its own unique file is what makes the previous merge-conflict hotspot go away.
 
-### How to determine the version
+### Where to put the fragment
 
-Find the current version in `.release-please-manifest.json` and increment it according to the bump your commit type will trigger:
-
-| Commit type | Current version | Next version |
-|---|---|---|
-| `fix`, `perf` | `6.33.1` | `6.33.2` |
-| `feat` | `6.33.1` | `6.34.0` |
+- Path: `docs/releases/pending/<descriptive-slug>.md`
+- Slug: short, kebab-case, descriptive of THIS change. Examples:
+  - `docs/releases/pending/guardrails-transient-node-errors.md`
+  - `docs/releases/pending/spec-drift-self-ack-guardrail.md`
+  - `docs/releases/pending/phase-complete-durable-gate-proof.md`
+- Pick a slug nobody else is likely to pick. Concurrent PRs each adding a *different* file produce zero merge conflicts.
 
 ### What to include
 
-The file is freeform markdown. Cover:
+The fragment is freeform markdown. Cover:
 - **What changed** — summarize the changes grouped by theme
 - **Why** — the motivation (bug report, feature request, hardening)
 - **Migration steps** — if any API, config, or behavior changed
 - **Breaking changes** — if any (should be rare)
 - **Known caveats** — anything users should watch out for
 
-Even a one-line change deserves a note explaining why it matters. See `docs/releases/v6.35.0.md` for the canonical format.
+Do not prefix the heading with a version (`# v7.21.4`) — release-please owns the version. A descriptive `# <topic>` is the canonical header. See `docs/releases/v6.35.0.md` for the prose style; ignore the version prefix in that historical file.
+
+### What still happens automatically
+
+After your PR merges, release-please opens or updates its release PR. CI runs `scripts/release-notes-fragments.mjs update-pr` to aggregate every pending fragment referenced by that release PR and inject it inside the `<!-- custom-release-notes:start --> … <!-- custom-release-notes:end -->` marker block (preserving release-please's own body markers). When the release PR merges and a tag is cut, `update-release` mirrors the same aggregation into the GitHub Release body. **Pending fragments are not deleted automatically.** They stay in `docs/releases/pending/` until a maintainer prunes them post-release.
 
 ---
 
@@ -302,17 +315,23 @@ gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'
 | Editing `.release-please-manifest.json` | release-please version tracking breaks | Let release-please manage the manifest |
 | Using only `docs`/`chore`/`test`/`ci` commit types | No version bump triggered, release PR is never created | Include at least one `feat` or `fix` commit if you want a release |
 | Creating tags or releases manually | `publish-npm` job doesn't trigger (gated on release-please output) | Let the pipeline create tags and releases |
-| Missing `docs/releases/v{VERSION}.md` | GitHub Release has no useful description | Always create the release notes file |
+| Missing `docs/releases/pending/<slug>.md` | GitHub Release has no useful description | Always add a unique pending fragment for your PR |
+| Creating `docs/releases/v{VERSION}.md` in a feature/fix PR | Version prediction collides with release-please; merge conflict hotspot | Use `docs/releases/pending/<slug>.md` instead — release-please owns the version |
+| Writing to a shared `docs/releases/unreleased.md` | Same merge-conflict hotspot, just relocated | Use a unique slug under `docs/releases/pending/` per PR |
 
 ---
 
 ## Summary checklist for any PR
 
+- [ ] [`AGENTS.md`](./AGENTS.md) read; touched invariants identified
+- [ ] PR body includes an `## Invariant audit` section in the format from `AGENTS.md` (when relevant invariants are touched)
+- [ ] OpenCode `test_runner` was NOT used with `scope: 'all'` or broad `'graph'` / `'impact'` scope to validate this repo (use shell commands instead)
+- [ ] If invariants 1, 2, or 3 (plugin init / runtime portability / subprocesses) are touched: ran `bun run build`, `node scripts/repro-704.mjs`, and `node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"` cleanly
 - [ ] Branch created from latest `main`
 - [ ] Every commit message follows `<type>(<scope>): <description>` format
 - [ ] PR title follows the same format and matches the primary change
 - [ ] No manual edits to `package.json` version, `CHANGELOG.md`, or `.release-please-manifest.json`
-- [ ] `docs/releases/v{NEXT_VERSION}.md` exists with release notes
+- [ ] `docs/releases/pending/<unique-slug>.md` exists with release notes (do NOT create `docs/releases/vX.Y.Z.md`)
 - [ ] New tests are in the correct `tests/` subdirectory
 - [ ] Tests updated for any changed behavior (defaults, validation, error messages)
 - [ ] If adding/modifying a workflow, all `uses:` references are SHA-pinned

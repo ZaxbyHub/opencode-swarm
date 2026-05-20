@@ -103,6 +103,10 @@ export declare const PhaseSchema: z.ZodObject<{
         evidence_path: z.ZodOptional<z.ZodString>;
         blocked_reason: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
+    type: z.ZodOptional<z.ZodEnum<{
+        code: "code";
+        "non-code": "non-code";
+    }>>;
     required_agents: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export type Phase = z.infer<typeof PhaseSchema>;
@@ -144,6 +148,10 @@ export declare const PlanSchema: z.ZodObject<{
             evidence_path: z.ZodOptional<z.ZodString>;
             blocked_reason: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>>>;
+        type: z.ZodOptional<z.ZodEnum<{
+            code: "code";
+            "non-code": "non-code";
+        }>>;
         required_agents: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
     migration_status: z.ZodOptional<z.ZodEnum<{
@@ -164,10 +172,18 @@ export type Plan = z.infer<typeof PlanSchema>;
 /**
  * Runtime plan with spec staleness tracking.
  * Extends Plan with runtime-only fields that are not persisted.
+ *
+ * `_midLoadRemovals` is attached by loadPlan-recovery paths that auto-
+ * acknowledged task removals (issue #853) so the system-enhancer Layer A
+ * can disclose the count to the model without re-reading the ledger.
  */
 export type RuntimePlan = Plan & {
     _specStale?: boolean;
     _specStaleReason?: string;
+    _midLoadRemovals?: {
+        count: number;
+        source: string;
+    };
 };
 /**
  * Find the first phase that is in progress.

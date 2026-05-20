@@ -60,50 +60,26 @@ afterEach(() => {
 describe('executeUpdateTaskStatus fallbackDir guard', () => {
 	// ── 1. Guard fires when fallbackDir is undefined and no working_directory ──
 
-	it('console.warn fires when fallbackDir is undefined and working_directory is not provided', async () => {
-		const warns: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warns.push(args[0] as string);
-		};
+	it('returns failure when fallbackDir is undefined and working_directory is not provided', async () => {
+		// Call WITHOUT fallbackDir AND without working_directory in args
+		const result = await executeUpdateTaskStatus({
+			task_id: '1.1',
+			status: 'pending',
+			// no working_directory
+		});
 
-		try {
-			// Call WITHOUT fallbackDir AND without working_directory in args
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				// no working_directory
-			});
-
-			expect(warns.some((w) => w.includes('fallbackDir is undefined'))).toBe(
-				true,
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('No working_directory provided');
 	});
 
-	it('console.warn fires with the exact expected message format', async () => {
-		const warns: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warns.push(args[0] as string);
-		};
+	it('returns failure with descriptive message when no directory is available', async () => {
+		const result = await executeUpdateTaskStatus({
+			task_id: '1.1',
+			status: 'pending',
+		});
 
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-			});
-
-			const fallbackWarns = warns.filter((w) => w.includes('fallbackDir'));
-			expect(fallbackWarns.length).toBeGreaterThanOrEqual(1);
-			expect(fallbackWarns[0]).toBe(
-				'[update-task-status] fallbackDir is undefined',
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('No working_directory provided');
 	});
 
 	// ── 2. Guard does NOT fire when fallbackDir IS provided ──
@@ -195,57 +171,30 @@ describe('executeUpdateTaskStatus fallbackDir guard', () => {
 		expect(result.new_status).toBe('pending');
 	});
 
-	it('falls back to process.cwd() when fallbackDir is undefined (result is still correct)', async () => {
-		// This test verifies that even when the guard fires, the function
-		// still produces a valid result by falling back to process.cwd()
-		const warns: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warns.push(args[0] as string);
-		};
+	it('returns failure without throwing when fallbackDir is undefined', async () => {
+		// Source returns { success: false } rather than throwing when no directory is available
+		const result = await executeUpdateTaskStatus({
+			task_id: '1.1',
+			status: 'pending',
+		});
 
-		try {
-			const result = await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-			});
-
-			// Guard fires
-			expect(warns.some((w) => w.includes('fallbackDir is undefined'))).toBe(
-				true,
-			);
-			// But the result should still be a valid response (not thrown)
-			expect(result).toBeDefined();
-			expect(typeof result.success).toBe('boolean');
-		} finally {
-			console.warn = originalWarn;
-		}
+		expect(result).toBeDefined();
+		expect(result.success).toBe(false);
 	});
 
 	// ── 4. Guard behavior with explicit undefined vs missing key ──
 
-	it('guard fires when fallbackDir is explicitly passed as undefined', async () => {
-		const warns: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warns.push(args[0] as string);
-		};
+	it('returns failure when fallbackDir is explicitly passed as undefined', async () => {
+		const result = await executeUpdateTaskStatus(
+			{
+				task_id: '1.1',
+				status: 'pending',
+			},
+			undefined, // explicitly undefined
+		);
 
-		try {
-			await executeUpdateTaskStatus(
-				{
-					task_id: '1.1',
-					status: 'pending',
-				},
-				undefined, // explicitly undefined
-			);
-
-			expect(warns.some((w) => w.includes('fallbackDir is undefined'))).toBe(
-				true,
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('No working_directory provided');
 	});
 
 	it('guard does NOT fire when fallbackDir is explicitly passed as a valid string', async () => {

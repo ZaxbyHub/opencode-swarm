@@ -11,7 +11,27 @@ import { createHash } from 'node:crypto';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
- * QA gate flags. All nine gates are tracked explicitly.
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
+ * for the rationale (`mock.module` from `bun:test` leaks across files in
+ * Bun's shared test-runner process). Mutating this local object is
+ * file-scoped and trivially restorable via `afterEach`.
+ */
+export const _internals: {
+	getProfile: typeof getProfile;
+	getOrCreateProfile: typeof getOrCreateProfile;
+	setGates: typeof setGates;
+	getEffectiveGates: typeof getEffectiveGates;
+	computeProfileHash: typeof computeProfileHash;
+} = {
+	getProfile,
+	getOrCreateProfile,
+	setGates,
+	getEffectiveGates,
+	computeProfileHash,
+};
+
+/**
+ * QA gate flags. All eleven gates are tracked explicitly.
  */
 export interface QaGates {
 	reviewer: boolean;
@@ -23,6 +43,8 @@ export interface QaGates {
 	sast_enabled: boolean;
 	mutation_test: boolean;
 	council_general_review: boolean;
+	drift_check: boolean;
+	final_council: boolean;
 }
 
 /**
@@ -38,6 +60,8 @@ export const DEFAULT_QA_GATES: QaGates = {
 	sast_enabled: true,
 	mutation_test: false,
 	council_general_review: false,
+	drift_check: true,
+	final_council: false,
 };
 
 /**
@@ -115,7 +139,7 @@ export function getOrCreateProfile(
 	planId: string,
 	projectType?: string,
 ): QaGateProfile {
-	const existing = getProfile(directory, planId);
+	const existing = _internals.getProfile(directory, planId);
 	if (existing) return existing;
 
 	const db = getProjectDb(directory);
@@ -136,7 +160,7 @@ export function getOrCreateProfile(
 		}
 	}
 
-	const after = getProfile(directory, planId);
+	const after = _internals.getProfile(directory, planId);
 	if (!after) {
 		throw new Error(
 			`Failed to create or load QA gate profile for plan_id=${planId}`,
@@ -155,7 +179,7 @@ export function setGates(
 	planId: string,
 	gates: Partial<QaGates>,
 ): QaGateProfile {
-	const current = getProfile(directory, planId);
+	const current = _internals.getProfile(directory, planId);
 	if (!current) {
 		throw new Error(
 			`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
@@ -187,7 +211,7 @@ export function setGates(
 		planId,
 	]);
 
-	const updated = getProfile(directory, planId);
+	const updated = _internals.getProfile(directory, planId);
 	if (!updated) {
 		throw new Error(
 			`Failed to re-read QA gate profile after update for plan_id=${planId}`,
@@ -205,7 +229,7 @@ export function lockProfile(
 	planId: string,
 	snapshotSeq: number,
 ): QaGateProfile {
-	const current = getProfile(directory, planId);
+	const current = _internals.getProfile(directory, planId);
 	if (!current) {
 		throw new Error(
 			`No QA gate profile found for plan_id=${planId} — cannot lock`,
@@ -219,7 +243,7 @@ export function lockProfile(
 		"UPDATE qa_gate_profile SET locked_at = datetime('now'), locked_by_snapshot_seq = ? WHERE plan_id = ?",
 		[snapshotSeq, planId],
 	);
-	const locked = getProfile(directory, planId);
+	const locked = _internals.getProfile(directory, planId);
 	if (!locked) {
 		throw new Error(
 			`Failed to re-read locked QA gate profile for plan_id=${planId}`,
@@ -257,7 +281,7 @@ export function computeProfileHash(profile: QaGateProfile): string {
  *   machine; blocks coder→next-coder advancement until reviewer + test_engineer
  *   delegations observed).
  * - council_mode — src/state.ts isCouncilGateActive + src/hooks/delegation-gate.ts
- *   (Stage B replaced by convene_council verdict).
+ *   (Stage B replaced by submit_council_verdicts verdict).
  * - sme_enabled — consumed during MODE: BRAINSTORM/SPECIFY architect dialogue.
  * - critic_pre_plan — consumed by MODE: PLAN critic delegation before save_plan.
  * - sast_enabled — consumed inside pre_check_batch tool.
@@ -268,6 +292,8 @@ export function computeProfileHash(profile: QaGateProfile): string {
  * - council_general_review — src/agents/architect.ts SPECIFY-COUNCIL-REVIEW
  *   (fires when gate is true; runs convene_general_council on draft spec before
  *   critic-gate to fold multi-model deliberation into the spec).
+ * - drift_check — src/tools/phase-complete.ts Gate 2 (blocks phase_complete when
+ *   drift-verifier.json missing or rejected)
  *
  * Session overrides are intentionally ephemeral — they live only in
  * in-memory `AgentSessionState.qaGateSessionOverrides` and are NOT

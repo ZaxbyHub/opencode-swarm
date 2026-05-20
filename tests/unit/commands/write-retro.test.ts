@@ -2,7 +2,7 @@
  * Tests for handleWriteRetroCommand
  * Verifies the command handler for /swarm write-retro
  */
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock the write-retro tool module
 const mockExecuteWriteRetro = mock(
@@ -22,6 +22,10 @@ const { handleWriteRetroCommand } = await import(
 describe('handleWriteRetroCommand', () => {
 	beforeEach(() => {
 		mockExecuteWriteRetro.mockClear();
+	});
+
+	afterEach(() => {
+		mock.restore();
 	});
 
 	describe('Usage instructions (no/empty args)', () => {

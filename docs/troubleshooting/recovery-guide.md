@@ -14,7 +14,7 @@ This guide covers common recovery scenarios for the opencode-swarm plan durabili
 import { importCheckpoint } from './src/plan/checkpoint'
 await importCheckpoint()
 
-# Option 2: Restore from SWARM_PLAN.json by copying it to `.swarm/plan.json`
+# Option 2: Restore from .swarm/SWARM_PLAN.json by copying it to `.swarm/plan.json`
 ```
 
 ---
@@ -40,7 +40,7 @@ await importCheckpoint()
 
 **Fix:** Automatic rebuild from ledger. If rebuild fails:
 ```bash
-# Restore from SWARM_PLAN.json by copying it to `.swarm/plan.json`
+# Restore from .swarm/SWARM_PLAN.json by copying it to `.swarm/plan.json`
 ```
 
 ---
@@ -54,7 +54,7 @@ await importCheckpoint()
 
 **Do NOT use for:**
 - Ledger corruption (use rebuild/import instead)
-- Missing plan files (use `importCheckpoint()` programmatically or restore from SWARM_PLAN.json instead)
+- Missing plan files (use `importCheckpoint()` programmatically or restore from .swarm/SWARM_PLAN.json instead)
 
 ---
 
@@ -65,7 +65,7 @@ await importCheckpoint()
 - Ledger is intact but plan projection is corrupted
 
 **Use import when:**
-- Starting fresh in a new repo with an existing `SWARM_PLAN.json` checkpoint
+- Starting fresh in a new repo with an existing `.swarm/SWARM_PLAN.json` checkpoint
 - Ledger is also missing/corrupted and you have a checkpoint backup
 
 ---

@@ -31,9 +31,29 @@ export interface LanguageProfile {
 	displayName: string;
 	tier: 1 | 2 | 3;
 	extensions: string[];
+	/**
+	 * Reserved for future "parser-only" entries (e.g. css, bash, ini, regex,
+	 * and the tsx parser-grammar split) that should register a tree-sitter
+	 * parser but never participate in test/build/lint dispatch. Currently
+	 * unused — populated in a later phase.
+	 */
+	parserOnly?: boolean;
 	treeSitter: {
 		grammarId: string;
 		wasmFile: string;
+		/**
+		 * Tree-sitter node names that represent comments for this language.
+		 * Used by tools that strip comments (e.g. ast-diff, syntax-check).
+		 *
+		 * Optional in the type because tests construct ad-hoc profiles for
+		 * fixtures that don't exercise comment-stripping. Production profiles
+		 * MUST populate this — enforced by
+		 * `tests/unit/lang/profile-registry-parity.test.ts` against every
+		 * profile in `LANGUAGE_REGISTRY`. Source of truth lives here;
+		 * `src/lang/registry.ts` exposes a parity subset for the parser-only
+		 * registry.
+		 */
+		commentNodes?: string[];
 	};
 	build: {
 		detectFiles: string[];
@@ -72,11 +92,54 @@ export class LanguageRegistry {
 		this.extensionIndex = new Map();
 	}
 
-	register(profile: LanguageProfile): void {
-		this.profiles.set(profile.id, profile);
-		for (const ext of profile.extensions) {
-			this.extensionIndex.set(ext, profile.id);
+	/**
+	 * Remove a previously registered profile and any extensions it claimed.
+	 * Primarily used by tests to clean up after registering fixture profiles
+	 * into the shared singleton — without this, fixture entries leak across
+	 * test files in Bun's per-file-but-shared-process test runner. No-op if
+	 * the id is not registered.
+	 */
+	unregister(id: string): void {
+		const profile = this.profiles.get(id);
+		if (!profile) return;
+		this.profiles.delete(id);
+		if (!profile.parserOnly) {
+			for (const ext of profile.extensions) {
+				if (this.extensionIndex.get(ext) === id) {
+					this.extensionIndex.delete(ext);
+				}
+			}
 		}
+	}
+
+	register(profile: LanguageProfile): void {
+		const existing = this.profiles.get(profile.id);
+		if (existing && existing !== profile) {
+			throw new Error(
+				`LanguageRegistry: profile id "${profile.id}" registered twice. ` +
+					`Each LanguageProfile.id must be unique. ` +
+					`Got: ${profile.displayName} vs existing ${existing.displayName}.`,
+			);
+		}
+		// parserOnly profiles do not participate in extension dispatch (they
+		// only register a parser via the tree-sitter registry). This protects
+		// the cpp profile from a future tsx parserOnly entry stealing `.tsx`
+		// from the typescript profile, etc.
+		if (!profile.parserOnly) {
+			for (const ext of profile.extensions) {
+				const claimedBy = this.extensionIndex.get(ext);
+				if (claimedBy && claimedBy !== profile.id) {
+					throw new Error(
+						`LanguageRegistry: extension "${ext}" registered by both ` +
+							`"${claimedBy}" and "${profile.id}". A non-parserOnly profile ` +
+							`must not collide on extensions. If both languages legitimately ` +
+							`share an extension, mark one parserOnly: true.`,
+					);
+				}
+				this.extensionIndex.set(ext, profile.id);
+			}
+		}
+		this.profiles.set(profile.id, profile);
 	}
 
 	get(id: string): LanguageProfile | undefined {
@@ -114,6 +177,7 @@ LANGUAGE_REGISTRY.register({
 	treeSitter: {
 		grammarId: 'typescript',
 		wasmFile: 'tree-sitter-typescript.wasm',
+		commentNodes: ['comment', 'line_comment', 'block_comment'],
 	},
 	build: {
 		detectFiles: ['package.json'],
@@ -139,7 +203,13 @@ LANGUAGE_REGISTRY.register({
 		],
 	},
 	test: {
-		detectFiles: ['package.json', 'vitest.config.ts', 'jest.config.js'],
+		detectFiles: [
+			'package.json',
+			'vitest.config.ts',
+			'jest.config.js',
+			'.mocharc.js',
+			'.mocharc.json',
+		],
 		frameworks: [
 			{
 				name: 'vitest',
@@ -149,10 +219,20 @@ LANGUAGE_REGISTRY.register({
 			},
 			{ name: 'jest', detect: 'jest.config.js', cmd: 'npx jest', priority: 9 },
 			{
+				// Bun lockfile is the unambiguous signal for a Bun-managed
+				// project — the dispatch path requires this to avoid the
+				// false-positive where any plain Node project's package.json
+				// triggers bun:test detection. (PR #825 review finding P1 #2.)
 				name: 'bun:test',
-				detect: 'package.json',
+				detect: 'bun.lock',
 				cmd: 'bun test',
 				priority: 8,
+			},
+			{
+				name: 'mocha',
+				detect: '.mocharc.json',
+				cmd: 'npx mocha',
+				priority: 7,
 			},
 		],
 	},
@@ -207,7 +287,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Python',
 	tier: 1,
 	extensions: ['.py', '.pyw'],
-	treeSitter: { grammarId: 'python', wasmFile: 'tree-sitter-python.wasm' },
+	treeSitter: {
+		grammarId: 'python',
+		wasmFile: 'tree-sitter-python.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['setup.py', 'pyproject.toml', 'setup.cfg'],
 		commands: [
@@ -278,7 +362,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Rust',
 	tier: 1,
 	extensions: ['.rs'],
-	treeSitter: { grammarId: 'rust', wasmFile: 'tree-sitter-rust.wasm' },
+	treeSitter: {
+		grammarId: 'rust',
+		wasmFile: 'tree-sitter-rust.wasm',
+		commentNodes: ['line_comment', 'block_comment'],
+	},
 	build: {
 		detectFiles: ['Cargo.toml'],
 		commands: [
@@ -348,7 +436,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Go',
 	tier: 1,
 	extensions: ['.go'],
-	treeSitter: { grammarId: 'go', wasmFile: 'tree-sitter-go.wasm' },
+	treeSitter: {
+		grammarId: 'go',
+		wasmFile: 'tree-sitter-go.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['go.mod'],
 		commands: [
@@ -414,7 +506,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Java',
 	tier: 2,
 	extensions: ['.java'],
-	treeSitter: { grammarId: 'java', wasmFile: 'tree-sitter-java.wasm' },
+	treeSitter: {
+		grammarId: 'java',
+		wasmFile: 'tree-sitter-java.wasm',
+		commentNodes: ['line_comment', 'block_comment'],
+	},
 	build: {
 		detectFiles: ['pom.xml', 'build.gradle', 'build.gradle.kts'],
 		commands: [
@@ -496,7 +592,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Kotlin',
 	tier: 2,
 	extensions: ['.kt', '.kts'],
-	treeSitter: { grammarId: 'kotlin', wasmFile: 'tree-sitter-kotlin.wasm' },
+	treeSitter: {
+		grammarId: 'kotlin',
+		wasmFile: 'tree-sitter-kotlin.wasm',
+		commentNodes: ['line_comment', 'multiline_comment'],
+	},
 	build: {
 		detectFiles: ['build.gradle.kts', 'build.gradle', 'pom.xml'],
 		commands: [
@@ -578,7 +678,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'C# / .NET',
 	tier: 2,
 	extensions: ['.cs', '.csx'],
-	treeSitter: { grammarId: 'csharp', wasmFile: 'tree-sitter-c-sharp.wasm' },
+	treeSitter: {
+		grammarId: 'csharp',
+		wasmFile: 'tree-sitter-c-sharp.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['*.csproj', '*.sln', 'Directory.Build.props'],
 		commands: [
@@ -648,7 +752,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'C / C++',
 	tier: 2,
 	extensions: ['.c', '.h', '.cpp', '.hpp', '.cc', '.cxx'],
-	treeSitter: { grammarId: 'cpp', wasmFile: 'tree-sitter-cpp.wasm' },
+	treeSitter: {
+		grammarId: 'cpp',
+		wasmFile: 'tree-sitter-cpp.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['CMakeLists.txt', 'Makefile', 'meson.build'],
 		commands: [
@@ -725,7 +833,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Swift',
 	tier: 2,
 	extensions: ['.swift'],
-	treeSitter: { grammarId: 'swift', wasmFile: 'tree-sitter-swift.wasm' },
+	treeSitter: {
+		grammarId: 'swift',
+		wasmFile: 'tree-sitter-swift.wasm',
+		commentNodes: ['comment', 'multiline_comment'],
+	},
 	build: {
 		detectFiles: ['Package.swift', '*.xcodeproj', '*.xcworkspace'],
 		commands: [
@@ -800,7 +912,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Dart / Flutter',
 	tier: 3,
 	extensions: ['.dart'],
-	treeSitter: { grammarId: 'dart', wasmFile: 'tree-sitter-dart.wasm' },
+	treeSitter: {
+		grammarId: 'dart',
+		wasmFile: 'tree-sitter-dart.wasm',
+		commentNodes: ['comment', 'documentation_comment'],
+	},
 	build: {
 		detectFiles: ['pubspec.yaml'],
 		commands: [
@@ -875,7 +991,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'Ruby',
 	tier: 3,
 	extensions: ['.rb', '.rake', '.gemspec'],
-	treeSitter: { grammarId: 'ruby', wasmFile: 'tree-sitter-ruby.wasm' },
+	treeSitter: {
+		grammarId: 'ruby',
+		wasmFile: 'tree-sitter-ruby.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['Gemfile', 'Rakefile'],
 		commands: [
@@ -946,7 +1066,11 @@ LANGUAGE_REGISTRY.register({
 	displayName: 'PHP',
 	tier: 3,
 	extensions: ['.php', '.phtml', '.blade.php'],
-	treeSitter: { grammarId: 'php', wasmFile: 'tree-sitter-php.wasm' },
+	treeSitter: {
+		grammarId: 'php',
+		wasmFile: 'tree-sitter-php.wasm',
+		commentNodes: ['comment'],
+	},
 	build: {
 		detectFiles: ['composer.json'],
 		commands: [
@@ -954,7 +1078,10 @@ LANGUAGE_REGISTRY.register({
 				name: 'Composer Install',
 				cmd: 'composer install --no-interaction --prefer-dist',
 				detectFile: 'composer.json',
-				priority: 1,
+				// HIGH-IS-HIGHER PRIORITY convention. The PR #825 review (P2)
+				// flagged that this profile previously used low-is-higher,
+				// inverting dispatch ordering relative to every other profile.
+				priority: 10,
 			},
 		],
 	},
@@ -965,19 +1092,19 @@ LANGUAGE_REGISTRY.register({
 				name: 'Pest',
 				detect: 'Pest.php',
 				cmd: 'vendor/bin/pest',
-				priority: 1,
+				priority: 10,
 			},
 			{
 				name: 'PHPUnit',
 				detect: 'phpunit.xml',
 				cmd: 'vendor/bin/phpunit',
-				priority: 3,
+				priority: 8,
 			},
 			{
 				name: 'PHPUnit',
 				detect: 'phpunit.xml.dist',
 				cmd: 'vendor/bin/phpunit',
-				priority: 4,
+				priority: 7,
 			},
 		],
 	},
@@ -990,32 +1117,32 @@ LANGUAGE_REGISTRY.register({
 			'phpcs.xml',
 		],
 		linters: [
-			// PHPStan — highest priority static analysis via phpstan.neon config
+			// PHPStan — highest priority static analysis via phpstan.neon config.
 			{
 				name: 'PHPStan',
 				detect: 'phpstan.neon',
 				cmd: 'vendor/bin/phpstan analyse',
-				priority: 1,
+				priority: 10,
 			},
 			{
 				name: 'PHPStan',
 				detect: 'phpstan.neon.dist',
 				cmd: 'vendor/bin/phpstan analyse',
-				priority: 2,
+				priority: 9,
 			},
-			// Pint — Laravel-focused PHP formatter. Preferred formatter when pint.json present.
+			// Pint — Laravel-focused PHP formatter. Preferred when pint.json present.
 			{
 				name: 'Pint',
 				detect: 'pint.json',
 				cmd: 'vendor/bin/pint --test',
-				priority: 3,
+				priority: 8,
 			},
-			// PHP-CS-Fixer — fallback formatter for non-Laravel or non-Pint projects
+			// PHP-CS-Fixer — fallback formatter for non-Laravel projects.
 			{
 				name: 'PHP-CS-Fixer',
 				detect: '.php-cs-fixer.php',
 				cmd: 'vendor/bin/php-cs-fixer fix --dry-run --diff',
-				priority: 4,
+				priority: 7,
 			},
 		],
 	},

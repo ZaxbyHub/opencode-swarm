@@ -6,6 +6,10 @@
  * No tool logic — pure detection only.
  */
 import { type LanguageProfile } from './profiles.js';
+export declare const _internals: {
+    getProfileForFile: typeof getProfileForFile;
+    detectProjectLanguages: typeof detectProjectLanguages;
+};
 /**
  * Resolve a language profile from a file path based on its extension.
  * Returns undefined for files with no extension or unknown extensions.

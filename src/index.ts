@@ -1,7 +1,7 @@
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plugin } from '@opencode-ai/plugin';
-import { createAgents, getAgentConfigs } from './agents';
+import packageJson from '../package.json' with { type: 'json' };
+import { type AgentDefinition, createAgents, getAgentConfigs } from './agents';
 import { parseSoundingBoardResponse } from './agents/critic.js';
 import {
 	type AutomationStatusArtifact,
@@ -10,13 +10,21 @@ import {
 	PlanSyncWorker,
 	type PreflightTriggerManager,
 } from './background';
-import { createSwarmCommandHandler } from './commands';
-import { loadPluginConfigWithMeta } from './config';
+import {
+	agentHasSwarmCommandTool,
+	createSwarmCommandHandler,
+} from './commands';
+import { loadPluginConfigWithMetaAsync } from './config';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
+import {
+	writeProjectConfigIfNew,
+	writeSwarmConfigExampleIfNew,
+} from './config/project-init';
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
 	GuardrailsConfigSchema,
+	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
@@ -24,6 +32,7 @@ import {
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
 } from './config/schema';
+import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
 	consolidateSystemMessages,
@@ -49,23 +58,36 @@ import {
 	handleDebuggingSpiral,
 	recordToolCall,
 } from './hooks/adversarial-detector.js';
+import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
+import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
+import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
+import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
 import { deleteStoredInputArgs } from './hooks/guardrails.js';
 import { createHivePromoterHook } from './hooks/hive-promoter.js';
 import { createIncrementalVerifyHook } from './hooks/incremental-verify';
+import {
+	knowledgeApplicationGateBefore,
+	knowledgeApplicationTransformScan,
+} from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
+import {
+	skillPropagationGateBefore,
+	skillPropagationTransformScan,
+} from './hooks/skill-propagation-gate.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
 import { createPrmHook } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
+import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import { ensureAgentSession, swarmState } from './state';
@@ -78,8 +100,8 @@ import {
 	co_change_analyzer,
 	completion_verify,
 	complexity_hotspots,
-	convene_council,
 	convene_general_council,
+	createSwarmCommandTool,
 	curator_analyze,
 	declare_council_criteria,
 	declare_scope,
@@ -95,10 +117,17 @@ import {
 	get_qa_gate_profile,
 	gitingest,
 	imports,
+	knowledge_ack,
 	knowledge_add,
 	knowledge_query,
 	knowledge_recall,
 	knowledge_remove,
+	lean_turbo_acquire_locks,
+	lean_turbo_plan_lanes,
+	lean_turbo_review,
+	lean_turbo_run_phase,
+	lean_turbo_runner_status,
+	lean_turbo_status,
 	lint,
 	lint_spec,
 	mutation_test,
@@ -117,6 +146,14 @@ import {
 	search,
 	secretscan,
 	set_qa_gates,
+	skill_apply,
+	skill_generate,
+	skill_improve,
+	skill_inspect,
+	skill_list,
+	spec_write,
+	submit_council_verdicts,
+	submit_phase_council_verdicts,
 	suggestPatch,
 	symbols,
 	syntax_check,
@@ -126,12 +163,17 @@ import {
 	update_task_status,
 	web_search,
 	write_drift_evidence,
+	write_final_council_evidence,
 	write_hallucination_evidence,
 	write_mutation_evidence,
 	write_retro,
 } from './tools';
 import { log } from './utils';
-import { warnIfSwarmNotGitignored } from './utils/gitignore-warning';
+import {
+	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+	ensureSwarmGitExcluded,
+} from './utils/gitignore-warning';
+import { withTimeout } from './utils/timeout';
 import { truncateToolOutput } from './utils/tool-output';
 
 /**
@@ -147,38 +189,76 @@ import { truncateToolOutput } from './utils/tool-output';
 // Heartbeat throttle map: sessionId -> last heartbeat timestamp
 const _heartbeatTimers = new Map<string, number>();
 
-// Writes .swarm/config.example.json on first plugin init for a given project.
-// This gives new users a ready-to-edit reference that shows all agent model
-// defaults. To override, copy entries into .opencode/opencode-swarm.json
-// (project-local) or ~/.config/opencode/opencode-swarm.json (global).
-// Non-fatal: all errors are silently ignored.
-function writeSwarmConfigExampleIfNew(projectDirectory: string): void {
-	try {
-		const swarmDir = path.join(projectDirectory, '.swarm');
-		const dest = path.join(swarmDir, 'config.example.json');
-		if (fs.existsSync(dest)) return;
-		const example = {
-			agents: Object.fromEntries(
-				Object.entries(DEFAULT_MODELS)
-					.filter(([name]) => name !== 'default')
-					.map(([name, model]) => [
-						name,
-						{
-							model,
-							fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
-						},
-					]),
-			),
-			max_iterations: 5,
-		};
-		fs.writeFileSync(dest, `${JSON.stringify(example, null, 2)}\n`, 'utf-8');
-	} catch {
-		// Non-fatal
-	}
+import {
+	addDeferredWarning,
+	deferredWarnings,
+} from './services/warning-buffer.js';
+
+const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
+
+function createSwarmCommandSystemRuleHook(
+	agentDefinitions: Record<string, AgentDefinition>,
+	registeredAgents: Record<string, { tools?: Record<string, boolean> }>,
+): (input: unknown, output: { system?: string[] }) => Promise<void> {
+	return async (input, output) => {
+		const { sessionID } = input as { sessionID?: string };
+		const activeAgentName = sessionID
+			? swarmState.activeAgent.get(sessionID)
+			: undefined;
+		if (
+			!agentHasSwarmCommandTool(
+				activeAgentName,
+				agentDefinitions,
+				registeredAgents,
+			)
+		) {
+			return;
+		}
+
+		const system = Array.isArray(output.system) ? output.system : [];
+		if (system.some((entry) => entry.includes(SWARM_COMMAND_SYSTEM_RULE_TAG))) {
+			output.system = system;
+			return;
+		}
+
+		system.push(
+			[
+				SWARM_COMMAND_SYSTEM_RULE_TAG,
+				'When a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output.',
+			].join('\n'),
+		);
+		output.system = system;
+	};
 }
 
 const OpenCodeSwarm: Plugin = async (ctx) => {
-	const { config, loadedFromFile } = loadPluginConfigWithMeta(ctx.directory);
+	try {
+		return await initializeOpenCodeSwarm(ctx);
+	} catch (err) {
+		// OpenCode's plugin loader silently drops plugins whose entry rejects,
+		// leaving the user staring at "in plugins" with no commands/agents and no
+		// visible error (issue #675). Surface init failures to stderr so the real
+		// cause is visible, then re-throw so the host still observes the rejection.
+		const stack =
+			err instanceof Error ? (err.stack ?? err.message) : String(err);
+		console.error(
+			'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
+		);
+		console.error(stack);
+		throw err;
+	}
+};
+
+// Return type intentionally inferred so the literal `{ name: ..., agent: ... }`
+// does not trip excess-property checks against `Hooks`. The wrapper above is
+// typed as `Plugin`, which validates the structural shape at the call site.
+async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
+	const { config, loadedFromFile } = await loadPluginConfigWithMetaAsync(
+		ctx.directory,
+	);
+
+	// Clear deferred warnings at session start for per-session isolation
+	deferredWarnings.length = 0;
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -195,9 +275,54 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 			config.agents?.architect?.model ?? DEFAULT_MODELS.default;
 
 		if (criticModel === architectModel) {
-			console.warn(
-				'[opencode-swarm] Full-auto mode warning: critic model matches architect model. Model validation is advisory-only; full-auto remains enabled. (Runtime architect model is determined by the orchestrator)',
-			);
+			const warning =
+				'[opencode-swarm] Full-auto mode warning: critic model matches architect model. Model validation is advisory-only; full-auto remains enabled. (Runtime architect model is determined by the orchestrator)';
+			if (!config.quiet) {
+				console.warn(warning);
+			} else {
+				addDeferredWarning(warning);
+			}
+		}
+	}
+
+	// Warn once about agents with custom models but no fallback_models configured.
+	// Collect all violating agents across top-level agents and all swarms, then
+	// emit a single consolidated message so the TUI is not spammed per-agent.
+	// Note: fallback_models:[] is treated as "no fallback" — an empty array provides
+	// no runtime protection (resolveFallbackModel returns null for length === 0).
+	{
+		const noFallback: string[] = [];
+		const hasNoFallback = (cfg: {
+			model?: string;
+			fallback_models?: string[];
+		}) =>
+			cfg.model && (!cfg.fallback_models || cfg.fallback_models.length === 0);
+
+		if (config.agents) {
+			for (const [name, cfg] of Object.entries(config.agents)) {
+				if (hasNoFallback(cfg)) noFallback.push(`${name}(${cfg.model})`);
+			}
+		}
+		if (config.swarms) {
+			for (const [swarmId, swarm] of Object.entries(config.swarms)) {
+				if (swarm.agents) {
+					for (const [name, cfg] of Object.entries(swarm.agents)) {
+						if (hasNoFallback(cfg))
+							noFallback.push(`${swarmId}/${name}(${cfg.model})`);
+					}
+				}
+			}
+		}
+		if (noFallback.length > 0) {
+			const msg =
+				`[opencode-swarm] WARNING: ${noFallback.length} agent(s) use a custom model without fallback_models: ` +
+				noFallback.join(', ') +
+				'. Add "fallback_models": ["model-a"] to each agent config for reliability.';
+			if (!config.quiet) {
+				console.warn(msg);
+			} else {
+				addDeferredWarning(msg);
+			}
 		}
 	}
 
@@ -207,23 +332,136 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 	// Store SDK client for curator LLM delegation
 	swarmState.opencodeClient = ctx.client;
 
-	// v6.18 Session persistence — restore state from previous session (non-blocking)
-	await loadSnapshot(ctx.directory);
-	// Initialize telemetry first to create .swarm/ directory synchronously.
-	// This is a defensive second layer — the repo graph hook also defensively
-	// creates .swarm/ before writing, but we want it to exist before the async
-	// write is dispatched by the libuv worker.
+	// v6.18 Session persistence — restore state from previous session.
+	// Bounded with a 5s timeout (issue #704): `loadSnapshot` is read-only, so
+	// timing out is safe — it only affects rehydration, not durable state. A
+	// slow filesystem (network home, iCloud-backed mount) must never block
+	// the plugin host's `await server(...)` indefinitely.
+	await withTimeout(
+		loadSnapshot(ctx.directory),
+		5_000,
+		new Error(
+			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
+	});
+
+	// Construct the repo-graph hook before any other side-task so we can
+	// dispatch its scan deferred to the next macrotask. Issue #704: the
+	// previous code invoked `repoGraphHook.init()` inline; because async
+	// function bodies execute synchronously up to the first `await`, the
+	// inline call blocked the event loop on the recursive workspace scan.
+	// The fix is twofold: (a) `init()` itself yields before doing any work
+	// and uses an async chunked walker; (b) we still dispatch the call via
+	// `queueMicrotask` and bound it with an unref'd 30s watchdog.
+	const repoGraphHook = createRepoGraphBuilderHook(ctx.directory);
+	queueMicrotask(() => {
+		const watchdog = setTimeout(() => {
+			log(
+				'[repo-graph] init exceeded 30s budget; scan will continue but is overdue',
+			);
+		}, 30_000);
+		if (typeof (watchdog as { unref?: () => void }).unref === 'function') {
+			(watchdog as { unref: () => void }).unref();
+		}
+		repoGraphHook
+			.init()
+			.catch(() => {
+				/* logged inside init */
+			})
+			.finally(() => clearTimeout(watchdog));
+	});
+
+	// Protect .swarm/ from Git before any write. Uses git CLI so worktrees and
+	// submodules (where .git is a file, not a directory) are handled correctly.
+	// The await is intentional: the exclude write should complete before the
+	// writes below create .swarm/ artifacts. The git subprocess calls finish in
+	// <50ms on a healthy host.
+	//
+	// HARD-BOUNDED via withTimeout because the OpenCode plugin host silently
+	// drops a plugin whose entry never resolves (issue #704). On a pathological
+	// host (antivirus interception, credential helper prompt, NFS-stalled .git,
+	// Bun-on-Windows stdin pipe semantics) this call could otherwise block
+	// plugin init forever and produce the symptom "no agents in TUI/GUI".
+	// On timeout we fail open: log non-fatal and let init continue.
+	// The repoGraphHook.init() above is queued via queueMicrotask and begins
+	// its async workspace scan during this await; writes .swarm/repo-graph.json
+	// only after a slow directory traversal — in practice the exclude write
+	// completes first. This ordering gap is accepted as non-critical.
+	await withTimeout(
+		ensureSwarmGitExcluded(ctx.directory, { quiet: config.quiet }),
+		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+		new Error(
+			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
+			error: msg,
+		});
+	});
+
+	// Side tasks moved AFTER the repo-graph dispatch so the deferred init
+	// is queued first. Each is small and scoped to `<ctx.directory>/.swarm/`
+	// or `<ctx.directory>/.opencode/`, so none risks a home-tree scan.
 	initTelemetry(ctx.directory);
 	writeSwarmConfigExampleIfNew(ctx.directory);
-	// Warn once per process if .swarm/ is not gitignored (audit logs may contain secrets)
-	warnIfSwarmNotGitignored(ctx.directory);
-	// Non-blocking: build repo graph in background
-	const repoGraphHook = createRepoGraphBuilderHook(ctx.directory);
-	repoGraphHook.init().catch(() => {
-		/* already logged inside init */
+	writeProjectConfigIfNew(ctx.directory, config.quiet);
+	// Background staleness check against npm. Detached, never blocks init,
+	// throttled to 24h on disk. See services/version-check.ts (issue #675).
+	if (config.version_check !== false) {
+		scheduleVersionCheck(packageJson.version, (msg) => {
+			if (config.quiet) {
+				addDeferredWarning(msg);
+			} else {
+				console.warn(msg);
+			}
+		});
+	}
+	// Phase 4b: resolve language-agnostic project context for agent prompt
+	// substitution. Bounded to 300ms and fails open with `null` (the agent
+	// prompts then ship with `unresolved (run /swarm preflight)` sentinels
+	// that the architect's existing DISCOVER mode picks up). Per Invariant 1
+	// (plugin init bounded + fail-open) — see ENSURE_SWARM_GIT_EXCLUDED
+	// precedent at line 342 above.
+	//
+	// 300ms budget chosen to keep total `server()` time under the 400ms
+	// Issue #704 / repro-704.mjs T1 deadline. `buildProjectContext` itself
+	// does NOT spawn subprocesses (see module docstring); typical runtime
+	// is <20ms on Linux/macOS and <100ms on Windows with cold FS. The
+	// timeout is belt-and-suspenders for pathological filesystems
+	// (antivirus interception, NFS stalls). A failed-open `null` projectContext
+	// is the same as no detection — placeholders resolve to the sentinel.
+	const projectContext = await withTimeout(
+		(async () => {
+			const mod = await import('./agents/project-context');
+			return mod.buildProjectContext(ctx.directory);
+		})(),
+		300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
+		new Error(
+			'language-backend detection exceeded 300ms; ' +
+				'continuing with unresolved sentinels',
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('language-backend detection timed out or failed (non-fatal)', {
+			error: msg,
+		});
+		return null;
 	});
-	const agents = getAgentConfigs(config, ctx.directory);
-	const agentDefinitions = createAgents(config);
+
+	const agents = getAgentConfigs(
+		config,
+		ctx.directory,
+		undefined,
+		projectContext ?? undefined,
+	);
+	const agentDefinitions = createAgents(config, projectContext ?? undefined);
+	const agentDefinitionMap = Object.fromEntries(
+		agentDefinitions.map((agent) => [agent.name, agent]),
+	);
 
 	// Collect all registered curator agent names across all swarms.
 	// The factory resolves the correct name at call time by matching the active
@@ -234,6 +472,21 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 	swarmState.curatorPhaseAgentNames = Object.keys(agents).filter(
 		(k) => k === 'curator_phase' || k.endsWith('_curator_phase'),
 	);
+	// v2: skill_improver and spec_writer agent registries — same multi-swarm
+	// resolution pattern as curator. Used by skill-improver-llm-factory to
+	// pick the right prefixed agent under named swarms.
+	swarmState.skillImproverAgentNames = Object.keys(agents).filter(
+		(k) => k === 'skill_improver' || k.endsWith('_skill_improver'),
+	);
+	swarmState.specWriterAgentNames = Object.keys(agents).filter(
+		(k) => k === 'spec_writer' || k.endsWith('_spec_writer'),
+	);
+	// Populate the generated-agent registry used by Full-Auto v2's strict
+	// canonical-role extraction (resolveGeneratedAgentRole). Without this,
+	// user-supplied prose like `not_an_architect` could collapse to
+	// `architect` via suffix-only matching and slip past the delegation
+	// guard (adversarial review C1 fix).
+	swarmState.generatedAgentNames = Object.keys(agents);
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
@@ -241,7 +494,15 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
-		Object.fromEntries(agentDefinitions.map((agent) => [agent.name, agent])),
+		agentDefinitionMap,
+		{
+			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+			registeredAgents: agents,
+		},
+	);
+	const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(
+		agentDefinitionMap,
+		agents,
 	);
 	const activityHooks = createAgentActivityHooks(config, ctx.directory);
 	const prmHook = createPrmHook(
@@ -267,6 +528,7 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 
 	// SECURITY AUDIT: Emit explicit warning when guardrails are disabled via user config
 	// This is a security-relevant action that requires explicit acknowledgment
+	// INTENTIONALLY NOT gated behind config.quiet — security warnings must always be visible
 	if (loadedFromFile && guardrailsConfig.enabled === false) {
 		console.warn('');
 		console.warn(
@@ -317,6 +579,33 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 		config,
 		ctx.directory,
 	);
+
+	// Full-Auto v2 hooks: permission, input-probe, delegation. Each is a no-op
+	// when full_auto.enabled is false. Hook ordering (tool.execute.before):
+	//   1. guardrails (existing)
+	//   2. scope-guard (existing)
+	//   3. delegation-gate (existing)
+	//   4. full-auto-permission (NEW — adds an additional decision layer)
+	//   5. full-auto-delegation outbound (NEW — Task tool only)
+	// Hook ordering (tool.execute.after):
+	//   - full-auto-input-probe runs after guardrails/delegation-gate so it can
+	//     observe tool output AFTER existing safety has cleaned it up.
+	//   - full-auto-delegation return check runs alongside.
+	const fullAutoPermissionHook = createFullAutoPermissionHook({
+		config,
+		directory: ctx.directory,
+	});
+	const fullAutoInputProbeHook = createFullAutoInputProbeHook({
+		config,
+		directory: ctx.directory,
+	});
+	const fullAutoDelegationHook = createFullAutoDelegationHook({
+		config,
+		directory: ctx.directory,
+	});
+
+	// CC command intercept: handle Claude Code command interception
+	const ccCommandInterceptHook = createCcCommandInterceptHook({});
 
 	// Watchdog: scope-guard + delegation-ledger
 	const watchdogConfig = WatchdogConfigSchema.parse(config.watchdog ?? {});
@@ -612,13 +901,21 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 			checkpoint,
 			completion_verify,
 			complexity_hotspots,
-			convene_council,
+			submit_council_verdicts,
+			submit_phase_council_verdicts,
 			convene_general_council,
 			curator_analyze,
 			declare_council_criteria,
+			knowledge_ack,
 			knowledge_add,
 			knowledge_recall,
 			knowledge_remove,
+			lean_turbo_acquire_locks,
+			lean_turbo_plan_lanes,
+			lean_turbo_review,
+			lean_turbo_run_phase,
+			lean_turbo_runner_status,
+			lean_turbo_status,
 			co_change_analyzer,
 			detect_domains,
 			mutation_test,
@@ -656,6 +953,12 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 			test_impact,
 			todo_extract,
 			search,
+			skill_apply,
+			skill_generate,
+			skill_improve,
+			skill_inspect,
+			skill_list,
+			spec_write,
 			batch_symbols,
 			build_check,
 			suggest_patch: suggestPatch,
@@ -665,16 +968,125 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 			write_drift_evidence,
 			write_hallucination_evidence,
 			write_mutation_evidence,
+			write_final_council_evidence,
 			declare_scope,
+			swarm_command: createSwarmCommandTool(agentDefinitionMap),
 		},
 
 		// Configure OpenCode - merge agents into config
 		config: async (opencodeConfig: Record<string, unknown>) => {
+			// Normalize agent config to a plain object if it's absent or a non-object primitive
+			if (!opencodeConfig.agent || typeof opencodeConfig.agent !== 'object') {
+				(opencodeConfig as any).agent = {};
+			}
+
 			// Merge agent configs (don't override default_agent)
 			if (!opencodeConfig.agent) {
 				opencodeConfig.agent = { ...agents };
 			} else {
 				Object.assign(opencodeConfig.agent, agents);
+			}
+
+			// Auto-select architect: disable competing built-in agents when enabled
+			const autoSelect = config?.auto_select_architect;
+			if (autoSelect) {
+				// Check that at least one architect agent exists in the generated set
+				const hasArchitect = Object.keys(agents).some(
+					(name) => stripKnownSwarmPrefix(name) === 'architect',
+				);
+				if (hasArchitect) {
+					// Disable build and plan built-in agents
+					for (const builtin of ['build', 'plan'] as const) {
+						const existing = (opencodeConfig.agent as Record<string, any>)?.[
+							builtin
+						];
+						if (
+							existing &&
+							typeof existing === 'object' &&
+							existing.disable === true
+						) {
+							// User already disabled this agent — respect their override
+							continue;
+						}
+						(opencodeConfig.agent as Record<string, any>)[builtin] = {
+							...(existing && typeof existing === 'object' ? existing : {}),
+							disable: true,
+						};
+					}
+
+					// Warn when boolean true and multiple architects are primary
+					if (autoSelect === true) {
+						const primaryArchitects = Object.entries(agents).filter(
+							([name, cfg]) =>
+								stripKnownSwarmPrefix(name) === 'architect' &&
+								(cfg as any).mode === 'primary',
+						);
+						if (primaryArchitects.length > 1) {
+							const names = primaryArchitects.map(([n]) => n).join(', ');
+							addDeferredWarning(
+								`[swarm] auto_select_architect is true but ${primaryArchitects.length} architect agents are primary (${names}). Consider setting auto_select_architect to a specific agent name.`,
+							);
+						}
+					}
+
+					// When a specific architect name is provided, demote non-matching architects to subagent
+					if (typeof autoSelect === 'string' && autoSelect !== '') {
+						const targetName = autoSelect;
+						// Only proceed if the target is actually an architect-role agent
+						const targetIsArchitect =
+							Object.hasOwn(agents, targetName) &&
+							stripKnownSwarmPrefix(targetName) === 'architect';
+
+						if (targetIsArchitect) {
+							// Demote non-matching architects to subagent
+							for (const [name, cfg] of Object.entries(agents)) {
+								if (
+									stripKnownSwarmPrefix(name) === 'architect' &&
+									name !== targetName
+								) {
+									if (
+										opencodeConfig.agent &&
+										typeof opencodeConfig.agent === 'object'
+									) {
+										(opencodeConfig.agent as Record<string, any>)[name] = {
+											...(cfg && typeof cfg === 'object' ? cfg : {}),
+											mode: 'subagent',
+										};
+									}
+								}
+							}
+							// Promote the target architect to primary
+							if (
+								opencodeConfig.agent &&
+								typeof opencodeConfig.agent === 'object'
+							) {
+								const targetExisting = (
+									opencodeConfig.agent as Record<string, any>
+								)[targetName];
+								(opencodeConfig.agent as Record<string, any>)[targetName] = {
+									...(targetExisting && typeof targetExisting === 'object'
+										? targetExisting
+										: {}),
+									...(agents[targetName] &&
+									typeof agents[targetName] === 'object'
+										? agents[targetName]
+										: {}),
+									mode: 'primary',
+								};
+							}
+						} else {
+							// Target is not a valid architect — warn the user
+							addDeferredWarning(
+								`[swarm] auto_select_architect is set to "${targetName}" but that is not a known architect agent. No architect demotion applied.`,
+							);
+						}
+					}
+				} else {
+					// No architect agents found — warn the user
+					addDeferredWarning(
+						'[swarm] auto_select_architect is enabled but no architect agents were found in the generated set. The option has no effect.',
+					);
+				}
 			}
 
 			// Register /swarm command
@@ -686,7 +1098,7 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|plan|agents|history|config|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor-tools|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -694,10 +1106,14 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 					description:
 						'Use /swarm status to show current swarm status and active phase',
 				},
+				'swarm-show-plan': {
+					template: '/swarm show-plan $ARGUMENTS',
+					description:
+						'Use /swarm show-plan to view or filter the current execution plan',
+				},
 				'swarm-plan': {
 					template: '/swarm plan $ARGUMENTS',
-					description:
-						'Use /swarm plan to view or filter the current execution plan',
+					description: 'Deprecated alias for /swarm show-plan',
 				},
 				'swarm-agents': {
 					template: '/swarm agents',
@@ -787,6 +1203,26 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 					description:
 						'Use /swarm brainstorm to enter the architect MODE: BRAINSTORM planning workflow',
 				},
+				'swarm-council': {
+					template: '/swarm council $ARGUMENTS',
+					description:
+						'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--preset <name>] [--spec-review]',
+				},
+				'swarm-pr-review': {
+					template: '/swarm pr-review $ARGUMENTS',
+					description:
+						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
+				},
+				'swarm-deep-dive': {
+					template: '/swarm deep-dive $ARGUMENTS',
+					description:
+						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+				},
+				'swarm-issue': {
+					template: '/swarm issue $ARGUMENTS',
+					description:
+						'Use /swarm issue to ingest a GitHub issue into the swarm workflow',
+				},
 				'swarm-qa-gates': {
 					template: '/swarm qa-gates $ARGUMENTS',
 					description:
@@ -812,7 +1248,7 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 						'Use /swarm turbo to enable turbo mode for faster execution',
 				},
 				'swarm-full-auto': {
-					template: '/swarm-full-auto $ARGUMENTS',
+					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
 				},
 				'swarm-write-retro': {
@@ -849,10 +1285,14 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 					description:
 						'Use /swarm evidence summary to generate evidence summaries',
 				},
+				'swarm-finalize': {
+					template: '/swarm finalize',
+					description:
+						'Use /swarm finalize to archive the swarm project and close active state',
+				},
 				'swarm-close': {
 					template: '/swarm close',
-					description:
-						'Use /swarm close to close the swarm project and archive state',
+					description: 'Deprecated alias for /swarm finalize',
 				},
 				'swarm-acknowledge-spec-drift': {
 					template: '/swarm acknowledge-spec-drift',
@@ -898,9 +1338,42 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 				contextBudgetHandler,
 				guardrailsHooks.messagesTransform,
 				fullAutoInterceptHook?.messagesTransform,
+				ccCommandInterceptHook?.messagesTransform,
 				delegationGateHooks.messagesTransform,
 				delegationSanitizerHook,
 				knowledgeInjectorHook, // v6.17 knowledge injection
+				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
+				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
+				// each via the dedup-aware path. Best-effort; never throws.
+				(input: unknown, output: unknown): Promise<void> => {
+					try {
+						const p = input as { sessionID?: string };
+						return knowledgeApplicationTransformScan(
+							ctx.directory,
+							output as {
+								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+							},
+							p.sessionID,
+						);
+					} catch {
+						return Promise.resolve();
+					}
+				},
+				// v2: scan for skill propagation warnings and compliance tracking
+				(input: unknown, output: unknown): Promise<void> => {
+					try {
+						const p = input as { sessionID?: string };
+						return skillPropagationTransformScan(
+							ctx.directory,
+							output as {
+								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+							},
+							p.sessionID,
+						);
+					} catch {
+						return Promise.resolve();
+					}
+				},
 				// Final transformation: consolidate multiple system messages into one
 				(_input: unknown, output: { messages?: unknown[] }): Promise<void> => {
 					if (output.messages) {
@@ -961,6 +1434,7 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 									createCuratorLLMDelegate(ctx.directory, 'init', sessionId),
 							)
 						: undefined,
+				swarmCommandSystemRuleHook,
 				(_input: unknown, output: { system?: string[] }): Promise<void> => {
 					if (Array.isArray(output.system) && output.system.length > 1) {
 						output.system = [output.system.join('\n\n')];
@@ -1021,14 +1495,93 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 				}
 			}
 
-			// Guardrails runs first WITHOUT safeHook — throws must propagate to block tools
+			// ---------------------------------------------------------------
+			// FAIL-CLOSED CHAIN — DO NOT wrap any of the calls below in
+			// safeHook() or composeHandlers(). Both helpers swallow throws,
+			// which would silently disable the policy and let the tool run
+			// anyway. The OpenCode host treats a propagated throw from
+			// `tool.execute.before` as a tool rejection.
+			//
+			// The semantically equivalent `composeBlockingHandlers` helper in
+			// src/hooks/utils.ts exists for new fail-closed compositions. The
+			// raw-await pattern below is preserved so each hook's role is
+			// individually documented for future maintainers.
+			//
+			// Regression test: tests/unit/hooks/hook-composition.test.ts
+			// asserts every callsite below uses raw `await` (not safeHook).
+			// ---------------------------------------------------------------
+
+			// 1. Guardrails authority enforcement (FAIL-CLOSED).
+			//    Throws must propagate to block tools.
 			await guardrailsHooks.toolBefore(input, output);
 
-			// Watchdog: scope-guard runs after guardrails WITHOUT safeHook — throws must propagate to block tools
+			// 2. Scope-guard watchdog (FAIL-CLOSED).
+			//    Blocks out-of-scope writes by non-architect agents.
 			await scopeGuardHook.toolBefore(input, output);
 
-			// Reviewer gate enforcement — throws must propagate to block coder re-delegation
+			// 3. Reviewer gate (FAIL-CLOSED).
+			//    Blocks coder re-delegation when the prior reviewer round
+			//    has not produced an explicit pass/decision.
 			await delegationGateHooks.toolBefore(input, output);
+
+			// 4. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
+			//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
+			//    delegations (unknown canonical role, missing coder scope).
+			await fullAutoDelegationHook.toolBefore(input, output);
+
+			// 5. Full-Auto v2 permission policy (FAIL-CLOSED).
+			//    Throws FULL_AUTO_DENY / FULL_AUTO_BLOCKED / FULL_AUTO_PAUSED /
+			//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
+			//    critic when escalate_critic is needed.
+			await fullAutoPermissionHook.toolBefore(input, output);
+
+			// 6. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
+			//    Reads in-memory currentCriticalShownIds populated at injection
+			//    time and the in-process ack dedup set. Throws
+			//    KNOWLEDGE_ENFORCE_GATE_DENY for high-risk architect actions
+			//    (save_plan / update_task_status / phase_complete / Task) when
+			//    a critical directive was shown but no ack was recorded.
+			//    In `warn` mode it appends to events.jsonl and returns.
+			await knowledgeApplicationGateBefore(
+				ctx.directory,
+				{
+					tool: input.tool,
+					agent: input.agent,
+					sessionID: input.sessionID,
+				},
+				KnowledgeApplicationConfigSchema.parse(
+					config.knowledge_application ?? {},
+				),
+			);
+			// 7. Skill propagation gate (soft warning when SKILLS field missing).
+			//    Logs to events.jsonl when architect delegates to skill-capable
+			//    agents without a SKILLS field. Also pushes a visible warning
+			//    to pendingAdvisoryMessages for injection into the architect's
+			//    next prompt. When enforce=true, blocks the delegation entirely.
+			const skillResult = await skillPropagationGateBefore(
+				ctx.directory,
+				{
+					tool: input.tool,
+					agent: input.agent,
+					sessionID: input.sessionID,
+					args: input.args,
+				},
+				{ enabled: true },
+			);
+			if (skillResult.blocked) {
+				throw new Error(
+					skillResult.reason ?? 'Blocked by skill propagation gate',
+				);
+			}
+			if (skillResult.reason) {
+				const skillSession = ensureAgentSession(
+					input.sessionID,
+					swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
+				);
+				skillSession.pendingAdvisoryMessages ??= [];
+				skillSession.pendingAdvisoryMessages.push(skillResult.reason);
+			}
+			// ---------------------------------------------------------------
 
 			// v6.29: One-time 50% context pressure warning
 			if (swarmState.lastBudgetPct >= 50) {
@@ -1045,7 +1598,10 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 				}
 			}
 
-			// Activity tracking runs second WITH safeHook — errors should not propagate
+			// ADVISORY — activity tracking is observer-only.
+			// Wrapped in safeHook intentionally: errors here must NOT block
+			// the tool call that the fail-closed chain above has already
+			// approved.
 			await safeHook(activityHooks.toolBefore)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
@@ -1087,6 +1643,11 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 					console.error(
 						`[DIAG] toolAfter delegationGate done tool=${_toolName}`,
 					);
+
+				// Full-Auto v2: prompt-injection probe + subagent return check.
+				// Both are non-throwing observers (errors swallowed by safeHook).
+				await safeHook(fullAutoInputProbeHook.toolAfter)(input, output);
+				await safeHook(fullAutoDelegationHook.toolAfter)(input, output);
 
 				// Adversarial semantic pattern detection on agent output
 				if (isTaskTool && typeof output.output === 'string') {
@@ -1222,9 +1783,12 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 			try {
 				await hookChain();
 			} catch (err) {
-				console.warn(
-					`[swarm] toolAfter hook chain error tool=${_toolName}: ${err instanceof Error ? err.message : String(err)}`,
-				);
+				const warning = `[swarm] toolAfter hook chain error tool=${_toolName}: ${err instanceof Error ? err.message : String(err)}`;
+				if (!config.quiet) {
+					console.warn(warning);
+				} else {
+					addDeferredWarning(warning);
+				}
 			}
 
 			// ── Task handoff runs AFTER hooks ───────────────────────────────
@@ -1309,6 +1873,34 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 						`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
 					);
 				await delegationHandler(input, output);
+
+				// Full-Auto v2 cadence: increment architect-turn counter and, when a
+				// cadence trigger fires (every N turns / minutes / near-limit
+				// denials), dispatch a critic oversight call in the background.
+				// Critic-internal tool calls run on ephemeral sessions that have
+				// no durable run state, so they short-circuit inside
+				// tickAndMaybeDispatchCadence and do NOT recurse.
+				try {
+					if (
+						config.full_auto?.enabled === true &&
+						input?.sessionID &&
+						input?.agent
+					) {
+						const stripped = stripKnownSwarmPrefix(String(input.agent));
+						if (stripped === 'architect') {
+							tickAndMaybeDispatchCadence(
+								ctx.directory,
+								input.sessionID,
+								'architectTurns',
+								config,
+								{ activeAgent: String(input.agent) },
+							);
+						}
+					}
+				} catch {
+					// Best-effort — never block chat.message.
+				}
+
 				if (process.env.DEBUG_SWARM)
 					console.error(
 						`[DIAG] chat.message DONE agent=${input.agent ?? 'none'}`,
@@ -1321,12 +1913,24 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 		// Exposed for future Task 5.x business feature integration
 		automation: automationManager,
 	};
-};
+}
 
-export default OpenCodeSwarm;
+// v1 plugin shape: OpenCode's readV1Plugin requires the default export to be
+// an object exposing `id` and `server`. Bare-function defaults fall through to
+// the legacy iterator, which then walks Object.values(mod) and throws on any
+// non-function export. Issue #675.
+//
+// `satisfies` keeps the wrapper type-checked against the inferred shape without
+// loosening the OpenCodeSwarm function's `Plugin` type. The id literal must
+// match the package name in package.json.
+export default {
+	id: 'opencode-swarm' as const,
+	server: OpenCodeSwarm,
+} satisfies { id: string; server: Plugin };
 
+// Type re-exports remain — they are erased at runtime so they do not appear
+// in Object.values(mod) and cannot break OpenCode's plugin loader.
 export type { AgentDefinition } from './agents';
-// Export types for consumers
 export type {
 	AgentName,
 	AutomationCapabilities,

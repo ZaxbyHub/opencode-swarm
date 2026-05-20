@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { tool } from '@opencode-ai/plugin';
+import type { tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -280,7 +281,7 @@ export const evidence_check: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Verify completed tasks in the plan have required evidence. Reads .swarm/plan.md for completed tasks and .swarm/evidence/ for evidence files. Returns JSON with completeness ratio and gaps for tasks missing required evidence types.',
 	args: {
-		required_types: tool.schema
+		required_types: z
 			.string()
 			.optional()
 			.describe(

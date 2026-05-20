@@ -1204,7 +1204,8 @@ describe('save-plan tool verification tests', () => {
 			planData.phases[0].tasks[0].status = 'completed';
 			await fs.writeFile(planJsonPath, JSON.stringify(planData, null, 2));
 
-			// Save with entirely new task IDs
+			// Save with entirely new task IDs. Issue #853: dropping 1.1 must now be
+			// acknowledged via removed_task_ids + removal_reason.
 			const args2: SavePlanArgs = {
 				title: 'New Tasks Merge Test v2',
 				swarm_id: 'mega',
@@ -1219,6 +1220,8 @@ describe('save-plan tool verification tests', () => {
 					},
 				],
 				working_directory: tmpDir,
+				removed_task_ids: ['1.1'],
+				removal_reason: 'test: replace task set entirely',
 			};
 			const result = await executeSavePlan(args2);
 			expect(result.success).toBe(true);

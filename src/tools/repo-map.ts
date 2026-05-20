@@ -1,5 +1,6 @@
 import * as path from 'node:path';
-import { type ToolContext, tool } from '@opencode-ai/plugin';
+import type { ToolContext } from '@opencode-ai/plugin';
+import { z } from 'zod';
 import {
 	buildAndSaveGraph,
 	getBlastRadius,
@@ -134,7 +135,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"localization" (compact context block for a target file), "key_files" (top-N most-imported files). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers.',
 	args: {
-		action: tool.schema
+		action: z
 			.enum([
 				'build',
 				'importers',
@@ -146,25 +147,25 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.describe(
 				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files"',
 			),
-		file: tool.schema
+		file: z
 			.string()
 			.optional()
 			.describe(
 				'Target file (workspace-relative or absolute). Required for importers/dependencies/localization.',
 			),
-		files: tool.schema
-			.array(tool.schema.string())
+		files: z
+			.array(z.string())
 			.optional()
 			.describe(
 				'Multiple target files for blast_radius. If omitted, falls back to `file`.',
 			),
-		symbol: tool.schema
+		symbol: z
 			.string()
 			.optional()
 			.describe(
 				'When provided alongside `file` on action="importers", restrict to consumers of this exported symbol.',
 			),
-		top_n: tool.schema
+		top_n: z
 			.number()
 			.int()
 			.min(1)
@@ -173,7 +174,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.describe(
 				'For action="key_files": number of files to return (default 10).',
 			),
-		max_depth: tool.schema
+		max_depth: z
 			.number()
 			.int()
 			.min(1)

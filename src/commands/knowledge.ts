@@ -1,26 +1,56 @@
+import { join } from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema.js';
 import { migrateContextToKnowledge } from '../hooks/knowledge-migrator.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../hooks/knowledge-store.js';
-import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
+import type {
+	KnowledgeEntryBase,
+	SwarmKnowledgeEntry,
+} from '../hooks/knowledge-types.js';
 import { quarantineEntry, restoreEntry } from '../hooks/knowledge-validator.js';
+
+/**
+ * Resolves a user-supplied ID or prefix against a list of entries.
+ * Tries exact match first, then prefix match.
+ * Returns the matched entry or an error message for zero or ambiguous matches.
+ */
+function resolveEntryByPrefix<T extends { id: string }>(
+	entries: T[],
+	inputId: string,
+): { entry: T } | { error: string } {
+	const exact = entries.find((e) => e.id === inputId);
+	if (exact) return { entry: exact };
+
+	const matches = entries.filter((e) => e.id.startsWith(inputId));
+	if (matches.length === 0) {
+		return { error: `No entry found matching '${inputId}'.` };
+	}
+	if (matches.length === 1) {
+		return { entry: matches[0] };
+	}
+	const candidates = matches.map((e) => e.id).join('\n  ');
+	return {
+		error: `Ambiguous prefix '${inputId}' matches ${matches.length} entries:\n  ${candidates}`,
+	};
+}
 
 /**
  * Handles /swarm knowledge quarantine <id> [reason] command.
  * Moves a knowledge entry to quarantine with optional reason.
+ * Accepts a full ID or a unique prefix.
  */
 export async function handleKnowledgeQuarantineCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
-	const entryId = args[0];
-	if (!entryId) {
+	const inputId = args[0];
+	if (!inputId) {
 		return 'Usage: /swarm knowledge quarantine <id> [reason]';
 	}
 
-	if (!/^[a-zA-Z0-9_-]{1,64}$/.test(entryId)) {
+	if (!/^[a-zA-Z0-9_-]{1,64}$/.test(inputId)) {
 		return 'Invalid entry ID. IDs must be 1-64 characters: letters, digits, hyphens, underscores only.';
 	}
 
@@ -29,8 +59,16 @@ export async function handleKnowledgeQuarantineCommand(
 		'Quarantined via /swarm knowledge quarantine command';
 
 	try {
-		await quarantineEntry(directory, entryId, reason, 'user');
-		return `✅ Entry ${entryId} quarantined successfully.`;
+		const entries = await readKnowledge<KnowledgeEntryBase>(
+			resolveSwarmKnowledgePath(directory),
+		);
+		const resolved = resolveEntryByPrefix(entries, inputId);
+		if ('error' in resolved) {
+			return `❌ ${resolved.error}`;
+		}
+		const fullId = resolved.entry.id;
+		await quarantineEntry(directory, fullId, reason, 'user');
+		return `✅ Entry ${fullId} quarantined successfully.`;
 	} catch (error) {
 		console.warn(
 			'[knowledge-command] quarantineEntry error:',
@@ -43,23 +81,35 @@ export async function handleKnowledgeQuarantineCommand(
 /**
  * Handles /swarm knowledge restore <id> command.
  * Restores a quarantined knowledge entry.
+ * Accepts a full ID or a unique prefix.
  */
 export async function handleKnowledgeRestoreCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
-	const entryId = args[0];
-	if (!entryId) {
+	const inputId = args[0];
+	if (!inputId) {
 		return 'Usage: /swarm knowledge restore <id>';
 	}
 
-	if (!/^[a-zA-Z0-9_-]{1,64}$/.test(entryId)) {
+	if (!/^[a-zA-Z0-9_-]{1,64}$/.test(inputId)) {
 		return 'Invalid entry ID. IDs must be 1-64 characters: letters, digits, hyphens, underscores only.';
 	}
 
 	try {
-		await restoreEntry(directory, entryId);
-		return `✅ Entry ${entryId} restored successfully.`;
+		const quarantinePath = join(
+			directory,
+			'.swarm',
+			'knowledge-quarantined.jsonl',
+		);
+		const entries = await readKnowledge<KnowledgeEntryBase>(quarantinePath);
+		const resolved = resolveEntryByPrefix(entries, inputId);
+		if ('error' in resolved) {
+			return `❌ ${resolved.error}`;
+		}
+		const fullId = resolved.entry.id;
+		await restoreEntry(directory, fullId);
+		return `✅ Entry ${fullId} restored successfully.`;
 	} catch (error) {
 		console.warn(
 			'[knowledge-command] restoreEntry error:',
@@ -127,8 +177,8 @@ export async function handleKnowledgeListCommand(
 		const lines: string[] = [
 			`## Knowledge Entries (${entries.length} total)`,
 			'',
-			'| ID | Category | Confidence | Lesson (truncated) |',
-			'|------|----------|------------|---------------------|',
+			'| ID (prefix) | Category | Confidence | Lesson (truncated) |',
+			'|--------------|----------|------------|---------------------|',
 		];
 
 		for (const entry of entries) {
@@ -138,12 +188,14 @@ export async function handleKnowledgeListCommand(
 					: entry.lesson;
 			const confidencePct = Math.round(entry.confidence * 100);
 			lines.push(
-				`| ${entry.id.slice(0, 8)}... | ${entry.category} | ${confidencePct}% | ${truncatedLesson} |`,
+				`| ${entry.id.slice(0, 12)}… | ${entry.category} | ${confidencePct}% | ${truncatedLesson} |`,
 			);
 		}
 
 		lines.push('');
-		lines.push('Use `/swarm knowledge quarantine <id>` to hide an entry.');
+		lines.push(
+			'Use `/swarm knowledge quarantine <id-prefix>` to hide an entry. Prefix matching is supported — the 12-character prefix shown is unique in most stores.',
+		);
 
 		return lines.join('\n');
 	} catch (error) {

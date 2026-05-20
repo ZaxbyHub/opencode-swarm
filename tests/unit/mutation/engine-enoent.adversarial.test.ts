@@ -66,6 +66,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		mockSpawnSync.mockClear();
 		try {
 			const entries = fs.readdirSync(tempDir);

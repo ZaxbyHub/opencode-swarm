@@ -1,7 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import type { AgentDefinition } from '../../../src/agents';
 import { handleAgentsCommand } from '../../../src/commands/agents';
+import { ALL_SUBAGENT_NAMES } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
+
+/** Generate the unregistered subagents list string for test assertions */
+function unregisteredList(names: readonly string[]): string {
+	return (
+		'\n' + names.map((n) => `- **${n}** (requires configuration)`).join('\n')
+	);
+}
 
 describe('handleAgentsCommand', () => {
 	test('Returns "No agents registered." for empty agents', () => {
@@ -37,13 +45,18 @@ describe('handleAgentsCommand', () => {
 		};
 
 		const result = handleAgentsCommand(agentsWithModelAndTemp);
+		const unregisteredNames = ALL_SUBAGENT_NAMES.filter((n) => n !== 'coder');
 
-		expect(result).toBe(`## Registered Agents (2 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (2 registered + ${unregisteredNames.length} unregistered)
 
 - **architect** | model: \`gpt-4\` | temp: 0.1 | ✏️ read-write
   The swarm architect
 - **coder** | model: \`claude-3\` | temp: 0.2 | ✏️ read-write
-  The coder agent`);
+  The coder agent
+
+### Unregistered Subagents${unregisteredList(unregisteredNames)}`);
 	});
 
 	test('Shows read-only for agents with tools.write === false', () => {
@@ -64,10 +77,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(readWriteAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **tester** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
-  The test agent`);
+  The test agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Shows read-only for agents with tools.edit === false', () => {
@@ -88,10 +105,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(readWriteAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length - 1} unregistered)
 
 - **reviewer** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
-  The review agent`);
+  The review agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES.filter((n) => n !== 'reviewer'))}`);
 	});
 
 	test('Shows read-write for agents without tool restrictions', () => {
@@ -112,10 +133,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(readWriteAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **developer** | model: \`gpt-4\` | temp: 0.2 | ✏️ read-write
-  The developer agent`);
+  The developer agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Shows read-write for agents with tools undefined', () => {
@@ -132,10 +157,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(noToolsAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length - 1} unregistered)
 
 - **designer** | model: \`gpt-4\` | temp: 0.15 | ✏️ read-write
-  The designer agent`);
+  The designer agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES.filter((n) => n !== 'designer'))}`);
 	});
 
 	test('Shows default for missing model', () => {
@@ -155,10 +184,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(noModelAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **helper** | model: \`default\` | temp: 0.3 | ✏️ read-write
-  The helper agent`);
+  The helper agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Shows default for missing temperature', () => {
@@ -178,10 +211,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(noTempAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **analyst** | model: \`claude-3\` | temp: default | 🔒 read-only
-  The analyst agent`);
+  The analyst agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Shows default for missing temperature even when tools are read-write', () => {
@@ -201,10 +238,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(noTempReadWriteAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **executor** | model: \`gpt-3.5\` | temp: default | ✏️ read-write
-  The executor agent`);
+  The executor agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Includes description when available', () => {
@@ -236,12 +277,17 @@ describe('handleAgentsCommand', () => {
 		};
 
 		const result = handleAgentsCommand(agentsWithDesc);
+		const unregisteredNames = ALL_SUBAGENT_NAMES.filter((n) => n !== 'coder');
 
-		expect(result).toBe(`## Registered Agents (2 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (2 registered + ${unregisteredNames.length} unregistered)
 
 - **architect** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
   Responsible for project planning and architecture decisions
-- **coder** | model: \`claude-3\` | temp: 0.2 | ✏️ read-write`);
+- **coder** | model: \`claude-3\` | temp: 0.2 | ✏️ read-write
+
+### Unregistered Subagents${unregisteredList(unregisteredNames)}`);
 	});
 
 	test('Handles multiple agents with mixed configurations', () => {
@@ -285,13 +331,17 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(mixedAgents);
 
-		expect(result).toBe(`## Registered Agents (3 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (3 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **arch** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
   The architect agent
 - **dev** | model: \`gpt-3.5\` | temp: 0.3 | ✏️ read-write
   The developer agent
-- **tester** | model: \`claude-2\` | temp: 0.2 | 🔒 read-only`);
+- **tester** | model: \`claude-2\` | temp: 0.2 | 🔒 read-only
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('Handles agent with description in config rather than agent level', () => {
@@ -311,11 +361,18 @@ describe('handleAgentsCommand', () => {
 		};
 
 		const result = handleAgentsCommand(agentWithConfigDesc);
+		const unregisteredNames = ALL_SUBAGENT_NAMES.filter(
+			(n) => n !== 'reviewer',
+		);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${unregisteredNames.length} unregistered)
 
 - **reviewer** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
-  Reviews code and provides feedback`);
+  Reviews code and provides feedback
+
+### Unregistered Subagents${unregisteredList(unregisteredNames)}`);
 	});
 
 	test('Prioritizes agent-level description over config description', () => {
@@ -336,11 +393,18 @@ describe('handleAgentsCommand', () => {
 		};
 
 		const result = handleAgentsCommand(agentWithBothDesc);
+		const unregisteredNames = ALL_SUBAGENT_NAMES.filter(
+			(n) => n !== 'reviewer',
+		);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${unregisteredNames.length} unregistered)
 
 - **reviewer** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
-  Agent-level description`);
+  Agent-level description
+
+### Unregistered Subagents${unregisteredList(unregisteredNames)}`);
 	});
 
 	test('shows "temp: 0" for agent with temperature of 0', () => {
@@ -357,10 +421,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(agentWithZeroTemp);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **precise** | model: \`gpt-4\` | temp: 0 | ✏️ read-write
-  The precise agent`);
+  The precise agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('shows read-only for agent with both write and edit set to false', () => {
@@ -381,10 +449,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(bothFalseAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **restricted** | model: \`gpt-4\` | temp: 0.1 | 🔒 read-only
-  Restricted agent`);
+  Restricted agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 
 	test('shows read-write for agent with empty tools object', () => {
@@ -402,10 +474,14 @@ describe('handleAgentsCommand', () => {
 
 		const result = handleAgentsCommand(emptyToolsAgent);
 
-		expect(result).toBe(`## Registered Agents (1 total)
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
 
 - **flexible** | model: \`gpt-4\` | temp: 0.2 | ✏️ read-write
-  Flexible agent`);
+  Flexible agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
 	});
 });
 
@@ -545,5 +621,161 @@ describe('enhanced agent view', () => {
 
 		expect(result).toContain('### Guardrail Profiles');
 		expect(result).toContain('**architect**: no overrides');
+	});
+});
+
+describe('unregistered subagents', () => {
+	test('When all subagents are registered, no unregistered section appears', () => {
+		// Create agents object with ALL_SUBAGENT_NAMES as keys
+		const allSubagentAgents: Record<string, AgentDefinition> =
+			Object.fromEntries(
+				ALL_SUBAGENT_NAMES.map((name) => [
+					name,
+					{
+						name,
+						description: `The ${name} agent`,
+						config: { model: 'gpt-4', temperature: 0.1 },
+					},
+				]),
+			);
+
+		const result = handleAgentsCommand(allSubagentAgents);
+
+		// Header should show total count (no split) since all are registered
+		expect(result).toContain(
+			`## Registered Agents (${ALL_SUBAGENT_NAMES.length} total)`,
+		);
+		// No unregistered section
+		expect(result).not.toContain('### Unregistered Subagents');
+	});
+
+	test('When some subagents are missing, they appear in unregistered section with "requires configuration" label', () => {
+		// Only register 'coder' and 'explorer' — rest are missing
+		const partialAgents: Record<string, AgentDefinition> = {
+			coder: {
+				name: 'coder',
+				description: 'The coder agent',
+				config: { model: 'gpt-4', temperature: 0.2 },
+			},
+			explorer: {
+				name: 'explorer',
+				description: 'The explorer agent',
+				config: { model: 'claude-3', temperature: 0.1 },
+			},
+		};
+
+		const result = handleAgentsCommand(partialAgents);
+		const unregisteredCount = ALL_SUBAGENT_NAMES.length - 2;
+
+		// Header should show split format
+		expect(result).toContain(
+			`## Registered Agents (2 registered + ${unregisteredCount} unregistered)`,
+		);
+		// Unregistered section should exist
+		expect(result).toContain('### Unregistered Subagents');
+		// Each unregistered subagent should have "(requires configuration)" label
+		const missingSubagents = ALL_SUBAGENT_NAMES.filter(
+			(n) => n !== 'coder' && n !== 'explorer',
+		);
+		for (const name of missingSubagents) {
+			expect(result).toContain(`**${name}** (requires configuration)`);
+		}
+	});
+
+	test('Shows read-write for agents without tool restrictions', () => {
+		const noToolsAgent: Record<string, AgentDefinition> = {
+			developer: {
+				name: 'developer',
+				description: 'The developer agent',
+				config: { model: 'gpt-4', temperature: 0.2 },
+			},
+		};
+
+		const result = handleAgentsCommand(noToolsAgent);
+
+		expect(
+			result,
+		).toBe(`## Registered Agents (1 registered + ${ALL_SUBAGENT_NAMES.length} unregistered)
+
+- **developer** | model: \`gpt-4\` | temp: 0.2 | ✏️ read-write
+  The developer agent
+
+### Unregistered Subagents${unregisteredList(ALL_SUBAGENT_NAMES)}`);
+	});
+
+	test('When no subagents are registered (only non-subagent names), header shows "(N registered + M unregistered)" with unregistered section', () => {
+		const nonSubagentAgents: Record<string, AgentDefinition> = {
+			tester: {
+				name: 'tester',
+				description: 'The tester agent',
+				config: { model: 'gpt-4', temperature: 0.1 },
+			},
+			developer: {
+				name: 'developer',
+				description: 'The developer agent',
+				config: { model: 'gpt-4', temperature: 0.2 },
+			},
+		};
+
+		const result = handleAgentsCommand(nonSubagentAgents);
+		const unregisteredCount = ALL_SUBAGENT_NAMES.length;
+
+		// Header shows 2 registered + rest unregistered (tester, developer are registered but not subagents)
+		expect(result).toContain(
+			`## Registered Agents (2 registered + ${unregisteredCount} unregistered)`,
+		);
+		// Unregistered section present when any subagents are missing
+		expect(result).toContain('### Unregistered Subagents');
+		// All ALL_SUBAGENT_NAMES listed as unregistered
+		for (const name of ALL_SUBAGENT_NAMES) {
+			expect(result).toContain(`**${name}** (requires configuration)`);
+		}
+	});
+});
+
+describe('prefixed agent name matching', () => {
+	test('prefixed agent counts as its base name being registered', () => {
+		// mega_coder strips to coder — coder should NOT appear in unregistered
+		const agents: Record<string, AgentDefinition> = {
+			mega_coder: {
+				name: 'mega_coder',
+				config: { model: 'gpt-4', temperature: 0.2 },
+			},
+		};
+
+		const result = handleAgentsCommand(agents);
+
+		expect(result).not.toContain('**coder** (requires configuration)');
+	});
+
+	test('local_ prefixed agent counts as its base name being registered', () => {
+		// local_reviewer strips to reviewer
+		const agents: Record<string, AgentDefinition> = {
+			local_reviewer: {
+				name: 'local_reviewer',
+				config: { model: 'gpt-4', temperature: 0.1 },
+			},
+		};
+
+		const result = handleAgentsCommand(agents);
+
+		expect(result).not.toContain('**reviewer** (requires configuration)');
+	});
+
+	test('all subagents registered via prefix variants shows "N total" header', () => {
+		// Register all ALL_SUBAGENT_NAMES via their base names — should produce no unregistered
+		const agents: Record<string, AgentDefinition> = Object.fromEntries(
+			ALL_SUBAGENT_NAMES.map((name) => [
+				`mega_${name}`,
+				{ name: `mega_${name}`, config: { model: 'gpt-4', temperature: 0.1 } },
+			]),
+		);
+
+		const result = handleAgentsCommand(agents);
+
+		expect(result).not.toContain('### Unregistered Subagents');
+		expect(result).toContain(
+			`## Registered Agents (${ALL_SUBAGENT_NAMES.length} total)`,
+		);
 	});
 });

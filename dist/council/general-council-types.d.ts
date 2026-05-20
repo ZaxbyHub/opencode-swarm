@@ -2,10 +2,12 @@
  * General Council Mode — data contracts.
  *
  * Distinct from the Work Complete Council (`./types.ts`). The general council
- * is an advisory deliberation system: user-selected models each independently
- * web-search and answer a question, then optionally engage in a single
- * disagreement-targeted reconciliation round. A moderator agent synthesizes
- * the final user-facing answer.
+ * is an advisory deliberation system: a fixed three-agent council
+ * (council_generalist / council_skeptic / council_domain_expert) reviews a
+ * question using an architect-supplied RESEARCH CONTEXT block and a
+ * disagreement-targeted reconciliation round. The architect synthesizes the
+ * final user-facing answer directly using inline output rules — the
+ * dedicated council_moderator agent has been removed.
  *
  * No business logic, no I/O. Only types, interfaces, and defaults.
  */
@@ -59,10 +61,12 @@ export interface GeneralCouncilResult {
     persistingDisagreements: string[];
     allSources: WebSearchResult[];
     /**
-     * Final moderator output (when council.general.moderator: true and a moderator
-     * model is configured). Populated by `convene-general-council.ts` after the
-     * architect delegates the moderator prompt to `council_moderator`. Undefined
-     * when no moderator pass is configured.
+     * @deprecated The dedicated council_moderator agent has been removed; the
+     * architect now synthesizes the final answer directly using inline output
+     * rules. This field is never populated post-refactor and the consumer in
+     * `general-council-advisory.ts` guards on its presence so omitting it is
+     * safe. Field kept on the type for backward compatibility with persisted
+     * evidence files.
      */
     moderatorOutput?: string;
     timestamp: string;
@@ -70,10 +74,17 @@ export interface GeneralCouncilResult {
 /**
  * Config shape — matched in schema.ts via GeneralCouncilConfigSchema.
  *
- * `enabled` defaults to false (feature gate). The moderator pass requires
- * a configured `moderatorModel`; when set, the architect delegates the
- * moderator prompt produced by `convene_general_council` to the dedicated
- * `council_moderator` agent (no `web_search` access — synthesis only).
+ * `enabled` defaults to false (feature gate). The council is now a fixed
+ * three-agent set (generalist / skeptic / domain_expert) registered when
+ * `enabled` is true; their models come from the reviewer / critic / sme
+ * swarm config entries respectively.
+ *
+ * Several fields are retained for backward compatibility with existing
+ * `opencode-swarm.json` files but are NO LONGER USED at runtime. See the
+ * per-field deprecation notes below. The schema in `schema.ts` is `.strict()`
+ * so removing these fields would break validation for users with stale
+ * configs; instead, they are accepted and ignored, and a deferred warning
+ * is surfaced when the legacy moderator fields are set.
  */
 export interface GeneralCouncilConfig {
     enabled: boolean;
@@ -83,16 +94,32 @@ export interface GeneralCouncilConfig {
      * `BRAVE_SEARCH_API_KEY` env vars depending on `searchProvider`.
      */
     searchApiKey?: string;
+    /**
+     * @deprecated Member selection is hardcoded to the three council agents
+     * (generalist / skeptic / domain_expert). This field is retained for
+     * backward compatibility but is ignored at runtime.
+     */
     members: GeneralCouncilMemberConfig[];
-    /** Named groups of members for `/swarm council --preset <name>`. */
+    /**
+     * @deprecated Preset-based member selection is no longer supported.
+     * Retained for backward compatibility; ignored at runtime.
+     */
     presets: Record<string, GeneralCouncilMemberConfig[]>;
-    /** When true, after Round 1 the architect routes disagreements back to disputing members. */
+    /** When true, after Round 1 the architect routes disagreements back to disputing agents. */
     deliberate: boolean;
-    /** When true, the architect delegates a moderator pass to `council_moderator` after synthesis. */
+    /**
+     * @deprecated The dedicated council_moderator agent has been removed; the
+     * architect synthesizes the final answer directly. Retained for backward
+     * compatibility; ignored at runtime. A deferred warning is surfaced when
+     * this field is set to silence the deprecation explicitly.
+     */
     moderator: boolean;
-    /** Required when `moderator: true` — model identifier for the council_moderator delegation. */
+    /**
+     * @deprecated See `moderator` — no longer used. Retained for backward
+     * compatibility; ignored at runtime.
+     */
     moderatorModel?: string;
-    /** Hard cap on results returned per member per search call (1–20). Defaults to 5. */
+    /** Hard cap on results returned per architect web_search call (1–20). Defaults to 5. */
     maxSourcesPerMember: number;
 }
 export declare const GENERAL_COUNCIL_DEFAULTS: GeneralCouncilConfig;

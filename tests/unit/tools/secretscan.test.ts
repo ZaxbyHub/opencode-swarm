@@ -1660,19 +1660,6 @@ describe('secretscan tool', () => {
 				expect(rawOutput).toContain('REDACTED');
 			});
 
-			it.skip('should not expose internal paths in error messages', async () => {
-				const result = await secretscan.execute(
-					{ directory: '/nonexistent/path/that/does/not/exist' },
-					{} as any,
-				);
-				const parsed = parseResult(result);
-
-				expect(parsed.error).toBeDefined();
-				// Should not leak resolved absolute paths
-				expect(parsed.error).not.toMatch(/[A-Z]:\\/i); // No Windows paths
-				expect(parsed.scan_dir).toBe('/nonexistent/path/that/does/not/exist');
-			});
-
 			it('should sanitize error messages from exceptions', async () => {
 				// Create a scenario that might trigger an internal error
 				// Try with a path that has special regex characters

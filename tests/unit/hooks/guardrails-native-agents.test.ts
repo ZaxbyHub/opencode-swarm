@@ -13,6 +13,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'bun:test';
+import * as os from 'node:os';
 import { OPENCODE_NATIVE_AGENTS } from '../../../src/config/constants.js';
 import type { GuardrailsConfig } from '../../../src/config/schema.js';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails.js';
@@ -22,7 +23,7 @@ import {
 	swarmState,
 } from '../../../src/state.js';
 
-const TEST_DIR = '/tmp';
+const TEST_DIR = os.tmpdir();
 
 function cfg(overrides?: Partial<GuardrailsConfig>): GuardrailsConfig {
 	return {

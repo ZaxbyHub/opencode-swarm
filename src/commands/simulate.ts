@@ -1,4 +1,5 @@
-import { detectDarkMatter } from '../tools/co-change-analyzer';
+import { _internals as coChangeAnalyzer } from '../tools/co-change-analyzer';
+import { warn } from '../utils';
 
 /**
  * Handle /swarm simulate command
@@ -32,7 +33,18 @@ export async function handleSimulateCommand(
 	}
 
 	// Run dark matter detection directly
-	const darkMatterPairs = await detectDarkMatter(directory, options);
+	let darkMatterPairs: Awaited<
+		ReturnType<typeof coChangeAnalyzer.detectDarkMatter>
+	>;
+	try {
+		darkMatterPairs = await coChangeAnalyzer.detectDarkMatter(
+			directory,
+			options,
+		);
+	} catch (err) {
+		const errMsg = err instanceof Error ? err.message : String(err);
+		return `## Simulate Report\n\n### Error\n\nError analyzing git history: ${errMsg}\n\nEnsure this is a git repository with commit history.`;
+	}
 
 	// Build simulate report
 	const reportLines = [
@@ -57,11 +69,19 @@ export async function handleSimulateCommand(
 	const report = reportLines.filter(Boolean).join('\n');
 
 	// Write report to .swarm/simulate-report.md
-	const fs = await import('node:fs/promises');
-	const path = await import('node:path');
-	const reportPath = path.join(directory, '.swarm', 'simulate-report.md');
-	await fs.mkdir(path.dirname(reportPath), { recursive: true });
-	await fs.writeFile(reportPath, report, 'utf-8');
+	try {
+		const fs = await import('node:fs/promises');
+		const path = await import('node:path');
+		const reportPath = path.join(directory, '.swarm', 'simulate-report.md');
+		await fs.mkdir(path.dirname(reportPath), { recursive: true });
+		await fs.writeFile(reportPath, report, 'utf-8');
+	} catch (err) {
+		const writeErr = err instanceof Error ? err.message : String(err);
+		warn(
+			`simulate: failed to write report to ${directory}/.swarm/simulate-report.md`,
+			writeErr,
+		);
+	}
 
 	// Return summary
 	return `${darkMatterPairs.length} hidden coupling pairs detected`;

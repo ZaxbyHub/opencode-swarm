@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import { curator_analyze } from './curator-analyze';
+import type { ToolResult } from './create-tool';
 
 // Test utilities
 function createTempDir(): string {
@@ -23,56 +23,90 @@ function createSwarmDir(dir: string): string {
 	return swarmDir;
 }
 
+// Helper to extract string from ToolResult
+function resultToString(result: ToolResult): string {
+	return typeof result === 'string' ? result : result.output;
+}
+
 // Helper to call tool execute with proper context (bypasses strict type requirements for testing)
 async function executeTool(
 	args: Record<string, unknown>,
 	directory: string,
 ): Promise<string> {
-	return curator_analyze.execute(args, {
+	const result = (await curator_analyze.execute(args, {
 		directory,
-	} as unknown as ToolContext);
+	} as unknown as ToolContext)) as unknown as ToolResult;
+	return resultToString(result);
 }
 
-// Mock modules before importing curator_analyze
-mock.module('../hooks/curator.js', () => ({
-	runCuratorPhase: mock(async () => ({
+// Extract mock functions before mock.module() calls so they can be cleared
+const mockRunCuratorPhase = mock(async () => ({
+	phase: 1,
+	digest: {
 		phase: 1,
-		digest: {
+		timestamp: '2026-01-01',
+		summary: 'Test digest',
+		agents_used: ['coder'],
+		tasks_completed: 2,
+		tasks_total: 3,
+		key_decisions: [],
+		blockers_resolved: [],
+	},
+	compliance: [
+		{
 			phase: 1,
 			timestamp: '2026-01-01',
-			summary: 'Test digest',
-			agents_used: ['coder'],
-			tasks_completed: 2,
-			tasks_total: 3,
-			key_decisions: [],
-			blockers_resolved: [],
+			type: 'missing_reviewer',
+			description: 'No reviewer dispatched',
+			severity: 'warning',
 		},
-		compliance: [
-			{
-				phase: 1,
-				timestamp: '2026-01-01',
-				type: 'missing_reviewer',
-				description: 'No reviewer dispatched',
-				severity: 'warning',
-			},
-		],
-		knowledge_recommendations: [],
-		summary_updated: true,
-	})),
-	applyCuratorKnowledgeUpdates: mock(async () => ({ applied: 2, skipped: 0 })),
+	],
+	knowledge_recommendations: [],
+	summary_updated: true,
 }));
 
-mock.module('../config/index.js', () => ({
-	loadPluginConfigWithMeta: mock(() => ({
-		config: { curator: { enabled: true, phase_enabled: true } },
-		meta: { path: '/tmp/test' },
-	})),
+const mockApplyCuratorKnowledgeUpdates = mock(async () => ({
+	applied: 2,
+	skipped: 0,
 }));
+
+const mockLoadPluginConfigWithMeta = mock(() => ({
+	config: { curator: { enabled: true, phase_enabled: true } },
+	meta: { path: '/tmp/test' },
+}));
+
+// Mock modules before importing curator_analyze
+const realCurator = await import('../hooks/curator.js');
+mock.module('../hooks/curator.js', () => ({
+	...realCurator,
+	runCuratorPhase: mockRunCuratorPhase,
+	applyCuratorKnowledgeUpdates: mockApplyCuratorKnowledgeUpdates,
+}));
+
+const realConfig = await import('../config/index.js');
+mock.module('../config/index.js', () => ({
+	...realConfig,
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+const mockBuildRejectedReceipt = mock(() => ({}));
+const mockBuildApprovedReceipt = mock(() => ({}));
+mock.module('../hooks/review-receipt.js', () => ({
+	buildRejectedReceipt: mockBuildRejectedReceipt,
+	buildApprovedReceipt: mockBuildApprovedReceipt,
+	persistReviewReceipt: mock(() => Promise.resolve()),
+}));
+
+// Dynamically import SUT after mocks are established
+const { curator_analyze } = await import('./curator-analyze');
 
 describe('curator_analyze tool', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
+		mockRunCuratorPhase.mockClear();
+		mockApplyCuratorKnowledgeUpdates.mockClear();
+		mockLoadPluginConfigWithMeta.mockClear();
 		tempDir = createTempDir();
 		createSwarmDir(tempDir);
 	});
@@ -102,6 +136,14 @@ describe('curator_analyze tool', () => {
 
 			expect(parsed.applied).toBe(0);
 			expect(parsed.skipped).toBe(0);
+		});
+
+		it('calls buildRejectedReceipt when compliance warnings exist', async () => {
+			mockBuildRejectedReceipt.mockClear();
+			mockBuildApprovedReceipt.mockClear();
+			await executeTool({ phase: 1 }, tempDir);
+			expect(mockBuildRejectedReceipt).toHaveBeenCalled();
+			expect(mockBuildApprovedReceipt).not.toHaveBeenCalled();
 		});
 	});
 
@@ -180,7 +222,12 @@ describe('curator_analyze tool', () => {
 		it('accepts valid recommendations with all action types', async () => {
 			const recommendations = [
 				{ action: 'promote', lesson: 'L1', reason: 'R1' },
-				{ action: 'archive', entry_id: 'e1', lesson: 'L2', reason: 'R2' },
+				{
+					action: 'archive',
+					entry_id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+					lesson: 'L2',
+					reason: 'R2',
+				},
 				{ action: 'flag_contradiction', lesson: 'L3', reason: 'R3' },
 			];
 

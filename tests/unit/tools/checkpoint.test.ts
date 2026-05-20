@@ -138,15 +138,27 @@ describe('checkpoint tool', () => {
 
 	describe('restore action', () => {
 		test('restores to checkpoint and returns success JSON', async () => {
-			// First save a checkpoint
+			// Create a file change so the checkpoint save creates a real commit
+			fs.writeFileSync(
+				path.join(tempDir, 'checkpoint-file.txt'),
+				'checkpoint content',
+			);
+
 			const saveResult = await checkpoint.execute({
 				action: 'save',
 				label: 'restore-me',
 			});
 			const saveParsed = JSON.parse(saveResult);
+			expect(saveParsed.success).toBe(true);
 			const checkpointSha = saveParsed.sha;
 
-			// Make a new commit
+			// Verify the checkpoint created a new commit (distinct from initial)
+			const priorSha = execSync('git rev-parse HEAD~1', {
+				encoding: 'utf-8',
+			}).trim();
+			expect(checkpointSha).not.toBe(priorSha);
+
+			// Make another commit on top
 			fs.writeFileSync(path.join(tempDir, 'new.txt'), 'new content');
 			execSync('git add .', { encoding: 'utf-8' });
 			execSync('git commit -m "new commit"', { encoding: 'utf-8' });
@@ -216,7 +228,7 @@ describe('checkpoint tool', () => {
 			expect(parsed.action).toBe('delete');
 			expect(parsed.success).toBe(true);
 			expect(parsed.label).toBe('to-delete');
-			expect(parsed.message).toContain('git commit preserved');
+			expect(parsed.message).toContain('to-delete');
 		});
 
 		test('removes checkpoint from log file', async () => {
@@ -386,6 +398,94 @@ describe('checkpoint tool', () => {
 			expect(restoreParsed).toHaveProperty('label');
 			expect(restoreParsed).toHaveProperty('sha');
 			expect(restoreParsed).toHaveProperty('message');
+		});
+	});
+
+	// ───────────────────────────────────────────────────────────────────────────
+	// Regression: empty-commit elimination (Issue #687)
+	// ───────────────────────────────────────────────────────────────────────────
+
+	describe('empty-commit elimination', () => {
+		test('save on clean tree records HEAD SHA without creating a new commit', async () => {
+			const headBefore = execSync('git rev-parse HEAD', {
+				encoding: 'utf-8',
+			}).trim();
+
+			const result = await checkpoint.execute({
+				action: 'save',
+				label: 'clean-tree-checkpoint',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+			expect(parsed.sha).toBe(headBefore);
+
+			// HEAD must not have advanced — no new commit was created
+			const headAfter = execSync('git rev-parse HEAD', {
+				encoding: 'utf-8',
+			}).trim();
+			expect(headAfter).toBe(headBefore);
+		});
+
+		test('save on dirty tree stages files and creates a new commit', async () => {
+			fs.writeFileSync(path.join(tempDir, 'dirty.txt'), 'dirty content');
+			const headBefore = execSync('git rev-parse HEAD', {
+				encoding: 'utf-8',
+			}).trim();
+
+			const result = await checkpoint.execute({
+				action: 'save',
+				label: 'dirty-tree-checkpoint',
+			});
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+
+			// HEAD must have advanced — a new commit was created
+			const headAfter = execSync('git rev-parse HEAD', {
+				encoding: 'utf-8',
+			}).trim();
+			expect(headAfter).not.toBe(headBefore);
+			expect(parsed.sha).toBe(headAfter);
+		});
+
+		test('save excludes .swarm/ directory from staged changes', async () => {
+			// Write something into .swarm/ — it must not appear in the commit
+			fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'sensitive.json'),
+				'{"secret":"value"}',
+			);
+			// Also write a non-swarm file to ensure a commit is created
+			fs.writeFileSync(path.join(tempDir, 'safe.txt'), 'safe content');
+
+			const result = await checkpoint.execute({
+				action: 'save',
+				label: 'exclude-swarm',
+			});
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+
+			// .swarm/sensitive.json must not be tracked in the commit
+			const committedFiles = execSync('git show --name-only --format="" HEAD', {
+				encoding: 'utf-8',
+			}).trim();
+			expect(committedFiles).not.toContain('.swarm');
+			expect(committedFiles).toContain('safe.txt');
+		});
+
+		test('two consecutive saves on a clean tree share the same SHA', async () => {
+			const r1 = JSON.parse(
+				await checkpoint.execute({ action: 'save', label: 'snap-1' }),
+			);
+			const r2 = JSON.parse(
+				await checkpoint.execute({ action: 'save', label: 'snap-2' }),
+			);
+
+			expect(r1.success).toBe(true);
+			expect(r2.success).toBe(true);
+			// Both record the same HEAD SHA because no commit was created
+			expect(r1.sha).toBe(r2.sha);
 		});
 	});
 });

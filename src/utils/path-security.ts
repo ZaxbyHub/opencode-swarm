@@ -116,3 +116,19 @@ export function validateSymlinkBoundary(
 		);
 	}
 }
+
+/**
+ * DI seam for testability. Contains all test-mocked exports.
+ * Internal calls should use _internals.fn() instead of fn() directly.
+ */
+export const _internals: {
+	containsPathTraversal: typeof containsPathTraversal;
+	containsControlChars: typeof containsControlChars;
+	validateDirectory: typeof validateDirectory;
+	validateSymlinkBoundary: typeof validateSymlinkBoundary;
+} = {
+	containsPathTraversal,
+	containsControlChars,
+	validateDirectory,
+	validateSymlinkBoundary,
+} as const;

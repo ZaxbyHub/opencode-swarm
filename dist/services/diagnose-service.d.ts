@@ -3,7 +3,7 @@
  */
 export interface HealthCheck {
     name: string;
-    status: '✅' | '❌';
+    status: '✅' | '❌' | '⚠️' | '⬜';
     detail: string;
 }
 /**

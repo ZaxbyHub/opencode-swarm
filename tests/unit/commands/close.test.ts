@@ -58,6 +58,47 @@ const mockArchiveEvidence = mock(async () => {});
 
 const mockFlushPendingSnapshot = mock(async () => {});
 
+const mockPromoteToHive = mock(
+	async (_dir: string, _lesson: string, _category: string) => {},
+);
+
+let forceSkillReviewConfigError = false;
+const mockLoadPluginConfigWithMeta = mock((_directory: string) => {
+	if (forceSkillReviewConfigError) throw new Error('bad config');
+	return {
+		config: {
+			skill_improver: {
+				enabled: true,
+				max_calls_per_day: 10,
+				trigger: 'manual',
+				targets: ['skills', 'spec', 'architect_prompt', 'knowledge'],
+				write_mode: 'proposal',
+				require_user_approval: true,
+				quota_window: 'utc',
+				allow_deterministic_fallback: true,
+			},
+		},
+		loadedFromFile: null,
+	};
+});
+
+const mockRunSkillImprover = mock(async () => ({
+	ran: true,
+	proposalPath: path.join(
+		testDir,
+		'.swarm',
+		'skill-improver',
+		'proposals',
+		'proposal.md',
+	),
+	source: 'deterministic_fallback',
+	quota: { date: '2026-05-11', calls_used: 1, max_calls: 10 },
+}));
+
+let forceSkillReviewTimeout = false;
+let observedSkillReviewSignal: AbortSignal | undefined;
+let observedSkillReviewAborted = false;
+
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
 }));
@@ -66,12 +107,41 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 	curateAndStoreSwarm: mockCurateAndStoreSwarm,
 }));
 
+mock.module('../../../src/hooks/hive-promoter.js', () => ({
+	promoteToHive: mockPromoteToHive,
+}));
+
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+}));
+
+mock.module('../../../src/config.js', () => ({
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+mock.module('../../../src/config/index.js', () => ({
+	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+}));
+
+mock.module('../../../src/services/skill-improver.js', () => ({
+	runSkillImprover: mock(async (req: { signal?: AbortSignal } = {}) => {
+		observedSkillReviewSignal = req.signal;
+		if (forceSkillReviewTimeout) {
+			req.signal?.addEventListener(
+				'abort',
+				() => {
+					observedSkillReviewAborted = true;
+				},
+				{ once: true },
+			);
+			return await new Promise<never>(() => {});
+		}
+		return await mockRunSkillImprover(req);
+	}),
 }));
 
 // Shared mock for swarmState + reset counter so tests can verify the full
@@ -90,6 +160,7 @@ const mockSwarmState = {
 	environmentProfiles: new Map(),
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
+	skillImproverAgentNames: [] as string[],
 };
 
 let resetSwarmStateCallCount = 0;
@@ -109,6 +180,7 @@ function mockResetSwarmState(): void {
 	mockSwarmState.environmentProfiles.clear();
 	mockSwarmState.curatorInitAgentNames = [];
 	mockSwarmState.curatorPhaseAgentNames = [];
+	mockSwarmState.skillImproverAgentNames = [];
 }
 
 mock.module('../../../src/state.js', () => ({
@@ -118,7 +190,29 @@ mock.module('../../../src/state.js', () => ({
 }));
 
 // Import after mock setup
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const { handleCloseCommand, _internals } = await import(
+	'../../../src/commands/close.js'
+);
+
+// ── DI Conversion Summary ────────────────────────────────────────────
+//
+// WITHIN-MODULE MOCKS: NONE POSSIBLE
+// close.ts imports all functions directly (flushPendingSnapshot, swarmState,
+// resetSwarmState, archiveEvidence, executeWriteRetro, curateAndStoreSwarm) and
+// does NOT route any through _internals. The _internals DI seam only works when
+// the consuming module uses _internals (e.g., full-auto-intercept.ts imports
+// state._internals directly). Since close.ts has no _internals usage, none of
+// its imports can be intercepted via _internals.
+//
+// CROSS-MODULE MOCKS: All mocks remain as mock.module
+// - executeWriteRetro (tools/write-retro.ts)
+// - curateAndStoreSwarm (hooks/knowledge-curator.ts)
+// - archiveEvidence (evidence/manager.ts) — not in manager._internals
+// - flushPendingSnapshot (session/snapshot-writer.ts) — close.ts imports directly
+// - swarmState + resetSwarmState (state.ts) — close.ts imports directly
+//
+// All mock.module calls require afterEach(mock.restore()) cleanup.
+// ─────────────────────────────────────────────────────────────────────
 
 let testDir: string;
 
@@ -128,6 +222,13 @@ describe('handleCloseCommand', () => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
+		mockPromoteToHive.mockClear();
+		mockLoadPluginConfigWithMeta.mockClear();
+		mockRunSkillImprover.mockClear();
+		forceSkillReviewTimeout = false;
+		observedSkillReviewSignal = undefined;
+		observedSkillReviewAborted = false;
+		forceSkillReviewConfigError = false;
 		resetSwarmStateCallCount = 0;
 		// Re-seed the mock state for each test so reset assertions are isolated.
 		mockSwarmState.opencodeClient = {
@@ -139,6 +240,10 @@ describe('handleCloseCommand', () => {
 			'swarm2_curator_init',
 		];
 		mockSwarmState.curatorPhaseAgentNames = ['curator_phase'];
+		mockSwarmState.skillImproverAgentNames = [
+			'skill_improver',
+			'swarm2_skill_improver',
+		];
 		mockSwarmState.activeToolCalls.set('tool-a', { stale: true });
 		mockSwarmState.agentSessions.set('session-1', { stale: true });
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-command-test-'));
@@ -151,6 +256,8 @@ describe('handleCloseCommand', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		// Restore all mock.module mocks to prevent cross-test pollution
+		mock.restore();
 	});
 
 	describe('Writes retrospective for in-progress phases', () => {
@@ -443,14 +550,11 @@ describe('handleCloseCommand', () => {
 			const summary = readFileSync(summaryPath, 'utf-8');
 			expect(summary).toContain('# Swarm Close Summary');
 			expect(summary).toContain('**Project:** Test Project');
-			expect(summary).toContain('## Phases Closed: 1');
-			expect(summary).toContain('- Phase 1');
-			expect(summary).toContain('## Tasks Closed: 1');
+			expect(summary).toContain('## Retrospective');
+			expect(summary).toContain('- Phase 1 closed');
+			expect(summary).toContain('**Tasks marked closed:** 1');
 			expect(summary).toContain('- 1.2');
-			expect(summary).toContain('## Actions Performed');
-			expect(summary).toContain(
-				'- Wrote retrospectives for in-progress phases',
-			);
+			expect(summary).toContain('## Lessons Committed');
 			expect(summary).toContain('Archived');
 			expect(summary).toContain(
 				'- Cleared agent sessions and delegation chains',
@@ -481,13 +585,14 @@ describe('handleCloseCommand', () => {
 
 			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
 			const summary = readFileSync(summaryPath, 'utf-8');
-			expect(summary).toContain('## Tasks Closed: 0');
-			expect(summary).toContain('_No incomplete tasks_');
+			expect(summary).toContain('## Lessons Committed');
+			expect(summary).toContain('_No lessons committed_');
 		});
 	});
 
 	describe('Clears state', () => {
-		it('should call flushPendingSnapshot', async () => {
+		it('should NOT call flushPendingSnapshot during close', async () => {
+			// flushPendingSnapshot was removed — close clears session state instead of flushing it
 			const planData = {
 				title: 'Test Project',
 				phases: [
@@ -506,8 +611,7 @@ describe('handleCloseCommand', () => {
 
 			await handleCloseCommand(testDir, []);
 
-			expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
-			expect(mockFlushPendingSnapshot).toHaveBeenCalledWith(testDir);
+			expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 		});
 	});
 
@@ -776,11 +880,11 @@ describe('handleCloseCommand', () => {
 				expect(mockCurateAndStoreSwarm).toHaveBeenCalledTimes(1);
 			});
 
-			it('PF5: No plan.json → flushPendingSnapshot IS called', async () => {
+			it('PF5: No plan.json → flushPendingSnapshot is NOT called', async () => {
 				// No plan.json — plan-free session
 				await handleCloseCommand(testDir, []);
 
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 			});
 
 			it('PF6: Malformed plan.json (exists but invalid JSON) → returns error containing "Failed to read plan.json"', async () => {
@@ -1258,6 +1362,202 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('Lessons curation failed');
 				expect(result).toContain('curation failed');
 			});
+
+			it('LN6: Retro evidence with lessons → curateAndStoreSwarm receives merged explicit + retro lessons', async () => {
+				// Create explicit lessons file
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Explicit lesson about testing',
+				);
+
+				// Create retro evidence directory with lessons
+				const evidenceDir = path.join(testDir, '.swarm', 'evidence', 'retro-1');
+				mkdirSync(evidenceDir, { recursive: true });
+				writeFileSync(
+					path.join(evidenceDir, 'evidence.json'),
+					JSON.stringify({
+						entries: [
+							{
+								lessons_learned: [
+									'Retro lesson about deployment',
+									'Retro lesson about code review',
+								],
+							},
+						],
+					}),
+				);
+
+				// Write a plan with in-progress phase
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Test Project',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				await handleCloseCommand(testDir, []);
+
+				// Both explicit and retro lessons should be passed (merged, deduplicated)
+				expect(mockCurateAndStoreSwarm).toHaveBeenCalledWith(
+					[
+						'Explicit lesson about testing',
+						'Retro lesson about deployment',
+						'Retro lesson about code review',
+					],
+					'Test Project',
+					{ phase_number: 0 },
+					testDir,
+					expect.any(Object),
+				);
+			});
+
+			it('LN7: Retro evidence without lessons + explicit lessons → curateAndStoreSwarm receives only explicit lessons', async () => {
+				// Create explicit lessons file
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Explicit lesson only',
+				);
+
+				// Create retro evidence directory with NO lessons_learned
+				const evidenceDir = path.join(testDir, '.swarm', 'evidence', 'retro-1');
+				mkdirSync(evidenceDir, { recursive: true });
+				writeFileSync(
+					path.join(evidenceDir, 'evidence.json'),
+					JSON.stringify({
+						entries: [
+							{
+								phase: 1,
+								summary: 'Some retro without lessons',
+							},
+						],
+					}),
+				);
+
+				// Write a plan with in-progress phase
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Test Project',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				await handleCloseCommand(testDir, []);
+
+				// Only explicit lessons should be passed (retro had none)
+				expect(mockCurateAndStoreSwarm).toHaveBeenCalledWith(
+					['Explicit lesson only'],
+					'Test Project',
+					{ phase_number: 0 },
+					testDir,
+					expect.any(Object),
+				);
+			});
+
+			it('LN8: Multiple retro evidence bundles → all lessons extracted and deduplicated', async () => {
+				// Create explicit lessons
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Explicit lesson',
+				);
+
+				// Create first retro evidence bundle
+				const evidenceDir1 = path.join(
+					testDir,
+					'.swarm',
+					'evidence',
+					'retro-1',
+				);
+				mkdirSync(evidenceDir1, { recursive: true });
+				writeFileSync(
+					path.join(evidenceDir1, 'evidence.json'),
+					JSON.stringify({
+						entries: [{ lessons_learned: ['Retro lesson 1'] }],
+					}),
+				);
+
+				// Create second retro evidence bundle
+				const evidenceDir2 = path.join(
+					testDir,
+					'.swarm',
+					'evidence',
+					'retro-2',
+				);
+				mkdirSync(evidenceDir2, { recursive: true });
+				writeFileSync(
+					path.join(evidenceDir2, 'evidence.json'),
+					JSON.stringify({
+						entries: [{ lessons_learned: ['Retro lesson 2'] }],
+					}),
+				);
+
+				// Write a plan with in-progress phase
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Test Project',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				await handleCloseCommand(testDir, []);
+
+				// All lessons from both bundles plus explicit should be present
+				expect(mockCurateAndStoreSwarm).toHaveBeenCalledWith(
+					['Explicit lesson', 'Retro lesson 1', 'Retro lesson 2'],
+					'Test Project',
+					{ phase_number: 0 },
+					testDir,
+					expect.any(Object),
+				);
+			});
+
+			it('LN9: Retro lesson duplicates explicit lesson → deduplicated to one', async () => {
+				// Create explicit lessons with a specific lesson
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Shared lesson',
+				);
+
+				// Create retro evidence with the same lesson
+				const evidenceDir = path.join(testDir, '.swarm', 'evidence', 'retro-1');
+				mkdirSync(evidenceDir, { recursive: true });
+				writeFileSync(
+					path.join(evidenceDir, 'evidence.json'),
+					JSON.stringify({
+						entries: [{ lessons_learned: ['Shared lesson'] }],
+					}),
+				);
+
+				// Write a plan with in-progress phase
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Test Project',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				await handleCloseCommand(testDir, []);
+
+				// Shared lesson should appear only once (deduplicated via Set)
+				expect(mockCurateAndStoreSwarm).toHaveBeenCalledWith(
+					['Shared lesson'],
+					'Test Project',
+					{ phase_number: 0 },
+					testDir,
+					expect.any(Object),
+				);
+			});
 		});
 
 		// =====================================================================
@@ -1350,6 +1650,192 @@ describe('handleCloseCommand', () => {
 				expect(mockSwarmState.curatorPhaseAgentNames).toEqual([
 					'curator_phase',
 				]);
+				expect(mockSwarmState.skillImproverAgentNames).toEqual([
+					'skill_improver',
+					'swarm2_skill_improver',
+				]);
+			});
+		});
+
+		// =====================================================================
+		// Group: Skill review hint and opt-in review (Issue #802)
+		// =====================================================================
+
+		describe('Skill review hint and opt-in review (Issue #802)', () => {
+			it('shows skill compilation hint when close curation stores knowledge entries', async () => {
+				mockCurateAndStoreSwarm.mockImplementationOnce(async () => ({
+					stored: 2,
+					skipped: 0,
+					rejected: 0,
+				}));
+				writeFileSync(
+					path.join(testDir, '.swarm', 'close-lessons.md'),
+					'Capture recurring test setup as a reusable skill\nCapture release note checklist',
+				);
+				writeFileSync(
+					path.join(testDir, '.swarm', 'plan.json'),
+					JSON.stringify({
+						title: 'Skill Hint Test',
+						phases: [
+							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+						],
+					}),
+				);
+
+				const result = await handleCloseCommand(testDir, []);
+				const summary = readFileSync(
+					path.join(testDir, '.swarm', 'close-summary.md'),
+					'utf-8',
+				);
+
+				expect(result).toContain('2 knowledge entries created this session');
+				expect(result).toContain('skill_improve');
+				expect(result).toContain('skill_generate');
+				expect(summary).toContain('2 knowledge entries created this session');
+			});
+
+			it('does not show skill compilation hint when no knowledge entries were created', async () => {
+				mockCurateAndStoreSwarm.mockImplementationOnce(async () => ({
+					stored: 0,
+					skipped: 0,
+					rejected: 0,
+				}));
+
+				const result = await handleCloseCommand(testDir, []);
+				const summary = readFileSync(
+					path.join(testDir, '.swarm', 'close-summary.md'),
+					'utf-8',
+				);
+
+				expect(result).not.toContain('knowledge entries created this session');
+				expect(result).not.toContain('skill_improve');
+				expect(summary).not.toContain('knowledge entries created this session');
+			});
+
+			it('counts knowledge entries at and after session start while ignoring older and invalid timestamps', async () => {
+				mockSwarmState.agentSessions.set('session-1', {
+					lastAgentEventTime: Date.parse('2026-05-11T10:00:00.000Z'),
+				});
+				mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+				writeFileSync(
+					path.join(testDir, '.swarm', 'knowledge.jsonl'),
+					[
+						{
+							id: 'before',
+							lesson: 'Old lesson',
+							category: 'process',
+							created_at: '2026-05-11T09:59:59.999Z',
+						},
+						{
+							id: 'equal',
+							lesson: 'Boundary lesson',
+							category: 'process',
+							created_at: '2026-05-11T10:00:00.000Z',
+						},
+						{
+							id: 'after',
+							lesson: 'Fresh lesson',
+							category: 'process',
+							created_at: '2026-05-11T10:01:00.000Z',
+						},
+						{
+							id: 'invalid',
+							lesson: 'Invalid timestamp lesson',
+							category: 'process',
+							created_at: 'not-a-date',
+						},
+					]
+						.map((entry) => JSON.stringify(entry))
+						.join('\n'),
+				);
+
+				const result = await handleCloseCommand(testDir, []);
+
+				expect(result).toContain('2 knowledge entries created this session');
+			});
+
+			it('count helper falls back when session start is missing or invalid', () => {
+				const entries = [
+					{ created_at: '2026-05-11T10:00:00.000Z' },
+					{ created_at: '2026-05-11T10:01:00.000Z' },
+				];
+
+				expect(
+					_internals.countSessionKnowledgeEntries(entries, undefined, 4),
+				).toBe(4);
+				expect(
+					_internals.countSessionKnowledgeEntries(entries, 'not-a-date', 3),
+				).toBe(3);
+			});
+
+			it('does not call skill improver on the default close path', async () => {
+				await handleCloseCommand(testDir, []);
+
+				expect(mockRunSkillImprover).not.toHaveBeenCalled();
+			});
+
+			it('runs skill improver in proposal mode when --skill-review is passed', async () => {
+				const result = await handleCloseCommand(testDir, ['--skill-review'], {
+					sessionID: 'session-802',
+				});
+
+				expect(mockRunSkillImprover).toHaveBeenCalledTimes(1);
+				expect(mockRunSkillImprover).toHaveBeenCalledWith(
+					expect.objectContaining({
+						directory: testDir,
+						targets: ['skills', 'knowledge'],
+						mode: 'proposal',
+						sessionId: 'session-802',
+					}),
+				);
+				expect(result).toContain('Skill review proposal generated');
+				expect(result).toContain('proposal.md');
+			});
+
+			it('reports skill improver refusal without blocking close', async () => {
+				mockRunSkillImprover.mockImplementationOnce(async () => ({
+					ran: false,
+					reason: 'quota exhausted',
+					quota: { date: '2026-05-11', calls_used: 10, max_calls: 10 },
+				}));
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review skipped: quota exhausted');
+			});
+
+			it('reports skill improver throws without blocking close', async () => {
+				mockRunSkillImprover.mockImplementationOnce(async () => {
+					throw new Error('service exploded');
+				});
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review failed: service exploded');
+			});
+
+			it('reports skill improver timeout without blocking close', async () => {
+				forceSkillReviewTimeout = true;
+
+				const result = await handleCloseCommand(testDir, ['--skill-review'], {
+					skillReviewTimeoutMs: 1,
+				});
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('skill_review exceeded');
+				expect(observedSkillReviewSignal).toBeDefined();
+				expect(observedSkillReviewAborted).toBe(true);
+			});
+
+			it('reports skill-review config load failures without blocking close', async () => {
+				forceSkillReviewConfigError = true;
+
+				const result = await handleCloseCommand(testDir, ['--skill-review']);
+
+				expect(result).toContain('finalized');
+				expect(result).toContain('Skill review failed: bad config');
 			});
 		});
 
@@ -1485,7 +1971,7 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('terminal state');
 			});
 
-			it('PF_P1_D: Plan with all phases complete → flushPendingSnapshot is still called', async () => {
+			it('PF_P1_D: Plan with all phases complete → flushPendingSnapshot is NOT called', async () => {
 				const planData = {
 					title: 'Test Project',
 					phases: [
@@ -1504,8 +1990,8 @@ describe('handleCloseCommand', () => {
 
 				await handleCloseCommand(testDir, []);
 
-				// State flushes even when plan is already done
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				// State is cleared, not flushed
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 			});
 		});
 
@@ -1571,7 +2057,7 @@ describe('handleCloseCommand', () => {
 				expect(result).toContain('finalized');
 				// Cleanup ran despite the error
 				expect(mockArchiveEvidence).toHaveBeenCalledTimes(1);
-				expect(mockFlushPendingSnapshot).toHaveBeenCalledTimes(1);
+				expect(mockFlushPendingSnapshot).not.toHaveBeenCalled();
 				// Warning mentions the thrown error
 				expect(result).toContain('Warnings');
 				expect(result).toContain('retro write failed');

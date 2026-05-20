@@ -15,18 +15,12 @@ import {
 	PlanSyncWorker,
 	type PlanSyncWorkerOptions,
 } from '../../../src/background/plan-sync-worker';
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
 
-// Mock the plan/manager functions
+// Within-module DI seam: mock functions are assigned to _internals
 const mockLoadPlan = mock(async () => null);
 const mockLoadPlanJsonOnly = mock(async () => null);
 const mockRegeneratePlanMarkdown = mock(async () => {});
-
-// Mock the plan/manager module
-mock.module('../../../src/plan/manager', () => ({
-	loadPlan: mockLoadPlan,
-	loadPlanJsonOnly: mockLoadPlanJsonOnly,
-	regeneratePlanMarkdown: mockRegeneratePlanMarkdown,
-}));
 
 // File watcher timing varies across platforms. Skip on non-Linux.
 describe.skipIf(process.platform !== 'linux')(
@@ -78,6 +72,11 @@ describe.skipIf(process.platform !== 'linux')(
 		}
 
 		beforeEach(() => {
+			// Install mock functions onto _internals seam
+			planManagerInternals.loadPlan = mockLoadPlan;
+			planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
+			planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
+
 			// Reset mock implementation to the default fast no-op before each test.
 			// This prevents a slow mockImplementation from a previous test from leaking
 			// into subsequent tests and causing timeouts.
@@ -87,6 +86,10 @@ describe.skipIf(process.platform !== 'linux')(
 		});
 
 		afterEach(async () => {
+			// Restore original functions to _internals seam
+			planManagerInternals.loadPlan = mockLoadPlan;
+			planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
+			planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
 			if (worker) {
 				worker.dispose();
 				worker = null;
