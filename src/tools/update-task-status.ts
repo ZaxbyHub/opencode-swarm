@@ -401,7 +401,12 @@ export function checkReviewerGate(
 			// Only counts entries from chains that contain NO coder delegation to avoid
 			// false positives where coder→reviewer→test_engineer from a previous task
 			// cycle would incorrectly satisfy the gate for an unrelated new task.
-			if (!hasReviewer || !hasTestEngineer) {
+			//
+			// Guard: skip if durable evidence names explicit missing gates for this task.
+			// When evidenceIncompleteReason is set the evidence file has already told us
+			// which gates are required and which are absent — a coder-free chain from a
+			// concurrent task must not override that durable assertion.
+			if (!evidenceIncompleteReason && (!hasReviewer || !hasTestEngineer)) {
 				for (const [, chain] of swarmState.delegationChains) {
 					const hasCoder = chain.some(
 						(d) => stripKnownSwarmPrefix(d.to) === 'coder',
@@ -547,7 +552,33 @@ export function recoverTaskStateFromDelegations(
 	// currentTaskId / lastCoderDelegationTaskId was never associated with this task.
 	// Only applies to chains with NO coder delegation to prevent false positives
 	// (a prior coder→reviewer→test_engineer cycle satisfying the gate for a new task).
-	if (!hasReviewer || !hasTestEngineer) {
+	//
+	// Guard: skip when durable evidence names explicit unmet gates for this task.
+	// If the evidence file already records required_gates for taskId and some are
+	// missing, a coder-free chain from a concurrent task must not advance this
+	// task's state — the evidence proves those gates have not been satisfied.
+	let hasDurableIncompleteGates = false;
+	if (directory) {
+		try {
+			const taskEvidence = readTaskEvidenceRaw(directory, taskId);
+			if (
+				taskEvidence &&
+				taskEvidence.gates &&
+				Array.isArray(taskEvidence.required_gates) &&
+				taskEvidence.required_gates.length > 0
+			) {
+				const gates = taskEvidence.gates;
+				hasDurableIncompleteGates = taskEvidence.required_gates.some(
+					(g) => gates[g] == null,
+				);
+			}
+		} catch {
+			// Evidence unreadable — be conservative and skip Pass 2
+			hasDurableIncompleteGates = true;
+		}
+	}
+
+	if (!hasDurableIncompleteGates && (!hasReviewer || !hasTestEngineer)) {
 		for (const [, chain] of swarmState.delegationChains) {
 			const hasCoder = chain.some(
 				(d) => stripKnownSwarmPrefix(d.to) === 'coder',

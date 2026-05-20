@@ -565,4 +565,76 @@ describe('checkReviewerGate', () => {
 		// The detailed errors should mention the specific missing gate
 		expect(result.errors?.[0]).toContain('test_engineer');
 	});
+
+	// ── regression: Pass 2 cross-task isolation (MEDIUM-1 review finding) ──────
+	// Bug: Pass 2 in checkReviewerGate had no evidenceIncompleteReason guard.
+	// A concurrent pure-verification task's coder-free chain (reviewer+test_engineer)
+	// could satisfy a code task's gate even when that code task's evidence file
+	// explicitly proved its gates were incomplete.
+	// Fix: Pass 2 now skips when evidenceIncompleteReason is set.
+
+	it('regression F1: Pass 2 does not satisfy code task gate via a concurrent pure-verification chain', async () => {
+		// Task A (pure-verification, session-a): has reviewer+test_engineer in a no-coder chain.
+		startAgentSession('session-a', 'architect');
+		const chainA: DelegationEntry[] = [
+			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
+			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+		];
+		swarmState.delegationChains.set('session-a', chainA);
+
+		// Task B (code task, session-b): coder dispatched, but reviewer/test_engineer hooks
+		// never fired. Evidence file records required_gates explicitly.
+		const { recordAgentDispatch } = await import('../gate-evidence');
+		await recordAgentDispatch(tmpDir, '7.1', 'coder'); // required_gates: ['reviewer','test_engineer'], gates: {}
+
+		startAgentSession('session-b', 'architect');
+		// session-b has no currentTaskId or lastCoderDelegationTaskId for '7.1' —
+		// simulate the hook-failure scenario where Pass 1 cannot scope to this task.
+
+		const result = checkReviewerGate('7.1', tmpDir);
+		// Must block: evidence proves gates are incomplete; Task A's chain must not satisfy Task B's gate.
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('test_engineer');
+	});
+
+	it('regression F1: recoverTaskStateFromDelegations does not advance code task via concurrent pure-verification chain', async () => {
+		// Task A (pure-verification, session-a): has reviewer+test_engineer in a no-coder chain.
+		startAgentSession('session-a', 'architect');
+		const chainA: DelegationEntry[] = [
+			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
+			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+		];
+		swarmState.delegationChains.set('session-a', chainA);
+
+		// Task B (code task): evidence has required_gates: ['reviewer','test_engineer'], gates: {}
+		const { recordAgentDispatch } = await import('../gate-evidence');
+		await recordAgentDispatch(tmpDir, '7.2', 'coder');
+
+		startAgentSession('session-b', 'architect');
+		const sessionBefore = swarmState.agentSessions.get('session-b')!;
+		expect(getTaskState(sessionBefore, '7.2')).toBe('idle');
+
+		// Recovery must NOT advance 7.2 to tests_run using Task A's chains.
+		recoverTaskStateFromDelegations('7.2', tmpDir);
+
+		const sessionAfter = swarmState.agentSessions.get('session-b')!;
+		expect(getTaskState(sessionAfter, '7.2')).not.toBe('tests_run');
+		expect(getTaskState(sessionAfter, '7.2')).not.toBe('complete');
+	});
+
+	it('regression F1: Pass 2 still allows pure-verification task with no evidence file', () => {
+		// Positive control: when there is NO evidence file for the task, Pass 2 should
+		// still fire and allow a pure-verification task through. This verifies the guard
+		// does not over-block the intended use case.
+		startAgentSession('session-1', 'architect');
+		const chain: DelegationEntry[] = [
+			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
+			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+		];
+		swarmState.delegationChains.set('session-1', chain);
+		// No evidence file written for '7.3' — pure-verification task with no dispatch record.
+
+		const result = checkReviewerGate('7.3', tmpDir);
+		expect(result.blocked).toBe(false);
+	});
 });
