@@ -578,7 +578,11 @@ describe('checkReviewerGate', () => {
 		startAgentSession('session-a', 'architect');
 		const chainA: DelegationEntry[] = [
 			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
-			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+			{
+				from: 'architect',
+				to: 'mega_test_engineer',
+				timestamp: Date.now() + 1,
+			},
 		];
 		swarmState.delegationChains.set('session-a', chainA);
 
@@ -602,7 +606,11 @@ describe('checkReviewerGate', () => {
 		startAgentSession('session-a', 'architect');
 		const chainA: DelegationEntry[] = [
 			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
-			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+			{
+				from: 'architect',
+				to: 'mega_test_engineer',
+				timestamp: Date.now() + 1,
+			},
 		];
 		swarmState.delegationChains.set('session-a', chainA);
 
@@ -629,7 +637,11 @@ describe('checkReviewerGate', () => {
 		startAgentSession('session-1', 'architect');
 		const chain: DelegationEntry[] = [
 			{ from: 'architect', to: 'mega_reviewer', timestamp: Date.now() },
-			{ from: 'architect', to: 'mega_test_engineer', timestamp: Date.now() + 1 },
+			{
+				from: 'architect',
+				to: 'mega_test_engineer',
+				timestamp: Date.now() + 1,
+			},
 		];
 		swarmState.delegationChains.set('session-1', chain);
 		// No evidence file written for '7.3' — pure-verification task with no dispatch record.
