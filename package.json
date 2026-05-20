@@ -38,7 +38,7 @@
 	],
 	"scripts": {
 		"clean": "bun -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external bash-parser && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome lint .",
