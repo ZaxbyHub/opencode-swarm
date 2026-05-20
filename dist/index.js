@@ -26990,7 +26990,7 @@ function createGuardrailsHooks(directory, directoryOrConfig, config2, authorityC
       }
       {
         const prmSession = swarmState.agentSessions.get(input.sessionID);
-        if (prmSession?.prmHardStopPending) {
+        if (prmSession?.prmHardStopPending && prmSession.delegationActive) {
           throw new Error("\uD83D\uDED1 PRM HARD STOP: Pattern escalation maximum reached. Stop tool calls and return progress summary.");
         }
       }
