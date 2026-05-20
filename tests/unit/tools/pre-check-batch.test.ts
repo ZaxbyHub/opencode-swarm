@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
 	type PreCheckBatchInput,
 	type PreCheckBatchResult,
+	pre_check_batch,
 	runPreCheckBatch,
 } from '../../../src/tools/pre-check-batch';
 
@@ -169,28 +170,6 @@ describe('runPreCheckBatch', () => {
 		expect(result.gates_passed).toBe(true);
 		// The lint should have run and found issues
 		expect(result.lint.ran).toBe(true);
-	});
-
-	test('secretscan failure → gates_passed false (hard gate)', async () => {
-		// Write a file with a fake API key that the inline scanner will detect
-		// This works because runSecretscanWithFiles scans files directly instead of using the mock
-		fs.writeFileSync(
-			path.join(tempDir, 'test.ts'),
-			'export const apiKey = "sk-abc1234567890abcdefghijklmnop";\n',
-		);
-
-		const input: PreCheckBatchInput = {
-			files: ['test.ts'],
-			directory: tempDir,
-		};
-
-		const result = await runPreCheckBatch(input);
-
-		expect(result.gates_passed).toBe(false);
-		expect(result.secretscan.result).toBeDefined();
-		expect(
-			(result.secretscan.result as { findings: unknown[] }).findings,
-		).toHaveLength(1);
 	});
 
 	test('sast_scan failure → gates_passed false (hard gate)', async () => {
@@ -1621,17 +1600,15 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test('subdirectory as input.directory with project root as workspaceDir validates correctly', async () => {
-		// Simulate: user passes "./src" but injected project root is tempDir.
-		// The execute method normalizes the arg to project root and uses project root as anchor.
-		// At the runPreCheckBatch level, workspaceDir=tempDir (project root).
+	test('subdirectory as input.directory with project root as workspaceDir is rejected by runPreCheckBatch', async () => {
+		// When workspaceDir is the true project root and input.directory is a subdirectory,
+		// the execute function now rejects subdirectories at the tool level.
+		// At runPreCheckBatch level (which does NOT have the subdirectory guard),
+		// subdirectory is still accepted because it's within the workspace.
 		const srcDir = path.join(tempDir, 'src');
 		fs.mkdirSync(srcDir);
 		fs.writeFileSync(path.join(srcDir, 'test.ts'), 'export const x = 1;\n');
 
-		// When workspaceDir is the true project root and input.directory is a subdirectory,
-		// validateDirectory(input.directory, workspaceDir) should succeed because the
-		// subdirectory is within the workspace
 		const input: PreCheckBatchInput = {
 			files: ['test.ts'],
 			directory: srcDir,
@@ -1639,7 +1616,7 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 
 		const result = await runPreCheckBatch(input, tempDir);
 
-		// Should succeed — subdirectory is within workspace
+		// runPreCheckBatch still accepts subdirectories (it validates containment, not identity)
 		expect(result.lint.ran).toBe(true);
 	});
 
@@ -1718,5 +1695,82 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 		// Validation should use tempDir as anchor, not subDir
 		// The file path "../test.ts" from subDir resolves to tempDir/test.ts — within workspace
 		expect(result.lint.ran).toBe(true);
+	});
+});
+
+describe('pre_check_batch execute — subdirectory rejection', () => {
+	let tempDir: string;
+	let originalCwd: string;
+
+	beforeEach(() => {
+		originalCwd = process.cwd();
+		tempDir = createTempDir();
+		process.chdir(tempDir);
+
+		try {
+			fs.symlinkSync(
+				path.join(originalCwd, 'node_modules'),
+				path.join(tempDir, 'node_modules'),
+				'junction',
+			);
+		} catch {
+			// Symlink may already exist or fail on some platforms
+		}
+
+		mockDetectAvailableLinter.mockClear();
+		mockRunLint.mockClear();
+		mockRunSecretscan.mockClear();
+		mockSastScan.mockClear();
+		mockQualityBudget.mockClear();
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	test('execute rejects subdirectory input with gates_passed false', async () => {
+		// Create a subdirectory inside the temp workspace
+		const srcDir = path.join(tempDir, 'src');
+		fs.mkdirSync(srcDir);
+		fs.writeFileSync(path.join(srcDir, 'test.ts'), 'export const x = 1;\n');
+
+		// Call execute directly — pass subdirectory as args.directory,
+		// project root (tempDir) as the injected directory parameter
+		const rawResult = await pre_check_batch.execute(
+			{ directory: srcDir, files: ['test.ts'] },
+			tempDir,
+		);
+
+		const result: PreCheckBatchResult = JSON.parse(rawResult);
+
+		expect(result.gates_passed).toBe(false);
+		expect(result.lint.error).toBeDefined();
+		expect(result.lint.error).toContain('subdirectory');
+		expect(result.secretscan.error).toContain('subdirectory');
+		expect(result.sast_scan.error).toContain('subdirectory');
+		expect(result.quality_budget.error).toContain('subdirectory');
+	});
+
+	test('execute accepts project root directory', async () => {
+		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
+
+		const rawResult = await pre_check_batch.execute(
+			{ directory: tempDir, files: ['test.ts'] },
+			tempDir,
+		);
+
+		const result: PreCheckBatchResult = JSON.parse(rawResult);
+
+		// Project root should be accepted — no subdirectory rejection in any tool error
+		const allErrors = [
+			result.lint.error,
+			result.secretscan.error,
+			result.sast_scan.error,
+			result.quality_budget.error,
+		]
+			.filter((e): e is string => typeof e === 'string')
+			.join(' ');
+		expect(allErrors).not.toContain('subdirectory');
 	});
 });

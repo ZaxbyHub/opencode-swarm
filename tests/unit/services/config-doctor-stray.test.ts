@@ -171,6 +171,30 @@ describe('detectStraySwarmDirs', () => {
 		expect(paths).toEqual(['lib/.swarm', 'packages/core/.swarm', 'src/.swarm']);
 	});
 
+	test('skips .swarm inside a nested standalone git repo (.git is a directory)', () => {
+		// Create a nested directory that is its own standalone git repo
+		const nestedRepo = createDir(projectRoot, 'vendor', 'lib');
+		// .git as a directory = standalone git repo (not a submodule)
+		createDir(nestedRepo, '.git', 'objects');
+		createDir(nestedRepo, '.git', 'refs');
+		createDir(nestedRepo, '.swarm');
+		writeFile(path.join(nestedRepo, '.swarm', 'plan-ledger.jsonl'), '{}');
+
+		const findings = detectStraySwarmDirs(projectRoot);
+		expect(findings.length).toBe(0);
+	});
+
+	test('skips .swarm inside a git submodule (.git is a file)', () => {
+		// Create a submodule where .git is a file pointing elsewhere
+		const submodule = createDir(projectRoot, 'submodules', 'dep');
+		writeFile(path.join(submodule, '.git'), 'gitdir: ../.git/modules/dep');
+		createDir(submodule, '.swarm');
+		writeFile(path.join(submodule, '.swarm', 'plan-ledger.jsonl'), '{}');
+
+		const findings = detectStraySwarmDirs(projectRoot);
+		expect(findings.length).toBe(0);
+	});
+
 	test('returns correct contents for readable stray dir', () => {
 		createDir(projectRoot, 'src', '.swarm');
 		writeFile(

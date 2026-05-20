@@ -5,17 +5,25 @@ import {
 	appendTestRun,
 	getAllHistory,
 	getTestHistory,
+	_internals as historyInternals,
 } from '../history-store.js';
 
 describe('history-store adversarial security tests', () => {
 	const tempDir = path.join(import.meta.dir, `adversarial-temp-${Date.now()}`);
+	let savedValidateProjectRoot: typeof historyInternals.validateProjectRoot;
 
 	beforeEach(() => {
+		// Disable validateProjectRoot for tests writing to temp dirs under
+		// the project source tree (which has .swarm/ at its root).
+		savedValidateProjectRoot = historyInternals.validateProjectRoot;
+		historyInternals.validateProjectRoot = () => {};
+
 		// Create fresh temp directory for each test
 		fs.mkdirSync(tempDir, { recursive: true });
 	});
 
 	afterEach(() => {
+		historyInternals.validateProjectRoot = savedValidateProjectRoot;
 		// Clean up temp directory after each test
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });

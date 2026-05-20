@@ -898,7 +898,10 @@ describe('validateProjectRoot integration', () => {
 	// Use a random path under os.tmpdir(). If tmpdir() has a .swarm/ ancestor
 	// (environment limitation), the "valid project root" test is silently skipped.
 	// The "subdirectory rejection" test always works because integrationRoot itself has .swarm/.
-	const integrationBase = join(tmpdir(), `.swarm-inttest-${Date.now()}-${Math.floor(Math.random() * 1e9)}`);
+	const integrationBase = join(
+		tmpdir(),
+		`.swarm-inttest-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+	);
 	let integrationRoot: string;
 	let ancestorHasSwarm = false;
 

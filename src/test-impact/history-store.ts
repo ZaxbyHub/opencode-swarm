@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { validateProjectRoot } from '../evidence/manager.js';
 
 export type TestRunResult = 'pass' | 'fail' | 'skip';
 
@@ -180,6 +181,9 @@ export function appendTestRun(
 	const historyPath = getHistoryPath(workingDir);
 	const historyDir = path.dirname(historyPath);
 
+	// Guard: reject writes to subdirectories of projects that already have .swarm/
+	_internals.validateProjectRoot(workingDir!);
+
 	// Create directory if it doesn't exist
 	if (!fs.existsSync(historyDir)) {
 		fs.mkdirSync(historyDir, { recursive: true });
@@ -309,3 +313,12 @@ export function getAllHistory(workingDir?: string): TestRunRecord[] {
 
 	return records;
 }
+
+/**
+ * DI seam for testability. Contains functions that tests may override.
+ */
+export const _internals: {
+	validateProjectRoot: typeof validateProjectRoot;
+} = {
+	validateProjectRoot,
+} as const;

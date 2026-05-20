@@ -51,10 +51,6 @@
 
 ## [Unreleased]
 
-### Bug Fixes
-
-* **.swarm containment:** fix issue [#922](https://github.com/zaxbysauce/opencode-swarm/issues/922) — `.swarm` directories no longer created in project subdirectories; all tools now validate that `working_directory` resolves to the project root or a sibling, not a subdirectory; `validateProjectRoot` defense-in-depth added to `saveEvidence`; stray `.swarm` detection and cleanup added to `/swarm doctor`
-
 ### Features
 
 * **config:** add `auto_select_architect` option to automatically select swarm architect and disable competing built-in agents ([#887](https://github.com/zaxbysauce/opencode-swarm/issues/887))

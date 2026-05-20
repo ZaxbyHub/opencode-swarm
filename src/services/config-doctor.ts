@@ -1092,13 +1092,13 @@ export function detectStraySwarmDirs(projectRoot: string): StraySwarmFinding[] {
 			// Skip known non-project directories
 			if (SKIP_DIRS.has(name)) continue;
 
-			// Skip git submodule roots (directories where .git is a file)
+			// Skip git submodule or nested standalone repo roots
 			const gitPath = path.join(fullPath, '.git');
 			try {
 				const gitStat = fs.statSync(gitPath);
-				if (gitStat.isFile()) continue; // submodule root — skip
+				if (gitStat.isFile() || gitStat.isDirectory()) continue; // submodule or nested repo — skip
 			} catch {
-				// .git doesn't exist or is unreadable — not a submodule, continue
+				// .git doesn't exist or is unreadable — not a git root, continue
 			}
 
 			// Check if this directory IS .swarm

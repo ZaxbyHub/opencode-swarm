@@ -1,3 +1,4 @@
+import { validateProjectRoot } from '../evidence/manager.js';
 export interface TestImpactResult {
     impactedTests: string[];
     unrelatedTests: string[];
@@ -18,6 +19,7 @@ declare function findTestFilesSync(cwd: string): string[];
 declare function extractImports(content: string): string[];
 declare function buildImpactMapInternal(cwd: string): Promise<Record<string, string[]>>;
 export declare const _internals: {
+    validateProjectRoot: typeof validateProjectRoot;
     normalizePath: typeof normalizePath;
     isCacheStale: typeof isCacheStale;
     resolveRelativeImport: typeof resolveRelativeImport;

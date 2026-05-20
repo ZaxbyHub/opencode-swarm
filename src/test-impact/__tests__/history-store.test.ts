@@ -6,6 +6,7 @@ import {
 	appendTestRun,
 	getAllHistory,
 	getTestHistory,
+	_internals as historyInternals,
 } from '../../test-impact/history-store.js';
 
 const { tmpdir } = os;
@@ -13,13 +14,21 @@ const { mkdtempSync, rmSync } = await import('node:fs');
 
 describe('history-store', () => {
 	let tempDir: string;
+	let savedValidateProjectRoot: typeof historyInternals.validateProjectRoot;
 
 	beforeEach(async () => {
+		// Most tests use temp dirs that may have parent .swarm/ (e.g. from the
+		// project's own .swarm leaking into os.tmpdir()). Disable the guard so
+		// these tests measure history-store logic, not project-root validation.
+		savedValidateProjectRoot = historyInternals.validateProjectRoot;
+		historyInternals.validateProjectRoot = () => {};
+
 		// Create a unique temp directory for each test
 		tempDir = mkdtempSync(path.join(tmpdir(), 'history-store-test-'));
 	});
 
 	afterEach(() => {
+		historyInternals.validateProjectRoot = savedValidateProjectRoot;
 		// Clean up temp directory
 		rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -814,6 +823,36 @@ describe('history-store', () => {
 			expect(records[0].testName).toBe('first');
 			expect(records[1].testName).toBe('second');
 			expect(records[1].result).toBe('fail');
+		});
+	});
+
+	describe('validateProjectRoot guard', () => {
+		test('appendTestRun throws when validateProjectRoot rejects directory', () => {
+			const savedValidate = historyInternals.validateProjectRoot;
+			afterEach(() => {
+				historyInternals.validateProjectRoot = savedValidate;
+			});
+
+			historyInternals.validateProjectRoot = () => {
+				throw new Error(
+					'Cannot write evidence in "/project/sub" — parent directory "/project" already contains a .swarm/ folder. Evidence must be written to the project root.',
+				);
+			};
+
+			expect(() =>
+				appendTestRun(
+					{
+						timestamp: new Date().toISOString(),
+						taskId: '4.1',
+						testFile: 'src/foo.test.ts',
+						testName: 'some test',
+						result: 'pass',
+						durationMs: 100,
+						changedFiles: [],
+					},
+					tempDir,
+				),
+			).toThrow('already contains a .swarm/ folder');
 		});
 	});
 });

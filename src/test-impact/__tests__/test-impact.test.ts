@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import type { ToolResult } from '../../tools/create-tool';
 import { test_impact } from '../../tools/test-impact.js';
@@ -42,8 +45,13 @@ describe('test_impact tool', () => {
 		vi.clearAllMocks();
 	});
 
+	let customDir: string | undefined;
+
 	afterEach(() => {
-		// Clean up any temp directories if created
+		if (customDir) {
+			fs.rmSync(customDir, { recursive: true, force: true });
+			customDir = undefined;
+		}
 	});
 
 	test('returns error when changedFiles is empty array', async () => {
@@ -113,6 +121,9 @@ describe('test_impact tool', () => {
 	});
 
 	test('uses working_directory when provided', async () => {
+		customDir = path.join(os.tmpdir(), 'test-impact-custom-dir');
+		fs.mkdirSync(customDir, { recursive: true });
+
 		mockAnalyzeImpact.mockResolvedValue({
 			impactedTests: [],
 			unrelatedTests: [],
@@ -121,14 +132,11 @@ describe('test_impact tool', () => {
 		});
 
 		await mockExecute(
-			{ changedFiles: ['src/file.ts'], working_directory: '/custom/dir' },
+			{ changedFiles: ['src/file.ts'], working_directory: customDir },
 			createMockCtx('/default/dir'),
 		);
 
-		expect(mockAnalyzeImpact).toHaveBeenCalledWith(
-			['src/file.ts'],
-			'/custom/dir',
-		);
+		expect(mockAnalyzeImpact).toHaveBeenCalledWith(['src/file.ts'], customDir);
 	});
 
 	test('falls back to directory when working_directory not provided', async () => {
@@ -199,5 +207,23 @@ describe('test_impact tool', () => {
 		expect(Array.isArray(parsed.unrelatedTests)).toBe(true);
 		expect(Array.isArray(parsed.untestedFiles)).toBe(true);
 		expect(typeof parsed.impactMap).toBe('object');
+	});
+
+	test('propagates validateProjectRoot rejection from analyzer', async () => {
+		mockAnalyzeImpact.mockRejectedValue(
+			new Error(
+				'Cannot write evidence in "/project/sub" — parent directory "/project" already contains a .swarm/ folder. Evidence must be written to the project root.',
+			),
+		);
+
+		const result = await mockExecute(
+			{ changedFiles: ['src/file.ts'] },
+			createMockCtx('/test/dir'),
+		);
+		const parsed = JSON.parse(resultToString(result));
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.error).toContain('Cannot write evidence');
+		expect(parsed.error).toContain('already contains a .swarm/ folder');
 	});
 });

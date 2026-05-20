@@ -1272,16 +1272,21 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 		// rather than the user-supplied arg value, to prevent self-validation bypass
 		const workspaceAnchor = path.resolve(directory);
 
-		// Reject subdirectory: if arg resolves inside project root, normalize to project root
+		// Reject subdirectory: if arg resolves inside project root, hard-reject
 		if (
 			resolvedDirectory !== workspaceAnchor &&
 			resolvedDirectory.startsWith(workspaceAnchor + path.sep)
 		) {
-			warn(
-				`[pre_check_batch] directory "${typedArgs.directory}" is a subdirectory of project root — normalizing to "${workspaceAnchor}"`,
-			);
-			// Normalize to project root — all downstream checks use the workspace root
-			resolvedDirectory = workspaceAnchor;
+			const subDirError = `directory "${typedArgs.directory}" is a subdirectory of the project root — pre_check_batch requires the project root directory "${workspaceAnchor}"`;
+			const subDirResult: PreCheckBatchResult = {
+				gates_passed: false,
+				lint: { ran: false, error: subDirError, duration_ms: 0 },
+				secretscan: { ran: false, error: subDirError, duration_ms: 0 },
+				sast_scan: { ran: false, error: subDirError, duration_ms: 0 },
+				quality_budget: { ran: false, error: subDirError, duration_ms: 0 },
+				total_duration_ms: 0,
+			};
+			return JSON.stringify(subDirResult, null, 2);
 		}
 
 		// Validate directory using the resolved path against the true workspace anchor

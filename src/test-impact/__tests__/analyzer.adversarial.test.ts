@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeImpact, buildImpactMap } from '../analyzer';
+import {
+	_internals as analyzerInternals,
+	analyzeImpact,
+	buildImpactMap,
+} from '../analyzer';
 
 function createTempDir(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'analyzer-adversarial-'));
@@ -19,12 +23,18 @@ function cleanup(dir: string): void {
 
 describe('analyzeImpact — adversarial inputs', () => {
 	let tempDir: string;
+	let savedValidateProjectRoot: typeof analyzerInternals.validateProjectRoot;
 
 	beforeEach(() => {
+		// Disable validateProjectRoot for tests using temp dirs under os.tmpdir()
+		// which may have a parent .swarm/ from prior runs.
+		savedValidateProjectRoot = analyzerInternals.validateProjectRoot;
+		analyzerInternals.validateProjectRoot = () => {};
 		tempDir = createTempDir();
 	});
 
 	afterEach(() => {
+		analyzerInternals.validateProjectRoot = savedValidateProjectRoot;
 		cleanup(tempDir);
 	});
 

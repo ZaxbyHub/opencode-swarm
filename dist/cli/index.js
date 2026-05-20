@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.24.1",
+    version: "7.25.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -40640,7 +40640,7 @@ function detectStraySwarmDirs(projectRoot) {
       const gitPath = path23.join(fullPath, ".git");
       try {
         const gitStat = fs8.statSync(gitPath);
-        if (gitStat.isFile())
+        if (gitStat.isFile() || gitStat.isDirectory())
           continue;
       } catch {}
       if (name === ".swarm") {
@@ -47115,6 +47115,7 @@ async function saveImpactMap(cwd, impactMap) {
   if (!path34.isAbsolute(cwd)) {
     throw new Error(`saveImpactMap requires an absolute project root path, got: "${cwd}"`);
   }
+  _internals22.validateProjectRoot(cwd);
   const cacheDir2 = path34.join(cwd, ".swarm", "cache");
   const cachePath = path34.join(cacheDir2, "impact-map.json");
   if (!fs17.existsSync(cacheDir2)) {
@@ -47207,6 +47208,7 @@ async function analyzeImpact(changedFiles, cwd, budget) {
 }
 var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, TS_EXTENSIONS, PYTHON_EXTENSIONS, GO_EXTENSIONS, EXTENSIONS_TO_TRY, goModuleCache, _internals22;
 var init_analyzer = __esm(() => {
+  init_manager2();
   init_go();
   init_python();
   IMPORT_REGEX_ES = /import\s+[\s\S]*?\s+from\s+['"]([^'"]+)['"]/g;
@@ -47218,6 +47220,7 @@ var init_analyzer = __esm(() => {
   EXTENSIONS_TO_TRY = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
   goModuleCache = new Map;
   _internals22 = {
+    validateProjectRoot,
     normalizePath,
     isCacheStale,
     resolveRelativeImport,
@@ -47539,6 +47542,7 @@ function appendTestRun(record3, workingDir) {
   };
   const historyPath = getHistoryPath(workingDir);
   const historyDir = path35.dirname(historyPath);
+  _internals23.validateProjectRoot(workingDir);
   if (!fs18.existsSync(historyDir)) {
     fs18.mkdirSync(historyDir, { recursive: true });
   }
@@ -47610,13 +47614,17 @@ function getAllHistory(workingDir) {
   records.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return records;
 }
-var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, DANGEROUS_PROPERTY_NAMES;
+var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, DANGEROUS_PROPERTY_NAMES, _internals23;
 var init_history_store = __esm(() => {
+  init_manager2();
   DANGEROUS_PROPERTY_NAMES = new Set([
     "__proto__",
     "constructor",
     "prototype"
   ]);
+  _internals23 = {
+    validateProjectRoot
+  };
 });
 
 // src/tools/resolve-working-directory.ts
@@ -47740,7 +47748,7 @@ function readPackageJsonRaw(dir) {
   }
 }
 function readPackageJson(dir) {
-  return _internals23.readPackageJsonRaw(dir);
+  return _internals24.readPackageJsonRaw(dir);
 }
 function readPackageJsonTestScript(dir) {
   return readPackageJson(dir)?.scripts?.test ?? null;
@@ -47910,7 +47918,7 @@ function buildTypescriptBackend() {
     selectEntryPoints: selectEntryPoints3
   };
 }
-var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals23;
+var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals24;
 var init_typescript = __esm(() => {
   init_default_backend();
   init_profiles();
@@ -47919,7 +47927,7 @@ var init_typescript = __esm(() => {
   IMPORT_REGEX_REQUIRE2 = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_DYNAMIC = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_REEXPORT2 = /export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/g;
-  _internals23 = {
+  _internals24 = {
     readPackageJsonRaw,
     readPackageJsonTestScript,
     frameworkFromScriptsTest
@@ -47950,7 +47958,7 @@ __export(exports_dispatch, {
   pickedProfiles: () => pickedProfiles,
   pickBackend: () => pickBackend,
   clearDispatchCache: () => clearDispatchCache,
-  _internals: () => _internals24
+  _internals: () => _internals25
 });
 import * as fs21 from "fs";
 import * as path38 from "path";
@@ -48005,7 +48013,7 @@ function findManifestRoot(start) {
   return start;
 }
 function evictIfNeeded() {
-  if (cache.size <= _internals24.cacheCapacity)
+  if (cache.size <= _internals25.cacheCapacity)
     return;
   let oldestKey;
   let oldestOrder = Infinity;
@@ -48036,7 +48044,7 @@ async function pickBackend(dir) {
     evictIfNeeded();
     return null;
   }
-  const profiles = await _internals24.detectProjectLanguages(root);
+  const profiles = await _internals25.detectProjectLanguages(root);
   if (profiles.length === 0) {
     cache.set(cacheKey, {
       hash: hash3,
@@ -48068,12 +48076,12 @@ function clearDispatchCache() {
   manifestRootCache.clear();
   insertCounter = 0;
 }
-var _internals24, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
+var _internals25, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
 var init_dispatch = __esm(() => {
   init_backends();
   init_detector();
   init_registry_backend();
-  _internals24 = {
+  _internals25 = {
     detectProjectLanguages,
     cacheCapacity: 64
   };
@@ -49271,11 +49279,11 @@ function normalizeHistoryTestFile(testFile, workingDir) {
   const normalized = testFile.replace(/\\/g, "/");
   if (!path39.isAbsolute(testFile))
     return normalized;
-  const relative8 = path39.relative(workingDir, testFile);
-  if (relative8.startsWith("..") || path39.isAbsolute(relative8)) {
+  const relative9 = path39.relative(workingDir, testFile);
+  if (relative9.startsWith("..") || path39.isAbsolute(relative9)) {
     return normalized;
   }
-  return relative8.replace(/\\/g, "/");
+  return relative9.replace(/\\/g, "/");
 }
 function combineAggregateResult(current, next) {
   if (current === "fail" || next === "fail")
@@ -49908,9 +49916,9 @@ function getVersionFileVersion(dir) {
 async function runVersionCheck(dir, _timeoutMs) {
   const startTime = Date.now();
   try {
-    const packageVersion = _internals25.getPackageVersion(dir);
-    const changelogVersion = _internals25.getChangelogVersion(dir);
-    const versionFileVersion = _internals25.getVersionFileVersion(dir);
+    const packageVersion = _internals26.getPackageVersion(dir);
+    const changelogVersion = _internals26.getChangelogVersion(dir);
+    const versionFileVersion = _internals26.getVersionFileVersion(dir);
     const versions3 = [];
     if (packageVersion)
       versions3.push(`package.json: ${packageVersion}`);
@@ -50260,7 +50268,7 @@ async function runPreflight(dir, phase, config3) {
   const reportId = `preflight-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let validatedDir;
   try {
-    validatedDir = _internals25.validateDirectoryPath(dir);
+    validatedDir = _internals26.validateDirectoryPath(dir);
   } catch (error93) {
     return {
       id: reportId,
@@ -50280,7 +50288,7 @@ async function runPreflight(dir, phase, config3) {
   }
   let validatedTimeout;
   try {
-    validatedTimeout = _internals25.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
+    validatedTimeout = _internals26.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
   } catch (error93) {
     return {
       id: reportId,
@@ -50321,12 +50329,12 @@ async function runPreflight(dir, phase, config3) {
   });
   const checks5 = [];
   log("[Preflight] Running lint check...");
-  const lintResult = await _internals25.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
+  const lintResult = await _internals26.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
   checks5.push(lintResult);
   log(`[Preflight] Lint check: ${lintResult.status} ${lintResult.message}`);
   if (!cfg.skipTests) {
     log("[Preflight] Running tests check...");
-    const testsResult = await _internals25.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
+    const testsResult = await _internals26.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
     checks5.push(testsResult);
     log(`[Preflight] Tests check: ${testsResult.status} ${testsResult.message}`);
   } else {
@@ -50338,7 +50346,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipSecrets) {
     log("[Preflight] Running secrets check...");
-    const secretsResult = await _internals25.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
+    const secretsResult = await _internals26.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(secretsResult);
     log(`[Preflight] Secrets check: ${secretsResult.status} ${secretsResult.message}`);
   } else {
@@ -50350,7 +50358,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipEvidence) {
     log("[Preflight] Running evidence check...");
-    const evidenceResult = await _internals25.runEvidenceCheck(validatedDir);
+    const evidenceResult = await _internals26.runEvidenceCheck(validatedDir);
     checks5.push(evidenceResult);
     log(`[Preflight] Evidence check: ${evidenceResult.status} ${evidenceResult.message}`);
   } else {
@@ -50361,12 +50369,12 @@ async function runPreflight(dir, phase, config3) {
     });
   }
   log("[Preflight] Running requirement coverage check...");
-  const reqCoverageResult = await _internals25.runRequirementCoverageCheck(validatedDir, phase);
+  const reqCoverageResult = await _internals26.runRequirementCoverageCheck(validatedDir, phase);
   checks5.push(reqCoverageResult);
   log(`[Preflight] Requirement coverage check: ${reqCoverageResult.status} ${reqCoverageResult.message}`);
   if (!cfg.skipVersion) {
     log("[Preflight] Running version check...");
-    const versionResult = await _internals25.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
+    const versionResult = await _internals26.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(versionResult);
     log(`[Preflight] Version check: ${versionResult.status} ${versionResult.message}`);
   } else {
@@ -50429,10 +50437,10 @@ function formatPreflightMarkdown(report) {
 async function handlePreflightCommand(directory, _args) {
   const plan = await loadPlan(directory);
   const phase = plan?.current_phase ?? 1;
-  const report = await _internals25.runPreflight(directory, phase);
-  return _internals25.formatPreflightMarkdown(report);
+  const report = await _internals26.runPreflight(directory, phase);
+  return _internals26.formatPreflightMarkdown(report);
 }
-var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals25;
+var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals26;
 var init_preflight_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -50449,7 +50457,7 @@ var init_preflight_service = __esm(() => {
     testScope: "convention",
     linter: "biome"
   };
-  _internals25 = {
+  _internals26 = {
     runPreflight,
     formatPreflightMarkdown,
     handlePreflightCommand,
@@ -52071,7 +52079,7 @@ async function getStatusData(directory, agents) {
 }
 function enrichWithLeanTurbo(status, directory) {
   const turboMode = hasActiveTurboMode();
-  const leanActive = _internals26.hasActiveLeanTurbo();
+  const leanActive = _internals27.hasActiveLeanTurbo();
   let turboStrategy = "off";
   if (leanActive) {
     turboStrategy = "lean";
@@ -52090,7 +52098,7 @@ function enrichWithLeanTurbo(status, directory) {
     }
   }
   if (leanSessionID) {
-    const runState = _internals26.loadLeanTurboRunState(directory, leanSessionID);
+    const runState = _internals27.loadLeanTurboRunState(directory, leanSessionID);
     if (runState) {
       status.leanTurboPhase = runState.phase;
       status.leanMaxParallelCoders = runState.maxParallelCoders;
@@ -52122,7 +52130,7 @@ function enrichWithLeanTurbo(status, directory) {
       }
     }
   }
-  status.fullAutoActive = _internals26.hasActiveFullAuto();
+  status.fullAutoActive = _internals27.hasActiveFullAuto();
   return status;
 }
 function formatStatusMarkdown(status) {
@@ -52204,7 +52212,7 @@ async function handleStatusCommand(directory, agents) {
   }
   return formatStatusMarkdown(statusData);
 }
-var _internals26;
+var _internals27;
 var init_status_service = __esm(() => {
   init_extractors();
   init_utils2();
@@ -52213,7 +52221,7 @@ var init_status_service = __esm(() => {
   init_state3();
   init_compaction_service();
   init_context_budget_service();
-  _internals26 = {
+  _internals27 = {
     loadLeanTurboRunState,
     hasActiveLeanTurbo,
     hasActiveFullAuto
@@ -52304,7 +52312,7 @@ async function handleTurboCommand(directory, args, sessionID) {
   if (arg0 === "on") {
     let strategy = "standard";
     try {
-      const { config: config3 } = _internals27.loadPluginConfigWithMeta(directory);
+      const { config: config3 } = _internals28.loadPluginConfigWithMeta(directory);
       if (config3.turbo?.strategy === "lean") {
         strategy = "lean";
       }
@@ -52359,7 +52367,7 @@ function enableLeanTurbo(session, directory, sessionID) {
   let maxParallelCoders = 4;
   let conflictPolicy = "serialize";
   try {
-    const { config: config3 } = _internals27.loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals28.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.lean;
     if (leanConfig) {
       maxParallelCoders = leanConfig.max_parallel_coders ?? 4;
@@ -52429,13 +52437,13 @@ function buildStatusMessage(session, directory, sessionID) {
   ].join(`
 `);
 }
-var _internals27;
+var _internals28;
 var init_turbo = __esm(() => {
   init_config();
   init_state();
   init_state3();
   init_logger();
-  _internals27 = {
+  _internals28 = {
     loadPluginConfigWithMeta
   };
 });
@@ -52528,7 +52536,7 @@ function formatCommandNotFound(tokens) {
   const attemptedCommand = tokens[0] || "";
   const MAX_DISPLAY = 100;
   const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-  const similar = _internals28.findSimilarCommands(attemptedCommand);
+  const similar = _internals29.findSimilarCommands(attemptedCommand);
   const header = `Command \`/swarm ${displayCommand}\` not found.`;
   const suggestions = similar.length > 0 ? `Did you mean:
 ${similar.map((cmd) => `  - /swarm ${cmd}`).join(`
@@ -52977,7 +52985,7 @@ async function buildSwarmCommandPrompt(args) {
     activeAgentName,
     registeredAgents
   } = args;
-  const resolved = _internals28.resolveCommand(tokens);
+  const resolved = _internals29.resolveCommand(tokens);
   if (!resolved) {
     if (tokens.length === 0) {
       return buildHelpText();
@@ -53128,7 +53136,7 @@ function findSimilarCommands(query) {
   }
   const scored = VALID_COMMANDS.map((cmd) => {
     const cmdLower = cmd.toLowerCase();
-    const fullScore = _internals28.levenshteinDistance(q, cmdLower);
+    const fullScore = _internals29.levenshteinDistance(q, cmdLower);
     let tokenScore = Infinity;
     if (cmd.includes(" ") || cmd.includes("-")) {
       const qTokens = q.split(/[\s-]+/);
@@ -53141,7 +53149,7 @@ function findSimilarCommands(query) {
         for (const ct of cmdTokens) {
           if (ct.length === 0)
             continue;
-          const dist = _internals28.levenshteinDistance(qt, ct);
+          const dist = _internals29.levenshteinDistance(qt, ct);
           if (dist < minDist)
             minDist = dist;
         }
@@ -53151,7 +53159,7 @@ function findSimilarCommands(query) {
     }
     const dashStrippedQ = q.replace(/-/g, "");
     const dashStrippedCmd = cmdLower.replace(/-/g, "");
-    const dashScore = _internals28.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const dashScore = _internals29.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
     const score = Math.min(fullScore, tokenScore, dashScore);
     return { cmd, score };
   });
@@ -53183,11 +53191,11 @@ async function handleHelpCommand(ctx) {
     return buildHelpText2();
   }
   const tokens = targetCommand.split(/\s+/);
-  const resolved = _internals28.resolveCommand(tokens);
+  const resolved = _internals29.resolveCommand(tokens);
   if (resolved) {
-    return _internals28.buildDetailedHelp(resolved.key, resolved.entry);
+    return _internals29.buildDetailedHelp(resolved.key, resolved.entry);
   }
-  const similar = _internals28.findSimilarCommands(targetCommand);
+  const similar = _internals29.findSimilarCommands(targetCommand);
   const { buildHelpText: fullHelp } = await Promise.resolve().then(() => (init_commands(), exports_commands));
   if (similar.length > 0) {
     return `Command '/swarm ${targetCommand}' not found.
@@ -53281,7 +53289,7 @@ function resolveCommand(tokens) {
   }
   return null;
 }
-var COMMAND_REGISTRY, VALID_COMMANDS, _internals28, validation;
+var COMMAND_REGISTRY, VALID_COMMANDS, _internals29, validation;
 var init_registry = __esm(() => {
   init_acknowledge_spec_drift();
   init_agents();
@@ -53351,7 +53359,7 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/agents"
     },
     help: {
-      handler: (ctx) => _internals28.handleHelpCommand(ctx),
+      handler: (ctx) => _internals29.handleHelpCommand(ctx),
       description: "Show help for swarm commands",
       category: "core",
       args: "[command]",
@@ -53723,7 +53731,7 @@ Subcommands:
     }
   };
   VALID_COMMANDS = Object.keys(COMMAND_REGISTRY);
-  _internals28 = {
+  _internals29 = {
     handleHelpCommand,
     validateAliases,
     resolveCommand,
@@ -53731,7 +53739,7 @@ Subcommands:
     findSimilarCommands,
     buildDetailedHelp
   };
-  validation = _internals28.validateAliases();
+  validation = _internals29.validateAliases();
   if (!validation.valid) {
     throw new Error(`COMMAND_REGISTRY alias validation failed:
 ${validation.errors.join(`

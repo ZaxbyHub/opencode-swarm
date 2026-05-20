@@ -6,18 +6,31 @@ import path from 'node:path';
 const isWindows = process.platform === 'win32';
 
 // Import the module under test
-import { analyzeImpact, buildImpactMap, loadImpactMap } from '../analyzer.js';
+import {
+	_internals as analyzerInternals,
+	analyzeImpact,
+	buildImpactMap,
+	loadImpactMap,
+} from '../analyzer.js';
 
 describe('TestImpactAnalyzer', () => {
 	let tempDir: string;
 	let cacheDir: string;
+	let savedValidateProjectRoot: typeof analyzerInternals.validateProjectRoot;
 
 	beforeEach(async () => {
+		// Most tests use temp dirs that may have parent .swarm/ (e.g. from the
+		// project's own .swarm leaking into os.tmpdir()). Disable the guard so
+		// these tests measure impact-map logic, not project-root validation.
+		savedValidateProjectRoot = analyzerInternals.validateProjectRoot;
+		analyzerInternals.validateProjectRoot = () => {};
+
 		tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'impact-test-'));
 		cacheDir = path.join(tempDir, '.swarm', 'cache');
 	});
 
 	afterEach(async () => {
+		analyzerInternals.validateProjectRoot = savedValidateProjectRoot;
 		try {
 			await fs.promises.rm(tempDir, { recursive: true, force: true });
 		} catch {
@@ -522,6 +535,42 @@ test('ex', () => { expect(x).toBe(1); });`,
 			for (const key of Object.keys(impactMap)) {
 				expect(key.includes('\\')).toBe(false);
 			}
+		});
+	});
+
+	describe('validateProjectRoot guard', () => {
+		test('buildImpactMap throws when validateProjectRoot rejects directory', async () => {
+			const savedValidate = analyzerInternals.validateProjectRoot;
+			afterEach(() => {
+				analyzerInternals.validateProjectRoot = savedValidate;
+			});
+
+			analyzerInternals.validateProjectRoot = () => {
+				throw new Error(
+					'Cannot write evidence in "/project/sub" — parent directory "/project" already contains a .swarm/ folder. Evidence must be written to the project root.',
+				);
+			};
+
+			await expect(buildImpactMap(tempDir)).rejects.toThrow(
+				'already contains a .swarm/ folder',
+			);
+		});
+
+		test('saveImpactMap throws when validateProjectRoot rejects directory', async () => {
+			const savedValidate = analyzerInternals.validateProjectRoot;
+			afterEach(() => {
+				analyzerInternals.validateProjectRoot = savedValidate;
+			});
+
+			analyzerInternals.validateProjectRoot = () => {
+				throw new Error(
+					'Cannot write evidence in "/project/sub" — parent "/project" already contains a .swarm/ folder. Evidence must be written to the project root.',
+				);
+			};
+
+			await expect(
+				analyzerInternals.saveImpactMap(tempDir, {}),
+			).rejects.toThrow('already contains a .swarm/ folder');
 		});
 	});
 });
