@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.25.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.25.1...v7.25.2) (2026-05-20)
+
+
+### Bug Fixes
+
+* **containment:** prevent .swarm creation in subdirectories ([#933](https://github.com/zaxbysauce/opencode-swarm/issues/933)) ([da0a186](https://github.com/zaxbysauce/opencode-swarm/commit/da0a186f77ee288d0e7d486ab3a0017e1ad37095))
+
 ## [7.25.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.25.0...v7.25.1) (2026-05-20)
 
 
