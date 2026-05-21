@@ -714,7 +714,7 @@ export async function executeSavePlan(
 					).catch(() => {});
 				}
 			}
-			// Write root-level checkpoint artifact (non-blocking)
+			// Write checkpoint artifacts under .swarm/ (non-blocking)
 			await writeCheckpoint(dir).catch(() => {});
 			// Advisory: write marker file for unauthorized-write detection
 			try {

@@ -37,6 +37,21 @@ export async function writeCheckpoint(directory: string): Promise<void> {
 		// Write Markdown checkpoint
 		const md = derivePlanMarkdown(plan);
 		fs.writeFileSync(mdPath, md, 'utf8');
+
+		// Best-effort migration cleanup: remove any legacy root-level artifacts.
+		// This ensures old pre-v7 files do not linger after fresh checkpoint writes.
+		for (const legacyPath of [
+			path.join(directory, 'SWARM_PLAN.json'),
+			path.join(directory, 'SWARM_PLAN.md'),
+		]) {
+			try {
+				if (_internals.existsSyncForCleanup(legacyPath)) {
+					_internals.unlinkSyncForCleanup(legacyPath);
+				}
+			} catch {
+				// Non-blocking: cleanup failures must not break checkpoint export
+			}
+		}
 	} catch (error) {
 		// Non-blocking: checkpoint failure must never break the calling operation
 		console.warn(
@@ -119,4 +134,6 @@ export async function importCheckpoint(
 export const _internals = {
 	writeCheckpoint,
 	importCheckpoint,
+	existsSyncForCleanup: fs.existsSync,
+	unlinkSyncForCleanup: fs.unlinkSync,
 };

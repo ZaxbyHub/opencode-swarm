@@ -1,8 +1,14 @@
-import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { describe, expect, mock, test } from 'bun:test';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { importCheckpoint, writeCheckpoint } from './checkpoint';
+import { _internals, importCheckpoint, writeCheckpoint } from './checkpoint';
 import { savePlan } from './manager';
 
 function createTempDir(): string {
@@ -207,6 +213,101 @@ describe('writeCheckpoint', () => {
 				expect(checkpointParsed.phases).toEqual(planParsed.phases);
 			} finally {
 				cleanupTempDir(tmpDir);
+			}
+		});
+	});
+
+	describe('legacy root artifact cleanup', () => {
+		test('removes root-level SWARM_PLAN artifacts after writing .swarm checkpoint', async () => {
+			const tmpDir = createTempDir();
+			try {
+				mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+				await savePlan(tmpDir, validPlan);
+
+				writeFileSync(
+					join(tmpDir, 'SWARM_PLAN.json'),
+					'{"legacy":true}',
+					'utf8',
+				);
+				writeFileSync(join(tmpDir, 'SWARM_PLAN.md'), '# legacy', 'utf8');
+
+				await writeCheckpoint(tmpDir);
+
+				expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.json'))).toBe(
+					true,
+				);
+				expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.md'))).toBe(true);
+				expect(existsSync(join(tmpDir, 'SWARM_PLAN.json'))).toBe(false);
+				expect(existsSync(join(tmpDir, 'SWARM_PLAN.md'))).toBe(false);
+			} finally {
+				cleanupTempDir(tmpDir);
+			}
+		});
+
+		test('removes root-level SWARM_PLAN.json when only that legacy file exists', async () => {
+			const tmpDir = createTempDir();
+			try {
+				mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+				await savePlan(tmpDir, validPlan);
+
+				// Only create SWARM_PLAN.json — no SWARM_PLAN.md at root
+				writeFileSync(
+					join(tmpDir, 'SWARM_PLAN.json'),
+					'{"legacy":true}',
+					'utf8',
+				);
+
+				await writeCheckpoint(tmpDir);
+
+				expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.json'))).toBe(
+					true,
+				);
+				expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.md'))).toBe(true);
+				expect(existsSync(join(tmpDir, 'SWARM_PLAN.json'))).toBe(false);
+				expect(existsSync(join(tmpDir, 'SWARM_PLAN.md'))).toBe(false);
+			} finally {
+				cleanupTempDir(tmpDir);
+			}
+		});
+
+		test('does not throw when unlinkSync fails with EPERM', async () => {
+			const originalUnlink = _internals.unlinkSyncForCleanup;
+			try {
+				_internals.unlinkSyncForCleanup = (_p: string) => {
+					const err = new Error('EPERM: operation not permitted');
+					(err as NodeJS.ErrnoException).code = 'EPERM';
+					throw err;
+				};
+
+				const tmpDir = createTempDir();
+				try {
+					mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+					await savePlan(tmpDir, validPlan);
+
+					// Create a legacy root artifact so the cleanup loop is exercised
+					writeFileSync(
+						join(tmpDir, 'SWARM_PLAN.json'),
+						'{"legacy":true}',
+						'utf8',
+					);
+
+					// Must NOT throw even though unlinkSync throws EPERM
+					await writeCheckpoint(tmpDir);
+
+					// Checkpoint files were still written successfully
+					expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.json'))).toBe(
+						true,
+					);
+					expect(existsSync(join(tmpDir, '.swarm', 'SWARM_PLAN.md'))).toBe(
+						true,
+					);
+					// Root artifact persists because unlink failed
+					expect(existsSync(join(tmpDir, 'SWARM_PLAN.json'))).toBe(true);
+				} finally {
+					cleanupTempDir(tmpDir);
+				}
+			} finally {
+				_internals.unlinkSyncForCleanup = originalUnlink;
 			}
 		});
 	});

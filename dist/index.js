@@ -73590,7 +73590,7 @@ var init_curator_drift = __esm(() => {
 var exports_project_context = {};
 __export(exports_project_context, {
   buildProjectContext: () => buildProjectContext,
-  _internals: () => _internals56,
+  _internals: () => _internals57,
   LANG_BACKEND_DETECTION_TIMEOUT_MS: () => LANG_BACKEND_DETECTION_TIMEOUT_MS
 });
 import * as fs112 from "node:fs";
@@ -73674,7 +73674,7 @@ function selectLintCommand(backend, directory) {
   return null;
 }
 async function buildProjectContext(directory) {
-  const backend = await _internals56.pickBackend(directory);
+  const backend = await _internals57.pickBackend(directory);
   if (!backend)
     return null;
   const ctx = emptyProjectContext();
@@ -73705,16 +73705,16 @@ async function buildProjectContext(directory) {
   if (backend.prompts.reviewerChecklist.length > 0) {
     ctx.REVIEWER_CHECKLIST = bulletList(backend.prompts.reviewerChecklist);
   }
-  const profiles = _internals56.pickedProfiles(directory);
+  const profiles = _internals57.pickedProfiles(directory);
   if (profiles.length > 1) {
     ctx.PROJECT_CONTEXT_SECONDARY_LANGUAGES = profiles.slice(1).map((p) => p.id).join(", ");
   }
   return ctx;
 }
-var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals56;
+var LANG_BACKEND_DETECTION_TIMEOUT_MS = 300, _internals57;
 var init_project_context = __esm(() => {
   init_dispatch();
-  _internals56 = {
+  _internals57 = {
     pickBackend,
     pickedProfiles
   };
@@ -92279,10 +92279,61 @@ async function writeCheckpoint(directory) {
     fs81.writeFileSync(jsonPath, JSON.stringify(plan, null, 2), "utf8");
     const md = derivePlanMarkdown(plan);
     fs81.writeFileSync(mdPath, md, "utf8");
+    for (const legacyPath of [
+      path108.join(directory, "SWARM_PLAN.json"),
+      path108.join(directory, "SWARM_PLAN.md")
+    ]) {
+      try {
+        if (_internals43.existsSyncForCleanup(legacyPath)) {
+          _internals43.unlinkSyncForCleanup(legacyPath);
+        }
+      } catch {}
+    }
   } catch (error93) {
     console.warn(`[checkpoint] Failed to write SWARM_PLAN checkpoint: ${error93 instanceof Error ? error93.message : String(error93)}`);
   }
 }
+async function importCheckpoint(directory, source) {
+  try {
+    const swarmDirPath = path108.join(directory, ".swarm", "SWARM_PLAN.json");
+    const rootPath = path108.join(directory, "SWARM_PLAN.json");
+    let checkpointPath;
+    let rawContent;
+    if (fs81.existsSync(swarmDirPath)) {
+      checkpointPath = swarmDirPath;
+      rawContent = fs81.readFileSync(checkpointPath, "utf8");
+    } else if (fs81.existsSync(rootPath)) {
+      checkpointPath = rootPath;
+      rawContent = fs81.readFileSync(checkpointPath, "utf8");
+      console.warn("[checkpoint] importCheckpoint: using legacy root-level SWARM_PLAN.json. Consider running /swarm close to migrate.");
+    } else {
+      return {
+        success: false,
+        error: "SWARM_PLAN.json not found in .swarm/ or project root"
+      };
+    }
+    const parsed = JSON.parse(rawContent);
+    const plan = PlanSchema.parse(parsed);
+    await savePlanWithAutoAcknowledgedRemovals(directory, plan, "import_checkpoint", "import external checkpoint");
+    await appendLedgerEvent(directory, {
+      event_type: "plan_rebuilt",
+      source: source ?? "external_reseed",
+      plan_id: derivePlanId(plan)
+    });
+    return { success: true, plan };
+  } catch (error93) {
+    return {
+      success: false,
+      error: error93 instanceof Error ? error93.message : String(error93)
+    };
+  }
+}
+var _internals43 = {
+  writeCheckpoint,
+  importCheckpoint,
+  existsSyncForCleanup: fs81.existsSync,
+  unlinkSyncForCleanup: fs81.unlinkSync
+};
 
 // src/tools/phase-complete.ts
 init_ledger();
@@ -92485,7 +92536,7 @@ function listLaneEvidenceSync(directory, phase) {
   }
   return laneIds;
 }
-var _internals43 = {
+var _internals44 = {
   listActiveLocks,
   readPersisted: readPersisted2,
   readPlanJson: defaultReadPlanJson,
@@ -92546,7 +92597,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
       reason: "Lean Turbo state unreadable or missing"
     };
   }
-  const persisted = _internals43.readPersisted(directory);
+  const persisted = _internals44.readPersisted(directory);
   if (!persisted) {
     return {
       ok: false,
@@ -92610,7 +92661,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
     }
   }
   if (runState.lanes.length > 0) {
-    const evidenceLaneIds = new Set(_internals43.listLaneEvidenceSync(directory, phase));
+    const evidenceLaneIds = new Set(_internals44.listLaneEvidenceSync(directory, phase));
     for (const lane of runState.lanes) {
       if ((lane.status === "completed" || lane.status === "failed") && !evidenceLaneIds.has(lane.laneId)) {
         return {
@@ -92620,7 +92671,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
       }
     }
   }
-  const activeLocks = _internals43.listActiveLocks(directory);
+  const activeLocks = _internals44.listActiveLocks(directory);
   const phaseLaneIds = new Set(laneIds);
   for (const lock of activeLocks) {
     if (lock.laneId && phaseLaneIds.has(lock.laneId)) {
@@ -92640,7 +92691,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   const serialDegradedTasks = runState.degradedTasks.filter((dt) => !laneTaskIds.has(dt.taskId));
   if (serialDegradedTasks.length > 0) {
-    const plan = _internals43.readPlanJson(directory);
+    const plan = _internals44.readPlanJson(directory);
     if (!plan) {
       return {
         ok: false,
@@ -92684,7 +92735,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   const serializedTasks = runState.serializedTasks;
   if (Array.isArray(serializedTasks) && serializedTasks.length > 0) {
-    const plan = _internals43.readPlanJson(directory);
+    const plan = _internals44.readPlanJson(directory);
     if (!plan) {
       return {
         ok: false,
@@ -92743,7 +92794,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   let reviewerVerdict = runState.lastReviewerVerdict;
   if (!reviewerVerdict) {
-    const evidence = _internals43.readReviewerEvidence(directory, phase);
+    const evidence = _internals44.readReviewerEvidence(directory, phase);
     reviewerVerdict = evidence?.verdict ?? undefined;
   }
   if (mergedConfig.phase_reviewer) {
@@ -92756,7 +92807,7 @@ function verifyLeanTurboPhaseReady(directory, phase, sessionIDOrConfig, config3)
   }
   let criticVerdict = runState.lastCriticVerdict;
   if (!criticVerdict) {
-    const evidence = _internals43.readCriticEvidence(directory, phase);
+    const evidence = _internals44.readCriticEvidence(directory, phase);
     criticVerdict = evidence?.verdict ?? undefined;
   }
   if (mergedConfig.phase_critic) {
@@ -93679,7 +93730,7 @@ Advisory notes: ${advisoryNotes.join("; ")}` : "";
       phase_critic: leanConfig.phase_critic,
       integrated_diff_required: leanConfig.integrated_diff_required
     } : undefined;
-    const leanCheck = _internals43.verifyLeanTurboPhaseReady(dir, phase, sessionID, leanPhaseReadyConfig);
+    const leanCheck = _internals44.verifyLeanTurboPhaseReady(dir, phase, sessionID, leanPhaseReadyConfig);
     if (!leanCheck.ok) {
       return JSON.stringify({
         success: false,
@@ -95867,11 +95918,11 @@ var quality_budget = createSwarmTool({
     }).optional().describe("Quality budget thresholds")
   },
   async execute(args2, directory) {
-    const result = await _internals44.qualityBudget(args2, directory);
+    const result = await _internals45.qualityBudget(args2, directory);
     return JSON.stringify(result);
   }
 });
-var _internals44 = {
+var _internals45 = {
   qualityBudget
 };
 
@@ -96600,7 +96651,7 @@ import * as path114 from "node:path";
 var semgrepAvailableCache = null;
 var DEFAULT_RULES_DIR = ".swarm/semgrep-rules";
 var DEFAULT_TIMEOUT_MS3 = 30000;
-var _internals45 = {
+var _internals46 = {
   isSemgrepAvailable,
   checkSemgrepAvailable,
   resetSemgrepCache,
@@ -96625,7 +96676,7 @@ function isSemgrepAvailable() {
   }
 }
 async function checkSemgrepAvailable() {
-  return _internals45.isSemgrepAvailable();
+  return _internals46.isSemgrepAvailable();
 }
 function resetSemgrepCache() {
   semgrepAvailableCache = null;
@@ -96722,12 +96773,12 @@ async function runSemgrep(options) {
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS3;
   if (files.length === 0) {
     return {
-      available: _internals45.isSemgrepAvailable(),
+      available: _internals46.isSemgrepAvailable(),
       findings: [],
       engine: "tier_a"
     };
   }
-  if (!_internals45.isSemgrepAvailable()) {
+  if (!_internals46.isSemgrepAvailable()) {
     return {
       available: false,
       findings: [],
@@ -96886,7 +96937,7 @@ function assignOccurrenceIndices(findings, directory) {
     }
     const occIdx = countMap.get(baseKey) ?? 0;
     countMap.set(baseKey, occIdx + 1);
-    const fp = _internals46.fingerprintFinding(finding, directory, occIdx);
+    const fp = _internals47.fingerprintFinding(finding, directory, occIdx);
     return {
       finding,
       index: occIdx,
@@ -96955,7 +97006,7 @@ async function captureOrMergeBaseline(directory, phase, findings, engine, scanne
       }
     } catch {}
     const scannedRelFiles = new Set(scannedFiles.map((f) => normalizeFindingPath(directory, f)));
-    const indexed = _internals46.assignOccurrenceIndices(findings, directory);
+    const indexed = _internals47.assignOccurrenceIndices(findings, directory);
     if (existing && !opts?.force) {
       const prunedFingerprints = existing.fingerprints.filter((fp) => {
         const relFile = fp.slice(0, fp.indexOf("|"));
@@ -97095,7 +97146,7 @@ function loadBaseline(directory, phase) {
     };
   }
 }
-var _internals46 = {
+var _internals47 = {
   fingerprintFinding,
   assignOccurrenceIndices,
   captureOrMergeBaseline,
@@ -97505,11 +97556,11 @@ var sast_scan = createSwarmTool({
       capture_baseline: safeArgs.capture_baseline,
       phase: safeArgs.phase
     };
-    const result = await _internals47.sastScan(input, directory);
+    const result = await _internals48.sastScan(input, directory);
     return JSON.stringify(result, null, 2);
   }
 });
-var _internals47 = {
+var _internals48 = {
   sastScan,
   sast_scan
 };
@@ -101421,7 +101472,7 @@ import {
   mkdirSync as mkdirSync31,
   readFileSync as readFileSync63,
   renameSync as renameSync20,
-  unlinkSync as unlinkSync15,
+  unlinkSync as unlinkSync16,
   writeFileSync as writeFileSync25
 } from "node:fs";
 import path125 from "node:path";
@@ -101655,7 +101706,7 @@ function writePhaseCouncilEvidence(workingDir, synthesis) {
     renameSync20(tempFile, evidenceFile);
   } finally {
     if (existsSync72(tempFile)) {
-      unlinkSync15(tempFile);
+      unlinkSync16(tempFile);
     }
   }
 }
@@ -102833,7 +102884,7 @@ function resolveDefaultReviewerAgent(generatedAgentNames) {
 }
 async function compileReviewPackage(directory, phase, sessionID, requireDiffSummary) {
   const lanes = await listLaneEvidence(directory, phase);
-  const persisted = _internals48.readPersisted?.(directory) ?? null;
+  const persisted = _internals49.readPersisted?.(directory) ?? null;
   if (persisted) {
     let matchingRunState = null;
     for (const sessionState of Object.values(persisted.sessions)) {
@@ -103025,7 +103076,7 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
     client.session.delete({ path: { id: sessionId } }).catch(() => {});
   }
 }
-var _internals48 = {
+var _internals49 = {
   compileReviewPackage,
   parseReviewerVerdict,
   writeReviewerEvidence,
@@ -103042,28 +103093,28 @@ async function dispatchPhaseReviewer(directory, phase, sessionID, config3) {
   };
   const generatedAgentNames = swarmState.generatedAgentNames;
   const agentName = mergedConfig.reviewerAgent || resolveDefaultReviewerAgent(generatedAgentNames);
-  const pkg = await _internals48.compileReviewPackage(directory, phase, sessionID, mergedConfig.requireDiffSummary);
+  const pkg = await _internals49.compileReviewPackage(directory, phase, sessionID, mergedConfig.requireDiffSummary);
   let responseText;
   try {
-    responseText = await _internals48.dispatchReviewerAgent(directory, pkg, agentName, mergedConfig.timeoutMs);
+    responseText = await _internals49.dispatchReviewerAgent(directory, pkg, agentName, mergedConfig.timeoutMs);
   } catch (error93) {
-    const evidencePath2 = await _internals48.writeReviewerEvidence(directory, phase, "REJECTED", error93 instanceof Error ? error93.message : String(error93));
+    const evidencePath2 = await _internals49.writeReviewerEvidence(directory, phase, "REJECTED", error93 instanceof Error ? error93.message : String(error93));
     return {
       verdict: "REJECTED",
       reason: `Reviewer dispatch failed: ${error93 instanceof Error ? error93.message : String(error93)}`,
       evidencePath: evidencePath2
     };
   }
-  const parsed = _internals48.parseReviewerVerdict(responseText);
+  const parsed = _internals49.parseReviewerVerdict(responseText);
   if (!parsed) {
-    const evidencePath2 = await _internals48.writeReviewerEvidence(directory, phase, "REJECTED", "Reviewer response could not be parsed");
+    const evidencePath2 = await _internals49.writeReviewerEvidence(directory, phase, "REJECTED", "Reviewer response could not be parsed");
     return {
       verdict: "REJECTED",
       reason: "Reviewer response could not be parsed",
       evidencePath: evidencePath2
     };
   }
-  const evidencePath = await _internals48.writeReviewerEvidence(directory, phase, parsed.verdict, parsed.reason);
+  const evidencePath = await _internals49.writeReviewerEvidence(directory, phase, parsed.verdict, parsed.reason);
   return {
     verdict: parsed.verdict,
     reason: parsed.reason,
@@ -103569,7 +103620,7 @@ ${fileList}
 
 // src/tools/lean-turbo-run-phase.ts
 init_create_tool();
-var _internals49 = {
+var _internals50 = {
   LeanTurboRunner,
   loadPluginConfigWithMeta
 };
@@ -103579,9 +103630,9 @@ async function executeLeanTurboRunPhase(args2) {
   let runError = null;
   let runner = null;
   try {
-    const { config: config3 } = _internals49.loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals50.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.strategy === "lean" ? config3.turbo.lean : undefined;
-    runner = new _internals49.LeanTurboRunner({
+    runner = new _internals50.LeanTurboRunner({
       directory,
       sessionID,
       opencodeClient: swarmState.opencodeClient ?? null,
@@ -103862,7 +103913,7 @@ import * as path132 from "node:path";
 
 // src/mutation/engine.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { unlinkSync as unlinkSync16, writeFileSync as writeFileSync26 } from "node:fs";
+import { unlinkSync as unlinkSync17, writeFileSync as writeFileSync26 } from "node:fs";
 import * as path131 from "node:path";
 
 // src/mutation/equivalence.ts
@@ -103935,7 +103986,7 @@ function isStaticallyEquivalent(originalCode, mutatedCode) {
   const strippedMutated = stripCode(mutatedCode);
   return strippedOriginal === strippedMutated;
 }
-var _internals50 = {
+var _internals51 = {
   isStaticallyEquivalent,
   checkEquivalence,
   batchCheckEquivalence
@@ -103975,7 +104026,7 @@ async function batchCheckEquivalence(patches, llmJudge) {
   const results = [];
   for (const { patch, originalCode, mutatedCode } of patches) {
     try {
-      const result = await _internals50.checkEquivalence(patch, originalCode, mutatedCode, llmJudge);
+      const result = await _internals51.checkEquivalence(patch, originalCode, mutatedCode, llmJudge);
       results.push(result);
     } catch (err3) {
       results.push({
@@ -103994,7 +104045,7 @@ async function batchCheckEquivalence(patches, llmJudge) {
 var MUTATION_TIMEOUT_MS = 30000;
 var TOTAL_BUDGET_MS = 300000;
 var GIT_APPLY_TIMEOUT_MS = 5000;
-var _internals51 = {
+var _internals52 = {
   executeMutation,
   computeReport,
   executeMutationSuite,
@@ -104026,7 +104077,7 @@ async function executeMutation(patch, testCommand, _testFiles, workingDir) {
       };
     }
     try {
-      const applyResult = _internals51.spawnSync("git", ["apply", "--", patchFile], {
+      const applyResult = _internals52.spawnSync("git", ["apply", "--", patchFile], {
         cwd: workingDir,
         timeout: GIT_APPLY_TIMEOUT_MS,
         stdio: "pipe"
@@ -104055,7 +104106,7 @@ async function executeMutation(patch, testCommand, _testFiles, workingDir) {
     }
     let testPassed = false;
     try {
-      const spawnResult = _internals51.spawnSync(testCommand[0], testCommand.slice(1), {
+      const spawnResult = _internals52.spawnSync(testCommand[0], testCommand.slice(1), {
         cwd: workingDir,
         timeout: MUTATION_TIMEOUT_MS,
         stdio: "pipe"
@@ -104088,7 +104139,7 @@ async function executeMutation(patch, testCommand, _testFiles, workingDir) {
   } finally {
     if (patchFile) {
       try {
-        const revertResult = _internals51.spawnSync("git", ["apply", "-R", "--", patchFile], {
+        const revertResult = _internals52.spawnSync("git", ["apply", "-R", "--", patchFile], {
           cwd: workingDir,
           timeout: GIT_APPLY_TIMEOUT_MS,
           stdio: "pipe"
@@ -104107,7 +104158,7 @@ async function executeMutation(patch, testCommand, _testFiles, workingDir) {
         revertError = new Error(`Failed to revert mutation ${patch.id}: ${revertErr}. Working tree may be dirty.`);
       }
       try {
-        unlinkSync16(patchFile);
+        unlinkSync17(patchFile);
       } catch (_unlinkErr) {}
     }
   }
@@ -104281,7 +104332,7 @@ async function executeMutationSuite(patches, testCommand, testFiles, workingDir,
 }
 
 // src/mutation/gate.ts
-var _internals52 = {
+var _internals53 = {
   evaluateMutationGate,
   buildTestImprovementPrompt,
   buildMessage
@@ -104302,8 +104353,8 @@ function evaluateMutationGate(report, passThreshold = PASS_THRESHOLD, warnThresh
   } else {
     verdict = "fail";
   }
-  const testImprovementPrompt = _internals52.buildTestImprovementPrompt(report, passThreshold, verdict);
-  const message = _internals52.buildMessage(verdict, adjustedKillRate, report.killed, report.totalMutants, report.equivalent, warnThreshold);
+  const testImprovementPrompt = _internals53.buildTestImprovementPrompt(report, passThreshold, verdict);
+  const message = _internals53.buildMessage(verdict, adjustedKillRate, report.killed, report.totalMutants, report.equivalent, warnThreshold);
   return {
     verdict,
     killRate: report.killRate,
@@ -104920,7 +104971,7 @@ import * as path136 from "node:path";
 init_bun_compat();
 import * as fs104 from "node:fs";
 import * as path135 from "node:path";
-var _internals53 = { bunSpawn };
+var _internals54 = { bunSpawn };
 var _swarmGitExcludedChecked = false;
 function fileCoversSwarm(content) {
   for (const rawLine of content.split(`
@@ -104953,7 +105004,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
       checkIgnoreExitCode
     ] = await Promise.all([
       (async () => {
-        const proc = _internals53.bunSpawn(["git", "-C", directory, "rev-parse", "--show-toplevel"], GIT_SPAWN_OPTIONS);
+        const proc = _internals54.bunSpawn(["git", "-C", directory, "rev-parse", "--show-toplevel"], GIT_SPAWN_OPTIONS);
         try {
           return await Promise.all([proc.exited, proc.stdout.text()]);
         } finally {
@@ -104963,7 +105014,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       })(),
       (async () => {
-        const proc = _internals53.bunSpawn(["git", "-C", directory, "rev-parse", "--git-path", "info/exclude"], GIT_SPAWN_OPTIONS);
+        const proc = _internals54.bunSpawn(["git", "-C", directory, "rev-parse", "--git-path", "info/exclude"], GIT_SPAWN_OPTIONS);
         try {
           return await Promise.all([proc.exited, proc.stdout.text()]);
         } finally {
@@ -104973,7 +105024,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       })(),
       (async () => {
-        const proc = _internals53.bunSpawn(["git", "-C", directory, "check-ignore", "-q", ".swarm/.gitkeep"], GIT_SPAWN_OPTIONS);
+        const proc = _internals54.bunSpawn(["git", "-C", directory, "check-ignore", "-q", ".swarm/.gitkeep"], GIT_SPAWN_OPTIONS);
         try {
           return await proc.exited;
         } finally {
@@ -105012,7 +105063,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
         }
       } catch {}
     }
-    const trackedProc = _internals53.bunSpawn(["git", "-C", directory, "ls-files", "--", ".swarm"], GIT_SPAWN_OPTIONS);
+    const trackedProc = _internals54.bunSpawn(["git", "-C", directory, "ls-files", "--", ".swarm"], GIT_SPAWN_OPTIONS);
     let trackedExitCode;
     let trackedOutput;
     try {
@@ -105037,7 +105088,7 @@ async function ensureSwarmGitExcluded(directory, options = {}) {
 }
 
 // src/hooks/diff-scope.ts
-var _internals54 = { bunSpawn };
+var _internals55 = { bunSpawn };
 function getDeclaredScope(taskId, directory) {
   try {
     const planPath = path136.join(directory, ".swarm", "plan.json");
@@ -105072,7 +105123,7 @@ var GIT_DIFF_SPAWN_OPTIONS = {
 };
 async function getChangedFiles(directory) {
   try {
-    const proc = _internals54.bunSpawn(["git", "diff", "--name-only", "HEAD~1"], {
+    const proc = _internals55.bunSpawn(["git", "diff", "--name-only", "HEAD~1"], {
       cwd: directory,
       ...GIT_DIFF_SPAWN_OPTIONS
     });
@@ -105089,7 +105140,7 @@ async function getChangedFiles(directory) {
       return stdout.trim().split(`
 `).map((f) => f.trim()).filter((f) => f.length > 0);
     }
-    const proc2 = _internals54.bunSpawn(["git", "diff", "--name-only", "HEAD"], {
+    const proc2 = _internals55.bunSpawn(["git", "diff", "--name-only", "HEAD"], {
       cwd: directory,
       ...GIT_DIFF_SPAWN_OPTIONS
     });
@@ -105147,7 +105198,7 @@ init_telemetry();
 init_file_locks();
 import * as fs106 from "node:fs";
 import * as path137 from "node:path";
-var _internals55 = {
+var _internals56 = {
   listActiveLocks,
   verifyLeanTurboTaskCompletion
 };
@@ -105289,7 +105340,7 @@ function verifyLeanTurboTaskCompletion(directory, taskId, sessionID) {
       }
     };
   }
-  const activeLocks = _internals55.listActiveLocks(directory);
+  const activeLocks = _internals56.listActiveLocks(directory);
   const laneLocks = activeLocks.filter((lock) => lock.laneId === lane.laneId);
   if (laneLocks.length > 0) {
     return {
