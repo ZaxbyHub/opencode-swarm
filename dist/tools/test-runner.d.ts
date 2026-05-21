@@ -23,7 +23,6 @@ export interface TestRunnerArgs {
     files?: string[];
     coverage?: boolean;
     timeout_ms?: number;
-    allow_full_suite?: boolean;
 }
 export type RegressionOutcome = 'pass' | 'skip' | 'regression' | 'scope_exceeded' | 'error';
 export interface TestTotals {

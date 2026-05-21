@@ -67,7 +67,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
 
 ### 6. Test execution — do not use broad `test_runner` for repo validation
 
-- Do not use the OpenCode `test_runner` tool with `scope: 'all'` or broad `'graph'` / `'impact'` scope for **whole-repo validation**. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors, not interactive use.
+- Do not use the OpenCode `test_runner` tool with `scope: 'all'` or broad `'graph'` / `'impact'` scope for **whole-repo validation**. The agent-settable `allow_full_suite` arg was removed; `scope: 'all'` is now gated behind the `SWARM_ALLOW_FULL_SUITE` environment variable (CI / maintainer environments only) and is unavailable in agent sessions. The tool also runs bun with `--smol` to cap memory.
 - `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP instruction; broad scopes can stall or kill OpenCode.
 - For repo validation, prefer **shell commands** (the per-file isolation loops in `contributing.md` / `TESTING.md`).
 - For targeted agent validation, use `test_runner` with explicit `files: [...]` or small targeted scopes.

@@ -20,9 +20,11 @@ This skill is about **executing** tests safely. For **writing** tests, see `writ
 
 `graph` and `impact` each fan out per file through the import tree; `convention` maps
 each source file to a test file by name convention. The union quickly exceeds
-`MAX_SAFE_TEST_FILES = 50`, triggering `scope_exceeded`, which causes LLMs to
-cascade to `scope: 'all'` and kill the session. All three scopes now reject with
+`MAX_SAFE_TEST_FILES = 50`, triggering `scope_exceeded`. All three scopes reject with
 `scope_exceeded` before fan-out when `sourceFiles.length > MAX_SAFE_SOURCE_FILES = 1`.
+`scope: 'all'` is reserved for CI / maintainer environments and is unavailable in
+agent sessions — never attempt it; use the per-file shell loops. The tool also runs
+bun with `--smol` to cap memory.
 
 ---
 
@@ -77,8 +79,8 @@ Do you need to run tests?
 | `'convention'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before fan-out; direct test file paths exempt |
 | `'graph'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
 | `'impact'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
-| `'all'` | ❌ Never | ❌ Never | Requires `allow_full_suite: true`; CI mirror only |
-| `'all'` | ❌ Never | ❌ Never | Requires `allow_full_suite: true`; CI mirror only |
+| `'all'` | ❌ Never | ❌ Never | Reserved for CI / maintainer environments; unavailable in agent sessions |
+| `'all'` | ❌ Never | ❌ Never | Reserved for CI / maintainer environments; unavailable in agent sessions |
 
 **Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
 
