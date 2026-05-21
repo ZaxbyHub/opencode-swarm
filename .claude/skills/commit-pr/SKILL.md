@@ -91,6 +91,8 @@ Choose the PR title type by the main change:
 
 The squash merge commit message must match the PR title exactly.
 
+> **Note:** The PR title MUST follow `<type>(<scope>): <description>` exactly — CI runs `action-semantic-pull-request` which will fail the `check-title` job if the format is wrong. Do not deviate from this format.
+
 ## Step 2 - Release note fragment
 
 Create a pending release fragment and do not calculate a version manually.
@@ -127,6 +129,8 @@ git diff --exit-code -- dist/
 ```
 
 ### Tier 1 - quality
+
+Run both linter AND formatter — e.g., `bunx biome check --write .` or equivalent — because CI quality gates reject code that passes tests but fails style validation.
 
 ```bash
 bun run typecheck
