@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.27.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.0...v7.27.1) (2026-05-21)
+
+
+### Bug Fixes
+
+* **gate-evidence:** normalize legacy/manual gate evidence entries to prevent false corrupt blocks ([8860120](https://github.com/zaxbysauce/opencode-swarm/commit/88601209a310170d2f31bd32e8feed5553a0b9c8))
+
 ## [7.27.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.26.2...v7.27.0) (2026-05-21)
 
 
