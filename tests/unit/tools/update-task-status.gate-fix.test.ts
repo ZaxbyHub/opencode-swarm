@@ -310,7 +310,11 @@ describe('readTaskEvidenceRaw', () => {
 			required_gates: ['reviewer', 'test_engineer'],
 			gates: {
 				reviewer: 'APPROVED',
-				test_engineer: { sessionId: 'session-1', timestamp: '2025-01-01T00:00:00.000Z', agent: 'test_engineer' },
+				test_engineer: {
+					sessionId: 'session-1',
+					timestamp: '2025-01-01T00:00:00.000Z',
+					agent: 'test_engineer',
+				},
 			},
 		};
 		fs.writeFileSync(
@@ -325,7 +329,9 @@ describe('readTaskEvidenceRaw', () => {
 		expect(asyncResult).not.toBeNull();
 		expect(rawResult!.taskId).toBe(asyncResult!.taskId);
 		expect(rawResult!.required_gates).toEqual(asyncResult!.required_gates);
-		expect(Object.keys(rawResult!.gates)).toEqual(Object.keys(asyncResult!.gates));
+		expect(Object.keys(rawResult!.gates)).toEqual(
+			Object.keys(asyncResult!.gates),
+		);
 		// Both should have normalized the string gate to an object
 		expect(rawResult!.gates['reviewer'].agent).toBe('reviewer');
 		expect(asyncResult!.gates['reviewer'].agent).toBe('reviewer');
