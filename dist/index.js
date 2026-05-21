@@ -51,7 +51,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.26.2",
+    version: "7.27.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -28072,13 +28072,59 @@ function getEvidencePath(directory, taskId) {
   assertValidTaskId(taskId);
   return path12.join(getEvidenceDir(directory), `${taskId}.json`);
 }
+function parseTaskEvidence(raw) {
+  const parsed = JSON.parse(raw);
+  const normalized = normalizeLegacyTaskEvidence(parsed);
+  return TaskEvidenceSchema.parse(normalized);
+}
 function readExisting(evidencePath) {
   try {
     const raw = readFileSync5(evidencePath, "utf-8");
-    return TaskEvidenceSchema.parse(JSON.parse(raw));
+    return parseTaskEvidence(raw);
   } catch {
     return null;
   }
+}
+function normalizeLegacyTaskEvidence(parsed) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return parsed;
+  }
+  const record2 = parsed;
+  if (record2.gates === null || typeof record2.gates !== "object" || Array.isArray(record2.gates)) {
+    return parsed;
+  }
+  const normalizedGates = {};
+  for (const [gateName, gateValue] of Object.entries(record2.gates)) {
+    if (gateValue !== null && typeof gateValue === "object" && !Array.isArray(gateValue)) {
+      const gateRecord = gateValue;
+      normalizedGates[gateName] = {
+        ...gateRecord,
+        sessionId: typeof gateRecord.sessionId === "string" ? gateRecord.sessionId : LEGACY_GATE_SESSION_ID,
+        timestamp: typeof gateRecord.timestamp === "string" ? gateRecord.timestamp : LEGACY_GATE_TIMESTAMP,
+        agent: typeof gateRecord.agent === "string" ? gateRecord.agent : gateName
+      };
+      continue;
+    }
+    if (typeof gateValue === "string") {
+      normalizedGates[gateName] = {
+        sessionId: LEGACY_GATE_SESSION_ID,
+        timestamp: LEGACY_GATE_TIMESTAMP,
+        agent: gateName,
+        verdict: gateValue
+      };
+      continue;
+    }
+    normalizedGates[gateName] = {
+      sessionId: LEGACY_GATE_SESSION_ID,
+      timestamp: LEGACY_GATE_TIMESTAMP,
+      agent: gateName
+    };
+  }
+  return {
+    ...record2,
+    taskId: typeof record2.taskId === "string" ? record2.taskId : typeof record2.task_id === "string" ? record2.task_id : "",
+    gates: normalizedGates
+  };
 }
 async function atomicWrite2(targetPath, content) {
   const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
@@ -28148,7 +28194,7 @@ function readTaskEvidenceRaw(directory, taskId) {
   const evidencePath = getEvidencePath(directory, taskId);
   try {
     const raw = readFileSync5(evidencePath, "utf-8");
-    return TaskEvidenceSchema.parse(JSON.parse(raw));
+    return parseTaskEvidence(raw);
   } catch (error49) {
     if (error49.code === "ENOENT")
       return null;
@@ -28163,7 +28209,7 @@ async function hasPassedAllGates(directory, taskId) {
     return false;
   return evidence.required_gates.every((gate) => evidence.gates[gate] != null);
 }
-var GateEvidenceSchema, TaskEvidenceSchema, DEFAULT_REQUIRED_GATES;
+var GateEvidenceSchema, TaskEvidenceSchema, DEFAULT_REQUIRED_GATES, LEGACY_GATE_SESSION_ID = "legacy-manual", LEGACY_GATE_TIMESTAMP = "1970-01-01T00:00:00.000Z";
 var init_gate_evidence = __esm(() => {
   init_zod();
   init_lock();

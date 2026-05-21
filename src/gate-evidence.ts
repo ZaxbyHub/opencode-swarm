@@ -48,6 +48,8 @@ const TaskEvidenceSchema = z.object({
 });
 
 export const DEFAULT_REQUIRED_GATES = ['reviewer', 'test_engineer'];
+const LEGACY_GATE_SESSION_ID = 'legacy-manual';
+const LEGACY_GATE_TIMESTAMP = '1970-01-01T00:00:00.000Z';
 
 /**
  * Canonical task-id validation helper.
@@ -111,13 +113,93 @@ function getEvidencePath(directory: string, taskId: string): string {
 	return path.join(getEvidenceDir(directory), `${taskId}.json`);
 }
 
+/**
+ * Shared parse path: raw JSON string → normalized → schema-validated TaskEvidence.
+ * Applies legacy/manual gate normalization so both read paths produce identical results.
+ */
+function parseTaskEvidence(raw: string): TaskEvidence {
+	const parsed = JSON.parse(raw);
+	const normalized = normalizeLegacyTaskEvidence(parsed);
+	return TaskEvidenceSchema.parse(normalized);
+}
+
 function readExisting(evidencePath: string): TaskEvidence | null {
 	try {
 		const raw = readFileSync(evidencePath, 'utf-8');
-		return TaskEvidenceSchema.parse(JSON.parse(raw));
+		return parseTaskEvidence(raw);
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Normalize legacy/manual gate-evidence shapes into TaskEvidence-compatible
+ * structure so status updates don't hard-fail on schema-light gate markers.
+ */
+function normalizeLegacyTaskEvidence(parsed: unknown): unknown {
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return parsed;
+	}
+	const record = parsed as Record<string, unknown>;
+	if (
+		record.gates === null ||
+		typeof record.gates !== 'object' ||
+		Array.isArray(record.gates)
+	) {
+		return parsed;
+	}
+
+	const normalizedGates: Record<string, Record<string, unknown>> = {};
+	for (const [gateName, gateValue] of Object.entries(
+		record.gates as Record<string, unknown>,
+	)) {
+		if (
+			gateValue !== null &&
+			typeof gateValue === 'object' &&
+			!Array.isArray(gateValue)
+		) {
+			const gateRecord = gateValue as Record<string, unknown>;
+			normalizedGates[gateName] = {
+				...gateRecord,
+				sessionId:
+					typeof gateRecord.sessionId === 'string'
+						? gateRecord.sessionId
+						: LEGACY_GATE_SESSION_ID,
+				timestamp:
+					typeof gateRecord.timestamp === 'string'
+						? gateRecord.timestamp
+						: LEGACY_GATE_TIMESTAMP,
+				agent:
+					typeof gateRecord.agent === 'string' ? gateRecord.agent : gateName,
+			};
+			continue;
+		}
+		if (typeof gateValue === 'string') {
+			normalizedGates[gateName] = {
+				sessionId: LEGACY_GATE_SESSION_ID,
+				timestamp: LEGACY_GATE_TIMESTAMP,
+				agent: gateName,
+				verdict: gateValue,
+			};
+			continue;
+		}
+		normalizedGates[gateName] = {
+			sessionId: LEGACY_GATE_SESSION_ID,
+			timestamp: LEGACY_GATE_TIMESTAMP,
+			agent: gateName,
+		};
+	}
+
+	return {
+		...record,
+		taskId:
+			typeof record.taskId === 'string'
+				? record.taskId
+				: typeof record.task_id === 'string'
+					? record.task_id
+					: '',
+		gates: normalizedGates,
+	};
 }
 
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
@@ -247,7 +329,7 @@ export function readTaskEvidenceRaw(
 	const evidencePath = getEvidencePath(directory, taskId);
 	try {
 		const raw = readFileSync(evidencePath, 'utf-8');
-		return TaskEvidenceSchema.parse(JSON.parse(raw));
+		return parseTaskEvidence(raw);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
 		throw error;

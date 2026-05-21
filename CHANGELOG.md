@@ -99,6 +99,10 @@
 
 ## [Unreleased]
 
+### Bug Fixes
+
+* **gate-evidence:** fix readExisting normalization gap and taskId fallback (PR-865)
+
 ### Features
 
 * **config:** add `auto_select_architect` option to automatically select swarm architect and disable competing built-in agents ([#887](https://github.com/zaxbysauce/opencode-swarm/issues/887))
