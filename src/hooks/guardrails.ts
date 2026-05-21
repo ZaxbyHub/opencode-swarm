@@ -2094,8 +2094,14 @@ export function createGuardrailsHooks(
 		// Resolve declared scope for this session
 		const declaredScope = resolveDeclaredScope(sessionID);
 
-		// If no scope is declared, allow (existing behavior preserved)
-		if (!declaredScope || declaredScope.length === 0) return;
+		// Fail closed if no active agent is registered for this session.
+		// Shell writes must honor the same per-agent authority model as write/edit tools.
+		const shellWriteAgent = swarmState.activeAgent.get(sessionID);
+		if (!shellWriteAgent) {
+			throw new Error(
+				`WRITE BLOCKED: No active agent registered for session "${sessionID}". Call startAgentSession before issuing shell write operations.`,
+			);
+		}
 
 		// Resolve write targets against effective cwd (handles subshell cd changes)
 		const resolvedWrites = resolveWriteTargets(
@@ -2113,8 +2119,41 @@ export function createGuardrailsHooks(
 				);
 			}
 
+			// Universal deny prefixes apply to shell writes too.
+			if (universalDenyPrefixes.length > 0) {
+				const normalizedPath = path
+					.relative(
+						path.resolve(effectiveDirectory),
+						path.resolve(effectiveDirectory, write.resolvedPath),
+					)
+					.replace(/\\/g, '/');
+				for (const prefix of universalDenyPrefixes) {
+					if (normalizedPath.toLowerCase().startsWith(prefix.toLowerCase())) {
+						throw new Error(
+							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
+						);
+					}
+				}
+			}
+
+			// Enforce per-agent authority rules for shell writes.
+			const authorityCheck = checkFileAuthorityWithRules(
+				shellWriteAgent,
+				write.resolvedPath,
+				effectiveDirectory,
+				precomputedAuthorityRules,
+				{ declaredScope },
+			);
+			if (!authorityCheck.allowed) {
+				throw new Error(
+					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}`,
+				);
+			}
+
 			// Check if the resolved write target is within declared scope
 			if (
+				declaredScope &&
+				declaredScope.length > 0 &&
 				!isInDeclaredScope(
 					write.resolvedPath,
 					declaredScope,

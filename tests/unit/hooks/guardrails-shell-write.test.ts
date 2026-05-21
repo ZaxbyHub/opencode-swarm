@@ -52,6 +52,10 @@ function coderSession(id: string): void {
 	startAgentSession(id, 'coder');
 }
 
+function architectSession(id: string): void {
+	startAgentSession(id, 'architect');
+}
+
 function setDeclaredScope(sessionId: string, scope: string[]): void {
 	const session = getAgentSession(sessionId);
 	if (session) {
@@ -563,6 +567,34 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo hello > /tmp/out.txt'),
 				),
 			).resolves.toBeUndefined();
+		});
+	});
+
+	describe('architect shell writes — regression: evidence/config bypass without declared scope', () => {
+		it('blocks architect redirect writes to config-zone evidence paths even without declared scope', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			architectSession('s52-architect-evidence');
+			// No setDeclaredScope call on purpose: this mirrors the bypass path
+			// where architect shell writes were previously allowed without scope.
+			await expect(
+				hooks.toolBefore(
+					makeBashInput('s52-architect-evidence'),
+					makeOutput('echo test > .swarm/evidence/5.4.json'),
+				),
+			).rejects.toThrow(/WRITE BLOCKED: Agent "architect".*config zone/);
+		});
+
+		it('blocks architect interpreter eval writes with unresolvable targets even without declared scope', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			architectSession('s53-architect-eval');
+			await expect(
+				hooks.toolBefore(
+					makeBashInput('s53-architect-eval'),
+					makeOutput(
+						`python3 -c "open('.swarm/evidence/5.4.json','w').write('x')"`,
+					),
+				),
+			).rejects.toThrow(/WRITE BLOCKED|unresolvable path/);
 		});
 	});
 
