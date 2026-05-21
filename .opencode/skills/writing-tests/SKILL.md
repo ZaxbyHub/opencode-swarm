@@ -104,6 +104,58 @@ Intentionally skipped on Windows (async child process handles cause EBUSY):
 - `tests/unit/tools/pre-check-batch-secretscan-evidence.test.ts`
 - `tests/unit/tools/pre-check-batch.test.ts`
 
+### Lifecycle Hook Placement (bun:test)
+
+**CRITICAL: `afterEach` called inside a `test()` body registers on the enclosing `describe`, NOT the current test.**
+
+In bun:test (and Jest-style test frameworks), lifecycle hooks (`beforeEach`, `afterEach`) are scoped to the `describe` block they appear in. Calling `afterEach()` inside a `test()` body does NOT create a per-test cleanup — it registers a hook on the enclosing `describe` that runs after **every** test in that describe block. This causes:
+
+1. **Cleanup running at wrong time** — the hook fires after all tests, not after the test that registered it
+2. **State bleed between tests** — mock state isn't restored between individual tests
+3. **Double cleanup** — if multiple tests register `afterEach`, they all run after every test
+
+**Correct pattern:**
+```typescript
+// ✅ CORRECT — beforeEach/afterEach at describe level
+describe('validateProjectRoot guard', () => {
+  let savedValidate: typeof analyzerInternals.validateProjectRoot;
+  
+  beforeEach(() => {
+    savedValidate = analyzerInternals.validateProjectRoot;
+  });
+  
+  afterEach(() => {
+    analyzerInternals.validateProjectRoot = savedValidate;
+  });
+  
+  test('throws when path escapes project root', () => {
+    analyzerInternals.validateProjectRoot = () => { throw new Error('escapes'); };
+    // ... test ...
+    // cleanup happens automatically via describe-level afterEach
+  });
+});
+```
+
+**Incorrect pattern:**
+```typescript
+// ❌ WRONG — afterEach inside test() registers on describe, not test
+describe('validateProjectRoot guard', () => {
+  test('throws when path escapes project root', () => {
+    const savedValidate = analyzerInternals.validateProjectRoot;
+    analyzerInternals.validateProjectRoot = () => { throw new Error('escapes'); };
+    
+    // This afterEach registers on the describe, not this test!
+    afterEach(() => {
+      analyzerInternals.validateProjectRoot = savedValidate;
+    });
+    // ... test ...
+    // cleanup may run after OTHER tests, not this one
+  });
+});
+```
+
+**Rule:** Always place `beforeEach` and `afterEach` at the `describe` level, never inside `test()` bodies.
+
 4. **Never create circular mock imports.** This pattern deadlocks Bun:
 ```typescript
 // BROKEN — imports from the module it's about to mock
