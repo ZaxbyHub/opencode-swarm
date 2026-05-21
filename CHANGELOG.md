@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.27.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.26.2...v7.27.0) (2026-05-21)
+
+
+### Features
+
+* **test-impact:** classify infrastructure failures separately ([#926](https://github.com/zaxbysauce/opencode-swarm/issues/926)) ([d5a2b96](https://github.com/zaxbysauce/opencode-swarm/commit/d5a2b96c2f5681f36fa6d011b2185ad11edbc918))
+
 ## [7.26.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.26.1...v7.26.2) (2026-05-21)
 
 
