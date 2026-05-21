@@ -1,6 +1,8 @@
 import { loadPluginConfig } from '../config/loader';
 import {
 	type ConfigDoctorResult,
+	detectStraySwarmDirs,
+	removeStraySwarmDir,
 	runConfigDoctor,
 } from '../services/config-doctor';
 import { runToolDoctor } from '../services/tool-doctor';
@@ -135,17 +137,61 @@ export async function handleDoctorCommand(
 	const config = loadPluginConfig(directory);
 	const result = runConfigDoctor(config, directory);
 
-	// If auto-fix is requested and there are auto-fixable issues
+	// If auto-fix is requested and there are auto-fixable issues, apply fixes
+	// before formatting — but do NOT return early; stray .swarm detection
+	// must always run regardless of --fix (see Issue #922).
+	let output: string;
 	if (enableAutoFix && result.hasAutoFixableIssues) {
 		// Lazy load to avoid circular dependency
 		const { runConfigDoctorWithFixes } = await import(
 			'../services/config-doctor'
 		);
 		const fixResult = await runConfigDoctorWithFixes(directory, config, true);
-		return formatDoctorMarkdown(fixResult.result);
+		output = formatDoctorMarkdown(fixResult.result);
+	} else {
+		output = formatDoctorMarkdown(result);
 	}
 
-	return formatDoctorMarkdown(result);
+	// Check for stray .swarm directories
+	const strayDirs = detectStraySwarmDirs(directory);
+	if (strayDirs.length > 0) {
+		if (enableAutoFix) {
+			// Auto-clean stray directories
+			let fixOutput = '\n---\n\n## Stray .swarm Directories\n\n';
+			let removed = 0;
+			let failed = 0;
+
+			for (const finding of strayDirs) {
+				const cleanupResult = removeStraySwarmDir(directory, finding.path);
+				if (cleanupResult.success) {
+					removed++;
+				} else {
+					failed++;
+					fixOutput += `- \`${finding.path}\`: ${cleanupResult.message}\n`;
+				}
+			}
+
+			fixOutput += `\nCleaned up ${removed} stray director${removed === 1 ? 'y' : 'ies'}.`;
+			if (failed > 0) {
+				fixOutput += ` ${failed} could not be removed.`;
+			}
+			output += fixOutput;
+		} else {
+			output += '\n---\n\n## Stray .swarm Directories\n\n';
+			output += `Found ${strayDirs.length} stray .swarm director${strayDirs.length === 1 ? 'y' : 'ies'} in subdirectories:\n\n`;
+			for (const finding of strayDirs) {
+				const contentsPreview =
+					finding.contents.length > 5
+						? `${finding.contents.slice(0, 5).join(', ')}, ...`
+						: finding.contents.join(', ');
+				output += `- \`${finding.path}\` (${finding.totalEntries} entries: ${contentsPreview})\n`;
+			}
+			output += '\nThese are likely from a prior bug (Issue #922). ';
+			output += 'Re-run with `--fix` to auto-clean.\n';
+		}
+	}
+
+	return output;
 }
 
 /**

@@ -1026,3 +1026,177 @@ export async function runConfigDoctorWithFixes(
 		artifactPath,
 	};
 }
+
+/**
+ * A stray .swarm directory found below the project root.
+ * These are typically created by bugs in prior versions (see Issue #922).
+ */
+export interface StraySwarmFinding {
+	/** Relative path from project root (forward-slash normalized) */
+	path: string;
+	/** Absolute path on disk */
+	absolutePath: string;
+	/** Contents summary (up to 20 entries) */
+	contents: string[];
+	/** Total number of entries in the directory */
+	totalEntries: number;
+}
+
+/**
+ * Detect stray .swarm directories in project subdirectories.
+ * These are .swarm/ directories that exist below the project root,
+ * typically created by bugs in prior versions (see Issue #922).
+ *
+ * Skips: node_modules/, .git/, dist/, .cache/, .next/, coverage/
+ * and common tool/build output directories.
+ */
+export function detectStraySwarmDirs(projectRoot: string): StraySwarmFinding[] {
+	const findings: StraySwarmFinding[] = [];
+
+	const SKIP_DIRS = new Set([
+		'node_modules',
+		'.git',
+		'dist',
+		'.cache',
+		'.next',
+		'coverage',
+		'.turbo',
+		'.vercel',
+		'.terraform',
+		'__pycache__',
+		'.tox',
+	]);
+
+	/** Maximum recursion depth to prevent runaway scans */
+	const MAX_DEPTH = 10;
+
+	/** Maximum number of directory entries to list per stray finding */
+	const MAX_CONTENTS_ENTRIES = 20;
+
+	function walk(dir: string, depth: number): void {
+		if (depth > MAX_DEPTH) return;
+
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return; // Permission denied or removed — skip silently
+		}
+
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+
+			const name = entry.name;
+			const fullPath = path.join(dir, name);
+
+			// Skip known non-project directories
+			if (SKIP_DIRS.has(name)) continue;
+
+			// Skip git submodule or nested standalone repo roots
+			const gitPath = path.join(fullPath, '.git');
+			try {
+				const gitStat = fs.statSync(gitPath);
+				if (gitStat.isFile() || gitStat.isDirectory()) continue; // submodule or nested repo — skip
+			} catch {
+				// .git doesn't exist or is unreadable — not a git root, continue
+			}
+
+			// Check if this directory IS .swarm
+			if (name === '.swarm') {
+				// Skip if this is the project root .swarm
+				const parentDir = path.dirname(fullPath);
+				if (parentDir === projectRoot) continue;
+
+				// This is a stray .swarm directory
+				let contents: string[] = [];
+				try {
+					contents = fs.readdirSync(fullPath);
+				} catch {
+					contents = ['<unreadable>'];
+				}
+
+				findings.push({
+					path: path.relative(projectRoot, fullPath).replace(/\\/g, '/'),
+					absolutePath: fullPath,
+					contents: contents.slice(0, MAX_CONTENTS_ENTRIES),
+					totalEntries: contents.length,
+				});
+
+				continue; // Don't recurse INTO .swarm directories
+			}
+
+			// Recurse into subdirectories
+			walk(fullPath, depth + 1);
+		}
+	}
+
+	walk(projectRoot, 0);
+	return findings;
+}
+
+/**
+ * Remove a stray .swarm directory.
+ * NEVER removes the root .swarm/ directory.
+ *
+ * @returns `{ success, message }` indicating outcome
+ */
+export function removeStraySwarmDir(
+	projectRoot: string,
+	strayPath: string,
+): { success: boolean; message: string } {
+	let canonicalRoot: string;
+	let canonicalStray: string;
+
+	try {
+		canonicalRoot = fs.realpathSync(projectRoot);
+		canonicalStray = fs.realpathSync(
+			path.isAbsolute(strayPath)
+				? strayPath
+				: path.resolve(projectRoot, strayPath),
+		);
+	} catch (err) {
+		return {
+			success: false,
+			message: `Failed to resolve paths: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+
+	// Safety: never remove the root .swarm/
+	const rootSwarm = path.join(canonicalRoot, '.swarm');
+	if (canonicalStray === rootSwarm || canonicalStray === canonicalRoot) {
+		return {
+			success: false,
+			message: 'Refusing to remove root .swarm/ directory',
+		};
+	}
+
+	// Verify it's actually inside the project
+	if (!canonicalStray.startsWith(canonicalRoot + path.sep)) {
+		return {
+			success: false,
+			message: 'Path is outside project root — refusing to remove',
+		};
+	}
+
+	// Verify the directory name ends with .swarm
+	const normalizedStray = canonicalStray.replace(/\\/g, '/');
+	if (!normalizedStray.endsWith('/.swarm')) {
+		return {
+			success: false,
+			message: 'Path is not a .swarm directory — refusing to remove',
+		};
+	}
+
+	try {
+		fs.rmSync(canonicalStray, { recursive: true, force: true });
+		return {
+			success: true,
+			message: `Removed stray .swarm directory: ${canonicalStray}`,
+		};
+	} catch (err) {
+		return {
+			success: false,
+			message: `Failed to remove: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}

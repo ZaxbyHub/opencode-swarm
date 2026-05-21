@@ -9,7 +9,11 @@ import {
 	detectFlakyTests,
 	type FlakyTestEntry,
 } from '../test-impact/flaky-detector.js';
-import { appendTestRun, getAllHistory } from '../test-impact/history-store.js';
+import {
+	batchAppendTestRuns,
+	getAllHistory,
+	type TestRunRecord,
+} from '../test-impact/history-store.js';
 import { bunSpawn } from '../utils/bun-compat';
 import {
 	containsControlChars,
@@ -108,6 +112,18 @@ export interface TestTotals {
 	total: number;
 }
 
+export interface ParsedTestCaseResult {
+	testFile: string;
+	testName: string;
+	result: 'pass' | 'fail' | 'skip';
+	durationMs: number;
+	errorMessage?: string;
+	stackPrefix?: string;
+}
+
+const AGGREGATE_TEST_NAME = '(aggregate)';
+const VITEST_JSON_OUTPUT_RELATIVE_PATH = '.swarm/cache/test-runner-vitest.json';
+
 export interface TestSuccessResult {
 	success: true;
 	framework: TestFramework;
@@ -118,6 +134,7 @@ export interface TestSuccessResult {
 	totals: TestTotals;
 	coveragePercent?: number;
 	rawOutput?: string;
+	testCases?: ParsedTestCaseResult[];
 	message?: string;
 	outcome?: RegressionOutcome;
 }
@@ -133,6 +150,7 @@ export interface TestErrorResult {
 	coveragePercent?: number;
 	error: string;
 	rawOutput?: string;
+	testCases?: ParsedTestCaseResult[];
 	message?: string;
 	outcome?: RegressionOutcome;
 	attempted_scope?: 'graph';
@@ -1073,7 +1091,14 @@ function buildTestCommand(
 			return args;
 		}
 		case 'vitest': {
-			const args: string[] = ['npx', 'vitest', 'run'];
+			const args: string[] = [
+				'npx',
+				'vitest',
+				'run',
+				'--reporter=json',
+				'--outputFile',
+				VITEST_JSON_OUTPUT_RELATIVE_PATH,
+			];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
@@ -1081,7 +1106,7 @@ function buildTestCommand(
 			return args;
 		}
 		case 'jest': {
-			const args: string[] = ['npx', 'jest'];
+			const args: string[] = ['npx', 'jest', '--json'];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
@@ -1207,6 +1232,184 @@ function buildTestCommand(
 		default:
 			return null;
 	}
+}
+
+function mapFrameworkStatusToResult(
+	status: unknown,
+): 'pass' | 'fail' | 'skip' | null {
+	if (typeof status !== 'string') return null;
+	const normalized = status.toLowerCase();
+	if (normalized === 'pass' || normalized === 'passed') return 'pass';
+	if (normalized === 'fail' || normalized === 'failed') return 'fail';
+	if (
+		normalized === 'skip' ||
+		normalized === 'skipped' ||
+		normalized === 'pending' ||
+		normalized === 'todo'
+	) {
+		return 'skip';
+	}
+	return null;
+}
+
+function firstLine(value: unknown): string | undefined {
+	if (typeof value !== 'string') return undefined;
+	const line = value
+		.split('\n')
+		.find((part) => part.trim().length > 0)
+		?.trim();
+	return line && line.length > 0 ? line : undefined;
+}
+
+function parseJestLikeJsonTestResults(
+	payload: unknown,
+): ParsedTestCaseResult[] {
+	if (typeof payload !== 'object' || payload === null) return [];
+	const rawSuites = (payload as Record<string, unknown>).testResults;
+	if (!Array.isArray(rawSuites)) return [];
+
+	const parsed: ParsedTestCaseResult[] = [];
+	for (const suite of rawSuites) {
+		if (typeof suite !== 'object' || suite === null) continue;
+		const suiteObj = suite as Record<string, unknown>;
+		const rawFile =
+			typeof suiteObj.name === 'string'
+				? suiteObj.name
+				: typeof suiteObj.testFilePath === 'string'
+					? suiteObj.testFilePath
+					: undefined;
+		if (!rawFile) continue;
+		const testFile = rawFile.replace(/\\/g, '/');
+		const assertionResults = suiteObj.assertionResults;
+		if (!Array.isArray(assertionResults)) continue;
+
+		for (const assertion of assertionResults) {
+			if (typeof assertion !== 'object' || assertion === null) continue;
+			const assertionObj = assertion as Record<string, unknown>;
+			const result = mapFrameworkStatusToResult(assertionObj.status);
+			const testName =
+				typeof assertionObj.fullName === 'string'
+					? assertionObj.fullName
+					: typeof assertionObj.title === 'string'
+						? assertionObj.title
+						: undefined;
+			if (!result || !testName || testName.length === 0) continue;
+
+			const failureMessages = Array.isArray(assertionObj.failureMessages)
+				? assertionObj.failureMessages
+				: [];
+			const firstFailure = failureMessages.find(
+				(entry) => typeof entry === 'string' && entry.length > 0,
+			);
+			const durationMs =
+				typeof assertionObj.duration === 'number' &&
+				Number.isFinite(assertionObj.duration)
+					? Math.max(assertionObj.duration, 0)
+					: 0;
+
+			parsed.push({
+				testFile,
+				testName,
+				result,
+				durationMs,
+				errorMessage: firstLine(firstFailure),
+				stackPrefix: firstLine(firstFailure),
+			});
+		}
+	}
+
+	return parsed;
+}
+
+function parseBunJsonLines(output: string): ParsedTestCaseResult[] {
+	const parsed: ParsedTestCaseResult[] = [];
+
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) continue;
+
+		try {
+			const obj = JSON.parse(trimmed) as Record<string, unknown>;
+			const rawFile =
+				typeof obj.file === 'string'
+					? obj.file
+					: typeof obj.testFile === 'string'
+						? obj.testFile
+						: typeof obj.path === 'string'
+							? obj.path
+							: undefined;
+			const rawName =
+				typeof obj.testName === 'string'
+					? obj.testName
+					: typeof obj.fullName === 'string'
+						? obj.fullName
+						: typeof obj.name === 'string'
+							? obj.name
+							: undefined;
+			const result = mapFrameworkStatusToResult(
+				typeof obj.status === 'string' ? obj.status : obj.result,
+			);
+			if (!rawFile || !rawName || !result) continue;
+
+			const errorObj =
+				typeof obj.error === 'object' && obj.error !== null
+					? (obj.error as Record<string, unknown>)
+					: undefined;
+			const durationMs =
+				typeof obj.durationMs === 'number' && Number.isFinite(obj.durationMs)
+					? Math.max(obj.durationMs, 0)
+					: typeof obj.duration === 'number' && Number.isFinite(obj.duration)
+						? Math.max(obj.duration, 0)
+						: 0;
+
+			parsed.push({
+				testFile: rawFile.replace(/\\/g, '/'),
+				testName: rawName,
+				result,
+				durationMs,
+				errorMessage: firstLine(errorObj?.message ?? obj.errorMessage),
+				stackPrefix: firstLine(errorObj?.stack),
+			});
+		} catch {
+			// Ignore non-JSON lines from mixed reporters
+		}
+	}
+
+	return parsed;
+}
+
+function parseFrameworkJsonTestResults(
+	framework: TestFramework,
+	output: string,
+): ParsedTestCaseResult[] {
+	const jsonMatch = output.match(/\{[\s\S]*"testResults"[\s\S]*\}/);
+	if (jsonMatch) {
+		try {
+			const parsed = JSON.parse(jsonMatch[0]);
+			const testResults = parseJestLikeJsonTestResults(parsed);
+			if (testResults.length > 0) return testResults;
+		} catch {
+			// Continue to line-delimited JSON fallback
+		}
+	}
+
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			const testResults = parseJestLikeJsonTestResults(parsed);
+			if (testResults.length > 0) return testResults;
+		} catch {
+			// Ignore malformed line
+		}
+	}
+
+	if (framework === 'bun') {
+		return parseBunJsonLines(output);
+	}
+
+	return [];
 }
 
 // ============ Test Output Parsing ============
@@ -1570,8 +1773,23 @@ export async function runTests(
 	}
 
 	const startTime = Date.now();
+	const vitestJsonOutputPath =
+		framework === 'vitest'
+			? path.join(cwd, '.swarm', 'cache', 'test-runner-vitest.json')
+			: undefined;
 
 	try {
+		if (vitestJsonOutputPath) {
+			try {
+				fs.mkdirSync(path.dirname(vitestJsonOutputPath), { recursive: true });
+				if (fs.existsSync(vitestJsonOutputPath)) {
+					fs.unlinkSync(vitestJsonOutputPath);
+				}
+			} catch {
+				// Best-effort output path prep; command can still run without it
+			}
+		}
+
 		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
@@ -1607,6 +1825,21 @@ export async function runTests(
 		if (stderrResult.text) {
 			output += (output ? '\n' : '') + stderrResult.text;
 		}
+		if (vitestJsonOutputPath) {
+			try {
+				if (fs.existsSync(vitestJsonOutputPath)) {
+					const vitestJsonOutput = fs.readFileSync(
+						vitestJsonOutputPath,
+						'utf-8',
+					);
+					if (vitestJsonOutput.trim().length > 0) {
+						output += (output ? '\n' : '') + vitestJsonOutput;
+					}
+				}
+			} catch {
+				// Best-effort read for vitest --outputFile
+			}
+		}
 
 		// Add truncation notice if either stream was capped
 		if (stdoutResult.truncated || stderrResult.truncated) {
@@ -1621,7 +1854,17 @@ export async function runTests(
 			? ((await parseTestOutputViaDispatch(framework, output, cwd)) ??
 				parseTestOutput(framework, output))
 			: parseTestOutput(framework, output);
-		const { totals, coveragePercent } = parsed;
+		const parsedTestCases = parseFrameworkJsonTestResults(framework, output);
+		const totals = { ...parsed.totals };
+		const { coveragePercent } = parsed;
+		if (totals.total === 0 && parsedTestCases.length > 0) {
+			for (const entry of parsedTestCases) {
+				if (entry.result === 'pass') totals.passed++;
+				else if (entry.result === 'fail') totals.failed++;
+				else totals.skipped++;
+			}
+			totals.total = parsedTestCases.length;
+		}
 
 		// Determine success based on exit code and failures
 		const isTimeout = exitCode === -1;
@@ -1638,6 +1881,7 @@ export async function runTests(
 				totals,
 				rawOutput: output,
 				outcome: 'pass',
+				testCases: parsedTestCases,
 			};
 
 			if (coveragePercent !== undefined) {
@@ -1667,6 +1911,7 @@ export async function runTests(
 					? `${framework} tests timed out after ${timeout_ms}ms`
 					: `${framework} tests failed (${totals.failed}/${totals.total} failed)`,
 				outcome: isTimeout ? 'error' : 'regression',
+				testCases: parsedTestCases,
 			};
 
 			if (coveragePercent !== undefined) {
@@ -1798,13 +2043,35 @@ interface TestHistoryReport {
 	quarantinedFailures: string[];
 }
 
+function normalizeHistoryTestFile(
+	testFile: string,
+	workingDir: string,
+): string {
+	const normalized = testFile.replace(/\\/g, '/');
+	if (!path.isAbsolute(testFile)) return normalized;
+	const relative = path.relative(workingDir, testFile);
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		return normalized;
+	}
+	return relative.replace(/\\/g, '/');
+}
+
+function combineAggregateResult(
+	current: 'pass' | 'fail' | 'skip' | undefined,
+	next: 'pass' | 'fail' | 'skip',
+): 'pass' | 'fail' | 'skip' {
+	if (current === 'fail' || next === 'fail') return 'fail';
+	if (current === 'pass' || next === 'pass') return 'pass';
+	return 'skip';
+}
+
 function recordAndAnalyzeResults(
 	result: TestResult,
 	testFiles: string[],
 	workingDir: string,
 	sourceFiles?: string[],
+	parsedTestCases?: ParsedTestCaseResult[],
 ): void {
-	// Only record if we have meaningful results
 	if (!result.totals || result.totals.total === 0) return;
 
 	const now = new Date().toISOString();
@@ -1812,25 +2079,84 @@ function recordAndAnalyzeResults(
 		sourceFiles && sourceFiles.length > 0 ? sourceFiles : testFiles
 	).map((f) => f.replace(/\\/g, '/'));
 
-	// Record aggregate result for each test file
-	for (const testFile of testFiles) {
-		try {
-			appendTestRun(
-				{
-					timestamp: now,
-					taskId: 'auto',
-					testFile: testFile.replace(/\\/g, '/'),
-					testName: '(aggregate)',
-					result: result.success ? 'pass' : 'fail',
-					durationMs: result.duration_ms || 0,
-					changedFiles,
-				},
-				workingDir,
-			);
-		} catch {
-			// History recording failure should not block test results
+	const aggregateResultsByFile = new Map<string, 'pass' | 'fail' | 'skip'>();
+	const validParsedCases =
+		parsedTestCases?.filter(
+			(parsedCase) =>
+				parsedCase.testFile.length > 0 && parsedCase.testName.length > 0,
+		) ?? [];
+
+	const allRecords: TestRunRecord[] = [];
+
+	// Collect individual test case records (no I/O)
+	for (const parsedCase of validParsedCases) {
+		const normalizedTestFile = normalizeHistoryTestFile(
+			parsedCase.testFile,
+			workingDir,
+		);
+		allRecords.push({
+			timestamp: now,
+			taskId: 'auto',
+			testFile: normalizedTestFile,
+			testName: parsedCase.testName,
+			result: parsedCase.result,
+			durationMs: parsedCase.durationMs,
+			errorMessage: parsedCase.errorMessage,
+			stackPrefix: parsedCase.stackPrefix,
+			changedFiles,
+		});
+		aggregateResultsByFile.set(
+			normalizedTestFile,
+			combineAggregateResult(
+				aggregateResultsByFile.get(normalizedTestFile),
+				parsedCase.result,
+			),
+		);
+	}
+
+	// Keep aggregate records as a compatibility signal for existing consumers.
+	if (aggregateResultsByFile.size === 0) {
+		const aggregateResult = result.success ? 'pass' : 'fail';
+		for (const testFile of testFiles) {
+			aggregateResultsByFile.set(testFile.replace(/\\/g, '/'), aggregateResult);
 		}
 	}
+
+	// Collect aggregate records (no I/O)
+	for (const [testFile, aggregateResult] of aggregateResultsByFile) {
+		allRecords.push({
+			timestamp: now,
+			taskId: 'auto',
+			testFile,
+			testName: AGGREGATE_TEST_NAME,
+			result: aggregateResult,
+			durationMs: result.duration_ms || 0,
+			changedFiles,
+		});
+	}
+
+	// Batch write: one read + one write instead of N reads + N writes
+	try {
+		batchAppendTestRuns(allRecords, workingDir);
+	} catch {
+		// History recording failure should not block test results
+	}
+}
+
+function selectHistoryForAnalysis(history: ReturnType<typeof getAllHistory>) {
+	const filesWithIndividualRecords = new Set<string>();
+	for (const record of history) {
+		if (record.testName !== AGGREGATE_TEST_NAME) {
+			filesWithIndividualRecords.add(record.testFile.toLowerCase());
+		}
+	}
+	if (filesWithIndividualRecords.size === 0) return history;
+
+	return history.filter(
+		(record) =>
+			record.testName !== AGGREGATE_TEST_NAME ||
+			!filesWithIndividualRecords.has(record.testFile.toLowerCase()),
+	);
 }
 
 function analyzeFailures(workingDir: string): TestHistoryReport {
@@ -1841,7 +2167,7 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 	};
 
 	try {
-		const history = getAllHistory(workingDir);
+		const history = selectHistoryForAnalysis(getAllHistory(workingDir));
 		if (history.length === 0) return report;
 
 		// Detect flaky tests
@@ -2404,6 +2730,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			testFiles,
 			workingDir,
 			_files.length > 0 ? _files : undefined,
+			result.testCases,
 		);
 
 		// If test failed, add failure analysis to the result message

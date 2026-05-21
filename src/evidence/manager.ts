@@ -1,4 +1,10 @@
-import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+	mkdirSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	statSync,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ZodError } from 'zod';
@@ -111,6 +117,51 @@ import { sanitizeTaskId as _sanitizeTaskId } from '../validation/task-id';
 export const sanitizeTaskId = _sanitizeTaskId;
 
 /**
+ * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
+ * of a project that already has a .swarm/ at its root.
+ * Walks up the directory tree to filesystem root looking for a parent .swarm/ directory.
+ * @throws Error if a parent directory contains .swarm/
+ */
+export function validateProjectRoot(directory: string): void {
+	let resolved: string;
+	try {
+		resolved = realpathSync(directory);
+	} catch {
+		warn(
+			`[evidence] Cannot canonicalize directory "${directory}" — failing closed`,
+		);
+		throw new Error(
+			`Cannot verify project root for "${directory}" — directory may not exist or is inaccessible`,
+		);
+	}
+	let current = resolved;
+	while (true) {
+		const parent = path.dirname(current);
+		if (parent === current) break; // reached filesystem root
+		const parentSwarm = path.join(parent, '.swarm');
+		try {
+			if (statSync(parentSwarm).isDirectory()) {
+				warn(
+					`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
+				);
+				throw new Error(
+					`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
+				);
+			}
+		} catch (error) {
+			if (
+				error instanceof Error &&
+				error.message.startsWith('Cannot write evidence')
+			) {
+				throw error;
+			}
+			// statSync failing means .swarm doesn't exist — continue walking
+		}
+		current = parent;
+	}
+}
+
+/**
  * Save evidence to a task's evidence bundle.
  * Creates new bundle if doesn't exist, appends to existing.
  * Performs atomic write via temp file + rename.
@@ -121,6 +172,9 @@ export async function saveEvidence(
 	taskId: string,
 	evidence: Evidence,
 ): Promise<EvidenceBundle> {
+	// Defense-in-depth: reject writes to subdirectories of projects that already have .swarm/
+	_internals.validateProjectRoot(directory);
+
 	// Validate task ID and resolve paths before acquiring the lock.
 	const sanitizedTaskId = sanitizeTaskId(taskId);
 	const relativePath = path.join('evidence', sanitizedTaskId, 'evidence.json');
@@ -566,8 +620,10 @@ export const _internals: {
 	wrapFlatRetrospective: typeof wrapFlatRetrospective;
 	loadEvidence: typeof loadEvidence;
 	listEvidenceTaskIds: typeof listEvidenceTaskIds;
+	validateProjectRoot: typeof validateProjectRoot;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
 	listEvidenceTaskIds,
+	validateProjectRoot,
 } as const;

@@ -1,11 +1,3 @@
-/**
- * Checkpoint artifact writer.
- * Writes SWARM_PLAN.md and SWARM_PLAN.json inside .swarm/.
- * Export-only — not a live runtime source of truth.
- * Called on: save_plan, phase completion, /swarm close.
- * NOT called on every task update.
- */
-import * as fs from 'node:fs';
 import { type Plan } from '../config/plan-schema';
 /**
  * Write SWARM_PLAN.json and SWARM_PLAN.md inside the .swarm/ directory under the project root.
@@ -34,6 +26,4 @@ export declare function importCheckpoint(directory: string, source?: string): Pr
 export declare const _internals: {
     writeCheckpoint: typeof writeCheckpoint;
     importCheckpoint: typeof importCheckpoint;
-    existsSyncForCleanup: typeof fs.existsSync;
-    unlinkSyncForCleanup: typeof fs.unlinkSync;
 };

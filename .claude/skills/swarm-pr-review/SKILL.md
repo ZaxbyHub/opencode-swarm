@@ -24,12 +24,6 @@ Determine review scope using this priority:
 3. staged changes
 4. latest commit
 
-> ⚠️ **PRE-CONDITION — Branch checkout required before Phase 2**
-> The PR branch must be checked out locally **before** dispatching any parallel explorer agents in Phase 2.
-> Explorer agents read filesystem code directly. If the branch is not checked out, they read **main branch code** and report "function does not exist" for any new or changed functions — producing invalid findings that require a full re-run of all lanes.
-> Checkout command: `git fetch origin <branch> && git checkout <branch>` (or `gh pr checkout <number>`).
-> This pre-condition is the single most important setup step for the 6-lane parallel review to produce valid results.
-
 ---
 
 ## 6-Phase Review Workflow

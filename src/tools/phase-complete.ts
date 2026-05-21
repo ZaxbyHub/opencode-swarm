@@ -2237,7 +2237,7 @@ export async function executePhaseComplete(
 	// v6.33.1: Flush debounced snapshot on phase-complete
 	await flushPendingSnapshot(dir);
 
-	// Write checkpoint artifacts under .swarm/ (non-blocking)
+	// Write root-level checkpoint artifact (non-blocking)
 	await writeCheckpoint(dir).catch(() => {});
 
 	return JSON.stringify(

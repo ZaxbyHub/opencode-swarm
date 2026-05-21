@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.27.1",
+	"version": "7.25.2",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -38,7 +38,7 @@
 	],
 	"scripts": {
 		"clean": "bun -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external bash-parser && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+		"build": "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome lint .",

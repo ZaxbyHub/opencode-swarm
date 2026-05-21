@@ -12,6 +12,7 @@ import {
 	appendTestRun,
 	getAllHistory,
 	getTestHistory,
+	_internals as historyInternals,
 } from '../../test-impact/history-store.js';
 
 const { tmpdir } = os;
@@ -32,12 +33,18 @@ function makeRecord(overrides: Partial<TestRunRecord> = {}): TestRunRecord {
 
 describe('council-fixes', () => {
 	let tempDir: string;
+	let savedValidateProjectRoot: typeof historyInternals.validateProjectRoot;
 
 	beforeEach(async () => {
+		// Disable validateProjectRoot for tests using temp dirs under os.tmpdir()
+		savedValidateProjectRoot = historyInternals.validateProjectRoot;
+		historyInternals.validateProjectRoot = () => {};
+
 		tempDir = mkdtempSync(path.join(tmpdir(), 'council-fixes-'));
 	});
 
 	afterEach(() => {
+		historyInternals.validateProjectRoot = savedValidateProjectRoot;
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 

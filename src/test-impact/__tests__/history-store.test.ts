@@ -6,6 +6,7 @@ import {
 	appendTestRun,
 	getAllHistory,
 	getTestHistory,
+	_internals as historyInternals,
 } from '../../test-impact/history-store.js';
 
 const { tmpdir } = os;
@@ -13,13 +14,21 @@ const { mkdtempSync, rmSync } = await import('node:fs');
 
 describe('history-store', () => {
 	let tempDir: string;
+	let savedValidateProjectRoot: typeof historyInternals.validateProjectRoot;
 
 	beforeEach(async () => {
+		// Most tests use temp dirs that may have parent .swarm/ (e.g. from the
+		// project's own .swarm leaking into os.tmpdir()). Disable the guard so
+		// these tests measure history-store logic, not project-root validation.
+		savedValidateProjectRoot = historyInternals.validateProjectRoot;
+		historyInternals.validateProjectRoot = () => {};
+
 		// Create a unique temp directory for each test
 		tempDir = mkdtempSync(path.join(tmpdir(), 'history-store-test-'));
 	});
 
 	afterEach(() => {
+		historyInternals.validateProjectRoot = savedValidateProjectRoot;
 		// Clean up temp directory
 		rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -338,10 +347,10 @@ describe('history-store', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// appendTestRun() pruning: keeps last 20 records per testFile
+	// appendTestRun() pruning: keeps last 20 records per (testFile, testName)
 	// -------------------------------------------------------------------------
 	describe('appendTestRun() pruning', () => {
-		test('keeps only the last 20 records per testFile', () => {
+		test('keeps only the last 20 records per testFile + testName key', () => {
 			const testFile = 'src/foo.test.ts';
 			for (let i = 0; i < 25; i++) {
 				appendTestRun(
@@ -349,7 +358,7 @@ describe('history-store', () => {
 						timestamp: new Date(Date.now() + i * 1000).toISOString(),
 						taskId: '4.1',
 						testFile,
-						testName: `run ${i}`,
+						testName: 'stable test name',
 						result: i % 2 === 0 ? 'pass' : 'fail',
 						durationMs: 10 + i,
 						changedFiles: [],
@@ -359,12 +368,12 @@ describe('history-store', () => {
 			}
 			const records = getTestHistory(testFile, tempDir);
 			expect(records.length).toBe(20);
-			// First record should be run 5 (index 5), last should be run 24
-			expect(records[0].testName).toBe('run 5');
-			expect(records[19].testName).toBe('run 24');
+			// First record should be the 6th inserted record, last should be the 25th
+			expect(records[0].durationMs).toBe(15);
+			expect(records[19].durationMs).toBe(34);
 		});
 
-		test('prunes independently per testFile', () => {
+		test('prunes independently per testFile + testName key', () => {
 			const fileA = 'src/a.test.ts';
 			const fileB = 'src/b.test.ts';
 			// Write 25 for file A
@@ -374,7 +383,7 @@ describe('history-store', () => {
 						timestamp: new Date(Date.now() + i * 1000).toISOString(),
 						taskId: '4.1',
 						testFile: fileA,
-						testName: `a run ${i}`,
+						testName: 'shared name',
 						result: 'pass',
 						durationMs: 10,
 						changedFiles: [],
@@ -389,7 +398,7 @@ describe('history-store', () => {
 						timestamp: new Date(Date.now() + i * 1000).toISOString(),
 						taskId: '4.1',
 						testFile: fileB,
-						testName: `b run ${i}`,
+						testName: 'shared name',
 						result: 'pass',
 						durationMs: 10,
 						changedFiles: [],
@@ -401,6 +410,45 @@ describe('history-store', () => {
 			const recordsB = getTestHistory(fileB, tempDir);
 			expect(recordsA.length).toBe(20);
 			expect(recordsB.length).toBe(5);
+		});
+
+		test('prunes independently for different test names in same file', () => {
+			const testFile = 'src/per-test-key.test.ts';
+			for (let i = 0; i < 25; i++) {
+				appendTestRun(
+					{
+						timestamp: new Date(Date.now() + i * 1000).toISOString(),
+						taskId: `a-${i}`,
+						testFile,
+						testName: 'alpha',
+						result: 'pass',
+						durationMs: i,
+						changedFiles: [],
+					},
+					tempDir,
+				);
+				appendTestRun(
+					{
+						timestamp: new Date(Date.now() + i * 1000 + 500).toISOString(),
+						taskId: `b-${i}`,
+						testFile,
+						testName: 'beta',
+						result: 'pass',
+						durationMs: i,
+						changedFiles: [],
+					},
+					tempDir,
+				);
+			}
+
+			const records = getTestHistory(testFile, tempDir);
+			expect(records.length).toBe(40);
+			expect(
+				records.filter((record) => record.testName === 'alpha').length,
+			).toBe(20);
+			expect(
+				records.filter((record) => record.testName === 'beta').length,
+			).toBe(20);
 		});
 
 		test('sorts pruned records by timestamp ascending (oldest first)', () => {
@@ -625,9 +673,8 @@ describe('history-store', () => {
 			);
 
 			const records = getAllHistory(tempDir);
-			// Should have 2 valid records (lines with required fields testFile/testName/result)
-			// The second line "not valid json" is skipped
-			expect(records.length).toBe(2);
+			// Only the fully valid persisted record is retained.
+			expect(records.length).toBe(1);
 		});
 
 		test('skips lines that are not objects with required fields', () => {
@@ -675,6 +722,46 @@ describe('history-store', () => {
 			expect(records.length).toBe(2);
 			expect(records[0].testName).toBe('valid 1');
 			expect(records[1].testName).toBe('valid 2');
+		});
+
+		test('skips malformed stored testName records before pruning', () => {
+			const historyPath = path.join(
+				tempDir,
+				'.swarm',
+				'cache',
+				'test-history.jsonl',
+			);
+			const histDir = path.dirname(historyPath);
+			fs.mkdirSync(histDir, { recursive: true });
+			const malformed = {
+				timestamp: new Date('2024-01-01T00:00:00Z').toISOString(),
+				taskId: '4.1',
+				testFile: 'src/poisoned.test.ts',
+				testName: 123,
+				result: 'pass',
+				durationMs: 10,
+				changedFiles: [],
+			};
+			fs.writeFileSync(historyPath, `${JSON.stringify(malformed)}\n`, 'utf-8');
+
+			// Previous code accepted the malformed row from disk, then crashed while
+			// pruning because it called testName.toLowerCase() on a number.
+			appendTestRun(
+				{
+					timestamp: new Date('2024-01-02T00:00:00Z').toISOString(),
+					taskId: '4.2',
+					testFile: 'src/poisoned.test.ts',
+					testName: 'real test',
+					result: 'pass',
+					durationMs: 20,
+					changedFiles: [],
+				},
+				tempDir,
+			);
+
+			const records = getAllHistory(tempDir);
+			expect(records.length).toBe(1);
+			expect(records[0].testName).toBe('real test');
 		});
 	});
 
@@ -736,6 +823,36 @@ describe('history-store', () => {
 			expect(records[0].testName).toBe('first');
 			expect(records[1].testName).toBe('second');
 			expect(records[1].result).toBe('fail');
+		});
+	});
+
+	describe('validateProjectRoot guard', () => {
+		test('appendTestRun throws when validateProjectRoot rejects directory', () => {
+			const savedValidate = historyInternals.validateProjectRoot;
+			afterEach(() => {
+				historyInternals.validateProjectRoot = savedValidate;
+			});
+
+			historyInternals.validateProjectRoot = () => {
+				throw new Error(
+					'Cannot write evidence in "/project/sub" — parent directory "/project" already contains a .swarm/ folder. Evidence must be written to the project root.',
+				);
+			};
+
+			expect(() =>
+				appendTestRun(
+					{
+						timestamp: new Date().toISOString(),
+						taskId: '4.1',
+						testFile: 'src/foo.test.ts',
+						testName: 'some test',
+						result: 'pass',
+						durationMs: 100,
+						changedFiles: [],
+					},
+					tempDir,
+				),
+			).toThrow('already contains a .swarm/ folder');
 		});
 	});
 });

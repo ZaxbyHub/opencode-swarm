@@ -37,6 +37,17 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established:** every `working_directory` argument must resolve to the project root. The shared helper enforces this for all six callers (`save_plan`, `completion_verify`, `check-gate-status`, `convene-council`, `declare-council-criteria`, `phase-complete`, `test-runner`). `process.cwd()` fallbacks must be removed from runtime metrics paths and replaced with explicit `ctx.directory` propagation.
 - **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
 
+### Issue #922 Phase 2 — Extended `.swarm/` containment to remaining tools
+
+- **Symptom:** five tools (`test-impact`, `mutation-test`, `diff-summary`, `update-task-status`, `declare-scope`) still contained `process.cwd()` fallbacks or lacked subdirectory containment guards, allowing `.swarm/` creation in subdirectories when those tools were invoked from non-project-root contexts.
+- **Fix applied:**
+  - `update-task-status` — added subdirectory containment guard with `realpathSync` canonicalization; removed any `process.cwd()` fallback
+  - `declare-scope` — removed `process.cwd()` fallback; throws explicit error when directory cannot be resolved to project root
+  - `mutation-test` + `diff-summary` — `resolveWorkingDirectory` replaces triple-fallback chains
+  - `test-impact` — `resolveWorkingDirectory` at tool entry; absolute-path guards in `analyzer.ts` and `history-store.ts`
+- **Invariant established:** all tools that may write runtime state under `.swarm/` must route through `resolveWorkingDirectory` (not `process.cwd()`) and enforce project-root anchoring. `realpathSync` canonicalization is required on platforms where symlinks may cause apparent project-root mismatch.
+- **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
+
 ### v6.85.1 — Multiple system messages crashing local models
 
 - **Symptom:** Qwen3.6 / Gemma require exactly one `{ role: 'system' }` message at index 0; the swarm hook appended multiple `output.system` entries, each materialized into a separate system message; local models crashed or silently degraded.

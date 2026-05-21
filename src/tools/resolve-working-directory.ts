@@ -25,7 +25,14 @@ export interface ResolveError {
 }
 
 /**
- * Resolve the effective working directory for a swarm tool.
+ * Resolves and validates a working directory against a fallback (injected project root).
+ *
+ * NOTE: This function intentionally does NOT use realpathSync for the resolved path
+ * to avoid Windows 8.3 short filename issues. Symlink-based subdirectory bypasses
+ * through this coarse filter are caught by the write-time validateProjectRoot guard
+ * in evidence/manager.ts, which DOES use realpathSync. These two functions form a
+ * defense-in-depth pair: resolveWorkingDirectory is the fast entry filter,
+ * validateProjectRoot is the authoritative canonical check at write time.
  *
  * Priority: explicit working_directory param > injected directory (from createSwarmTool).
  *

@@ -123,3 +123,36 @@ export declare function runConfigDoctorWithFixes(directory: string, config: Plug
     updatedConfigPath: string | null;
     artifactPath: string | null;
 }>;
+/**
+ * A stray .swarm directory found below the project root.
+ * These are typically created by bugs in prior versions (see Issue #922).
+ */
+export interface StraySwarmFinding {
+    /** Relative path from project root (forward-slash normalized) */
+    path: string;
+    /** Absolute path on disk */
+    absolutePath: string;
+    /** Contents summary (up to 20 entries) */
+    contents: string[];
+    /** Total number of entries in the directory */
+    totalEntries: number;
+}
+/**
+ * Detect stray .swarm directories in project subdirectories.
+ * These are .swarm/ directories that exist below the project root,
+ * typically created by bugs in prior versions (see Issue #922).
+ *
+ * Skips: node_modules/, .git/, dist/, .cache/, .next/, coverage/
+ * and common tool/build output directories.
+ */
+export declare function detectStraySwarmDirs(projectRoot: string): StraySwarmFinding[];
+/**
+ * Remove a stray .swarm directory.
+ * NEVER removes the root .swarm/ directory.
+ *
+ * @returns `{ success, message }` indicating outcome
+ */
+export declare function removeStraySwarmDir(projectRoot: string, strayPath: string): {
+    success: boolean;
+    message: string;
+};

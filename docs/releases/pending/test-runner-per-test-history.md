@@ -1,0 +1,1 @@
+`test_runner` now records per-test history for supported structured reporters while retaining aggregate history records for compatibility. Vitest JSON output is written under `.swarm/cache/test-runner-vitest.json`; Bun keeps its standard `bun test` command on supported Bun versions instead of using an unsupported JSON reporter flag.

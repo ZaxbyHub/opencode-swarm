@@ -354,38 +354,6 @@ function getSeedTaskId(session: AgentSessionState): string | null {
 	return session.currentTaskId ?? session.lastCoderDelegationTaskId;
 }
 
-/**
- * Returns all task IDs from session.taskWorkflowStates in eligible states for
- * evidence recording. Includes post-advancement states because state machine
- * advancement runs BEFORE evidence recording in both the stored-args and
- * fallback paths.
- *
- * Batch-review contract (#929): one reviewer/test_engineer delegation covers
- * all eligible tasks in the session, matching the state machine's batch
- * advancement behavior. Evidence must be recorded for the same set.
- */
-function getEligibleTaskIdsForEvidence(session: AgentSessionState): string[] {
-	if (
-		!session.taskWorkflowStates ||
-		!(session.taskWorkflowStates instanceof Map)
-	) {
-		return [];
-	}
-	const eligible: string[] = [];
-	const eligibleStates = new Set([
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-	]);
-	for (const [taskId, state] of session.taskWorkflowStates) {
-		if (eligibleStates.has(state)) {
-			eligible.push(taskId);
-		}
-	}
-	return eligible;
-}
-
 const ACTIVE_PARALLEL_TASK_STATES = new Set([
 	'coder_delegated',
 	'pre_check_passed',
@@ -1022,77 +990,44 @@ export function createDelegationGateHook(
 			// v6.33.7: Entire block wrapped in try-catch — getEvidenceTaskId can
 			// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
 			// escaped outside the evidence try-catch and propagated to safeHook.
-			// #929: Record for ALL eligible tasks, not just one. Mirrors state machine
-			// advancement which advances all eligible tasks when a gate agent completes.
-			// Uses Promise.allSettled for parallel per-task writes (independent lock files).
 			if (typeof subagentType === 'string') {
 				try {
 					const rawTaskId = directArgs?.task_id;
-					const turbo = hasActiveTurboMode(input.sessionID);
-					const gateAgents = [
-						'reviewer',
-						'test_engineer',
-						'docs',
-						'designer',
-						'critic',
-						'explorer',
-						'sme',
-					];
-					const targetAgentForEvidence = stripKnownSwarmPrefix(subagentType);
-
-					// When task_id is explicit and valid, record for that task only.
-					// When absent, record for all eligible tasks (batch-review contract #929).
-					let taskIds: string[];
-					if (
+					const evidenceTaskId =
 						typeof rawTaskId === 'string' &&
 						rawTaskId.length <= 20 &&
 						isStrictTaskId(rawTaskId.trim())
-					) {
-						taskIds = [rawTaskId.trim()];
-					} else {
-						const allEligible = getEligibleTaskIdsForEvidence(session);
-						if (allEligible.length > 0) {
-							taskIds = allEligible;
-						} else {
-							const fallback = await getEvidenceTaskId(session, directory);
-							taskIds = fallback ? [fallback] : [];
-						}
-					}
-
-					if (taskIds.length > 0) {
-						let settled: PromiseSettledResult<void>[];
+							? rawTaskId.trim()
+							: await getEvidenceTaskId(session, directory);
+					if (evidenceTaskId) {
+						const turbo = hasActiveTurboMode(input.sessionID);
+						const gateAgents = [
+							'reviewer',
+							'test_engineer',
+							'docs',
+							'designer',
+							'critic',
+							'explorer',
+							'sme',
+						];
+						const targetAgentForEvidence = stripKnownSwarmPrefix(subagentType);
 						if (gateAgents.includes(targetAgentForEvidence)) {
 							const { recordGateEvidence } = await import('../gate-evidence');
-							settled = await Promise.allSettled(
-								taskIds.map((tid) =>
-									recordGateEvidence(
-										directory,
-										tid,
-										targetAgentForEvidence,
-										input.sessionID,
-										turbo,
-									),
-								),
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								targetAgentForEvidence,
+								input.sessionID,
+								turbo,
 							);
 						} else {
 							const { recordAgentDispatch } = await import('../gate-evidence');
-							settled = await Promise.allSettled(
-								taskIds.map((tid) =>
-									recordAgentDispatch(
-										directory,
-										tid,
-										targetAgentForEvidence,
-										turbo,
-									),
-								),
+							await recordAgentDispatch(
+								directory,
+								evidenceTaskId,
+								targetAgentForEvidence,
+								turbo,
 							);
-						}
-						for (const r of settled) {
-							if (r.status === 'rejected') {
-								console.warn(
-									`[delegation-gate] evidence recording failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-								);
-							}
 						}
 					}
 				} catch (err) {
@@ -1253,60 +1188,36 @@ export function createDelegationGateHook(
 				}
 
 				// Record gate evidence for delegation-chain fallback path
-				// #929: Record for ALL eligible tasks (same fix as stored-args path).
+				// v6.33.7: Entire block wrapped in try-catch (same fix as stored-args path)
 				try {
 					const rawTaskId = directArgs?.task_id;
-					let taskIds: string[];
-					if (
+					const evidenceTaskId =
 						typeof rawTaskId === 'string' &&
 						rawTaskId.length <= 20 &&
 						isStrictTaskId(rawTaskId.trim())
-					) {
-						taskIds = [rawTaskId.trim()];
-					} else {
-						const allEligible = getEligibleTaskIdsForEvidence(session);
-						if (allEligible.length > 0) {
-							taskIds = allEligible;
-						} else {
-							const fallback = await getEvidenceTaskId(session, directory);
-							taskIds = fallback ? [fallback] : [];
-						}
-					}
-					if (taskIds.length > 0) {
+							? rawTaskId.trim()
+							: await getEvidenceTaskId(session, directory);
+					if (evidenceTaskId) {
 						const turbo = hasActiveTurboMode(input.sessionID);
-						const promises: Promise<void>[] = [];
-						const { recordGateEvidence } = await import('../gate-evidence');
-						for (const tid of taskIds) {
-							if (hasReviewer) {
-								promises.push(
-									recordGateEvidence(
-										directory,
-										tid,
-										'reviewer',
-										input.sessionID,
-										turbo,
-									),
-								);
-							}
-							if (hasTestEngineer) {
-								promises.push(
-									recordGateEvidence(
-										directory,
-										tid,
-										'test_engineer',
-										input.sessionID,
-										turbo,
-									),
-								);
-							}
+						if (hasReviewer) {
+							const { recordGateEvidence } = await import('../gate-evidence');
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								'reviewer',
+								input.sessionID,
+								turbo,
+							);
 						}
-						const settled = await Promise.allSettled(promises);
-						for (const r of settled) {
-							if (r.status === 'rejected') {
-								console.warn(
-									`[delegation-gate] fallback evidence recording failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-								);
-							}
+						if (hasTestEngineer) {
+							const { recordGateEvidence } = await import('../gate-evidence');
+							await recordGateEvidence(
+								directory,
+								evidenceTaskId,
+								'test_engineer',
+								input.sessionID,
+								turbo,
+							);
 						}
 					}
 				} catch (err) {

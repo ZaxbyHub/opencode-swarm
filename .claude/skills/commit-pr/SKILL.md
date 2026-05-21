@@ -180,25 +180,6 @@ git worktree remove /tmp/repro-check
 
 If the failure reproduces on `main`, document it under `## Pre-existing failures`. Do not silently inherit it.
 
-#### dist-check version mismatch
-
-If `dist-check` fails but your changes don't touch `dist/`, the failure may be a **pre-existing version mismatch** on `origin/main` between the committed `dist/` artifacts and `package.json` version. This is common after release-please bumps the version but the dist rebuild hasn't been committed yet.
-
-**Diagnosis:**
-```bash
-git worktree add /tmp/dist-check origin/main
-cd /tmp/dist-check && bun run build
-git diff -- dist/   # Non-empty output = pre-existing mismatch
-git worktree remove --force /tmp/dist-check
-```
-
-**Resolution:**
-1. Run `bun run build` inside the worktree (or a clean clone of `main`), then `git diff --exit-code -- dist/` to confirm the rebuild is clean
-2. Commit the rebuilt dist directly to `main` (or open a separate fix PR)
-3. Rebase your PR branch onto updated `main`
-
-Do not carry this into your PR as a new failure — it is a pre-existing infrastructure drift.
-
 ## Step 4 - Workflow changes
 
 If any `.github/workflows/*.yml` file changed, every third-party `uses:` must be pinned to a full 40-character SHA.

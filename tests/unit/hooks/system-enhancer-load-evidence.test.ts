@@ -33,6 +33,7 @@ vi.mock('../../../src/evidence/manager.js', () => ({
 	isBuildEvidence: vi.fn(() => false),
 	isQualityBudgetEvidence: vi.fn(() => false),
 	isSecretscanEvidence: vi.fn(() => false),
+	validateProjectRoot: vi.fn(),
 	VALID_EVIDENCE_TYPES: [],
 }));
 

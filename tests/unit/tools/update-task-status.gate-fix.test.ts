@@ -3,9 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	readTaskEvidence,
 	readTaskEvidenceRaw,
-	recordGateEvidence,
 	type TaskEvidence,
 } from '../../../src/gate-evidence';
 import { swarmState } from '../../../src/state';
@@ -192,178 +190,6 @@ describe('readTaskEvidenceRaw', () => {
 		expect(result).not.toBeNull();
 		expect(result!.required_gates).toEqual(['reviewer']);
 		expect(Object.keys(result!.gates)).toHaveLength(3);
-	});
-
-	test('9. legacy string gate values are preserved after recordGateEvidence adds new gate', async () => {
-		// Create a legacy evidence file with string gate values (e.g., reviewer: "APPROVED")
-		const legacyEvidence = {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: 'APPROVED',
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		// readTaskEvidenceRaw should be able to read the legacy format
-		const initial = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(initial).not.toBeNull();
-		expect(initial!.gates['reviewer']).toBeDefined();
-		expect(initial!.gates['reviewer'].agent).toBe('reviewer');
-
-		// Record a new gate - this should preserve the legacy reviewer gate
-		await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'session-2');
-
-		// Read again and verify both gates are present
-		const updated = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(updated).not.toBeNull();
-		expect(updated!.gates['reviewer']).toBeDefined();
-		expect(updated!.gates['reviewer'].agent).toBe('reviewer');
-		expect(updated!.gates['test_engineer']).toBeDefined();
-		expect(updated!.gates['test_engineer'].agent).toBe('test_engineer');
-	});
-
-	test('10. legacy evidence missing required_gates still normalizes string gates', () => {
-		// Gate normalization runs even when required_gates is absent
-		// This was a bug: before the fix, gates with string values were NOT normalized
-		// when required_gates was missing
-		const legacyEvidence = {
-			taskId: '1.1',
-			// required_gates is MISSING
-			gates: {
-				reviewer: 'APPROVED',
-				diff: { verdict: 'CONCERNS' },
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		const result = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(result).not.toBeNull();
-		// String gate value should be normalized to object with agent, sessionId, timestamp
-		expect(result!.gates['reviewer']).toBeDefined();
-		expect(result!.gates['reviewer'].agent).toBe('reviewer');
-		expect(result!.gates['reviewer'].sessionId).toBe('legacy-manual');
-		expect(result!.gates['reviewer'].verdict).toBe('APPROVED');
-		// Object gate value should also be normalized
-		expect(result!.gates['diff']).toBeDefined();
-		expect(result!.gates['diff'].agent).toBe('diff');
-		expect(result!.gates['diff'].verdict).toBe('CONCERNS');
-	});
-
-	test('11. taskId fallback returns empty string when both taskId and task_id are absent', () => {
-		// Bug fix: before the fix, falling back to record.taskId could yield undefined
-		const legacyEvidence = {
-			// taskId is MISSING
-			// task_id is also MISSING
-			required_gates: ['reviewer'],
-			gates: {
-				reviewer: {
-					sessionId: 'session-1',
-					timestamp: '2025-01-01T00:00:00.000Z',
-					agent: 'reviewer',
-				},
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		const result = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(result).not.toBeNull();
-		// taskId should be '' not undefined
-		expect(result!.taskId).toBe('');
-	});
-
-	test('12. taskId uses task_id (snake_case) when taskId is absent', () => {
-		const legacyEvidence = {
-			task_id: '1.1', // snake_case variant
-			required_gates: ['reviewer'],
-			gates: {
-				reviewer: {
-					sessionId: 'session-1',
-					timestamp: '2025-01-01T00:00:00.000Z',
-					agent: 'reviewer',
-				},
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		const result = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(result).not.toBeNull();
-		expect(result!.taskId).toBe('1.1');
-	});
-
-	test('13. readTaskEvidence (async) and readTaskEvidenceRaw produce identical normalized output', async () => {
-		// Both read paths now share parseTaskEvidence helper
-		const legacyEvidence = {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: 'APPROVED',
-				test_engineer: {
-					sessionId: 'session-1',
-					timestamp: '2025-01-01T00:00:00.000Z',
-					agent: 'test_engineer',
-				},
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		const rawResult = readTaskEvidenceRaw(tempDir, '1.1');
-		const asyncResult = await readTaskEvidence(tempDir, '1.1');
-
-		expect(rawResult).not.toBeNull();
-		expect(asyncResult).not.toBeNull();
-		expect(rawResult!.taskId).toBe(asyncResult!.taskId);
-		expect(rawResult!.required_gates).toEqual(asyncResult!.required_gates);
-		expect(Object.keys(rawResult!.gates)).toEqual(
-			Object.keys(asyncResult!.gates),
-		);
-		// Both should have normalized the string gate to an object
-		expect(rawResult!.gates['reviewer'].agent).toBe('reviewer');
-		expect(asyncResult!.gates['reviewer'].agent).toBe('reviewer');
-	});
-
-	test('14. recordGateEvidence preserves legacy gates with string values when adding new gates', async () => {
-		// Legacy evidence with string gate values should be preserved when recordGateEvidence runs
-		const legacyEvidence = {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer', 'diff'],
-			gates: {
-				reviewer: 'APPROVED',
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(legacyEvidence),
-		);
-
-		// Record test_engineer gate
-		await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'session-2');
-
-		const result = readTaskEvidenceRaw(tempDir, '1.1');
-		expect(result).not.toBeNull();
-		// reviewer was a string 'APPROVED' - it should now be normalized to an object
-		expect(result!.gates['reviewer']).toBeDefined();
-		expect(result!.gates['reviewer'].agent).toBe('reviewer');
-		// test_engineer was just added
-		expect(result!.gates['test_engineer']).toBeDefined();
-		expect(result!.gates['test_engineer'].agent).toBe('test_engineer');
-		// diff was in required_gates but not in gates - should NOT be added
-		expect(result!.gates['diff']).toBeUndefined();
 	});
 });
 
@@ -682,23 +508,6 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 		expect(result.blocked).toBe(true);
 		expect(result.reason).toContain('diff');
 		expect(result.reason).toContain('missing required gates');
-	});
-
-	test('12. legacy/manual gate entries are normalized instead of treated as corrupt', () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify({
-				taskId: '1.1',
-				required_gates: ['reviewer', 'test_engineer'],
-				gates: {
-					reviewer: 'APPROVED',
-					test_engineer: { verdict: 'PASS' },
-				},
-			}),
-		);
-
-		const result = checkReviewerGate('1.1', tempDir);
-		expect(result.blocked).toBe(false);
 	});
 });
 
