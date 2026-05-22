@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit PR"
+  short_description: "Publish opencode-swarm changes safely"
+  default_prompt: "Use $commit-pr to commit these changes, push the branch, and prepare the PR with the required invariant audit."
