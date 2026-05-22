@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research First"
+  short_description: "Verify facts before planning"
+  default_prompt: "Use $research-first to investigate this before proposing an implementation plan."
