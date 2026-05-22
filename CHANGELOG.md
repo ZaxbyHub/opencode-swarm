@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.27.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.1...v7.27.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* **gates:** session-scoped cross-task isolation and batched test history ([#940](https://github.com/zaxbysauce/opencode-swarm/issues/940)) ([5a8c22c](https://github.com/zaxbysauce/opencode-swarm/commit/5a8c22c7f3837556bc2c76050be32779db9fe464))
+* **guardrails:** scope-aware destructive command guard for coder declared scope ([#964](https://github.com/zaxbysauce/opencode-swarm/issues/964)) ([c142467](https://github.com/zaxbysauce/opencode-swarm/commit/c1424670380f6b338fe2c24db6771601540a6bd7))
+
 ## [7.26.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.25.2...v7.26.0) (2026-05-22)
 
 
