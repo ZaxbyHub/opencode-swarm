@@ -94,6 +94,26 @@ Launch all 6 lanes in parallel in a **single message with multiple Agent tool ca
 
 Explorers optimize for **recall and speed** — over-reporting is expected. Do not interpret explorer output as final findings.
 
+Determine the affected test suite using the `test_impact` tool (maps changed files to
+consumers) or `test_runner` with `scope: 'impact'` (auto-detects impacted tests from the
+diff). Avoid `scope: 'all'` or broad `scope: 'graph'` — these can trigger `scope_exceeded`
+and stall the review.
+
+Run the affected test suite:
+```bash
+bun test tests/unit/path/to/affected.test.ts --timeout 30000
+```
+This confirms candidate regressions are real (not static-analysis noise) and surfaces
+behavioral issues that code review alone cannot detect. Example: PR #959 had 15 regressions
+that only test execution revealed.
+
+**If tests fail:** classify each failure as REGRESSION (introduced by the PR) or PRE_EXISTING
+(on the base branch). Route regression failures to the coder for investigation alongside
+other confirmed findings.
+
+**Blocking gate:** If regression count > 0 after investigation, BLOCK approval.
+The review must not proceed to final output until all PR-introduced regressions are resolved.
+
 ---
 
 ### Phase 3: Independent Reviewer Confirmation
@@ -240,7 +260,14 @@ If **any** answer is yes and unaccounted for in the finding, the finding is down
 Before writing the final output, you MUST print this checklist to stdout with filled values.
 Every blank field = gate not run = final output is INVALID.
 
+Test execution is a mandatory prerequisite (see Phase 2): run the affected test suite in
+parallel with explorer lanes to confirm candidate regressions are real.
+
 ```
+[TEST EXECUTION] tests run: ___ (command used)
+[TEST EXECUTION] result: ___ (N pass, N fail)
+[TEST EXECUTION] regression failures (PR-introduced): ___ (count)
+[TEST EXECUTION] pre-existing failures (base branch): ___ (count)
 [VALIDATION] reviewer dispatched: ___ (agent type, task description)
 [VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
 [VALIDATION] critic dispatched: ___ (agent type, task description) OR "SKIPPED — no reviewer-confirmed HIGH or borderline-confidence findings"
