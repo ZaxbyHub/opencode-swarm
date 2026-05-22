@@ -227,12 +227,15 @@ describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 			'npx',
 			'vitest',
 			'run',
+			'--reporter=json',
+			'--outputFile',
+			'.swarm/cache/test-runner-vitest.json',
 			'--coverage',
 			'src/foo.test.ts',
 		]);
 	});
 
-	test('bun without coverage in scope=all drops files', async () => {
+	test('bun without coverage in scope=all drops files and avoids unsupported JSON reporter', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, 'package.json'),
 			JSON.stringify({ scripts: { test: 'bun test' } }),
@@ -244,6 +247,7 @@ describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 			false,
 			tempDir,
 		);
+		// Bun 1.3.x supports junit/dots reporters, not --reporter=json.
 		expect(cmd).toEqual(['bun', 'test']);
 	});
 

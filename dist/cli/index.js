@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.27.0",
+    version: "7.26.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -90,7 +90,7 @@ var init_package = __esm(() => {
     ],
     scripts: {
       clean: `bun -e "require('fs').rmSync('dist',{recursive:true,force:true})"`,
-      build: "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external bash-parser && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+      build: "bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
       typecheck: "tsc --noEmit",
       test: "bun test",
       lint: "biome lint .",
@@ -19821,13 +19821,47 @@ var init_task_id = __esm(() => {
 });
 
 // src/evidence/manager.ts
-import { mkdirSync as mkdirSync3, readdirSync as readdirSync3, rmSync, statSync as statSync4 } from "fs";
+import {
+  mkdirSync as mkdirSync3,
+  readdirSync as readdirSync3,
+  realpathSync,
+  rmSync,
+  statSync as statSync4
+} from "fs";
 import * as fs4 from "fs/promises";
 import * as path7 from "path";
 function isValidEvidenceType(type) {
   return VALID_EVIDENCE_TYPES.includes(type);
 }
+function validateProjectRoot(directory) {
+  let resolved;
+  try {
+    resolved = realpathSync(directory);
+  } catch {
+    warn(`[evidence] Cannot canonicalize directory "${directory}" \u2014 failing closed`);
+    throw new Error(`Cannot verify project root for "${directory}" \u2014 directory may not exist or is inaccessible`);
+  }
+  let current = resolved;
+  while (true) {
+    const parent = path7.dirname(current);
+    if (parent === current)
+      break;
+    const parentSwarm = path7.join(parent, ".swarm");
+    try {
+      if (statSync4(parentSwarm).isDirectory()) {
+        warn(`[evidence] Rejecting write to subdirectory "${resolved}" \u2014 parent "${parent}" already contains .swarm/`);
+        throw new Error(`Cannot write evidence in "${resolved}" \u2014 parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`);
+      }
+    } catch (error49) {
+      if (error49 instanceof Error && error49.message.startsWith("Cannot write evidence")) {
+        throw error49;
+      }
+    }
+    current = parent;
+  }
+}
 async function saveEvidence(directory, taskId, evidence) {
+  _internals5.validateProjectRoot(directory);
   const sanitizedTaskId = sanitizeTaskId2(taskId);
   const relativePath = path7.join("evidence", sanitizedTaskId, "evidence.json");
   validateSwarmPath(directory, relativePath);
@@ -20092,7 +20126,8 @@ var init_manager2 = __esm(() => {
   _internals5 = {
     wrapFlatRetrospective,
     loadEvidence,
-    listEvidenceTaskIds
+    listEvidenceTaskIds,
+    validateProjectRoot
   };
 });
 
@@ -40020,7 +40055,9 @@ __export(exports_config_doctor, {
   runConfigDoctorWithFixes: () => runConfigDoctorWithFixes,
   runConfigDoctor: () => runConfigDoctor,
   restoreFromBackup: () => restoreFromBackup,
+  removeStraySwarmDir: () => removeStraySwarmDir,
   getConfigPaths: () => getConfigPaths,
+  detectStraySwarmDirs: () => detectStraySwarmDirs,
   createConfigBackup: () => createConfigBackup,
   applySafeAutoFixes: () => applySafeAutoFixes
 });
@@ -40635,6 +40672,114 @@ async function runConfigDoctorWithFixes(directory, config3, autoFix = false) {
     updatedConfigPath,
     artifactPath
   };
+}
+function detectStraySwarmDirs(projectRoot) {
+  const findings = [];
+  const SKIP_DIRS = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    ".cache",
+    ".next",
+    "coverage",
+    ".turbo",
+    ".vercel",
+    ".terraform",
+    "__pycache__",
+    ".tox"
+  ]);
+  const MAX_DEPTH = 10;
+  const MAX_CONTENTS_ENTRIES = 20;
+  function walk(dir, depth) {
+    if (depth > MAX_DEPTH)
+      return;
+    let entries;
+    try {
+      entries = fs8.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory())
+        continue;
+      const name = entry.name;
+      const fullPath = path23.join(dir, name);
+      if (SKIP_DIRS.has(name))
+        continue;
+      const gitPath = path23.join(fullPath, ".git");
+      try {
+        const gitStat = fs8.statSync(gitPath);
+        if (gitStat.isFile() || gitStat.isDirectory())
+          continue;
+      } catch {}
+      if (name === ".swarm") {
+        const parentDir = path23.dirname(fullPath);
+        if (parentDir === projectRoot)
+          continue;
+        let contents = [];
+        try {
+          contents = fs8.readdirSync(fullPath);
+        } catch {
+          contents = ["<unreadable>"];
+        }
+        findings.push({
+          path: path23.relative(projectRoot, fullPath).replace(/\\/g, "/"),
+          absolutePath: fullPath,
+          contents: contents.slice(0, MAX_CONTENTS_ENTRIES),
+          totalEntries: contents.length
+        });
+        continue;
+      }
+      walk(fullPath, depth + 1);
+    }
+  }
+  walk(projectRoot, 0);
+  return findings;
+}
+function removeStraySwarmDir(projectRoot, strayPath) {
+  let canonicalRoot;
+  let canonicalStray;
+  try {
+    canonicalRoot = fs8.realpathSync(projectRoot);
+    canonicalStray = fs8.realpathSync(path23.isAbsolute(strayPath) ? strayPath : path23.resolve(projectRoot, strayPath));
+  } catch (err) {
+    return {
+      success: false,
+      message: `Failed to resolve paths: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
+  const rootSwarm = path23.join(canonicalRoot, ".swarm");
+  if (canonicalStray === rootSwarm || canonicalStray === canonicalRoot) {
+    return {
+      success: false,
+      message: "Refusing to remove root .swarm/ directory"
+    };
+  }
+  if (!canonicalStray.startsWith(canonicalRoot + path23.sep)) {
+    return {
+      success: false,
+      message: "Path is outside project root \u2014 refusing to remove"
+    };
+  }
+  const normalizedStray = canonicalStray.replace(/\\/g, "/");
+  if (!normalizedStray.endsWith("/.swarm")) {
+    return {
+      success: false,
+      message: "Path is not a .swarm directory \u2014 refusing to remove"
+    };
+  }
+  try {
+    fs8.rmSync(canonicalStray, { recursive: true, force: true });
+    return {
+      success: true,
+      message: `Removed stray .swarm directory: ${canonicalStray}`
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: `Failed to remove: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
 }
 var VALID_CONFIG_PATTERNS, DANGEROUS_PATH_SEGMENTS;
 var init_config_doctor = __esm(() => {
@@ -42323,12 +42468,62 @@ async function handleDoctorCommand(directory, args) {
   const enableAutoFix = args.includes("--fix") || args.includes("-f");
   const config3 = loadPluginConfig(directory);
   const result = runConfigDoctor(config3, directory);
+  let output;
   if (enableAutoFix && result.hasAutoFixableIssues) {
     const { runConfigDoctorWithFixes: runConfigDoctorWithFixes2 } = await Promise.resolve().then(() => (init_config_doctor(), exports_config_doctor));
     const fixResult = await runConfigDoctorWithFixes2(directory, config3, true);
-    return formatDoctorMarkdown(fixResult.result);
+    output = formatDoctorMarkdown(fixResult.result);
+  } else {
+    output = formatDoctorMarkdown(result);
   }
-  return formatDoctorMarkdown(result);
+  const strayDirs = detectStraySwarmDirs(directory);
+  if (strayDirs.length > 0) {
+    if (enableAutoFix) {
+      let fixOutput = `
+---
+
+## Stray .swarm Directories
+
+`;
+      let removed = 0;
+      let failed = 0;
+      for (const finding of strayDirs) {
+        const cleanupResult = removeStraySwarmDir(directory, finding.path);
+        if (cleanupResult.success) {
+          removed++;
+        } else {
+          failed++;
+          fixOutput += `- \`${finding.path}\`: ${cleanupResult.message}
+`;
+        }
+      }
+      fixOutput += `
+Cleaned up ${removed} stray director${removed === 1 ? "y" : "ies"}.`;
+      if (failed > 0) {
+        fixOutput += ` ${failed} could not be removed.`;
+      }
+      output += fixOutput;
+    } else {
+      output += `
+---
+
+## Stray .swarm Directories
+
+`;
+      output += `Found ${strayDirs.length} stray .swarm director${strayDirs.length === 1 ? "y" : "ies"} in subdirectories:
+
+`;
+      for (const finding of strayDirs) {
+        const contentsPreview = finding.contents.length > 5 ? `${finding.contents.slice(0, 5).join(", ")}, ...` : finding.contents.join(", ");
+        output += `- \`${finding.path}\` (${finding.totalEntries} entries: ${contentsPreview})
+`;
+      }
+      output += `
+These are likely from a prior bug (Issue #922). `;
+      output += "Re-run with `--fix` to auto-clean.\n";
+    }
+  }
+  return output;
 }
 async function handleDoctorToolsCommand(directory, _args) {
   const result = runToolDoctor(directory);
@@ -46086,7 +46281,14 @@ function defaultBuildTestCommand(profile, framework, files, dir = ".", opts = {}
       return args;
     }
     case "vitest": {
-      const args = ["npx", "vitest", "run"];
+      const args = [
+        "npx",
+        "vitest",
+        "run",
+        "--reporter=json",
+        "--outputFile",
+        ".swarm/cache/test-runner-vitest.json"
+      ];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0)
@@ -46094,7 +46296,7 @@ function defaultBuildTestCommand(profile, framework, files, dir = ".", opts = {}
       return args;
     }
     case "jest": {
-      const args = ["npx", "jest"];
+      const args = ["npx", "jest", "--json"];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0)
@@ -46979,6 +47181,10 @@ async function loadImpactMap(cwd, options) {
   return _internals22.buildImpactMap(cwd);
 }
 async function saveImpactMap(cwd, impactMap) {
+  if (!path34.isAbsolute(cwd)) {
+    throw new Error(`saveImpactMap requires an absolute project root path, got: "${cwd}"`);
+  }
+  _internals22.validateProjectRoot(cwd);
   const cacheDir2 = path34.join(cwd, ".swarm", "cache");
   const cachePath = path34.join(cacheDir2, "impact-map.json");
   if (!fs17.existsSync(cacheDir2)) {
@@ -47071,6 +47277,7 @@ async function analyzeImpact(changedFiles, cwd, budget) {
 }
 var IMPORT_REGEX_ES, IMPORT_REGEX_REQUIRE, IMPORT_REGEX_REEXPORT, TS_EXTENSIONS, PYTHON_EXTENSIONS, GO_EXTENSIONS, EXTENSIONS_TO_TRY, goModuleCache, _internals22;
 var init_analyzer = __esm(() => {
+  init_manager2();
   init_go();
   init_python();
   IMPORT_REGEX_ES = /import\s+[\s\S]*?\s+from\s+['"]([^'"]+)['"]/g;
@@ -47082,6 +47289,7 @@ var init_analyzer = __esm(() => {
   EXTENSIONS_TO_TRY = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
   goModuleCache = new Map;
   _internals22 = {
+    validateProjectRoot,
     normalizePath,
     isCacheStale,
     resolveRelativeImport,
@@ -47135,31 +47343,10 @@ function stringHash(str) {
   h2 ^= Math.imul(h1 ^ h1 >>> 13, 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
-function isInfrastructureFailure(currentResult) {
-  const errorMessage = currentResult.errorMessage || "";
-  const stackPrefix = currentResult.stackPrefix || "";
-  if (/\bassertionerror\b/i.test(errorMessage)) {
-    return false;
-  }
-  const combinedText = `${errorMessage}
-${stackPrefix}`;
-  return INFRASTRUCTURE_FAILURE_PATTERNS.some((pattern) => pattern.test(combinedText));
-}
 function classifyFailure(currentResult, history) {
   const normalizedFile = currentResult.testFile.toLowerCase();
   const normalizedName = currentResult.testName.toLowerCase();
   const testHistory = history.filter((r) => r.testFile.toLowerCase() === normalizedFile && r.testName.toLowerCase() === normalizedName).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  if (isInfrastructureFailure(currentResult)) {
-    return {
-      testFile: currentResult.testFile,
-      testName: currentResult.testName,
-      classification: "infrastructure_failure",
-      errorMessage: currentResult.errorMessage,
-      stackPrefix: currentResult.stackPrefix,
-      durationMs: currentResult.durationMs,
-      confidence: computeConfidence2(testHistory.length)
-    };
-  }
   const lastThree = testHistory.slice(0, 3);
   const lastTen = testHistory.slice(0, 10);
   const normalizedTestFile = currentResult.testFile.toLowerCase();
@@ -47259,20 +47446,6 @@ function classifyAndCluster(testResults, history) {
   const clusters = clusterFailures(classified);
   return { classified, clusters };
 }
-var MAX_INFRA_CONTEXT_CHARS = 80, INFRASTRUCTURE_FAILURE_PATTERNS;
-var init_failure_classifier = __esm(() => {
-  INFRASTRUCTURE_FAILURE_PATTERNS = [
-    /\boutofmemoryerror\b/i,
-    /(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:out of memory|oom|by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
-    /(?:^|\n)\s*etimedout\b/i,
-    new RegExp(`\\b(?:connect|connection|request|socket|network)\\b[^\\n]{0,${MAX_INFRA_CONTEXT_CHARS}}\\betimedout\\b`, "i"),
-    /(?:^|\n)\s*econnrefused\b/i,
-    new RegExp(`\\b(?:connect|connection|socket)\\b[^\\n]{0,${MAX_INFRA_CONTEXT_CHARS}}\\beconnrefused\\b`, "i"),
-    /(?:^|\n)\s*enotfound\b/i,
-    new RegExp(`\\b(?:getaddrinfo|dns|lookup)\\b[^\\n]{0,${MAX_INFRA_CONTEXT_CHARS}}\\benotfound\\b`, "i"),
-    /\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*137\b/i
-  ];
-});
 
 // src/test-impact/flaky-detector.ts
 function detectFlakyTests(allHistory) {
@@ -47340,7 +47513,13 @@ var FLAKY_THRESHOLD = 0.3, MIN_RUNS_FOR_QUARANTINE = 5, MAX_HISTORY_RUNS = 20;
 import fs18 from "fs";
 import path35 from "path";
 function getHistoryPath(workingDir) {
-  return path35.join(workingDir || process.cwd(), ".swarm", "cache", "test-history.jsonl");
+  if (!workingDir) {
+    throw new Error("getHistoryPath requires a working directory \u2014 project root must be provided by the caller");
+  }
+  if (!path35.isAbsolute(workingDir)) {
+    throw new Error(`getHistoryPath requires an absolute project root path, got: "${workingDir}"`);
+  }
+  return path35.join(workingDir, ".swarm", "cache", "test-history.jsonl");
 }
 function sanitizeErrorMessage(errorMessage) {
   if (errorMessage === undefined) {
@@ -47364,55 +47543,96 @@ function sanitizeChangedFiles(changedFiles) {
   const validFiles = changedFiles.filter((f) => typeof f === "string" && f.length > 0 && !DANGEROUS_PROPERTY_NAMES.has(f));
   return validFiles.slice(0, MAX_CHANGED_FILES);
 }
-function appendTestRun(record3, workingDir) {
+function isTestRunResult(value) {
+  return value === "pass" || value === "fail" || value === "skip";
+}
+function parseStoredRecord(value) {
+  if (typeof value !== "object" || value === null)
+    return null;
+  const record3 = value;
   if (typeof record3.testFile !== "string" || record3.testFile.length === 0) {
-    throw new TypeError("testFile must be a non-empty string");
+    return null;
   }
   if (typeof record3.testName !== "string" || record3.testName.length === 0) {
-    throw new TypeError("testName must be a non-empty string");
+    return null;
   }
   if (typeof record3.taskId !== "string" || record3.taskId.length === 0) {
-    throw new TypeError("taskId must be a non-empty string");
+    return null;
   }
-  if (record3.result !== "pass" && record3.result !== "fail" && record3.result !== "skip") {
-    throw new TypeError('result must be "pass", "fail", or "skip"');
-  }
+  if (!isTestRunResult(record3.result))
+    return null;
   if (typeof record3.durationMs !== "number" || !Number.isFinite(record3.durationMs)) {
-    throw new TypeError("durationMs must be a finite number");
+    return null;
   }
-  if (record3.timestamp !== undefined && Number.isNaN(Date.parse(record3.timestamp))) {
-    throw new TypeError("timestamp must be a valid ISO 8601 string");
+  if (typeof record3.timestamp !== "string" || Number.isNaN(Date.parse(record3.timestamp))) {
+    return null;
   }
-  if (record3.changedFiles !== undefined && !Array.isArray(record3.changedFiles)) {
-    throw new TypeError("changedFiles must be an array");
+  return {
+    timestamp: record3.timestamp,
+    taskId: record3.taskId,
+    testFile: record3.testFile,
+    testName: record3.testName,
+    result: record3.result,
+    durationMs: Math.max(0, record3.durationMs),
+    errorMessage: typeof record3.errorMessage === "string" ? sanitizeErrorMessage(record3.errorMessage) : undefined,
+    stackPrefix: typeof record3.stackPrefix === "string" ? sanitizeStackPrefix(record3.stackPrefix) : undefined,
+    changedFiles: sanitizeChangedFiles(Array.isArray(record3.changedFiles) ? record3.changedFiles : [])
+  };
+}
+function batchAppendTestRuns(records, workingDir) {
+  if (records.length === 0)
+    return;
+  for (const record3 of records) {
+    if (typeof record3.testFile !== "string" || record3.testFile.length === 0) {
+      throw new TypeError("testFile must be a non-empty string");
+    }
+    if (typeof record3.testName !== "string" || record3.testName.length === 0) {
+      throw new TypeError("testName must be a non-empty string");
+    }
+    if (typeof record3.taskId !== "string" || record3.taskId.length === 0) {
+      throw new TypeError("taskId must be a non-empty string");
+    }
+    if (record3.result !== "pass" && record3.result !== "fail" && record3.result !== "skip") {
+      throw new TypeError('result must be "pass", "fail", or "skip"');
+    }
+    if (typeof record3.durationMs !== "number" || !Number.isFinite(record3.durationMs)) {
+      throw new TypeError("durationMs must be a finite number");
+    }
+    if (record3.timestamp !== undefined && Number.isNaN(Date.parse(record3.timestamp))) {
+      throw new TypeError("timestamp must be a valid ISO 8601 string");
+    }
+    if (record3.changedFiles !== undefined && !Array.isArray(record3.changedFiles)) {
+      throw new TypeError("changedFiles must be an array");
+    }
   }
-  const sanitizedRecord = {
+  const historyPath = getHistoryPath(workingDir);
+  const historyDir = path35.dirname(historyPath);
+  _internals23.validateProjectRoot(workingDir);
+  if (!fs18.existsSync(historyDir)) {
+    fs18.mkdirSync(historyDir, { recursive: true });
+  }
+  const existingRecords = readAllRecords(historyPath);
+  const sanitizedRecords = records.map((record3) => ({
     ...record3,
     timestamp: record3.timestamp || new Date().toISOString(),
     durationMs: Math.max(0, record3.durationMs),
     errorMessage: sanitizeErrorMessage(record3.errorMessage),
     stackPrefix: sanitizeStackPrefix(record3.stackPrefix),
     changedFiles: sanitizeChangedFiles(record3.changedFiles || [])
-  };
-  const historyPath = getHistoryPath(workingDir);
-  const historyDir = path35.dirname(historyPath);
-  if (!fs18.existsSync(historyDir)) {
-    fs18.mkdirSync(historyDir, { recursive: true });
-  }
-  const existingRecords = readAllRecords(historyPath);
-  existingRecords.push(sanitizedRecord);
-  const recordsByFile = new Map;
+  }));
+  existingRecords.push(...sanitizedRecords);
+  const recordsByTest = new Map;
   for (const rec of existingRecords) {
-    const normalizedFile = rec.testFile.toLowerCase();
-    if (!recordsByFile.has(normalizedFile)) {
-      recordsByFile.set(normalizedFile, []);
+    const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
+    if (!recordsByTest.has(normalizedKey)) {
+      recordsByTest.set(normalizedKey, []);
     }
-    recordsByFile.get(normalizedFile).push(rec);
+    recordsByTest.get(normalizedKey).push(rec);
   }
   const prunedRecords = [];
-  for (const [, records] of recordsByFile) {
-    records.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    const toKeep = records.slice(-MAX_HISTORY_PER_TEST);
+  for (const [, recs] of recordsByTest) {
+    recs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const toKeep = recs.slice(-MAX_HISTORY_PER_TEST);
     prunedRecords.push(...toKeep);
   }
   prunedRecords.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -47450,8 +47670,9 @@ function readAllRecords(historyPath) {
       }
       try {
         const parsed = JSON.parse(trimmed);
-        if (typeof parsed === "object" && parsed !== null && "testFile" in parsed && "testName" in parsed && "result" in parsed) {
-          records.push(parsed);
+        const record3 = parseStoredRecord(parsed);
+        if (record3) {
+          records.push(record3);
         }
       } catch {}
     }
@@ -47466,13 +47687,17 @@ function getAllHistory(workingDir) {
   records.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return records;
 }
-var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, DANGEROUS_PROPERTY_NAMES;
+var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, DANGEROUS_PROPERTY_NAMES, _internals23;
 var init_history_store = __esm(() => {
+  init_manager2();
   DANGEROUS_PROPERTY_NAMES = new Set([
     "__proto__",
     "constructor",
     "prototype"
   ]);
+  _internals23 = {
+    validateProjectRoot
+  };
 });
 
 // src/tools/resolve-working-directory.ts
@@ -47596,7 +47821,7 @@ function readPackageJsonRaw(dir) {
   }
 }
 function readPackageJson(dir) {
-  return _internals23.readPackageJsonRaw(dir);
+  return _internals24.readPackageJsonRaw(dir);
 }
 function readPackageJsonTestScript(dir) {
   return readPackageJson(dir)?.scripts?.test ?? null;
@@ -47766,7 +47991,7 @@ function buildTypescriptBackend() {
     selectEntryPoints: selectEntryPoints3
   };
 }
-var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals23;
+var PROFILE_ID3 = "typescript", IMPORT_REGEX_ES2, IMPORT_REGEX_BARE, IMPORT_REGEX_REQUIRE2, IMPORT_REGEX_DYNAMIC, IMPORT_REGEX_REEXPORT2, _internals24;
 var init_typescript = __esm(() => {
   init_default_backend();
   init_profiles();
@@ -47775,7 +48000,7 @@ var init_typescript = __esm(() => {
   IMPORT_REGEX_REQUIRE2 = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_DYNAMIC = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   IMPORT_REGEX_REEXPORT2 = /export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/g;
-  _internals23 = {
+  _internals24 = {
     readPackageJsonRaw,
     readPackageJsonTestScript,
     frameworkFromScriptsTest
@@ -47806,7 +48031,7 @@ __export(exports_dispatch, {
   pickedProfiles: () => pickedProfiles,
   pickBackend: () => pickBackend,
   clearDispatchCache: () => clearDispatchCache,
-  _internals: () => _internals24
+  _internals: () => _internals25
 });
 import * as fs21 from "fs";
 import * as path38 from "path";
@@ -47861,7 +48086,7 @@ function findManifestRoot(start) {
   return start;
 }
 function evictIfNeeded() {
-  if (cache.size <= _internals24.cacheCapacity)
+  if (cache.size <= _internals25.cacheCapacity)
     return;
   let oldestKey;
   let oldestOrder = Infinity;
@@ -47892,7 +48117,7 @@ async function pickBackend(dir) {
     evictIfNeeded();
     return null;
   }
-  const profiles = await _internals24.detectProjectLanguages(root);
+  const profiles = await _internals25.detectProjectLanguages(root);
   if (profiles.length === 0) {
     cache.set(cacheKey, {
       hash: hash3,
@@ -47924,12 +48149,12 @@ function clearDispatchCache() {
   manifestRootCache.clear();
   insertCounter = 0;
 }
-var _internals24, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
+var _internals25, cache, insertCounter = 0, MANIFEST_FILES, _MANIFEST_SET, manifestRootCache;
 var init_dispatch = __esm(() => {
   init_backends();
   init_detector();
   init_registry_backend();
-  _internals24 = {
+  _internals25 = {
     detectProjectLanguages,
     cacheCapacity: 64
   };
@@ -48490,7 +48715,14 @@ function buildTestCommand2(framework, scope, files, coverage, baseDir) {
       return args;
     }
     case "vitest": {
-      const args = ["npx", "vitest", "run"];
+      const args = [
+        "npx",
+        "vitest",
+        "run",
+        "--reporter=json",
+        "--outputFile",
+        VITEST_JSON_OUTPUT_RELATIVE_PATH
+      ];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0) {
@@ -48499,7 +48731,7 @@ function buildTestCommand2(framework, scope, files, coverage, baseDir) {
       return args;
     }
     case "jest": {
-      const args = ["npx", "jest"];
+      const args = ["npx", "jest", "--json"];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0) {
@@ -48594,6 +48826,122 @@ function buildTestCommand2(framework, scope, files, coverage, baseDir) {
     default:
       return null;
   }
+}
+function mapFrameworkStatusToResult(status) {
+  if (typeof status !== "string")
+    return null;
+  const normalized = status.toLowerCase();
+  if (normalized === "pass" || normalized === "passed")
+    return "pass";
+  if (normalized === "fail" || normalized === "failed")
+    return "fail";
+  if (normalized === "skip" || normalized === "skipped" || normalized === "pending" || normalized === "todo") {
+    return "skip";
+  }
+  return null;
+}
+function firstLine(value) {
+  if (typeof value !== "string")
+    return;
+  const line = value.split(`
+`).find((part) => part.trim().length > 0)?.trim();
+  return line && line.length > 0 ? line : undefined;
+}
+function parseJestLikeJsonTestResults(payload) {
+  if (typeof payload !== "object" || payload === null)
+    return [];
+  const rawSuites = payload.testResults;
+  if (!Array.isArray(rawSuites))
+    return [];
+  const parsed = [];
+  for (const suite of rawSuites) {
+    if (typeof suite !== "object" || suite === null)
+      continue;
+    const suiteObj = suite;
+    const rawFile = typeof suiteObj.name === "string" ? suiteObj.name : typeof suiteObj.testFilePath === "string" ? suiteObj.testFilePath : undefined;
+    if (!rawFile)
+      continue;
+    const testFile = rawFile.replace(/\\/g, "/");
+    const assertionResults = suiteObj.assertionResults;
+    if (!Array.isArray(assertionResults))
+      continue;
+    for (const assertion of assertionResults) {
+      if (typeof assertion !== "object" || assertion === null)
+        continue;
+      const assertionObj = assertion;
+      const result = mapFrameworkStatusToResult(assertionObj.status);
+      const testName = typeof assertionObj.fullName === "string" ? assertionObj.fullName : typeof assertionObj.title === "string" ? assertionObj.title : undefined;
+      if (!result || !testName || testName.length === 0)
+        continue;
+      const failureMessages = Array.isArray(assertionObj.failureMessages) ? assertionObj.failureMessages : [];
+      const firstFailure = failureMessages.find((entry) => typeof entry === "string" && entry.length > 0);
+      const durationMs = typeof assertionObj.duration === "number" && Number.isFinite(assertionObj.duration) ? Math.max(assertionObj.duration, 0) : 0;
+      parsed.push({
+        testFile,
+        testName,
+        result,
+        durationMs,
+        errorMessage: firstLine(firstFailure),
+        stackPrefix: firstLine(firstFailure)
+      });
+    }
+  }
+  return parsed;
+}
+function parseBunJsonLines(output) {
+  const parsed = [];
+  for (const line of output.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}"))
+      continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      const rawFile = typeof obj.file === "string" ? obj.file : typeof obj.testFile === "string" ? obj.testFile : typeof obj.path === "string" ? obj.path : undefined;
+      const rawName = typeof obj.testName === "string" ? obj.testName : typeof obj.fullName === "string" ? obj.fullName : typeof obj.name === "string" ? obj.name : undefined;
+      const result = mapFrameworkStatusToResult(typeof obj.status === "string" ? obj.status : obj.result);
+      if (!rawFile || !rawName || !result)
+        continue;
+      const errorObj = typeof obj.error === "object" && obj.error !== null ? obj.error : undefined;
+      const durationMs = typeof obj.durationMs === "number" && Number.isFinite(obj.durationMs) ? Math.max(obj.durationMs, 0) : typeof obj.duration === "number" && Number.isFinite(obj.duration) ? Math.max(obj.duration, 0) : 0;
+      parsed.push({
+        testFile: rawFile.replace(/\\/g, "/"),
+        testName: rawName,
+        result,
+        durationMs,
+        errorMessage: firstLine(errorObj?.message ?? obj.errorMessage),
+        stackPrefix: firstLine(errorObj?.stack)
+      });
+    } catch {}
+  }
+  return parsed;
+}
+function parseFrameworkJsonTestResults(framework, output) {
+  const jsonMatch = output.match(/\{[\s\S]*"testResults"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const testResults = parseJestLikeJsonTestResults(parsed);
+      if (testResults.length > 0)
+        return testResults;
+    } catch {}
+  }
+  for (const line of output.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}"))
+      continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const testResults = parseJestLikeJsonTestResults(parsed);
+      if (testResults.length > 0)
+        return testResults;
+    } catch {}
+  }
+  if (framework === "bun") {
+    return parseBunJsonLines(output);
+  }
+  return [];
 }
 function parseTestOutput2(framework, output) {
   const totals = {
@@ -48882,7 +49230,16 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
     };
   }
   const startTime = Date.now();
+  const vitestJsonOutputPath = framework === "vitest" ? path39.join(cwd, ".swarm", "cache", "test-runner-vitest.json") : undefined;
   try {
+    if (vitestJsonOutputPath) {
+      try {
+        fs22.mkdirSync(path39.dirname(vitestJsonOutputPath), { recursive: true });
+        if (fs22.existsSync(vitestJsonOutputPath)) {
+          fs22.unlinkSync(vitestJsonOutputPath);
+        }
+      } catch {}
+    }
     const proc = bunSpawn(command, {
       stdout: "pipe",
       stderr: "pipe",
@@ -48903,13 +49260,37 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
       output += (output ? `
 ` : "") + stderrResult.text;
     }
+    if (vitestJsonOutputPath) {
+      try {
+        if (fs22.existsSync(vitestJsonOutputPath)) {
+          const vitestJsonOutput = fs22.readFileSync(vitestJsonOutputPath, "utf-8");
+          if (vitestJsonOutput.trim().length > 0) {
+            output += (output ? `
+` : "") + vitestJsonOutput;
+          }
+        }
+      } catch {}
+    }
     if (stdoutResult.truncated || stderrResult.truncated) {
       output += `
 ... (output truncated at stream read limit)`;
     }
     const useDispatchParse = process.env.SWARM_LANG_BACKEND !== "legacy";
     const parsed = useDispatchParse ? await parseTestOutputViaDispatch(framework, output, cwd) ?? parseTestOutput2(framework, output) : parseTestOutput2(framework, output);
-    const { totals, coveragePercent } = parsed;
+    const parsedTestCases = parseFrameworkJsonTestResults(framework, output);
+    const totals = { ...parsed.totals };
+    const { coveragePercent } = parsed;
+    if (totals.total === 0 && parsedTestCases.length > 0) {
+      for (const entry of parsedTestCases) {
+        if (entry.result === "pass")
+          totals.passed++;
+        else if (entry.result === "fail")
+          totals.failed++;
+        else
+          totals.skipped++;
+      }
+      totals.total = parsedTestCases.length;
+    }
     const isTimeout = exitCode === -1;
     const testPassed = exitCode === 0 && totals.failed === 0;
     if (testPassed) {
@@ -48922,7 +49303,8 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
         duration_ms,
         totals,
         rawOutput: output,
-        outcome: "pass"
+        outcome: "pass",
+        testCases: parsedTestCases
       };
       if (coveragePercent !== undefined) {
         result.coveragePercent = coveragePercent;
@@ -48944,7 +49326,8 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
         rawOutput: output,
         error: isTimeout ? `Tests timed out after ${timeout_ms}ms` : `Tests failed with ${totals.failed} failures`,
         message: isTimeout ? `${framework} tests timed out after ${timeout_ms}ms` : `${framework} tests failed (${totals.failed}/${totals.total} failed)`,
-        outcome: isTimeout ? "error" : "regression"
+        outcome: isTimeout ? "error" : "regression",
+        testCases: parsedTestCases
       };
       if (coveragePercent !== undefined) {
         result.coveragePercent = coveragePercent;
@@ -48965,24 +49348,77 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
     };
   }
 }
-function recordAndAnalyzeResults(result, testFiles, workingDir, sourceFiles) {
+function normalizeHistoryTestFile(testFile, workingDir) {
+  const normalized = testFile.replace(/\\/g, "/");
+  if (!path39.isAbsolute(testFile))
+    return normalized;
+  const relative9 = path39.relative(workingDir, testFile);
+  if (relative9.startsWith("..") || path39.isAbsolute(relative9)) {
+    return normalized;
+  }
+  return relative9.replace(/\\/g, "/");
+}
+function combineAggregateResult(current, next) {
+  if (current === "fail" || next === "fail")
+    return "fail";
+  if (current === "pass" || next === "pass")
+    return "pass";
+  return "skip";
+}
+function recordAndAnalyzeResults(result, testFiles, workingDir, sourceFiles, parsedTestCases) {
   if (!result.totals || result.totals.total === 0)
     return;
   const now = new Date().toISOString();
   const changedFiles = (sourceFiles && sourceFiles.length > 0 ? sourceFiles : testFiles).map((f) => f.replace(/\\/g, "/"));
-  for (const testFile of testFiles) {
-    try {
-      appendTestRun({
-        timestamp: now,
-        taskId: "auto",
-        testFile: testFile.replace(/\\/g, "/"),
-        testName: "(aggregate)",
-        result: result.success ? "pass" : "fail",
-        durationMs: result.duration_ms || 0,
-        changedFiles
-      }, workingDir);
-    } catch {}
+  const aggregateResultsByFile = new Map;
+  const validParsedCases = parsedTestCases?.filter((parsedCase) => parsedCase.testFile.length > 0 && parsedCase.testName.length > 0) ?? [];
+  const allRecords = [];
+  for (const parsedCase of validParsedCases) {
+    const normalizedTestFile = normalizeHistoryTestFile(parsedCase.testFile, workingDir);
+    allRecords.push({
+      timestamp: now,
+      taskId: "auto",
+      testFile: normalizedTestFile,
+      testName: parsedCase.testName,
+      result: parsedCase.result,
+      durationMs: parsedCase.durationMs,
+      errorMessage: parsedCase.errorMessage,
+      stackPrefix: parsedCase.stackPrefix,
+      changedFiles
+    });
+    aggregateResultsByFile.set(normalizedTestFile, combineAggregateResult(aggregateResultsByFile.get(normalizedTestFile), parsedCase.result));
   }
+  if (aggregateResultsByFile.size === 0) {
+    const aggregateResult = result.success ? "pass" : "fail";
+    for (const testFile of testFiles) {
+      aggregateResultsByFile.set(testFile.replace(/\\/g, "/"), aggregateResult);
+    }
+  }
+  for (const [testFile, aggregateResult] of aggregateResultsByFile) {
+    allRecords.push({
+      timestamp: now,
+      taskId: "auto",
+      testFile,
+      testName: AGGREGATE_TEST_NAME,
+      result: aggregateResult,
+      durationMs: result.duration_ms || 0,
+      changedFiles
+    });
+  }
+  try {
+    batchAppendTestRuns(allRecords, workingDir);
+  } catch {}
+}
+function selectHistoryForAnalysis(history) {
+  const filesWithIndividualRecords = new Set;
+  for (const record3 of history) {
+    if (record3.testName !== AGGREGATE_TEST_NAME) {
+      filesWithIndividualRecords.add(record3.testFile.toLowerCase());
+    }
+  }
+  if (filesWithIndividualRecords.size === 0)
+    return history;
+  return history.filter((record3) => record3.testName !== AGGREGATE_TEST_NAME || !filesWithIndividualRecords.has(record3.testFile.toLowerCase()));
 }
 function analyzeFailures(workingDir) {
   const report = {
@@ -48991,7 +49427,7 @@ function analyzeFailures(workingDir) {
     quarantinedFailures: []
   };
   try {
-    const history = getAllHistory(workingDir);
+    const history = selectHistoryForAnalysis(getAllHistory(workingDir));
     if (history.length === 0)
       return report;
     report.flakyTests = detectFlakyTests(history);
@@ -49012,12 +49448,11 @@ function analyzeFailures(workingDir) {
   } catch {}
   return report;
 }
-var MAX_OUTPUT_BYTES3 = 512000, MAX_COMMAND_LENGTH2 = 500, DEFAULT_TIMEOUT_MS = 60000, MAX_TIMEOUT_MS = 300000, MAX_SAFE_TEST_FILES = 50, MAX_SAFE_SOURCE_FILES = 1, POWERSHELL_METACHARACTERS, DISPATCH_FRAMEWORK_MAP, COMPOUND_TEST_EXTENSIONS, TEST_DIRECTORY_NAMES, SOURCE_EXTENSIONS, SKIP_DIRECTORIES, test_runner;
+var MAX_OUTPUT_BYTES3 = 512000, MAX_COMMAND_LENGTH2 = 500, DEFAULT_TIMEOUT_MS = 60000, MAX_TIMEOUT_MS = 300000, MAX_SAFE_TEST_FILES = 50, MAX_SAFE_SOURCE_FILES = 1, AGGREGATE_TEST_NAME = "(aggregate)", VITEST_JSON_OUTPUT_RELATIVE_PATH = ".swarm/cache/test-runner-vitest.json", POWERSHELL_METACHARACTERS, DISPATCH_FRAMEWORK_MAP, COMPOUND_TEST_EXTENSIONS, TEST_DIRECTORY_NAMES, SOURCE_EXTENSIONS, SKIP_DIRECTORIES, test_runner;
 var init_test_runner = __esm(() => {
   init_zod();
   init_discovery();
   init_analyzer();
-  init_failure_classifier();
   init_history_store();
   init_bun_compat();
   init_path_security();
@@ -49459,7 +49894,7 @@ var init_test_runner = __esm(() => {
         return JSON.stringify(errorResult, null, 2);
       }
       const result = await runTests(framework, effectiveScope, testFiles, coverage, timeout_ms, workingDir);
-      recordAndAnalyzeResults(result, testFiles, workingDir, _files.length > 0 ? _files : undefined);
+      recordAndAnalyzeResults(result, testFiles, workingDir, _files.length > 0 ? _files : undefined, result.testCases);
       let historyReport;
       if (!result.success && result.totals && result.totals.failed > 0) {
         historyReport = analyzeFailures(workingDir);
@@ -49554,9 +49989,9 @@ function getVersionFileVersion(dir) {
 async function runVersionCheck(dir, _timeoutMs) {
   const startTime = Date.now();
   try {
-    const packageVersion = _internals25.getPackageVersion(dir);
-    const changelogVersion = _internals25.getChangelogVersion(dir);
-    const versionFileVersion = _internals25.getVersionFileVersion(dir);
+    const packageVersion = _internals26.getPackageVersion(dir);
+    const changelogVersion = _internals26.getChangelogVersion(dir);
+    const versionFileVersion = _internals26.getVersionFileVersion(dir);
     const versions3 = [];
     if (packageVersion)
       versions3.push(`package.json: ${packageVersion}`);
@@ -49906,7 +50341,7 @@ async function runPreflight(dir, phase, config3) {
   const reportId = `preflight-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let validatedDir;
   try {
-    validatedDir = _internals25.validateDirectoryPath(dir);
+    validatedDir = _internals26.validateDirectoryPath(dir);
   } catch (error93) {
     return {
       id: reportId,
@@ -49926,7 +50361,7 @@ async function runPreflight(dir, phase, config3) {
   }
   let validatedTimeout;
   try {
-    validatedTimeout = _internals25.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
+    validatedTimeout = _internals26.validateTimeout(config3?.checkTimeoutMs, DEFAULT_CONFIG.checkTimeoutMs);
   } catch (error93) {
     return {
       id: reportId,
@@ -49967,12 +50402,12 @@ async function runPreflight(dir, phase, config3) {
   });
   const checks5 = [];
   log("[Preflight] Running lint check...");
-  const lintResult = await _internals25.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
+  const lintResult = await _internals26.runLintCheck(validatedDir, cfg.linter, cfg.checkTimeoutMs);
   checks5.push(lintResult);
   log(`[Preflight] Lint check: ${lintResult.status} ${lintResult.message}`);
   if (!cfg.skipTests) {
     log("[Preflight] Running tests check...");
-    const testsResult = await _internals25.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
+    const testsResult = await _internals26.runTestsCheck(validatedDir, cfg.testScope, cfg.checkTimeoutMs);
     checks5.push(testsResult);
     log(`[Preflight] Tests check: ${testsResult.status} ${testsResult.message}`);
   } else {
@@ -49984,7 +50419,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipSecrets) {
     log("[Preflight] Running secrets check...");
-    const secretsResult = await _internals25.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
+    const secretsResult = await _internals26.runSecretsCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(secretsResult);
     log(`[Preflight] Secrets check: ${secretsResult.status} ${secretsResult.message}`);
   } else {
@@ -49996,7 +50431,7 @@ async function runPreflight(dir, phase, config3) {
   }
   if (!cfg.skipEvidence) {
     log("[Preflight] Running evidence check...");
-    const evidenceResult = await _internals25.runEvidenceCheck(validatedDir);
+    const evidenceResult = await _internals26.runEvidenceCheck(validatedDir);
     checks5.push(evidenceResult);
     log(`[Preflight] Evidence check: ${evidenceResult.status} ${evidenceResult.message}`);
   } else {
@@ -50007,12 +50442,12 @@ async function runPreflight(dir, phase, config3) {
     });
   }
   log("[Preflight] Running requirement coverage check...");
-  const reqCoverageResult = await _internals25.runRequirementCoverageCheck(validatedDir, phase);
+  const reqCoverageResult = await _internals26.runRequirementCoverageCheck(validatedDir, phase);
   checks5.push(reqCoverageResult);
   log(`[Preflight] Requirement coverage check: ${reqCoverageResult.status} ${reqCoverageResult.message}`);
   if (!cfg.skipVersion) {
     log("[Preflight] Running version check...");
-    const versionResult = await _internals25.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
+    const versionResult = await _internals26.runVersionCheck(validatedDir, cfg.checkTimeoutMs);
     checks5.push(versionResult);
     log(`[Preflight] Version check: ${versionResult.status} ${versionResult.message}`);
   } else {
@@ -50075,10 +50510,10 @@ function formatPreflightMarkdown(report) {
 async function handlePreflightCommand(directory, _args) {
   const plan = await loadPlan(directory);
   const phase = plan?.current_phase ?? 1;
-  const report = await _internals25.runPreflight(directory, phase);
-  return _internals25.formatPreflightMarkdown(report);
+  const report = await _internals26.runPreflight(directory, phase);
+  return _internals26.formatPreflightMarkdown(report);
 }
-var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals25;
+var MIN_CHECK_TIMEOUT_MS = 5000, MAX_CHECK_TIMEOUT_MS = 300000, DEFAULT_CONFIG, _internals26;
 var init_preflight_service = __esm(() => {
   init_manager2();
   init_manager();
@@ -50095,7 +50530,7 @@ var init_preflight_service = __esm(() => {
     testScope: "convention",
     linter: "biome"
   };
-  _internals25 = {
+  _internals26 = {
     runPreflight,
     formatPreflightMarkdown,
     handlePreflightCommand,
@@ -51717,7 +52152,7 @@ async function getStatusData(directory, agents) {
 }
 function enrichWithLeanTurbo(status, directory) {
   const turboMode = hasActiveTurboMode();
-  const leanActive = _internals26.hasActiveLeanTurbo();
+  const leanActive = _internals27.hasActiveLeanTurbo();
   let turboStrategy = "off";
   if (leanActive) {
     turboStrategy = "lean";
@@ -51736,7 +52171,7 @@ function enrichWithLeanTurbo(status, directory) {
     }
   }
   if (leanSessionID) {
-    const runState = _internals26.loadLeanTurboRunState(directory, leanSessionID);
+    const runState = _internals27.loadLeanTurboRunState(directory, leanSessionID);
     if (runState) {
       status.leanTurboPhase = runState.phase;
       status.leanMaxParallelCoders = runState.maxParallelCoders;
@@ -51768,7 +52203,7 @@ function enrichWithLeanTurbo(status, directory) {
       }
     }
   }
-  status.fullAutoActive = _internals26.hasActiveFullAuto();
+  status.fullAutoActive = _internals27.hasActiveFullAuto();
   return status;
 }
 function formatStatusMarkdown(status) {
@@ -51850,7 +52285,7 @@ async function handleStatusCommand(directory, agents) {
   }
   return formatStatusMarkdown(statusData);
 }
-var _internals26;
+var _internals27;
 var init_status_service = __esm(() => {
   init_extractors();
   init_utils2();
@@ -51859,7 +52294,7 @@ var init_status_service = __esm(() => {
   init_state3();
   init_compaction_service();
   init_context_budget_service();
-  _internals26 = {
+  _internals27 = {
     loadLeanTurboRunState,
     hasActiveLeanTurbo,
     hasActiveFullAuto
@@ -51950,7 +52385,7 @@ async function handleTurboCommand(directory, args, sessionID) {
   if (arg0 === "on") {
     let strategy = "standard";
     try {
-      const { config: config3 } = _internals27.loadPluginConfigWithMeta(directory);
+      const { config: config3 } = _internals28.loadPluginConfigWithMeta(directory);
       if (config3.turbo?.strategy === "lean") {
         strategy = "lean";
       }
@@ -52005,7 +52440,7 @@ function enableLeanTurbo(session, directory, sessionID) {
   let maxParallelCoders = 4;
   let conflictPolicy = "serialize";
   try {
-    const { config: config3 } = _internals27.loadPluginConfigWithMeta(directory);
+    const { config: config3 } = _internals28.loadPluginConfigWithMeta(directory);
     const leanConfig = config3.turbo?.lean;
     if (leanConfig) {
       maxParallelCoders = leanConfig.max_parallel_coders ?? 4;
@@ -52075,13 +52510,13 @@ function buildStatusMessage(session, directory, sessionID) {
   ].join(`
 `);
 }
-var _internals27;
+var _internals28;
 var init_turbo = __esm(() => {
   init_config();
   init_state();
   init_state3();
   init_logger();
-  _internals27 = {
+  _internals28 = {
     loadPluginConfigWithMeta
   };
 });
@@ -52174,7 +52609,7 @@ function formatCommandNotFound(tokens) {
   const attemptedCommand = tokens[0] || "";
   const MAX_DISPLAY = 100;
   const displayCommand = attemptedCommand.length > MAX_DISPLAY ? `${attemptedCommand.slice(0, MAX_DISPLAY)}...` : attemptedCommand;
-  const similar = _internals28.findSimilarCommands(attemptedCommand);
+  const similar = _internals29.findSimilarCommands(attemptedCommand);
   const header = `Command \`/swarm ${displayCommand}\` not found.`;
   const suggestions = similar.length > 0 ? `Did you mean:
 ${similar.map((cmd) => `  - /swarm ${cmd}`).join(`
@@ -52623,7 +53058,7 @@ async function buildSwarmCommandPrompt(args) {
     activeAgentName,
     registeredAgents
   } = args;
-  const resolved = _internals28.resolveCommand(tokens);
+  const resolved = _internals29.resolveCommand(tokens);
   if (!resolved) {
     if (tokens.length === 0) {
       return buildHelpText();
@@ -52774,7 +53209,7 @@ function findSimilarCommands(query) {
   }
   const scored = VALID_COMMANDS.map((cmd) => {
     const cmdLower = cmd.toLowerCase();
-    const fullScore = _internals28.levenshteinDistance(q, cmdLower);
+    const fullScore = _internals29.levenshteinDistance(q, cmdLower);
     let tokenScore = Infinity;
     if (cmd.includes(" ") || cmd.includes("-")) {
       const qTokens = q.split(/[\s-]+/);
@@ -52787,7 +53222,7 @@ function findSimilarCommands(query) {
         for (const ct of cmdTokens) {
           if (ct.length === 0)
             continue;
-          const dist = _internals28.levenshteinDistance(qt, ct);
+          const dist = _internals29.levenshteinDistance(qt, ct);
           if (dist < minDist)
             minDist = dist;
         }
@@ -52797,7 +53232,7 @@ function findSimilarCommands(query) {
     }
     const dashStrippedQ = q.replace(/-/g, "");
     const dashStrippedCmd = cmdLower.replace(/-/g, "");
-    const dashScore = _internals28.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
+    const dashScore = _internals29.levenshteinDistance(dashStrippedQ, dashStrippedCmd);
     const score = Math.min(fullScore, tokenScore, dashScore);
     return { cmd, score };
   });
@@ -52829,11 +53264,11 @@ async function handleHelpCommand(ctx) {
     return buildHelpText2();
   }
   const tokens = targetCommand.split(/\s+/);
-  const resolved = _internals28.resolveCommand(tokens);
+  const resolved = _internals29.resolveCommand(tokens);
   if (resolved) {
-    return _internals28.buildDetailedHelp(resolved.key, resolved.entry);
+    return _internals29.buildDetailedHelp(resolved.key, resolved.entry);
   }
-  const similar = _internals28.findSimilarCommands(targetCommand);
+  const similar = _internals29.findSimilarCommands(targetCommand);
   const { buildHelpText: fullHelp } = await Promise.resolve().then(() => (init_commands(), exports_commands));
   if (similar.length > 0) {
     return `Command '/swarm ${targetCommand}' not found.
@@ -52927,7 +53362,7 @@ function resolveCommand(tokens) {
   }
   return null;
 }
-var COMMAND_REGISTRY, VALID_COMMANDS, _internals28, validation;
+var COMMAND_REGISTRY, VALID_COMMANDS, _internals29, validation;
 var init_registry = __esm(() => {
   init_acknowledge_spec_drift();
   init_agents();
@@ -52997,7 +53432,7 @@ var init_registry = __esm(() => {
       clashesWithNativeCcCommand: "/agents"
     },
     help: {
-      handler: (ctx) => _internals28.handleHelpCommand(ctx),
+      handler: (ctx) => _internals29.handleHelpCommand(ctx),
       description: "Show help for swarm commands",
       category: "core",
       args: "[command]",
@@ -53369,7 +53804,7 @@ Subcommands:
     }
   };
   VALID_COMMANDS = Object.keys(COMMAND_REGISTRY);
-  _internals28 = {
+  _internals29 = {
     handleHelpCommand,
     validateAliases,
     resolveCommand,
@@ -53377,7 +53812,7 @@ Subcommands:
     findSimilarCommands,
     buildDetailedHelp
   };
-  validation = _internals28.validateAliases();
+  validation = _internals29.validateAliases();
   if (!validation.valid) {
     throw new Error(`COMMAND_REGISTRY alias validation failed:
 ${validation.errors.join(`

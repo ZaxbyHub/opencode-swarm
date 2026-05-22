@@ -1543,8 +1543,7 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	try {
 		ast = parse(command, { mode: 'posix' });
 	} catch {
-		// Fail closed for unparseable commands — signal parse error so guardrails can reject.
-		// However, attempt regex-based process substitution detection first.
+		// Parser failed — treat as parse error (fail-closed)
 		parseFailed = true;
 	}
 
@@ -1999,14 +1998,8 @@ export function resolveWriteTargets(
 	try {
 		ast = parse(command, { mode: 'posix' });
 	} catch {
-		// Fall back to resolving against provided cwd
-		return writes.map((original) => ({
-			original,
-			resolvedPath: resolvePath(original.path, cwd),
-			resolved: original.path !== null && !isDynamicPath(original.path),
-		}));
+		ast = null;
 	}
-
 	if (!ast || typeof ast !== 'object') {
 		return writes.map((original) => ({
 			original,

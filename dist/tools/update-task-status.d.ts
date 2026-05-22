@@ -53,7 +53,7 @@ export interface ReviewerGateResult {
  * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
-export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean, sessionID?: string): ReviewerGateResult;
+export declare function checkReviewerGate(taskId: string, workingDirectory?: string, stageBParallelEnabled?: boolean, sessionID?: string, fallbackDir?: string): ReviewerGateResult;
 /**
  * Wrapper around checkReviewerGate that appends a diff-scope advisory warning.
  * Keeps checkReviewerGate synchronous for backward compatibility.
@@ -61,9 +61,10 @@ export declare function checkReviewerGate(taskId: string, workingDirectory?: str
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
+ * @param fallbackDir - Optional fallback directory for resolveWorkingDirectory when workingDirectory is absent
  * @returns ReviewerGateResult with optional scope warning appended to reason
  */
-export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string, sessionID?: string): Promise<ReviewerGateResult>;
+export declare function checkReviewerGateWithScope(taskId: string, workingDirectory?: string, sessionID?: string, fallbackDir?: string): Promise<ReviewerGateResult>;
 /**
  * Recovery mechanism: reconcile task state with delegation history.
  * When task-scoped reviewer/test_engineer delegations occurred but the state

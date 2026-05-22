@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { validateProjectRoot } from '../evidence/manager.js';
 import { _internals as goInternals } from '../lang/backends/go';
 import { _internals as pythonInternals } from '../lang/backends/python';
 
@@ -398,6 +399,7 @@ async function buildImpactMapInternal(
 }
 
 export const _internals: {
+	validateProjectRoot: typeof validateProjectRoot;
 	normalizePath: typeof normalizePath;
 	isCacheStale: typeof isCacheStale;
 	resolveRelativeImport: typeof resolveRelativeImport;
@@ -410,6 +412,7 @@ export const _internals: {
 	analyzeImpact: typeof analyzeImpact;
 	_clearGoModuleCache: typeof _clearGoModuleCache;
 } = {
+	validateProjectRoot,
 	normalizePath,
 	isCacheStale,
 	resolveRelativeImport,
@@ -496,6 +499,16 @@ async function saveImpactMap(
 	cwd: string,
 	impactMap: Record<string, string[]>,
 ): Promise<void> {
+	// Guard: reject if cwd is not an absolute path
+	if (!path.isAbsolute(cwd)) {
+		throw new Error(
+			`saveImpactMap requires an absolute project root path, got: "${cwd}"`,
+		);
+	}
+
+	// Guard: reject writes to subdirectories of projects that already have .swarm/
+	_internals.validateProjectRoot(cwd);
+
 	const cacheDir = path.join(cwd, '.swarm', 'cache');
 	const cachePath = path.join(cacheDir, 'impact-map.json');
 

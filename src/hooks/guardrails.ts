@@ -1378,9 +1378,22 @@ export function createGuardrailsHooks(
 	 *   - Remote filesystem path rejection
 	 *   - POSIX long-form flags (--recursive --force)
 	 */
-	function checkDestructiveCommand(tool: string, args: unknown): void {
+	function checkDestructiveCommand(
+		sessionID: string,
+		tool: string,
+		args: unknown,
+	): void {
 		if (tool !== 'bash' && tool !== 'shell') return;
 		if (cfg.block_destructive_commands === false) return;
+
+		// Only coder agents get scope exemption for destructive commands
+		const rawAgent = swarmState.activeAgent.get(sessionID);
+		const agentRole = rawAgent
+			? stripKnownSwarmPrefix(rawAgent).toLowerCase()
+			: 'unknown';
+		const isCoder = agentRole === 'coder';
+
+		const declaredScope = isCoder ? resolveDeclaredScope(sessionID) : null;
 		const toolArgs = args as Record<string, unknown> | undefined;
 		const rawCommand =
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
@@ -1443,9 +1456,21 @@ export function createGuardrailsHooks(
 					DC_SAFE_TARGETS.has(t.replace(/^["']|["']$/g, '').trim()),
 				);
 				if (!allSafe) {
-					throw new Error(
-						`BLOCKED: Potentially destructive shell command: rm with recursive/force flags on unsafe path(s): ${targetPart}`,
-					);
+					const scopeExempt =
+						declaredScope != null &&
+						declaredScope.length > 0 &&
+						targets.every((t) =>
+							isInDeclaredScope(
+								t.replace(/^["']|["']$/g, '').trim(),
+								declaredScope,
+								cwd,
+							),
+						);
+					if (!scopeExempt) {
+						throw new Error(
+							`BLOCKED: Potentially destructive shell command: rm with recursive/force flags on unsafe path(s): ${targetPart}`,
+						);
+					}
 				}
 			}
 
@@ -1465,9 +1490,17 @@ export function createGuardrailsHooks(
 				if (validateBlock) throw new Error(validateBlock);
 				const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
 				if (!allSafe) {
-					throw new Error(
-						`BLOCKED: Windows recursive directory delete on unsafe path(s): ${targets.join(', ')}`,
-					);
+					const scopeExempt =
+						declaredScope != null &&
+						declaredScope.length > 0 &&
+						targets.every((t) =>
+							isInDeclaredScope(t.trim(), declaredScope, cwd),
+						);
+					if (!scopeExempt) {
+						throw new Error(
+							`BLOCKED: Windows recursive directory delete on unsafe path(s): ${targets.join(', ')}`,
+						);
+					}
 				}
 			}
 
@@ -1482,9 +1515,17 @@ export function createGuardrailsHooks(
 					if (validateBlock) throw new Error(validateBlock);
 					const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
 					if (!allSafe) {
-						throw new Error(
-							`BLOCKED: Windows recursive file delete (del /s) on unsafe path(s): ${targets.join(', ')}`,
-						);
+						const scopeExempt =
+							declaredScope != null &&
+							declaredScope.length > 0 &&
+							targets.every((t) =>
+								isInDeclaredScope(t.trim(), declaredScope, cwd),
+							);
+						if (!scopeExempt) {
+							throw new Error(
+								`BLOCKED: Windows recursive file delete (del /s) on unsafe path(s): ${targets.join(', ')}`,
+							);
+						}
 					}
 				}
 			}
@@ -1505,9 +1546,17 @@ export function createGuardrailsHooks(
 					if (validateBlock) throw new Error(validateBlock);
 					const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
 					if (!allSafe) {
-						throw new Error(
-							`BLOCKED: PowerShell recursive delete on unsafe path(s): ${targets.join(', ')}`,
-						);
+						const scopeExempt =
+							declaredScope != null &&
+							declaredScope.length > 0 &&
+							targets.every((t) =>
+								isInDeclaredScope(t.trim(), declaredScope, cwd),
+							);
+						if (!scopeExempt) {
+							throw new Error(
+								`BLOCKED: PowerShell recursive delete on unsafe path(s): ${targets.join(', ')}`,
+							);
+						}
 					}
 				} else {
 					throw new Error(
@@ -1642,9 +1691,21 @@ export function createGuardrailsHooks(
 			// 12. rsync mirror / sync with delete
 			// ----------------------------------------------------------------
 			if (/^rsync\b.*--delete(?:-after|-before|-during|-delay)?\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "rsync --delete" detected — can delete files in the destination. Verify source is not empty.`,
-				);
+				// Extract destination (last non-flag, non-remote positional arg)
+				const rsyncArgs = seg.split(/\s+/).slice(1);
+				const rsyncTarget = rsyncArgs
+					.filter((a) => !a.startsWith('-') && !a.includes('@'))
+					.pop();
+				const scopeExempt =
+					rsyncTarget != null &&
+					declaredScope != null &&
+					declaredScope.length > 0 &&
+					isInDeclaredScope(rsyncTarget, declaredScope, cwd);
+				if (!scopeExempt) {
+					throw new Error(
+						`BLOCKED: "rsync --delete" detected — can delete files in the destination. Verify source is not empty.`,
+					);
+				}
 			}
 
 			// ----------------------------------------------------------------
@@ -3019,7 +3080,7 @@ export function createGuardrailsHooks(
 			handleInterpreterGating(input.sessionID, input.tool);
 
 			// Block destructive shell commands (rm -rf, force push, kubectl delete, etc.)
-			checkDestructiveCommand(input.tool, output.args);
+			checkDestructiveCommand(input.sessionID, input.tool, output.args);
 
 			// Shell write scope enforcement: block bash/shell writes outside declared scope
 			checkShellWriteScope(input.sessionID, input.tool, output.args);
@@ -3212,24 +3273,20 @@ export function createGuardrailsHooks(
 				}
 			}
 
-			// Resolve session — returns null if architect or native-agent exempt
-			const resolved = resolveSessionAndWindow(input.sessionID);
-			if (!resolved) return;
-
 			// v6.29: PRM hard stop — blocks all tool execution when escalation level 3 is reached.
-			// Placed AFTER resolveSessionAndWindow so that architect sessions and native OpenCode
-			// agents (build, plan, general, explore, etc.) are exempted before this check fires.
-			// The delegationActive guard provides defense-in-depth: only swarm-delegated subagent
-			// sessions (where delegationActive=true) will hit this hard stop. Fixes #942.
-
+			// Check before resolveSessionAndWindow so it fires even for architect sessions.
 			{
 				const prmSession = swarmState.agentSessions.get(input.sessionID);
-				if (prmSession?.prmHardStopPending && prmSession.delegationActive) {
+				if (prmSession?.prmHardStopPending) {
 					throw new Error(
 						'🛑 PRM HARD STOP: Pattern escalation maximum reached. Stop tool calls and return progress summary.',
 					);
 				}
 			}
+
+			// Resolve session — returns null if architect-exempt
+			const resolved = resolveSessionAndWindow(input.sessionID);
+			if (!resolved) return;
 
 			const { agentConfig, window } = resolved;
 			const { repetitionCount, elapsedMinutes } = trackToolCall(

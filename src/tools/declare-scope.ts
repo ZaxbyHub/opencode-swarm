@@ -197,18 +197,46 @@ export async function executeDeclareScope(
 				],
 			};
 		}
+
+		// Subdirectory containment: reject if normalizedDir is a strict subdirectory of the injected project root
+		if (normalizedDir && fallbackDir) {
+			try {
+				const canonicalWorkingDir = fs.realpathSync(
+					path.resolve(normalizedDir),
+				);
+				const canonicalProjectRoot = fs.realpathSync(path.resolve(fallbackDir));
+				if (canonicalWorkingDir.startsWith(canonicalProjectRoot + path.sep)) {
+					return {
+						success: false,
+						message: `working_directory "${normalizedDir}" is a subdirectory of the project root. Use the project root "${fallbackDir}" instead.`,
+						errors: [
+							`Subdirectory working_directory not allowed — use project root "${fallbackDir}"`,
+						],
+					};
+				}
+				// canonicalWorkingDir === canonicalProjectRoot is fine (same dir)
+				// canonicalWorkingDir outside canonicalProjectRoot is fine (different project)
+			} catch {
+				// fallbackDir doesn't exist on disk — skip containment check;
+				// plan.json existence check below will catch the invalid path
+			}
+		}
 	}
 
 	// Step 4: Resolve target directory
-	if (!fallbackDir) {
-		console.warn(
-			'[declare-scope] fallbackDir is undefined, falling back to process.cwd()',
-		);
+	if (!normalizedDir && !fallbackDir) {
+		return {
+			success: false,
+			message: 'Cannot resolve project directory',
+			errors: [
+				'Provide working_directory or ensure the tool is invoked from a project root',
+			],
+		};
 	}
-	const directory = normalizedDir || fallbackDir;
+	const directory = (normalizedDir || fallbackDir)!;
 
 	// Step 5: Check that taskId exists in plan.json
-	const planPath = path.resolve(directory!, '.swarm', 'plan.json');
+	const planPath = path.resolve(directory, '.swarm', 'plan.json');
 	if (!fs.existsSync(planPath)) {
 		return {
 			success: false,
@@ -272,7 +300,7 @@ export async function executeDeclareScope(
 	// them here and warn the caller to prevent confusing downstream WRITE BLOCKED errors.
 	const warnings: string[] = [];
 	const normalizeErrors: string[] = [];
-	const dir = normalizedDir || fallbackDir || process.cwd();
+	const dir = directory;
 	const mergedFiles = rawMergedFiles.map((file) => {
 		if (path.isAbsolute(file)) {
 			const relativePath = path.relative(dir, file).replace(/\\/g, '/');

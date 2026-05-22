@@ -156,13 +156,20 @@ export function defaultBuildTestCommand(
 			return args;
 		}
 		case 'vitest': {
-			const args: string[] = ['npx', 'vitest', 'run'];
+			const args: string[] = [
+				'npx',
+				'vitest',
+				'run',
+				'--reporter=json',
+				'--outputFile',
+				'.swarm/cache/test-runner-vitest.json',
+			];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
 		case 'jest': {
-			const args: string[] = ['npx', 'jest'];
+			const args: string[] = ['npx', 'jest', '--json'];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;

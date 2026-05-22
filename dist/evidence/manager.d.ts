@@ -39,6 +39,13 @@ export declare function isSecretscanEvidence(evidence: Evidence): evidence is Se
 import { sanitizeTaskId as _sanitizeTaskId } from '../validation/task-id';
 export declare const sanitizeTaskId: typeof _sanitizeTaskId;
 /**
+ * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
+ * of a project that already has a .swarm/ at its root.
+ * Walks up the directory tree to filesystem root looking for a parent .swarm/ directory.
+ * @throws Error if a parent directory contains .swarm/
+ */
+export declare function validateProjectRoot(directory: string): void;
+/**
  * Save evidence to a task's evidence bundle.
  * Creates new bundle if doesn't exist, appends to existing.
  * Performs atomic write via temp file + rename.
@@ -88,5 +95,6 @@ export declare const _internals: {
     wrapFlatRetrospective: typeof wrapFlatRetrospective;
     loadEvidence: typeof loadEvidence;
     listEvidenceTaskIds: typeof listEvidenceTaskIds;
+    validateProjectRoot: typeof validateProjectRoot;
 };
 export {};

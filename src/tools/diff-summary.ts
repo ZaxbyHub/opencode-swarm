@@ -11,6 +11,7 @@ import {
 } from '../diff/semantic-classifier.js';
 import { generateSummary } from '../diff/summary-generator.js';
 import { createSwarmTool } from './create-tool';
+import { resolveWorkingDirectory } from './resolve-working-directory';
 
 export interface DiffSummaryArgs {
 	files: string[];
@@ -63,7 +64,15 @@ export const diff_summary: ReturnType<typeof createSwarmTool> = createSwarmTool(
 					return JSON.stringify(errorResult, null, 2);
 				}
 
-				const workingDir = directory || process.cwd();
+				const resolved = resolveWorkingDirectory(undefined, directory);
+				if (!resolved.success) {
+					return JSON.stringify(
+						{ success: false, error: resolved.message },
+						null,
+						2,
+					);
+				}
+				const workingDir = resolved.directory;
 
 				// Get old content from HEAD and new content from working tree for each file
 				const astDiffs: ASTDiffResult[] = [];

@@ -91,6 +91,8 @@ Choose the PR title type by the main change:
 
 The squash merge commit message must match the PR title exactly.
 
+> **Note:** The PR title MUST follow `<type>(<scope>): <description>` exactly — CI runs `action-semantic-pull-request` which will fail the `check-title` job if the format is wrong. Do not deviate from this format.
+
 ## Step 2 - Release note fragment
 
 Create a pending release fragment and do not calculate a version manually.
@@ -113,7 +115,20 @@ Do not manually edit:
 
 - `package.json` version
 - `CHANGELOG.md`
-- `.release-please-manifest.json`
+- `.release-please-manifest.json` — exception: reconciliation when the manifest desyncs from actual releases (see below)
+
+### Release-please manifest desync
+
+`.release-please-manifest.json` is the version source of truth for release-please. If it desyncs from the actual published release (e.g., `7.26.0` in manifest but `v7.27.1` on GitHub), release-please will propose a version that goes backwards.
+
+**Common cause:** An older release PR (e.g., `chore(main): release 7.26.0`) merges after a newer one (`chore(main): release 7.27.1`). Both PRs modify the manifest, so the later one to merge wins — regardless of which version is higher.
+
+**Detection:** If a release-please PR proposes a version that seems too low, check:
+1. `gh release list --limit 5` — what's the latest published release?
+2. `git show origin/main:.release-please-manifest.json` — what does the manifest say?
+3. If different, the manifest is desynced.
+
+**Fix:** Open a PR that updates `.release-please-manifest.json` to match the actual latest release (e.g., `"7.27.1"`). Close the incorrect release PR with explanation. After the manifest fix merges, release-please will auto-create a correct release PR.
 
 ## Step 3 - Mandatory validation suite
 
@@ -127,6 +142,8 @@ git diff --exit-code -- dist/
 ```
 
 ### Tier 1 - quality
+
+Run both linter AND formatter — e.g., `bunx biome check --write .` or equivalent — because CI quality gates reject code that passes tests but fails style validation.
 
 ```bash
 bun run typecheck
@@ -175,25 +192,6 @@ git worktree remove /tmp/repro-check
 ```
 
 If the failure reproduces on `main`, document it under `## Pre-existing failures`. Do not silently inherit it.
-
-#### dist-check version mismatch
-
-If `dist-check` fails but your changes don't touch `dist/`, the failure may be a **pre-existing version mismatch** on `origin/main` between the committed `dist/` artifacts and `package.json` version. This is common after release-please bumps the version but the dist rebuild hasn't been committed yet.
-
-**Diagnosis:**
-```bash
-git worktree add /tmp/dist-check origin/main
-cd /tmp/dist-check && bun run build
-git diff -- dist/   # Non-empty output = pre-existing mismatch
-git worktree remove --force /tmp/dist-check
-```
-
-**Resolution:**
-1. Run `bun run build` inside the worktree (or a clean clone of `main`), then `git diff --exit-code -- dist/` to confirm the rebuild is clean
-2. Commit the rebuilt dist directly to `main` (or open a separate fix PR)
-3. Rebase your PR branch onto updated `main`
-
-Do not carry this into your PR as a new failure — it is a pre-existing infrastructure drift.
 
 ## Step 4 - Workflow changes
 

@@ -39,7 +39,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex (extending: see [docs/adding-a-language.md](docs/adding-a-language.md))
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
 - 📝 **Shell write detection** — Static analysis of POSIX/PowerShell/cmd commands to detect file writes (redirects, builtins, in-place editors, network downloads, archive extraction, git destructive ops) before execution
-- 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence and TTL expiry
+- 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence, TTL expiry, and scope-aware destructive command blocking
 - 🆓 **Free tier** — works with OpenCode Zen's free model roster
 - ⚙️ **Fully configurable** — override any agent's model, disable agents, tune guardrails
 
@@ -76,6 +76,7 @@ Swarm includes comprehensive static analysis for shell commands to detect and in
   - TTL expiry (default 24 hours)
   - Symlink guards (O_NOFOLLOW + realpath containment)
   - Schema versioning and fail-closed validation
+  - **Scope-aware destructive command blocking** — Recursive delete patterns (`rm -rf`, `rmdir /s`, `del /s`, `Remove-Item -Recurse`, `rsync --delete`) are blocked unless ALL target paths are within the declared scope (coder agents only)
 
 ### Security Patterns
 
@@ -717,14 +718,28 @@ File rotates automatically at 10MB to `.swarm/telemetry.jsonl.1`.
 </details>
 
 <details>
-<summary><strong>Save Plan Tool: Target Workspace Requirement</strong></summary>
+<summary><strong>Working Directory Requirement: No process.cwd() Fallback</strong></summary>
 
-The `save_plan` tool requires an explicit target workspace path. It does **not** fall back to `process.cwd()`.
+All Swarm tools that accept a `working_directory` parameter **require an explicit path**. They do **not** fall back to `process.cwd()`. This prevents `.swarm` state from being created in project subdirectories when the host process's working directory differs from the actual project root (issue [#922](https://github.com/zaxbysauce/opencode-swarm/issues/922)).
 
-### Explicit Workspace Requirement
+### Defense-in-Depth
 
-- The `working_directory` parameter must be provided
-- Providing no value or relying on implicit directory resolution will result in deterministic failure
+This safety guarantee is implemented in two layers:
+
+1. **Fast-path filter** (`resolveWorkingDirectory` in `src/tools/resolve-working-directory.ts`) — validates all incoming `working_directory` values for null-byte injection, path traversal, Windows device paths, and subdirectory containment before any file system access
+2. **Canonical write-time guard** (`validateProjectRoot` in `src/evidence/manager.ts`) — uses `realpathSync` to canonicalize paths at evidence-write time, catching any symlink-based subdirectory bypasses that slip past the fast-path filter
+
+### Tools That Require Explicit working_directory
+
+The following tools require an explicit `working_directory` and reject subdirectory paths:
+
+- `save_plan`
+- `update_task_status`
+- `declare_scope`
+- `pre_check_batch`
+- `test_impact`
+- `mutation_test`
+- `diff_summary`
 
 ### Failure Conditions
 
@@ -733,19 +748,33 @@ The `save_plan` tool requires an explicit target workspace path. It does **not**
 | Missing (`undefined` / `null`) | Fails with: "Target workspace is required" |
 | Empty or whitespace-only | Fails with: "Target workspace cannot be empty or whitespace" |
 | Path traversal (`..`) | Fails with: "Target workspace cannot contain path traversal" |
+| Subdirectory of project root | Fails with: "...is a subdirectory of fallback..." |
+| Windows device path | Fails with: "Windows device paths are not allowed" |
 
 ### Usage Contract
 
-When using `save_plan`, always pass a valid `working_directory`:
+When using any affected tool, always pass a valid `working_directory`:
 
 ```typescript
+// save_plan example
 save_plan({
   title: "My Project",
   swarm_id: "mega",
   phases: [{ id: 1, name: "Setup", tasks: [{ id: "1.1", description: "Initialize project" }] }],
+  working_directory: "/path/to/project"  // Required - no process.cwd() fallback
+})
+
+// update_task_status example
+update_task_status({
+  task_id: "1.1",
+  status: "completed",
   working_directory: "/path/to/project"  // Required - no fallback
 })
 ```
+
+### Stray .swarm Detection
+
+`/swarm doctor` now detects and reports stray `.swarm` directories found in project subdirectories (created by older versions or misconfigured tools). It offers cleanup guidance to prevent state pollution.
 
 </details>
 

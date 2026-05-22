@@ -53,6 +53,15 @@ For EACH finding:
 - When downgrading, record the original severity and the recommended severity with a one-line justification.
 - Print the full validated findings table before proceeding.
 
+## Step 1a — Check normalization consistency (when applicable)
+
+When a PR adds data normalization, transformation, or coercion logic:
+
+1. Identify ALL consumer paths that read the transformed data.
+2. Verify that normalization is applied consistently across EVERY path.
+3. Common failure mode: normalization applied in one read path (e.g., gate-check) but not in another (e.g., write/update), causing silent data loss or inconsistent behavior.
+4. If inconsistency is found, flag as a HIGH severity finding requiring shared helper extraction.
+
 ## Step 2 — Classify findings by file and fix scope
 
 Group findings by file, then determine fix scope for each group:

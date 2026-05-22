@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
-import { resetSwarmState, startAgentSession } from '../../../src/state';
+import {
+	getAgentSession,
+	resetSwarmState,
+	startAgentSession,
+} from '../../../src/state';
 
 const TEST_DIR = '/tmp';
 
@@ -287,6 +291,169 @@ describe('destructive command guard', () => {
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
 				/BLOCKED: Disk format command \(mkfs\) detected/,
 			);
+		});
+	});
+
+	describe('scope-aware destructive command guard', () => {
+		describe('POSIX rm -rf with scope', () => {
+			test('rm -rf plugins/oxlint-plugin-effect with scope → ALLOWED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'rm -rf plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput('rm -rf plugins/oxlint-plugin-effect');
+				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			});
+
+			test('rm -rf plugins/oxlint-plugin-effect without scope → BLOCKED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				// No scope declared
+				const input = makeBashInput(
+					'test-session',
+					'rm -rf plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput('rm -rf plugins/oxlint-plugin-effect');
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/BLOCKED/,
+				);
+			});
+
+			test('rm -rf mixed targets — one in scope, one not → BLOCKED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'rm -rf plugins/oxlint-plugin-effect src/other-dir',
+				);
+				const output = makeBashOutput(
+					'rm -rf plugins/oxlint-plugin-effect src/other-dir',
+				);
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/BLOCKED/,
+				);
+			});
+		});
+
+		describe('rmdir with scope (Windows cmd.exe)', () => {
+			test('rmdir /s plugins with scope → ALLOWED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'rmdir /s plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput('rmdir /s plugins/oxlint-plugin-effect');
+				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			});
+		});
+
+		describe('del /s with scope (Windows cmd.exe)', () => {
+			test('del /s plugins with scope → ALLOWED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'del /s plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput('del /s plugins/oxlint-plugin-effect');
+				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			});
+		});
+
+		describe('Remove-Item with scope (PowerShell)', () => {
+			test('Remove-Item -Recurse plugins with scope → ALLOWED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'Remove-Item -Recurse plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput(
+					'Remove-Item -Recurse plugins/oxlint-plugin-effect',
+				);
+				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			});
+		});
+
+		describe('non-coder agents do not get scope exemption', () => {
+			test('rm -rf path in scope when agent is not coder → still BLOCKED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				// Start agent as 'reviewer' (not coder)
+				resetSwarmState();
+				startAgentSession('test-session', 'reviewer');
+				const session = getAgentSession('test-session');
+				if (session)
+					session.declaredCoderScope = ['plugins/oxlint-plugin-effect'];
+				const input = makeBashInput(
+					'test-session',
+					'rm -rf plugins/oxlint-plugin-effect',
+				);
+				const output = makeBashOutput('rm -rf plugins/oxlint-plugin-effect');
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/BLOCKED/,
+				);
+			});
+		});
+
+		describe('safety checks still apply within scope', () => {
+			test('rm -rf system path not in scope → still BLOCKED even with scope declared', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session) session.declaredCoderScope = ['plugins'];
+				const input = makeBashInput('test-session', 'rm -rf /etc');
+				const output = makeBashOutput('rm -rf /etc');
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/BLOCKED/,
+				);
+			});
+		});
+
+		describe('rsync --delete with scope', () => {
+			test('rsync --delete plugins-dest with scope → ALLOWED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const session = getAgentSession('test-session');
+				if (session) session.declaredCoderScope = ['plugins'];
+				const input = makeBashInput(
+					'test-session',
+					'rsync -av --delete src/other plugins',
+				);
+				const output = makeBashOutput('rsync -av --delete src/other plugins');
+				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			});
+
+			test('rsync --delete without scope → BLOCKED', async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const input = makeBashInput(
+					'test-session',
+					'rsync -av --delete src/ plugins',
+				);
+				const output = makeBashOutput('rsync -av --delete src/ plugins');
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/BLOCKED/,
+				);
+			});
 		});
 	});
 });

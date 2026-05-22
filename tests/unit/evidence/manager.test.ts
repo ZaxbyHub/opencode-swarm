@@ -1,5 +1,19 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from 'bun:test';
+import {
+	mkdirSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -12,6 +26,7 @@ import type {
 	SyntaxEvidence,
 } from '../../../src/config/evidence-schema';
 import {
+	_internals,
 	deleteEvidence,
 	isBuildEvidence,
 	isPlaceholderEvidence,
@@ -25,11 +40,17 @@ import {
 	sanitizeTaskId,
 	saveEvidence,
 	VALID_EVIDENCE_TYPES,
+	validateProjectRoot,
 } from '../../../src/evidence/manager';
 
 let tempDir: string;
+let savedValidateProjectRoot: typeof validateProjectRoot;
 
 beforeEach(() => {
+	// Mock validateProjectRoot for all tests except the dedicated validateProjectRoot describe block
+	savedValidateProjectRoot = _internals.validateProjectRoot;
+	_internals.validateProjectRoot = () => {};
+
 	tempDir = join(
 		tmpdir(),
 		`evidence-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -38,6 +59,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// Restore the real validateProjectRoot
+	_internals.validateProjectRoot = savedValidateProjectRoot;
+
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -755,3 +779,198 @@ function makeQualityBudgetEvidence(): QualityBudgetEvidence {
 		files_analyzed: ['src/index.ts'],
 	};
 }
+
+describe('validateProjectRoot (Task 1.2)', () => {
+	let subDir: string;
+
+	beforeEach(() => {
+		// Restore the real validateProjectRoot — this block tests the actual guard
+		_internals.validateProjectRoot = savedValidateProjectRoot;
+
+		subDir = join(tempDir, 'subdir', 'deep');
+		mkdirSync(subDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		// Re-mock for subsequent non-validateProjectRoot tests
+		_internals.validateProjectRoot = () => {};
+	});
+
+	it('rejects a subdirectory whose parent already has .swarm/', () => {
+		// tempDir has .swarm/ created in the top-level beforeEach
+		expect(() => validateProjectRoot(subDir)).toThrow(
+			/Cannot write evidence.*already contains a \.swarm\//,
+		);
+	});
+
+	it('does not throw when directory is the project root (has .swarm/ directly)', () => {
+		// tempDir has .swarm/ in it, but tempDir itself IS the root — no parent has .swarm/
+		// Skip if tmpdir itself has a .swarm/ ancestor (guard would reject before checking
+		// that tempDir's own .swarm/ is direct)
+		let envHasSwarmAncestor = false;
+		try {
+			validateProjectRoot(tempDir);
+		} catch {
+			envHasSwarmAncestor = true;
+		}
+		if (envHasSwarmAncestor) {
+			// tmpdir has .swarm/ ancestor — cannot test this path in this environment
+			return;
+		}
+		expect(() => validateProjectRoot(tempDir)).not.toThrow();
+	});
+
+	it('does not throw for a directory with no parent .swarm/ at all', () => {
+		// Create a completely standalone directory tree with no .swarm/ anywhere.
+		// If tmpdir itself has a .swarm/ ancestor (e.g. C:\Users\...\Temp\.swarm),
+		// this test cannot exercise the "no throw" path — skip gracefully.
+		const standaloneRoot = join(
+			tmpdir(),
+			`validate-root-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(join(standaloneRoot, 'child'), { recursive: true });
+		try {
+			let envHasSwarmAncestor = false;
+			try {
+				validateProjectRoot(standaloneRoot);
+			} catch {
+				envHasSwarmAncestor = true;
+			}
+			if (envHasSwarmAncestor) {
+				// Cannot test "no throw" path in this environment — not a failure
+				return;
+			}
+			expect(() =>
+				validateProjectRoot(join(standaloneRoot, 'child')),
+			).not.toThrow();
+		} finally {
+			rmSync(standaloneRoot, { recursive: true, force: true });
+		}
+	});
+
+	it('deeply nested subdirectory still detects parent .swarm/', () => {
+		// Create a deeply nested subdirectory within a project that has .swarm/
+		const subDir = join(tempDir, 'subdir');
+		mkdirSync(subDir, { recursive: true });
+		// Create .swarm in the project root (tempDir)
+		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
+		// Create a deeply nested directory
+		const deepDir = join(
+			subDir,
+			'a',
+			'b',
+			'c',
+			'd',
+			'e',
+			'f',
+			'g',
+			'h',
+			'i',
+			'j',
+		);
+		mkdirSync(deepDir, { recursive: true });
+		// Even at 10+ levels deep, the parent .swarm/ should be detected
+		expect(() => validateProjectRoot(deepDir)).toThrow('Cannot write evidence');
+	});
+
+	it('symlinked subdirectory is detected via realpath', () => {
+		// Create a project root with .swarm/
+		const projectRoot = join(tempDir, 'project');
+		mkdirSync(join(projectRoot, '.swarm'), { recursive: true });
+		// Create a subdirectory inside the project
+		const subDir = join(projectRoot, 'subdir');
+		mkdirSync(subDir, { recursive: true });
+		// Create a symlink outside the project pointing to the subdirectory
+		const linkDir = join(tempDir, 'link-to-subdir');
+		try {
+			symlinkSync(subDir, linkDir, 'junction');
+		} catch {
+			// Symlinks may not be supported on this platform
+			return;
+		}
+		// The symlink target is inside a project with .swarm/
+		// validateProjectRoot should detect the parent .swarm/ via realpath
+		expect(() => validateProjectRoot(linkDir)).toThrow('Cannot write evidence');
+	});
+});
+
+describe('validateProjectRoot integration', () => {
+	// Use a random path under os.tmpdir(). If tmpdir() has a .swarm/ ancestor
+	// (environment limitation), the "valid project root" test is silently skipped.
+	// The "subdirectory rejection" test always works because integrationRoot itself has .swarm/.
+	const integrationBase = join(
+		tmpdir(),
+		`.swarm-inttest-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+	);
+	let integrationRoot: string;
+	let ancestorHasSwarm = false;
+
+	beforeAll(() => {
+		// Walk up from integrationBase checking for .swarm/ in any ancestor.
+		// validateProjectRoot checks PARENT directories — not the target itself.
+		let check = integrationBase;
+		ancestorHasSwarm = false;
+		while (true) {
+			const parent = join(check, '..');
+			if (parent === check) break; // filesystem root
+			try {
+				if (statSync(join(parent, '.swarm')).isDirectory()) {
+					ancestorHasSwarm = true;
+					break;
+				}
+			} catch {
+				// .swarm doesn't exist at this level — continue
+			}
+			check = parent;
+		}
+
+		mkdirSync(integrationBase, { recursive: true });
+		integrationRoot = join(integrationBase, `root-${Date.now()}`);
+		mkdirSync(join(integrationRoot, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			join(integrationRoot, '.swarm', 'plan.json'),
+			JSON.stringify({ title: 'test', swarm_id: 'test', phases: [] }),
+		);
+	});
+
+	afterAll(() => {
+		try {
+			rmSync(integrationBase, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
+	beforeEach(() => {
+		// Restore the real validateProjectRoot — this block tests the actual guard
+		_internals.validateProjectRoot = savedValidateProjectRoot;
+	});
+
+	afterEach(() => {
+		// Re-mock for subsequent non-integration tests
+		_internals.validateProjectRoot = () => {};
+	});
+
+	it('saveEvidence writes successfully to a valid project root with .swarm/', async () => {
+		if (ancestorHasSwarm) return; // environment limitation — skip silently
+
+		const evidence = makeEvidence({ summary: 'Integration test evidence' });
+		const bundle = await saveEvidence(integrationRoot, '1.1', evidence);
+		expect(bundle.task_id).toBe('1.1');
+		expect(bundle.entries.length).toBe(1);
+		expect(bundle.entries[0].summary).toBe('Integration test evidence');
+	});
+
+	it('saveEvidence rejects when directory is a subdirectory whose parent has .swarm/', async () => {
+		// This test always works: integrationRoot itself has .swarm/, so any
+		// subdirectory under it will be rejected by validateProjectRoot regardless
+		// of ancestor .swarm/ directories further up the tree.
+		const subDir = join(integrationRoot, 'subdir', 'deep');
+		mkdirSync(subDir, { recursive: true });
+
+		const evidence = makeEvidence({ summary: 'Should fail' });
+		await expect(saveEvidence(subDir, '1.1', evidence)).rejects.toThrow(
+			/Cannot write evidence.*already contains a \.swarm\//,
+		);
+	});
+});

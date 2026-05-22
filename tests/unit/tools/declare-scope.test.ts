@@ -520,4 +520,185 @@ describe('executeDeclareScope', () => {
 			'resolves outside the project directory',
 		);
 	});
+
+	// Regression: when working_directory is not provided and fallbackDir is also
+	// undefined, executeDeclareScope must NOT fall back to process.cwd() — it
+	// should return an explicit error (FR-006).
+	test('rejects when neither working_directory nor fallbackDir is provided', async () => {
+		const session = createWorkflowTestSession();
+		swarmState.agentSessions.set('test-session', session);
+
+		const args: DeclareScopeArgs = {
+			taskId: '1.1',
+			files: ['src/index.ts'],
+		};
+
+		// Pass undefined as fallbackDir — should fail, not fall back to process.cwd()
+		const result = await executeDeclareScope(args, undefined);
+
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('Cannot resolve project directory');
+	});
+
+	// Issue #922: Subdirectory containment check
+	describe('subdirectory containment (Issue #922)', () => {
+		test('accepts working_directory equal to project root (same dir)', async () => {
+			const session = createWorkflowTestSession();
+			swarmState.agentSessions.set('test-session', session);
+
+			// working_directory === fallbackDir (same directory)
+			const args: DeclareScopeArgs = {
+				taskId: '1.1',
+				files: ['src/index.ts'],
+				working_directory: tempDir,
+			};
+
+			const result = await executeDeclareScope(args, tempDir);
+
+			expect(result.success).toBe(true);
+			expect(result.taskId).toBe('1.1');
+		});
+
+		test('rejects working_directory that is a strict subdirectory of project root', async () => {
+			const session = createWorkflowTestSession();
+			swarmState.agentSessions.set('test-session', session);
+
+			// Create a subdirectory that has its own .swarm/plan.json
+			// (so it passes the existence check and reaches the containment check)
+			const subDir = path.join(tempDir, 'src');
+			fs.mkdirSync(path.join(subDir, '.swarm'), { recursive: true });
+			fs.writeFileSync(
+				path.join(subDir, '.swarm', 'plan.json'),
+				JSON.stringify(
+					{
+						schema_version: '1.0.0',
+						title: 'Sub Project',
+						swarm: 'sub-swarm',
+						current_phase: 1,
+						migration_status: 'migrated',
+						phases: [
+							{
+								id: 1,
+								name: 'Phase 1',
+								status: 'in_progress',
+								tasks: [
+									{
+										id: '1.1',
+										phase: 1,
+										status: 'pending',
+										size: 'small',
+										description: 'Sub task',
+										depends: [],
+										files_touched: [],
+									},
+								],
+							},
+						],
+					},
+					null,
+					2,
+				),
+			);
+
+			const args: DeclareScopeArgs = {
+				taskId: '1.1',
+				files: ['src/index.ts'],
+				working_directory: subDir,
+			};
+
+			const result = await executeDeclareScope(args, tempDir);
+
+			expect(result.success).toBe(false);
+			expect(result.errors).toBeDefined();
+			expect(result.errors![0]).toContain(
+				'Subdirectory working_directory not allowed',
+			);
+		});
+
+		test('accepts working_directory that is outside project root (different project)', async () => {
+			const session = createWorkflowTestSession();
+			swarmState.agentSessions.set('test-session', session);
+
+			// Create a completely separate project directory with its own plan.json
+			const otherProjectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'other-project-')),
+			);
+			try {
+				fs.mkdirSync(path.join(otherProjectDir, '.swarm'), { recursive: true });
+				const otherPlan = {
+					schema_version: '1.0.0',
+					title: 'Other Project',
+					swarm: 'other-swarm',
+					current_phase: 1,
+					migration_status: 'migrated',
+					phases: [
+						{
+							id: 1,
+							name: 'Phase 1',
+							status: 'in_progress',
+							tasks: [
+								{
+									id: '1.1',
+									phase: 1,
+									status: 'pending',
+									size: 'small',
+									description: 'Task in other project',
+									depends: [],
+									files_touched: [],
+								},
+							],
+						},
+					],
+				};
+				fs.writeFileSync(
+					path.join(otherProjectDir, '.swarm', 'plan.json'),
+					JSON.stringify(otherPlan, null, 2),
+				);
+
+				const args: DeclareScopeArgs = {
+					taskId: '1.1',
+					files: ['src/index.ts'],
+					working_directory: otherProjectDir,
+				};
+
+				// tempDir is the injected project root; otherProjectDir is outside it
+				const result = await executeDeclareScope(args, tempDir);
+
+				expect(result.success).toBe(true);
+				expect(result.taskId).toBe('1.1');
+			} finally {
+				fs.rmSync(otherProjectDir, { recursive: true, force: true });
+			}
+		});
+
+		test('handles realpathSync correctly — canonical paths via symlink', async () => {
+			const session = createWorkflowTestSession();
+			swarmState.agentSessions.set('test-session', session);
+
+			// Create a symlink to the tempDir to verify realpathSync canonicalizes correctly
+			const symlinkDir = path.join(tempDir, 'symlink-root');
+			try {
+				fs.symlinkSync(tempDir, symlinkDir, 'junction' as any);
+
+				const args: DeclareScopeArgs = {
+					taskId: '1.1',
+					files: ['src/index.ts'],
+					working_directory: symlinkDir,
+				};
+
+				// Symlink resolves to same canonical path as tempDir — should be accepted
+				const result = await executeDeclareScope(args, tempDir);
+
+				expect(result.success).toBe(true);
+				expect(result.taskId).toBe('1.1');
+			} finally {
+				// Clean up symlink (junction on Windows needs different handling)
+				try {
+					fs.unlinkSync(symlinkDir);
+				} catch {
+					// ignore
+				}
+			}
+		});
+	});
 });
