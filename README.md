@@ -39,7 +39,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex (extending: see [docs/adding-a-language.md](docs/adding-a-language.md))
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
 - 📝 **Shell write detection** — Static analysis of POSIX/PowerShell/cmd commands to detect file writes (redirects, builtins, in-place editors, network downloads, archive extraction, git destructive ops) before execution
-- 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence and TTL expiry
+- 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence, TTL expiry, and scope-aware destructive command blocking
 - 🆓 **Free tier** — works with OpenCode Zen's free model roster
 - ⚙️ **Fully configurable** — override any agent's model, disable agents, tune guardrails
 
@@ -76,6 +76,7 @@ Swarm includes comprehensive static analysis for shell commands to detect and in
   - TTL expiry (default 24 hours)
   - Symlink guards (O_NOFOLLOW + realpath containment)
   - Schema versioning and fail-closed validation
+  - **Scope-aware destructive command blocking** — Recursive delete patterns (`rm -rf`, `rmdir /s`, `del /s`, `Remove-Item -Recurse`, `rsync --delete`) are blocked unless ALL target paths are within the declared scope (coder agents only)
 
 ### Security Patterns
 
