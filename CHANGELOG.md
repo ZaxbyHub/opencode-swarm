@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.28.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.1...v7.28.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* **delegation-gate:** resolve evidence task IDs correctly for parallel Stage B dispatches ([#982](https://github.com/zaxbysauce/opencode-swarm/issues/982)) ([ffbde54](https://github.com/zaxbysauce/opencode-swarm/commit/ffbde54890f55a1137ba9e8c963cfac302ab937a))
+
 ## [7.28.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.0...v7.28.1) (2026-05-22)
 
 
