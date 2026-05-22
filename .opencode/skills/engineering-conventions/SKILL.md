@@ -48,7 +48,7 @@ The OpenCode `test_runner` tool is for **targeted agent validation** with explic
 
 - `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP. Do not lean on this — broad scopes can stall or kill OpenCode before that guard fires.
 - For repo validation, run the shell commands in `contributing.md` / `TESTING.md` directly (per-file isolation loops + tier orchestration).
-- `scope: 'all'` requires the `SWARM_ALLOW_FULL_SUITE=1` environment variable (settable only by CI / maintainer shell — not accessible via tool args) and is intended for opt-in CI mirrors only. Default to `files: [...]` instead.
+- `scope: 'all'` is reserved for CI / maintainer environments and is unavailable in agent sessions — never attempt it; use the per-file shell loops. Default to `files: [...]` instead.
 
 ## The invariant-audit gate (PR-time)
 

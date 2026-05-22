@@ -94,7 +94,6 @@ export interface TestRunnerArgs {
 	files?: string[];
 	coverage?: boolean;
 	timeout_ms?: number;
-	allow_full_suite?: boolean;
 }
 
 // ============ Response Types ============
@@ -1083,7 +1082,11 @@ function buildTestCommand(
 ): string[] | null {
 	switch (framework) {
 		case 'bun': {
-			const args: string[] = ['bun', 'test'];
+			// --smol caps bun's heap growth. Running multiple test files (up to
+			// MAX_SAFE_TEST_FILES) or the full suite in one default-heap process
+			// is the dominant session-kill OOM vector; --smol mirrors the repo's
+			// per-file CI invariant (release v6.44.1, engineering-invariants).
+			const args: string[] = ['bun', '--smol', 'test'];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
@@ -1793,7 +1796,12 @@ export async function runTests(
 		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
+			stdin: 'ignore',
 			cwd: cwd,
+			// Test frameworks (jest/vitest) fork worker processes; on timeout we
+			// must reap the whole tree, or orphaned workers keep consuming memory
+			// after proc.kill() and can still wedge the session.
+			killProcessTree: true,
 		});
 
 		// Race with timeout — but read streams CONCURRENTLY with waiting for exit.
@@ -1805,18 +1813,21 @@ export async function runTests(
 		// Fix: read bounded streams in parallel with exit/timeout, so the pipe is
 		// always being drained. readBoundedStream caps memory at MAX_OUTPUT_BYTES
 		// per stream, preventing OOM from unbounded test output.
-		const timeoutPromise = new Promise<number>((resolve) =>
-			setTimeout(() => {
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		const timeoutPromise = new Promise<number>((resolve) => {
+			timeoutHandle = setTimeout(() => {
 				proc.kill();
 				resolve(-1); // Timeout indicator
-			}, timeout_ms),
-		);
+			}, timeout_ms);
+		});
 
 		const [exitCode, stdoutResult, stderrResult] = await Promise.all([
 			Promise.race([proc.exited, timeoutPromise]),
 			readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES),
 			readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES),
 		]);
+
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 
 		const duration_ms = Date.now() - startTime;
 
@@ -2222,12 +2233,6 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.number()
 			.optional()
 			.describe('Timeout in milliseconds (default 60000, max 300000)'),
-		allow_full_suite: z
-			.boolean()
-			.optional()
-			.describe(
-				'Explicit opt-in for scope "all". Required because full-suite output can destabilize SSE streaming.',
-			),
 		working_directory: z
 			.string()
 			.optional()
@@ -2317,16 +2322,24 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		const scope = args.scope || 'all';
 
-		// Guard 1: scope === 'all' requires explicit opt-in via allow_full_suite flag
+		// Guard 1: scope === 'all' requires an ENVIRONMENT opt-in, not a tool arg.
 		// Rationale: Full-suite output is one of the largest SSE payloads the swarm produces.
 		// Opencode's SSE pipeline has known issues with large payloads causing session wedge,
 		// memory leaks, and OOM crashes (anomalyco/opencode #17977, #15645, #17908).
-		// This guard ensures full-suite runs are a deliberate architect decision, not accidental.
 		//
-		// IMPORTANT: The error message must NOT instruct the caller to add allow_full_suite.
-		// LLMs follow such instructions literally, defeating the guard entirely.
+		// Why an env var and not a flag: the previous `allow_full_suite` arg was
+		// agent-settable. When an agent hit `scope_exceeded` on a discovery scope it
+		// would rationally set `allow_full_suite: true` and run the whole suite,
+		// re-triggering the exact crash the guard exists to prevent. `SWARM_ALLOW_FULL_SUITE`
+		// can only be set by the human/CI environment, so an LLM cannot self-authorize it.
+		//
+		// IMPORTANT: The error message must NOT name the env var — LLMs follow such
+		// instructions literally and would try to set it, defeating the guard.
 		if (scope === 'all') {
-			if (!args.allow_full_suite) {
+			const fullSuiteAllowed =
+				process.env.SWARM_ALLOW_FULL_SUITE === '1' ||
+				process.env.SWARM_ALLOW_FULL_SUITE === 'true';
+			if (!fullSuiteAllowed) {
 				const errorResult: TestErrorResult = {
 					success: false,
 					framework: 'none',
@@ -2339,7 +2352,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
-			// Allow through — caller explicitly opted in
+			// Allow through — environment explicitly opted in (CI mirror)
 		}
 
 		// Hard guard: convention, graph, and impact scopes require explicit files to prevent unsafe full-project discovery

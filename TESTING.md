@@ -2,7 +2,7 @@
 
 > **For LLM agents:** Load the `writing-tests` skill (`.opencode/skills/writing-tests/SKILL.md`) before writing or modifying any test file. It contains the full mock isolation rules, CI pipeline structure, and anti-patterns. For agent operational safety and the broader engineering invariants of this repo (especially the `test_runner` broad-scope restriction and the `_internals` DI-seam pattern for mock isolation), read [`AGENTS.md`](./AGENTS.md) at the repo root.
 
-> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`) guard fires. For repo validation, use the shell commands below — per-file isolation loops match CI behavior. See [`AGENTS.md`](./AGENTS.md) invariant 6 for the full contract.
+> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. The agent-settable `allow_full_suite` arg was removed; `scope: 'all'` now requires `SWARM_ALLOW_FULL_SUITE=1` in the environment (CI / maintainer only) and is unavailable in agent sessions. The tool runs bun with `--smol` to cap memory, but broad scopes can still stall OpenCode before the `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`) guard fires. For repo validation, use the shell commands below — per-file isolation loops match CI behavior. See [`AGENTS.md`](./AGENTS.md) invariant 6 for the full contract.
 
 ## Quick Reference
 
