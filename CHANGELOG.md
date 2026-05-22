@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.28.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.2...v7.28.3) (2026-05-22)
+
+
+### Bug Fixes
+
+* **test-runner:** cap bun heap with --smol, env-gate scope:all, process-group kill on timeout ([#962](https://github.com/zaxbysauce/opencode-swarm/issues/962)) ([2ea310a](https://github.com/zaxbysauce/opencode-swarm/commit/2ea310a03b2975df193a1df83cd422afb57abc82))
+
 ## [7.28.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.1...v7.28.2) (2026-05-22)
 
 
