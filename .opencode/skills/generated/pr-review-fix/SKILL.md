@@ -53,13 +53,57 @@ For EACH finding:
 - When downgrading, record the original severity and the recommended severity with a one-line justification.
 - Print the full validated findings table before proceeding.
 
-## Step 1a — Check normalization consistency (when applicable)
+## Step 1a — Delegation strategy: plan-based vs Task-only
+
+When fixing findings on a PR branch (no active swarm plan), the plan system's scaffolding
+requirements (spec.md, plan.json, QA gate selection) may block `declare_scope`. Choose
+the delegation strategy based on context:
+
+**Plan-based delegation (use when a plan is active):**
+- Creates `.swarm/scopes/scope-{taskId}.json` for the coder agent
+- Coder has restricted write access (only files in scope)
+- Preferred for multi-file changes where scope discipline matters
+- Requires: `.swarm/plan.json` + `.swarm/spec.md` + QA gate selection
+
+**Task-only delegation (use when fixing PR review findings without a swarm plan):**
+- Delegate to coder via **Task tool** with exact change specification
+- The coder accepts the delegation, applies fixes, runs tests, and validates changes
+  without scope restrictions (no scope file means the coder can write any file)
+- After the Task returns, verify: `syntax_check` passes on changed files,
+  relevant tests pass, no unintended file modifications
+- The architect MUST NOT edit source files directly — all code changes go through
+  the coder even when no scope is active
+
+**Mechanical vs complex:**
+- **Mechanical** (e.g., updating test expectations, renaming a parameter): one-line
+  Task delegation specifying the exact old→new text and file path
+- **Complex** (e.g., logic restructure, adding a new function): detailed Task delegation
+  with acceptance criteria, test expectations, and skill references
+
+**Enforcement: regardless of delegation strategy, the architect MUST NOT edit source files
+directly.** All code changes must go through the coder agent. The architect orchestrates,
+specifies, and validates — never edits.
+
+**Validation after Task delegation (any strategy):**
+- `syntax_check` passes on all changed files
+- No unintended files were modified by the coder
+- Relevant test suite passes
+- Diff matches the intended fix scope only
+
+**Gate:** Print your delegation strategy before proceeding:
+`DELEGATION STRATEGY: plan-based / Task-only`
+
+## Step 1b — Check normalization consistency (when applicable)
 
 When a PR adds data normalization, transformation, or coercion logic:
 
 1. Identify ALL consumer paths that read the transformed data.
 2. Verify that normalization is applied consistently across EVERY path.
 3. Common failure mode: normalization applied in one read path (e.g., gate-check) but not in another (e.g., write/update), causing silent data loss or inconsistent behavior.
+   Example: if a PR normalizes file paths during read (via `path.resolve`), verify the
+   same normalization is applied during write/update operations. Missing normalization
+   on the write path creates an asymmetry: the read gate passes but the stored value
+   bypasses normalization.
 4. If inconsistency is found, flag as a HIGH severity finding requiring shared helper extraction.
 
 ## Step 2 — Classify findings by file and fix scope
