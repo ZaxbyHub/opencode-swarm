@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guardrail Patterns"
+  short_description: "Change command guardrails safely"
+  default_prompt: "Use $guardrail-patterns before changing opencode-swarm shell guardrails."
