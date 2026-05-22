@@ -80,7 +80,6 @@ Do you need to run tests?
 | `'graph'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
 | `'impact'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
 | `'all'` | ❌ Never | ❌ Never | Reserved for CI / maintainer environments; unavailable in agent sessions |
-| `'all'` | ❌ Never | ❌ Never | Reserved for CI / maintainer environments; unavailable in agent sessions |
 
 **Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
 

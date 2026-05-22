@@ -386,6 +386,7 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - Test real behavior: call the actual function with real inputs, assert on real outputs.
 - Test error paths: what happens with `null`, `undefined`, empty string, oversized input?
 - Use temp directories (`fs.mkdtemp`) for file I/O tests. Clean up in `afterEach`.
+- **Stray `.swarm` directories**: Tests that create `.swarm/` directories MUST use `os.tmpdir()` + `path.join()` and clean up in `afterEach`. A stray `.swarm` at the drive root (e.g. `C:\.swarm`) blocks evidence writes, `write_retro`, `pre_check_batch`, and `sast_scan` for the entire project. The detection logic walks parent directories looking for `.swarm` and finds the wrong one.
 - Assert on specific values, not just truthiness: `expect(result.status).toBe('pending')` not `expect(result).toBeTruthy()`.
 
 ### DO NOT
