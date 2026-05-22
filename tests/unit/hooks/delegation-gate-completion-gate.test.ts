@@ -670,26 +670,23 @@ describe('delegation-gate: completion gate integration (PR #961)', () => {
 			expect(threw).toBe(true);
 		});
 
-		it('should NOT block update_task_status when status is not completed for different task', async () => {
+		it('should block update_task_status(in_progress) for a different task when current task awaits completion', async () => {
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
 
-			// Non-completion update should pass through
 			let threw = false;
 			try {
 				await callToolBefore(hook, 'update_task_status', 'test-session', {
 					task_id: '1.2',
-					status: 'in_progress', // Not 'completed'
+					status: 'in_progress',
 				});
 			} catch {
 				threw = true;
 			}
 
-			// Should NOT throw because allowCompletionUpdate requires status=completed
-			// and this is a different task, so it would be blocked
-			// Actually this WILL throw because 1.2 is a different task from 1.1
-			// The completion gate blocks starting different tasks
+			// The completion gate blocks all tool calls for a different task (1.2)
+			// when the current task (1.1) hasn't been durably marked completed.
 			expect(threw).toBe(true);
 		});
 	});
