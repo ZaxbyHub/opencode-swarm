@@ -58,6 +58,7 @@ export declare const _internals: {
     appendSkillUsageEntry: typeof appendSkillUsageEntry;
     readSkillUsageEntries: typeof readSkillUsageEntries;
     readSkillUsageEntriesTail: typeof readSkillUsageEntriesTail;
+    extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
     parseSkillPaths: typeof parseSkillPaths;
     extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
     computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
@@ -82,6 +83,15 @@ export declare function parseDelegationArgs(args: unknown): {
     targetAgent: string;
     skillsField: string;
 } | null;
+/**
+ * Extracts the value of a SKILLS field from a delegation prompt. Supports both
+ * legacy one-line fields (`SKILLS: file:...`) and description-rich blocks:
+ *
+ *   SKILLS:
+ *   - file:.claude/skills/writing-tests/SKILL.md - test conventions
+ *   - file:.claude/skills/react/SKILL.md - React UI patterns
+ */
+export declare function extractSkillsFieldFromPrompt(prompt: string): string;
 /** Write a warning event to .swarm/events.jsonl (sync, best-effort). */
 export declare function writeWarnEvent(directory: string, record: Record<string, unknown>): void;
 /**

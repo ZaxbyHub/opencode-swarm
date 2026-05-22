@@ -66,6 +66,20 @@ describe('Skills Propagation to Subagents', () => {
 			expect(skillsSection).toContain('Use inline skill bodies only');
 		});
 
+		it('instructs architect to inspect project contract files before delegation', () => {
+			const skillsSection = prompt.slice(prompt.indexOf('SKILLS PROPAGATION'));
+			expect(skillsSection).toContain('AGENTS.md');
+			expect(skillsSection).toContain('MUST/NEVER rules');
+			expect(skillsSection).toContain('INPUT/CONSTRAINT');
+		});
+
+		it('requires descriptions next to file references for on-demand skill loading', () => {
+			const skillsSection = prompt.slice(prompt.indexOf('SKILLS PROPAGATION'));
+			expect(skillsSection).toContain('file:` path and description');
+			expect(skillsSection).toContain('load on demand');
+			expect(skillsSection).toContain('Guidelines for writing tests');
+		});
+
 		it('includes anti-rationalization rules against skipping skills', () => {
 			const skillsSection = prompt.slice(prompt.indexOf('SKILLS PROPAGATION'));
 			expect(skillsSection).toContain('ANTI-RATIONALIZATION');
@@ -179,7 +193,12 @@ describe('Skills Propagation to Subagents', () => {
 
 		it('SKILLS HANDLING instructs to load file-based skills before writing code', () => {
 			const skillsHandling = prompt.slice(prompt.indexOf('SKILLS HANDLING'));
-			expect(skillsHandling).toContain('load EVERY referenced skill');
+			expect(skillsHandling).toContain(
+				'read the skill names/descriptions first',
+			);
+			expect(skillsHandling).toContain(
+				'load every referenced skill that applies',
+			);
 			expect(skillsHandling).toContain('use the search tool');
 			expect(skillsHandling).toContain('before writing any code');
 		});
@@ -220,7 +239,12 @@ describe('Skills Propagation to Subagents', () => {
 
 		it('SKILLS HANDLING instructs to load file-based skills before review', () => {
 			const skillsHandling = prompt.slice(prompt.indexOf('SKILLS HANDLING'));
-			expect(skillsHandling).toContain('load EVERY referenced skill');
+			expect(skillsHandling).toContain(
+				'read the skill names/descriptions first',
+			);
+			expect(skillsHandling).toContain(
+				'load every referenced skill that applies',
+			);
 			expect(skillsHandling).toContain('use the search tool');
 			expect(skillsHandling).toContain('before beginning');
 		});
@@ -274,7 +298,12 @@ describe('Skills Propagation to Subagents', () => {
 
 		it('SKILLS HANDLING instructs to load file-based skills before writing tests', () => {
 			const skillsHandling = prompt.slice(prompt.indexOf('SKILLS HANDLING'));
-			expect(skillsHandling).toContain('load EVERY referenced skill');
+			expect(skillsHandling).toContain(
+				'read the skill names/descriptions first',
+			);
+			expect(skillsHandling).toContain(
+				'load every referenced skill that applies',
+			);
 			expect(skillsHandling).toContain('use the search tool');
 			expect(skillsHandling).toContain('before writing any test code');
 		});
@@ -312,7 +341,12 @@ describe('Skills Propagation to Subagents', () => {
 
 		it('SKILLS HANDLING instructs to load file-based skills before recommendation', () => {
 			const skillsHandling = prompt.slice(prompt.indexOf('SKILLS HANDLING'));
-			expect(skillsHandling).toContain('load EVERY referenced skill');
+			expect(skillsHandling).toContain(
+				'read the skill names/descriptions first',
+			);
+			expect(skillsHandling).toContain(
+				'load every referenced skill that applies',
+			);
 			expect(skillsHandling).toContain('use the search tool');
 			expect(skillsHandling).toContain('before formulating');
 		});
