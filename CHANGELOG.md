@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.29.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.3...v7.29.0) (2026-05-22)
+
+
+### Features
+
+* **skill-propagation:** auto-inject skills into subagent delegations ([#987](https://github.com/zaxbysauce/opencode-swarm/issues/987)) ([00f1e8b](https://github.com/zaxbysauce/opencode-swarm/commit/00f1e8b495505b45c6b14346831936b2a53afcaf))
+
 ## [7.28.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.2...v7.28.3) (2026-05-22)
 
 
