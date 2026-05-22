@@ -25,7 +25,7 @@ If instructions conflict:
 
 ## Codex Execution Rules
 
-- Use `shell_command` for `git`, `gh`, build, test, and CI commands.
+- Use the available shell execution tool for `git`, `gh`, build, test, and CI commands.
 - Use `apply_patch` for manual file edits.
 - Use `multi_tool_use.parallel` for independent reads, status checks, and non-conflicting repo inspections.
 - Do not stage `.Codex/`, IDE-local files, or unrelated worktree changes.
