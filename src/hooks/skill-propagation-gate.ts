@@ -101,6 +101,7 @@ export const _internals: {
 	appendSkillUsageEntry: typeof appendSkillUsageEntry;
 	readSkillUsageEntries: typeof readSkillUsageEntries;
 	readSkillUsageEntriesTail: typeof readSkillUsageEntriesTail;
+	extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
 	parseSkillPaths: typeof parseSkillPaths;
 	extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
 	computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
@@ -126,6 +127,8 @@ export const _internals: {
 	appendSkillUsageEntry,
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
+	extractSkillsFieldFromPrompt:
+		null as unknown as typeof extractSkillsFieldFromPrompt,
 	parseSkillPaths: null as unknown as typeof parseSkillPaths,
 	extractTaskIdFromPrompt: null as unknown as typeof extractTaskIdFromPrompt,
 	computeSkillRelevanceScore,
@@ -164,7 +167,7 @@ export function discoverAvailableSkills(directory: string): string[] {
 					_internals.statSync(skillDir).isDirectory() &&
 					_internals.existsSync(skillFile)
 				) {
-					results.push(path.join(root, entry, 'SKILL.md'));
+					results.push(path.join(root, entry, 'SKILL.md').replace(/\\/g, '/'));
 				}
 			} catch (err) {
 				warn(
@@ -221,19 +224,51 @@ export function parseDelegationArgs(
 	if (!targetAgent) return null;
 
 	// Extract SKILLS: field value from prompt text only
-	let skillsField = '';
-	if (prompt) {
-		const lines = prompt.split('\n');
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (trimmed.startsWith('SKILLS:')) {
-				skillsField = trimmed.slice('SKILLS:'.length).trim();
-				break;
-			}
-		}
-	}
+	const skillsField = prompt
+		? _internals.extractSkillsFieldFromPrompt(prompt)
+		: '';
 
 	return { targetAgent, skillsField };
+}
+
+/**
+ * Extracts the value of a SKILLS field from a delegation prompt. Supports both
+ * legacy one-line fields (`SKILLS: file:...`) and description-rich blocks:
+ *
+ *   SKILLS:
+ *   - file:.claude/skills/writing-tests/SKILL.md - test conventions
+ *   - file:.claude/skills/react/SKILL.md - React UI patterns
+ */
+export function extractSkillsFieldFromPrompt(prompt: string): string {
+	const lines = prompt.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].trim();
+		if (!/^SKILLS\s*:/i.test(trimmed)) continue;
+
+		const firstLine = trimmed.replace(/^SKILLS\s*:/i, '').trim();
+		const collected: string[] = [];
+		if (firstLine) collected.push(firstLine);
+
+		for (let j = i + 1; j < lines.length; j++) {
+			const next = lines[j];
+			const nextTrimmed = next.trim();
+			if (!nextTrimmed) {
+				if (collected.length === 0) continue;
+				break;
+			}
+			if (/^[A-Z][A-Z0-9_ -]{1,40}\s*:/i.test(nextTrimmed)) break;
+			if (/^(?:-|\*|\d+\.)\s+/.test(nextTrimmed) || /^\s+/.test(next)) {
+				collected.push(nextTrimmed);
+				continue;
+			}
+			if (collected.length === 0) collected.push(nextTrimmed);
+			break;
+		}
+
+		return collected.join('\n').trim();
+	}
+
+	return '';
 }
 
 // ============================================================================
@@ -273,10 +308,33 @@ export function parseSkillPaths(fieldValue: string): string[] {
 	const trimmed = fieldValue.trim();
 	if (trimmed.toLowerCase() === 'none' || trimmed === '') return [];
 
-	return trimmed
-		.split(',')
-		.map((s) => s.trim())
-		.filter((s) => s.length > 0);
+	const lines = trimmed.split(/\r?\n/);
+	const hasCatalogLines = lines.some((line) =>
+		/^(?:-|\*|\d+\.)\s+/.test(line.trim()),
+	);
+	const parts = hasCatalogLines ? lines : trimmed.split(',');
+
+	const paths: string[] = [];
+	for (const rawPart of parts) {
+		const part = rawPart
+			.trim()
+			.replace(/^(?:-|\*|\d+\.)\s+/, '')
+			.trim();
+		if (!part || part.toLowerCase() === 'none') continue;
+
+		const fileRef = part.match(/\bfile:[^\s,;)\]]+/);
+		if (fileRef) {
+			paths.push(fileRef[0].replace(/\\/g, '/'));
+			continue;
+		}
+
+		// Legacy shorthand: `writing-tests`, `code`, `.claude/.../SKILL.md`,
+		// or even arbitrary path strings. Preserve these verbatim for backwards
+		// compatibility with the existing audit log contract.
+		paths.push(part);
+	}
+
+	return [...new Set(paths)];
 }
 
 /**
@@ -786,7 +844,9 @@ export async function skillPropagationTransformScan(
 		let currentTargetAgent = '';
 		let skillsField = '';
 
-		for (const line of text.split('\n')) {
+		const textLines = text.split('\n');
+		for (let lineIndex = 0; lineIndex < textLines.length; lineIndex++) {
+			const line = textLines[lineIndex] ?? '';
 			const trimmed = line.trim();
 
 			// Detect delegation to a skill-capable agent
@@ -800,7 +860,9 @@ export async function skillPropagationTransformScan(
 			}
 
 			if (trimmed.startsWith('SKILLS:')) {
-				skillsField = trimmed.slice('SKILLS:'.length).trim();
+				skillsField = _internals.extractSkillsFieldFromPrompt(
+					textLines.slice(lineIndex).join('\n'),
+				);
 			}
 
 			// When we have both, record and reset
@@ -850,6 +912,7 @@ _internals.skillPropagationTransformScan = skillPropagationTransformScan;
 _internals.writeWarnEvent = writeWarnEvent;
 _internals.discoverAvailableSkills = discoverAvailableSkills;
 _internals.parseDelegationArgs = parseDelegationArgs;
+_internals.extractSkillsFieldFromPrompt = extractSkillsFieldFromPrompt;
 _internals.parseSkillPaths = parseSkillPaths;
 _internals.extractTaskIdFromPrompt = extractTaskIdFromPrompt;
 _internals.formatSkillIndexWithContext = formatSkillIndexWithContext;

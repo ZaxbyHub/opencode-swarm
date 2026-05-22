@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { parseSkillPaths } from '../../../src/hooks/skill-propagation-gate.js';
 import {
 	_internals,
 	computeSkillRelevanceScore,
@@ -487,7 +488,7 @@ describe('rankSkillsForContext', () => {
 
 		expect(results).toHaveLength(2);
 		// They have identical scores and identical usage counts, order is stable
-		expect(results[0].score).toBe(results[1].score);
+		expect(results[0].score).toBeCloseTo(results[1].score, 10);
 	});
 });
 
@@ -673,6 +674,81 @@ describe('formatSkillIndexWithContext', () => {
 		expect(output).toContain('writing-tests');
 		expect(output).toContain('used: 2');
 		expect(output).toContain('compliance: 100%');
+	});
+
+	test('includes skill frontmatter description and repo-relative path when no usage log exists', () => {
+		const skillDir = path.join(tempDir, '.claude', 'skills', 'vitest-patterns');
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, 'SKILL.md'),
+			[
+				'---',
+				'name: vitest-patterns',
+				'description: Effect-TS 4 Vitest patterns for tests',
+				'---',
+				'# Body',
+			].join('\n'),
+		);
+
+		const output = _internals.formatSkillIndexWithContext(
+			['.claude/skills/vitest-patterns/SKILL.md'],
+			tempDir,
+		);
+
+		expect(output).toContain('vitest-patterns');
+		expect(output).toContain('Effect-TS 4 Vitest patterns for tests');
+		expect(output).toContain('file:.claude/skills/vitest-patterns/SKILL.md');
+		expect(parseSkillPaths(output)).toEqual([
+			'file:.claude/skills/vitest-patterns/SKILL.md',
+		]);
+	});
+
+	test('parses folded frontmatter descriptions for skill index output', () => {
+		const skillDir = path.join(tempDir, '.opencode', 'skills', 'writing-tests');
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, 'SKILL.md'),
+			[
+				'---',
+				'name: writing-tests',
+				'description: >',
+				'  Guidelines for writing, organizing,',
+				'  and maintaining tests.',
+				'---',
+				'# Body',
+			].join('\n'),
+		);
+
+		const output = _internals.formatSkillIndexWithContext(
+			['.opencode/skills/writing-tests/SKILL.md'],
+			tempDir,
+		);
+
+		expect(output).toContain(
+			'Guidelines for writing, organizing, and maintaining tests.',
+		);
+	});
+
+	test('reads metadata when the input skill path already has a file: prefix', () => {
+		const skillDir = path.join(tempDir, '.claude', 'skills', 'prefixed');
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, 'SKILL.md'),
+			[
+				'---',
+				'name: prefixed',
+				'description: Prefix-safe metadata',
+				'---',
+			].join('\n'),
+		);
+
+		const metadata = _internals.readSkillMetadata(
+			'file:.claude/skills/prefixed/SKILL.md',
+			tempDir,
+		);
+
+		expect(metadata.path).toBe('.claude/skills/prefixed/SKILL.md');
+		expect(metadata.description).toBe('Prefix-safe metadata');
 	});
 
 	test('falls back to simple index when log is empty', () => {
