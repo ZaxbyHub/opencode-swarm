@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.27.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.3...v7.27.4) (2026-05-22)
+
+
+### Bug Fixes
+
+* **delegation-gate:** block next task until completion is persisted ([#961](https://github.com/zaxbysauce/opencode-swarm/issues/961)) ([ecc8727](https://github.com/zaxbysauce/opencode-swarm/commit/ecc872761cf4be22611166fe2280d26c7da6ef19))
+
 ## [7.27.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.2...v7.27.3) (2026-05-22)
 
 
