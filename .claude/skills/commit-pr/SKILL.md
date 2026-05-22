@@ -193,6 +193,14 @@ git worktree remove /tmp/repro-check
 
 If the failure reproduces on `main`, document it under `## Pre-existing failures`. Do not silently inherit it.
 
+### dist-check is never pre-existing
+
+`dist-check` is a **hard gate**. Unlike test failures, a `dist-check` failure is never "pre-existing" and must be resolved before the PR merges.
+
+- **If your PR touches `src/`**: You must run `bun run build`, verify `git diff -- dist/` shows only expected changes from your source edits, and commit `dist/` in the same PR.
+- **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has dist drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
+- **Never** commit rebuilt `dist/` solely to make CI green when your PR does not touch source files.
+
 ## Step 4 - Workflow changes
 
 If any `.github/workflows/*.yml` file changed, every third-party `uses:` must be pinned to a full 40-character SHA.

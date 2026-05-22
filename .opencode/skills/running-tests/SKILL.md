@@ -278,4 +278,4 @@ bun --smol test tests/unit/agents/some-file.test.ts --timeout 30000
 | `Select-String -Last N` error | Invalid PowerShell parameter | Use `Select-Object -Last N` |
 | Token budget test failure | Prompt grew past hardcoded threshold | Treat as soft regression; update threshold |
 | CONSTRAINT assertion fails after refactor | Test checks for removed format template | Update assertion to match current prompt |
-| dist-check CI failure | `src/` change not rebuilt before commit | Run `bun run build` and stage `dist/` |
+| dist-check CI failure | `dist-check` is a hard gate. If your PR touched `src/`, run `bun run build` and commit `dist/` in the same PR. If your PR did not touch `src/`, the drift is on `main` — do not commit rebuilt dist to your PR. |

@@ -66,6 +66,21 @@ Determine the exact task scope first:
 
 If the task is unclear, ask a small number of targeted questions or create a short written plan before coding.
 
+### Phase 0a — Parallel work check
+
+**Reference the [parallel-work-check skill](../../../.opencode/skills/generated/parallel-work-check/SKILL.md) for the full protocol.**
+
+Before starting implementation on an existing branch, check for parallel work:
+
+1. Fetch remote state and compare with local (`git fetch` + compare HEAD hashes).
+2. If parallel swarm work is detected on the target branch:
+   - Read the new commits with `git log origin/<branch> --not HEAD`.
+   - Evaluate whether to **integrate**, **supersede**, or **proceed** with your planned work.
+   - Default stance: prefer the parallel swarm's work unless you can clearly articulate why your approach is better.
+3. Document the decision before proceeding to Phase 1 using the PARALLEL WORK CHECK template from the parallel-work-check skill.
+
+**This check prevents wasted effort on stale branches and ensures you build on the latest remote state.**
+
 ### Phase 1 — Parallel exploration
 Launch parallel subagents for disjoint investigation tasks such as:
 - repository mapping for relevant subsystems
