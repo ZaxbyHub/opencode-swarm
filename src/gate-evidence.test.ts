@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -8,6 +14,7 @@ import {
 	hasPassedAllGates,
 	isValidTaskId,
 	readTaskEvidence,
+	readTaskEvidenceRaw,
 	recordAgentDispatch,
 	recordGateEvidence,
 } from './gate-evidence';
@@ -255,5 +262,117 @@ describe('append-only expansion', () => {
 
 		// docs gate still present after expansion
 		expect(after!.gates.docs).toBeDefined();
+	});
+});
+
+// ── corruption handling ─────────────────────────────────────────────────────
+
+describe('corruption handling', () => {
+	const getEvidencePath = (taskId: string) =>
+		path.join(tmpDir, '.swarm', 'evidence', `${taskId}.json`);
+
+	describe('recordGateEvidence', () => {
+		it('21. truncated JSON → throws, file unchanged', async () => {
+			// Create a valid evidence file first
+			await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-2');
+
+			// Overwrite with truncated JSON
+			const evidencePath = getEvidencePath('1.1');
+			writeFileSync(evidencePath, '{"taskId": "1.1",', 'utf-8');
+
+			// Call recordGateEvidence - should throw
+			await expect(
+				recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-2'),
+			).rejects.toThrow();
+
+			// Assert: file is UNCHANGED (still truncated JSON)
+			const content = readFileSync(evidencePath, 'utf-8');
+			expect(content).toBe('{"taskId": "1.1",');
+		});
+
+		it('22. ZodError (schema validation failure) → throws, file unchanged', async () => {
+			// Create the evidence directory first
+			const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
+			mkdirSync(evidenceDir, { recursive: true });
+
+			// Create file with valid JSON but wrong schema (gates is string instead of object)
+			const evidencePath = getEvidencePath('1.2');
+			writeFileSync(
+				evidencePath,
+				'{"taskId":"1.2","required_gates":[],"gates":"wrong"}',
+				'utf-8',
+			);
+
+			// Call recordGateEvidence - should throw ZodError
+			await expect(
+				recordGateEvidence(tmpDir, '1.2', 'reviewer', 'session-X'),
+			).rejects.toThrow();
+
+			// Assert: file is UNCHANGED
+			const content = readFileSync(evidencePath, 'utf-8');
+			expect(content).toBe(
+				'{"taskId":"1.2","required_gates":[],"gates":"wrong"}',
+			);
+		});
+
+		it('23. empty file → throws, file unchanged', async () => {
+			// Create the evidence directory first
+			const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
+			mkdirSync(evidenceDir, { recursive: true });
+
+			// Create an empty file
+			const evidencePath = getEvidencePath('1.3');
+			writeFileSync(evidencePath, '', 'utf-8');
+
+			// Call recordGateEvidence - should throw (SyntaxError from JSON.parse(''))
+			await expect(
+				recordGateEvidence(tmpDir, '1.3', 'reviewer', 'session-X'),
+			).rejects.toThrow();
+
+			// Assert: file is UNCHANGED (still empty)
+			const content = readFileSync(evidencePath, 'utf-8');
+			expect(content).toBe('');
+		});
+	});
+
+	describe('recordAgentDispatch', () => {
+		it('24. truncated JSON → throws, file unchanged', async () => {
+			// Create a valid evidence file first
+			await recordAgentDispatch(tmpDir, '1.4', 'coder');
+
+			// Overwrite with truncated JSON
+			const evidencePath = getEvidencePath('1.4');
+			writeFileSync(evidencePath, '{"taskId": "1.4",', 'utf-8');
+
+			// Call recordAgentDispatch - should throw
+			await expect(
+				recordAgentDispatch(tmpDir, '1.4', 'coder'),
+			).rejects.toThrow();
+
+			// Assert: file is UNCHANGED (still truncated JSON)
+			const content = readFileSync(evidencePath, 'utf-8');
+			expect(content).toBe('{"taskId": "1.4",');
+		});
+	});
+
+	describe('readTaskEvidenceRaw', () => {
+		it('25. ENOENT → returns null', () => {
+			// Call on non-existent file
+			const result = readTaskEvidenceRaw(tmpDir, '999.9');
+			expect(result).toBeNull();
+		});
+
+		it('26. parse error → throws', () => {
+			// Create the evidence directory first
+			const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
+			mkdirSync(evidenceDir, { recursive: true });
+
+			// Create corrupted file
+			const evidencePath = getEvidencePath('1.5');
+			writeFileSync(evidencePath, '{"taskId": "1.5",', 'utf-8');
+
+			// Call readTaskEvidenceRaw - should throw
+			expect(() => readTaskEvidenceRaw(tmpDir, '1.5')).toThrow();
+		});
 	});
 });

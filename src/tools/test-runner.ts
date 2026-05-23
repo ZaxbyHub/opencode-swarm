@@ -2317,16 +2317,17 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		const scope = args.scope || 'all';
 
-		// Guard 1: scope === 'all' requires explicit opt-in via allow_full_suite flag
+		// Guard 1: scope === 'all' requires explicit opt-in via SWARM_ALLOW_FULL_SUITE env var
 		// Rationale: Full-suite output is one of the largest SSE payloads the swarm produces.
 		// Opencode's SSE pipeline has known issues with large payloads causing session wedge,
 		// memory leaks, and OOM crashes (anomalyco/opencode #17977, #15645, #17908).
 		// This guard ensures full-suite runs are a deliberate architect decision, not accidental.
 		//
-		// IMPORTANT: The error message must NOT instruct the caller to add allow_full_suite.
+		// IMPORTANT: The error message must NOT instruct the caller how to bypass.
 		// LLMs follow such instructions literally, defeating the guard entirely.
+		// Use SWARM_ALLOW_FULL_SUITE=1 env var only — do not rely on args.allow_full_suite.
 		if (scope === 'all') {
-			if (!args.allow_full_suite) {
+			if (!process.env.SWARM_ALLOW_FULL_SUITE) {
 				const errorResult: TestErrorResult = {
 					success: false,
 					framework: 'none',
@@ -2339,7 +2340,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
-			// Allow through — caller explicitly opted in
+			// Allow through — env opt-in confirmed
 		}
 
 		// Hard guard: convention, graph, and impact scopes require explicit files to prevent unsafe full-project discovery

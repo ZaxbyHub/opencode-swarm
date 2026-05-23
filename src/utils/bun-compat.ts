@@ -234,6 +234,16 @@ export interface BunCompatSpawnOptions {
 	stdout?: 'inherit' | 'ignore' | 'pipe';
 	stderr?: 'inherit' | 'ignore' | 'pipe';
 	timeout?: number;
+	/**
+	 * When true, spawn the child as its own process-group leader (Node path:
+	 * `detached`) and kill the entire descendant tree on `kill()`/timeout
+	 * rather than only the direct child. A test runner that forks worker
+	 * processes (jest/vitest, or a runaway suite) can otherwise outlive a
+	 * `proc.kill()` of the parent and keep consuming memory after the timeout.
+	 * Opt-in because the default single-child kill is correct for the many
+	 * short-lived `bunSpawn` callers (git, lint, version checks).
+	 */
+	killProcessTree?: boolean;
 }
 
 export interface BunCompatStream {
@@ -254,6 +264,42 @@ export interface BunCompatSubprocess {
 	readonly exited: Promise<number>;
 	exitCode: number | null;
 	kill(signal?: NodeJS.Signals | number): void;
+}
+
+/**
+ * Best-effort kill of a process and all its descendants. On Windows uses
+ * `taskkill /T` (tree) keyed off the pid. On POSIX, when the child was spawned
+ * detached (its own group leader) we signal the negative pid to reach the whole
+ * group; otherwise we fall back to signalling the direct child.
+ */
+function killProcessTreeImpl(
+	pid: number | undefined,
+	signal: NodeJS.Signals | number | undefined,
+	directKill: () => void,
+	wasDetached: boolean,
+): void {
+	if (typeof pid !== 'number' || pid <= 0) {
+		directKill();
+		return;
+	}
+	if (process.platform === 'win32') {
+		try {
+			nodeSpawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
+		} catch {
+			// taskkill unavailable or already gone — fall back to direct kill
+			directKill();
+		}
+		return;
+	}
+	if (wasDetached) {
+		try {
+			process.kill(-pid, (signal as NodeJS.Signals) ?? 'SIGKILL');
+			return;
+		} catch {
+			// group gone or never created — fall through to direct kill
+		}
+	}
+	directKill();
 }
 
 function streamFromNode(
@@ -431,6 +477,7 @@ export function bunSpawn(
 			stderr?: unknown;
 			exited: Promise<number>;
 			exitCode: number | null;
+			pid?: number;
 			kill: (sig?: NodeJS.Signals | number) => void;
 		};
 		return {
@@ -441,20 +488,43 @@ export function bunSpawn(
 				return proc.exitCode;
 			},
 			kill(sig) {
-				proc.kill(sig);
+				if (options?.killProcessTree) {
+					// Bun.spawn does not expose a detached option here, so the
+					// POSIX group-kill path is unavailable; taskkill /T still
+					// reaps the tree on Windows.
+					killProcessTreeImpl(proc.pid, sig, () => proc.kill(sig), false);
+				} else {
+					proc.kill(sig);
+				}
 			},
 		};
 	}
 	const [file, ...args] = cmd;
+	const detached = options?.killProcessTree === true;
 	const proc = nodeSpawn(file, args, {
 		cwd: options?.cwd,
 		env: options?.env as NodeJS.ProcessEnv | undefined,
+		detached,
+		windowsHide: true,
 		stdio: [
 			mapStdio(options?.stdin),
 			mapStdio(options?.stdout),
 			mapStdio(options?.stderr),
 		],
 	});
+
+	const killChild = (signal?: NodeJS.Signals | number) => {
+		if (detached) {
+			killProcessTreeImpl(
+				proc.pid,
+				signal,
+				() => proc.kill(signal as NodeJS.Signals),
+				true,
+			);
+		} else {
+			proc.kill(signal as NodeJS.Signals);
+		}
+	};
 
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	const exited = new Promise<number>((resolve) => {
@@ -463,7 +533,7 @@ export function bunSpawn(
 		if (options?.timeout && options.timeout > 0) {
 			timeoutHandle = setTimeout(() => {
 				try {
-					proc.kill('SIGKILL');
+					killChild('SIGKILL');
 				} catch {
 					// ignore — process may already be gone
 				}
@@ -486,11 +556,7 @@ export function bunSpawn(
 			return proc.exitCode;
 		},
 		kill(signal?: NodeJS.Signals | number) {
-			try {
-				proc.kill(signal as NodeJS.Signals);
-			} catch {
-				// ignore
-			}
+			killChild(signal);
 		},
 	};
 }

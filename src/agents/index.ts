@@ -388,6 +388,7 @@ Your swarm ID is "${swarmId}". ALL your agents have the "${swarmId}_" prefix:
 - @${swarmId}_coder (not @coder)
 - @${swarmId}_sme (not @sme)
 - @${swarmId}_reviewer (not @reviewer)
+- @${swarmId}_spec_writer (not @spec_writer)
 - etc.
 
 CRITICAL: Agents without the "${swarmId}_" prefix DO NOT EXIST or belong to a DIFFERENT swarm.

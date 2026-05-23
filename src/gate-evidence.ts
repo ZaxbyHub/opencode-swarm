@@ -111,12 +111,17 @@ function getEvidencePath(directory: string, taskId: string): string {
 	return path.join(getEvidenceDir(directory), `${taskId}.json`);
 }
 
-function readExisting(evidencePath: string): TaskEvidence | null {
+function readExisting(
+	evidencePath: string,
+	taskId: string,
+): TaskEvidence | null {
 	try {
 		const raw = readFileSync(evidencePath, 'utf-8');
 		return TaskEvidenceSchema.parse(JSON.parse(raw));
-	} catch {
-		return null;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		telemetry.gateParseError(taskId, error as Error);
+		throw error;
 	}
 }
 
@@ -154,7 +159,13 @@ export async function recordGateEvidence(
 	const lockRelPath = path.join('evidence', `${taskId}.json`);
 	await withEvidenceLock(directory, lockRelPath, gate, taskId, async () => {
 		const evidencePath = getEvidencePath(directory, taskId);
-		const existing = readExisting(evidencePath);
+		let existing: TaskEvidence | null = null;
+		try {
+			existing = readExisting(evidencePath, taskId);
+		} catch (error) {
+			telemetry.gateParseError(taskId, error as Error);
+			throw error;
+		}
 		const requiredGates = existing
 			? expandRequiredGates(existing.required_gates, gate)
 			: deriveRequiredGates(gate);
@@ -201,7 +212,13 @@ export async function recordAgentDispatch(
 		taskId,
 		async () => {
 			const evidencePath = getEvidencePath(directory, taskId);
-			const existing = readExisting(evidencePath);
+			let existing: TaskEvidence | null = null;
+			try {
+				existing = readExisting(evidencePath, taskId);
+			} catch (error) {
+				telemetry.gateParseError(taskId, error as Error);
+				throw error;
+			}
 			const requiredGates = existing
 				? expandRequiredGates(existing.required_gates, agentType)
 				: deriveRequiredGates(agentType);
@@ -228,7 +245,7 @@ export async function readTaskEvidence(
 ): Promise<TaskEvidence | null> {
 	try {
 		assertValidTaskId(taskId);
-		return readExisting(getEvidencePath(directory, taskId));
+		return readExisting(getEvidencePath(directory, taskId), taskId);
 	} catch {
 		return null;
 	}

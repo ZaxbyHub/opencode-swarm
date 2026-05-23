@@ -1,4 +1,4 @@
-export type TelemetryEvent = 'session_started' | 'session_ended' | 'agent_activated' | 'delegation_begin' | 'delegation_end' | 'task_state_changed' | 'gate_passed' | 'gate_failed' | 'phase_changed' | 'budget_updated' | 'model_fallback' | 'hard_limit_hit' | 'revision_limit_hit' | 'loop_detected' | 'scope_violation' | 'qa_skip_violation' | 'heartbeat' | 'turbo_mode_changed' | 'auto_oversight_escalation' | 'environment_detected' | 'evidence_lock_acquired' | 'evidence_lock_contended' | 'evidence_lock_stale_recovered' | 'plan_ledger_cas_retry' | 'plan_md_write_failed' | 'prm_pattern_detected' | 'prm_course_correction_injected' | 'prm_escalation_triggered' | 'prm_hard_stop';
+export type TelemetryEvent = 'session_started' | 'session_ended' | 'agent_activated' | 'delegation_begin' | 'delegation_end' | 'task_state_changed' | 'gate_passed' | 'gate_failed' | 'gate_parse_error' | 'phase_changed' | 'budget_updated' | 'model_fallback' | 'hard_limit_hit' | 'revision_limit_hit' | 'loop_detected' | 'scope_violation' | 'qa_skip_violation' | 'heartbeat' | 'turbo_mode_changed' | 'auto_oversight_escalation' | 'environment_detected' | 'evidence_lock_acquired' | 'evidence_lock_contended' | 'evidence_lock_stale_recovered' | 'plan_ledger_cas_retry' | 'plan_md_write_failed' | 'prm_pattern_detected' | 'prm_course_correction_injected' | 'prm_escalation_triggered' | 'prm_hard_stop';
 export type TelemetryListener = (event: TelemetryEvent, data: Record<string, unknown>) => void;
 /** @internal - For testing only */
 export declare function resetTelemetryForTesting(): void;
@@ -39,6 +39,7 @@ export declare const telemetry: {
     delegationEnd(sessionId: string, agentName: string, taskId: string, result: string): void;
     taskStateChanged(sessionId: string, taskId: string, newState: string, oldState?: string): void;
     gatePassed(sessionId: string, gate: string, taskId: string): void;
+    gateParseError(taskId: string, error: Error): void;
     gateFailed(sessionId: string, gate: string, taskId: string, reason: string): void;
     phaseChanged(sessionId: string, oldPhase: number, newPhase: number): void;
     budgetUpdated(sessionId: string, budgetPct: number, agentName: string): void;
