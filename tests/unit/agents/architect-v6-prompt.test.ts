@@ -61,18 +61,6 @@ describe('Architect Agent - All MODE Sections', () => {
 			expect(positions[i]).toBeGreaterThan(positions[i - 1]);
 		}
 	});
-
-	it('MODE: RESUME moves directly to scoped coder dispatch', () => {
-		const resumeIdx = p.indexOf('### MODE: RESUME');
-		const clarifyIdx = p.indexOf('### MODE: CLARIFY', resumeIdx);
-		const section = p.slice(resumeIdx, clarifyIdx);
-		expect(section).toContain('do not restart broad discovery');
-		expect(section).toContain('declare_scope');
-		expect(section).toContain('ONE atomic task per coder Task call');
-		expect(section).toContain(
-			'parallel profiles may dispatch up to the available coder slots',
-		);
-	});
 });
 
 describe('Architect Agent - Key Structural Elements', () => {

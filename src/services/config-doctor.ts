@@ -9,9 +9,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ALL_AGENT_NAMES } from '../config/constants';
 import type { PluginConfig } from '../config/schema';
-import { stripKnownSwarmPrefix } from '../config/schema';
 import { log } from '../utils';
 
 /**
@@ -400,9 +398,19 @@ function validateConfigKey(
 		case 'guardrails.profiles': {
 			const profiles = value as Record<string, unknown> | undefined;
 			if (profiles) {
-				const validAgents = new Set(ALL_AGENT_NAMES as readonly string[]);
+				const validAgents = [
+					'architect',
+					'coder',
+					'test_engineer',
+					'explorer',
+					'reviewer',
+					'critic',
+					'sme',
+					'docs',
+					'designer',
+				];
 				for (const [agentName, profile] of Object.entries(profiles)) {
-					if (!validAgents.has(agentName)) {
+					if (!validAgents.includes(agentName)) {
 						findings.push({
 							id: 'unknown-agent-profile',
 							title: 'Unknown agent profile',
@@ -576,34 +584,26 @@ function validateConfigKey(
 		case 'swarms': {
 			const swarms = value as Record<string, unknown> | undefined;
 			if (swarms && typeof swarms === 'object') {
-				const validAgents = new Set(ALL_AGENT_NAMES as readonly string[]);
 				for (const [swarmId, swarmConfig] of Object.entries(swarms)) {
 					const swarm = swarmConfig as Record<string, unknown>;
 					if (swarm.agents && typeof swarm.agents === 'object') {
 						for (const [agentName] of Object.entries(
 							swarm.agents as Record<string, unknown>,
 						)) {
-							const baseName = stripKnownSwarmPrefix(agentName);
-							if (
-								baseName !== agentName &&
-								agentName.startsWith(`${swarmId}_`) &&
-								validAgents.has(baseName)
-							) {
-								findings.push({
-									id: 'prefixed-swarm-agent-override',
-									title: 'Prefixed agent override is ignored',
-									description:
-										`Agent "${agentName}" in swarm "${swarmId}" uses a generated agent name. ` +
-										`Per-swarm overrides must use the canonical key "${baseName}", e.g. ` +
-										`"swarms.${swarmId}.agents.${baseName}.model". Otherwise the override is ignored and the agent falls back to its default model.`,
-									severity: 'warn',
-									path: `swarms.${swarmId}.agents.${agentName}`,
-									currentValue: (swarm.agents as Record<string, unknown>)[
-										agentName
-									],
-									autoFixable: false,
-								});
-							} else if (!validAgents.has(baseName)) {
+							const validAgents = [
+								'architect',
+								'coder',
+								'test_engineer',
+								'explorer',
+								'reviewer',
+								'critic',
+								'sme',
+								'docs',
+								'designer',
+							];
+							// Allow swarm-prefixed agents like "local_coder"
+							const baseName = agentName.replace(/^[a-zA-Z0-9]+_/, '');
+							if (!validAgents.includes(baseName)) {
 								findings.push({
 									id: 'unknown-swarm-agent',
 									title: 'Unknown agent in swarm',

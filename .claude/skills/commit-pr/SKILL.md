@@ -200,7 +200,6 @@ If the failure reproduces on `main`, document it under `## Pre-existing failures
 - **If your PR touches `src/`**: You must run `bun run build`, verify `git diff -- dist/` shows only expected changes from your source edits, and commit `dist/` in the same PR.
 - **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has dist drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
 - **Never** commit rebuilt `dist/` solely to make CI green when your PR does not touch source files.
-- **Version bump from parallel release PR**: If dist-check shows only a version number diff (e.g. `7.28.0` → `7.28.1`), a release-please PR merged to main after your branch was cut is the cause. Fix: `git fetch origin main && git rebase origin/main && bun run build && git add dist/ && git commit --amend --no-edit && git push --force-with-lease`. Never manually edit version strings in dist files.
 
 ## Step 4 - Workflow changes
 

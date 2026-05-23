@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.29.1",
+    version: "7.28.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -326,27 +326,6 @@ function bunHash(input) {
   }
   return hash;
 }
-function killProcessTreeImpl(pid, signal, directKill, wasDetached) {
-  if (typeof pid !== "number" || pid <= 0) {
-    directKill();
-    return;
-  }
-  if (process.platform === "win32") {
-    try {
-      nodeSpawnSync("taskkill", ["/PID", String(pid), "/T", "/F"]);
-    } catch {
-      directKill();
-    }
-    return;
-  }
-  if (wasDetached) {
-    try {
-      process.kill(-pid, signal ?? "SIGKILL");
-      return;
-    } catch {}
-  }
-  directKill();
-}
 function streamFromNode(pipe) {
   const collected = new Promise((resolve) => {
     if (!pipe) {
@@ -469,34 +448,20 @@ function bunSpawn(cmd, options) {
         return proc2.exitCode;
       },
       kill(sig) {
-        if (options?.killProcessTree) {
-          killProcessTreeImpl(proc2.pid, sig, () => proc2.kill(sig), false);
-        } else {
-          proc2.kill(sig);
-        }
+        proc2.kill(sig);
       }
     };
   }
   const [file, ...args] = cmd;
-  const detached = options?.killProcessTree === true;
   const proc = nodeSpawn(file, args, {
     cwd: options?.cwd,
     env: options?.env,
-    detached,
-    windowsHide: true,
     stdio: [
       mapStdio(options?.stdin),
       mapStdio(options?.stdout),
       mapStdio(options?.stderr)
     ]
   });
-  const killChild = (signal) => {
-    if (detached) {
-      killProcessTreeImpl(proc.pid, signal, () => proc.kill(signal), true);
-    } else {
-      proc.kill(signal);
-    }
-  };
   let timeoutHandle;
   const exited = new Promise((resolve) => {
     proc.on("exit", (code) => resolve(code ?? 0));
@@ -504,7 +469,7 @@ function bunSpawn(cmd, options) {
     if (options?.timeout && options.timeout > 0) {
       timeoutHandle = setTimeout(() => {
         try {
-          killChild("SIGKILL");
+          proc.kill("SIGKILL");
         } catch {}
       }, options.timeout);
       if (typeof timeoutHandle.unref === "function") {
@@ -524,7 +489,7 @@ function bunSpawn(cmd, options) {
     },
     kill(signal) {
       try {
-        killChild(signal);
+        proc.kill(signal);
       } catch {}
     }
   };
@@ -40278,9 +40243,19 @@ function validateConfigKey(path24, value, _config) {
     case "guardrails.profiles": {
       const profiles = value;
       if (profiles) {
-        const validAgents = new Set(ALL_AGENT_NAMES);
+        const validAgents = [
+          "architect",
+          "coder",
+          "test_engineer",
+          "explorer",
+          "reviewer",
+          "critic",
+          "sme",
+          "docs",
+          "designer"
+        ];
         for (const [agentName, profile] of Object.entries(profiles)) {
-          if (!validAgents.has(agentName)) {
+          if (!validAgents.includes(agentName)) {
             findings.push({
               id: "unknown-agent-profile",
               title: "Unknown agent profile",
@@ -40441,23 +40416,23 @@ function validateConfigKey(path24, value, _config) {
     case "swarms": {
       const swarms = value;
       if (swarms && typeof swarms === "object") {
-        const validAgents = new Set(ALL_AGENT_NAMES);
         for (const [swarmId, swarmConfig] of Object.entries(swarms)) {
           const swarm = swarmConfig;
           if (swarm.agents && typeof swarm.agents === "object") {
             for (const [agentName] of Object.entries(swarm.agents)) {
-              const baseName = stripKnownSwarmPrefix(agentName);
-              if (baseName !== agentName && agentName.startsWith(`${swarmId}_`) && validAgents.has(baseName)) {
-                findings.push({
-                  id: "prefixed-swarm-agent-override",
-                  title: "Prefixed agent override is ignored",
-                  description: `Agent "${agentName}" in swarm "${swarmId}" uses a generated agent name. ` + `Per-swarm overrides must use the canonical key "${baseName}", e.g. ` + `"swarms.${swarmId}.agents.${baseName}.model". Otherwise the override is ignored and the agent falls back to its default model.`,
-                  severity: "warn",
-                  path: `swarms.${swarmId}.agents.${agentName}`,
-                  currentValue: swarm.agents[agentName],
-                  autoFixable: false
-                });
-              } else if (!validAgents.has(baseName)) {
+              const validAgents = [
+                "architect",
+                "coder",
+                "test_engineer",
+                "explorer",
+                "reviewer",
+                "critic",
+                "sme",
+                "docs",
+                "designer"
+              ];
+              const baseName = agentName.replace(/^[a-zA-Z0-9]+_/, "");
+              if (!validAgents.includes(baseName)) {
                 findings.push({
                   id: "unknown-swarm-agent",
                   title: "Unknown agent in swarm",
@@ -40808,8 +40783,6 @@ function removeStraySwarmDir(projectRoot, strayPath) {
 }
 var VALID_CONFIG_PATTERNS, DANGEROUS_PATH_SEGMENTS;
 var init_config_doctor = __esm(() => {
-  init_constants();
-  init_schema();
   init_utils();
   VALID_CONFIG_PATTERNS = [
     /^\.config[\\/]opencode[\\/]opencode-swarm\.json$/,
@@ -46300,7 +46273,7 @@ function defaultBuildTestCommand(profile, framework, files, dir = ".", opts = {}
   const coverage = opts.coverage ?? false;
   switch (framework) {
     case "bun": {
-      const args = ["bun", "--smol", "test"];
+      const args = ["bun", "test"];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0)
@@ -48733,7 +48706,7 @@ function getTargetedExecutionUnsupportedReason(framework) {
 function buildTestCommand2(framework, scope, files, coverage, baseDir) {
   switch (framework) {
     case "bun": {
-      const args = ["bun", "--smol", "test"];
+      const args = ["bun", "test"];
       if (coverage)
         args.push("--coverage");
       if (scope !== "all" && files.length > 0) {
@@ -49270,24 +49243,17 @@ async function runTests(framework, scope, files, coverage, timeout_ms, cwd) {
     const proc = bunSpawn(command, {
       stdout: "pipe",
       stderr: "pipe",
-      stdin: "ignore",
-      cwd,
-      killProcessTree: true
+      cwd
     });
-    let timeoutHandle;
-    const timeoutPromise = new Promise((resolve14) => {
-      timeoutHandle = setTimeout(() => {
-        proc.kill();
-        resolve14(-1);
-      }, timeout_ms);
-    });
+    const timeoutPromise = new Promise((resolve14) => setTimeout(() => {
+      proc.kill();
+      resolve14(-1);
+    }, timeout_ms));
     const [exitCode, stdoutResult, stderrResult] = await Promise.all([
       Promise.race([proc.exited, timeoutPromise]),
       readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES3),
       readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES3)
     ]);
-    if (timeoutHandle !== undefined)
-      clearTimeout(timeoutHandle);
     const duration_ms = Date.now() - startTime;
     let output = stdoutResult.text;
     if (stderrResult.text) {
@@ -49590,6 +49556,7 @@ var init_test_runner = __esm(() => {
       files: exports_external.array(exports_external.string()).optional().describe('Specific files to test. For "convention", pass source files or direct test files. For "graph" and "impact", pass source files only.'),
       coverage: exports_external.boolean().optional().describe("Enable coverage reporting if supported"),
       timeout_ms: exports_external.number().optional().describe("Timeout in milliseconds (default 60000, max 300000)"),
+      allow_full_suite: exports_external.boolean().optional().describe('Explicit opt-in for scope "all". Required because full-suite output can destabilize SSE streaming.'),
       working_directory: exports_external.string().optional().describe("Explicit project root directory. When provided, tests run relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.")
     },
     async execute(args, directory) {
@@ -49663,8 +49630,7 @@ var init_test_runner = __esm(() => {
       }
       const scope = args.scope || "all";
       if (scope === "all") {
-        const fullSuiteAllowed = process.env.SWARM_ALLOW_FULL_SUITE === "1" || process.env.SWARM_ALLOW_FULL_SUITE === "true";
-        if (!fullSuiteAllowed) {
+        if (!args.allow_full_suite) {
           const errorResult = {
             success: false,
             framework: "none",

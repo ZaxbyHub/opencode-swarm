@@ -235,7 +235,7 @@ describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 		]);
 	});
 
-	test('bun without coverage in scope=all drops files', async () => {
+	test('bun without coverage in scope=all drops files and avoids unsupported JSON reporter', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, 'package.json'),
 			JSON.stringify({ scripts: { test: 'bun test' } }),
@@ -247,7 +247,8 @@ describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 			false,
 			tempDir,
 		);
-		expect(cmd).toEqual(['bun', '--smol', 'test']);
+		// Bun 1.3.x supports junit/dots reporters, not --reporter=json.
+		expect(cmd).toEqual(['bun', 'test']);
 	});
 
 	test('pytest produces python3/python -m pytest with --cov when coverage=true', async () => {

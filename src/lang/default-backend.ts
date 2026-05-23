@@ -150,11 +150,7 @@ export function defaultBuildTestCommand(
 
 	switch (framework) {
 		case 'bun': {
-			// --smol caps bun's heap growth across multiple test files / the full
-			// suite — the dominant session-kill OOM vector. This is the default
-			// runtime builder (dispatch path); the inline builder in
-			// test-runner.ts mirrors it for the SWARM_LANG_BACKEND=legacy path.
-			const args: string[] = ['bun', '--smol', 'test'];
+			const args: string[] = ['bun', 'test'];
 			if (coverage) args.push('--coverage');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;

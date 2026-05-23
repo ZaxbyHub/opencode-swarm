@@ -522,67 +522,7 @@ async function buildParallelExecutionGuidance(
 		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
 	}
 
-	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; for each dispatched task, call update_task_status(in_progress), call declare_scope, then send the coder Task. Preserve ONE atomic task per coder Task call.`;
-}
-
-async function buildPlanContinuationGuidance(
-	directory: string | undefined,
-): Promise<string | null> {
-	if (!directory) return null;
-
-	const plan: Plan | null = await loadPlanJsonOnly(directory);
-	const currentTaskId = getPlanContinuationTaskId(plan);
-	if (!currentTaskId) return null;
-	const sanitizedTaskId = sanitizeGuidanceValue(currentTaskId, 32);
-
-	return (
-		`[NEXT] Continue plan task ${sanitizedTaskId}: if it is not already in progress, call update_task_status with task_id="${sanitizedTaskId}" and status="in_progress"; ` +
-		`then call declare_scope for the task files and dispatch coder Task call(s) according to the execution profile. ` +
-		`Preserve ONE atomic task per coder Task call; when parallel execution is enabled, use available coder slots instead of forcing a single coder.`
-	);
-}
-
-function sanitizeGuidanceValue(value: string, maxLength: number): string {
-	return value
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/\[ \]/g, '()')
-		.replace(/\[/g, '(')
-		.replace(/\]/g, ')')
-		.replace(/[\r\n]/g, ' ')
-		.slice(0, maxLength);
-}
-
-function getPlanContinuationTaskId(
-	plan: Plan | null | undefined,
-): string | undefined {
-	if (!plan) return undefined;
-	const currentPhase = plan.current_phase ?? 1;
-	const phase = plan.phases.find((p) => p.id === currentPhase);
-	if (!phase) return undefined;
-	const sortedTasks = [...phase.tasks].sort((a, b) =>
-		comparePlanTaskIds(a.id, b.id),
-	);
-	const inProgress = sortedTasks.find((task) => task.status === 'in_progress');
-	if (inProgress) return inProgress.id;
-	const incomplete = sortedTasks.find(
-		(task) => task.status !== 'completed' && task.status !== 'closed',
-	);
-	return incomplete?.id;
-}
-
-function comparePlanTaskIds(a: string, b: string): number {
-	const partsA = a.split('.').map((part) => Number.parseInt(part, 10));
-	const partsB = b.split('.').map((part) => Number.parseInt(part, 10));
-	const maxLength = Math.max(partsA.length, partsB.length);
-
-	for (let i = 0; i < maxLength; i++) {
-		const numA = partsA[i] ?? 0;
-		const numB = partsB[i] ?? 0;
-		if (numA !== numB) return numA - numB;
-	}
-
-	return 0;
+	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
 }
 
 function isParallelGuidancePhaseComplete(phase: Phase): boolean {
@@ -1750,10 +1690,6 @@ export function createDelegationGateHook(
 							deliberationSessionID,
 							deliberationSession,
 						);
-						const planContinuationGuidance =
-							parallelGuidance === null
-								? await buildPlanContinuationGuidance(directory)
-								: null;
 						const taskAwaitingCompletion = await findTaskAwaitingCompletion(
 							directory,
 							deliberationSession,
@@ -1766,22 +1702,31 @@ export function createDelegationGateHook(
 						} else if (lastGate?.taskId) {
 							const gateResult = lastGate.passed ? 'PASSED' : 'FAILED';
 							// Sanitize interpolated values
-							const sanitizedGate = sanitizeGuidanceValue(lastGate.gate, 64);
-							const sanitizedTaskId = sanitizeGuidanceValue(
-								lastGate.taskId,
-								32,
-							);
+							const sanitizedGate = lastGate.gate
+								.replace(/</g, '&lt;')
+								.replace(/>/g, '&gt;')
+								.replace(/\[ \]/g, '()')
+								.replace(/\[/g, '(')
+								.replace(/\]/g, ')')
+								.replace(/[\r\n]/g, ' ')
+								.slice(0, 64);
+							const sanitizedTaskId = lastGate.taskId
+								.replace(/</g, '&lt;')
+								.replace(/>/g, '&gt;')
+								.replace(/\[/g, '(')
+								.replace(/\]/g, ')')
+								.replace(/[\r\n]/g, ' ')
+								.slice(0, 32);
 							// Concise [NEXT] directive with last-gate status
 							guidance = `[Last gate: ${sanitizedGate} ${gateResult} for task ${sanitizedTaskId}]\n${
 								parallelGuidance ??
 								'[NEXT] Execute the next gate for the current task.'
 							}`;
 						} else {
-							// Concise [NEXT] directive to continue from the durable plan cursor
+							// Concise [NEXT] directive to begin first plan task
 							// Also handles case where lastGate exists but taskId is missing
 							guidance =
 								parallelGuidance ??
-								planContinuationGuidance ??
 								'[NEXT] Begin the first plan task and run gates sequentially.';
 						}
 

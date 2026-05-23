@@ -13,14 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	bunFile,
-	bunHash,
-	bunSpawn,
-	bunSpawnSync,
-	bunWrite,
-	isBun,
-} from '../bun-compat';
+import { bunFile, bunHash, bunSpawnSync, bunWrite, isBun } from '../bun-compat';
 
 function tmpFile(name: string): string {
 	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'bun-compat-'));
@@ -76,21 +69,6 @@ describe('bun-compat shim', () => {
 		const res = bunSpawnSync(cmd);
 		expect(res.success).toBe(true);
 		expect(res.exitCode).toBe(0);
-	});
-
-	test('bunSpawn with killProcessTree spawns detached and still captures output', async () => {
-		// Verifies the opt-in detached/tree-kill path does not break the normal
-		// spawn + stdout-capture contract. Full descendant-tree reaping on timeout
-		// is integration-level and platform-specific, so it is not asserted here.
-		const cmd =
-			process.platform === 'win32'
-				? ['cmd', '/c', 'echo', 'hi']
-				: ['echo', 'hi'];
-		const proc = bunSpawn(cmd, { stdout: 'pipe', killProcessTree: true });
-		const out = await proc.stdout.text();
-		const code = await proc.exited;
-		expect(code).toBe(0);
-		expect(out.trim()).toContain('hi');
 	});
 
 	test('bunWrite atomic write does not leave a temp file on success', async () => {

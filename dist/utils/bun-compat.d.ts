@@ -71,16 +71,6 @@ export interface BunCompatSpawnOptions {
     stdout?: 'inherit' | 'ignore' | 'pipe';
     stderr?: 'inherit' | 'ignore' | 'pipe';
     timeout?: number;
-    /**
-     * When true, spawn the child as its own process-group leader (Node path:
-     * `detached`) and kill the entire descendant tree on `kill()`/timeout
-     * rather than only the direct child. A test runner that forks worker
-     * processes (jest/vitest, or a runaway suite) can otherwise outlive a
-     * `proc.kill()` of the parent and keep consuming memory after the timeout.
-     * Opt-in because the default single-child kill is correct for the many
-     * short-lived `bunSpawn` callers (git, lint, version checks).
-     */
-    killProcessTree?: boolean;
 }
 export interface BunCompatStream {
     text(): Promise<string>;

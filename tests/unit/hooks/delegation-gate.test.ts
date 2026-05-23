@@ -1,7 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
@@ -51,16 +48,6 @@ function makeMessages(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type MessageWithParts = any;
 
-const tempDirs: string[] = [];
-
-function makeTempProject(prefix: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	const real = fs.realpathSync(dir);
-	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
-	tempDirs.push(real);
-	return real;
-}
-
 // Helper to find user messages in the array (accounts for injected system messages)
 function findUserMessage(messages: { messages: MessageWithParts[] }) {
 	return messages.messages.find(
@@ -104,9 +91,6 @@ describe('delegation gate hook', () => {
 	afterEach(() => {
 		// Clean up after each test
 		resetSwarmState();
-		for (const dir of tempDirs.splice(0)) {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
 	});
 
 	it('no-op when disabled', async () => {
@@ -2541,8 +2525,7 @@ describe('delegation gate hook', () => {
 
 		it('null lastGateOutcome → [NEXT] guidance injected as model-only system message', async () => {
 			const config = makeConfig();
-			const tempDir = makeTempProject('delegation-gate-next-');
-			const hook = createDelegationGateHook(config, tempDir);
+			const hook = createDelegationGateHook(config, process.cwd());
 			const sessionID = 'deliberation-test-1';
 
 			// Setup session with no lastGateOutcome (null)

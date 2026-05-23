@@ -1,33 +1,5 @@
 # Changelog
 
-## [7.29.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.1...v7.29.2) (2026-05-23)
-
-
-### Bug Fixes
-
-* **delegation:** resume plan tasks through coder dispatch ([#992](https://github.com/zaxbysauce/opencode-swarm/issues/992)) ([c174163](https://github.com/zaxbysauce/opencode-swarm/commit/c174163ebcfbee7e79303f42c28dadf0d40060bc))
-
-## [7.29.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.0...v7.29.1) (2026-05-22)
-
-
-### Bug Fixes
-
-* **agents:** route prefixed spec writer delegations ([#991](https://github.com/zaxbysauce/opencode-swarm/issues/991)) ([2421702](https://github.com/zaxbysauce/opencode-swarm/commit/2421702141450f4f6cf839ee60c96d4c1ee63f42))
-
-## [7.29.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.3...v7.29.0) (2026-05-22)
-
-
-### Features
-
-* **skill-propagation:** auto-inject skills into subagent delegations ([#987](https://github.com/zaxbysauce/opencode-swarm/issues/987)) ([00f1e8b](https://github.com/zaxbysauce/opencode-swarm/commit/00f1e8b495505b45c6b14346831936b2a53afcaf))
-
-## [7.28.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.2...v7.28.3) (2026-05-22)
-
-
-### Bug Fixes
-
-* **test-runner:** cap bun heap with --smol, env-gate scope:all, process-group kill on timeout ([#962](https://github.com/zaxbysauce/opencode-swarm/issues/962)) ([2ea310a](https://github.com/zaxbysauce/opencode-swarm/commit/2ea310a03b2975df193a1df83cd422afb57abc82))
-
 ## [7.28.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.1...v7.28.2) (2026-05-22)
 
 

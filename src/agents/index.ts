@@ -378,79 +378,9 @@ function createSwarmAgents(
 				projectContext.PROJECT_CONTEXT_SECONDARY_LANGUAGES,
 			);
 
-		const skillImproverEnabled = !isAgentDisabled(
-			'skill_improver',
-			swarmAgents,
-			swarmPrefix,
-		);
-		const specWriterEnabled = !isAgentDisabled(
-			'spec_writer',
-			swarmAgents,
-			swarmPrefix,
-		);
-
-		if (!skillImproverEnabled) {
-			architect.config.prompt = architect.config.prompt
-				?.replace(`, ${agentPrefix}skill_improver`, '')
-				.replace(
-					`\n${agentPrefix}skill_improver - Low-frequency skill / knowledge / prompt improvement adviser`,
-					'',
-				)
-				.replace(/\n## SKILL IMPROVER[\s\S]*?(?=\n\n## SPEC WRITER)/, '');
-		}
-
-		if (!specWriterEnabled) {
-			const escapedAgentPrefix = agentPrefix.replace(
-				/[.*+?^${}()|[\]\\]/g,
-				'\\$&',
-			);
-			architect.config.prompt = architect.config.prompt
-				?.replace(`, ${agentPrefix}spec_writer`, '')
-				.replace(
-					`\n${agentPrefix}spec_writer - .swarm/spec.md authoring via spec_write`,
-					'',
-				)
-				.replace(/\n## SPEC WRITER[\s\S]*?(?=\n\n### ANTI-RATIONALIZATION)/, '')
-				.replace(
-					new RegExp(
-						`- Delegate substantial spec drafting to \`${escapedAgentPrefix}spec_writer\`[^\\n]*\\n`,
-						'g',
-					),
-					'- spec_writer is disabled. Ask the user to enable the spec_writer agent before creating or revising `.swarm/spec.md`.\n',
-				)
-				.replace(
-					new RegExp(
-						`4\\. Delegate substantial spec drafting to \`${escapedAgentPrefix}spec_writer\`[^\\n]*`,
-					),
-					'4. spec_writer is disabled. Ask the user to enable the spec_writer agent before creating or revising `.swarm/spec.md`.',
-				)
-				.replace(
-					new RegExp(
-						`5\\. Require \`${escapedAgentPrefix}spec_writer\` to write the spec via \`spec_write\`, then read back and lint \`\\.swarm/spec\\.md\`\\.`,
-					),
-					'5. Do not continue SPECIFY until spec_writer is available.',
-				)
-				.replace(
-					new RegExp(
-						`- Read back and lint the final spec after \`${escapedAgentPrefix}spec_writer\` writes it\\.`,
-					),
-					'- Do not continue BRAINSTORM spec writing until spec_writer is available.',
-				);
-		}
-
 		// Add swarm identity header for non-default swarms
 		if (!isDefault) {
 			architect.description = `[${swarmName}] ${architect.description}`;
-			const optionalAgentLines = [
-				skillImproverEnabled
-					? `- @${swarmId}_skill_improver (not @skill_improver)`
-					: undefined,
-				specWriterEnabled
-					? `- @${swarmId}_spec_writer (not @spec_writer)`
-					: undefined,
-			]
-				.filter((line): line is string => Boolean(line))
-				.join('\n');
 			const swarmHeader = `## ⚠️ YOU ARE THE ${swarmName.toUpperCase()} SWARM ARCHITECT
 
 Your swarm ID is "${swarmId}". ALL your agents have the "${swarmId}_" prefix:
@@ -458,7 +388,7 @@ Your swarm ID is "${swarmId}". ALL your agents have the "${swarmId}_" prefix:
 - @${swarmId}_coder (not @coder)
 - @${swarmId}_sme (not @sme)
 - @${swarmId}_reviewer (not @reviewer)
-${optionalAgentLines ? `${optionalAgentLines}\n` : ''}- etc.
+- etc.
 
 CRITICAL: Agents without the "${swarmId}_" prefix DO NOT EXIST or belong to a DIFFERENT swarm.
 If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the wrong swarm.

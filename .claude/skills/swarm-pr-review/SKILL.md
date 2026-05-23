@@ -24,25 +24,6 @@ Determine review scope using this priority:
 3. staged changes
 4. latest commit
 
-> ⚠️ **STALE BRANCH CHECK — run before dispatching explorers**
-> A branch that has not been rebased on recent `main` makes `git diff origin/main..HEAD` show
-> ALL of main's intervening changes as additions/deletions, inflating apparent scope from 22
-> to 152 files and producing meaningless explorer findings. Always verify:
->
-> ```bash
-> # 1. Read the PR commit's parent SHA
-> git cat-file -p <pr-commit-sha> | grep ^parent
->
-> # 2. Compare to origin/main HEAD
-> git rev-parse origin/main
->
-> # 3. If they differ, use the real scope:
-> git diff <parent-sha>..<pr-commit-sha> --stat   # true PR scope
-> ```
->
-> If the branch is stale: rebase before reviewing (`git rebase origin/main`), resolve
-> conflicts, and force-push. Explorers read the filesystem — they need the post-rebase tree.
-
 ---
 
 ## 6-Phase Review Workflow

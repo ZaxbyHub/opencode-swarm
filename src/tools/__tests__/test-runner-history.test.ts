@@ -115,11 +115,9 @@ describe('History integration - unit style tests', () => {
 		}
 	});
 
-	test('3. execute blocks scope "all" without the SWARM_ALLOW_FULL_SUITE env opt-in', async () => {
+	test('3. execute requires allow_full_suite for all scope', async () => {
 		const tmpBase = process.env.TEMP || process.env.TMP || '/tmp';
 		const tempDir = fs.mkdtempSync(path.join(tmpBase, 'test-runner-hist-'));
-		const savedFullSuiteEnv = process.env.SWARM_ALLOW_FULL_SUITE;
-		delete process.env.SWARM_ALLOW_FULL_SUITE;
 
 		try {
 			fs.writeFileSync(
@@ -134,17 +132,15 @@ describe('History integration - unit style tests', () => {
 			const execute = getExecute();
 			const args = {
 				scope: 'all' as const,
+				// No allow_full_suite
 			};
 
 			const result = await execute(args, tempDir);
 			const parsed = parseResult(result);
 
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('scope "all" is blocked');
+			expect(parsed.error).toContain('scope "all" is not allowed');
 		} finally {
-			if (savedFullSuiteEnv === undefined)
-				delete process.env.SWARM_ALLOW_FULL_SUITE;
-			else process.env.SWARM_ALLOW_FULL_SUITE = savedFullSuiteEnv;
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

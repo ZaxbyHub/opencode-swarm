@@ -358,32 +358,20 @@ describe('two-layer pre-resolution guard', () => {
 	});
 
 	describe('scope "all" bypasses pre-resolution guard', () => {
-		test('12. scope "all" with SWARM_ALLOW_FULL_SUITE env bypasses pre-resolution cap', async () => {
-			const saved = process.env.SWARM_ALLOW_FULL_SUITE;
-			process.env.SWARM_ALLOW_FULL_SUITE = '1';
-			try {
-				const result = await execute({ scope: 'all', files: [] }, tempDir);
-				const parsed = parseResult(result);
-				expect(parsed.outcome).not.toBe('scope_exceeded');
-				// Guard passed — not blocked by the full-suite gate
-				expect(parsed.error ?? '').not.toContain('scope "all" is blocked');
-			} finally {
-				if (saved === undefined) delete process.env.SWARM_ALLOW_FULL_SUITE;
-				else process.env.SWARM_ALLOW_FULL_SUITE = saved;
-			}
+		test('12. scope "all" with allow_full_suite bypasses pre-resolution cap', async () => {
+			const result = await execute(
+				{ scope: 'all', files: [], allow_full_suite: true },
+				tempDir,
+			);
+			const parsed = parseResult(result);
+			expect(parsed.outcome).not.toBe('scope_exceeded');
 		});
 
-		test('13. scope "all" without the env opt-in returns error (own guard)', async () => {
-			const saved = process.env.SWARM_ALLOW_FULL_SUITE;
-			delete process.env.SWARM_ALLOW_FULL_SUITE;
-			try {
-				const result = await execute({ scope: 'all', files: [] }, tempDir);
-				const parsed = parseResult(result);
-				expect(parsed.success).toBe(false);
-				expect(parsed.error).toContain('scope "all"');
-			} finally {
-				if (saved !== undefined) process.env.SWARM_ALLOW_FULL_SUITE = saved;
-			}
+		test('13. scope "all" without allow_full_suite returns error (own guard)', async () => {
+			const result = await execute({ scope: 'all', files: [] }, tempDir);
+			const parsed = parseResult(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.error).toContain('scope "all"');
 		});
 	});
 

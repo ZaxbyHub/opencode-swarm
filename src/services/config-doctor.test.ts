@@ -176,28 +176,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.autoFixable).toBe(true);
 		});
 
-		it('should accept guardrails profiles for optional spec_writer and skill_improver agents', () => {
-			const config = createTestConfigObj({
-				guardrails: {
-					enabled: true,
-					max_tool_calls: 200,
-					max_duration_minutes: 30,
-					max_repetitions: 10,
-					max_consecutive_errors: 5,
-					warning_threshold: 0.75,
-					idle_timeout_minutes: 60,
-					profiles: {
-						spec_writer: { max_tool_calls: 20 },
-						skill_improver: { max_tool_calls: 30 },
-					},
-				},
-			});
-
-			const result = runConfigDoctor(config, tempDir);
-
-			expect(result.findings).toHaveLength(0);
-		});
-
 		it('should detect unknown hook fields', () => {
 			const config = createTestConfigObj({
 				hooks: {
@@ -242,62 +220,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings.some((f) => f.id === 'unknown-swarm-agent')).toBe(
 				true,
 			);
-		});
-
-		it('should warn when per-swarm config uses a generated prefixed agent key', () => {
-			const config = createTestConfigObj({
-				swarms: {
-					modelrelay: {
-						agents: {
-							modelrelay_spec_writer: { model: 'provider/custom-spec' },
-						},
-					},
-				},
-			});
-
-			const result = runConfigDoctor(config, tempDir);
-
-			expect(result.findings).toHaveLength(1);
-			expect(result.findings[0]!.id).toBe('prefixed-swarm-agent-override');
-			expect(result.findings[0]!.severity).toBe('warn');
-			expect(result.findings[0]!.description).toContain(
-				'swarms.modelrelay.agents.spec_writer.model',
-			);
-			expect(result.findings[0]!.autoFixable).toBe(false);
-		});
-
-		it('should accept canonical spec_writer and skill_improver swarm agent keys', () => {
-			const config = createTestConfigObj({
-				swarms: {
-					modelrelay: {
-						agents: {
-							spec_writer: { model: 'provider/custom-spec' },
-							skill_improver: { model: 'provider/custom-skill' },
-							test_engineer: { model: 'provider/test' },
-						},
-					},
-				},
-			});
-
-			const result = runConfigDoctor(config, tempDir);
-
-			expect(result.findings).toHaveLength(0);
-		});
-
-		it('should accept canonical agent keys that start with the swarm id', () => {
-			const config = createTestConfigObj({
-				swarms: {
-					critic: {
-						agents: {
-							critic_sounding_board: { model: 'provider/critic-board' },
-						},
-					},
-				},
-			});
-
-			const result = runConfigDoctor(config, tempDir);
-
-			expect(result.findings).toHaveLength(0);
 		});
 	});
 

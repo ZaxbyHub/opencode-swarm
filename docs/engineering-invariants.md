@@ -90,13 +90,6 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established (THIS PR):** every awaited operation on the init path must be bounded by `withTimeout` (or equivalent) AND fail open. Every subprocess on the init path must have explicit `cwd`, `stdin: 'ignore'`, `timeout`, bounded stdout/stderr, and `proc.kill()` in `finally`. The same hardening applies to the secondary defect site `validateDiffScope` even though it is not on the init path. Tests use a file-scoped `_internals` DI seam — not `mock.module` — to avoid Bun's cross-file mock leakage.
 - **Maps to AGENTS.md:** invariants 1 (plugin init), 3 (subprocesses), 7 (test writing).
 
-### 2026-05-21 — `test_runner` full/broad scope wedging OpenCode (full-suite OOM)
-
-- **Symptom:** agents repeatedly crashed the OpenCode session by running `test_runner` with broad or full scope. After hitting `outcome: 'scope_exceeded'`, the model would set `allow_full_suite: true` and retry with `scope: 'all'`, re-triggering a single-process full-suite run that exhausted memory (OOM) and wedged the session.
-- **Root cause:** the single-process, non-`--smol` bun execution model combined with the agent-settable `allow_full_suite` escape hatch. The file-count guards (`MAX_SAFE_SOURCE_FILES`, `MAX_SAFE_TEST_FILES`) were never the problem — they only bounded discovery breadth, not the full-suite path the agent could self-authorize around.
-- **Invariants established (THIS FIX):** both bun command builders (`src/lang/default-backend.ts`, `src/tools/test-runner.ts`) always pass `--smol` to cap memory. The agent-settable `allow_full_suite` arg was removed; `scope: 'all'` is now gated behind the `SWARM_ALLOW_FULL_SUITE` environment variable (`1` or `true`), settable only by the human / CI environment, never by an LLM via tool args. Timeouts kill the whole process group, not just the parent, so no orphaned bun children survive.
-- **Maps to AGENTS.md:** invariant 6 (test_runner safety).
-
 ## Invariants — anti-pattern, required pattern, verification
 
 ### 1. Plugin initialization
@@ -262,7 +255,7 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 **Anti-pattern:**
 
 ```ts
-test_runner({ scope: 'all' }); // env-gated; rejected in agent sessions
+test_runner({ scope: 'all', allow_full_suite: true });
 // or: scope: 'graph' on a 10k-file repo without explicit files
 ```
 
@@ -284,7 +277,6 @@ test_runner({ files: ['tests/unit/foo.test.ts'] });
 
 - For repo validation, do not invoke `test_runner` at all in this repo. Use shell.
 - For agent validation, the call must use `files: [...]` or a small targeted scope; `MAX_SAFE_TEST_FILES = 50` will SKIP otherwise (this is fail-safe, not a guarantee — do not lean on it).
-- The agent-settable `allow_full_suite` arg was removed. `scope: 'all'` is now gated behind the `SWARM_ALLOW_FULL_SUITE` environment variable (`1` or `true`) that only the human/CI environment can set — an agent cannot enable it via tool args. The tool also runs bun with `--smol` to cap memory.
 
 ### 7. Test writing
 
