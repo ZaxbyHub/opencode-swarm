@@ -11,18 +11,34 @@ function sourceText(item: RecallResultItem): string {
 	return source.type;
 }
 
-function formatItem(item: RecallResultItem): string {
+function formatItem(item: RecallResultItem, generatedAt: string): string {
 	const record = item.record;
+	const age = ageText(record.updatedAt || record.createdAt, generatedAt);
 	return [
-		`- [${record.id}] kind=${record.kind} scope=${record.scope.type} confidence=${record.confidence.toFixed(2)} score=${item.score.toFixed(2)}`,
+		`- [${record.id}] kind=${record.kind} scope=${record.scope.type} confidence=${record.confidence.toFixed(2)} age=${age} score=${item.score.toFixed(2)}`,
 		`  ${redactSecrets(record.text)}`,
 		`  Source: ${sourceText(item)}`,
 	].join('\n');
 }
 
+function ageText(isoDate: string, generatedAt: string): string {
+	const then = Date.parse(isoDate);
+	const now = Date.parse(generatedAt);
+	if (!Number.isFinite(then)) return 'unknown';
+	const elapsedMs = Math.max(
+		0,
+		(Number.isFinite(now) ? now : Date.now()) - then,
+	);
+	const elapsedDays = Math.floor(elapsedMs / (24 * 60 * 60 * 1000));
+	if (elapsedDays < 1) return 'today';
+	if (elapsedDays === 1) return '1d';
+	return `${elapsedDays}d`;
+}
+
 export function buildRecallPromptBlock(
 	items: RecallResultItem[],
 	tokenBudget: number,
+	generatedAt = new Date().toISOString(),
 ): { promptBlock: string; tokenEstimate: number; items: RecallResultItem[] } {
 	const header = [
 		'## Retrieved Swarm Memory',
@@ -34,7 +50,7 @@ export function buildRecallPromptBlock(
 	const selected: RecallResultItem[] = [];
 	let promptBlock = header;
 	for (const item of items) {
-		const candidate = `${promptBlock}${formatItem(item)}\n`;
+		const candidate = `${promptBlock}${formatItem(item, generatedAt)}\n`;
 		if (selected.length > 0 && estimateTokens(candidate) > tokenBudget) break;
 		if (estimateTokens(candidate) > tokenBudget) break;
 		selected.push(item);
@@ -54,7 +70,11 @@ export function toRecallBundle(input: {
 	items: RecallResultItem[];
 	tokenBudget: number;
 }): RecallBundle {
-	const block = buildRecallPromptBlock(input.items, input.tokenBudget);
+	const block = buildRecallPromptBlock(
+		input.items,
+		input.tokenBudget,
+		input.generatedAt,
+	);
 	return {
 		id: input.id,
 		query: input.query,

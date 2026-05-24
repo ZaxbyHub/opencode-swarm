@@ -512,6 +512,7 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	architect: ['swarm_memory_recall', 'swarm_memory_propose'],
 	explorer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	coder: ['swarm_memory_recall', 'swarm_memory_propose'],
+	reviewer: ['swarm_memory_recall'],
 	test_engineer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	sme: ['swarm_memory_recall', 'swarm_memory_propose'],
 	critic: ['swarm_memory_recall'],

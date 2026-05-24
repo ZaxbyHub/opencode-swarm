@@ -146,6 +146,40 @@ describe('MemoryGateway', () => {
 		expect(bundle.promptBlock).toContain('## Retrieved Swarm Memory');
 		expect(bundle.promptBlock).toContain('untrusted retrieved facts');
 		expect(bundle.promptBlock).toContain(record.id);
+		expect(bundle.promptBlock).toContain('age=today');
+	});
+
+	test('recall accepts only explicitly allowed controller scopes', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		const allowedScopes = gateway.deriveAllowedScopes();
+		const record = gateway.createRecord({
+			kind: 'repo_convention',
+			text: 'This repo keeps recall scoped to allowed controller scopes.',
+			evidenceRefs: ['README.md'],
+			confidence: 0.9,
+		});
+		await gateway.upsertCurated(record);
+
+		const bundle = await gateway.recall({
+			query: 'controller scoped recall',
+			scopes: allowedScopes,
+			minScore: 0,
+		});
+		expect(bundle.items.map((item) => item.record.id)).toEqual([record.id]);
+
+		await expect(
+			gateway.recall({
+				query: 'scope escalation attempt',
+				scopes: [{ type: 'repository', repoId: 'other-repo' }],
+				minScore: 0,
+			}),
+		).rejects.toThrow('recall scope is not allowed');
 	});
 
 	test('token budget truncates recall output deterministically', async () => {

@@ -96,6 +96,6 @@ describe('AGENT_TOOL_MAP', () => {
 			'swarm_memory_propose',
 		]);
 		expect(MEMORY_AGENT_TOOL_MAP.critic).toEqual(['swarm_memory_recall']);
-		expect(MEMORY_AGENT_TOOL_MAP.reviewer).toBeUndefined();
+		expect(MEMORY_AGENT_TOOL_MAP.reviewer).toEqual(['swarm_memory_recall']);
 	});
 });

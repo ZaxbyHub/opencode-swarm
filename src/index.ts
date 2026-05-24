@@ -86,6 +86,7 @@ import { appendSkillUsageEntry } from './hooks/skill-usage-log.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
+import { createMemoryLifecycleHooks } from './memory';
 import { createPrmHook } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
@@ -522,6 +523,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
+	const memoryLifecycleHooks = createMemoryLifecycleHooks({
+		directory: ctx.directory,
+		config: config.memory,
+		getActiveAgentName: (sessionID) =>
+			sessionID ? swarmState.activeAgent.get(sessionID) : undefined,
+	});
 	// Fail-secure: honor explicit guardrails.enabled === false (preserving the full
 	// guardrails block), otherwise let Zod schema defaults fill in enabled: true.
 	const guardrailsFallback =
@@ -1347,6 +1354,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				ccCommandInterceptHook?.messagesTransform,
 				delegationGateHooks.messagesTransform,
 				delegationSanitizerHook,
+				memoryLifecycleHooks.messagesTransform,
 				knowledgeInjectorHook, // v6.17 knowledge injection
 				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
 				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
@@ -1750,6 +1758,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				await safeHook(selfReviewHook.toolAfter)(input, output);
 				if (_dbg)
 					console.error(`[DIAG] toolAfter selfReview done tool=${_toolName}`);
+				await safeHook(memoryLifecycleHooks.toolAfter)(input, output);
+				if (_dbg)
+					console.error(`[DIAG] toolAfter memory done tool=${_toolName}`);
 				await safeHook(delegationGateHooks.toolAfter)(input, output);
 				if (_dbg)
 					console.error(

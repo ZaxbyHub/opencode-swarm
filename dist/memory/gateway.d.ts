@@ -18,6 +18,7 @@ export interface ProposeMemoryInput {
 export interface RecallMemoryInput {
     query: string;
     task?: string;
+    scopes?: MemoryScopeRef[];
     kinds?: MemoryKind[];
     maxItems?: number;
     tokenBudget?: number;

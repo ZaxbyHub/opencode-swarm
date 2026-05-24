@@ -1,5 +1,5 @@
 import type { RecallBundle, RecallResultItem } from './types';
-export declare function buildRecallPromptBlock(items: RecallResultItem[], tokenBudget: number): {
+export declare function buildRecallPromptBlock(items: RecallResultItem[], tokenBudget: number, generatedAt?: string): {
     promptBlock: string;
     tokenEstimate: number;
     items: RecallResultItem[];

@@ -83,6 +83,33 @@ describe('LocalJsonlMemoryProvider', () => {
 		expect(results.map((item) => item.record.id)).toEqual([repoA.id]);
 	});
 
+	test('records recall usage through the provider audit seam', async () => {
+		const provider = new LocalJsonlMemoryProvider(tmpDir, { enabled: true });
+		const repoA = makeRecord('Repo A uses pnpm for tests.', 'repo-a');
+		await provider.upsert(repoA);
+
+		await provider.recordRecallUsage({
+			bundleId: 'bundle_20260524_abcd',
+			query: 'pnpm tests',
+			scopes: [repoA.scope],
+			kinds: ['repo_convention'],
+			memoryIds: [repoA.id],
+			scores: [0.9],
+			tokenEstimate: 100,
+			agentRole: 'coder',
+			runId: 'session-a',
+			timestamp: '2026-05-24T12:00:00.000Z',
+		});
+
+		const audit = await fs.readFile(
+			path.join(tmpDir, '.swarm', 'memory', 'audit.jsonl'),
+			'utf-8',
+		);
+		expect(audit).toContain('"operation":"recall"');
+		expect(audit).toContain(repoA.id);
+		expect(audit).toContain('bundle_20260524_abcd');
+	});
+
 	test('recall excludes expired records by default', async () => {
 		const provider = new LocalJsonlMemoryProvider(tmpDir, { enabled: true });
 		const expired = {

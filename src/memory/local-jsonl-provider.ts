@@ -11,7 +11,11 @@ import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
 import { MemoryValidationError } from './errors';
-import type { MemoryProposalStore, MemoryProvider } from './provider';
+import type {
+	MemoryProposalStore,
+	MemoryProvider,
+	MemoryRecallUsageEvent,
+} from './provider';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import { scopeAllowed, scoreMemoryRecords } from './scoring';
 import type {
@@ -26,6 +30,7 @@ type AuditOperation =
 	| 'upsert'
 	| 'delete'
 	| 'proposal'
+	| 'recall'
 	| 'compact'
 	| 'invalid_load';
 
@@ -154,6 +159,24 @@ export class LocalJsonlMemoryProvider
 			includeExpired: request.includeExpired,
 		});
 		return scoreMemoryRecords(records, request).slice(0, request.maxItems);
+	}
+
+	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {
+		await this.initialize();
+		await this.audit(
+			'recall',
+			event.bundleId,
+			JSON.stringify({
+				query: event.query,
+				scopes: event.scopes,
+				kinds: event.kinds,
+				memoryIds: event.memoryIds,
+				scores: event.scores,
+				tokenEstimate: event.tokenEstimate,
+				agentRole: event.agentRole,
+				runId: event.runId,
+			}),
+		);
 	}
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {

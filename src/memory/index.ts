@@ -7,10 +7,27 @@ export type {
 	RecallMemoryInput,
 } from './gateway';
 export { createMemoryGateway, MemoryGateway } from './gateway';
+export {
+	createMemoryLifecycleHooks,
+	type MemoryLifecycleHookOptions,
+	type MemoryLifecycleHooks,
+} from './injector';
 export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 export { buildRecallPromptBlock } from './prompt-block';
 export type { MemoryProposalStore, MemoryProvider } from './provider';
+export {
+	buildMemoryRecallPlan,
+	type MemoryRecallPlan,
+	type MemoryRecallPlannerInput,
+} from './recall-planner';
 export { findSecrets, redactSecrets } from './redaction';
+export {
+	MEMORY_RECALL_PROFILES,
+	type MemoryRecallProfile,
+	normalizeMemoryAgentRole,
+	resolveMemoryRecallProfile,
+} from './role-profiles';
+export { appendMemoryRunLog, sanitizeRunId } from './run-log';
 export {
 	computeMemoryContentHash,
 	createBundleId,

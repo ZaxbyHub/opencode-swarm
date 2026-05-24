@@ -23,7 +23,7 @@ describe('memory tool gating', () => {
 		expect(agents.architect.prompt).toContain('swarm_memory_propose');
 		expect(agents.critic.tools?.swarm_memory_recall).toBe(true);
 		expect(agents.critic.tools?.swarm_memory_propose).toBeUndefined();
-		expect(agents.reviewer.tools?.swarm_memory_recall).toBeUndefined();
+		expect(agents.reviewer.tools?.swarm_memory_recall).toBe(true);
 		expect(agents.reviewer.tools?.swarm_memory_propose).toBeUndefined();
 	});
 

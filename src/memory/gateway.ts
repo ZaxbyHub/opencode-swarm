@@ -49,6 +49,7 @@ export interface ProposeMemoryInput {
 export interface RecallMemoryInput {
 	query: string;
 	task?: string;
+	scopes?: MemoryScopeRef[];
 	kinds?: MemoryKind[];
 	maxItems?: number;
 	tokenBudget?: number;
@@ -123,11 +124,15 @@ export class MemoryGateway {
 			5000,
 		);
 		const generatedAt = this.now().toISOString();
+		const allowedScopes = this.deriveAllowedScopes();
+		const scopes = input.scopes
+			? validateRequestedScopes(input.scopes, allowedScopes)
+			: allowedScopes;
 		const request: RecallRequest = {
 			query,
 			task: input.task,
 			agentRole: this.context.agentRole,
-			scopes: this.deriveAllowedScopes(),
+			scopes,
 			kinds: input.kinds,
 			maxItems,
 			tokenBudget,
@@ -135,13 +140,26 @@ export class MemoryGateway {
 			includeExpired: input.includeExpired,
 		};
 		const results = await this.provider.recall(request);
-		return toRecallBundle({
+		const bundle = toRecallBundle({
 			id: createBundleId(query, generatedAt),
 			query,
 			generatedAt,
 			items: results,
 			tokenBudget,
 		});
+		await this.provider.recordRecallUsage({
+			bundleId: bundle.id,
+			query,
+			scopes,
+			kinds: input.kinds,
+			memoryIds: bundle.items.map((item) => item.record.id),
+			scores: bundle.items.map((item) => item.score),
+			tokenEstimate: bundle.tokenEstimate,
+			agentRole: this.context.agentRole,
+			runId: this.context.runId ?? this.context.sessionID,
+			timestamp: generatedAt,
+		});
+		return bundle;
 	}
 
 	async propose(input: ProposeMemoryInput): Promise<MemoryProposal> {
@@ -364,6 +382,37 @@ function readGitRemoteUrl(directory: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function validateRequestedScopes(
+	requested: MemoryScopeRef[],
+	allowed: MemoryScopeRef[],
+): MemoryScopeRef[] {
+	if (requested.length === 0) {
+		throw new MemoryValidationError('recall scopes must not be empty');
+	}
+	const allowedKeys = new Set(allowed.map(scopeKey));
+	for (const scope of requested) {
+		if (!allowedKeys.has(scopeKey(scope))) {
+			throw new MemoryValidationError(
+				'recall scope is not allowed for this context',
+			);
+		}
+	}
+	return requested;
+}
+
+function scopeKey(scope: MemoryScopeRef): string {
+	return JSON.stringify({
+		type: scope.type,
+		userId: scope.userId,
+		workspaceId: scope.workspaceId,
+		projectId: scope.projectId,
+		repoId: scope.repoId,
+		repoRoot: scope.repoRoot ? path.resolve(scope.repoRoot) : undefined,
+		runId: scope.runId,
+		agentId: scope.agentId,
+	});
 }
 
 function clamp(value: number, min: number, max: number): number {
