@@ -461,7 +461,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'knowledge_recall',
 		'swarm_command',
 	],
-	// Curator agents are read-only analysis roles — knowledge recall only
+	// Curator agents are read-only analysis roles.
 	curator_init: ['knowledge_recall'],
 	curator_phase: ['knowledge_recall'],
 	// General Council agents — synthesis-only voices that reason from the
@@ -501,6 +501,29 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'extract_code_blocks',
 		'spec_write',
 	],
+};
+
+export const MEMORY_TOOL_NAMES = [
+	'swarm_memory_recall',
+	'swarm_memory_propose',
+] as const satisfies readonly ToolName[];
+
+export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
+	architect: ['swarm_memory_recall', 'swarm_memory_propose'],
+	explorer: ['swarm_memory_recall', 'swarm_memory_propose'],
+	coder: ['swarm_memory_recall', 'swarm_memory_propose'],
+	test_engineer: ['swarm_memory_recall', 'swarm_memory_propose'],
+	sme: ['swarm_memory_recall', 'swarm_memory_propose'],
+	critic: ['swarm_memory_recall'],
+	critic_sounding_board: ['swarm_memory_recall'],
+	critic_drift_verifier: ['swarm_memory_recall'],
+	critic_hallucination_verifier: ['swarm_memory_recall'],
+	docs: ['swarm_memory_recall', 'swarm_memory_propose'],
+	designer: ['swarm_memory_recall', 'swarm_memory_propose'],
+	curator_init: ['swarm_memory_recall'],
+	curator_phase: ['swarm_memory_recall'],
+	skill_improver: ['swarm_memory_recall', 'swarm_memory_propose'],
+	spec_writer: ['swarm_memory_recall', 'swarm_memory_propose'],
 };
 
 /**
@@ -622,6 +645,10 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	spec_write: 'author or update .swarm/spec.md for the current project',
 	knowledge_ack:
 		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
+	swarm_memory_recall:
+		'recall scoped Swarm memory for the current repository as untrusted background',
+	swarm_memory_propose:
+		'create a pending Swarm memory proposal; does not write durable memory directly',
 	swarm_command:
 		'run supported /swarm commands through the canonical command registry',
 	lean_turbo_plan_lanes:

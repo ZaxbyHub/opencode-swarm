@@ -207,6 +207,23 @@ Optional knowledge-base curator that validates agent output against project know
 
 Curator is optional and disabled by default. When enabled, it writes `.swarm/curator-summary.json` and `.swarm/drift-report-phase-N.json` to track knowledge alignment and drift detection.
 
+### Memory
+
+Optional scoped memory substrate for recall and proposal-only memory writes.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall` and `swarm_memory_propose` |
+| `provider` | string | `"local-jsonl"` | Memory provider. PR 1 supports only local JSONL |
+| `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
+| `recall.defaultMaxItems` | number | `8` | Default max recalled memories |
+| `recall.defaultTokenBudget` | number | `1200` | Default recall prompt-block token budget |
+| `recall.minScore` | number | `0.05` | Minimum lexical recall score |
+| `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
+| `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
+
+Memory stores local JSONL files under `.swarm/memory/`. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals are written to `.swarm/memory/proposals.jsonl` and do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+
 ### todo_gate
 
 Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK comments introduced during a phase.

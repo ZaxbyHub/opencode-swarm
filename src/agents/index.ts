@@ -10,6 +10,7 @@ import {
 	AGENT_TOOL_MAP,
 	ALL_AGENT_NAMES,
 	DEFAULT_MODELS,
+	MEMORY_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { addDeferredWarning } from '../services/warning-buffer.js';
@@ -343,6 +344,7 @@ function createSwarmAgents(
 			pluginConfig?.adversarial_testing,
 			pluginConfig?.council,
 			pluginConfig?.ui_review,
+			pluginConfig?.memory?.enabled === true,
 		);
 		architect.name = prefixName('architect');
 
@@ -907,7 +909,10 @@ export function getAgentConfigs(
 				return [agent.name, sdkConfig];
 			}
 
-			// Determine allowed tools: check override first, then fall back to AGENT_TOOL_MAP
+			// Determine allowed tools: check override first, then fall back to AGENT_TOOL_MAP.
+			// Memory tools are opt-in: default configs must not advertise or enable
+			// them until memory.enabled is explicitly true. Apply the opt-in map after
+			// overrides so prompt capability text and the SDK allow-list stay in sync.
 			let allowedTools: string[] | undefined;
 			const override = toolFilterOverrides[baseAgentName];
 			if (override !== undefined) {
@@ -917,6 +922,17 @@ export function getAgentConfigs(
 				// No override - use default AGENT_TOOL_MAP
 				allowedTools =
 					AGENT_TOOL_MAP[baseAgentName as keyof typeof AGENT_TOOL_MAP];
+			}
+			if (config?.memory?.enabled === true) {
+				const memoryTools =
+					MEMORY_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof MEMORY_AGENT_TOOL_MAP
+					] ?? [];
+				if (memoryTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...memoryTools]),
+					);
+				}
 			}
 
 			// Feature-gate: when council is enabled, the architect's system prompt

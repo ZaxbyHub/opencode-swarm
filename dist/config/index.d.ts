@@ -18,7 +18,7 @@ export declare const _internals: {
 };
 export type { MigrationStatus, Phase, PhaseStatus, Plan, Task, TaskSize, TaskStatus, } from './plan-schema';
 export { MigrationStatusSchema, PhaseSchema, PhaseStatusSchema, PlanSchema, TaskSchema, TaskSizeSchema, TaskStatusSchema, } from './plan-schema';
-export type { AgentOverrideConfig, AutomationCapabilities, AutomationConfig, AutomationMode, LeanTurboConfig, PhaseCompleteConfig, PipelineConfig, PluginConfig, SwarmConfig, TurboConfig, } from './schema';
-export { AgentOverrideConfigSchema, AutomationCapabilitiesSchema, AutomationConfigSchema, AutomationModeSchema, LeanTurboConfigSchema, PhaseCompleteConfigSchema, PipelineConfigSchema, PluginConfigSchema, SwarmConfigSchema, TurboConfigSchema, } from './schema';
+export type { AgentOverrideConfig, AutomationCapabilities, AutomationConfig, AutomationMode, LeanTurboConfig, MemoryConfig, PhaseCompleteConfig, PipelineConfig, PluginConfig, SwarmConfig, TurboConfig, } from './schema';
+export { AgentOverrideConfigSchema, AutomationCapabilitiesSchema, AutomationConfigSchema, AutomationModeSchema, LeanTurboConfigSchema, MemoryConfigSchema, PhaseCompleteConfigSchema, PipelineConfigSchema, PluginConfigSchema, SwarmConfigSchema, TurboConfigSchema, } from './schema';
 export type { DeltaSpec, Obligation, SpecDelta, SpecRequirement, SpecScenario, SpecSection, SwarmSpec, } from './spec-schema';
 export { DeltaSpecSchema, ObligationSchema, SpecDeltaSchema, SpecRequirementSchema, SpecScenarioSchema, SpecSectionSchema, SwarmSpecSchema, validateSpecContent, } from './spec-schema';

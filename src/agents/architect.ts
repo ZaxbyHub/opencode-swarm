@@ -7,7 +7,11 @@ import {
 	type RegisteredCommand,
 	VALID_COMMANDS,
 } from '../commands/registry.js';
-import { AGENT_TOOL_MAP, TOOL_DESCRIPTIONS } from '../config/constants';
+import {
+	AGENT_TOOL_MAP,
+	MEMORY_AGENT_TOOL_MAP,
+	TOOL_DESCRIPTIONS,
+} from '../config/constants';
 
 export interface AgentDefinition {
 	name: string;
@@ -1887,7 +1891,7 @@ sending it to the coder — the coder never sees contradictory instructions.`;
 }
 
 /**
- * Generate the YOUR TOOLS line from AGENT_TOOL_MAP.architect.
+ * Generate the YOUR TOOLS line from AGENT_TOOL_MAP.architect plus enabled opt-in tool maps.
  * Format: "Task (delegation), tool1, tool2, ..." — Task is always first.
  *
  * When `council?.enabled !== true`, the QA-council tools are filtered out
@@ -1896,8 +1900,14 @@ sending it to the coder — the coder never sees contradictory instructions.`;
  * also filtered out — runtime gates would reject those calls anyway, so
  * the model is not shown phantom tools.
  */
-function buildYourToolsList(council?: CouncilWorkflowConfig): string {
-	const tools = AGENT_TOOL_MAP.architect ?? [];
+function buildYourToolsList(
+	council?: CouncilWorkflowConfig,
+	memoryEnabled = false,
+): string {
+	const tools = [
+		...(AGENT_TOOL_MAP.architect ?? []),
+		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -1977,7 +1987,7 @@ If the user keeps the default phase-level behavior, do not write this section.`;
 }
 
 /**
- * Generate the Available Tools block from AGENT_TOOL_MAP.architect + TOOL_DESCRIPTIONS.
+ * Generate the Available Tools block from AGENT_TOOL_MAP.architect, enabled opt-in tool maps, and TOOL_DESCRIPTIONS.
  * Format: "tool1 (description), tool2 (description), ..." — tools without descriptions use name only.
  *
  * When `council?.enabled !== true`, the QA-council tools
@@ -1988,8 +1998,14 @@ If the user keeps the default phase-level behavior, do not write this section.`;
  * also filtered out — same reasoning: the runtime gate at
  * src/tools/convene-general-council.ts:execute will reject the call.
  */
-function buildAvailableToolsList(council?: CouncilWorkflowConfig): string {
-	const tools = AGENT_TOOL_MAP.architect ?? [];
+function buildAvailableToolsList(
+	council?: CouncilWorkflowConfig,
+	memoryEnabled = false,
+): string {
+	const tools = [
+		...(AGENT_TOOL_MAP.architect ?? []),
+		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -2203,6 +2219,7 @@ export function createArchitectAgent(
 	adversarialTesting?: AdversarialTestingConfig,
 	council?: CouncilWorkflowConfig,
 	uiReview?: UIReviewConfig,
+	memoryEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -2212,14 +2229,17 @@ export function createArchitectAgent(
 		prompt = `${ARCHITECT_PROMPT}\n\n${customAppendPrompt}`;
 	}
 
-	// Resolve capability placeholders from AGENT_TOOL_MAP (single source of truth).
+	// Resolve capability placeholders from AGENT_TOOL_MAP plus enabled opt-in tool maps.
 	// Thread `council` through the tool-list builders so council-only tools
 	// (`submit_council_verdicts`, `declare_council_criteria`, `submit_phase_council_verdicts`)
 	// are omitted when the feature is disabled — keeping the rendered tool list in sync with
 	// the runtime gate in src/tools/convene-council.ts.
 	prompt = prompt
-		?.replace('{{YOUR_TOOLS}}', buildYourToolsList(council))
-		?.replace('{{AVAILABLE_TOOLS}}', buildAvailableToolsList(council))
+		?.replace('{{YOUR_TOOLS}}', buildYourToolsList(council, memoryEnabled))
+		?.replace(
+			'{{AVAILABLE_TOOLS}}',
+			buildAvailableToolsList(council, memoryEnabled),
+		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());
 
 	// Substitute the QA gate selection dialogue blocks shared across

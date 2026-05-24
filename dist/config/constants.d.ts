@@ -10,6 +10,8 @@ export type QAAgentName = (typeof QA_AGENTS)[number];
 export type PipelineAgentName = (typeof PIPELINE_AGENTS)[number];
 export type AgentName = (typeof ALL_AGENT_NAMES)[number];
 export declare const AGENT_TOOL_MAP: Record<AgentName, ToolName[]>;
+export declare const MEMORY_TOOL_NAMES: readonly ["swarm_memory_recall", "swarm_memory_propose"];
+export declare const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>>;
 /**
  * Human-readable descriptions for tools shown in the architect Available Tools block.
  * Used to generate the Available Tools section of the architect prompt at construction time.

@@ -1,0 +1,35 @@
+export type { MemoryConfig } from './config';
+export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
+export { MemoryDisabledError, MemoryValidationError } from './errors';
+export type {
+	MemoryGatewayOptions,
+	ProposeMemoryInput,
+	RecallMemoryInput,
+} from './gateway';
+export { createMemoryGateway, MemoryGateway } from './gateway';
+export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
+export { buildRecallPromptBlock } from './prompt-block';
+export type { MemoryProposalStore, MemoryProvider } from './provider';
+export { findSecrets, redactSecrets } from './redaction';
+export {
+	computeMemoryContentHash,
+	createBundleId,
+	createMemoryId,
+	createProposalId,
+	isExpired,
+	normalizeMemoryText,
+	validateMemoryProposal,
+	validateMemoryRecordRules,
+} from './schema';
+export type {
+	MemoryContext,
+	MemoryKind,
+	MemoryListFilter,
+	MemoryProposal,
+	MemoryRecord,
+	MemoryScopeRef,
+	MemoryScopeType,
+	RecallBundle,
+	RecallRequest,
+	RecallResultItem,
+} from './types';

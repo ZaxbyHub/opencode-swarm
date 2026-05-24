@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.29.3",
+    version: "7.29.4",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16243,6 +16243,8 @@ var init_tool_names = __esm(() => {
     "skill_improve",
     "spec_write",
     "knowledge_ack",
+    "swarm_memory_recall",
+    "swarm_memory_propose",
     "swarm_command",
     "lean_turbo_plan_lanes",
     "lean_turbo_acquire_locks",
@@ -16775,6 +16777,8 @@ var init_constants = __esm(() => {
     skill_improve: "run the skill_improver agent to review and refine skills",
     spec_write: "author or update .swarm/spec.md for the current project",
     knowledge_ack: "record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment",
+    swarm_memory_recall: "recall scoped Swarm memory for the current repository as untrusted background",
+    swarm_memory_propose: "create a pending Swarm memory proposal; does not write durable memory directly",
     swarm_command: "run supported /swarm commands through the canonical command registry",
     lean_turbo_plan_lanes: "partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution",
     lean_turbo_acquire_locks: "acquire file locks for all files in a lane (all-or-nothing) before lane execution",
@@ -16886,7 +16890,7 @@ function getCanonicalAgentRole(agentName, generatedAgentNames) {
 function stripKnownSwarmPrefix(agentName) {
   return getCanonicalAgentRole(agentName);
 }
-var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
+var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, MemoryConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
 var init_schema = __esm(() => {
   init_zod();
   init_constants();
@@ -17338,6 +17342,23 @@ var init_schema = __esm(() => {
     todo_max_phases: exports_external.number().int().positive().default(3),
     sweep_enabled: exports_external.boolean().default(true)
   });
+  MemoryConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(false),
+    provider: exports_external.literal("local-jsonl").default("local-jsonl"),
+    storageDir: exports_external.string().default(".swarm/memory"),
+    recall: exports_external.object({
+      defaultMaxItems: exports_external.number().int().min(1).max(20).default(8),
+      defaultTokenBudget: exports_external.number().int().min(100).max(5000).default(1200),
+      minScore: exports_external.number().min(0).max(1).default(0.05)
+    }).default({ defaultMaxItems: 8, defaultTokenBudget: 1200, minScore: 0.05 }),
+    writes: exports_external.object({
+      mode: exports_external.literal("propose").default("propose")
+    }).default({ mode: "propose" }),
+    redaction: exports_external.object({
+      rejectDurableSecrets: exports_external.boolean().default(true)
+    }).default({ rejectDurableSecrets: true }),
+    hardDelete: exports_external.boolean().default(false)
+  });
   CuratorConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(true),
     init_enabled: exports_external.boolean().default(true),
@@ -17545,6 +17566,7 @@ var init_schema = __esm(() => {
     checkpoint: CheckpointConfigSchema.optional(),
     automation: AutomationConfigSchema.optional(),
     knowledge: KnowledgeConfigSchema.optional(),
+    memory: MemoryConfigSchema.optional(),
     curator: CuratorConfigSchema.optional(),
     knowledge_application: KnowledgeApplicationConfigSchema.optional(),
     skill_improver: SkillImproverConfigSchema.optional(),
