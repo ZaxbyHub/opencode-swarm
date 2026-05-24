@@ -15,4 +15,4 @@
  * any filesystem op.
  */
 import type { CouncilSynthesis } from './types';
-export declare function writeCouncilEvidence(workingDir: string, synthesis: CouncilSynthesis): void;
+export declare function writeCouncilEvidence(workingDir: string, synthesis: CouncilSynthesis): Promise<void>;

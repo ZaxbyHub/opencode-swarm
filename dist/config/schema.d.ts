@@ -287,8 +287,8 @@ export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 export declare const AdversarialDetectionConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     policy: z.ZodDefault<z.ZodEnum<{
-        gate: "gate";
         ignore: "ignore";
+        gate: "gate";
         warn: "warn";
     }>>;
     pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
@@ -1053,8 +1053,8 @@ export declare const PluginConfigSchema: z.ZodObject<{
     adversarial_detection: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         policy: z.ZodDefault<z.ZodEnum<{
-            gate: "gate";
             ignore: "ignore";
+            gate: "gate";
             warn: "warn";
         }>>;
         pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
