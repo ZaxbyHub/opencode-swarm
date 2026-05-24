@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.29.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.2...v7.29.3) (2026-05-23)
+
+
+### Bug Fixes
+
+* **gate-evidence:** distinguish ENOENT from corruption errors in readExisting ([#995](https://github.com/zaxbysauce/opencode-swarm/issues/995)) ([f61557a](https://github.com/zaxbysauce/opencode-swarm/commit/f61557ab9a98f385b3c9ff2c25a02aa6b8be6df8))
+
 ## [7.28.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.1...v7.28.2) (2026-05-22)
 
 
