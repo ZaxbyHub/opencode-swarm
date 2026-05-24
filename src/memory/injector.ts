@@ -345,7 +345,9 @@ function extractTouchedFiles(text: string): string[] {
 }
 
 function compactText(text: string): string {
-	return text.replace(/\s+/g, ' ').trim().slice(0, 2000);
+	const compacted = text.replace(/\s+/g, ' ').trim();
+	if (compacted.length <= 2000) return compacted;
+	return Array.from(compacted).slice(0, 2000).join('');
 }
 
 type RequiredInternals = {
@@ -354,3 +356,4 @@ type RequiredInternals = {
 };
 
 export type { ProposeMemoryInput, MemoryKind };
+export const _test_exports = { compactText, messagesContainRecall };

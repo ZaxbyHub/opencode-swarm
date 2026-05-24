@@ -9,6 +9,7 @@ import {
 	normalizeMemoryAgentRole,
 	resolveMemoryRecallProfile,
 } from '../../../src/memory';
+import { _test_exports as injectorTestExports } from '../../../src/memory/injector';
 import type {
 	MemoryProposal,
 	MemoryRecord,
@@ -21,6 +22,12 @@ const repositoryScope: MemoryScopeRef = {
 	repoId: 'repo-a',
 	repoRoot: 'C:/repo-a',
 };
+const allowedScopes: MemoryScopeRef[] = [
+	{ type: 'workspace', workspaceId: 'workspace-a' },
+	repositoryScope,
+	{ type: 'run', runId: 'session-a' },
+	{ type: 'agent', agentId: 'test_engineer', runId: 'session-a' },
+];
 
 function makeRecord(kind: MemoryRecord['kind'], text: string): MemoryRecord {
 	return {
@@ -59,6 +66,9 @@ function makeBundle(record: MemoryRecord): RecallBundle {
 function makeHooks(
 	bundle: RecallBundle,
 	enabled = true,
+	options: {
+		propose?: (input: ProposeMemoryInput) => Promise<MemoryProposal>;
+	} = {},
 ): {
 	hooks: ReturnType<typeof createMemoryLifecycleHooks>;
 	recalls: RecallMemoryInput[];
@@ -70,12 +80,13 @@ function makeHooks(
 	const logs: unknown[] = [];
 	const createGateway: MemoryLifecycleHookOptions['createGateway'] = () => ({
 		isEnabled: () => enabled,
-		deriveAllowedScopes: () => [repositoryScope],
+		deriveAllowedScopes: () => allowedScopes,
 		recall: async (input) => {
 			recalls.push(input);
 			return bundle;
 		},
 		propose: async (input) => {
+			if (options.propose) return options.propose(input);
 			proposals.push(input);
 			const proposal: MemoryProposal = {
 				id: 'prop_1111111111111111',
@@ -107,6 +118,7 @@ describe('memory recall role profiles', () => {
 		expect(normalizeMemoryAgentRole('mega_test_engineer')).toBe('qa');
 		expect(normalizeMemoryAgentRole('local_reviewer')).toBe('qa');
 		expect(normalizeMemoryAgentRole('critic_drift_verifier')).toBe('security');
+		expect(normalizeMemoryAgentRole('unknown_specialist')).toBe('coder');
 	});
 
 	test('coder profile recalls code, test, and failure patterns', () => {
@@ -145,7 +157,7 @@ describe('memory lifecycle injection', () => {
 			'## Retrieved Swarm Memory',
 		);
 		expect(output.messages[2].parts[0].text).toContain('TASK: verify');
-		expect(recalls[0].scopes).toEqual([repositoryScope]);
+		expect(recalls[0].scopes).toEqual(allowedScopes);
 		expect(recalls[0].kinds).toEqual([
 			'test_pattern',
 			'failure_pattern',
@@ -182,6 +194,40 @@ describe('memory lifecycle injection', () => {
 		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
 
 		expect(output.messages).toHaveLength(2);
+	});
+
+	test('existing recall block prevents duplicate injection', async () => {
+		const { hooks, recalls } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'unused')),
+		);
+		const output = {
+			messages: [
+				{
+					info: { role: 'system' },
+					parts: [
+						{ type: 'text', text: '## Retrieved Swarm Memory\nexisting' },
+					],
+				},
+				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+			],
+		};
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		expect(output.messages).toHaveLength(2);
+		expect(recalls).toHaveLength(0);
+		expect(injectorTestExports.messagesContainRecall(output.messages)).toBe(
+			true,
+		);
+	});
+
+	test('compactText preserves complete unicode code points at the length cap', () => {
+		const prefix = 'a'.repeat(1999);
+		const compacted = injectorTestExports.compactText(`${prefix}😀 trailing`);
+
+		expect(Array.from(compacted)).toHaveLength(2000);
+		expect(compacted.endsWith('😀')).toBe(true);
+		expect(compacted).not.toContain('\uFFFD');
 	});
 
 	test('memory disabled leaves messages and proposals unchanged', async () => {
@@ -257,6 +303,48 @@ describe('memory lifecycle injection', () => {
 				expect.objectContaining({
 					event: 'proposal_created',
 					proposalId: 'prop_1111111111111111',
+				}),
+			]),
+		);
+	});
+
+	test('Task output proposal errors are logged without throwing', async () => {
+		const { hooks, logs } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'unused')),
+			true,
+			{
+				propose: async () => {
+					throw new Error('provider rejected proposal');
+				},
+			},
+		);
+
+		await hooks.toolAfter(
+			{
+				tool: 'task',
+				sessionID: 'session-a',
+				args: { subagent_type: 'coder', prompt: 'TASK: implement' },
+			},
+			{
+				output: JSON.stringify({
+					memoryProposals: [
+						{
+							operation: 'add',
+							kind: 'repo_convention',
+							text: 'This repo uses bun.',
+							rationale: 'Observed package manager.',
+							evidenceRefs: ['package.json'],
+						},
+					],
+				}),
+			},
+		);
+
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'proposal_rejected_by_validation',
+					rejectionReason: 'provider rejected proposal',
 				}),
 			]),
 		);

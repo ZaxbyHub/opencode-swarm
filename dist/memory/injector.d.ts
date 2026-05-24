@@ -22,4 +22,10 @@ export interface MemoryLifecycleHooks {
     toolAfter(input: unknown, output: unknown): Promise<void>;
 }
 export declare function createMemoryLifecycleHooks(options: MemoryLifecycleHookOptions): MemoryLifecycleHooks;
+declare function messagesContainRecall(messages: unknown[]): boolean;
+declare function compactText(text: string): string;
 export type { ProposeMemoryInput, MemoryKind };
+export declare const _test_exports: {
+    compactText: typeof compactText;
+    messagesContainRecall: typeof messagesContainRecall;
+};

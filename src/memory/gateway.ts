@@ -147,7 +147,7 @@ export class MemoryGateway {
 			items: results,
 			tokenBudget,
 		});
-		await this.provider.recordRecallUsage({
+		await this.provider.recordRecallUsage?.({
 			bundleId: bundle.id,
 			query,
 			scopes,
@@ -370,16 +370,25 @@ function createStableId(value: string): string {
 		.slice(0, 16);
 }
 
+const gitRemoteUrlCache = new Map<string, string | undefined>();
+
 function readGitRemoteUrl(directory: string): string | undefined {
+	if (gitRemoteUrlCache.has(directory)) return gitRemoteUrlCache.get(directory);
 	const gitConfigPath = path.join(directory, '.git', 'config');
-	if (!existsSync(gitConfigPath)) return undefined;
+	if (!existsSync(gitConfigPath)) {
+		gitRemoteUrlCache.set(directory, undefined);
+		return undefined;
+	}
 	try {
 		const content = readFileSync(gitConfigPath, 'utf-8');
 		const match = content.match(
 			/\[remote "origin"\][\s\S]*?\n\s*url\s*=\s*(.+)/,
 		);
-		return match?.[1]?.trim();
+		const remoteUrl = match?.[1]?.trim();
+		gitRemoteUrlCache.set(directory, remoteUrl);
+		return remoteUrl;
 	} catch {
+		gitRemoteUrlCache.set(directory, undefined);
 		return undefined;
 	}
 }

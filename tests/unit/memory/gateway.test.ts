@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
 	MemoryDisabledError,
 	MemoryGateway,
+	type MemoryProvider,
 	type MemoryRecord,
 } from '../../../src/memory';
 
@@ -147,6 +148,29 @@ describe('MemoryGateway', () => {
 		expect(bundle.promptBlock).toContain('untrusted retrieved facts');
 		expect(bundle.promptBlock).toContain(record.id);
 		expect(bundle.promptBlock).toContain('age=today');
+	});
+
+	test('recall no-ops when provider omits optional usage recording', async () => {
+		const provider: MemoryProvider = {
+			name: 'fake-no-usage-recording',
+			upsert: async (record) => record,
+			get: async () => null,
+			delete: async () => {},
+			recall: async () => [],
+			list: async () => [],
+		};
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				provider,
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+
+		const bundle = await gateway.recall({ query: 'missing memory safe noop' });
+
+		expect(bundle.items).toHaveLength(0);
 	});
 
 	test('recall accepts only explicitly allowed controller scopes', async () => {

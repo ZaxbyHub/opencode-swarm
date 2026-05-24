@@ -18,7 +18,7 @@ export interface MemoryProvider {
     get(id: string): Promise<MemoryRecord | null>;
     delete(id: string, reason?: string): Promise<void>;
     recall(request: RecallRequest): Promise<RecallResultItem[]>;
-    recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void>;
+    recordRecallUsage?(event: MemoryRecallUsageEvent): Promise<void>;
     list(filter: MemoryListFilter): Promise<MemoryRecord[]>;
 }
 export interface MemoryProposalStore {
