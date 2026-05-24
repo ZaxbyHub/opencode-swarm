@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.32.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.31.0...v7.32.0) (2026-05-24)
+
+
+### Features
+
+* **memory:** inject scoped recall bundles into agent prompts ([#1006](https://github.com/zaxbysauce/opencode-swarm/issues/1006)) ([67f5e0b](https://github.com/zaxbysauce/opencode-swarm/commit/67f5e0b3c7037d83faa5be6b4909878f282953d4))
+
 ## [7.31.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.30.0...v7.31.0) (2026-05-24)
 
 
