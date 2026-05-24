@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.31.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.30.0...v7.31.0) (2026-05-24)
+
+
+### Features
+
+* **knowledge:** enforce mature-only retrieval defaults and cross-tier retraction ([#998](https://github.com/zaxbysauce/opencode-swarm/issues/998)) ([ef5da0a](https://github.com/zaxbysauce/opencode-swarm/commit/ef5da0abb3df9ba4555314de617ca74c6e2e1704))
+
 ## [7.30.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.4...v7.30.0) (2026-05-24)
 
 
