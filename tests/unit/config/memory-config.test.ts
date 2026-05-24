@@ -23,6 +23,13 @@ describe('MemoryConfigSchema', () => {
 				defaultMaxItems: 8,
 				defaultTokenBudget: 1200,
 				minScore: 0.05,
+				injection: {
+					enabled: true,
+					minScore: 0.25,
+					requireQuerySignal: true,
+					maxItems: 6,
+					tokenBudget: 1000,
+				},
 			},
 			writes: { mode: 'propose' },
 			redaction: { rejectDurableSecrets: true },
@@ -40,6 +47,33 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed.recall.defaultMaxItems).toBe(3);
 		expect(parsed.recall.defaultTokenBudget).toBe(500);
 		expect(parsed.recall.minScore).toBe(0.2);
+	});
+
+	test('accepts bounded injection overrides while preserving tool recall defaults', () => {
+		const parsed = MemoryConfigSchema.parse({
+			recall: {
+				defaultMaxItems: 8,
+				defaultTokenBudget: 1200,
+				minScore: 0.05,
+				injection: {
+					enabled: false,
+					minScore: 0.4,
+					requireQuerySignal: false,
+					maxItems: 4,
+					tokenBudget: 700,
+				},
+			},
+		});
+
+		expect(parsed.recall.defaultMaxItems).toBe(8);
+		expect(parsed.recall.minScore).toBe(0.05);
+		expect(parsed.recall.injection).toEqual({
+			enabled: false,
+			minScore: 0.4,
+			requireQuerySignal: false,
+			maxItems: 4,
+			tokenBudget: 700,
+		});
 	});
 
 	test('rejects unsupported providers and direct write modes', () => {

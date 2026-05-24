@@ -10,4 +10,5 @@ export declare function toRecallBundle(input: {
     generatedAt: string;
     items: RecallResultItem[];
     tokenBudget: number;
+    diagnostics?: RecallBundle['diagnostics'];
 }): RecallBundle;

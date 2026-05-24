@@ -957,8 +957,34 @@ export const MemoryConfigSchema = z.object({
 			defaultMaxItems: z.number().int().min(1).max(20).default(8),
 			defaultTokenBudget: z.number().int().min(100).max(5000).default(1200),
 			minScore: z.number().min(0).max(1).default(0.05),
+			injection: z
+				.object({
+					enabled: z.boolean().default(true),
+					minScore: z.number().min(0).max(1).default(0.25),
+					requireQuerySignal: z.boolean().default(true),
+					maxItems: z.number().int().min(1).max(20).default(6),
+					tokenBudget: z.number().int().min(100).max(5000).default(1000),
+				})
+				.default({
+					enabled: true,
+					minScore: 0.25,
+					requireQuerySignal: true,
+					maxItems: 6,
+					tokenBudget: 1000,
+				}),
 		})
-		.default({ defaultMaxItems: 8, defaultTokenBudget: 1200, minScore: 0.05 }),
+		.default({
+			defaultMaxItems: 8,
+			defaultTokenBudget: 1200,
+			minScore: 0.05,
+			injection: {
+				enabled: true,
+				minScore: 0.25,
+				requireQuerySignal: true,
+				maxItems: 6,
+				tokenBudget: 1000,
+			},
+		}),
 	writes: z
 		.object({
 			/** Normal agents can only create proposals in PR 1. */

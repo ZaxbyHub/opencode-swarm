@@ -1,4 +1,4 @@
-import type { MemoryConfig } from './config';
+import { type MemoryConfig } from './config';
 import type { MemoryGateway, ProposeMemoryInput } from './gateway';
 import { appendMemoryRunLog } from './run-log';
 import type { MemoryKind } from './types';

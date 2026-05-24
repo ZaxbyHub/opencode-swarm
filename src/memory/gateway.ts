@@ -19,6 +19,7 @@ import {
 	normalizeMemoryText,
 	validateMemoryRecordRules,
 } from './schema';
+import type { RecallScoringDiagnostics } from './scoring';
 import type {
 	MemoryContext,
 	MemoryKind,
@@ -27,6 +28,8 @@ import type {
 	MemoryScopeRef,
 	MemorySource,
 	RecallBundle,
+	RecallInjectionSkipReason,
+	RecallMode,
 	RecallRequest,
 } from './types';
 
@@ -49,11 +52,13 @@ export interface ProposeMemoryInput {
 export interface RecallMemoryInput {
 	query: string;
 	task?: string;
+	mode?: RecallMode;
 	scopes?: MemoryScopeRef[];
 	kinds?: MemoryKind[];
 	maxItems?: number;
 	tokenBudget?: number;
 	minScore?: number;
+	requireQuerySignal?: boolean;
 	includeExpired?: boolean;
 }
 
@@ -132,20 +137,35 @@ export class MemoryGateway {
 			query,
 			task: input.task,
 			agentRole: this.context.agentRole,
+			mode: input.mode ?? 'manual',
 			scopes,
 			kinds: input.kinds,
 			maxItems,
 			tokenBudget,
 			minScore: input.minScore ?? this.config.recall.minScore,
+			requireQuerySignal: input.requireQuerySignal,
 			includeExpired: input.includeExpired,
 		};
-		const results = await this.provider.recall(request);
+		const recallResult = this.provider.recallWithDiagnostics
+			? await this.provider.recallWithDiagnostics(request)
+			: { items: await this.provider.recall(request) };
 		const bundle = toRecallBundle({
 			id: createBundleId(query, generatedAt),
 			query,
 			generatedAt,
-			items: results,
+			items: recallResult.items,
 			tokenBudget,
+			diagnostics: recallResult.diagnostics
+				? {
+						injectionSkipReason:
+							input.mode === 'injection'
+								? resolveInjectionSkipReason(recallResult.diagnostics)
+								: undefined,
+						candidateCount: recallResult.diagnostics.candidateCount,
+						noSignalCount: recallResult.diagnostics.noSignalCount,
+						belowThresholdCount: recallResult.diagnostics.belowThresholdCount,
+					}
+				: undefined,
 		});
 		await this.provider.recordRecallUsage?.({
 			bundleId: bundle.id,
@@ -409,6 +429,21 @@ function validateRequestedScopes(
 		}
 	}
 	return requested;
+}
+
+function resolveInjectionSkipReason(
+	diagnostics: RecallScoringDiagnostics,
+): RecallInjectionSkipReason | undefined {
+	if (diagnostics.returnedCount > 0) return undefined;
+	if (diagnostics.candidateCount === 0) return 'no_results';
+	if (
+		diagnostics.noSignalCount > 0 &&
+		diagnostics.noSignalCount >= diagnostics.candidateCount
+	) {
+		return 'no_signal';
+	}
+	if (diagnostics.belowThresholdCount > 0) return 'below_threshold';
+	return 'no_results';
 }
 
 function scopeKey(scope: MemoryScopeRef): string {

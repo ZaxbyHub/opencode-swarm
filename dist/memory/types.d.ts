@@ -56,15 +56,19 @@ export interface MemoryProposal {
     createdAt: string;
     metadata: Record<string, unknown>;
 }
+export type RecallMode = 'manual' | 'injection' | 'curator' | 'evaluation';
+export type RecallInjectionSkipReason = 'disabled' | 'no_signal' | 'below_threshold' | 'no_results';
 export interface RecallRequest {
     query: string;
     task?: string;
     agentRole?: string;
+    mode?: RecallMode;
     scopes: MemoryScopeRef[];
     kinds?: MemoryKind[];
     maxItems: number;
     tokenBudget: number;
     minScore?: number;
+    requireQuerySignal?: boolean;
     includeExpired?: boolean;
     includePendingProposals?: boolean;
 }
@@ -72,6 +76,14 @@ export interface RecallResultItem {
     record: MemoryRecord;
     score: number;
     reason: string;
+    signals: {
+        textOverlap: number;
+        tagOverlap: number;
+        fileOverlap?: number;
+        symbolOverlap?: number;
+        kindMatch: boolean;
+        scopeMatch: boolean;
+    };
 }
 export interface RecallBundle {
     id: string;
@@ -80,6 +92,12 @@ export interface RecallBundle {
     items: RecallResultItem[];
     tokenEstimate: number;
     promptBlock: string;
+    diagnostics?: {
+        injectionSkipReason?: RecallInjectionSkipReason;
+        candidateCount?: number;
+        noSignalCount?: number;
+        belowThresholdCount?: number;
+    };
 }
 export interface MemoryContext {
     directory: string;

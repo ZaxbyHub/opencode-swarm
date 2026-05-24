@@ -173,6 +173,132 @@ describe('MemoryGateway', () => {
 		expect(bundle.items).toHaveLength(0);
 	});
 
+	test('injection recall records no-signal diagnostics for unrelated same-scope memory', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'repo_convention',
+			text: 'This repo uses pnpm for frontend scripts.',
+			evidenceRefs: ['package.json'],
+			confidence: 1,
+		});
+		await gateway.upsertCurated(record);
+
+		const bundle = await gateway.recall({
+			query: 'backend database migration strategy',
+			mode: 'injection',
+			kinds: ['repo_convention'],
+			minScore: 0,
+			requireQuerySignal: true,
+		});
+
+		expect(bundle.items).toHaveLength(0);
+		expect(bundle.diagnostics).toMatchObject({
+			injectionSkipReason: 'no_signal',
+			candidateCount: 1,
+			noSignalCount: 1,
+		});
+	});
+
+	test('injection query-signal gating ignores synthetic agent role labels', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'critic' },
+			{
+				config: { enabled: true },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'security_note',
+			text: 'Always review authentication token storage boundaries.',
+			evidenceRefs: ['SECURITY.md'],
+			confidence: 1,
+			tags: ['security'],
+		});
+		await gateway.upsertCurated(record);
+
+		const bundle = await gateway.recall({
+			query: 'critic_drift_verifier task: backend database migration strategy',
+			task: 'backend database migration strategy',
+			mode: 'injection',
+			kinds: ['security_note'],
+			minScore: 0.25,
+			requireQuerySignal: true,
+		});
+
+		expect(bundle.items).toHaveLength(0);
+		expect(bundle.diagnostics).toMatchObject({
+			injectionSkipReason: 'no_signal',
+			candidateCount: 1,
+			noSignalCount: 1,
+		});
+	});
+
+	test('injection recall records below-threshold diagnostics for weak query signal', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'repo_convention',
+			text: 'This repo uses bun for scripts.',
+			evidenceRefs: ['package.json'],
+			confidence: 0.1,
+		});
+		await gateway.upsertCurated(record);
+
+		const bundle = await gateway.recall({
+			query: 'bun unrelated words',
+			mode: 'injection',
+			kinds: ['repo_convention'],
+			minScore: 0.9,
+			requireQuerySignal: true,
+		});
+
+		expect(bundle.items).toHaveLength(0);
+		expect(bundle.diagnostics).toMatchObject({
+			injectionSkipReason: 'below_threshold',
+			candidateCount: 1,
+			belowThresholdCount: 1,
+		});
+	});
+
+	test('injection recall returns relevant text signals', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'repo_convention',
+			text: 'This repo uses bun for memory tests.',
+			evidenceRefs: ['package.json'],
+			confidence: 0.9,
+		});
+		await gateway.upsertCurated(record);
+
+		const bundle = await gateway.recall({
+			query: 'bun memory tests',
+			mode: 'injection',
+			kinds: ['repo_convention'],
+			minScore: 0.25,
+			requireQuerySignal: true,
+		});
+
+		expect(bundle.items.map((item) => item.record.id)).toEqual([record.id]);
+		expect(bundle.items[0].signals.textOverlap).toBeGreaterThan(0);
+	});
+
 	test('recall accepts only explicitly allowed controller scopes', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },

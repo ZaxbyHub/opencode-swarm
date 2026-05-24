@@ -47,6 +47,8 @@ export type {
 	MemoryScopeRef,
 	MemoryScopeType,
 	RecallBundle,
+	RecallInjectionSkipReason,
+	RecallMode,
 	RecallRequest,
 	RecallResultItem,
 } from './types';

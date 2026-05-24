@@ -69,6 +69,7 @@ export function toRecallBundle(input: {
 	generatedAt: string;
 	items: RecallResultItem[];
 	tokenBudget: number;
+	diagnostics?: RecallBundle['diagnostics'];
 }): RecallBundle {
 	const block = buildRecallPromptBlock(
 		input.items,
@@ -82,5 +83,6 @@ export function toRecallBundle(input: {
 		items: block.items,
 		tokenEstimate: block.tokenEstimate,
 		promptBlock: block.promptBlock,
+		diagnostics: input.diagnostics,
 	};
 }

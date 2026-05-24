@@ -7,6 +7,14 @@ import type {
 	RecallResultItem,
 } from './types';
 
+export interface RecallScoringDiagnostics {
+	candidateCount: number;
+	scoredCount: number;
+	returnedCount: number;
+	noSignalCount: number;
+	belowThresholdCount: number;
+}
+
 function tokenize(text: string): Set<string> {
 	return new Set(
 		text
@@ -16,6 +24,27 @@ function tokenize(text: string): Set<string> {
 			.map((token) => token.trim())
 			.filter(Boolean),
 	);
+}
+
+function normalizeKindText(kind: MemoryKind): string {
+	return kind.replace(/_/g, ' ');
+}
+
+function collectMetadataStrings(
+	metadata: Record<string, unknown>,
+	keys: string[],
+): string[] {
+	const values: string[] = [];
+	for (const key of keys) {
+		const value = metadata[key];
+		if (typeof value === 'string') values.push(value);
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				if (typeof item === 'string') values.push(item);
+			}
+		}
+	}
+	return values;
 }
 
 function overlap(a: Set<string>, b: Set<string>): number {
@@ -64,20 +93,74 @@ export function scoreMemoryRecord(
 	record: MemoryRecord,
 	request: RecallRequest,
 ): RecallResultItem | null {
-	if (!request.includeExpired && isExpired(record)) return null;
-	if (record.supersededBy) return null;
-	if (record.metadata.deleted === true) return null;
-	if (!scopeAllowed(record.scope, request.scopes)) return null;
-	if (request.kinds && !request.kinds.includes(record.kind)) return null;
+	const result = scoreMemoryRecordDetailed(record, request);
+	return result.item;
+}
 
-	const queryTokens = tokenize(request.query);
+function scoreMemoryRecordDetailed(
+	record: MemoryRecord,
+	request: RecallRequest,
+): { item: RecallResultItem | null; skipReason?: 'no_signal' } {
+	if (!request.includeExpired && isExpired(record)) return { item: null };
+	if (record.supersededBy) return { item: null };
+	if (record.metadata.deleted === true) return { item: null };
+	if (!scopeAllowed(record.scope, request.scopes)) return { item: null };
+	if (request.kinds && !request.kinds.includes(record.kind)) {
+		return { item: null };
+	}
+
+	const queryTokens =
+		request.mode === 'injection' && request.task
+			? tokenize(request.task)
+			: tokenize(request.query);
 	const textTokens = tokenize(record.text);
 	const tagTokens = tokenize(record.tags.join(' '));
+	const fileTokens = tokenize(
+		[
+			record.source.filePath,
+			...collectMetadataStrings(record.metadata, [
+				'file',
+				'filePath',
+				'files',
+				'touchedFiles',
+			]),
+		]
+			.filter((value): value is string => typeof value === 'string')
+			.join(' '),
+	);
+	const symbolTokens = tokenize(
+		collectMetadataStrings(record.metadata, ['symbol', 'symbols']).join(' '),
+	);
+	const kindQueryOverlap = overlap(
+		queryTokens,
+		tokenize(normalizeKindText(record.kind)),
+	);
 	const textOverlap = overlap(queryTokens, textTokens);
 	const tagOverlap = overlap(queryTokens, tagTokens);
+	const fileOverlap = overlap(queryTokens, fileTokens);
+	const symbolOverlap = overlap(queryTokens, symbolTokens);
+	const kindMatch = request.kinds?.includes(record.kind) ?? false;
+	const scopeMatch = scopeAllowed(record.scope, request.scopes);
+	const hasQuerySignal =
+		textOverlap > 0 ||
+		tagOverlap > 0 ||
+		fileOverlap > 0 ||
+		symbolOverlap > 0 ||
+		kindQueryOverlap > 0;
+
+	if (
+		request.mode === 'injection' &&
+		request.requireQuerySignal !== false &&
+		!hasQuerySignal
+	) {
+		return { item: null, skipReason: 'no_signal' };
+	}
+
 	const score =
 		textOverlap * 0.45 +
 		tagOverlap * 0.2 +
+		fileOverlap * 0.05 +
+		symbolOverlap * 0.05 +
 		scopeSpecificityBoost(record.scope) * 0.15 +
 		kindProfileBoost(record.kind, request) * 0.1 +
 		record.confidence * 0.1;
@@ -85,14 +168,27 @@ export function scoreMemoryRecord(
 	const reasonParts = [
 		textOverlap > 0 ? `text_overlap=${textOverlap.toFixed(2)}` : null,
 		tagOverlap > 0 ? `tag_overlap=${tagOverlap.toFixed(2)}` : null,
+		fileOverlap > 0 ? `file_overlap=${fileOverlap.toFixed(2)}` : null,
+		symbolOverlap > 0 ? `symbol_overlap=${symbolOverlap.toFixed(2)}` : null,
+		kindQueryOverlap > 0 ? `kind_query=${kindQueryOverlap.toFixed(2)}` : null,
 		`scope=${record.scope.type}`,
 		`confidence=${record.confidence.toFixed(2)}`,
 	].filter(Boolean);
 
 	return {
-		record,
-		score,
-		reason: reasonParts.join(', '),
+		item: {
+			record,
+			score,
+			reason: reasonParts.join(', '),
+			signals: {
+				textOverlap,
+				tagOverlap,
+				fileOverlap,
+				symbolOverlap,
+				kindMatch,
+				scopeMatch,
+			},
+		},
 	};
 }
 
@@ -100,11 +196,40 @@ export function scoreMemoryRecords(
 	records: MemoryRecord[],
 	request: RecallRequest,
 ): RecallResultItem[] {
-	return records
-		.map((record) => scoreMemoryRecord(record, request))
-		.filter((item): item is RecallResultItem => item !== null)
-		.filter((item) => item.score >= (request.minScore ?? 0))
-		.sort(
-			(a, b) => b.score - a.score || a.record.id.localeCompare(b.record.id),
-		);
+	return scoreMemoryRecordsWithDiagnostics(records, request).items;
+}
+
+export function scoreMemoryRecordsWithDiagnostics(
+	records: MemoryRecord[],
+	request: RecallRequest,
+): { items: RecallResultItem[]; diagnostics: RecallScoringDiagnostics } {
+	const minScore = request.minScore ?? 0;
+	const diagnostics: RecallScoringDiagnostics = {
+		candidateCount: records.length,
+		scoredCount: 0,
+		returnedCount: 0,
+		noSignalCount: 0,
+		belowThresholdCount: 0,
+	};
+	const items: RecallResultItem[] = [];
+
+	for (const record of records) {
+		const result = scoreMemoryRecordDetailed(record, request);
+		if (!result.item) {
+			if (result.skipReason === 'no_signal') diagnostics.noSignalCount++;
+			continue;
+		}
+		diagnostics.scoredCount++;
+		if (result.item.score < minScore) {
+			diagnostics.belowThresholdCount++;
+			continue;
+		}
+		items.push(result.item);
+	}
+
+	items.sort(
+		(a, b) => b.score - a.score || a.record.id.localeCompare(b.record.id),
+	);
+	diagnostics.returnedCount = items.length;
+	return { items, diagnostics };
 }

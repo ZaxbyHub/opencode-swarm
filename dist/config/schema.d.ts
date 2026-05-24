@@ -510,6 +510,13 @@ export declare const MemoryConfigSchema: z.ZodObject<{
         defaultMaxItems: z.ZodDefault<z.ZodNumber>;
         defaultTokenBudget: z.ZodDefault<z.ZodNumber>;
         minScore: z.ZodDefault<z.ZodNumber>;
+        injection: z.ZodDefault<z.ZodObject<{
+            enabled: z.ZodDefault<z.ZodBoolean>;
+            minScore: z.ZodDefault<z.ZodNumber>;
+            requireQuerySignal: z.ZodDefault<z.ZodBoolean>;
+            maxItems: z.ZodDefault<z.ZodNumber>;
+            tokenBudget: z.ZodDefault<z.ZodNumber>;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
     writes: z.ZodDefault<z.ZodObject<{
         mode: z.ZodDefault<z.ZodLiteral<"propose">>;
@@ -1161,6 +1168,13 @@ export declare const PluginConfigSchema: z.ZodObject<{
             defaultMaxItems: z.ZodDefault<z.ZodNumber>;
             defaultTokenBudget: z.ZodDefault<z.ZodNumber>;
             minScore: z.ZodDefault<z.ZodNumber>;
+            injection: z.ZodDefault<z.ZodObject<{
+                enabled: z.ZodDefault<z.ZodBoolean>;
+                minScore: z.ZodDefault<z.ZodNumber>;
+                requireQuerySignal: z.ZodDefault<z.ZodBoolean>;
+                maxItems: z.ZodDefault<z.ZodNumber>;
+                tokenBudget: z.ZodDefault<z.ZodNumber>;
+            }, z.core.$strip>>;
         }, z.core.$strip>>;
         writes: z.ZodDefault<z.ZodObject<{
             mode: z.ZodDefault<z.ZodLiteral<"propose">>;

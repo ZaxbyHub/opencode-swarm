@@ -17,7 +17,8 @@ import type {
 	MemoryRecallUsageEvent,
 } from './provider';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
-import { scopeAllowed, scoreMemoryRecords } from './scoring';
+import type { RecallScoringDiagnostics } from './scoring';
+import { scopeAllowed, scoreMemoryRecordsWithDiagnostics } from './scoring';
 import type {
 	MemoryListFilter,
 	MemoryProposal,
@@ -152,13 +153,30 @@ export class LocalJsonlMemoryProvider
 	}
 
 	async recall(request: RecallRequest): Promise<RecallResultItem[]> {
+		return (await this.recallWithDiagnostics(request)).items;
+	}
+
+	async recallWithDiagnostics(request: RecallRequest): Promise<{
+		items: RecallResultItem[];
+		diagnostics: RecallScoringDiagnostics;
+	}> {
 		await this.initialize();
 		const records = await this.list({
 			scopes: request.scopes,
 			kinds: request.kinds,
 			includeExpired: request.includeExpired,
 		});
-		return scoreMemoryRecords(records, request).slice(0, request.maxItems);
+		const result = scoreMemoryRecordsWithDiagnostics(records, request);
+		return {
+			items: result.items.slice(0, request.maxItems),
+			diagnostics: {
+				...result.diagnostics,
+				returnedCount: Math.min(
+					result.diagnostics.returnedCount,
+					request.maxItems,
+				),
+			},
+		};
 	}
 
 	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {

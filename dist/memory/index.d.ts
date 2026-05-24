@@ -12,4 +12,4 @@ export { findSecrets, redactSecrets } from './redaction';
 export { MEMORY_RECALL_PROFILES, type MemoryRecallProfile, normalizeMemoryAgentRole, resolveMemoryRecallProfile, } from './role-profiles';
 export { appendMemoryRunLog, sanitizeRunId } from './run-log';
 export { computeMemoryContentHash, createBundleId, createMemoryId, createProposalId, isExpired, normalizeMemoryText, validateMemoryProposal, validateMemoryRecordRules, } from './schema';
-export type { MemoryContext, MemoryKind, MemoryListFilter, MemoryProposal, MemoryRecord, MemoryScopeRef, MemoryScopeType, RecallBundle, RecallRequest, RecallResultItem, } from './types';
+export type { MemoryContext, MemoryKind, MemoryListFilter, MemoryProposal, MemoryRecord, MemoryScopeRef, MemoryScopeType, RecallBundle, RecallInjectionSkipReason, RecallMode, RecallRequest, RecallResultItem, } from './types';

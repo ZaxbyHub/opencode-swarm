@@ -25,7 +25,19 @@ function makeItem(text: string): RecallResultItem {
 		contentHash: computeMemoryContentHash(base),
 		metadata: {},
 	};
-	return { record, score: 0.8, reason: 'test' };
+	return {
+		record,
+		score: 0.8,
+		reason: 'test',
+		signals: {
+			textOverlap: 0.5,
+			tagOverlap: 0,
+			fileOverlap: 0,
+			symbolOverlap: 0,
+			kindMatch: true,
+			scopeMatch: true,
+		},
+	};
 }
 
 describe('memory prompt block', () => {

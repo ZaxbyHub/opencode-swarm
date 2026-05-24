@@ -47,4 +47,71 @@ describe('memory scoring', () => {
 
 		expect(result).toBeNull();
 	});
+
+	test('manual recall can return same-scope lower-confidence matches without query signal', () => {
+		const result = scoreMemoryRecord(
+			makeRecord({
+				text: 'Use pnpm for frontend packages.',
+				tags: ['frontend'],
+				confidence: 0.2,
+			}),
+			makeRequest(),
+		);
+
+		expect(result).not.toBeNull();
+		expect(result?.signals).toMatchObject({
+			textOverlap: 0,
+			tagOverlap: 0,
+			kindMatch: false,
+			scopeMatch: true,
+		});
+	});
+
+	test('injection recall rejects unrelated same-scope memories without query signal', () => {
+		const result = scoreMemoryRecord(
+			makeRecord({
+				text: 'Use pnpm for frontend packages.',
+				tags: ['frontend'],
+				confidence: 1,
+			}),
+			{
+				...makeRequest(),
+				mode: 'injection',
+				kinds: ['repo_convention'],
+				requireQuerySignal: true,
+			},
+		);
+
+		expect(result).toBeNull();
+	});
+
+	test('injection recall accepts relevant tag and file signals', () => {
+		const tagged = scoreMemoryRecord(
+			makeRecord({
+				text: 'Package manager note.',
+				tags: ['tests'],
+			}),
+			{
+				...makeRequest(),
+				mode: 'injection',
+				requireQuerySignal: true,
+			},
+		);
+		const fileMatched = scoreMemoryRecord(
+			makeRecord({
+				text: 'Config note.',
+				tags: ['config'],
+				source: { type: 'file', filePath: 'tests/unit/memory/scoring.test.ts' },
+			}),
+			{
+				...makeRequest(),
+				query: 'adjust tests/unit/memory/scoring.test.ts',
+				mode: 'injection',
+				requireQuerySignal: true,
+			},
+		);
+
+		expect(tagged?.signals.tagOverlap).toBeGreaterThan(0);
+		expect(fileMatched?.signals.fileOverlap).toBeGreaterThan(0);
+	});
 });

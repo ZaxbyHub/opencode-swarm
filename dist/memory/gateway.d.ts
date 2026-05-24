@@ -1,6 +1,6 @@
 import { type MemoryConfig } from './config';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
-import type { MemoryContext, MemoryKind, MemoryProposal, MemoryRecord, MemoryScopeRef, MemorySource, RecallBundle } from './types';
+import type { MemoryContext, MemoryKind, MemoryProposal, MemoryRecord, MemoryScopeRef, MemorySource, RecallBundle, RecallMode } from './types';
 export interface MemoryGatewayOptions {
     config?: Partial<MemoryConfig>;
     provider?: MemoryProvider & Partial<MemoryProposalStore>;
@@ -18,11 +18,13 @@ export interface ProposeMemoryInput {
 export interface RecallMemoryInput {
     query: string;
     task?: string;
+    mode?: RecallMode;
     scopes?: MemoryScopeRef[];
     kinds?: MemoryKind[];
     maxItems?: number;
     tokenBudget?: number;
     minScore?: number;
+    requireQuerySignal?: boolean;
     includeExpired?: boolean;
 }
 export declare class MemoryGateway {

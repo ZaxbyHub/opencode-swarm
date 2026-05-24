@@ -8,6 +8,13 @@ export interface MemoryConfig {
 		defaultMaxItems: number;
 		defaultTokenBudget: number;
 		minScore: number;
+		injection: {
+			enabled: boolean;
+			minScore: number;
+			requireQuerySignal: boolean;
+			maxItems: number;
+			tokenBudget: number;
+		};
 	};
 	writes: {
 		mode: 'propose';
@@ -26,6 +33,13 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 		defaultMaxItems: 8,
 		defaultTokenBudget: 1200,
 		minScore: 0.05,
+		injection: {
+			enabled: true,
+			minScore: 0.25,
+			requireQuerySignal: true,
+			maxItems: 6,
+			tokenBudget: 1000,
+		},
 	},
 	writes: {
 		mode: 'propose',
@@ -62,6 +76,10 @@ export function resolveMemoryConfig(
 		recall: {
 			...DEFAULT_MEMORY_CONFIG.recall,
 			...(input?.recall ?? {}),
+			injection: {
+				...DEFAULT_MEMORY_CONFIG.recall.injection,
+				...(input?.recall?.injection ?? {}),
+			},
 		},
 		writes: {
 			...DEFAULT_MEMORY_CONFIG.writes,

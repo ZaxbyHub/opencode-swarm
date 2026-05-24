@@ -2,7 +2,7 @@ import { extractMemoryProposalsFromAgentOutput } from '../agents/agent-output-sc
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
 import { normalizeToolName } from '../hooks/normalize-tool-name';
-import type { MemoryConfig } from './config';
+import { type MemoryConfig, resolveMemoryConfig } from './config';
 import type {
 	MemoryGateway,
 	ProposeMemoryInput,
@@ -14,7 +14,12 @@ import {
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
 import { appendMemoryRunLog } from './run-log';
-import type { MemoryKind, MemoryScopeRef, RecallBundle } from './types';
+import type {
+	MemoryKind,
+	MemoryScopeRef,
+	RecallBundle,
+	RecallInjectionSkipReason,
+} from './types';
 
 const MEMORY_SENTINEL = '## Retrieved Swarm Memory';
 
@@ -193,7 +198,15 @@ async function recallForAgent(input: {
 		},
 		{ config: input.config },
 	);
-	if (!gateway.isEnabled()) return null;
+	const resolvedConfig = resolveMemoryConfig(input.config);
+	if (!gateway.isEnabled()) {
+		await logInjectionSkipped(input, 'disabled');
+		return null;
+	}
+	if (!resolvedConfig.recall.injection.enabled) {
+		await logInjectionSkipped(input, 'disabled');
+		return null;
+	}
 	const scopes = gateway.deriveAllowedScopes();
 	const planInput: MemoryRecallPlannerInput = {
 		userGoal: compactText(input.userGoal),
@@ -204,6 +217,8 @@ async function recallForAgent(input: {
 		touchedFiles: extractTouchedFiles(input.agentTask),
 	};
 	const plan = buildMemoryRecallPlan(planInput, { scopes });
+	plan.maxItems = resolvedConfig.recall.injection.maxItems;
+	plan.tokenBudget = resolvedConfig.recall.injection.tokenBudget;
 	await input.appendRunLog(input.directory, input.sessionID, {
 		event: 'recall_requested',
 		runId: input.sessionID ?? 'unknown',
@@ -219,10 +234,13 @@ async function recallForAgent(input: {
 	const recallInput: RecallMemoryInput = {
 		query: plan.query,
 		task: planInput.agentTask,
+		mode: 'injection',
 		scopes: plan.scopes,
 		kinds: plan.kinds,
 		maxItems: plan.maxItems,
 		tokenBudget: plan.tokenBudget,
+		minScore: resolvedConfig.recall.injection.minScore,
+		requireQuerySignal: resolvedConfig.recall.injection.requireQuerySignal,
 	};
 	const bundle = await gateway.recall(recallInput);
 	await input.appendRunLog(input.directory, input.sessionID, {
@@ -235,7 +253,44 @@ async function recallForAgent(input: {
 		scores: bundle.items.map((item) => item.score),
 		tokenEstimate: bundle.tokenEstimate,
 	});
+	if (bundle.items.length === 0) {
+		await logInjectionSkipped(
+			input,
+			bundle.diagnostics?.injectionSkipReason ?? 'no_results',
+			bundle,
+		);
+	}
 	return { bundle, scopes };
+}
+
+async function logInjectionSkipped(
+	input: {
+		directory: string;
+		sessionID?: string;
+		agentRole: string;
+		agentId: string;
+		appendRunLog: RequiredInternals['appendRunLog'];
+	},
+	reason: RecallInjectionSkipReason,
+	bundle?: RecallBundle,
+): Promise<void> {
+	await input.appendRunLog(input.directory, input.sessionID, {
+		event: 'prompt_injection_skipped',
+		runId: input.sessionID ?? 'unknown',
+		agentRole: input.agentRole,
+		agentId: input.agentId,
+		bundleId: bundle?.id,
+		memoryIds: bundle?.items.map((item) => item.record.id),
+		scores: bundle?.items.map((item) => item.score),
+		tokenEstimate: bundle?.tokenEstimate,
+		rejectionReason: reason,
+		metadata: {
+			reason,
+			candidateCount: bundle?.diagnostics?.candidateCount,
+			noSignalCount: bundle?.diagnostics?.noSignalCount,
+			belowThresholdCount: bundle?.diagnostics?.belowThresholdCount,
+		},
+	});
 }
 
 interface ParsedTaskInput {

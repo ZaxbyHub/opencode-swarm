@@ -52,7 +52,21 @@ function makeBundle(record: MemoryRecord): RecallBundle {
 		id: 'bundle_20260524_abcd',
 		query: 'query',
 		generatedAt: '2026-05-24T00:00:00.000Z',
-		items: [{ record, score: 0.81, reason: 'test fixture' }],
+		items: [
+			{
+				record,
+				score: 0.81,
+				reason: 'test fixture',
+				signals: {
+					textOverlap: 0.5,
+					tagOverlap: 0,
+					fileOverlap: 0,
+					symbolOverlap: 0,
+					kindMatch: true,
+					scopeMatch: true,
+				},
+			},
+		],
 		tokenEstimate: 64,
 		promptBlock: [
 			'## Retrieved Swarm Memory',
@@ -68,6 +82,8 @@ function makeHooks(
 	enabled = true,
 	options: {
 		propose?: (input: ProposeMemoryInput) => Promise<MemoryProposal>;
+		activeAgent?: string;
+		config?: MemoryLifecycleHookOptions['config'];
 	} = {},
 ): {
 	hooks: ReturnType<typeof createMemoryLifecycleHooks>;
@@ -103,8 +119,8 @@ function makeHooks(
 	});
 	const hooks = createMemoryLifecycleHooks({
 		directory: 'C:/repo-a',
-		config: { enabled },
-		getActiveAgentName: () => 'mega_test_engineer',
+		config: options.config ?? { enabled },
+		getActiveAgentName: () => options.activeAgent ?? 'mega_test_engineer',
 		createGateway,
 		appendRunLog: async (_directory, _runId, event) => {
 			logs.push(event);
@@ -164,6 +180,13 @@ describe('memory lifecycle injection', () => {
 			'repo_convention',
 			'security_note',
 		]);
+		expect(recalls[0]).toMatchObject({
+			mode: 'injection',
+			maxItems: 6,
+			tokenBudget: 1000,
+			minScore: 0.25,
+			requireQuerySignal: true,
+		});
 		expect(logs).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ event: 'recall_requested' }),
@@ -177,13 +200,85 @@ describe('memory lifecycle injection', () => {
 		);
 	});
 
+	test.each([
+		[
+			'architect',
+			[
+				'project_fact',
+				'architecture_decision',
+				'repo_convention',
+				'failure_pattern',
+				'security_note',
+			],
+		],
+		[
+			'mega_coder',
+			[
+				'architecture_decision',
+				'repo_convention',
+				'code_pattern',
+				'test_pattern',
+				'failure_pattern',
+			],
+		],
+		[
+			'local_reviewer',
+			['test_pattern', 'failure_pattern', 'repo_convention', 'security_note'],
+		],
+		[
+			'critic_drift_verifier',
+			['security_note', 'architecture_decision', 'repo_convention', 'evidence'],
+		],
+		[
+			'curator_phase',
+			[
+				'project_fact',
+				'architecture_decision',
+				'repo_convention',
+				'api_finding',
+				'code_pattern',
+				'test_pattern',
+				'failure_pattern',
+				'security_note',
+				'evidence',
+			],
+		],
+	])('injection applies strict defaults for %s profile', async (agent, kinds) => {
+		const { hooks, recalls } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'Use existing repo patterns.')),
+			true,
+			{ activeAgent: agent },
+		);
+		const output = {
+			messages: [
+				{ info: { role: 'system' }, parts: [{ type: 'text', text: 'system' }] },
+				{
+					info: { role: 'user', sessionID: 'session-a' },
+					parts: [{ type: 'text', text: 'Implement src/memory/injector.ts' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		expect(recalls).toHaveLength(1);
+		expect(recalls[0]).toMatchObject({
+			mode: 'injection',
+			kinds,
+			maxItems: 6,
+			tokenBudget: 1000,
+			minScore: 0.25,
+			requireQuerySignal: true,
+		});
+	});
+
 	test('missing memory is a no-op', async () => {
 		const emptyBundle: RecallBundle = {
 			...makeBundle(makeRecord('repo_convention', 'unused')),
 			items: [],
 			promptBlock: '## Retrieved Swarm Memory',
 		};
-		const { hooks } = makeHooks(emptyBundle);
+		const { hooks, logs } = makeHooks(emptyBundle);
 		const output = {
 			messages: [
 				{ info: { role: 'system' }, parts: [{ type: 'text', text: 'system' }] },
@@ -194,6 +289,100 @@ describe('memory lifecycle injection', () => {
 		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
 
 		expect(output.messages).toHaveLength(2);
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'prompt_injection_skipped',
+					rejectionReason: 'no_results',
+				}),
+			]),
+		);
+	});
+
+	test('injection disabled leaves memory tools usable but skips automatic injection', async () => {
+		const { hooks, recalls, logs } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'disabled')),
+			true,
+			{
+				config: {
+					enabled: true,
+					recall: {
+						defaultMaxItems: 8,
+						defaultTokenBudget: 1200,
+						minScore: 0.05,
+						injection: {
+							enabled: false,
+							minScore: 0.25,
+							requireQuerySignal: true,
+							maxItems: 6,
+							tokenBudget: 1000,
+						},
+					},
+				},
+			},
+		);
+		const output = {
+			messages: [
+				{ info: { role: 'system' }, parts: [{ type: 'text', text: 'system' }] },
+				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+			],
+		};
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		expect(output.messages).toHaveLength(2);
+		expect(recalls).toHaveLength(0);
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'prompt_injection_skipped',
+					rejectionReason: 'disabled',
+				}),
+			]),
+		);
+	});
+
+	test.each([
+		'no_signal',
+		'below_threshold',
+	] as const)('empty injection logs %s skip reason from recall diagnostics', async (reason) => {
+		const bundle: RecallBundle = {
+			...makeBundle(makeRecord('repo_convention', 'unused')),
+			items: [],
+			promptBlock: '## Retrieved Swarm Memory',
+			diagnostics: {
+				injectionSkipReason: reason,
+				candidateCount: 1,
+				noSignalCount: reason === 'no_signal' ? 1 : 0,
+				belowThresholdCount: reason === 'below_threshold' ? 1 : 0,
+			},
+		};
+		const { hooks, logs } = makeHooks(bundle);
+		const output = {
+			messages: [
+				{
+					info: { role: 'system' },
+					parts: [{ type: 'text', text: 'system' }],
+				},
+				{
+					info: { role: 'user' },
+					parts: [{ type: 'text', text: 'hello' }],
+				},
+			],
+		};
+
+		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
+
+		expect(output.messages).toHaveLength(2);
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'prompt_injection_skipped',
+					rejectionReason: reason,
+					metadata: expect.objectContaining({ reason }),
+				}),
+			]),
+		);
 	});
 
 	test('existing recall block prevents duplicate injection', async () => {

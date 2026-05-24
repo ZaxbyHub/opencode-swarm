@@ -7,6 +7,13 @@ export interface MemoryConfig {
         defaultMaxItems: number;
         defaultTokenBudget: number;
         minScore: number;
+        injection: {
+            enabled: boolean;
+            minScore: number;
+            requireQuerySignal: boolean;
+            maxItems: number;
+            tokenBudget: number;
+        };
     };
     writes: {
         mode: 'propose';

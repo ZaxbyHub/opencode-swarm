@@ -1,4 +1,9 @@
+import type { RecallScoringDiagnostics } from './scoring';
 import type { MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem } from './types';
+export interface MemoryRecallResult {
+    items: RecallResultItem[];
+    diagnostics?: RecallScoringDiagnostics;
+}
 export interface MemoryRecallUsageEvent {
     bundleId: string;
     query: string;
@@ -18,6 +23,7 @@ export interface MemoryProvider {
     get(id: string): Promise<MemoryRecord | null>;
     delete(id: string, reason?: string): Promise<void>;
     recall(request: RecallRequest): Promise<RecallResultItem[]>;
+    recallWithDiagnostics?(request: RecallRequest): Promise<MemoryRecallResult>;
     recordRecallUsage?(event: MemoryRecallUsageEvent): Promise<void>;
     list(filter: MemoryListFilter): Promise<MemoryRecord[]>;
 }

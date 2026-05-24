@@ -219,6 +219,11 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `recall.defaultMaxItems` | number | `8` | Default max recalled memories |
 | `recall.defaultTokenBudget` | number | `1200` | Default recall prompt-block token budget |
 | `recall.minScore` | number | `0.05` | Minimum lexical recall score |
+| `recall.injection.enabled` | boolean | `true` | Enable automatic prompt injection when memory is enabled |
+| `recall.injection.minScore` | number | `0.25` | Minimum score for automatic injection |
+| `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
+| `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
+| `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
 
