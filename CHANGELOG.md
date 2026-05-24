@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.30.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.4...v7.30.0) (2026-05-24)
+
+
+### Features
+
+* **memory:** add opt-in swarm memory core ([#1000](https://github.com/zaxbysauce/opencode-swarm/issues/1000)) ([84b07f8](https://github.com/zaxbysauce/opencode-swarm/commit/84b07f8686a592c8676e35887603b1f734eb6339))
+
 ## [7.29.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.3...v7.29.4) (2026-05-24)
 
 
