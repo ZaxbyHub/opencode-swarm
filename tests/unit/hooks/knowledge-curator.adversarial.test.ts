@@ -40,7 +40,6 @@ const mockValidateLesson = vi.fn<
 	}
 >();
 
-
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: (...args: unknown[]) =>
 		mockResolveSwarmKnowledgePath(...(args as [string])),
@@ -78,8 +77,6 @@ vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
 			]),
 		),
 }));
-
-;
 
 // ============================================================================
 // Test data
@@ -980,5 +977,4 @@ ${largeContent}
 			expect(mockAppendKnowledge).not.toHaveBeenCalled();
 		});
 	});
-
 });
