@@ -14,5 +14,14 @@
  * filename; defense-in-depth regex validation rejects malformed IDs before
  * any filesystem op.
  */
+import { withTaskEvidenceLock } from '../evidence/task-file.js';
 import type { CouncilSynthesis } from './types';
-export declare function writeCouncilEvidence(workingDir: string, synthesis: CouncilSynthesis): void;
+/**
+ * Dependency-injection seam for testing. Tests can temporarily replace
+ * `withTaskEvidenceLock` to exercise error paths (e.g. EvidenceLockTimeoutError)
+ * without mock.module leakage. Restore the entry in afterEach.
+ */
+export declare const _internals: {
+    withTaskEvidenceLock: typeof withTaskEvidenceLock;
+};
+export declare function writeCouncilEvidence(workingDir: string, synthesis: CouncilSynthesis): Promise<void>;

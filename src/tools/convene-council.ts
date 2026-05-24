@@ -230,7 +230,10 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			);
 
 			// ── Evidence write ────────────────────────────────────────────────
-			writeCouncilEvidence(workingDir, synthesis);
+			// Awaited: writeCouncilEvidence now acquires the shared evidence lock
+			// and writes atomically (#978). A lock-timeout throw is caught by the
+			// createSwarmTool wrapper and surfaced as a structured failure.
+			await writeCouncilEvidence(workingDir, synthesis);
 
 			// ── Architect self-echo advisory ──────────────────────────────────
 			// When the tool is invoked inside an architect session, push the

@@ -52,8 +52,8 @@ afterEach(() => {
 });
 
 describe('evidence writer — gates.council integration', () => {
-	test('writes to evidence.gates.council with standard GateInfo fields', () => {
-		writeCouncilEvidence(tempDir, makeSynthesis());
+	test('writes to evidence.gates.council with standard GateInfo fields', async () => {
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(
 			readFileSync(join(tempDir, '.swarm', 'evidence', '1.1.json'), 'utf-8'),
 		);
@@ -67,8 +67,8 @@ describe('evidence writer — gates.council integration', () => {
 		expect(evidence.gates.council.quorumSize).toBe(3);
 	});
 
-	test('does NOT write council at top-level (must be under gates)', () => {
-		writeCouncilEvidence(tempDir, makeSynthesis());
+	test('does NOT write council at top-level (must be under gates)', async () => {
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(
 			readFileSync(join(tempDir, '.swarm', 'evidence', '1.1.json'), 'utf-8'),
 		);
@@ -77,7 +77,7 @@ describe('evidence writer — gates.council integration', () => {
 });
 
 describe('evidence writer — preservation of existing evidence', () => {
-	test('preserves existing non-council gate entries', () => {
+	test('preserves existing non-council gate entries', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -95,7 +95,7 @@ describe('evidence writer — preservation of existing evidence', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// Existing reviewer gate entry survives
@@ -108,12 +108,12 @@ describe('evidence writer — preservation of existing evidence', () => {
 		expect(evidence.gates.council).toBeDefined();
 	});
 
-	test('second write overwrites council but keeps other gates', () => {
-		writeCouncilEvidence(
+	test('second write overwrites council but keeps other gates', async () => {
+		await writeCouncilEvidence(
 			tempDir,
 			makeSynthesis({ roundNumber: 1, overallVerdict: 'REJECT' }),
 		);
-		writeCouncilEvidence(
+		await writeCouncilEvidence(
 			tempDir,
 			makeSynthesis({ roundNumber: 2, overallVerdict: 'APPROVE' }),
 		);
@@ -127,7 +127,7 @@ describe('evidence writer — preservation of existing evidence', () => {
 });
 
 describe('evidence writer — prototype pollution defence', () => {
-	test('poisoned __proto__ in existing evidence does not pollute Object.prototype', () => {
+	test('poisoned __proto__ in existing evidence does not pollute Object.prototype', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -135,7 +135,7 @@ describe('evidence writer — prototype pollution defence', () => {
 			'{"__proto__": {"polluted": true}, "gates": {}}',
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 
 		// Global Object.prototype must not have gained a `polluted` key.
 		expect(({} as Record<string, unknown>).polluted).toBeUndefined();
@@ -146,7 +146,7 @@ describe('evidence writer — prototype pollution defence', () => {
 		expect(Object.hasOwn(evidence, '__proto__')).toBe(false);
 	});
 
-	test('poisoned constructor / prototype keys are dropped', () => {
+	test('poisoned constructor / prototype keys are dropped', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -154,7 +154,7 @@ describe('evidence writer — prototype pollution defence', () => {
 			'{"constructor": "evil", "prototype": "bad", "gates": {"__proto__": {"x":1}}}',
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const raw = readFileSync(
 			join(tempDir, '.swarm', 'evidence', '1.1.json'),
 			'utf-8',
@@ -166,23 +166,25 @@ describe('evidence writer — prototype pollution defence', () => {
 });
 
 describe('evidence writer — malformed input recovery', () => {
-	test('corrupted existing JSON falls through to fresh start', () => {
+	test('corrupted existing JSON falls through to fresh start', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, '1.1.json'), 'not valid json at all');
 
 		// Must not throw; must write a valid council entry.
-		expect(() => writeCouncilEvidence(tempDir, makeSynthesis())).not.toThrow();
+		await expect(
+			writeCouncilEvidence(tempDir, makeSynthesis()),
+		).resolves.toBeUndefined();
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
 	});
 
-	test('existing file containing a JSON array triggers fresh start (not spread)', () => {
+	test('existing file containing a JSON array triggers fresh start (not spread)', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, '1.1.json'), '["not","an","object"]');
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 		// Result must be a plain object with gates.council, not an array.
 		expect(Array.isArray(evidence)).toBe(false);
@@ -191,21 +193,23 @@ describe('evidence writer — malformed input recovery', () => {
 		expect(Object.hasOwn(evidence, '0')).toBe(false);
 	});
 
-	test('existing JSON null triggers fresh start', () => {
+	test('existing JSON null triggers fresh start', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, '1.1.json'), 'null');
 
-		expect(() => writeCouncilEvidence(tempDir, makeSynthesis())).not.toThrow();
+		await expect(
+			writeCouncilEvidence(tempDir, makeSynthesis()),
+		).resolves.toBeUndefined();
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
 	});
 
-	test('file with gates field of wrong type (array) is gracefully replaced', () => {
+	test('file with gates field of wrong type (array) is gracefully replaced', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, '1.1.json'), '{"taskId":"1.1","gates":["oops"]}');
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 		expect(Array.isArray(evidence.gates)).toBe(false);
 		expect(evidence.gates.council).toBeDefined();
@@ -227,7 +231,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		}
 	}
 
-	test('forbidden key at level 3 (deeply nested) is filtered', () => {
+	test('forbidden key at level 3 (deeply nested) is filtered', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		// { gates: { reviewer: { __proto__: { polluted: true } } } }
@@ -244,7 +248,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// The nested __proto__ must be completely absent
@@ -254,7 +258,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('array of objects with forbidden keys — forbidden keys sanitized within each item', () => {
+	test('array of objects with forbidden keys — forbidden keys sanitized within each item', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		// { gates: { items: [{ __proto__: {} }, { constructor: {} }, { name: 'ok' }] } }
@@ -272,7 +276,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// Array length preserved; forbidden keys sanitized within each object
@@ -283,7 +287,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('array of arrays containing objects with forbidden keys — inner objects sanitized', () => {
+	test('array of arrays containing objects with forbidden keys — inner objects sanitized', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		// Deeply nested: gates.data = [[[{ __proto__: {} }, { safe: 1 }]]]
@@ -297,7 +301,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// Both objects preserved but __proto__ sanitized from first
@@ -307,7 +311,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('mixed nesting: object → array → object with forbidden key at level 3', () => {
+	test('mixed nesting: object → array → object with forbidden key at level 3', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		// gates.levels: [{ inner: { __proto__: {} } }]
@@ -325,7 +329,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		expect(evidence.gates.levels[0].inner.safe).toBe('present');
@@ -335,7 +339,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('gates.reviewer.__proto__ nested forbidden key is filtered', () => {
+	test('gates.reviewer.__proto__ nested forbidden key is filtered', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		// The exact shape: gates.reviewer.__proto__ = { polluted: true }
@@ -354,7 +358,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// reviewer entry survives with safe fields
@@ -363,7 +367,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('round-trip: write evidence with nested forbidden keys, read back, keys are gone', () => {
+	test('round-trip: write evidence with nested forbidden keys, read back, keys are gone', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 
@@ -385,13 +389,13 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		);
 
 		// First read via writeCouncilEvidence (which re-reads and sanitizes)
-		writeCouncilEvidence(
+		await writeCouncilEvidence(
 			tempDir,
 			makeSynthesis({ overallVerdict: 'REJECT', roundNumber: 1 }),
 		);
 
 		// Write again with new synthesis
-		writeCouncilEvidence(
+		await writeCouncilEvidence(
 			tempDir,
 			makeSynthesis({ overallVerdict: 'APPROVE', roundNumber: 2 }),
 		);
@@ -406,7 +410,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 		assertNoForbiddenKeys(evidence);
 	});
 
-	test('all three forbidden keys (__proto__, constructor, prototype) filtered at all depths', () => {
+	test('all three forbidden keys (__proto__, constructor, prototype) filtered at all depths', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -428,7 +432,7 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// All safe paths survive
@@ -446,8 +450,8 @@ describe('evidence writer — safeAssignOwnProps recursive filtering', () => {
 });
 
 describe('evidence writer — idempotency / no directory pollution', () => {
-	test('writer only creates files under .swarm/evidence/', () => {
-		writeCouncilEvidence(tempDir, makeSynthesis());
+	test('writer only creates files under .swarm/evidence/', async () => {
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		expect(existsSync(join(tempDir, '.swarm', 'evidence', '1.1.json'))).toBe(
 			true,
 		);
@@ -463,7 +467,7 @@ describe('evidence writer — idempotency / no directory pollution', () => {
 });
 
 describe('evidence writer — primitive gates value handling', () => {
-	test('gates as string primitive is discarded and replaced with council entry', () => {
+	test('gates as string primitive is discarded and replaced with council entry', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -475,7 +479,7 @@ describe('evidence writer — primitive gates value handling', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// gates must be a valid object, not the original string
@@ -488,7 +492,7 @@ describe('evidence writer — primitive gates value handling', () => {
 		expect(evidence.status).toBe('pending');
 	});
 
-	test('gates as number primitive is discarded and replaced with council entry', () => {
+	test('gates as number primitive is discarded and replaced with council entry', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -499,7 +503,7 @@ describe('evidence writer — primitive gates value handling', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// gates must be a valid object, not the original number
@@ -509,7 +513,7 @@ describe('evidence writer — primitive gates value handling', () => {
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
 	});
 
-	test('absent gates key results in gates.council being created', () => {
+	test('absent gates key results in gates.council being created', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -520,7 +524,7 @@ describe('evidence writer — primitive gates value handling', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// gates must now exist with council entry
@@ -533,7 +537,7 @@ describe('evidence writer — primitive gates value handling', () => {
 		expect(evidence.status).toBe('pending');
 	});
 
-	test('gates as array is discarded and replaced with council entry', () => {
+	test('gates as array is discarded and replaced with council entry', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -545,7 +549,7 @@ describe('evidence writer — primitive gates value handling', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// gates must be an object, not the original array
@@ -559,7 +563,7 @@ describe('evidence writer — primitive gates value handling', () => {
 		expect(evidence.status).toBe('pending');
 	});
 
-	test('gates as null is discarded and replaced with council entry', () => {
+	test('gates as null is discarded and replaced with council entry', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -571,7 +575,7 @@ describe('evidence writer — primitive gates value handling', () => {
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// gates must be an object, not null
@@ -588,7 +592,7 @@ describe('evidence writer — primitive gates value handling', () => {
 });
 
 describe('evidence writer — Object.hasOwn constructor/prototype filtering', () => {
-	test('constructor and prototype are not own properties of gates after write', () => {
+	test('constructor and prototype are not own properties of gates after write', async () => {
 		const dir = join(tempDir, '.swarm', 'evidence');
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -608,7 +612,7 @@ describe('evidence writer — Object.hasOwn constructor/prototype filtering', ()
 			}),
 		);
 
-		writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis());
 		const evidence = JSON.parse(readFileSync(join(dir, '1.1.json'), 'utf-8'));
 
 		// Verify with Object.hasOwn — stronger than string search
@@ -643,15 +647,15 @@ describe('evidence writer — round-history audit log', () => {
 		...overrides,
 	});
 
-	test('creates .swarm/council/{taskId}.rounds.jsonl after write', () => {
-		writeCouncilEvidence(tempDir, makeRoundSynthesis());
+	test('creates .swarm/council/{taskId}.rounds.jsonl after write', async () => {
+		await writeCouncilEvidence(tempDir, makeRoundSynthesis());
 
 		const roundsPath = join(tempDir, '.swarm', 'council', '1.1.rounds.jsonl');
 		expect(existsSync(roundsPath)).toBe(true);
 	});
 
-	test('JSONL line contains {round, verdict, timestamp, vetoedBy}', () => {
-		writeCouncilEvidence(
+	test('JSONL line contains {round, verdict, timestamp, vetoedBy}', async () => {
+		await writeCouncilEvidence(
 			tempDir,
 			makeRoundSynthesis({
 				roundNumber: 3,
@@ -673,8 +677,8 @@ describe('evidence writer — round-history audit log', () => {
 		});
 	});
 
-	test('multiple calls append multiple lines (not overwrite)', () => {
-		writeCouncilEvidence(
+	test('multiple calls append multiple lines (not overwrite)', async () => {
+		await writeCouncilEvidence(
 			tempDir,
 			makeRoundSynthesis({
 				roundNumber: 1,
@@ -682,7 +686,7 @@ describe('evidence writer — round-history audit log', () => {
 				vetoedBy: ['reviewer'],
 			}),
 		);
-		writeCouncilEvidence(
+		await writeCouncilEvidence(
 			tempDir,
 			makeRoundSynthesis({
 				roundNumber: 2,
@@ -690,7 +694,7 @@ describe('evidence writer — round-history audit log', () => {
 				vetoedBy: null,
 			}),
 		);
-		writeCouncilEvidence(
+		await writeCouncilEvidence(
 			tempDir,
 			makeRoundSynthesis({
 				roundNumber: 3,
@@ -730,7 +734,8 @@ describe('evidence writer — round-history audit log', () => {
 		console.warn = (msg: string) => warnings.push(msg);
 
 		// Mock appendFileSync to throw on audit log paths — simulating permission error.
-		// We use mock.module so the real writeFileSync (primary path) still works.
+		// The primary evidence write uses atomicWriteFile (bunWrite + rename), not
+		// appendFileSync, so mocking appendFileSync only affects the audit log path.
 		const realFs = await import('node:fs');
 		const mockAppendFileSync = mock((path: string, data: string) => {
 			if (path.includes('.rounds.jsonl')) {
@@ -745,9 +750,9 @@ describe('evidence writer — round-history audit log', () => {
 		}));
 
 		// Primary evidence write must succeed even when audit log fails.
-		expect(() =>
+		await expect(
 			writeCouncilEvidence(tempDir, makeRoundSynthesis()),
-		).not.toThrow();
+		).resolves.toBeUndefined();
 
 		// Verify the primary evidence file was written correctly.
 		const evidence = JSON.parse(

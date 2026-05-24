@@ -41,8 +41,8 @@ export declare const MemoryKindSchema: z.ZodEnum<{
 }>;
 export declare const MemorySourceSchema: z.ZodObject<{
     type: z.ZodEnum<{
-        agent: "agent";
         file: "file";
+        agent: "agent";
         manual: "manual";
         test: "test";
         tool: "tool";
@@ -100,8 +100,8 @@ export declare const MemoryRecordSchema: z.ZodObject<{
     }>;
     source: z.ZodObject<{
         type: z.ZodEnum<{
-            agent: "agent";
             file: "file";
+            agent: "agent";
             manual: "manual";
             test: "test";
             tool: "tool";
@@ -178,8 +178,8 @@ export declare const MemoryProposalSchema: z.ZodObject<{
         }>;
         source: z.ZodObject<{
             type: z.ZodEnum<{
-                agent: "agent";
                 file: "file";
+                agent: "agent";
                 manual: "manual";
                 test: "test";
                 tool: "tool";
