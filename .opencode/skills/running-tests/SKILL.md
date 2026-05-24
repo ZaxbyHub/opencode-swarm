@@ -137,6 +137,7 @@ Get-Content "$env:TEMP\test_out.txt" | Select-Object -Last 50
 - `Select-String -Last N` — invalid parameter, use `Select-Object -Last N`
 - `2>&1 2>&1` — duplicate redirection, causes parse error; use `2>&1` once
 - `&&` — not supported in PowerShell 5.1; use `; if ($?) { cmd2 }` instead
+- After `bun install --frozen-lockfile --force`, non-elevated Windows shells can hit `EPERM` while reading refreshed `node_modules` entries. Treat that as a host permission/access issue: rerun the same focused Bun command with approved/elevated access before diagnosing it as a code or test failure.
 
 ---
 

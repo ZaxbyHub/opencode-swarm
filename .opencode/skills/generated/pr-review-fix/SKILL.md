@@ -33,6 +33,7 @@ Before reading any review comments, check whether other agents have pushed work 
 ## Step 1 — Read the review and normalize findings
 
 1. Collect ALL review comments from the PR (inline comments, general comments, review summary).
+   - For bot or app reviews, also identify commits pushed by that bot/app and compare the comment claims against branch history and current code. Do not assume the review text and pushed code are equivalent.
 2. Normalize each finding into a structured record:
 
 ```
