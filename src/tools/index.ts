@@ -94,7 +94,9 @@ export { skill_inspect } from './skill-inspect';
 export { skill_list } from './skill-list';
 export { spec_write } from './spec-write';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
-export { createSwarmCommandTool } from './swarm-command';
+export { createSwarmCommandTool, swarm_command } from './swarm-command';
+export { swarm_memory_propose } from './swarm-memory-propose';
+export { swarm_memory_recall } from './swarm-memory-recall';
 
 import { suggestPatch } from './suggest-patch';
 

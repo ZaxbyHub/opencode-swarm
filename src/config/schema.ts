@@ -945,6 +945,36 @@ export const KnowledgeConfigSchema = z.object({
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
 
+export const MemoryConfigSchema = z.object({
+	/** Enable Swarm memory tools and local memory storage. Default: false. */
+	enabled: z.boolean().default(false),
+	/** Memory provider. PR 1 supports local JSONL only. */
+	provider: z.literal('local-jsonl').default('local-jsonl'),
+	/** Storage directory under the project root. Must remain inside .swarm/. */
+	storageDir: z.string().default('.swarm/memory'),
+	recall: z
+		.object({
+			defaultMaxItems: z.number().int().min(1).max(20).default(8),
+			defaultTokenBudget: z.number().int().min(100).max(5000).default(1200),
+			minScore: z.number().min(0).max(1).default(0.05),
+		})
+		.default({ defaultMaxItems: 8, defaultTokenBudget: 1200, minScore: 0.05 }),
+	writes: z
+		.object({
+			/** Normal agents can only create proposals in PR 1. */
+			mode: z.literal('propose').default('propose'),
+		})
+		.default({ mode: 'propose' }),
+	redaction: z
+		.object({
+			rejectDurableSecrets: z.boolean().default(true),
+		})
+		.default({ rejectDurableSecrets: true }),
+	hardDelete: z.boolean().default(false),
+});
+
+export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
+
 // Curator configuration (phase context consolidation and drift detection)
 export const CuratorConfigSchema = z.object({
 	/** Enable curator mode. Default: true */
@@ -1469,6 +1499,9 @@ export const PluginConfigSchema = z.object({
 
 	// Knowledge base configuration (v6.17 two-tier cross-project knowledge)
 	knowledge: KnowledgeConfigSchema.optional(),
+
+	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
+	memory: MemoryConfigSchema.optional(),
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),

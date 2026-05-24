@@ -7,6 +7,7 @@ import {
 	DEFAULT_MODELS,
 	isQAAgent,
 	isSubagent,
+	MEMORY_AGENT_TOOL_MAP,
 	ORCHESTRATOR_NAME,
 	PIPELINE_AGENTS,
 	QA_AGENTS,
@@ -158,9 +159,12 @@ describe('constants.ts', () => {
 	});
 
 	describe('AGENT_TOOL_MAP registry coherence', () => {
-		it('every tool in TOOL_NAMES is assigned to at least one agent in AGENT_TOOL_MAP', () => {
+		it('every tool in TOOL_NAMES is assigned to a default or opt-in agent map', () => {
 			const assignedTools = new Set<string>();
 			for (const tools of Object.values(AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(MEMORY_AGENT_TOOL_MAP)) {
 				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tool of TOOL_NAMES) {

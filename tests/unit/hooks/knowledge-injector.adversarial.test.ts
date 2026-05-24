@@ -169,6 +169,7 @@ mock.module('../../../src/config/schema.js', () => ({
 	LeanTurboConfigSchema: zodStub,
 	LeanTurboStrategyConfigSchema: zodStub,
 	LintConfigSchema: zodStub,
+	MemoryConfigSchema: zodStub,
 	ParallelizationConfigSchema: zodStub,
 	StandardTurboConfigSchema: zodStub,
 	TurboConfig: {} as any,
