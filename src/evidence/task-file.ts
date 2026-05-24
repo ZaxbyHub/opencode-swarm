@@ -38,6 +38,16 @@ export function taskEvidencePath(directory: string, taskId: string): string {
 }
 
 /**
+ * Dependency-injection seam for testing. Tests can temporarily replace these
+ * to exercise failure paths (e.g. EPERM on renameSync) without mock.module leakage.
+ * Restore each entry in afterEach via the saved original reference.
+ */
+export const _internals = {
+	renameSync,
+	unlinkSync,
+};
+
+/**
  * Atomic write: write to a unique temp file, then rename over the target.
  * The rename is atomic on POSIX and Windows, so readers never observe a torn
  * file. The temp file is cleaned up in `finally` (no-op once renamed away).
@@ -49,10 +59,10 @@ export async function atomicWriteFile(
 	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
 		await bunWrite(tempPath, content);
-		renameSync(tempPath, targetPath);
+		_internals.renameSync(tempPath, targetPath);
 	} finally {
 		try {
-			unlinkSync(tempPath);
+			_internals.unlinkSync(tempPath);
 		} catch {
 			/* already renamed or never created */
 		}

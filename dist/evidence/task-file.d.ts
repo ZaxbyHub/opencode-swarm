@@ -17,6 +17,7 @@
  * This module deliberately holds no schema/validation logic — each caller keeps
  * its own taskId validation and read/merge semantics.
  */
+import { renameSync, unlinkSync } from 'node:fs';
 /**
  * Relative path (under `.swarm/`) of the flat task evidence file.
  * This is also the lock key — it MUST be identical across all writers to the
@@ -25,6 +26,15 @@
 export declare function taskEvidenceRelPath(taskId: string): string;
 /** Absolute path of the flat task evidence file under `<directory>/.swarm/`. */
 export declare function taskEvidencePath(directory: string, taskId: string): string;
+/**
+ * Dependency-injection seam for testing. Tests can temporarily replace these
+ * to exercise failure paths (e.g. EPERM on renameSync) without mock.module leakage.
+ * Restore each entry in afterEach via the saved original reference.
+ */
+export declare const _internals: {
+    renameSync: typeof renameSync;
+    unlinkSync: typeof unlinkSync;
+};
 /**
  * Atomic write: write to a unique temp file, then rename over the target.
  * The rename is atomic on POSIX and Windows, so readers never observe a torn

@@ -34,6 +34,15 @@ const COUNCIL_GATE_NAME = 'council';
 const COUNCIL_AGENT_ID = 'architect';
 
 /**
+ * Dependency-injection seam for testing. Tests can temporarily replace
+ * `withTaskEvidenceLock` to exercise error paths (e.g. EvidenceLockTimeoutError)
+ * without mock.module leakage. Restore the entry in afterEach.
+ */
+export const _internals = {
+	withTaskEvidenceLock,
+};
+
+/**
  * Merge existing own properties into the target, skipping keys that would
  * pollute the prototype chain even though object spread does not linkify them.
  * We still filter these defensively so malicious evidence files cannot add
@@ -90,7 +99,7 @@ export async function writeCouncilEvidence(
 	// read-modify-write on the same {taskId}.json — otherwise the unlocked,
 	// non-atomic write could clobber concurrently-recorded gate evidence
 	// (lost update) or leave a torn file (#978).
-	await withTaskEvidenceLock(
+	await _internals.withTaskEvidenceLock(
 		workingDir,
 		synthesis.taskId,
 		COUNCIL_AGENT_ID,

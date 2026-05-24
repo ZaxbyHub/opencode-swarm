@@ -9,6 +9,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	_internals,
 	atomicWriteFile,
 	taskEvidencePath,
 	taskEvidenceRelPath,
@@ -106,5 +107,40 @@ describe('atomicWriteFile', () => {
 		expect(readdirSync(tempDir).filter((f) => f.includes('.tmp'))).toHaveLength(
 			0,
 		);
+	});
+});
+
+describe('atomicWriteFile — failure paths', () => {
+	// Save the real renameSync so we can restore it after each test.
+	const realRenameSync = _internals.renameSync;
+
+	afterEach(() => {
+		// Restore the seam so subsequent tests (and other files) use the real fs.
+		_internals.renameSync = realRenameSync;
+	});
+
+	test('renameSync failure cleans up the temp file and propagates the error', async () => {
+		// Arrange: replace renameSync with one that simulates EPERM.
+		const epermError = Object.assign(
+			new Error('EPERM: operation not permitted'),
+			{ code: 'EPERM' },
+		);
+		_internals.renameSync = () => {
+			throw epermError;
+		};
+
+		const target = join(tempDir, 'out.json');
+
+		// Act + Assert: error propagates.
+		await expect(atomicWriteFile(target, '{}')).rejects.toThrow(
+			'EPERM: operation not permitted',
+		);
+
+		// Assert: no .tmp file left behind (finally block cleaned up).
+		const leftovers = readdirSync(tempDir).filter((f) => f.includes('.tmp'));
+		expect(leftovers).toHaveLength(0);
+
+		// Assert: target was never written (rename never completed).
+		expect(readdirSync(tempDir)).toHaveLength(0);
 	});
 });

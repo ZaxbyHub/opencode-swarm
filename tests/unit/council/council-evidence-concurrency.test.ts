@@ -14,8 +14,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeCouncilEvidence } from '../../../src/council/council-evidence-writer';
+import {
+	_internals,
+	writeCouncilEvidence,
+} from '../../../src/council/council-evidence-writer';
 import type { CouncilSynthesis } from '../../../src/council/types';
+import { EvidenceLockTimeoutError } from '../../../src/evidence/lock';
 import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
@@ -112,5 +116,70 @@ describe('council evidence writer — regression: serializes via shared evidence
 		);
 		expect(evidence.gates.council).toBeDefined();
 		expect(evidence.gates.reviewer).toBeDefined();
+	});
+
+	test('concurrent gate write and council write both land (Promise.all interleave)', async () => {
+		// F-010: both writers start simultaneously via Promise.all. With the shared
+		// lock they must serialize — neither read-modify-write can clobber the other.
+		// All entries must survive in the final file regardless of which writer wins
+		// the lock race.
+		await Promise.all([
+			recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-concurrent'),
+			writeCouncilEvidence(tempDir, makeSynthesis()),
+		]);
+
+		const evidence = JSON.parse(
+			readFileSync(taskEvidencePath(tempDir, '1.1'), 'utf-8'),
+		);
+		expect(evidence.gates.reviewer).toBeDefined();
+		expect(evidence.gates.council).toBeDefined();
+		expect(evidence.gates.council.verdict).toBe('APPROVE');
+	});
+});
+
+describe('council evidence writer — EvidenceLockTimeoutError propagation (#978 F-002)', () => {
+	// Save the real withTaskEvidenceLock so we can restore it after each test.
+	const realWithTaskEvidenceLock = _internals.withTaskEvidenceLock;
+
+	afterEach(() => {
+		_internals.withTaskEvidenceLock = realWithTaskEvidenceLock;
+	});
+
+	test('EvidenceLockTimeoutError from the lock propagates out of writeCouncilEvidence', async () => {
+		// Arrange: inject a lock that immediately throws EvidenceLockTimeoutError,
+		// simulating a deadlocked writer that holds the lock past the timeout.
+		const timeout = new EvidenceLockTimeoutError(
+			tempDir,
+			'evidence/1.1.json',
+			'architect',
+			'1.1',
+			60000,
+		);
+		_internals.withTaskEvidenceLock = () => Promise.reject(timeout);
+
+		// Act + Assert: the async signature means the error surfaces as a rejection.
+		await expect(
+			writeCouncilEvidence(tempDir, makeSynthesis()),
+		).rejects.toBeInstanceOf(EvidenceLockTimeoutError);
+
+		await expect(
+			writeCouncilEvidence(tempDir, makeSynthesis()),
+		).rejects.toThrow('Evidence lock timeout after 60000ms');
+	});
+
+	test('EvidenceLockTimeoutError carries the correct metadata fields', () => {
+		const err = new EvidenceLockTimeoutError(
+			'/swarm',
+			'evidence/2.3.json',
+			'architect',
+			'2.3',
+			30000,
+		);
+		expect(err.name).toBe('EvidenceLockTimeoutError');
+		expect(err.directory).toBe('/swarm');
+		expect(err.evidencePath).toBe('evidence/2.3.json');
+		expect(err.agent).toBe('architect');
+		expect(err.taskId).toBe('2.3');
+		expect(err.message).toContain('30000ms');
 	});
 });
