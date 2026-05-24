@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.29.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.3...v7.29.4) (2026-05-24)
+
+
+### Bug Fixes
+
+* **evidence:** add depth-bounded walk and project indicators to validateProjectRoot ([#997](https://github.com/zaxbysauce/opencode-swarm/issues/997)) ([6085676](https://github.com/zaxbysauce/opencode-swarm/commit/6085676d631d7279d2adb9c604668088fda50d35))
+
 ## [7.29.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.2...v7.29.3) (2026-05-23)
 
 
