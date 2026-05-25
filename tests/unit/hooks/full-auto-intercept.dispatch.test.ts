@@ -311,6 +311,19 @@ ESCALATION_NEEDED: NO`;
 
 			expect(result.verdict).toBe('REPHRASE');
 		});
+
+		it('parses PENDING verdict', () => {
+			const input = `VERDICT: PENDING
+REASONING: Waiting for additional evidence
+EVIDENCE_CHECKED: none
+ANTI_PATTERNS_DETECTED: none
+ESCALATION_NEEDED: NO`;
+
+			const result = parseCriticResponse(input);
+
+			expect(result.verdict).toBe('PENDING');
+			expect(result.reasoning).toBe('Waiting for additional evidence');
+		});
 	});
 
 	describe('multi-line reasoning', () => {
@@ -723,6 +736,23 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 				c.includes('No opencodeClient — critic dispatch skipped'),
 			),
 		).toBe(true);
+	});
+
+	it('throws when fallback event write fails', async () => {
+		fs.rmSync(path.join(testDir, '.swarm'), { recursive: true, force: true });
+
+		await expect(
+			dispatchCriticAndWriteEvent(
+				testDir,
+				'Ready for Phase 2?',
+				'Critic context',
+				'claude-sonnet-4-20250514',
+				'phase_completion',
+				0,
+				0,
+				'critic_oversight',
+			),
+		).rejects.toThrow();
 	});
 });
 

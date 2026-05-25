@@ -1,10 +1,5 @@
-export interface FullAutoCriticResult {
-    verdict: string;
-    reasoning: string;
-    evidenceChecked: string[];
-    antiPatternsDetected: string[];
-    escalationNeeded: boolean;
-    rawResponse: string;
+import { type ParsedCriticResponse } from './critic-response-parser';
+export interface FullAutoCriticResult extends ParsedCriticResponse {
 }
 export type FullAutoTriggerSource = 'text_pattern' | 'tool_action' | 'cadence' | 'subagent_return' | 'phase_boundary' | 'task_completion' | 'risk';
 export interface FullAutoOversightEvent {

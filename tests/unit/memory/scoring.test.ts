@@ -5,7 +5,10 @@ import {
 	type MemoryRecord,
 	type RecallRequest,
 } from '../../../src/memory';
-import { scoreMemoryRecord } from '../../../src/memory/scoring';
+import {
+	scoreMemoryRecord,
+	scoreMemoryRecordsWithDiagnostics,
+} from '../../../src/memory/scoring';
 
 function makeRecord(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
 	const base = {
@@ -113,5 +116,56 @@ describe('memory scoring', () => {
 
 		expect(tagged?.signals.tagOverlap).toBeGreaterThan(0);
 		expect(fileMatched?.signals.fileOverlap).toBeGreaterThan(0);
+	});
+
+	test('injection diagnostics exclude pre-scoring filters from no-signal denominator', () => {
+		const expired = makeRecord({
+			text: 'This repository uses database migrations.',
+			expiresAt: '2020-01-01T00:00:00.000Z',
+		});
+		const unrelated = makeRecord({
+			text: 'Use pnpm for frontend packages.',
+			tags: ['frontend'],
+			confidence: 1,
+		});
+		const result = scoreMemoryRecordsWithDiagnostics([expired, unrelated], {
+			...makeRequest(),
+			query: 'backend database migration strategy',
+			mode: 'injection',
+			kinds: ['repo_convention'],
+			requireQuerySignal: true,
+		});
+
+		expect(result.items).toHaveLength(0);
+		expect(result.diagnostics).toMatchObject({
+			candidateCount: 2,
+			preScoredFilteredCount: 1,
+			noSignalCount: 1,
+		});
+	});
+
+	test('injection diagnostics count all-filtered candidates separately from no-signal', () => {
+		const result = scoreMemoryRecordsWithDiagnostics(
+			[
+				makeRecord({
+					text: 'This repository uses database migrations.',
+					expiresAt: '2020-01-01T00:00:00.000Z',
+				}),
+			],
+			{
+				...makeRequest(),
+				query: 'backend database migration strategy',
+				mode: 'injection',
+				kinds: ['repo_convention'],
+				requireQuerySignal: true,
+			},
+		);
+
+		expect(result.items).toHaveLength(0);
+		expect(result.diagnostics).toMatchObject({
+			candidateCount: 1,
+			preScoredFilteredCount: 1,
+			noSignalCount: 0,
+		});
 	});
 });

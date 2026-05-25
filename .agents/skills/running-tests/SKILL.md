@@ -18,5 +18,6 @@ Codex-specific execution notes:
 - Prefer `rg` and repo scripts to rediscover exact commands from source.
 - Capture long output to a temp file when needed and report the important tail or failure lines.
 - Do not use broad OpenCode `test_runner` scopes for repo validation.
+- On Windows, if Bun reports `EPERM` after a forced dependency refresh, rerun the same focused command with approved/elevated access before treating it as a test failure.
 
 Default rule: one source file or one explicit test file can be targeted narrowly; multiple files or directories should use shell loops or the documented tier commands.

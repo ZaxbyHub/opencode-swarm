@@ -200,6 +200,7 @@ If the failure reproduces on `main`, document it under `## Pre-existing failures
 - **If your PR touches `src/`**: You must run `bun run build`, verify `git diff -- dist/` shows only expected changes from your source edits, and commit `dist/` in the same PR.
 - **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has dist drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
 - **Never** commit rebuilt `dist/` solely to make CI green when your PR does not touch source files.
+- **If CI `dist-check` fails after a source-touching PR already rebuilt `dist/` locally**: inspect the CI log before classifying the failure, then refresh dependency-generated output with `bun install --frozen-lockfile --force`, rerun `bun run build`, verify the `dist/` diff is expected, and commit the regenerated files. Stale nested dependencies can make local `dist/` output differ from CI even when the build command succeeds.
 
 ## Step 4 - Workflow changes
 
@@ -305,7 +306,7 @@ If a PR already exists for the branch:
 2. update the existing PR body when summary, invariant evidence, test counts, caveats, or pre-existing failure notes changed
 3. keep the PR draft while follow-up edits are still expected or required checks are still pending
 4. mark the PR ready only after the body is current and required remote checks are green, unless the user explicitly wants it ready earlier
-5. after any follow-up push or force-push, verify the PR head matches the expected commit:
+5. after any follow-up push or force-push, verify the PR head matches the expected commit and that reported checks belong to the current `headRefOid`:
 
 ```powershell
 gh pr view <number> --json headRefOid,body,isDraft,state,statusCheckRollup,url
@@ -318,6 +319,8 @@ gh pr edit <number> --body-file "$env:TEMP\pr_body.txt"
 gh pr ready <number>
 gh pr checks <number> --watch --fail-fast
 ```
+
+If a previous run from an older PR head is still in progress or already failed and is blocking the current head's workflow through concurrency, inspect it with `gh run view <run-id> --json headSha,status,conclusion,jobs,url`. Cancel only obsolete older-head runs that are no longer relevant to the PR head you are validating, then wait for the current-head checks to complete.
 
 ## Step 8 - Cancelled jobs and skipped dependents
 

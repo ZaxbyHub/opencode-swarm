@@ -287,6 +287,7 @@ async function logInjectionSkipped(
 		metadata: {
 			reason,
 			candidateCount: bundle?.diagnostics?.candidateCount,
+			preScoredFilteredCount: bundle?.diagnostics?.preScoredFilteredCount,
 			noSignalCount: bundle?.diagnostics?.noSignalCount,
 			belowThresholdCount: bundle?.diagnostics?.belowThresholdCount,
 		},

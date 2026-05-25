@@ -9,6 +9,7 @@ import type {
 
 export interface RecallScoringDiagnostics {
 	candidateCount: number;
+	preScoredFilteredCount: number;
 	scoredCount: number;
 	returnedCount: number;
 	noSignalCount: number;
@@ -100,13 +101,19 @@ export function scoreMemoryRecord(
 function scoreMemoryRecordDetailed(
 	record: MemoryRecord,
 	request: RecallRequest,
-): { item: RecallResultItem | null; skipReason?: 'no_signal' } {
-	if (!request.includeExpired && isExpired(record)) return { item: null };
-	if (record.supersededBy) return { item: null };
-	if (record.metadata.deleted === true) return { item: null };
-	if (!scopeAllowed(record.scope, request.scopes)) return { item: null };
+): { item: RecallResultItem | null; skipReason?: 'filtered' | 'no_signal' } {
+	if (!request.includeExpired && isExpired(record)) {
+		return { item: null, skipReason: 'filtered' };
+	}
+	if (record.supersededBy) return { item: null, skipReason: 'filtered' };
+	if (record.metadata.deleted === true) {
+		return { item: null, skipReason: 'filtered' };
+	}
+	if (!scopeAllowed(record.scope, request.scopes)) {
+		return { item: null, skipReason: 'filtered' };
+	}
 	if (request.kinds && !request.kinds.includes(record.kind)) {
-		return { item: null };
+		return { item: null, skipReason: 'filtered' };
 	}
 
 	const queryTokens =
@@ -206,6 +213,7 @@ export function scoreMemoryRecordsWithDiagnostics(
 	const minScore = request.minScore ?? 0;
 	const diagnostics: RecallScoringDiagnostics = {
 		candidateCount: records.length,
+		preScoredFilteredCount: 0,
 		scoredCount: 0,
 		returnedCount: 0,
 		noSignalCount: 0,
@@ -216,6 +224,8 @@ export function scoreMemoryRecordsWithDiagnostics(
 	for (const record of records) {
 		const result = scoreMemoryRecordDetailed(record, request);
 		if (!result.item) {
+			if (result.skipReason === 'filtered')
+				diagnostics.preScoredFilteredCount++;
 			if (result.skipReason === 'no_signal') diagnostics.noSignalCount++;
 			continue;
 		}

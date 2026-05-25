@@ -95,6 +95,7 @@ export interface RecallBundle {
     diagnostics?: {
         injectionSkipReason?: RecallInjectionSkipReason;
         candidateCount?: number;
+        preScoredFilteredCount?: number;
         noSignalCount?: number;
         belowThresholdCount?: number;
     };

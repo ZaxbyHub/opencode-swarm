@@ -71,6 +71,14 @@ describe('parseFullAutoCriticResponse', () => {
 		expect(r.verdict).toBe('NEEDS_REVISION');
 	});
 
+	test('parses PENDING verdict', () => {
+		const r = parseFullAutoCriticResponse(
+			'VERDICT: PENDING\nREASONING: Waiting for additional evidence\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO',
+		);
+		expect(r.verdict).toBe('PENDING');
+		expect(r.reasoning).toBe('Waiting for additional evidence');
+	});
+
 	test('handles multi-line reasoning blocks', () => {
 		const r = parseFullAutoCriticResponse(
 			'VERDICT: NEEDS_REVISION\nREASONING: line1\n  more details\n  and more\nEVIDENCE_CHECKED: diff\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO',

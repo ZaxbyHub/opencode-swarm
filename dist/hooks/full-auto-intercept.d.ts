@@ -8,6 +8,7 @@
  * and injects the critic's autonomous oversight response when escalation is detected.
  */
 import type { PluginConfig } from '../config';
+import { type ParsedCriticResponse } from '../full-auto/critic-response-parser';
 interface MessageWithParts {
     info: {
         role: string;
@@ -24,13 +25,7 @@ interface MessageWithParts {
 /**
  * Result from critic dispatch — used to inject verdict into message stream.
  */
-interface CriticDispatchResult {
-    verdict: string;
-    reasoning: string;
-    evidenceChecked: string[];
-    antiPatternsDetected: string[];
-    escalationNeeded: boolean;
-    rawResponse: string;
+interface CriticDispatchResult extends ParsedCriticResponse {
 }
 /**
  * Parses the critic's structured text response into a CriticDispatchResult.

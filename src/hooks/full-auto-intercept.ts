@@ -14,6 +14,10 @@ import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
+	type ParsedCriticResponse,
+	parseCriticResponseFields,
+} from '../full-auto/critic-response-parser';
+import {
 	type FullAutoOversightEvent as V2FullAutoOversightEvent,
 	writeFullAutoOversightEvent as v2WriteOversightEvent,
 	writeFullAutoOversightEvidence as v2WriteOversightEvidence,
@@ -206,14 +210,7 @@ interface AutoOversightEvent {
 /**
  * Result from critic dispatch — used to inject verdict into message stream.
  */
-interface CriticDispatchResult {
-	verdict: string;
-	reasoning: string;
-	evidenceChecked: string[];
-	antiPatternsDetected: string[];
-	escalationNeeded: boolean;
-	rawResponse: string;
-}
+interface CriticDispatchResult extends ParsedCriticResponse {}
 
 /**
  * Parses the critic's structured text response into a CriticDispatchResult.
@@ -225,109 +222,13 @@ interface CriticDispatchResult {
  *   ESCALATION_NEEDED: YES | NO
  */
 export function parseCriticResponse(rawResponse: string): CriticDispatchResult {
-	const result: CriticDispatchResult = {
-		verdict: 'NEEDS_REVISION',
-		reasoning: '',
-		evidenceChecked: [],
-		antiPatternsDetected: [],
-		escalationNeeded: false,
-		rawResponse,
-	};
-
-	const lines = rawResponse.split('\n');
-	let currentKey = '';
-	let currentValue = '';
-
-	const commitField = (
-		res: CriticDispatchResult,
-		key: string,
-		value: string,
-	): void => {
-		switch (key) {
-			case 'VERDICT': {
-				const validVerdicts = [
-					'APPROVED',
-					'NEEDS_REVISION',
-					'REJECTED',
-					'BLOCKED',
-					'ANSWER',
-					'ESCALATE_TO_HUMAN',
-					'REPHRASE',
-				];
-				const normalized = value.trim().toUpperCase().replace(/[`*]/g, '');
-				if (validVerdicts.includes(normalized)) {
-					res.verdict = normalized;
-				} else {
-					logger.warn(
-						`[full-auto-intercept] Unknown verdict '${value}' — defaulting to NEEDS_REVISION`,
-					);
-					res.verdict = 'NEEDS_REVISION';
-				}
-				break;
-			}
-			case 'REASONING':
-				res.reasoning = value.trim();
-				break;
-			case 'EVIDENCE_CHECKED':
-				if (value && value !== 'none' && value !== '"none"') {
-					res.evidenceChecked = value
-						.split(',')
-						.map((s) => s.trim())
-						.filter(Boolean);
-				}
-				break;
-			case 'ANTI_PATTERNS_DETECTED':
-				if (value && value !== 'none' && value !== '"none"') {
-					res.antiPatternsDetected = value
-						.split(',')
-						.map((s) => s.trim())
-						.filter(Boolean);
-				}
-				break;
-			case 'ESCALATION_NEEDED':
-				res.escalationNeeded = value.trim().toUpperCase() === 'YES';
-				break;
-		}
-	};
-
-	for (const line of lines) {
-		const colonIndex = line.indexOf(':');
-		if (colonIndex !== -1) {
-			const key = line.slice(0, colonIndex).trim().toUpperCase();
-			// Check if this looks like a field header (next KEY: line)
-			if (
-				[
-					'VERDICT',
-					'REASONING',
-					'EVIDENCE_CHECKED',
-					'ANTI_PATTERNS_DETECTED',
-					'ESCALATION_NEEDED',
-				].includes(key)
-			) {
-				// Save previous field
-				if (currentKey) {
-					commitField(result, currentKey, currentValue);
-				}
-				currentKey = key;
-				currentValue = line.slice(colonIndex + 1).trim();
-			} else {
-				// Continuation of previous field (no valid key prefix)
-				currentValue += `\n${line}`;
-			}
-		} else {
-			// Continuation line (no colon) — append to current value
-			if (line.trim()) {
-				currentValue += `\n${line}`;
-			}
-		}
-	}
-
-	// Commit last field
-	if (currentKey) {
-		commitField(result, currentKey, currentValue);
-	}
-
-	return result;
+	return parseCriticResponseFields(rawResponse, {
+		onUnknownVerdict: (value) => {
+			logger.warn(
+				`[full-auto-intercept] Unknown verdict '${value}' — defaulting to NEEDS_REVISION`,
+			);
+		},
+	});
 }
 
 /**
@@ -394,8 +295,9 @@ async function writeAutoOversightEvent(
 		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
 	} catch (writeError) {
 		logger.error(
-			`[full-auto-intercept] Warning: failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+			`[full-auto-intercept] Failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
+		throw writeError;
 	} finally {
 		if (lockResult?.acquired && lockResult.lock._release) {
 			try {
@@ -682,24 +584,19 @@ export async function dispatchCriticAndWriteEvent(
 		};
 	}
 
-	// 5. Write the auto_oversight event AFTER the critic responds
-	try {
-		await writeAutoOversightEvent(
-			directory,
-			architectOutput,
-			parsed.verdict,
-			parsed.reasoning,
-			parsed.evidenceChecked,
-			interactionCount,
-			deadlockCount,
-			escalationType,
-		);
-	} catch (writeError) {
-		logger.error(
-			`[full-auto-intercept] Failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
-		);
-		// Don't rethrow — event write failure shouldn't crash the hook
-	}
+	// 5. Write the auto_oversight event AFTER the critic responds.
+	// Note: if this throws (e.g. disk error), the v2 mirror step below is skipped,
+	// meaning phase-approval evidence coherence depends on the write succeeding.
+	await writeAutoOversightEvent(
+		directory,
+		architectOutput,
+		parsed.verdict,
+		parsed.reasoning,
+		parsed.evidenceChecked,
+		interactionCount,
+		deadlockCount,
+		escalationType,
+	);
 
 	// v2: Mirror the verdict into the shared oversight pipeline so that phase
 	// approval evidence and durable run-state stay coherent with reactive

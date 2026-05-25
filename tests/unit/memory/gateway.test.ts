@@ -173,6 +173,51 @@ describe('MemoryGateway', () => {
 		expect(bundle.items).toHaveLength(0);
 	});
 
+	test('injection skip reason ignores pre-scoring filtered records in diagnostics denominator', async () => {
+		const provider: MemoryProvider = {
+			name: 'fake-diagnostics-provider',
+			upsert: async (record) => record,
+			get: async () => null,
+			delete: async () => {},
+			recall: async () => [],
+			recallWithDiagnostics: async () => ({
+				items: [],
+				diagnostics: {
+					candidateCount: 2,
+					preScoredFilteredCount: 1,
+					scoredCount: 0,
+					returnedCount: 0,
+					noSignalCount: 1,
+					belowThresholdCount: 0,
+				},
+			}),
+			list: async () => [],
+		};
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: { enabled: true },
+				provider,
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+
+		const bundle = await gateway.recall({
+			query: 'backend database migration strategy',
+			mode: 'injection',
+			minScore: 0,
+			requireQuerySignal: true,
+		});
+
+		expect(bundle.items).toHaveLength(0);
+		expect(bundle.diagnostics).toMatchObject({
+			injectionSkipReason: 'no_signal',
+			candidateCount: 2,
+			preScoredFilteredCount: 1,
+			noSignalCount: 1,
+		});
+	});
+
 	test('injection recall records no-signal diagnostics for unrelated same-scope memory', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },

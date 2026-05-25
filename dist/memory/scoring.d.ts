@@ -1,6 +1,7 @@
 import type { MemoryRecord, MemoryScopeRef, RecallRequest, RecallResultItem } from './types';
 export interface RecallScoringDiagnostics {
     candidateCount: number;
+    preScoredFilteredCount: number;
     scoredCount: number;
     returnedCount: number;
     noSignalCount: number;

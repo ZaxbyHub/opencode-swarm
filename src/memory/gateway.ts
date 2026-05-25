@@ -162,6 +162,8 @@ export class MemoryGateway {
 								? resolveInjectionSkipReason(recallResult.diagnostics)
 								: undefined,
 						candidateCount: recallResult.diagnostics.candidateCount,
+						preScoredFilteredCount:
+							recallResult.diagnostics.preScoredFilteredCount,
 						noSignalCount: recallResult.diagnostics.noSignalCount,
 						belowThresholdCount: recallResult.diagnostics.belowThresholdCount,
 					}
@@ -436,9 +438,12 @@ function resolveInjectionSkipReason(
 ): RecallInjectionSkipReason | undefined {
 	if (diagnostics.returnedCount > 0) return undefined;
 	if (diagnostics.candidateCount === 0) return 'no_results';
+	const signalEligibleCount =
+		diagnostics.candidateCount - diagnostics.preScoredFilteredCount;
 	if (
+		signalEligibleCount > 0 &&
 		diagnostics.noSignalCount > 0 &&
-		diagnostics.noSignalCount >= diagnostics.candidateCount
+		diagnostics.noSignalCount >= signalEligibleCount
 	) {
 		return 'no_signal';
 	}
