@@ -8,11 +8,6 @@ import {
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {
-	SandboxCapabilityProbe,
-	type SandboxStatus,
-} from '../sandbox/capability-probe';
-import { getExecutor } from '../sandbox/executor';
-import {
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -23,22 +18,6 @@ import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
 
 /**
- * Structured sandbox status for plugin capability reporting.
- */
-export interface SandboxStatusInfo {
-	/** Whether the sandbox mechanism is available. */
-	status: SandboxStatus;
-	/** Human-readable mechanism name, e.g. "Bubblewrap". */
-	mechanism: string;
-	/** Current process.platform value. */
-	platform: 'linux' | 'darwin' | 'win32';
-	/** Error message from the probe, if any. */
-	error?: string;
-	/** Whether a sandbox executor is currently available (may differ from capability probe if instantiation failed). */
-	executorAvailable: boolean;
-}
-
-/**
  * Dependency-injection seam for status-service.
  * Allows tests to intercept Lean Turbo state queries without mock.module leakage.
  */
@@ -47,29 +26,6 @@ export const _internals = {
 	hasActiveLeanTurbo,
 	hasActiveFullAuto,
 };
-
-/**
- * Get sandbox status by probing capability and checking executor availability.
- *
- * This function is cached at the module level (via SandboxCapabilityProbe's
- * internal cache) so repeated calls during a session are fast.
- */
-export async function getSandboxStatus(): Promise<SandboxStatusInfo> {
-	const probe = new SandboxCapabilityProbe();
-	const capability = await probe.detect();
-
-	// Check if an executor can actually be instantiated
-	const executor = await getExecutor();
-	const executorAvailable = executor !== null;
-
-	return {
-		status: capability.status,
-		mechanism: capability.mechanism,
-		platform: capability.platform,
-		error: capability.error,
-		executorAvailable,
-	};
-}
 
 /**
  * Structured status data returned by the status service.
@@ -115,8 +71,6 @@ export interface StatusData {
 	specStaleStoredHash?: string;
 	/** Current spec.md hash on disk (null when spec.md is missing) */
 	specStaleCurrentHash?: string | null;
-	/** Sandbox capability and availability status. */
-	sandbox?: SandboxStatusInfo;
 }
 
 /**
@@ -252,12 +206,7 @@ export async function getStatusData(
 	}
 
 	// Enrich with Lean Turbo data if active
-	status = enrichWithLeanTurbo(status, directory);
-
-	// Enrich with sandbox capability status
-	status.sandbox = await getSandboxStatus();
-
-	return status;
+	return enrichWithLeanTurbo(status, directory);
 }
 
 /**
@@ -422,11 +371,6 @@ export function formatStatusMarkdown(status: StatusData): string {
 		}
 	}
 
-	// Sandbox capability status (security feature)
-	if (status.sandbox) {
-		lines.push(...formatSandboxLines(status.sandbox));
-	}
-
 	return lines.join('\n');
 }
 
@@ -448,57 +392,15 @@ export async function handleStatusCommand(
 				statusData.specStaleReason ?? 'spec.md changed since plan saved';
 			const stored = statusData.specStaleStoredHash ?? 'unknown';
 			const current = statusData.specStaleCurrentHash ?? '(spec.md missing)';
-			const lines = [
+			return [
 				'No active swarm plan found.',
 				'',
 				`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
 				'Run `/swarm clarify` to update the spec or `/swarm acknowledge-spec-drift` to dismiss.',
-			];
-			// Append sandbox info if available
-			if (statusData.sandbox) {
-				lines.push(...formatSandboxLines(statusData.sandbox));
-			}
-			return lines.join('\n');
-		}
-		// No plan, no spec drift — still show sandbox status
-		if (statusData.sandbox) {
-			const lines = ['No active swarm plan found.', ''];
-			lines.push(...formatSandboxLines(statusData.sandbox));
-			return lines.join('\n');
+			].join('\n');
 		}
 		return 'No active swarm plan found.';
 	}
 
 	return formatStatusMarkdown(statusData);
-}
-
-/**
- * Format sandbox status lines for display.
- */
-function formatSandboxLines(sandbox: SandboxStatusInfo): string[] {
-	const lines: string[] = [];
-	const {
-		status: sandboxStatus,
-		mechanism,
-		executorAvailable,
-		error,
-	} = sandbox;
-	lines.push('');
-	if (sandboxStatus === 'enabled') {
-		if (executorAvailable) {
-			lines.push(`**Sandbox**: ${mechanism} (enabled)`);
-		} else {
-			lines.push(`**Sandbox**: ${mechanism} (probe ok, executor unavailable)`);
-		}
-	} else if (sandboxStatus === 'disabled') {
-		lines.push(
-			`**Sandbox**: ${mechanism} (disabled${error ? ` — ${error}` : ''})`,
-		);
-	} else {
-		// unsupported
-		lines.push(
-			`**Sandbox**: ${mechanism} (unsupported) — Sandbox enforcement not active on this platform`,
-		);
-	}
-	return lines;
 }

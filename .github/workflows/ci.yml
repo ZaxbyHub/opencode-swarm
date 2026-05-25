@@ -326,27 +326,6 @@ jobs:
             done
           done
           exit $failed
-      - name: Unit tests (sandbox - integration + recovery)
-        shell: bash
-        run: |
-          set -o pipefail
-          IFS=$'\n'
-          failed=0
-          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
-          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
-          for f in tests/unit/sandbox/sandbox-integration.test.ts tests/unit/sandbox/recovery.test.ts; do
-            [ -f "$f" ] || continue
-            tmp="$tmpdir/bun-out-$$-${f##*/}"
-            exit_code=0
-            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
-            if [ $exit_code -ne 0 ]; then
-              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
-                echo "::error file=$f::FAILED: $f"
-                failed=1
-              fi
-            fi
-          done
-          exit $failed
       - name: Unit tests (state, agents, knowledge, evidence, plan, misc)
         shell: bash
         run: |

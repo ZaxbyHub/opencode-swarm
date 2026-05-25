@@ -1,22 +1,6 @@
 import type { AgentDefinition } from '../agents';
-import { type SandboxStatus } from '../sandbox/capability-probe';
 import { hasActiveFullAuto, hasActiveLeanTurbo } from '../state';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
-/**
- * Structured sandbox status for plugin capability reporting.
- */
-export interface SandboxStatusInfo {
-    /** Whether the sandbox mechanism is available. */
-    status: SandboxStatus;
-    /** Human-readable mechanism name, e.g. "Bubblewrap". */
-    mechanism: string;
-    /** Current process.platform value. */
-    platform: 'linux' | 'darwin' | 'win32';
-    /** Error message from the probe, if any. */
-    error?: string;
-    /** Whether a sandbox executor is currently available (may differ from capability probe if instantiation failed). */
-    executorAvailable: boolean;
-}
 /**
  * Dependency-injection seam for status-service.
  * Allows tests to intercept Lean Turbo state queries without mock.module leakage.
@@ -26,13 +10,6 @@ export declare const _internals: {
     hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
     hasActiveFullAuto: typeof hasActiveFullAuto;
 };
-/**
- * Get sandbox status by probing capability and checking executor availability.
- *
- * This function is cached at the module level (via SandboxCapabilityProbe's
- * internal cache) so repeated calls during a session are fast.
- */
-export declare function getSandboxStatus(): Promise<SandboxStatusInfo>;
 /**
  * Structured status data returned by the status service.
  * This can be used by GUI, background flows, or command adapters.
@@ -77,8 +54,6 @@ export interface StatusData {
     specStaleStoredHash?: string;
     /** Current spec.md hash on disk (null when spec.md is missing) */
     specStaleCurrentHash?: string | null;
-    /** Sandbox capability and availability status. */
-    sandbox?: SandboxStatusInfo;
 }
 /**
  * Get status data from the swarm directory.

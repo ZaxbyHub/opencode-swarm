@@ -28,8 +28,6 @@ import {
 } from '../config/schema';
 import { classifyFile, type FileZone } from '../context/zone-classifier';
 import { loadPlan } from '../plan/manager';
-import { getExecutor } from '../sandbox/executor';
-import { resolveScopePaths } from '../sandbox/scope-resolver';
 import { resolveScopeWithFallbacks } from '../scope/scope-persistence';
 import {
 	advanceTaskState,
@@ -2242,59 +2240,6 @@ export function createGuardrailsHooks(
 	}
 
 	/**
-	 * OS-native sandbox wrapper for bash/shell commands.
-	 *
-	 * Defense-in-depth: runs AFTER all static-analysis scope checks have passed.
-	 * Adds platform-specific sandbox enforcement (bubblewrap/sandbox-exec/Windows Sandbox)
-	 * as an additional OS-level boundary. If the sandbox is unavailable or
-	 * wrapping fails, the command passes through unchanged — existing enforcement
-	 * remains the primary protection.
-	 *
-	 * FR-004: Graceful fallback when sandbox unavailable (pass-through).
-	 * FR-006: OS-level errors from sandbox reach the coder as distinguishable errors.
-	 */
-	async function applySandboxExecution(
-		sessionID: string,
-		tool: string,
-		args: unknown,
-	): Promise<void> {
-		// Only wrap bash and shell tools
-		if (tool !== 'bash' && tool !== 'shell') return;
-
-		// Get the platform-appropriate executor (cached after first call)
-		const executor = await getExecutor();
-		if (!executor || !executor.isAvailable()) return;
-
-		const toolArgs = args as Record<string, unknown> | undefined;
-		const rawCommand =
-			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
-		if (!rawCommand || !toolArgs) return;
-
-		// Get declared scope paths for this session
-		const declaredPaths = resolveDeclaredScope(sessionID);
-		if (!declaredPaths || declaredPaths.length === 0) return;
-
-		// Resolve scope paths to absolute paths for the sandbox
-		const resolved = resolveScopePaths(declaredPaths, effectiveDirectory);
-		if (resolved.paths.length === 0) return;
-
-		try {
-			// Wrap the command with sandbox prefix (platform-specific)
-			const wrappedCommand = executor.wrapCommand(rawCommand, resolved.paths);
-
-			// Modify the args in-place so the bash tool executes the sandbox-wrapped version
-			toolArgs.command = wrappedCommand;
-		} catch (err) {
-			// Sandboxing failed — log and fall through to existing enforcement.
-			// Sandbox errors are distinguishable (they include the mechanism name)
-			// so coders can understand why a command was blocked at the OS level.
-			warn(
-				`[sandbox] Failed to wrap command with ${executor.mechanism}: ${err}`,
-			);
-		}
-	}
-
-	/**
 	 * Checks gate limits (hard limits, idle timeout, soft warnings) for the current invocation.
 	 * Extracted from toolBefore for maintainability.
 	 */
@@ -3139,11 +3084,6 @@ export function createGuardrailsHooks(
 
 			// Shell write scope enforcement: block bash/shell writes outside declared scope
 			checkShellWriteScope(input.sessionID, input.tool, output.args);
-
-			// OS-native sandbox wrapper — defense-in-depth after static analysis passes.
-			// FR-004: graceful fallback when sandbox unavailable (pass-through).
-			// FR-006: OS-level errors from sandbox reach coder as distinguishable errors.
-			await applySandboxExecution(input.sessionID, input.tool, output.args);
 
 			// Issue #853 Layer B: structural spec-drift block.
 			// Refuses plan-mutating tools while .swarm/spec-staleness.json exists.
