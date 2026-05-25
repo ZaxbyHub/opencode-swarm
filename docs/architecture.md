@@ -46,6 +46,22 @@ Swarm enforces discipline:
 - Handles failures and escalations
 - Maintains project memory
 
+### DEEP_DIVE Protocol (On-Demand Skill)
+When the architect receives a `[MODE: DEEP_DIVE ...]` signal, it triggers a high-rigor, read-only codebase audit. This protocol is now implemented as a specialized **Skill**, loaded on-demand to keep the core architect prompt lean and focused.
+
+The protocol executes in the following stages:
+
+1. **Parse Header**: Extracts `scope`, `profile`, `max_explorers`, and other configuration from the signal.
+2. **Repo Readiness**: Checks git status and ensures the environment is ready for a deep audit.
+3. **Scope Resolution**: Uses `repo_map` and `symbols` to build a detailed SCOPE MAP of the audit boundary.
+4. **Explorer Missions (Parallel Waves)**: Dispatches parallel explorer waves to discover patterns, dataflow, and vulnerabilities based on the selected profile.
+5. **Normalize Candidates**: Deduplicates and ranks findings by severity (CRITICAL → INFO).
+6. **Parallel Reviewers**: Two independent reviewers verify or reject each candidate finding.
+7. **Critic Challenge**: For HIGH/CRITICAL findings, sequential critic passes challenge the verdict to eliminate false positives.
+8. **Final Report**: Assembles the Wiring Map, Functionality Assessment, and a Verified Findings Table.
+
+This mode is strictly **read-only**: it does NOT mutate source code, delegate to the coder, or call `declare_scope`.
+
 ### Explorer: The Eyes
 
 Fast codebase scanner and factual mapping agent. Explorer is **strictly observational** — it reports what is observed without judgment, verdict, or directive.
