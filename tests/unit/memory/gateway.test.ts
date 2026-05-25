@@ -5,9 +5,9 @@ import * as path from 'node:path';
 import {
 	MemoryDisabledError,
 	MemoryGateway,
-	SQLiteMemoryProvider,
 	type MemoryProvider,
 	type MemoryRecord,
+	SQLiteMemoryProvider,
 } from '../../../src/memory';
 
 let tmpDir: string;

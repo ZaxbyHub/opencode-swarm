@@ -32,7 +32,6 @@ export {
 	resolveMemoryRecallProfile,
 } from './role-profiles';
 export { appendMemoryRunLog, sanitizeRunId } from './run-log';
-export { SQLiteMemoryProvider } from './sqlite-provider';
 export {
 	computeMemoryContentHash,
 	createBundleId,
@@ -43,6 +42,7 @@ export {
 	validateMemoryProposal,
 	validateMemoryRecordRules,
 } from './schema';
+export { SQLiteMemoryProvider } from './sqlite-provider';
 export type {
 	MemoryContext,
 	MemoryKind,

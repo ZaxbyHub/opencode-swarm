@@ -11,6 +11,6 @@ export { buildMemoryRecallPlan, type MemoryRecallPlan, type MemoryRecallPlannerI
 export { findSecrets, redactSecrets } from './redaction';
 export { MEMORY_RECALL_PROFILES, type MemoryRecallProfile, normalizeMemoryAgentRole, resolveMemoryRecallProfile, } from './role-profiles';
 export { appendMemoryRunLog, sanitizeRunId } from './run-log';
-export { SQLiteMemoryProvider } from './sqlite-provider';
 export { computeMemoryContentHash, createBundleId, createMemoryId, createProposalId, isExpired, normalizeMemoryText, validateMemoryProposal, validateMemoryRecordRules, } from './schema';
+export { SQLiteMemoryProvider } from './sqlite-provider';
 export type { MemoryContext, MemoryKind, MemoryListFilter, MemoryProposal, MemoryRecord, MemoryScopeRef, MemoryScopeType, RecallBundle, RecallInjectionSkipReason, RecallMode, RecallRequest, RecallResultItem, } from './types';

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -9,11 +9,11 @@ import {
 	createMemoryId,
 	createProposalId,
 	LocalJsonlMemoryProvider,
-	SQLiteMemoryProvider,
 	type MemoryProposal,
 	type MemoryProposalStore,
 	type MemoryProvider,
 	type MemoryRecord,
+	SQLiteMemoryProvider,
 } from '../../../src/memory';
 
 type ContractProvider = MemoryProvider &

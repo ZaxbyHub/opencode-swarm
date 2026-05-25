@@ -1,8 +1,8 @@
+import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
-import type { Database } from 'bun:sqlite';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
 import { MemoryValidationError } from './errors';

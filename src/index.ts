@@ -988,17 +988,22 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 		// Configure OpenCode - merge agents into config
 		config: async (opencodeConfig: Record<string, unknown>) => {
+			const isObjectRecord = (
+				value: unknown,
+			): value is Record<string, unknown> =>
+				typeof value === 'object' && value !== null;
+			const pluginConfig = opencodeConfig as Record<string, unknown> & {
+				agent?: Record<string, unknown>;
+			};
+
 			// Normalize agent config to a plain object if it's absent or a non-object primitive
-			if (!opencodeConfig.agent || typeof opencodeConfig.agent !== 'object') {
-				(opencodeConfig as any).agent = {};
+			if (!isObjectRecord(pluginConfig.agent)) {
+				pluginConfig.agent = {};
 			}
+			const agentConfig = pluginConfig.agent;
 
 			// Merge agent configs (don't override default_agent)
-			if (!opencodeConfig.agent) {
-				opencodeConfig.agent = { ...agents };
-			} else {
-				Object.assign(opencodeConfig.agent, agents);
-			}
+			Object.assign(agentConfig, agents);
 
 			// Auto-select architect: disable competing built-in agents when enabled
 			const autoSelect = config?.auto_select_architect;
@@ -1010,19 +1015,13 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				if (hasArchitect) {
 					// Disable build and plan built-in agents
 					for (const builtin of ['build', 'plan'] as const) {
-						const existing = (opencodeConfig.agent as Record<string, any>)?.[
-							builtin
-						];
-						if (
-							existing &&
-							typeof existing === 'object' &&
-							existing.disable === true
-						) {
+						const existing = agentConfig[builtin];
+						if (isObjectRecord(existing) && existing.disable === true) {
 							// User already disabled this agent — respect their override
 							continue;
 						}
-						(opencodeConfig.agent as Record<string, any>)[builtin] = {
-							...(existing && typeof existing === 'object' ? existing : {}),
+						agentConfig[builtin] = {
+							...(isObjectRecord(existing) ? existing : {}),
 							disable: true,
 						};
 					}
@@ -1032,7 +1031,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						const primaryArchitects = Object.entries(agents).filter(
 							([name, cfg]) =>
 								stripKnownSwarmPrefix(name) === 'architect' &&
-								(cfg as any).mode === 'primary',
+								isObjectRecord(cfg) &&
+								cfg.mode === 'primary',
 						);
 						if (primaryArchitects.length > 1) {
 							const names = primaryArchitects.map(([n]) => n).join(', ');
@@ -1057,36 +1057,20 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 									stripKnownSwarmPrefix(name) === 'architect' &&
 									name !== targetName
 								) {
-									if (
-										opencodeConfig.agent &&
-										typeof opencodeConfig.agent === 'object'
-									) {
-										(opencodeConfig.agent as Record<string, any>)[name] = {
-											...(cfg && typeof cfg === 'object' ? cfg : {}),
-											mode: 'subagent',
-										};
-									}
+									agentConfig[name] = {
+										...(isObjectRecord(cfg) ? cfg : {}),
+										mode: 'subagent',
+									};
 								}
 							}
 							// Promote the target architect to primary
-							if (
-								opencodeConfig.agent &&
-								typeof opencodeConfig.agent === 'object'
-							) {
-								const targetExisting = (
-									opencodeConfig.agent as Record<string, any>
-								)[targetName];
-								(opencodeConfig.agent as Record<string, any>)[targetName] = {
-									...(targetExisting && typeof targetExisting === 'object'
-										? targetExisting
-										: {}),
-									...(agents[targetName] &&
-									typeof agents[targetName] === 'object'
-										? agents[targetName]
-										: {}),
-									mode: 'primary',
-								};
-							}
+							const targetExisting = agentConfig[targetName];
+							const targetAgent = agents[targetName];
+							agentConfig[targetName] = {
+								...(isObjectRecord(targetExisting) ? targetExisting : {}),
+								...(isObjectRecord(targetAgent) ? targetAgent : {}),
+								mode: 'primary',
+							};
 						} else {
 							// Target is not a valid architect — warn the user
 							addDeferredWarning(
