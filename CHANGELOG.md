@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.32.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.2...v7.32.3) (2026-05-25)
+
+
+### Bug Fixes
+
+* **memory:** harden recall injection precision ([#1011](https://github.com/zaxbysauce/opencode-swarm/issues/1011)) ([b06d79c](https://github.com/zaxbysauce/opencode-swarm/commit/b06d79c6a98bb2e6867e848dc2fbb22c53a73185))
+
 ## [7.32.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.1...v7.32.2) (2026-05-25)
 
 
