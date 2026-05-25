@@ -87,6 +87,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 					return [];
 				}
 			},
+			readRetractionRecords: async () => [],
 			normalize: (text: string): string => {
 				return text
 					.toLowerCase()
@@ -144,7 +145,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 			tags: [],
 			scope: 'global',
 			confidence: 0.8,
-			status: 'candidate',
+			status: 'established',
 			confirmed_by: [],
 			retrieval_outcomes: {
 				applied_count: 0,
@@ -171,7 +172,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 			tags: [],
 			scope: 'global',
 			confidence: 0.7,
-			status: 'candidate',
+			status: 'established',
 			confirmed_by: [],
 			retrieval_outcomes: {
 				applied_count: 0,
@@ -411,7 +412,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 
 	// ========== GROUP 3: Status Boost Scoring ==========
 	describe('Group 3: Status boost scoring', () => {
-		it('established status gets +0.1 boost', async () => {
+		it('candidate status is excluded from normal recall', async () => {
 			writeSwarmKnowledge([
 				makeSwarmEntry({
 					id: 'candidate',
@@ -438,20 +439,11 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				(r: { id: string }) => r.id === 'candidate',
 			);
 
-			// established should be ranked higher due to +0.1 boost
-			const establishedIdx = parsed.results.findIndex(
-				(r: { id: string }) => r.id === 'established',
-			);
-			const candidateIdx = parsed.results.findIndex(
-				(r: { id: string }) => r.id === 'candidate',
-			);
-			expect(establishedIdx).toBeLessThan(candidateIdx);
-
-			// Score difference should be approximately 0.1
-			expect(established.score).toBeGreaterThan(candidate.score);
+			expect(established).toBeDefined();
+			expect(candidate).toBeUndefined();
 		});
 
-		it('promoted status gets +0.05 boost', async () => {
+		it('promoted status remains retrievable', async () => {
 			writeSwarmKnowledge([
 				makeSwarmEntry({
 					id: 'candidate',
@@ -477,51 +469,8 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 			const candidate = parsed.results.find(
 				(r: { id: string }) => r.id === 'candidate',
 			);
-
-			// promoted should be ranked higher due to +0.05 boost
-			const promotedIdx = parsed.results.findIndex(
-				(r: { id: string }) => r.id === 'promoted',
-			);
-			const candidateIdx = parsed.results.findIndex(
-				(r: { id: string }) => r.id === 'candidate',
-			);
-			expect(promotedIdx).toBeLessThan(candidateIdx);
-
-			expect(promoted.score).toBeGreaterThan(candidate.score);
-		});
-
-		it('candidate status gets no boost (0)', async () => {
-			writeSwarmKnowledge([
-				makeSwarmEntry({
-					id: 'candidate-1',
-					lesson: 'Test candidate lesson alpha',
-					status: 'candidate',
-				}),
-				makeSwarmEntry({
-					id: 'candidate-2',
-					lesson: 'Test candidate lesson beta',
-					status: 'candidate',
-				}),
-			]);
-
-			const result = await knowledge_recall.execute(
-				{ query: 'test candidate lesson', tier: 'swarm' } as Record<
-					string,
-					unknown
-				>,
-				tmpDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Both candidate entries should have score with no boost
-			const candidate1 = parsed.results.find(
-				(r: { id: string }) => r.id === 'candidate-1',
-			);
-			const candidate2 = parsed.results.find(
-				(r: { id: string }) => r.id === 'candidate-2',
-			);
-			expect(candidate1.score).toBeDefined();
-			expect(candidate2.score).toBeDefined();
+			expect(promoted).toBeDefined();
+			expect(candidate).toBeUndefined();
 		});
 
 		it('Boost is additive to text similarity score', async () => {
@@ -720,7 +669,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				makeSwarmEntry({
 					id: 'low',
 					lesson: 'Test lesson about something',
-					status: 'candidate',
+					status: 'established',
 				}),
 				makeSwarmEntry({
 					id: 'high',
@@ -933,7 +882,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				makeSwarmEntry({
 					id: 'c1',
 					lesson: 'Test candidate lesson',
-					status: 'candidate',
+					status: 'established',
 					confidence: 0.5,
 				}),
 			]);
@@ -1015,7 +964,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				// tags is missing
 				scope: 'global',
 				confidence: 0.8,
-				status: 'candidate',
+				status: 'established',
 				confirmed_by: [],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -1051,7 +1000,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				tags: 'not-an-array', // Should be array but is string
 				scope: 'global',
 				confidence: 0.8,
-				status: 'candidate',
+				status: 'established',
 				confirmed_by: [],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -1087,7 +1036,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				tags: [],
 				scope: 'global',
 				confidence: 0.8,
-				status: 'candidate',
+				status: 'established',
 				confirmed_by: [],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -1106,9 +1055,8 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				tmpDir,
 			);
 			const parsed = JSON.parse(result);
-			// Should not crash
-			expect(parsed.results).toBeDefined();
-			expect(parsed.total).toBeDefined();
+			expect(parsed.success).toBe(false);
+			expect(Array.isArray(parsed.errors)).toBe(true);
 		});
 
 		it('Returns partial results when some entries are malformed', async () => {
@@ -1122,7 +1070,7 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				tags: [],
 				scope: 'global',
 				confidence: 0.8,
-				status: 'candidate',
+				status: 'established',
 				confirmed_by: [],
 				retrieval_outcomes: {
 					applied_count: 0,
@@ -1162,17 +1110,14 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				'utf-8',
 			);
 
-			// The tool catches the TypeError from entry.tags.join() being called on undefined
-			// at the scoring loop and returns an error JSON via createSwarmTool's catch block.
-			// It does NOT return partial results - the entire operation fails.
 			const result = await knowledge_recall.execute(
 				{ query: 'valid lesson about testing' } as Record<string, unknown>,
 				tmpDir,
 			);
 			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.errors).toBeDefined();
-			expect(Array.isArray(parsed.errors)).toBe(true);
+			expect(parsed.results).toBeDefined();
+			expect(parsed.total).toBe(1);
+			expect(parsed.results[0].id).toBe('valid-entry');
 		});
 	});
 });

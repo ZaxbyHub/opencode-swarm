@@ -425,6 +425,22 @@ export function gateKnowledgeApplication(args: {
 	};
 }
 
+/**
+ * Filter knowledge entries by minimum confidence threshold.
+ * Used by the knowledge reinjection hook to surface high-confidence
+ * knowledge after context compression events.
+ *
+ * @param entries - Array of knowledge entries (swarm or hive)
+ * @param threshold - Minimum confidence score (default 0.8)
+ * @returns Filtered entries with confidence >= threshold
+ */
+export function filterHighConfidenceKnowledge<T extends { confidence: number }>(
+	entries: T[],
+	threshold: number = 0.8,
+): T[] {
+	return entries.filter((entry) => entry.confidence >= threshold);
+}
+
 // ============================================================================
 // DI seam
 // ============================================================================

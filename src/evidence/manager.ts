@@ -116,11 +116,31 @@ import { sanitizeTaskId as _sanitizeTaskId } from '../validation/task-id';
 
 export const sanitizeTaskId = _sanitizeTaskId;
 
+/** Maximum depth to walk up the directory tree before stopping (fail-open). */
+export const MAX_DEPTH = 20;
+
+/** File/directory names that indicate a real project root. */
+export const PROJECT_INDICATORS = [
+	'package.json',
+	'.git',
+	'.opencode',
+	'Cargo.toml',
+	'go.mod',
+	'pyproject.toml',
+	'Gemfile',
+	'composer.json',
+	'pom.xml',
+	'build.gradle',
+	'CMakeLists.txt',
+] as const;
+
 /**
  * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
  * of a project that already has a .swarm/ at its root.
- * Walks up the directory tree to filesystem root looking for a parent .swarm/ directory.
- * @throws Error if a parent directory contains .swarm/
+ * Walks up the directory tree (bounded by MAX_DEPTH) looking for a parent .swarm/ directory.
+ * When .swarm/ is found, checks for at least one PROJECT_INDICATORS entry to distinguish
+ * real projects from stray artifacts (e.g. `C:\.swarm`).
+ * @throws Error if a parent directory contains both .swarm/ and a project indicator
  */
 export function validateProjectRoot(directory: string): void {
 	let resolved: string;
@@ -135,18 +155,47 @@ export function validateProjectRoot(directory: string): void {
 		);
 	}
 	let current = resolved;
+	let depth = 0;
 	while (true) {
+		if (depth >= MAX_DEPTH) break; // depth limit — fail open
+		depth++;
 		const parent = path.dirname(current);
 		if (parent === current) break; // reached filesystem root
 		const parentSwarm = path.join(parent, '.swarm');
 		try {
 			if (statSync(parentSwarm).isDirectory()) {
-				warn(
-					`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
-				);
-				throw new Error(
-					`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
-				);
+				// Check for at least one project indicator to confirm this is a real project
+				let hasProjectIndicator = false;
+				for (const indicator of PROJECT_INDICATORS) {
+					try {
+						const indicatorStat = statSync(path.join(parent, indicator));
+						if (indicatorStat.isFile() || indicatorStat.isDirectory()) {
+							hasProjectIndicator = true;
+							break;
+						}
+					} catch (error) {
+						if (
+							error instanceof Error &&
+							'code' in error &&
+							(error as NodeJS.ErrnoException).code === 'ENOENT'
+						) {
+							// indicator doesn't exist — continue checking next one
+						} else {
+							// Non-ENOENT error (EPERM, EBUSY, etc.) — can't verify, assume indicator present (fail-closed)
+							hasProjectIndicator = true;
+							break;
+						}
+					}
+				}
+				if (hasProjectIndicator) {
+					warn(
+						`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
+					);
+					throw new Error(
+						`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
+					);
+				}
+				// No project indicators found — treat as stray artifact, continue walking
 			}
 		} catch (error) {
 			if (

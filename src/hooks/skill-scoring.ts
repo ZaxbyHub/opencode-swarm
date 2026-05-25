@@ -8,6 +8,7 @@
  * and `skill-propagation-gate.ts` for testability.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	readSkillUsageEntries,
@@ -39,6 +40,9 @@ const CONTEXT_WEIGHT = 0.2;
 /** Age in milliseconds at which recency score decays to zero (30 days). */
 const RECENCY_DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** Maximum bytes read from a SKILL.md when extracting frontmatter metadata. */
+const SKILL_FRONTMATTER_READ_BYTES = 16 * 1024;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -67,6 +71,16 @@ export interface SkillStats {
 	topAgents: Array<{ agent: string; count: number }>;
 }
 
+/** Metadata extracted from a SKILL.md frontmatter block. */
+export interface SkillMetadata {
+	/** Repo-relative path to the skill file. */
+	path: string;
+	/** Human-readable skill name. */
+	name: string;
+	/** Short description from frontmatter, or a fallback when absent. */
+	description: string;
+}
+
 // ============================================================================
 // DI seam — function references assigned after their declarations at end of file
 // ============================================================================
@@ -76,6 +90,8 @@ export const _internals: {
 	rankSkillsForContext: typeof rankSkillsForContext;
 	getSkillStats: typeof getSkillStats;
 	formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
+	parseSkillFrontmatter: typeof parseSkillFrontmatter;
+	readSkillMetadata: typeof readSkillMetadata;
 	extractSkillName: typeof extractSkillName;
 	computeRecencyScore: typeof computeRecencyScore;
 	computeContextMatchScore: typeof computeContextMatchScore;
@@ -86,6 +102,8 @@ export const _internals: {
 	getSkillStats: null as unknown as typeof getSkillStats,
 	formatSkillIndexWithContext:
 		null as unknown as typeof formatSkillIndexWithContext,
+	parseSkillFrontmatter: null as unknown as typeof parseSkillFrontmatter,
+	readSkillMetadata: null as unknown as typeof readSkillMetadata,
 	extractSkillName: null as unknown as typeof extractSkillName,
 	computeRecencyScore: null as unknown as typeof computeRecencyScore,
 	computeContextMatchScore: null as unknown as typeof computeContextMatchScore,
@@ -105,6 +123,139 @@ function extractSkillName(skillPath: string): string {
 	// Fall back to parent directory name
 	const parent = path.basename(path.dirname(skillPath));
 	return parent;
+}
+
+function stripQuotes(value: string): string {
+	const trimmed = value.trim();
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		return trimmed.slice(1, -1).trim();
+	}
+	return trimmed;
+}
+
+function normalizeDescription(description: string): string {
+	const singleLine = description.replace(/\s+/g, ' ').trim();
+	if (!singleLine) return 'No description provided';
+	return singleLine.length > 240
+		? `${singleLine.slice(0, 237)}...`
+		: singleLine;
+}
+
+/**
+ * Parse the YAML-like frontmatter from a SKILL.md file. This intentionally
+ * supports only the small subset skills use today: scalar `name` and scalar,
+ * folded (`>`), or literal (`|`) `description`.
+ */
+export function parseSkillFrontmatter(
+	content: string,
+	skillPath: string,
+): SkillMetadata {
+	const normalizedPath = skillPath.replace(/^file:/, '').replace(/\\/g, '/');
+	const fallbackName = extractSkillName(normalizedPath);
+	const fallback: SkillMetadata = {
+		path: normalizedPath,
+		name: fallbackName,
+		description: 'No description provided',
+	};
+
+	const lines = content.split(/\r?\n/);
+	if (lines[0]?.trim() !== '---') return fallback;
+
+	const end = lines.findIndex(
+		(line, index) => index > 0 && line.trim() === '---',
+	);
+	if (end === -1) return fallback;
+
+	let name = fallbackName;
+	let description = '';
+
+	for (let i = 1; i < end; i++) {
+		const line = lines[i] ?? '';
+		const match = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
+		if (!match) continue;
+
+		const key = match[1].toLowerCase();
+		const rawValue = match[2].trim();
+
+		if (key === 'name') {
+			const parsed = stripQuotes(rawValue);
+			if (parsed) name = parsed;
+			continue;
+		}
+
+		if (key !== 'description') continue;
+
+		if (rawValue === '>' || rawValue === '|') {
+			const collected: string[] = [];
+			for (let j = i + 1; j < end; j++) {
+				const next = lines[j] ?? '';
+				if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(next)) break;
+				collected.push(next.trim());
+				i = j;
+			}
+			description = collected.join(' ');
+		} else {
+			description = stripQuotes(rawValue);
+		}
+	}
+
+	return {
+		path: normalizedPath,
+		name: name || fallbackName,
+		description: normalizeDescription(description),
+	};
+}
+
+function readFilePrefix(filePath: string): string {
+	const fd = fs.openSync(filePath, 'r');
+	try {
+		const buffer = Buffer.alloc(SKILL_FRONTMATTER_READ_BYTES);
+		const bytesRead = fs.readSync(
+			fd,
+			buffer,
+			0,
+			SKILL_FRONTMATTER_READ_BYTES,
+			0,
+		);
+		return buffer.toString('utf-8', 0, bytesRead);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Extract skill metadata from a repo-relative SKILL.md path. Fails open to
+ * path-derived metadata when the file is missing, outside the project, or has
+ * malformed frontmatter.
+ */
+export function readSkillMetadata(
+	skillPath: string,
+	directory: string,
+): SkillMetadata {
+	const normalizedPath = skillPath.replace(/^file:/, '').replace(/\\/g, '/');
+	const fallback = parseSkillFrontmatter('', normalizedPath);
+
+	try {
+		if (
+			path.isAbsolute(normalizedPath) ||
+			normalizedPath.split('/').includes('..')
+		) {
+			return fallback;
+		}
+		const root = path.resolve(directory);
+		const absolutePath = path.resolve(directory, normalizedPath);
+		if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) {
+			return fallback;
+		}
+
+		const content = readFilePrefix(absolutePath);
+		return parseSkillFrontmatter(content, normalizedPath);
+	} catch {
+		return fallback;
+	}
 }
 
 /**
@@ -389,19 +540,33 @@ export function formatSkillIndexWithContext(
 	skills: string[],
 	directory: string,
 ): string {
-	const allEntries = readSkillUsageEntries(directory);
-	const hasHistory = allEntries.length > 0;
+	// Bounded check: just verify the log file exists and has content
+	// instead of reading the entire file on every delegation.
+	const usageLogPath = path.join(directory, '.swarm', 'skill-usage.jsonl');
+	let hasHistory = false;
+	try {
+		const stat = fs.statSync(usageLogPath);
+		hasHistory = stat.size > 0;
+	} catch {
+		// File doesn't exist — no history yet
+	}
 
 	if (!hasHistory) {
-		// Simple index without stats
-		return skills.map((sp) => `  - ${extractSkillName(sp)}`).join('\n');
+		// Simple index without stats, but with enough metadata for agents to
+		// decide whether to load the full skill body on demand.
+		return skills
+			.map((sp) => {
+				const meta = _internals.readSkillMetadata(sp, directory);
+				return `  - file:${meta.path} - ${meta.name}: ${meta.description}`;
+			})
+			.join('\n');
 	}
 
 	const lines: string[] = [];
 
 	for (const skillPath of skills) {
 		const stats = getSkillStats(skillPath, directory);
-		const name = extractSkillName(skillPath);
+		const meta = _internals.readSkillMetadata(skillPath, directory);
 		const compliancePct = Math.round(stats.complianceRate * 100);
 		const topAgentNames = stats.topAgents
 			.slice(0, 3)
@@ -409,7 +574,7 @@ export function formatSkillIndexWithContext(
 			.join(', ');
 
 		lines.push(
-			`  ${name}: ${skillPath} (used: ${stats.totalUsage}, compliance: ${compliancePct}%)` +
+			`  - file:${meta.path} - ${meta.name}: ${meta.description} (used: ${stats.totalUsage}, compliance: ${compliancePct}%)` +
 				(stats.topAgents.length > 0 ? ` → ${topAgentNames}` : ''),
 		);
 	}
@@ -425,6 +590,8 @@ _internals.computeSkillRelevanceScore = computeSkillRelevanceScore;
 _internals.rankSkillsForContext = rankSkillsForContext;
 _internals.getSkillStats = getSkillStats;
 _internals.formatSkillIndexWithContext = formatSkillIndexWithContext;
+_internals.parseSkillFrontmatter = parseSkillFrontmatter;
+_internals.readSkillMetadata = readSkillMetadata;
 _internals.extractSkillName = extractSkillName;
 _internals.computeRecencyScore = computeRecencyScore;
 _internals.computeContextMatchScore = computeContextMatchScore;

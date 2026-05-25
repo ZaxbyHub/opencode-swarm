@@ -16,6 +16,7 @@ export type TelemetryEvent =
 	| 'task_state_changed'
 	| 'gate_passed'
 	| 'gate_failed'
+	| 'gate_parse_error'
 	| 'phase_changed'
 	| 'budget_updated'
 	| 'model_fallback'
@@ -248,6 +249,14 @@ export const telemetry = {
 
 	gatePassed(sessionId: string, gate: string, taskId: string): void {
 		_internals.emit('gate_passed', { sessionId, gate, taskId });
+	},
+
+	gateParseError(taskId: string, error: Error): void {
+		_internals.emit('gate_parse_error', {
+			taskId,
+			errorName: error.name,
+			errorMessage: error.message.slice(0, 200),
+		});
 	},
 
 	gateFailed(

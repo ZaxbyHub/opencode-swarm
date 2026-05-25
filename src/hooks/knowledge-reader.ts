@@ -11,6 +11,7 @@ import {
 	jaccardBigram,
 	normalize,
 	readKnowledge,
+	readRetractionRecords,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
@@ -58,6 +59,7 @@ const HIVE_TIER_BOOST = 0.05;
 
 /** Confidence penalty for same-project hive entries (architect likely knows these). */
 const SAME_PROJECT_PENALTY = -0.05;
+const NORMAL_RETRIEVAL_STATUSES = new Set(['established', 'promoted']);
 
 // ============================================================================
 // Internal Helper: computeRelevance
@@ -359,13 +361,25 @@ export async function readMergedKnowledge(
 		});
 	}
 
+	const retractionRecords = await readRetractionRecords(directory);
+	const suppressedLessons = new Set(
+		retractionRecords
+			.map((record) => record.normalized_lesson)
+			.filter(
+				(value): value is string =>
+					typeof value === 'string' && value.length > 0,
+			),
+	);
+
 	// Step 3.5: Apply scope_filter — exclude entries whose scope doesn't match
 	const scopeFilter = config.scope_filter ?? ['global'];
-	// Also filter out archived entries (stale by age/decay)
+	// Also filter out entries that are not mature enough for normal retrieval,
+	// and suppress lessons retracted by architect retrospectives.
 	const filtered = merged.filter(
 		(entry) =>
 			scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern) &&
-			entry.status !== 'archived',
+			NORMAL_RETRIEVAL_STATUSES.has(entry.status) &&
+			!suppressedLessons.has(normalize(entry.lesson)),
 	);
 
 	// Step 4: Compute finalScore using three-tier weighted scoring

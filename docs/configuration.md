@@ -207,6 +207,28 @@ Optional knowledge-base curator that validates agent output against project know
 
 Curator is optional and disabled by default. When enabled, it writes `.swarm/curator-summary.json` and `.swarm/drift-report-phase-N.json` to track knowledge alignment and drift detection.
 
+### Memory
+
+Optional scoped memory substrate for recall and proposal-only memory writes.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall` and `swarm_memory_propose` |
+| `provider` | string | `"local-jsonl"` | Memory provider. PR 1 supports only local JSONL |
+| `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
+| `recall.defaultMaxItems` | number | `8` | Default max recalled memories |
+| `recall.defaultTokenBudget` | number | `1200` | Default recall prompt-block token budget |
+| `recall.minScore` | number | `0.05` | Minimum lexical recall score |
+| `recall.injection.enabled` | boolean | `true` | Enable automatic prompt injection when memory is enabled |
+| `recall.injection.minScore` | number | `0.25` | Minimum score for automatic injection |
+| `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
+| `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
+| `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
+| `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
+| `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
+
+Memory stores local JSONL files under `.swarm/memory/`. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals are written to `.swarm/memory/proposals.jsonl` and do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+
 ### todo_gate
 
 Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK comments introduced during a phase.
@@ -218,6 +240,74 @@ Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK commen
 | `block_on_threshold` | boolean | `false` | If `true`, block phase completion when the threshold is exceeded. If `false`, the gate is advisory only (warns but does not block). |
 
 The TODO gate scans for new `TODO`, `FIXME`, and `HACK` comments introduced in the current phase and compares the count against `max_high_priority`. The count is included in the `todo_scan` field returned by the `check_gate_status` tool.
+
+### skill_propagation
+
+Intelligent skill tracking, scoring, and recommendation system for agent delegations.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable/disable skill propagation tracking |
+| `enforce` | boolean | `false` | When `true`, block delegations missing the `SKILLS:` field. Advisory mode (default) only warns. |
+| `scoring.threshold` | number | `0.5` | Minimum relevance score for skill recommendations (0.0–1.0) |
+| `scoring.max_recommendations` | number | `5` | Maximum number of skill recommendations per delegation |
+
+**What it does:**
+- Logs all skill delegations to `.swarm/skill-usage.jsonl` with session-scoped entries
+- Scores available skills by relevance based on frequency, compliance, recency, and task diversity
+- Provides recommendations when delegating without a `SKILLS:` field
+- Auto-populates `.swarm/context.md` with an "Available Skills" section
+- Supports explicit routing via `.opencode/skill-routing.yaml` (Phase 2)
+
+**Guardrails:**
+- Relevance scoring threshold: 0.5 (skills below this are not recommended)
+- Maximum recommendations per delegation: 5
+- Scoring budget safeguard: Skipped when session exceeds 500 skill-usage entries
+- Graceful degradation: Zero installed skills = zero friction (no warnings, no blocks)
+
+**Example:**
+
+```json
+{
+  "skill_propagation": {
+    "enabled": true,
+    "enforce": false,
+    "scoring": {
+      "threshold": 0.5,
+      "max_recommendations": 5
+    }
+  }
+}
+```
+
+**Skill routing file** (`.opencode/skill-routing.yaml`):
+
+```yaml
+version: 1
+routing:
+  coder:
+    - path: .claude/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .claude/skills/engineering-conventions/SKILL.md
+      keywords: ["engineering", "conventions", "invariants"]
+  reviewer:
+    - path: .claude/skills/swarm-pr-review/SKILL.md
+      keywords: ["review", "security", "audit"]
+  test_engineer:
+    - path: .claude/skills/running-tests/SKILL.md
+      keywords: ["test execution", "test runner", "running tests"]
+  sme:
+    - path: .claude/skills/research-first/SKILL.md
+      keywords: ["research", "documentation", "external sources"]
+  docs:
+    - path: .claude/skills/quality-docs-manager/SKILL.md
+      keywords: ["documentation", "knowledge", "ADRs"]
+  designer:
+    - path: .claude/skills/frontend-design/SKILL.md
+      keywords: ["frontend", "UI", "design"]
+```
+
+Routing skills are merged with scored recommendations, with explicitly routed skills receiving a boosted score (0.9) to prioritize them.
 
 ## Phase Complete Configuration
 

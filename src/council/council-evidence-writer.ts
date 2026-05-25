@@ -15,14 +15,13 @@
  * any filesystem op.
  */
 
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	writeFileSync,
-} from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+	atomicWriteFile,
+	taskEvidencePath,
+	withTaskEvidenceLock,
+} from '../evidence/task-file.js';
 import type { CouncilSynthesis } from './types';
 
 const EVIDENCE_DIR = '.swarm/evidence';
@@ -33,6 +32,15 @@ const EVIDENCE_DIR = '.swarm/evidence';
 const VALID_TASK_ID = /^\d+\.\d+(\.\d+)*$/;
 const COUNCIL_GATE_NAME = 'council';
 const COUNCIL_AGENT_ID = 'architect';
+
+/**
+ * Dependency-injection seam for testing. Tests can temporarily replace
+ * `withTaskEvidenceLock` to exercise error paths (e.g. EvidenceLockTimeoutError)
+ * without mock.module leakage. Restore the entry in afterEach.
+ */
+export const _internals = {
+	withTaskEvidenceLock,
+};
 
 /**
  * Merge existing own properties into the target, skipping keys that would
@@ -70,10 +78,10 @@ function safeAssignOwnProps(
 	return target;
 }
 
-export function writeCouncilEvidence(
+export async function writeCouncilEvidence(
 	workingDir: string,
 	synthesis: CouncilSynthesis,
-): void {
+): Promise<void> {
 	// Defense in depth — library-level writer should not trust upstream validation.
 	if (!VALID_TASK_ID.test(synthesis.taskId)) {
 		throw new Error(
@@ -84,64 +92,76 @@ export function writeCouncilEvidence(
 	const dir = join(workingDir, EVIDENCE_DIR);
 	mkdirSync(dir, { recursive: true });
 
-	const filePath = join(dir, `${synthesis.taskId}.json`);
+	const filePath = taskEvidencePath(workingDir, synthesis.taskId);
 
-	// Read existing evidence (if any) and start from a clean prototype-free object.
-	const existingRoot: Record<string, unknown> = Object.create(null);
-	if (existsSync(filePath)) {
-		try {
-			const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				safeAssignOwnProps(existingRoot, parsed as Record<string, unknown>);
+	// Acquire the shared evidence lock and write atomically so this
+	// read-modify-write cannot interleave with the delegation-gate hook's
+	// read-modify-write on the same {taskId}.json — otherwise the unlocked,
+	// non-atomic write could clobber concurrently-recorded gate evidence
+	// (lost update) or leave a torn file (#978).
+	await _internals.withTaskEvidenceLock(
+		workingDir,
+		synthesis.taskId,
+		COUNCIL_AGENT_ID,
+		async () => {
+			// Read existing evidence (if any) and start from a clean prototype-free object.
+			const existingRoot: Record<string, unknown> = Object.create(null);
+			if (existsSync(filePath)) {
+				try {
+					const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+					if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+						safeAssignOwnProps(existingRoot, parsed as Record<string, unknown>);
+					}
+					// Arrays, nulls, or corrupt JSON all fall through to a fresh start.
+				} catch {
+					// Corrupted evidence file — start fresh rather than crashing.
+				}
 			}
-			// Arrays, nulls, or corrupt JSON all fall through to a fresh start.
-		} catch {
-			// Corrupted evidence file — start fresh rather than crashing.
-		}
-	}
 
-	// Preserve any prior gates entries alongside the council entry.
-	const existingGatesRaw = existingRoot.gates;
-	const mergedGates: Record<string, unknown> = Object.create(null);
-	if (
-		existingGatesRaw &&
-		typeof existingGatesRaw === 'object' &&
-		!Array.isArray(existingGatesRaw)
-	) {
-		safeAssignOwnProps(
-			mergedGates,
-			existingGatesRaw as Record<string, unknown>,
-		);
-	}
+			// Preserve any prior gates entries alongside the council entry.
+			const existingGatesRaw = existingRoot.gates;
+			const mergedGates: Record<string, unknown> = Object.create(null);
+			if (
+				existingGatesRaw &&
+				typeof existingGatesRaw === 'object' &&
+				!Array.isArray(existingGatesRaw)
+			) {
+				safeAssignOwnProps(
+					mergedGates,
+					existingGatesRaw as Record<string, unknown>,
+				);
+			}
 
-	mergedGates[COUNCIL_GATE_NAME] = {
-		// Standard GateInfo fields so check_gate_status / update_task_status see it.
-		sessionId: synthesis.swarmId,
-		timestamp: synthesis.timestamp,
-		agent: COUNCIL_AGENT_ID,
-		// Council-specific extras — safe to carry; existing readers only check presence.
-		verdict: synthesis.overallVerdict,
-		vetoedBy: synthesis.vetoedBy,
-		roundNumber: synthesis.roundNumber,
-		allCriteriaMet: synthesis.allCriteriaMet,
-		// Quorum metadata — read by applyRehydrationCache and the council
-		// fast-path to validate the APPROVE was recorded with sufficient
-		// distinct members. Old evidence files (pre-quorum) lack this field
-		// and are conservatively rehydrated as quorumSize: 1.
-		quorumSize: synthesis.quorumSize,
-	};
+			mergedGates[COUNCIL_GATE_NAME] = {
+				// Standard GateInfo fields so check_gate_status / update_task_status see it.
+				sessionId: synthesis.swarmId,
+				timestamp: synthesis.timestamp,
+				agent: COUNCIL_AGENT_ID,
+				// Council-specific extras — safe to carry; existing readers only check presence.
+				verdict: synthesis.overallVerdict,
+				vetoedBy: synthesis.vetoedBy,
+				roundNumber: synthesis.roundNumber,
+				allCriteriaMet: synthesis.allCriteriaMet,
+				// Quorum metadata — read by applyRehydrationCache and the council
+				// fast-path to validate the APPROVE was recorded with sufficient
+				// distinct members. Old evidence files (pre-quorum) lack this field
+				// and are conservatively rehydrated as quorumSize: 1.
+				quorumSize: synthesis.quorumSize,
+			};
 
-	const updated: Record<string, unknown> = Object.create(null);
-	safeAssignOwnProps(updated, existingRoot);
-	updated.gates = mergedGates;
-	// Ensure TaskEvidence schema-required fields are always present.
-	// readTaskEvidenceRaw validates against TaskEvidenceSchema (requires taskId +
-	// required_gates); council-only writes omit them when no prior gate evidence
-	// exists, causing ZodError → false "gate not run" block in checkCouncilGate.
-	if (!updated.taskId) updated.taskId = synthesis.taskId;
-	if (!Array.isArray(updated.required_gates)) updated.required_gates = [];
+			const updated: Record<string, unknown> = Object.create(null);
+			safeAssignOwnProps(updated, existingRoot);
+			updated.gates = mergedGates;
+			// Ensure TaskEvidence schema-required fields are always present.
+			// readTaskEvidenceRaw validates against TaskEvidenceSchema (requires taskId +
+			// required_gates); council-only writes omit them when no prior gate evidence
+			// exists, causing ZodError → false "gate not run" block in checkCouncilGate.
+			if (!updated.taskId) updated.taskId = synthesis.taskId;
+			if (!Array.isArray(updated.required_gates)) updated.required_gates = [];
 
-	writeFileSync(filePath, JSON.stringify(updated, null, 2));
+			await atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
+		},
+	);
 
 	// ── Round-history audit log (non-blocking) ────────────────────────────
 	// Append-only log of every council round for multi-round tasks.

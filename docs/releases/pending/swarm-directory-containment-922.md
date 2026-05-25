@@ -14,7 +14,13 @@ Issue #922 reported that `.swarm/` directories were being created in project sub
 ## Migration
 No migration required. Existing stray `.swarm/` directories can be detected and cleaned up by running `/swarm doctor --fix`.
 
+## Phase 1 update (depth bound + project-indicator heuristic)
+- `validateProjectRoot` now bounds its parent-directory walk to `MAX_DEPTH=20` levels, preventing unbounded filesystem traversal on deep directory trees.
+- Added `PROJECT_INDICATORS` array (11 items: `package.json`, `.git`, `.opencode`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle`, `CMakeLists.txt`).
+- Stray `.swarm/` directories without a coexisting project indicator are now ignored (fail-open). Rejection only occurs when a parent `.swarm/` coexists with a project indicator, indicating a genuine parent project.
+- Backward-compatible error messages and rejection behavior for genuine parent projects are preserved. Closes #980.
+
 ## Known caveats
-- `detectStraySwarmDirs` has a depth limit of 10 levels, which may miss strays in deeply nested monorepos. This is a detection gap only — creation prevention works at any depth.
+- `detectStraySwarmDirs` has a depth limit of 10 levels, which may miss strays in deeply nested monorepos. This is a detection gap only — creation prevention (`validateProjectRoot`) walks up to `MAX_DEPTH=20` levels and fails open beyond that.
 - `resolveWorkingDirectory` intentionally avoids `realpathSync` for the resolved path to prevent Windows 8.3 short filename issues. The write-time `validateProjectRoot` guard (which does use `realpathSync`) catches any symlink-based bypasses.
 - Case-sensitive `.swarm` checks on Windows will not match directories named `.SWARM` or `.Swarm`.

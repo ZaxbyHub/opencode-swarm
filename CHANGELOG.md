@@ -1,5 +1,82 @@
 # Changelog
 
+## [7.32.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.2...v7.32.3) (2026-05-25)
+
+
+### Bug Fixes
+
+* **memory:** harden recall injection precision ([#1011](https://github.com/zaxbysauce/opencode-swarm/issues/1011)) ([b06d79c](https://github.com/zaxbysauce/opencode-swarm/commit/b06d79c6a98bb2e6867e848dc2fbb22c53a73185))
+
+## [7.32.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.1...v7.32.2) (2026-05-25)
+
+
+### Bug Fixes
+
+* **full-auto:** harden oversight gates with phase-exact evidence, fail-closed writes, and shared parser ([#1008](https://github.com/zaxbysauce/opencode-swarm/issues/1008)) ([68da309](https://github.com/zaxbysauce/opencode-swarm/commit/68da309ff981fe077d44ac400269cd7bebefc85b))
+
+## [7.32.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.0...v7.32.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* **council:** serialize council evidence write under shared evidence lock with atomic write ([#1001](https://github.com/zaxbysauce/opencode-swarm/issues/1001)) ([b4c0570](https://github.com/zaxbysauce/opencode-swarm/commit/b4c05700851edbee5d31055024ced2be06a90337))
+
+## [7.32.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.31.0...v7.32.0) (2026-05-24)
+
+
+### Features
+
+* **memory:** inject scoped recall bundles into agent prompts ([#1006](https://github.com/zaxbysauce/opencode-swarm/issues/1006)) ([67f5e0b](https://github.com/zaxbysauce/opencode-swarm/commit/67f5e0b3c7037d83faa5be6b4909878f282953d4))
+
+## [7.31.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.30.0...v7.31.0) (2026-05-24)
+
+
+### Features
+
+* **knowledge:** enforce mature-only retrieval defaults and cross-tier retraction ([#998](https://github.com/zaxbysauce/opencode-swarm/issues/998)) ([ef5da0a](https://github.com/zaxbysauce/opencode-swarm/commit/ef5da0abb3df9ba4555314de617ca74c6e2e1704))
+
+## [7.30.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.4...v7.30.0) (2026-05-24)
+
+
+### Features
+
+* **memory:** add opt-in swarm memory core ([#1000](https://github.com/zaxbysauce/opencode-swarm/issues/1000)) ([84b07f8](https://github.com/zaxbysauce/opencode-swarm/commit/84b07f8686a592c8676e35887603b1f734eb6339))
+
+## [7.29.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.3...v7.29.4) (2026-05-24)
+
+
+### Bug Fixes
+
+* **evidence:** add depth-bounded walk and project indicators to validateProjectRoot ([#997](https://github.com/zaxbysauce/opencode-swarm/issues/997)) ([6085676](https://github.com/zaxbysauce/opencode-swarm/commit/6085676d631d7279d2adb9c604668088fda50d35))
+
+## [7.29.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.29.2...v7.29.3) (2026-05-23)
+
+
+### Bug Fixes
+
+* **gate-evidence:** distinguish ENOENT from corruption errors in readExisting ([#995](https://github.com/zaxbysauce/opencode-swarm/issues/995)) ([f61557a](https://github.com/zaxbysauce/opencode-swarm/commit/f61557ab9a98f385b3c9ff2c25a02aa6b8be6df8))
+
+## [7.28.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.1...v7.28.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* **delegation-gate:** resolve evidence task IDs correctly for parallel Stage B dispatches ([#982](https://github.com/zaxbysauce/opencode-swarm/issues/982)) ([ffbde54](https://github.com/zaxbysauce/opencode-swarm/commit/ffbde54890f55a1137ba9e8c963cfac302ab937a))
+
+## [7.28.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.28.0...v7.28.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **skills:** propagate descriptions to subagents ([#981](https://github.com/zaxbysauce/opencode-swarm/issues/981)) ([b51b2f8](https://github.com/zaxbysauce/opencode-swarm/commit/b51b2f80e3c156174de352e2768e0c2d426ed45d))
+
+## [7.28.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.4...v7.28.0) (2026-05-22)
+
+
+### Features
+
+* **skills:** add parallel-work-check skill and integrate into pr-review-fix and swarm-implement ([8da32c0](https://github.com/zaxbysauce/opencode-swarm/commit/8da32c04a415628dd5f43835e4776e57d198892b)), closes [#975](https://github.com/zaxbysauce/opencode-swarm/issues/975)
+
 ## [7.27.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.27.3...v7.27.4) (2026-05-22)
 
 

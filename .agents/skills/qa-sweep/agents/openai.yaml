@@ -1,0 +1,4 @@
+interface:
+  display_name: "QA Sweep"
+  short_description: "Run a focused quality review"
+  default_prompt: "Use $qa-sweep to review this change and identify remaining risks."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mock Migration"
+  short_description: "Replace leaky mocks with seams"
+  default_prompt: "Use $mock-to-internals-migration to convert this test away from mock.module."

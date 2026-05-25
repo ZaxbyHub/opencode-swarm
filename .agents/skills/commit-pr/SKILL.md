@@ -25,7 +25,7 @@ If instructions conflict:
 
 ## Codex Execution Rules
 
-- Use `shell_command` for `git`, `gh`, build, test, and CI commands.
+- Use the available shell execution tool for `git`, `gh`, build, test, and CI commands.
 - Use `apply_patch` for manual file edits.
 - Use `multi_tool_use.parallel` for independent reads, status checks, and non-conflicting repo inspections.
 - Do not stage `.Codex/`, IDE-local files, or unrelated worktree changes.
@@ -63,18 +63,22 @@ If the user explicitly asks for a ready PR sooner, obey that request and documen
 When the user asks to open, ship, ready, or close out a PR:
 
 1. inspect remote checks with `gh pr view <n> --json statusCheckRollup,...` or `gh pr checks <n>`
-2. wait for required checks to finish when practical
+2. verify check data belongs to the current `headRefOid` after every follow-up push
 3. if a required job is `cancelled` and downstream jobs are `skipped`, inspect the run and rerun failed/cancelled jobs
-4. do not call the PR merge-ready while a required check is `cancelled`, `skipped`, `in_progress`, or otherwise non-green unless the user explicitly accepts that state
+4. if an obsolete older-head run is already failed or still consuming concurrency, inspect it before cancellation and cancel only when it is no longer the PR head under validation
+5. wait for required checks to finish when practical
+6. do not call the PR merge-ready while a required check is `cancelled`, `skipped`, `in_progress`, or otherwise non-green unless the user explicitly accepts that state
 
 Recommended commands:
 
 ```powershell
 gh pr view <number> --json body,headRefName,headRefOid,isDraft,state,statusCheckRollup,url
 gh pr checks <number> --watch --fail-fast
-gh run view <run-id> --json jobs,status,conclusion,url
+gh run view <run-id> --json headSha,jobs,status,conclusion,url
 gh run rerun <run-id> --failed
 ```
+
+For CI `dist-check` failures on source-touching PRs, inspect the CI log first. If the failure is generated bundle drift from stale local dependencies, refresh with `bun install --frozen-lockfile --force`, run `bun run build`, verify the `dist/` diff, and commit the regenerated files instead of calling the check pre-existing.
 
 ### Issue comment requirement
 

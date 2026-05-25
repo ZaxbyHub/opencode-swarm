@@ -121,6 +121,29 @@ describe('readContextualKnowledge', () => {
 		);
 	});
 
+	it('excludes candidate entries from default retrieval', async () => {
+		await seed([
+			entry('cccccccc-1111-4ccc-9ccc-cccccccccccc', {
+				lesson: 'candidate lesson should stay hidden',
+				status: 'candidate',
+			}),
+			entry('dddddddd-1111-4ddd-9ddd-dddddddddddd', {
+				lesson: 'established lesson should be retrievable',
+				status: 'established',
+			}),
+		]);
+		const result = await readContextualKnowledge(tmp, cfg, {
+			projectName: 't',
+			currentPhase: 'Phase 1',
+		});
+		expect(result.map((r) => r.id)).not.toContain(
+			'cccccccc-1111-4ccc-9ccc-cccccccccccc',
+		);
+		expect(result.map((r) => r.id)).toContain(
+			'dddddddd-1111-4ddd-9ddd-dddddddddddd',
+		);
+	});
+
 	it('boosts entries that have an active generated_skill_path', async () => {
 		await seed([
 			entry('cccccccc-cccc-4ccc-9ccc-cccccccccccc', {

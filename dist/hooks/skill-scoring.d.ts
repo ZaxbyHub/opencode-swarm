@@ -33,11 +33,22 @@ export interface SkillStats {
         count: number;
     }>;
 }
+/** Metadata extracted from a SKILL.md frontmatter block. */
+export interface SkillMetadata {
+    /** Repo-relative path to the skill file. */
+    path: string;
+    /** Human-readable skill name. */
+    name: string;
+    /** Short description from frontmatter, or a fallback when absent. */
+    description: string;
+}
 export declare const _internals: {
     computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
     rankSkillsForContext: typeof rankSkillsForContext;
     getSkillStats: typeof getSkillStats;
     formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
+    parseSkillFrontmatter: typeof parseSkillFrontmatter;
+    readSkillMetadata: typeof readSkillMetadata;
     extractSkillName: typeof extractSkillName;
     computeRecencyScore: typeof computeRecencyScore;
     computeContextMatchScore: typeof computeContextMatchScore;
@@ -47,6 +58,18 @@ export declare const _internals: {
  * E.g. `.claude/skills/writing-tests/SKILL.md` → `writing-tests`
  */
 declare function extractSkillName(skillPath: string): string;
+/**
+ * Parse the YAML-like frontmatter from a SKILL.md file. This intentionally
+ * supports only the small subset skills use today: scalar `name` and scalar,
+ * folded (`>`), or literal (`|`) `description`.
+ */
+export declare function parseSkillFrontmatter(content: string, skillPath: string): SkillMetadata;
+/**
+ * Extract skill metadata from a repo-relative SKILL.md path. Fails open to
+ * path-derived metadata when the file is missing, outside the project, or has
+ * malformed frontmatter.
+ */
+export declare function readSkillMetadata(skillPath: string, directory: string): SkillMetadata;
 /**
  * Computes a recency score in [0, 1] based on how recently the skill was used.
  * Full score (1.0) for usage within 24 hours, linearly decaying to 0 over 30 days.

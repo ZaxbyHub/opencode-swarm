@@ -1,0 +1,4 @@
+interface:
+  display_name: "Running Tests"
+  short_description: "Run opencode-swarm tests safely"
+  default_prompt: "Use $running-tests to choose and run the right opencode-swarm validation commands."

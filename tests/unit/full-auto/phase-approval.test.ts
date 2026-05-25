@@ -97,6 +97,25 @@ describe('verifyFullAutoPhaseApproval', () => {
 		expect(r.evidence?.verdict).toBe('APPROVED');
 	});
 
+	test('blocks when APPROVED phase-boundary evidence omits phase field', () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		writeEvidence(tmpDir, 12, {
+			type: 'full_auto_oversight',
+			verdict: 'APPROVED',
+			trigger_source: 'phase_boundary',
+			timestamp: new Date().toISOString(),
+			evidence_checked: ['diff'],
+		});
+		const r = verifyFullAutoPhaseApproval(
+			tmpDir,
+			'sess-1',
+			12,
+			makeConfig(true),
+		);
+		expect(r.ok).toBe(false);
+		expect(r.reason).toContain('no phase-boundary oversight record found');
+	});
+
 	test('blocks on stale evidence (>24h)', () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();

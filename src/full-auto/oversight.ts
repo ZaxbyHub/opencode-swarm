@@ -29,6 +29,10 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import * as logger from '../utils/logger';
 import {
+	type ParsedCriticResponse,
+	parseCriticResponseFields,
+} from './critic-response-parser';
+import {
 	loadFullAutoRunState,
 	nextFullAutoOversightSequence,
 	pauseFullAutoRun,
@@ -43,14 +47,7 @@ import {
 let oversightSequenceCounter = 0;
 void oversightSequenceCounter; // referenced via _internals.resetSequence
 
-export interface FullAutoCriticResult {
-	verdict: string;
-	reasoning: string;
-	evidenceChecked: string[];
-	antiPatternsDetected: string[];
-	escalationNeeded: boolean;
-	rawResponse: string;
-}
+export interface FullAutoCriticResult extends ParsedCriticResponse {}
 
 export type FullAutoTriggerSource =
 	| 'text_pattern'
@@ -107,101 +104,16 @@ export interface DispatchFullAutoOversightInput {
 	};
 }
 
-const VALID_VERDICTS = [
-	'APPROVED',
-	'NEEDS_REVISION',
-	'REJECTED',
-	'BLOCKED',
-	'ANSWER',
-	'ESCALATE_TO_HUMAN',
-	'REPHRASE',
-	'PENDING',
-] as const;
-
 export function parseFullAutoCriticResponse(
 	rawResponse: string,
 ): FullAutoCriticResult {
-	const result: FullAutoCriticResult = {
-		verdict: 'NEEDS_REVISION',
-		reasoning: '',
-		evidenceChecked: [],
-		antiPatternsDetected: [],
-		escalationNeeded: false,
-		rawResponse,
-	};
-
-	const lines = rawResponse.split('\n');
-	let currentKey = '';
-	let currentValue = '';
-
-	const commitField = (
-		res: FullAutoCriticResult,
-		key: string,
-		value: string,
-	): void => {
-		switch (key) {
-			case 'VERDICT': {
-				const normalized = value.trim().toUpperCase().replace(/[`*]/g, '');
-				if ((VALID_VERDICTS as readonly string[]).includes(normalized)) {
-					res.verdict = normalized;
-				} else {
-					logger.warn(
-						`[full-auto/oversight] Unknown verdict '${value}' — defaulting to NEEDS_REVISION`,
-					);
-					res.verdict = 'NEEDS_REVISION';
-				}
-				break;
-			}
-			case 'REASONING':
-				res.reasoning = value.trim();
-				break;
-			case 'EVIDENCE_CHECKED':
-				if (value && value !== 'none' && value !== '"none"') {
-					res.evidenceChecked = value
-						.split(',')
-						.map((s) => s.trim())
-						.filter(Boolean);
-				}
-				break;
-			case 'ANTI_PATTERNS_DETECTED':
-				if (value && value !== 'none' && value !== '"none"') {
-					res.antiPatternsDetected = value
-						.split(',')
-						.map((s) => s.trim())
-						.filter(Boolean);
-				}
-				break;
-			case 'ESCALATION_NEEDED':
-				res.escalationNeeded = value.trim().toUpperCase() === 'YES';
-				break;
-		}
-	};
-
-	for (const line of lines) {
-		const colonIndex = line.indexOf(':');
-		if (colonIndex !== -1) {
-			const key = line.slice(0, colonIndex).trim().toUpperCase();
-			if (
-				[
-					'VERDICT',
-					'REASONING',
-					'EVIDENCE_CHECKED',
-					'ANTI_PATTERNS_DETECTED',
-					'ESCALATION_NEEDED',
-				].includes(key)
-			) {
-				if (currentKey) commitField(result, currentKey, currentValue);
-				currentKey = key;
-				currentValue = line.slice(colonIndex + 1).trim();
-			} else {
-				currentValue += `\n${line}`;
-			}
-		} else if (line.trim()) {
-			currentValue += `\n${line}`;
-		}
-	}
-	if (currentKey) commitField(result, currentKey, currentValue);
-	return result;
+	return parseCriticResponseFields(rawResponse, {
+		onUnknownVerdict: (value) => {
+			logger.warn(
+				`[full-auto/oversight] Unknown verdict '${value}' — defaulting to NEEDS_REVISION`,
+			);
+		},
+	});
 }
 
 function buildOversightPrompt(input: DispatchFullAutoOversightInput): string {

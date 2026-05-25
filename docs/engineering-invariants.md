@@ -37,6 +37,18 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established:** every `working_directory` argument must resolve to the project root. The shared helper enforces this for all six callers (`save_plan`, `completion_verify`, `check-gate-status`, `convene-council`, `declare-council-criteria`, `phase-complete`, `test-runner`). `process.cwd()` fallbacks must be removed from runtime metrics paths and replaced with explicit `ctx.directory` propagation.
 - **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
 
+### Issue #922 Phase 1 — `validateProjectRoot` depth-bounded walk with project indicators
+
+- **Symptom:** `validateProjectRoot` in `src/evidence/manager.ts` performed an unbounded parent-directory walk with no depth limit, risking unbounded filesystem traversal on deep directory trees.
+- **Fix applied:**
+  - Added `MAX_DEPTH = 20` constant bounding the parent walk
+  - Added `PROJECT_INDICATORS` array (11 items): `package.json`, `.git`, `.opencode`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle`, `CMakeLists.txt`
+  - Stray `.swarm/` directories without a coexisting project indicator are ignored (fail-open at depth limit)
+  - Fail-closed on non-ENOENT indicator errors (EPERM, EBUSY → assume indicator present)
+  - `realpathSync` for junction/symlink resolution
+- **Invariant established:** `validateProjectRoot` prevents unbounded traversal while distinguishing genuine parent projects (`.swarm/` + project indicator) from stray artifacts (`.swarm/` alone). Depth limit is fail-open; indicator errors are fail-closed.
+- **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
+
 ### Issue #922 Phase 2 — Extended `.swarm/` containment to remaining tools
 
 - **Symptom:** five tools (`test-impact`, `mutation-test`, `diff-summary`, `update-task-status`, `declare-scope`) still contained `process.cwd()` fallbacks or lacked subdirectory containment guards, allowing `.swarm/` creation in subdirectories when those tools were invoked from non-project-root contexts.

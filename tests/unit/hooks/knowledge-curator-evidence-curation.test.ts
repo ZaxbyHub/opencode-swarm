@@ -15,8 +15,11 @@ const mockReadKnowledge = vi.fn<[string], Promise<unknown[]>>();
 const mockRewriteKnowledge = vi.fn<[string, unknown[]], Promise<void>>();
 const mockResolveSwarmKnowledgePath = vi.fn<[string], string>();
 const mockResolveSwarmRejectedPath = vi.fn<[string], string>();
+const mockResolveHiveKnowledgePath = vi.fn<[], string>();
 const mockComputeConfidence = vi.fn<[number, boolean], number>();
 const mockInferTags = vi.fn<[string], string[]>();
+const mockReadRetractionRecords = vi.fn<[string], Promise<unknown[]>>();
+const mockAppendRetractionRecord = vi.fn<[string, unknown], Promise<void>>();
 
 // Create local mock variables for utils
 const mockReadSwarmFileAsync = vi.fn<
@@ -73,9 +76,14 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 		mockResolveSwarmKnowledgePath(...(args as [string])),
 	resolveSwarmRejectedPath: (...args: unknown[]) =>
 		mockResolveSwarmRejectedPath(...(args as [string])),
+	resolveHiveKnowledgePath: () => mockResolveHiveKnowledgePath(),
 	readKnowledge: (...args: unknown[]) =>
 		mockReadKnowledge(...(args as [string])),
+	readRetractionRecords: (...args: unknown[]) =>
+		mockReadRetractionRecords(...(args as [string])),
 	appendKnowledge: (...args: unknown[]) => mockAppendKnowledge(...(args as [])),
+	appendRetractionRecord: (...args: unknown[]) =>
+		mockAppendRetractionRecord(...(args as [string, unknown])),
 	appendRejectedLesson: (...args: unknown[]) =>
 		mockAppendRejectedLesson(...(args as [])),
 	findNearDuplicate: (...args: unknown[]) =>
@@ -143,8 +151,13 @@ describe('knowledge-curator - evidence file curation', () => {
 		mockResolveSwarmRejectedPath.mockReturnValue(
 			'/project/.swarm/rejected.jsonl',
 		);
+		mockResolveHiveKnowledgePath.mockReturnValue(
+			'/home/user/.local/share/opencode-swarm/shared-learnings.jsonl',
+		);
 		mockReadKnowledge.mockResolvedValue([]);
+		mockReadRetractionRecords.mockResolvedValue([]);
 		mockAppendKnowledge.mockResolvedValue(undefined);
+		mockAppendRetractionRecord.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockRewriteKnowledge.mockResolvedValue(undefined);
@@ -512,12 +525,7 @@ Phase: 1
 				}),
 			);
 
-			// Expected: updateRetrievalOutcome called with phase number
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 5',
-				true,
-			);
+			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 		});
 
 		test('missing project_name defaults to "unknown"', async () => {
@@ -579,12 +587,7 @@ Phase: 1
 				}),
 			);
 
-			// Expected: updateRetrievalOutcome called with default phase
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 1',
-				true,
-			);
+			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 		});
 	});
 

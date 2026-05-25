@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import type { AgentName } from '../../../src/config/constants';
-import { AGENT_TOOL_MAP } from '../../../src/config/constants';
+import {
+	AGENT_TOOL_MAP,
+	MEMORY_AGENT_TOOL_MAP,
+	MEMORY_TOOL_NAMES,
+} from '../../../src/config/constants';
 
 describe('AGENT_TOOL_MAP', () => {
 	const allAgentNames: AgentName[] = [
@@ -76,5 +80,22 @@ describe('AGENT_TOOL_MAP', () => {
 		for (const agent of allAgentNames) {
 			expect(AGENT_TOOL_MAP[agent]).toContain('swarm_command');
 		}
+	});
+
+	it('memory tools are not in the default agent map', () => {
+		for (const tools of Object.values(AGENT_TOOL_MAP)) {
+			for (const memoryTool of MEMORY_TOOL_NAMES) {
+				expect(tools).not.toContain(memoryTool);
+			}
+		}
+	});
+
+	it('memory opt-in map assigns proposal tools only to non-reviewer roles', () => {
+		expect(MEMORY_AGENT_TOOL_MAP.architect).toEqual([
+			'swarm_memory_recall',
+			'swarm_memory_propose',
+		]);
+		expect(MEMORY_AGENT_TOOL_MAP.critic).toEqual(['swarm_memory_recall']);
+		expect(MEMORY_AGENT_TOOL_MAP.reviewer).toEqual(['swarm_memory_recall']);
 	});
 });

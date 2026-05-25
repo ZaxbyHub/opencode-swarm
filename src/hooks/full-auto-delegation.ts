@@ -178,6 +178,7 @@ async function writeDelegationEvent(
 		logger.error(
 			`[full-auto/delegation] failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
+		throw error;
 	} finally {
 		if (lockResult?.acquired && lockResult.lock._release) {
 			try {

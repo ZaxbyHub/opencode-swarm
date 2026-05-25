@@ -90,6 +90,18 @@ export declare function gateKnowledgeApplication(args: {
     recentArchitectText: string;
     config: KnowledgeApplicationConfig;
 }): GateResult;
+/**
+ * Filter knowledge entries by minimum confidence threshold.
+ * Used by the knowledge reinjection hook to surface high-confidence
+ * knowledge after context compression events.
+ *
+ * @param entries - Array of knowledge entries (swarm or hive)
+ * @param threshold - Minimum confidence score (default 0.8)
+ * @returns Filtered entries with confidence >= threshold
+ */
+export declare function filterHighConfidenceKnowledge<T extends {
+    confidence: number;
+}>(entries: T[], threshold?: number): T[];
 export declare const _internals: {
     parseAcknowledgments: typeof parseAcknowledgments;
     recordKnowledgeShown: typeof recordKnowledgeShown;

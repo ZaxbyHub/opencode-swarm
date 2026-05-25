@@ -137,6 +137,7 @@ Get-Content "$env:TEMP\test_out.txt" | Select-Object -Last 50
 - `Select-String -Last N` — invalid parameter, use `Select-Object -Last N`
 - `2>&1 2>&1` — duplicate redirection, causes parse error; use `2>&1` once
 - `&&` — not supported in PowerShell 5.1; use `; if ($?) { cmd2 }` instead
+- After `bun install --frozen-lockfile --force`, non-elevated Windows shells can hit `EPERM` while reading refreshed `node_modules` entries. Treat that as a host permission/access issue: rerun the same focused Bun command with approved/elevated access before diagnosing it as a code or test failure.
 
 ---
 
@@ -278,4 +279,4 @@ bun --smol test tests/unit/agents/some-file.test.ts --timeout 30000
 | `Select-String -Last N` error | Invalid PowerShell parameter | Use `Select-Object -Last N` |
 | Token budget test failure | Prompt grew past hardcoded threshold | Treat as soft regression; update threshold |
 | CONSTRAINT assertion fails after refactor | Test checks for removed format template | Update assertion to match current prompt |
-| dist-check CI failure | `src/` change not rebuilt before commit | Run `bun run build` and stage `dist/` |
+| dist-check CI failure | `dist-check` is a hard gate. If your PR touched `src/`, run `bun run build` and commit `dist/` in the same PR. If your PR did not touch `src/`, the drift is on `main` — do not commit rebuilt dist to your PR. |

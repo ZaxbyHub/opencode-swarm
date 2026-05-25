@@ -21,8 +21,11 @@ const mockReadKnowledge = vi.fn<[string], Promise<unknown[]>>();
 const mockRewriteKnowledge = vi.fn<[string, unknown[]], Promise<void>>();
 const mockResolveSwarmKnowledgePath = vi.fn<[string], string>();
 const mockResolveSwarmRejectedPath = vi.fn<[string], string>();
+const mockResolveHiveKnowledgePath = vi.fn<[], string>();
 const mockComputeConfidence = vi.fn<[number, boolean], number>();
 const mockInferTags = vi.fn<[string], string[]>();
+const mockReadRetractionRecords = vi.fn<[string], Promise<unknown[]>>();
+const mockAppendRetractionRecord = vi.fn<[string, unknown], Promise<void>>();
 
 // Create local mock variables for utils
 const mockReadSwarmFileAsync = vi.fn<
@@ -79,9 +82,14 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 		mockResolveSwarmKnowledgePath(...(args as [string])),
 	resolveSwarmRejectedPath: (...args: unknown[]) =>
 		mockResolveSwarmRejectedPath(...(args as [string])),
+	resolveHiveKnowledgePath: () => mockResolveHiveKnowledgePath(),
 	readKnowledge: (...args: unknown[]) =>
 		mockReadKnowledge(...(args as [string])),
+	readRetractionRecords: (...args: unknown[]) =>
+		mockReadRetractionRecords(...(args as [string])),
 	appendKnowledge: (...args: unknown[]) => mockAppendKnowledge(...(args as [])),
+	appendRetractionRecord: (...args: unknown[]) =>
+		mockAppendRetractionRecord(...(args as [string, unknown])),
 	appendRejectedLesson: (...args: unknown[]) =>
 		mockAppendRejectedLesson(...(args as [])),
 	findNearDuplicate: (...args: unknown[]) =>
@@ -166,8 +174,13 @@ describe('knowledge-curator', () => {
 		mockResolveSwarmRejectedPath.mockReturnValue(
 			'/project/.swarm/rejected.jsonl',
 		);
+		mockResolveHiveKnowledgePath.mockReturnValue(
+			'/home/user/.local/share/opencode-swarm/shared-learnings.jsonl',
+		);
 		mockReadKnowledge.mockResolvedValue([]);
+		mockReadRetractionRecords.mockResolvedValue([]);
 		mockAppendKnowledge.mockResolvedValue(undefined);
+		mockAppendRetractionRecord.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockRewriteKnowledge.mockResolvedValue(undefined);
@@ -644,7 +657,15 @@ Another line without a bullet
 				project_name: 'proj',
 				auto_generated: true,
 			};
+			const hiveEntry = {
+				...existingEntry,
+				id: 'hive-entry-1',
+				tier: 'hive' as const,
+				source_project: 'other-project',
+				encounter_score: 1,
+			};
 			mockReadKnowledge.mockResolvedValueOnce([existingEntry]);
+			mockReadKnowledge.mockResolvedValueOnce([hiveEntry]);
 
 			// Plan with RETRACT: line
 			const planContent = `# Test Project
@@ -682,6 +703,14 @@ Phase: 1
 				'Retracted by architect: Always use strict mode',
 				'architect',
 			);
+			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
+				'/project',
+				expect.objectContaining({
+					normalized_lesson: 'always use strict mode',
+					matched_swarm_ids: ['entry-1'],
+					matched_hive_ids: ['hive-entry-1'],
+				}),
+			);
 		});
 
 		test('BAD RULE: line has same behavior as RETRACT:', async () => {
@@ -713,7 +742,15 @@ Phase: 1
 				project_name: 'proj',
 				auto_generated: true,
 			};
+			const hiveEntry = {
+				...existingEntry,
+				id: 'hive-entry-2',
+				tier: 'hive' as const,
+				source_project: 'other-project',
+				encounter_score: 1,
+			};
 			mockReadKnowledge.mockResolvedValueOnce([existingEntry]);
+			mockReadKnowledge.mockResolvedValueOnce([hiveEntry]);
 
 			const planContent = `# Test Project
 Swarm: mega
@@ -749,6 +786,14 @@ Phase: 1
 				'entry-2',
 				'Retracted by architect: Disable all linting errors',
 				'architect',
+			);
+			expect(mockAppendRetractionRecord).toHaveBeenCalledWith(
+				'/project',
+				expect.objectContaining({
+					normalized_lesson: 'disable all linting errors',
+					matched_swarm_ids: ['entry-2'],
+					matched_hive_ids: ['hive-entry-2'],
+				}),
 			);
 		});
 
@@ -1084,8 +1129,8 @@ Phase: 1
 		});
 	});
 
-	describe('updateRetrievalOutcome wiring', () => {
-		test('updateRetrievalOutcome is called with correct arguments after curation', async () => {
+	describe('retrieval outcome semantics', () => {
+		test('curation does not mark retrieval outcomes as successful', async () => {
 			const planContent = `# Test Project
 Swarm: mega
 Phase: 7
@@ -1105,19 +1150,14 @@ Phase: 7
 
 			await hook(input, {});
 
-			// Expected: updateRetrievalOutcome called with directory, "Phase 7", and true
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledTimes(1);
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 7',
-				true,
-			);
+			// Curation should not eagerly claim a success outcome.
+			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 
 			// Also ensure curation happened
 			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
 		});
 
-		test('updateRetrievalOutcome is called even when curation returns zero new entries', async () => {
+		test('curation with zero stored entries still does not mark outcome', async () => {
 			const planContent = `# Test Project
 Swarm: mega
 Phase: 3
@@ -1145,19 +1185,14 @@ Phase: 3
 
 			await hook(input, {});
 
-			// Expected: updateRetrievalOutcome still called even though no entries were stored
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledTimes(1);
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 3',
-				true,
-			);
+			// No success/failure outcome should be attributed at curation time.
+			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 
 			// Confirm no entries were stored
 			expect(mockAppendKnowledge).not.toHaveBeenCalled();
 		});
 
-		test('updateRetrievalOutcome errors are swallowed by safeHook', async () => {
+		test('curation remains safe even without retrieval-outcome side effects', async () => {
 			const planContent = `# Test Project
 Swarm: mega
 Phase: 5
@@ -1165,11 +1200,6 @@ Phase: 5
 ### Lessons Learned
 - Test lesson
 `;
-
-			// Make updateRetrievalOutcome throw
-			mockUpdateRetrievalOutcome.mockRejectedValueOnce(
-				new Error('knowledge-reader failed'),
-			);
 
 			// Make safeHook wrap the function to catch errors (the real behavior)
 			mockSafeHook.mockImplementation((fn: unknown) => {
@@ -1197,14 +1227,13 @@ Phase: 5
 			// Expected: hook should NOT throw (safeHook catches errors)
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
-			// Confirm updateRetrievalOutcome was called (even though it threw)
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledTimes(1);
+			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 
 			// Curation should have completed successfully
 			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
 		});
 
-		test('phase number is correctly interpolated for single-digit phases', async () => {
+		test('phase parsing still works for single-digit phases', async () => {
 			const planContent = `# Test Project
 Swarm: mega
 Phase: 1
@@ -1224,15 +1253,10 @@ Phase: 1
 
 			await hook(input, {});
 
-			// Expected: "Phase 1" (not "Phase 01" or "Phase  1")
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 1',
-				true,
-			);
+			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
 		});
 
-		test('phase number is correctly interpolated for multi-digit phases', async () => {
+		test('phase parsing still works for multi-digit phases', async () => {
 			const planContent = `# Test Project
 Swarm: mega
 Phase: 12
@@ -1252,12 +1276,7 @@ Phase: 12
 
 			await hook(input, {});
 
-			// Expected: "Phase 12" (not "Phase 12" or other formatting)
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 12',
-				true,
-			);
+			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('phase number defaults to 1 when Phase: header is missing', async () => {
@@ -1279,12 +1298,7 @@ Swarm: mega
 
 			await hook(input, {});
 
-			// Expected: Falls back to "Phase 1" when Phase: header not found
-			expect(mockUpdateRetrievalOutcome).toHaveBeenCalledWith(
-				'/project',
-				'Phase 1',
-				true,
-			);
+			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
 		});
 	});
 });

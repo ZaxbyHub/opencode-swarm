@@ -131,7 +131,7 @@ export function verifyFullAutoPhaseApproval(
 	// phase is NOT a phase boundary and cannot stand in for one.
 	const phaseBoundary = events.filter(
 		(e) =>
-			(e.phase === phase || e.phase === undefined) &&
+			e.phase === phase &&
 			e.trigger_source === 'phase_boundary' &&
 			(e.verdict ?? '').toUpperCase() === 'APPROVED',
 	);

@@ -13,9 +13,27 @@ effort: medium
 
 Follow every step in order. Do not skip steps. This skill assumes you already have an open PR with review comments.
 
-## Step 0 — Read the review and normalize findings
+## Step 0 — Check for parallel work on the PR branch
+
+**Reference the [parallel-work-check skill](../parallel-work-check/SKILL.md) for the full protocol.**
+
+Before reading any review comments, check whether other agents have pushed work to this PR branch:
+
+1. Fetch the remote PR branch state.
+2. Compare local HEAD with remote HEAD (`git log origin/<branch>..HEAD` and `git log HEAD..origin/<branch>`).
+3. If remote is ahead: read the new commits with `git log origin/<branch> --not HEAD`.
+4. Evaluate whether the parallel work supersedes your planned fixes:
+   - **Supersedes**: The remote already fixes the issues you planned to address. Abort your planned fixes, integrate the remote changes, and re-evaluate what remains.
+   - **Complementary**: The remote fixes different issues than your planned fixes. Integrate first, then proceed.
+   - **Does not affect**: The remote touches unrelated files. Proceed with your planned fixes.
+5. Document the decision using the PARALLEL WORK CHECK template from the parallel-work-check skill.
+
+**Gate:** If remote is ahead and parallel work supersedes your planned fixes, do NOT proceed with Step 1 until you have re-evaluated the remaining scope.
+
+## Step 1 — Read the review and normalize findings
 
 1. Collect ALL review comments from the PR (inline comments, general comments, review summary).
+   - For bot or app reviews, also identify commits pushed by that bot/app and compare the comment claims against branch history and current code. Do not assume the review text and pushed code are equivalent.
 2. Normalize each finding into a structured record:
 
 ```
@@ -31,27 +49,6 @@ EVIDENCE: Exact quote from the reviewer
 4. Print the full findings table before proceeding.
 
 **Gate:** Every finding must have an ID, severity, file, and exact quote. If any field is missing, go back and fill it.
-
-## Step 1 — Validate findings against actual code (do NOT skip)
-
-**Critical step.** Reviewers sometimes flag code that is correct, misread control flow, or cite issues that don't exist at the referenced line. Blindly fixing every finding wastes time and can introduce regressions.
-
-For EACH finding:
-
-1. Open the referenced file at the referenced line.
-2. Read the surrounding context (at least 20 lines before and after).
-3. Determine one of:
-   - **VALID** — the finding is correct and the code needs a fix
-   - **DOWNGRADE** — the finding is real but severity is lower than stated (e.g., HIGH → LOW)
-   - **INVALID** — the finding is incorrect; the code is already correct
-   - **NEEDS CONTEXT** — you cannot determine validity without asking the reviewer or user
-4. Record the verdict next to the finding.
-
-**Rules:**
-- A finding is INVALID only if you can prove with code evidence that the reviewer's claim is wrong.
-- "I think it's fine" is NOT a valid INVALID verdict. You need a specific code-level reason.
-- When downgrading, record the original severity and the recommended severity with a one-line justification.
-- Print the full validated findings table before proceeding.
 
 ## Step 1a — Delegation strategy: plan-based vs Task-only
 
@@ -106,7 +103,28 @@ When a PR adds data normalization, transformation, or coercion logic:
    bypasses normalization.
 4. If inconsistency is found, flag as a HIGH severity finding requiring shared helper extraction.
 
-## Step 2 — Classify findings by file and fix scope
+## Step 2 — Validate findings against actual code (do NOT skip)
+
+**Critical step.** Reviewers sometimes flag code that is correct, misread control flow, or cite issues that don't exist at the referenced line. Blindly fixing every finding wastes time and can introduce regressions.
+
+For EACH finding:
+
+1. Open the referenced file at the referenced line.
+2. Read the surrounding context (at least 20 lines before and after).
+3. Determine one of:
+   - **VALID** — the finding is correct and the code needs a fix
+   - **DOWNGRADE** — the finding is real but severity is lower than stated (e.g., HIGH → LOW)
+   - **INVALID** — the finding is incorrect; the code is already correct
+   - **NEEDS CONTEXT** — you cannot determine validity without asking the reviewer or user
+4. Record the verdict next to the finding.
+
+**Rules:**
+- A finding is INVALID only if you can prove with code evidence that the reviewer's claim is wrong.
+- "I think it's fine" is NOT a valid INVALID verdict. You need a specific code-level reason.
+- When downgrading, record the original severity and the recommended severity with a one-line justification.
+- Print the full validated findings table before proceeding.
+
+## Step 3 — Classify findings by file and fix scope
 
 Group findings by file, then determine fix scope for each group:
 
@@ -124,7 +142,7 @@ For each group, answer:
 
 **Gate:** Every finding must be classified. Do not proceed with unclassified findings.
 
-## Step 3 — Fix findings (one file group at a time)
+## Step 4 — Fix findings (one file group at a time)
 
 For each file group:
 
@@ -140,7 +158,7 @@ For each file group:
 - Changing unrelated code to "improve" the area around the finding.
 - Accepting coder edits to template literal strings (backtick-delimited `.ts` content) without verifying that internal backticks are escaped. Unescaped backticks cause `SyntaxError` at build time even when the text looks correct in Read output.
 
-## Step 4 — Update tests
+## Step 5 — Update tests
 
 For each code fix:
 
@@ -154,7 +172,7 @@ Run the relevant test files in isolation before proceeding to the full suite:
 bun --smol test tests/unit/path/to/test.test.ts --timeout 30000
 ```
 
-## Step 5 — Update documentation
+## Step 6 — Update documentation
 
 Check if any fix requires documentation updates:
 
@@ -162,7 +180,7 @@ Check if any fix requires documentation updates:
 - **README / guides**: Update if the fix changes installation steps, configuration options, or usage patterns.
 - **Code comments**: Update if the fix invalidates an existing comment or makes a non-obvious behavior change.
 
-## Step 6 — Commit the fixes
+## Step 7 — Commit the fixes
 
 1. Stage ALL fix files (code + tests + docs). Do not stage unrelated changes.
    - Use explicit path staging to include new files (tests, docs) that `git add -u` would miss:
@@ -183,7 +201,7 @@ git commit -m "fix(pr-review): address findings C-01, C-02, T-01, W-01"
 
 3. Verify the commit message follows conventional commit format.
 
-## Step 7 — Pre-push validation
+## Step 8 — Pre-push validation
 
 Before pushing, run local validation to catch formatting and style issues that CI would reject:
 
@@ -191,7 +209,7 @@ Before pushing, run local validation to catch formatting and style issues that C
 2. **Build check**: Run the project build command to verify no syntax errors (especially important when coders modify template literal strings — unescaped backticks cause build failures).
 3. Stage and commit.
 
-## Step 8 — Push and update PR
+## Step 9 — Push and update PR
 
 ```bash
 # For amended commits:
@@ -219,7 +237,7 @@ Addressed N findings from PR review:
 Skipped: none
 ```
 
-## Step 9 — Monitor CI
+## Step 10 — Monitor CI
 
 1. Wait for CI to start.
 2. **If a CI run appears stuck (queued >10 minutes)**: check for stale in-progress runs from prior pushes. Cancel them with `gh run cancel <run-id>` — GitHub Actions concurrency groups queue new runs behind in-progress ones.

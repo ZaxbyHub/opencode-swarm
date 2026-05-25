@@ -745,7 +745,7 @@ describe('Explicit [tier:status] prefixes', () => {
 		// Set up entries before call (first call now injects immediately)
 		const entries = [
 			{
-				...makeSwarmEntry('New experimental pattern', 0.6),
+				...makeSwarmEntry('New experimental pattern', 0.85),
 				status: 'experimental',
 			},
 		];
@@ -777,7 +777,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'established',
 			},
 			{
-				...makeSwarmEntry('Swarm experimental lesson', 0.6),
+				...makeSwarmEntry('Swarm experimental lesson', 0.85),
 				status: 'experimental',
 			},
 			{
@@ -785,7 +785,7 @@ describe('Explicit [tier:status] prefixes', () => {
 				status: 'established',
 			},
 			{
-				...makeHiveEntry('Hive experimental lesson', 0.65),
+				...makeHiveEntry('Hive experimental lesson', 0.85),
 				status: 'experimental',
 			},
 		];

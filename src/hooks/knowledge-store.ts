@@ -47,6 +47,11 @@ export function resolveSwarmRejectedPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-rejected.jsonl');
 }
 
+// Returns path to .swarm/knowledge-retractions.jsonl in the project directory
+export function resolveSwarmRetractionsPath(directory: string): string {
+	return path.join(directory, '.swarm', 'knowledge-retractions.jsonl');
+}
+
 // Cross-platform resolver — inlined 15-line implementation (NO env-paths dependency)
 export function resolveHiveKnowledgePath(): string {
 	const platform = process.platform;
@@ -194,6 +199,31 @@ export async function readRejectedLessons(
 	directory: string,
 ): Promise<RejectedLesson[]> {
 	return readKnowledge<RejectedLesson>(resolveSwarmRejectedPath(directory));
+}
+
+export interface KnowledgeRetractionRecord {
+	id: string;
+	retracted_lesson: string;
+	normalized_lesson: string;
+	recorded_at: string;
+	reported_by: 'architect' | 'user' | 'auto';
+	matched_swarm_ids: string[];
+	matched_hive_ids: string[];
+}
+
+export async function readRetractionRecords(
+	directory: string,
+): Promise<KnowledgeRetractionRecord[]> {
+	return readKnowledge<KnowledgeRetractionRecord>(
+		resolveSwarmRetractionsPath(directory),
+	);
+}
+
+export async function appendRetractionRecord(
+	directory: string,
+	record: KnowledgeRetractionRecord,
+): Promise<void> {
+	await appendKnowledge(resolveSwarmRetractionsPath(directory), record);
 }
 
 // ============================================================================

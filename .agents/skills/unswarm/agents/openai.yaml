@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unswarm"
+  short_description: "Return to normal workflow"
+  default_prompt: "Use $unswarm to stop applying swarm-mode workflow behavior in this thread."

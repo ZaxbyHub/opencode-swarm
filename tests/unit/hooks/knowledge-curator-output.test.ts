@@ -52,6 +52,9 @@ const mockReadKnowledge = mock(async () => []);
 const mockRewriteKnowledge = mock(async () => {});
 const mockResolveSwarmKnowledgePath = mock(() => '/mock/knowledge.jsonl');
 const mockResolveSwarmRejectedPath = mock(() => '/mock/rejected.jsonl');
+const mockResolveHiveKnowledgePath = mock(() => '/mock/hive-knowledge.jsonl');
+const mockReadRetractionRecords = mock(async () => [] as const);
+const mockAppendRetractionRecord = mock(async () => {});
 const mockComputeConfidence = mock(() => 0.6);
 const mockInferTags = mock(() => [] as string[]);
 const mockNormalize = mock((text: string) => text.toLowerCase().trim());
@@ -59,7 +62,10 @@ const mockNormalize = mock((text: string) => text.toLowerCase().trim());
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
 	resolveSwarmRejectedPath: mockResolveSwarmRejectedPath,
+	resolveHiveKnowledgePath: mockResolveHiveKnowledgePath,
 	readKnowledge: mockReadKnowledge,
+	readRetractionRecords: mockReadRetractionRecords,
+	appendRetractionRecord: mockAppendRetractionRecord,
 	appendKnowledge: mockAppendKnowledge,
 	appendRejectedLesson: mockAppendRejectedLesson,
 	findNearDuplicate: mockFindNearDuplicate,

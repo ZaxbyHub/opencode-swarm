@@ -538,457 +538,6 @@ All tools run locally. No Docker, no network calls.
 
 ### Context Budget Guard
 
-Monitors how much context Swarm injects to prevent overflow:
-
-- **Warning threshold (70%)** — Advisory when context reaches ~2800 tokens
-- **Critical threshold (90%)** — Alert at ~3600 tokens with `/swarm handoff` recommendation
-- **Non-nagging** — One-time alerts per session
-
-Disable entirely with `context_budget.enabled: false`.
-
-### File Locking for Concurrent Safety
-
-Hard lock on `plan.json` (serialized writes), advisory lock on `events.jsonl` (append-only log). Stale locks auto-expire via `proper-lockfile`.
-
-### Agent Categories
-
-Agents are classified into four categories for the monitor server `/metadata` endpoint:
-
-| Category | Agents |
-|----------|--------|
-| `orchestrator` | architect |
-| `pipeline` | explorer, coder, test_engineer |
-| `qa` | reviewer, critic, critic_sounding_board, critic_drift_verifier |
-| `support` | sme, docs, designer |
-
-Use `getAgentCategory(agentName)` from `src/config/agent-categories.ts` to resolve an agent's category at runtime.
-
----
-
-<details>
-<summary><strong>Full Execution Pipeline (Technical Detail)</strong></summary>
-
-### The Pipeline
-
-Every task goes through this sequence. No exceptions, no overrides.
-
-```
-MODE: EXECUTE (per task)
-│
-├── 5a. @coder implements (ONE task only)
-├── 5b. diff + imports (contract + dependency analysis + semantic diff context)
-│       └── @system-enhancer injects AST-based semantic diff summary with blast radius
-│           into @reviewer context (up to 10 files, conditional on declared scope)
-├── 5c. syntax_check (parse validation)
-├── 5d. placeholder_scan (catches TODOs, stubs, incomplete code)
-├── 5e. lint fix → lint check
-├── 5f. build_check (does it compile?)
-├── 5g. pre_check_batch (4 parallel: lint, secretscan, SAST, quality budget)
-├── 5h. @reviewer (correctness pass)
-├── 5i. @reviewer (security pass, if security-sensitive files changed)
-├── 5j. @test_engineer (verification tests + coverage ≥70%)
-├── 5k. @test_engineer (adversarial tests)
-├── 5l. architect regression sweep (scope:"graph" to find cross-task test regressions)
-├── 5l-ter. test drift detection (conditional — fires when changes involve command behaviour,
-│         parsing/routing logic, user-visible output, public contracts, assertion-heavy areas,
-│         or helper lifecycle changes; validates tests still align with current behaviour)
-├── 5m. ⛔ Pre-commit checklist (all 4 items required, no override)
-└── 5n. Task marked complete, evidence written
-```
-
-If any step fails, the coder gets structured feedback and retries. After 5 failures on the same task, it escalates to you.
-
-### Architect Workflow Modes
-
-The architect moves through these modes automatically:
-
-| Mode | What It Means |
-|---|---|
-| `RESUME` | Existing `.swarm/` state was found, so Swarm continues where it left off |
-| `CLARIFY` | Swarm asks for missing information it cannot infer |
-| `DISCOVER` | Explorer scans the codebase; co-change dark matter analysis runs automatically to detect hidden file couplings (v6.41) |
-| `CONSULT` | SME agents provide domain guidance |
-| `PLAN` | Architect writes or updates the phased plan (includes CODEBASE REALITY CHECK on brownfield projects) |
-| `CRITIC-GATE` | Critic reviews the plan before execution |
-| `EXECUTE` | Tasks are implemented one at a time through the QA pipeline |
-| `PHASE-WRAP` | A phase closes out, including: explorer rescan, docs update, `context.md` update, `write_retro`, evidence check, `sbom_generate`, **`@critic_drift_verifier` delegation** (drift check — blocking gate), `write_drift_evidence` call with verdict, mandatory gate evidence verification (`completion-verify.json` + `drift-verifier.json` both required), then `phase_complete` |
-
-> **CODEBASE REALITY CHECK (v6.29.2):** Before any planning, the Architect dispatches Explorer to verify the current state of every referenced item. Produces a CODEBASE REALITY REPORT with statuses: NOT STARTED, PARTIALLY DONE, ALREADY COMPLETE, or ASSUMPTION INCORRECT. This prevents planning against stale assumptions. Skipped for greenfield projects with no existing codebase references.
-
-> **Phase Completion Gates (v6.33.4):** Before a phase can be marked complete, two mandatory gates are enforced: (1) completion-verify — deterministic check that plan task identifiers exist in source files, and (2) critic_drift_verifier evidence — verification that the drift verifier approved the implementation. Both gates are automatically bypassed when turbo mode is active.
-
-### Important
-
-A second or later run does **not** necessarily look like a first run.
-
-If `.swarm/plan.md` already exists, the architect may enter `RESUME` and then go directly into `EXECUTE`. That is expected and does **not** mean Swarm stopped using agents.
-
-Use `/swarm status` if you are unsure what Swarm is doing.
-
-Release automation uses release-please and requires conventional commit prefixes such as `fix:` or `feat:` on changes merged to `main`.
-
-</details>
-
-<details>
-<summary><strong>Persistent Memory (What's in .swarm/)</strong></summary>
-
-### plan.md: Your Project Roadmap
-
-```markdown
-# Project: Auth System
-Current Phase: 2
-
-## Phase 1: Foundation [COMPLETE]
-- [x] Task 1.1: Create user model [SMALL]
-- [x] Task 1.2: Add password hashing [SMALL]
-- [x] Task 1.3: Database migrations [MEDIUM]
-
-## Phase 2: Core Auth [IN PROGRESS]
-- [x] Task 2.1: Login endpoint [MEDIUM]
-- [ ] Task 2.2: JWT generation [MEDIUM] (depends: 2.1) ← CURRENT
-  - Acceptance: Returns valid JWT with user claims, 15-minute expiry
-  - Attempt 1: REJECTED — missing expiration claim
-- [ ] Task 2.3: Token validation middleware [MEDIUM]
-```
-
-### context.md: What's Been Decided
-
-```markdown
-## Technical Decisions
-- bcrypt cost factor: 12
-- JWT TTL: 15 minutes; refresh TTL: 7 days
-
-## SME Guidance (cached, never re-asked)
-### security (Phase 1)
-- Never log tokens or passwords
-- Rate-limit login: 5 attempts / 15 min per IP
-
-### api (Phase 1)
-- Return 401 for invalid credentials (not 404)
-```
-
-### Evidence Bundles
-
-Every completed task writes structured evidence to `.swarm/evidence/`:
-
-| Type | What It Captures |
-|------|--------------------|
-| review | Verdict, risk level, specific issues |
-| test | Pass/fail counts, coverage %, failure messages |
-| diff | Files changed, additions/deletions |
-| retrospective | Phase metrics, lessons learned, error taxonomy classification (injected into next phase) |
-| secretscan | Secret scan results: findings count, files scanned, skipped files (v6.33) |
-| completion-verify | Deterministic gate: verifies plan task identifiers exist in source files (written automatically by `completion-verify` tool; required before `phase_complete`) |
-| drift-verifier | Phase-close drift gate: `critic_drift_verifier` verdict (APPROVED/NEEDS_REVISION) and summary (written by architect via `write_drift_evidence`; required before `phase_complete`) |
-
-### telemetry.jsonl: Session Observability
-
-Swarm emits structured JSONL events to `.swarm/telemetry.jsonl` for observability tooling (dashboards, alerting, audit logs). Events are fire-and-forget — failures never affect execution.
-
-```json
-{"timestamp":"2026-03-25T14:30:00.000Z","event":"session_started","sessionId":"abc123","agentName":"architect"}
-{"timestamp":"2026-03-25T14:30:05.000Z","event":"delegation_begin","sessionId":"abc123","agentName":"coder","taskId":"1.1"}
-{"timestamp":"2026-03-25T14:31:00.000Z","event":"delegation_end","sessionId":"abc123","agentName":"coder","taskId":"1.1","result":"success"}
-{"timestamp":"2026-03-25T14:31:10.000Z","event":"gate_passed","sessionId":"abc123","gate":"reviewer","taskId":"1.1"}
-{"timestamp":"2026-03-25T14:32:00.000Z","event":"phase_changed","sessionId":"abc123","oldPhase":1,"newPhase":2}
-```
-
-| Event | When Emitted |
-|-------|-------------|
-| `session_started` | New agent session created |
-| `session_ended` | Session ends (reason: normal, timeout, error) |
-| `agent_activated` | Agent identity confirmed via chat.message |
-| `delegation_begin` | Task dispatched to a sub-agent |
-| `delegation_end` | Sub-agent returns (success, rejected, error) |
-| `task_state_changed` | Task workflow state transitions |
-| `gate_passed` | Evidence written to `.swarm/evidence/{taskId}.json` |
-| `gate_failed` | Gate check blocked task completion |
-| `phase_changed` | Phase completed and new phase started |
-| `budget_updated` | Context budget crossed warning/critical threshold |
-| `hard_limit_hit` | Tool call/duration/repetition limit reached |
-| `revision_limit_hit` | Coder revision limit exceeded |
-| `loop_detected` | Repetitive tool call pattern detected |
-| `scope_violation` | Architect wrote outside declared scope |
-| `qa_skip_violation` | QA gate skipped without valid reason |
-| `model_fallback` | Transient error triggered model fallback |
-| `heartbeat` | 30-second throttled keep-alive signal |
-
-File rotates automatically at 10MB to `.swarm/telemetry.jsonl.1`.
-
-</details>
-
-<details>
-<summary><strong>Working Directory Requirement: No process.cwd() Fallback</strong></summary>
-
-All Swarm tools that accept a `working_directory` parameter **require an explicit path**. They do **not** fall back to `process.cwd()`. This prevents `.swarm` state from being created in project subdirectories when the host process's working directory differs from the actual project root (issue [#922](https://github.com/zaxbysauce/opencode-swarm/issues/922)).
-
-### Defense-in-Depth
-
-This safety guarantee is implemented in two layers:
-
-1. **Fast-path filter** (`resolveWorkingDirectory` in `src/tools/resolve-working-directory.ts`) — validates all incoming `working_directory` values for null-byte injection, path traversal, Windows device paths, and subdirectory containment before any file system access
-2. **Canonical write-time guard** (`validateProjectRoot` in `src/evidence/manager.ts`) — uses `realpathSync` to canonicalize paths at evidence-write time, catching any symlink-based subdirectory bypasses that slip past the fast-path filter
-
-### Tools That Require Explicit working_directory
-
-The following tools require an explicit `working_directory` and reject subdirectory paths:
-
-- `save_plan`
-- `update_task_status`
-- `declare_scope`
-- `pre_check_batch`
-- `test_impact`
-- `mutation_test`
-- `diff_summary`
-
-### Failure Conditions
-
-| Condition | Behavior |
-|-----------|----------|
-| Missing (`undefined` / `null`) | Fails with: "Target workspace is required" |
-| Empty or whitespace-only | Fails with: "Target workspace cannot be empty or whitespace" |
-| Path traversal (`..`) | Fails with: "Target workspace cannot contain path traversal" |
-| Subdirectory of project root | Fails with: "...is a subdirectory of fallback..." |
-| Windows device path | Fails with: "Windows device paths are not allowed" |
-
-### Usage Contract
-
-When using any affected tool, always pass a valid `working_directory`:
-
-```typescript
-// save_plan example
-save_plan({
-  title: "My Project",
-  swarm_id: "mega",
-  phases: [{ id: 1, name: "Setup", tasks: [{ id: "1.1", description: "Initialize project" }] }],
-  working_directory: "/path/to/project"  // Required - no process.cwd() fallback
-})
-
-// update_task_status example
-update_task_status({
-  task_id: "1.1",
-  status: "completed",
-  working_directory: "/path/to/project"  // Required - no fallback
-})
-```
-
-### Stray .swarm Detection
-
-`/swarm doctor` now detects and reports stray `.swarm` directories found in project subdirectories (created by older versions or misconfigured tools). It offers cleanup guidance to prevent state pollution.
-
-</details>
-
-<details>
-<summary><strong>Guardrails and Circuit Breakers</strong></summary>
-
-Every agent runs inside a circuit breaker that kills runaway behavior before it burns your credits.
-
-| Signal | Default Limit | What Happens |
-|--------|:---:|-------------|
-| Tool calls | 200 | Agent is stopped |
-| Duration | 30 min | Agent is stopped |
-| Same tool repeated | 10x | Agent is warned, then stopped |
-| Consecutive errors | 5 | Agent is stopped |
-
-Limits reset per task. A coder working on Task 2.3 is not penalized for tool calls made during Task 2.2.
-
-#### Architect Self-Coding Block
-
-If the architect writes files directly instead of delegating to the coder, a hard block fires:
-
-| Write count | Behavior |
-|:-----------:|----------|
-| 1–2 | Warning injected into next architect message |
-| ≥ 3 | `Error` thrown with `SELF_CODING_BLOCK` — identifies file paths written and count |
-
-The counter resets only when a coder delegation is dispatched. This is a hard enforcement — not advisory.
-
-Per-agent overrides:
-
-```json
-{
-  "guardrails": {
-    "profiles": {
-      "coder": { "max_tool_calls": 500, "max_duration_minutes": 60 },
-      "explorer": { "max_tool_calls": 50 }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>File Authority (Per-Agent Write Permissions)</strong></summary>
-
-Swarm enforces per-agent file write authority — each agent can only write to specific paths. By default, these rules are hardcoded, but you can override them via config.
-
-### Default Rules
-
-| Agent | Can Write | Blocked | Zones |
-|-------|-----------|---------|-------|
-| `architect` | Everything (except plan files) | `.swarm/plan.md`, `.swarm/plan.json` | `generated` |
-| `coder` | `src/`, `tests/`, `docs/`, `scripts/` | `.swarm/` (entire directory) | `generated`, `config` |
-| `reviewer` | `.swarm/evidence/`, `.swarm/outputs/` | `src/`, `.swarm/plan.md`, `.swarm/plan.json` | `generated` |
-| `test_engineer` | `tests/`, `.swarm/evidence/` | `src/`, `.swarm/plan.md`, `.swarm/plan.json` | `generated` |
-| `explorer` | Read-only | Everything | — |
-| `sme` | Read-only | Everything | — |
-| `docs` | `docs/`, `.swarm/outputs/` | — | `generated` |
-| `designer` | `docs/`, `.swarm/outputs/` | — | `generated` |
-| `critic` | `.swarm/evidence/` | — | `generated` |
-
-### Prefixed Agents
-
-Prefixed agents (e.g., `paid_coder`, `mega_reviewer`, `local_architect`) inherit defaults from their canonical base agent via `stripKnownSwarmPrefix`. The lookup order is:
-
-1. Exact match for the prefixed name (if explicitly defined in user config)
-2. Fall back to the canonical agent's defaults (e.g., `paid_coder` → `coder`)
-
-```json
-{
-  "authority": {
-    "rules": {
-      "coder": { "allowedPrefix": ["src/", "lib/"] },
-      "paid_coder": { "allowedPrefix": ["vendor/", "plugins/"] }
-    }
-  }
-}
-```
-
-In this example, `paid_coder` gets its own explicit rule, while other prefixed coders (e.g., `mega_coder`) fall back to `coder`.
-
-#### Selecting the primary agent in multi-swarm configs (`default_agent`)
-
-The top-level `default_agent` field controls which generated agents OpenCode treats as primary. **It is optional.** Behavior:
-
-- **Omitted** — every architect-role agent is primary. In a multi-swarm config that means each swarm exposes its own architect (`local_architect`, `mega_architect`, `paid_architect`, `modelrelay_architect`, …) as a selectable session default. This is the v7.0.0-compatible behavior and the recommended setup.
-- **Base role** (e.g. `"coder"`) — every generated agent whose canonical base role matches becomes primary (`local_coder`, `mega_coder`, …).
-- **Exact generated name** (e.g. `"local_architect"`) — only that agent is primary.
-- **Unknown / invalid value** — a one-time warning is logged and the resolver falls back to architect-role primaries (or the first generated agent if architects are disabled). The plugin never produces zero primaries when at least one agent exists.
-
-See [`docs/configuration.md`](docs/configuration.md) for the full table.
-
-### Runtime Enforcement
-
-Architect direct writes are enforced at runtime via `toolBefore` hook. This tracks writes to source code paths outside `.swarm/` and protects `.swarm/plan.md` and `.swarm/plan.json` from direct modification.
-
-### Configuration
-
-Override default rules in `.opencode/opencode-swarm.json`:
-
-```json
-{
-  "authority": {
-    "enabled": true,
-    "rules": {
-      "coder": {
-        "allowedPrefix": ["src/", "lib/", "scripts/"],
-        "blockedPrefix": [".swarm/"],
-        "blockedZones": ["generated"]
-      },
-      "explorer": {
-        "readOnly": false,
-        "allowedPrefix": ["notes/", "scratch/"]
-      }
-    }
-  }
-}
-```
-
-### Rule Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `readOnly` | boolean | If `true`, agent cannot write anywhere |
-| `blockedExact` | string[] | Exact file paths that are blocked |
-| `allowedExact` | string[] | Exact file paths that are allowed (overrides prefix/glob restrictions) |
-| `blockedPrefix` | string[] | Path prefixes that are blocked (e.g., `.swarm/`) |
-| `allowedPrefix` | string[] | Only these path prefixes are allowed. Omit to remove restriction; set `[]` to deny all |
-| `blockedGlobs` | string[] | Glob patterns that are blocked (uses picomatch: `**`, `*`, `?`) |
-| `allowedGlobs` | string[] | Glob patterns that are allowed (uses picomatch: `**`, `*`, `?`) |
-| `blockedZones` | string[] | File zones to block: `production`, `test`, `config`, `generated`, `docs`, `build` |
-
-### Merge Behavior
-
-- User rules **override** hardcoded defaults for the specified agent
-- Scalar fields (`readOnly`) — user value replaces default
-- Array fields (`blockedPrefix`, `allowedPrefix`, etc.) — user array **replaces** entirely (not merged)
-- If a field is omitted in the user rule for a **known agent** (one with hardcoded defaults), the default value for that field is preserved
-- If a field is omitted in the user rule for a **custom agent** (not in the defaults list), that field is `undefined` — there are no defaults to inherit
-- `allowedPrefix: []` explicitly denies all writes; omitting `allowedPrefix` entirely means no allowlist restriction is applied (all paths are evaluated against blocklist rules only)
-- Setting `enabled: false` ignores all custom rules and uses hardcoded defaults
-
-### Custom Agents
-
-Custom agents (not in the defaults list) start with no rules. Their write authority depends entirely on what you configure:
-
-- **Not in config at all** — agent is denied with `Unknown agent` (no rule exists; this is not the same as "blocked from all writes")
-- **In config without `allowedPrefix`** — no allowlist restriction applies; only any `blockedPrefix`, `blockedZones`, or `readOnly` rules you explicitly set will enforce limits
-- **In config with `allowedPrefix: []`** — all writes are denied
-
-To safely restrict a custom agent, always set `allowedPrefix` explicitly:
-
-```json
-{
-  "authority": {
-    "rules": {
-      "my_custom_agent": {
-        "allowedPrefix": ["plugins/", "extensions/"],
-        "blockedZones": ["generated"]
-      }
-    }
-  }
-}
-```
-
-### Advanced Examples
-
-#### Glob Pattern Support
-
-Use glob patterns for complex path matching:
-
-```json
-{
-  "authority": {
-    "rules": {
-      "coder": {
-        "allowedGlobs": ["src/**/*.ts", "tests/**/*.test.ts"],
-        "blockedGlobs": ["src/**/*.generated.ts", "**/*.d.ts"],
-        "allowedExact": ["src/index.ts", "package.json"]
-      },
-      "docs_agent": {
-        "allowedGlobs": ["docs/**/*.md", "*.md"],
-        "blockedExact": [".swarm/plan.md"]
-      }
-    }
-  }
-}
-```
-
-**Glob Pattern Features:**
-- `**` — Match any number of directories: `src/**/*.ts` matches all TypeScript files in src/ and subdirectories
-- `*` — Match any characters except path separators: `*.md` matches all Markdown files in current directory
-- `?` — Match single character: `test?.js` matches `test1.js`, `testa.js`
-- Uses [picomatch](https://github.com/micromatch/picomatch) for cross-platform compatibility
-
-**Path Normalization and Symlinks:**
-Paths are resolved via `realpathSync` before matching, which resolves symlinks and prevents path-traversal escapes. However, if a symlink's target does not exist, `realpathSync` throws and the fallback returns the symlink's own path (unresolved). A dangling symlink inside an `allowedPrefix` directory will therefore pass prefix-based checks even if its intended target is outside the project. Use `blockedExact` or `blockedGlobs` to deny known dangling-symlink paths explicitly.
-
-**Evaluation Order:**
-1. `readOnly` check (if true, deny all writes)
-2. `blockedExact` (exact path matches, highest priority)
-3. `blockedGlobs` (glob pattern matches)
-4. `allowedExact` (exact path matches, overrides prefix/glob restrictions)
-5. `allowedGlobs` (glob pattern matches)
-6. `blockedPrefix` (prefix matches)
-7. `allowedPrefix` (prefix matches)
-8. `blockedZones` (zone classification)
-
-</details>
-
-<details>
-<summary><strong>Context Budget Guard</strong></summary>
-
 The Context Budget Guard monitors how much context Swarm is injecting into the conversation. It helps prevent context overflow before it becomes a problem.
 
 ### Default Behavior
@@ -1001,6 +550,57 @@ The Context Budget Guard monitors how much context Swarm is injecting into the c
 - **Who sees warnings** — Only the architect receives these warnings. Other agents are unaware of the budget.
 
 To disable entirely, set `context_budget.enabled: false` in your swarm config.
+
+---
+
+### Skill Propagation
+
+Swarm includes an intelligent skill propagation system that tracks, validates, and scores skill usage across agent delegations. When the architect delegates to subagents (coder, reviewer, test_engineer, etc.), the system:
+
+- **Logs skill usage** to `.swarm/skill-usage.jsonl` with session-scoped entries (agent, task ID, skill paths, timestamp)
+- **Scores skill relevance** based on frequency, compliance, recency, task ID diversity, and context matching
+- **Provides recommendations** — when delegating without a `SKILLS:` field, the system suggests relevant skills with relevance scores
+- **Enforces compliance** — optional enforcement mode can block delegations missing the `SKILLS:` field
+- **Auto-populates skill index** — maintains a `## Available Skills` section in `.swarm/context.md` with usage counts and compliance rates
+- **Supports explicit routing** — `.opencode/skill-routing.yaml` maps agent types to specific skill paths with optional keyword descriptions
+
+**Guardrails:**
+- Relevance scoring threshold: 0.5 (skills below this are not recommended)
+- Maximum recommendations per delegation: 5
+- Scoring budget safeguard: Skipped when session exceeds 500 skill-usage entries to prevent unbounded file reads
+- Graceful degradation: Zero installed skills = zero friction — no warnings, no blocks, no auto-population
+
+**Configuration:**
+
+```json
+{
+  "skill_propagation": {
+    "enabled": true,
+    "enforce": false,
+    "scoring": {
+      "threshold": 0.5,
+      "max_recommendations": 5
+    }
+  }
+}
+```
+
+**Skill routing file format** (`.opencode/skill-routing.yaml`):
+
+```yaml
+version: 1
+routing:
+  coder:
+    - path: .claude/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .claude/skills/engineering-conventions/SKILL.md
+      keywords: ["engineering", "conventions", "invariants"]
+  reviewer:
+    - path: .claude/skills/swarm-pr-review/SKILL.md
+      keywords: ["review", "security", "audit"]
+```
+
+Routing skills are merged with scored recommendations, with explicitly routed skills receiving a boosted score (0.9) to prioritize them.
 
 ### Configuration Reference
 

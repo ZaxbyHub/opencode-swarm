@@ -38,11 +38,17 @@ export declare function isQualityBudgetEvidence(evidence: Evidence): evidence is
 export declare function isSecretscanEvidence(evidence: Evidence): evidence is SecretscanEvidence;
 import { sanitizeTaskId as _sanitizeTaskId } from '../validation/task-id';
 export declare const sanitizeTaskId: typeof _sanitizeTaskId;
+/** Maximum depth to walk up the directory tree before stopping (fail-open). */
+export declare const MAX_DEPTH = 20;
+/** File/directory names that indicate a real project root. */
+export declare const PROJECT_INDICATORS: readonly ["package.json", ".git", ".opencode", "Cargo.toml", "go.mod", "pyproject.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle", "CMakeLists.txt"];
 /**
  * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
  * of a project that already has a .swarm/ at its root.
- * Walks up the directory tree to filesystem root looking for a parent .swarm/ directory.
- * @throws Error if a parent directory contains .swarm/
+ * Walks up the directory tree (bounded by MAX_DEPTH) looking for a parent .swarm/ directory.
+ * When .swarm/ is found, checks for at least one PROJECT_INDICATORS entry to distinguish
+ * real projects from stray artifacts (e.g. `C:\.swarm`).
+ * @throws Error if a parent directory contains both .swarm/ and a project indicator
  */
 export declare function validateProjectRoot(directory: string): void;
 /**

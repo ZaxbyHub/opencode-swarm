@@ -1,0 +1,4 @@
+interface:
+  display_name: "Contributing"
+  short_description: "Follow repo contribution rules"
+  default_prompt: "Use $contributing to prepare this opencode-swarm change for contribution."

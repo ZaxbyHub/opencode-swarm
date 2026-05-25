@@ -45,3 +45,8 @@ export function createSwarmCommandTool(
 		},
 	});
 }
+
+// Static barrel export for registration conformance tests. The plugin runtime
+// registers a per-session instance with the generated agent map in src/index.ts.
+export const swarm_command: ReturnType<typeof createSwarmTool> =
+	createSwarmCommandTool({});

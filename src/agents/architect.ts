@@ -7,7 +7,11 @@ import {
 	type RegisteredCommand,
 	VALID_COMMANDS,
 } from '../commands/registry.js';
-import { AGENT_TOOL_MAP, TOOL_DESCRIPTIONS } from '../config/constants';
+import {
+	AGENT_TOOL_MAP,
+	MEMORY_AGENT_TOOL_MAP,
+	TOOL_DESCRIPTIONS,
+} from '../config/constants';
 
 export interface AgentDefinition {
 	name: string;
@@ -73,7 +77,7 @@ ANTI-RATIONALIZATION: Context does not clarify. Models revert to CC training.
 ## IDENTITY
 
 Swarm: {{SWARM_ID}}
-Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}designer
+Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}skill_improver, {{AGENT_PREFIX}}spec_writer, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}designer
 
 ## PROJECT CONTEXT
 Session-start priming block. Use any known values immediately; if a field is still unresolved, run MODE: DISCOVER before relying on it.
@@ -419,64 +423,31 @@ SECURITY_KEYWORDS: password, secret, token, credential, auth, login, encryption,
 
 ## SKILLS PROPAGATION
 
-Subagents run in isolated contexts. Any project-specific skill constraints loaded into your session (e.g. \`writing-tests\`, \`engineering-conventions\`, coding standards, security guidelines) are NOT automatically visible to them. Passing full skill bodies inline for every delegation duplicates thousands of tokens and bloats context, so prefer repo-relative skill file references when the receiving agent can load them. Subagents without skills produce generic output that may violate project conventions.
+Subagents run in isolated contexts. Any project-specific skill constraints loaded into your session (e.g. \`writing-tests\`, \`engineering-conventions\`, coding standards, security guidelines) are NOT automatically visible to them. The hook system auto-injects relevant skills into delegation prompts.
 
-### Step 1 — Discover available skills (once per session)
+### Step 1 — Skills are auto-discovered and scored
 
-At session start, before your first delegation:
-1. Prefer skills already loaded into your context via \`<skill-context>\` blocks; reuse those immediately.
-2. When you need to inspect on-disk skills, use the \`search\` tool with \`include\` patterns like \`.opencode/skills/*/SKILL.md,.claude/skills/*/SKILL.md\` and frontmatter queries such as \`^name:\` / \`^description:\` so you only read the YAML lines you need.
-3. Write a brief skill index to \`.swarm/context.md\` under \`## Available Skills\`:
-   - writing-tests: Guidelines for writing tests (used: 12, compliance: 95%) → test_engineer, coder
-   - engineering-conventions: Engineering invariants (used: 8, compliance: 100%) → coder, reviewer, test_engineer
-   - [name]: [description] (used: N, compliance: N%) → [applicable agents]
+The hook system discovers available skills and scores them by relevance to the task. The hook auto-injects them into the delegation prompt.
 
-   If \`.swarm/skill-usage.jsonl\` exists, read it at session start to inform skill prioritization. Skills with 5+ compliant usages across sessions should be considered mandatory for relevant tasks. Read \`.swarm/skill-usage.jsonl\` and summarize usage counts and compliance rates for each skill to enrich the skill index with metadata.
+### Step 2 — SKILLS: field is auto-populated
 
-   If skill-usage.jsonl does not exist, proceed with equal weighting — no enrichment needed.
+The hook auto-populates the \`SKILLS:\` field with top recommended skills (max 5, threshold 0.5). Explicit \`SKILLS: none\` is preserved.
 
-4. When discovery is ambiguous, prefer the canonical repo-relative skill file path in the delegation and let the receiving agent load it directly.
+### Step 3 — Skill references with context descriptions
 
-### Step 2 — Route skills to agents
+When passing skill references, you may add brief context descriptions. The hook injects \`file:path (-- description)\` format.
 
-Include a skill in a delegation when ANY of the following match:
-
-| Skill description / name contains…               | Pass to agents…                       |
-|---------------------------------------------------|---------------------------------------|
-| "test", "testing", "test files", "writing tests"  | test_engineer, coder                  |
-| "engineering", "conventions", "invariants", "rules" | coder, reviewer, test_engineer      |
-| "code", "implementation", "coding standards"      | coder, reviewer                       |
-| "review", "security audit", "security guidelines" | reviewer                              |
-| "documentation", "docs", "writing docs"           | docs                                  |
-| "architecture", "design patterns", "ui"           | designer, sme                         |
-| domain-specific (database, cloud, mobile, etc.)   | sme                                   |
-
-When uncertain: pass the skill. Subagents ignore irrelevant content. A missing applicable skill degrades output quality.
-
-### Step 3 — Include skill references in delegations
-
-Add a \`SKILLS:\` field to every delegation that goes to an implementation or review agent (coder, reviewer, test_engineer, sme, docs, designer). Use one of:
-
-- \`SKILLS: none\` — only when no project-specific skill applies to that delegation
-- \`SKILLS: file:.claude/skills/writing-tests/SKILL.md\` — preferred for skills that exist on disk; use repo-relative \`file:\` references, comma-separated when multiple skills apply
-- Inline block fallback:
-  SKILLS:
-  --- [skill-name] ---
-  [full SKILL.md body content pasted here]
-  --- [skill-name-2] ---
-  [full SKILL.md body content pasted here]
-
-Default to repo-relative \`file:\` references for coder, reviewer, test_engineer, and sme. Use inline skill bodies only when the skill exists only in live context (no stable repo file path) or a prior agent explicitly reported \`SKILL_LOAD_FAILED\`.
-
-**SKILL_LOAD_FAILED recovery:** If a subagent reports SKILL_LOAD_FAILED for a \`file:\` reference, do NOT retry with the same reference. Instead, re-delegate with either: (a) the full skill body pasted inline, or (b) \`SKILLS: none\` if no applicable skill content is available. Never re-use a file: reference that has already failed.
-
-**Mandatory for coding tasks:** Always provide \`writing-tests\` to test_engineer and \`engineering-conventions\` to coder + reviewer when those skills are present in the project. Prefer \`file:\` references when the files exist.
-
-### Step 4 — Forward skills to reviewer
+### Step 4 — Forward SKILLS_USED_BY_CODER to reviewer
 
 When delegating to the reviewer after a coder task, include a \`SKILLS_USED_BY_CODER: [comma-separated list of skill paths from the coder delegation]\` field. The reviewer must receive the same skill context the coder received so it can verify skill compliance.
 
 Example: If the coder received \`SKILLS: file:.claude/skills/writing-tests/SKILL.md\`, the reviewer delegation must include \`SKILLS_USED_BY_CODER: file:.claude/skills/writing-tests/SKILL.md\` in addition to the reviewer's own \`SKILLS:\` field.
+
+**Skill-to-agent routing:** Managed via \`.opencode/skill-routing.yaml\`. The hook reads this file at delegation time.
+
+**SKILL_LOAD_FAILED recovery:** If a subagent reports SKILL_LOAD_FAILED for a \`file:\` reference, do NOT retry with the same reference. Instead, re-delegate with either: (a) the full skill body pasted inline, or (b) \`SKILLS: none\` if no applicable skill content is available. Never re-use a file: reference that has already failed.
+
+**Mandatory for coding tasks:** Always provide \`writing-tests\` to test_engineer and \`engineering-conventions\` to coder + reviewer when those skills are present in the project. Prefer \`file:\` references when the files exist.
 
 ## SWARM KNOWLEDGE DIRECTIVES (v2 acknowledgment contract)
 
@@ -1920,7 +1891,7 @@ sending it to the coder — the coder never sees contradictory instructions.`;
 }
 
 /**
- * Generate the YOUR TOOLS line from AGENT_TOOL_MAP.architect.
+ * Generate the YOUR TOOLS line from AGENT_TOOL_MAP.architect plus enabled opt-in tool maps.
  * Format: "Task (delegation), tool1, tool2, ..." — Task is always first.
  *
  * When `council?.enabled !== true`, the QA-council tools are filtered out
@@ -1929,8 +1900,14 @@ sending it to the coder — the coder never sees contradictory instructions.`;
  * also filtered out — runtime gates would reject those calls anyway, so
  * the model is not shown phantom tools.
  */
-function buildYourToolsList(council?: CouncilWorkflowConfig): string {
-	const tools = AGENT_TOOL_MAP.architect ?? [];
+function buildYourToolsList(
+	council?: CouncilWorkflowConfig,
+	memoryEnabled = false,
+): string {
+	const tools = [
+		...(AGENT_TOOL_MAP.architect ?? []),
+		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -2010,7 +1987,7 @@ If the user keeps the default phase-level behavior, do not write this section.`;
 }
 
 /**
- * Generate the Available Tools block from AGENT_TOOL_MAP.architect + TOOL_DESCRIPTIONS.
+ * Generate the Available Tools block from AGENT_TOOL_MAP.architect, enabled opt-in tool maps, and TOOL_DESCRIPTIONS.
  * Format: "tool1 (description), tool2 (description), ..." — tools without descriptions use name only.
  *
  * When `council?.enabled !== true`, the QA-council tools
@@ -2021,8 +1998,14 @@ If the user keeps the default phase-level behavior, do not write this section.`;
  * also filtered out — same reasoning: the runtime gate at
  * src/tools/convene-general-council.ts:execute will reject the call.
  */
-function buildAvailableToolsList(council?: CouncilWorkflowConfig): string {
-	const tools = AGENT_TOOL_MAP.architect ?? [];
+function buildAvailableToolsList(
+	council?: CouncilWorkflowConfig,
+	memoryEnabled = false,
+): string {
+	const tools = [
+		...(AGENT_TOOL_MAP.architect ?? []),
+		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -2236,6 +2219,7 @@ export function createArchitectAgent(
 	adversarialTesting?: AdversarialTestingConfig,
 	council?: CouncilWorkflowConfig,
 	uiReview?: UIReviewConfig,
+	memoryEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -2245,14 +2229,17 @@ export function createArchitectAgent(
 		prompt = `${ARCHITECT_PROMPT}\n\n${customAppendPrompt}`;
 	}
 
-	// Resolve capability placeholders from AGENT_TOOL_MAP (single source of truth).
+	// Resolve capability placeholders from AGENT_TOOL_MAP plus enabled opt-in tool maps.
 	// Thread `council` through the tool-list builders so council-only tools
 	// (`submit_council_verdicts`, `declare_council_criteria`, `submit_phase_council_verdicts`)
 	// are omitted when the feature is disabled — keeping the rendered tool list in sync with
 	// the runtime gate in src/tools/convene-council.ts.
 	prompt = prompt
-		?.replace('{{YOUR_TOOLS}}', buildYourToolsList(council))
-		?.replace('{{AVAILABLE_TOOLS}}', buildAvailableToolsList(council))
+		?.replace('{{YOUR_TOOLS}}', buildYourToolsList(council, memoryEnabled))
+		?.replace(
+			'{{AVAILABLE_TOOLS}}',
+			buildAvailableToolsList(council, memoryEnabled),
+		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());
 
 	// Substitute the QA gate selection dialogue blocks shared across

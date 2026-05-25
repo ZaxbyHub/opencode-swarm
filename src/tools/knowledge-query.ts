@@ -7,7 +7,9 @@ import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import {
+	normalize,
 	readKnowledge,
+	readRetractionRecords,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 } from '../hooks/knowledge-store.js';
@@ -40,7 +42,13 @@ const VALID_CATEGORIES: KnowledgeCategory[] = [
 ];
 
 // Valid statuses for filtering
-const VALID_STATUSES = ['candidate', 'established', 'promoted'] as const;
+const VALID_STATUSES = [
+	'candidate',
+	'established',
+	'promoted',
+	'archived',
+] as const;
+const DEFAULT_QUERY_STATUSES = new Set(['established', 'promoted']);
 
 // Valid tiers for filtering
 const VALID_TIERS = ['swarm', 'hive', 'all'] as const;
@@ -144,10 +152,15 @@ interface FilterOptions {
 function filterSwarmEntries(
 	entries: SwarmKnowledgeEntry[],
 	filters: FilterOptions,
+	suppressedLessons: Set<string>,
 	scopeFilter?: string[],
 ): SwarmKnowledgeEntry[] {
 	return entries.filter((entry) => {
-		if (filters.status && entry.status !== filters.status) {
+		if (filters.status) {
+			if (entry.status !== filters.status) {
+				return false;
+			}
+		} else if (!DEFAULT_QUERY_STATUSES.has(entry.status)) {
 			return false;
 		}
 		if (filters.category && entry.category !== filters.category) {
@@ -163,6 +176,9 @@ function filterSwarmEntries(
 				return false;
 			}
 		}
+		if (suppressedLessons.has(normalize(entry.lesson))) {
+			return false;
+		}
 		return true;
 	});
 }
@@ -170,15 +186,23 @@ function filterSwarmEntries(
 function filterHiveEntries(
 	entries: HiveKnowledgeEntry[],
 	filters: FilterOptions,
+	suppressedLessons: Set<string>,
 ): HiveKnowledgeEntry[] {
 	return entries.filter((entry) => {
-		if (filters.status && entry.status !== filters.status) {
+		if (filters.status) {
+			if (entry.status !== filters.status) {
+				return false;
+			}
+		} else if (!DEFAULT_QUERY_STATUSES.has(entry.status)) {
 			return false;
 		}
 		if (filters.category && entry.category !== filters.category) {
 			return false;
 		}
 		if (filters.minScore !== undefined && entry.confidence < filters.minScore) {
+			return false;
+		}
+		if (suppressedLessons.has(normalize(entry.lesson))) {
 			return false;
 		}
 		return true;
@@ -240,7 +264,9 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 		status: z
 			.string()
 			.optional()
-			.describe("Filter by status: 'candidate', 'established', or 'promoted'"),
+			.describe(
+				"Filter by status: 'candidate', 'established', 'promoted', or 'archived'",
+			),
 		category: z
 			.string()
 			.optional()
@@ -291,6 +317,15 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 			category: category ?? undefined,
 			minScore: minScore ?? undefined,
 		};
+		const retractionRecords = await readRetractionRecords(directory);
+		const suppressedLessons = new Set(
+			retractionRecords
+				.map((record) => record.normalized_lesson)
+				.filter(
+					(value): value is string =>
+						typeof value === 'string' && value.length > 0,
+				),
+		);
 
 		// Collect results
 		const results: {
@@ -310,7 +345,12 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 		// Read swarm knowledge if requested
 		if (tier === 'swarm' || tier === 'all') {
 			const swarmEntries = await readSwarmKnowledge(directory);
-			const filtered = filterSwarmEntries(swarmEntries, filters, scopeFilter);
+			const filtered = filterSwarmEntries(
+				swarmEntries,
+				filters,
+				suppressedLessons,
+				scopeFilter,
+			);
 			for (const entry of filtered) {
 				results.push({ entry, tier: 'swarm' });
 			}
@@ -319,7 +359,11 @@ export const knowledge_query: ReturnType<typeof tool> = createSwarmTool({
 		// Read hive knowledge if requested
 		if (tier === 'hive' || tier === 'all') {
 			const hiveEntries = await readHiveKnowledge();
-			const filtered = filterHiveEntries(hiveEntries, filters);
+			const filtered = filterHiveEntries(
+				hiveEntries,
+				filters,
+				suppressedLessons,
+			);
 			for (const entry of filtered) {
 				results.push({ entry, tier: 'hive' });
 			}

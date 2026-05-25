@@ -403,7 +403,9 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 1. **Identify the actual failing test from the job log first.** Do not assume it's a pre-existing failure based on a local repro of a different test. Open the failing job's URL and find the `<file>:<line>` in the Bun output. WebFetch can scrape this if the `gh` CLI isn't available.
 2. **Reproduce that exact file locally:** `bun --smol test tests/unit/<dir>/<file>.test.ts --timeout 30000`.
 3. **Then check if the same failure reproduces on `main`.** If yes, document as pre-existing in the PR description and continue with your branch's work; do not silently inherit the failure.
-4. **For dist-check failures:** any change under `src/` that the bundler picks up requires `bun run build` + commit of `dist/` in the same PR. The job compares committed `dist/` against a fresh build.
+4. **For dist-check failures:** `dist-check` is a **hard gate** — never bypass or ignore it.
+   - If your PR touches `src/`: run `bun run build`, examine `git diff -- dist/`, and commit the rebuilt `dist/` in the same PR.
+   - If your PR does **not** touch `src/` but `dist-check` fails: `origin/main` has a dist drift. Do **not** commit rebuilt dist to your PR. The fix belongs on `main`, not in your PR.
 
 ## Test Quality Standards
 

@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import {
 	_internals,
 	discoverAvailableSkills,
+	extractSkillsFieldFromPrompt,
 	parseDelegationArgs,
 	parseSkillPaths,
 	SKILL_CAPABLE_AGENTS,
@@ -172,6 +173,55 @@ describe('parseDelegationArgs', () => {
 	});
 });
 
+describe('description-rich SKILLS field parsing', () => {
+	test('extracts multiline SKILLS catalog entries until the next field', () => {
+		const prompt = [
+			'TASK: implement tests',
+			'SKILLS:',
+			'- file:.claude/skills/writing-tests/SKILL.md - Guidelines for tests',
+			'- file:.claude/skills/engineering-conventions/SKILL.md - Invariants',
+			'OUTPUT: patch',
+		].join('\n');
+
+		const field = extractSkillsFieldFromPrompt(prompt);
+
+		expect(field).toContain('writing-tests/SKILL.md');
+		expect(field).toContain('Guidelines for tests');
+		expect(field).not.toContain('OUTPUT: patch');
+	});
+
+	test('parseDelegationArgs preserves description-rich multiline SKILLS fields', () => {
+		const parsed = parseDelegationArgs({
+			subagent_type: 'coder',
+			prompt: [
+				'TASK: implement tests',
+				'SKILLS:',
+				'- file:.claude/skills/writing-tests/SKILL.md - Guidelines for tests',
+				'- file:.claude/skills/engineering-conventions/SKILL.md - Invariants',
+				'OUTPUT: patch',
+			].join('\n'),
+		});
+
+		expect(parsed?.targetAgent).toBe('coder');
+		expect(parsed?.skillsField).toContain('Guidelines for tests');
+		expect(parsed?.skillsField).not.toContain('OUTPUT: patch');
+	});
+
+	test('parseSkillPaths extracts file refs while ignoring descriptions', () => {
+		const paths = parseSkillPaths(
+			[
+				'- file:.claude/skills/writing-tests/SKILL.md - Guidelines for tests',
+				'- file:.claude/skills/engineering-conventions/SKILL.md - Invariants',
+			].join('\n'),
+		);
+
+		expect(paths).toEqual([
+			'file:.claude/skills/writing-tests/SKILL.md',
+			'file:.claude/skills/engineering-conventions/SKILL.md',
+		]);
+	});
+});
+
 // ============================================================================
 // discoverAvailableSkills — original tests
 // ============================================================================
@@ -248,6 +298,16 @@ describe('discoverAvailableSkills', () => {
 
 		const result = discoverAvailableSkills(tmp);
 		expect(normalizePath(result[0])).toBe('.claude/skills/my-skill/SKILL.md');
+	});
+
+	test('returns repo-relative paths with forward slashes on every platform', () => {
+		const skillDir = path.join(tmp, '.claude', 'skills', 'windows-safe');
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# Skill');
+
+		const result = discoverAvailableSkills(tmp);
+		expect(result).toContain('.claude/skills/windows-safe/SKILL.md');
+		expect(result[0]).not.toContain('\\');
 	});
 
 	test('ignores dot-prefixed entries in skill root', () => {
@@ -1989,7 +2049,11 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 				},
 				{ enabled: true },
 			),
-		).resolves.toEqual({ blocked: false, reason: null });
+		).resolves.toMatchObject({
+			blocked: false,
+			reason: null,
+			recommendedSkills: [],
+		});
 
 		// Delegation recording should still have succeeded
 		expect(recorded).toHaveLength(1);
@@ -2185,7 +2249,11 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 				},
 				{ enabled: true },
 			),
-		).resolves.toEqual({ blocked: false, reason: null });
+		).resolves.toMatchObject({
+			blocked: false,
+			reason: null,
+			recommendedSkills: [],
+		});
 
 		// Scoring was not called because the read threw before we could check
 		expect(scoringCalled).toBe(false);
@@ -3486,7 +3554,11 @@ describe('skillPropagationGateBefore — context.md skill index auto-population'
 					prompt: 'SKILLS: writing-tests\ndo work',
 				},
 			}),
-		).resolves.toEqual({ blocked: false, reason: null });
+		).resolves.toMatchObject({
+			blocked: false,
+			reason: null,
+			recommendedSkills: expect.any(Array),
+		});
 	});
 
 	test('does NOT write when formatSkillIndexWithContext returns empty string', async () => {
@@ -4305,7 +4377,11 @@ describe('skillPropagationGateBefore — edge cases: formatSkillIndexWithContext
 			{ enabled: true },
 		);
 
-		expect(result).toEqual({ blocked: false, reason: null });
+		expect(result).toMatchObject({
+			blocked: false,
+			reason: null,
+			recommendedSkills: expect.any(Array),
+		});
 		expect(writtenContent).toHaveLength(1);
 		// Should contain the ## Available Skills header with simple index (no stats)
 		expect(writtenContent[0]).toContain('## Available Skills');

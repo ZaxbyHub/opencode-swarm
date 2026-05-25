@@ -44,6 +44,7 @@ OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCo
 | Document | Covers |
 |----------|--------|
 | [Knowledge System](knowledge.md) | Hive vs swarm knowledge, TTL decay, migration, quarantine workflows |
+| [Swarm Memory](memory.md) | Local JSONL memory, scoped recall, proposal-only writes, redaction policy |
 | [Evidence and Telemetry](evidence-and-telemetry.md) | Evidence bundle schema, JSONL event stream, how to analyze results |
 | [Work Complete Council](council/README.md) | Optional consensus gate for verifying phase completion |
 | [Troubleshooting](troubleshooting/recovery-guide.md) | Session recovery, common error scenarios |

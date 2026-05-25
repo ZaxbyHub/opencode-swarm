@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swarm Implement"
+  short_description: "Implement with structured rigor"
+  default_prompt: "Use $swarm-implement to plan, implement, review, and validate this change."

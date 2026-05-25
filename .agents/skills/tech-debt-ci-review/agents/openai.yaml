@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tech Debt CI Review"
+  short_description: "Audit CI and test reliability"
+  default_prompt: "Use $tech-debt-ci-review to audit this repo's CI and test debt."

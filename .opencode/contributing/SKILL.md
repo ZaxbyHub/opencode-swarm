@@ -87,6 +87,8 @@ bun run build
 bun test tests/smoke --timeout 120000
 ```
 
+**`dist-check` CI failures:** If `dist-check` fails, the committed `dist/` does not match what `bun run build` produces locally. This usually means the `dist/` was not rebuilt after source TypeScript changes. Fix: `bunx bun@1.3.13 run build` (CI uses Bun 1.3.13 — using a different local version produces different empty-if-branch formatting that fails the diff check). Commit the rebuilt `dist/` and push.
+
 If a pre-existing unrelated failure exists, note it in the PR description but do NOT skip other tiers.
 
 ## 5. Push and Open PR

@@ -3,11 +3,23 @@ import type { KnowledgeEntryBase, RejectedLesson } from './knowledge-types.js';
 export declare function getPlatformConfigDir(): string;
 export declare function resolveSwarmKnowledgePath(directory: string): string;
 export declare function resolveSwarmRejectedPath(directory: string): string;
+export declare function resolveSwarmRetractionsPath(directory: string): string;
 export declare function resolveHiveKnowledgePath(): string;
 export declare function resolveHiveRejectedPath(): string;
 export declare function readKnowledge<T>(filePath: string): Promise<T[]>;
 export declare function normalizeEntry<T>(raw: T): T;
 export declare function readRejectedLessons(directory: string): Promise<RejectedLesson[]>;
+export interface KnowledgeRetractionRecord {
+    id: string;
+    retracted_lesson: string;
+    normalized_lesson: string;
+    recorded_at: string;
+    reported_by: 'architect' | 'user' | 'auto';
+    matched_swarm_ids: string[];
+    matched_hive_ids: string[];
+}
+export declare function readRetractionRecords(directory: string): Promise<KnowledgeRetractionRecord[]>;
+export declare function appendRetractionRecord(directory: string, record: KnowledgeRetractionRecord): Promise<void>;
 export declare function appendKnowledge<T>(filePath: string, entry: T): Promise<void>;
 export declare function rewriteKnowledge<T>(filePath: string, entries: T[]): Promise<void>;
 export declare function enforceKnowledgeCap<T>(filePath: string, maxEntries: number): Promise<void>;

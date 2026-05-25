@@ -20,6 +20,12 @@ import * as fs from 'node:fs';
 import type { MessageWithParts } from './knowledge-types.js';
 import { computeSkillRelevanceScore, formatSkillIndexWithContext } from './skill-scoring.js';
 import { appendSkillUsageEntry, readSkillUsageEntries, readSkillUsageEntriesTail } from './skill-usage-log.js';
+/**
+ * Load routing skills from .opencode/skill-routing.yaml for a target agent.
+ * Returns array of skill paths that are explicitly routed for the agent.
+ * Best-effort: returns empty array on any error or if file doesn't exist.
+ */
+export declare function loadRoutingSkills(directory: string, targetAgent: string): string[];
 /** Agents that should receive skill context in delegations. */
 export declare const SKILL_CAPABLE_AGENTS: Set<string>;
 /**
@@ -60,8 +66,10 @@ export declare const _internals: {
     readSkillUsageEntriesTail: typeof readSkillUsageEntriesTail;
     parseSkillPaths: typeof parseSkillPaths;
     extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
+    extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
     computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
     formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
+    loadRoutingSkills: typeof loadRoutingSkills;
 };
 /**
  * Scans project for available skill SKILL.md files.
@@ -82,6 +90,15 @@ export declare function parseDelegationArgs(args: unknown): {
     targetAgent: string;
     skillsField: string;
 } | null;
+/**
+ * Extracts the value of a SKILLS field from a delegation prompt. Supports both
+ * legacy one-line fields (`SKILLS: file:...`) and description-rich blocks:
+ *
+ *   SKILLS:
+ *   - file:.claude/skills/writing-tests/SKILL.md - test conventions
+ *   - file:.claude/skills/react/SKILL.md - React UI patterns
+ */
+export declare function extractSkillsFieldFromPrompt(prompt: string): string;
 /** Write a warning event to .swarm/events.jsonl (sync, best-effort). */
 export declare function writeWarnEvent(directory: string, record: Record<string, unknown>): void;
 /**
@@ -107,13 +124,18 @@ export declare function extractTaskIdFromPrompt(prompt: string): string;
  * the architect delegates to a skill-capable agent with a non-empty, non-"none"
  * SKILLS field.
  *
- * @returns { blocked: false, reason: null } when no action needed.
- *          { blocked: false, reason: "warning message" } when warning only (enforce=false).
- *          { blocked: true, reason: "blocked: ..." } when blocking (enforce=true).
+ * @returns { blocked: boolean; reason: string | null; recommendedSkills?: Array<{ skillPath: string; score: number; usageCount: number }> }
+ *          When scoring has computed results, includes `recommendedSkills` with ranked skill recommendations.
+ *          When scoring was skipped or errored, `recommendedSkills` is undefined.
  */
 export declare function skillPropagationGateBefore(directory: string, input: SkillGateInput, config: SkillPropagationConfig): Promise<{
     blocked: boolean;
     reason: string | null;
+    recommendedSkills?: Array<{
+        skillPath: string;
+        score: number;
+        usageCount: number;
+    }>;
 }>;
 /**
  * Chat messages transform hook. Scans reviewer output for SKILL_COMPLIANCE

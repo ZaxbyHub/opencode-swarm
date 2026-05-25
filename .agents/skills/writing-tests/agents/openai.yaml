@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing Tests"
+  short_description: "Author bun:test suites safely"
+  default_prompt: "Use $writing-tests before adding or changing tests in opencode-swarm."

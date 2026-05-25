@@ -3,6 +3,7 @@ import {
 	jaccardBigram,
 	normalize,
 	readKnowledge,
+	readRetractionRecords,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	wordBigrams,
@@ -25,6 +26,8 @@ interface KnowledgeRecallResult {
 	results: ScoredEntry[];
 	total: number;
 }
+
+const NORMAL_RETRIEVAL_STATUSES = new Set(['established', 'promoted']);
 
 export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -104,8 +107,21 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				entries = entries.concat(hiveEntries);
 			}
 
-			// Step 3: Filter out archived entries
-			entries = entries.filter((entry) => entry.status !== 'archived');
+			// Step 3: Filter out entries that are not mature enough for normal recall.
+			const retractions = await readRetractionRecords(directory);
+			const suppressedLessons = new Set(
+				retractions
+					.map((record) => record.normalized_lesson)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.length > 0,
+					),
+			);
+			entries = entries.filter(
+				(entry) =>
+					NORMAL_RETRIEVAL_STATUSES.has(entry.status) &&
+					!suppressedLessons.has(normalize(entry.lesson)),
+			);
 
 			// Step 3b: Empty store check
 			if (entries.length === 0) {

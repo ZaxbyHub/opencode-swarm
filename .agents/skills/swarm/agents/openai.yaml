@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swarm"
+  short_description: "Use a higher-rigor workflow"
+  default_prompt: "Use $swarm to approach this task with a swarm-style workflow."

@@ -1,0 +1,51 @@
+# Skill routing configuration for opencode-swarm
+# Maps agent types to skill paths that should be auto-injected.
+# Read by the skill propagation hook during delegation.
+# Version 1
+
+version: 1
+description: >
+  Agent-to-skill routing mapping. The hook reads this file at delegation time
+  and injects matching skills into the agent's prompt. When this file is absent,
+  the hook falls back to scoring-only recommendations.
+
+routing:
+  coder:
+    - path: .claude/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .claude/skills/engineering-conventions/SKILL.md
+      keywords: ["engineering", "conventions", "invariants", "rules"]
+    - path: .opencode/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .opencode/skills/running-tests/SKILL.md
+      keywords: ["test", "running tests"]
+    - path: .claude/skills/commit-pr/SKILL.md
+      keywords: ["code", "implementation", "commit", "pr"]
+    - path: .claude/skills/issue-tracer/SKILL.md
+      keywords: ["code", "implementation", "tracer", "issue"]
+    - path: .claude/skills/qa-sweep/SKILL.md
+      keywords: ["code", "qa", "quality"]
+    - path: .claude/skills/swarm-implement/SKILL.md
+      keywords: ["code", "implementation", "swarm"]
+    - path: .claude/skills/research-first/SKILL.md
+      keywords: ["research", "investigate", "domain"]
+
+  reviewer:
+    - path: .claude/skills/engineering-conventions/SKILL.md
+      keywords: ["engineering", "conventions", "invariants"]
+    - path: .claude/skills/swarm-pr-review/SKILL.md
+      keywords: ["review", "security", "audit"]
+    - path: .claude/skills/tech-debt-ci-review/SKILL.md
+      keywords: ["review", "audit", "tech debt"]
+    - path: .opencode/skills/running-tests/SKILL.md
+      keywords: ["test", "running tests"]
+
+  test_engineer:
+    - path: .claude/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .opencode/skills/writing-tests/SKILL.md
+      keywords: ["test", "testing", "writing tests"]
+    - path: .opencode/skills/running-tests/SKILL.md
+      keywords: ["test", "running tests"]
+    - path: .claude/skills/engineering-conventions/SKILL.md
+      keywords: ["engineering", "conventions", "invariants"]

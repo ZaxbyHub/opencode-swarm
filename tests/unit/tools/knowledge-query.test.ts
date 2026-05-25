@@ -353,6 +353,108 @@ describe('knowledge-query tool verification tests', () => {
 			// When no results, filter info is in the "No knowledge entries" message
 			expect(result).toContain('status=established');
 		});
+
+		it('Default query excludes candidate and archived entries', async () => {
+			writeSwarmKnowledge([
+				{
+					id: 'candidate-default-hidden',
+					tier: 'swarm',
+					lesson: 'Candidate should not be shown by default',
+					category: 'process',
+					tags: [],
+					scope: 'global',
+					confidence: 0.7,
+					status: 'candidate',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					project_name: 'test-project',
+				},
+				{
+					id: 'archived-default-hidden',
+					tier: 'swarm',
+					lesson: 'Archived should not be shown by default',
+					category: 'process',
+					tags: [],
+					scope: 'global',
+					confidence: 0.7,
+					status: 'archived',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					project_name: 'test-project',
+				},
+				{
+					id: 'established-default-visible',
+					tier: 'swarm',
+					lesson: 'Established should be shown by default',
+					category: 'process',
+					tags: [],
+					scope: 'global',
+					confidence: 0.8,
+					status: 'established',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					project_name: 'test-project',
+				},
+			]);
+
+			const result = await knowledge_query.execute({ tier: 'swarm' });
+			expect(result).toContain('established-default-visible');
+			expect(result).not.toContain('candidate-default-hidden');
+			expect(result).not.toContain('archived-default-hidden');
+		});
+
+		it('Archived entries can still be queried explicitly with status filter', async () => {
+			writeSwarmKnowledge([
+				{
+					id: 'archived-explicit-visible',
+					tier: 'swarm',
+					lesson: 'Archived but explicitly requested',
+					category: 'process',
+					tags: [],
+					scope: 'global',
+					confidence: 0.6,
+					status: 'archived',
+					confirmed_by: [],
+					retrieval_outcomes: {
+						applied_count: 0,
+						succeeded_after_count: 0,
+						failed_after_count: 0,
+					},
+					schema_version: 1,
+					created_at: '2024-01-01T00:00:00Z',
+					updated_at: '2024-01-01T00:00:00Z',
+					project_name: 'test-project',
+				},
+			]);
+
+			const result = await knowledge_query.execute({
+				tier: 'swarm',
+				status: 'archived',
+			});
+			expect(result).toContain('archived-explicit-visible');
+			expect(result).toContain('Status filter: archived');
+		});
 	});
 
 	// ========== GROUP 4: Category filtering ==========
@@ -552,7 +654,7 @@ describe('knowledge-query tool verification tests', () => {
 			expect(result).not.toContain('entry-low');
 		});
 
-		it('Applies min_score 0.0 to return all entries', async () => {
+		it('Applies min_score 0.0 while still enforcing default safe status visibility', async () => {
 			const swarmData1: SwarmKnowledgeEntry = {
 				id: 'entry-1',
 				tier: 'swarm',
@@ -600,7 +702,7 @@ describe('knowledge-query tool verification tests', () => {
 				min_score: 0.0,
 			});
 
-			expect(result).toContain('entry-1');
+			expect(result).not.toContain('entry-1');
 			expect(result).toContain('entry-2');
 		});
 

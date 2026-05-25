@@ -613,6 +613,63 @@ async function getEvidenceTaskId(
 }
 
 /**
+ * Resolves the correct task ID for evidence recording by chaining:
+ * 1. Explicit task_id in direct args (structured field)
+ * 2. Prompt-text extraction via resolveDelegatedPlanTaskId (plan-aware)
+ * 3. Session-state fallback via getEvidenceTaskId
+ *
+ * This fixes parallel evidence recording where multiple reviewer/test_engineer
+ * agents are dispatched for different tasks from the same architect session.
+ * Issue #970.
+ */
+async function resolveEvidenceTaskId(
+	args: Record<string, unknown> | undefined,
+	session: AgentSessionState,
+	directory: string,
+): Promise<string | null> {
+	// Step 1: Explicit task_id in direct args
+	const rawTaskId = args?.task_id;
+	if (
+		typeof rawTaskId === 'string' &&
+		rawTaskId.length <= 20 &&
+		isStrictTaskId(rawTaskId.trim())
+	) {
+		return rawTaskId.trim();
+	}
+
+	// Step 2: Prompt-text extraction via resolveDelegatedPlanTaskId with plan-aware filtering
+	// When plan is unavailable, skip text extraction entirely to prevent version-like
+	// patterns (e.g. "v6.33.7") from being misidentified as task IDs.
+	if (args) {
+		try {
+			const plan = await loadPlanJsonOnly(directory);
+			if (plan) {
+				const planTaskIds = new Set(
+					plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
+				);
+				const promptTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+				if (promptTaskId) return promptTaskId;
+			}
+			// Plan unavailable — skip text extraction, fall through to session state
+		} catch {
+			// Plan unavailable — proceed to session fallback
+		}
+	}
+
+	// Step 3: Session-state fallback
+	return getEvidenceTaskId(session, directory);
+}
+
+/**
+ * _internals export for testing — do not use in production code.
+ * Exposes resolveEvidenceTaskId and resolveDelegatedPlanTaskId for unit testing.
+ */
+export const _internals = {
+	resolveEvidenceTaskId,
+	resolveDelegatedPlanTaskId,
+};
+
+/**
  * Creates the experimental.chat.messages.transform hook for delegation gating.
  * Inspects coder delegations and warns when tasks are oversized or batched.
  */
@@ -1160,13 +1217,12 @@ export function createDelegationGateHook(
 			// escaped outside the evidence try-catch and propagated to safeHook.
 			if (typeof subagentType === 'string') {
 				try {
-					const rawTaskId = directArgs?.task_id;
-					const evidenceTaskId =
-						typeof rawTaskId === 'string' &&
-						rawTaskId.length <= 20 &&
-						isStrictTaskId(rawTaskId.trim())
-							? rawTaskId.trim()
-							: await getEvidenceTaskId(session, directory);
+					const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
+					const evidenceTaskId = await resolveEvidenceTaskId(
+						mergedArgs,
+						session,
+						directory,
+					);
 					if (evidenceTaskId) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						const gateAgents = [
@@ -1358,13 +1414,11 @@ export function createDelegationGateHook(
 				// Record gate evidence for delegation-chain fallback path
 				// v6.33.7: Entire block wrapped in try-catch (same fix as stored-args path)
 				try {
-					const rawTaskId = directArgs?.task_id;
-					const evidenceTaskId =
-						typeof rawTaskId === 'string' &&
-						rawTaskId.length <= 20 &&
-						isStrictTaskId(rawTaskId.trim())
-							? rawTaskId.trim()
-							: await getEvidenceTaskId(session, directory);
+					const evidenceTaskId = await resolveEvidenceTaskId(
+						directArgs,
+						session,
+						directory,
+					);
 					if (evidenceTaskId) {
 						const turbo = hasActiveTurboMode(input.sessionID);
 						if (hasReviewer) {

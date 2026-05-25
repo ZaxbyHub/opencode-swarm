@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engineering Conventions"
+  short_description: "Apply opencode-swarm invariants"
+  default_prompt: "Use $engineering-conventions before making this opencode-swarm architecture or runtime change."

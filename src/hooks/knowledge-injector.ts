@@ -17,7 +17,10 @@ import {
 	readPriorDriftReports,
 } from './curator-drift.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
-import { recordKnowledgeShown } from './knowledge-application.js';
+import {
+	filterHighConfidenceKnowledge,
+	recordKnowledgeShown,
+} from './knowledge-application.js';
 import type { ProjectContext, RankedEntry } from './knowledge-reader.js';
 import { readContextualKnowledge } from './knowledge-reader.js';
 import { readRejectedLessons } from './knowledge-store.js';
@@ -358,8 +361,10 @@ export function createKnowledgeInjectorHook(
 				config,
 				retrievalCtx,
 			);
+			// Filter to high-confidence entries only (confidence >= 0.8)
+			const filteredEntries = filterHighConfidenceKnowledge(entries);
 			// Track which IDs we showed so application-tracking can split shown from applied.
-			cachedShownIds = entries.map((e) => e.id);
+			cachedShownIds = filteredEntries.map((e) => e.id);
 
 			// Build drift/briefing preamble into a LOCAL variable so cachedInjectionText
 			// is never mutated before we know whether entries exist. This prevents the
@@ -399,7 +404,7 @@ export function createKnowledgeInjectorHook(
 			}
 
 			// If no knowledge entries AND no drift/briefing, nothing to inject
-			if (entries.length === 0) {
+			if (filteredEntries.length === 0) {
 				if (freshPreamble === null) return;
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
@@ -420,7 +425,7 @@ export function createKnowledgeInjectorHook(
 			const lessonBudget = Math.floor(effectiveBudget * 0.3);
 
 			// v2: Emit structured directive block for entries that have actionable metadata.
-			const directiveEntries = entries.filter(
+			const directiveEntries = filteredEntries.filter(
 				(e) =>
 					(e.triggers && e.triggers.length > 0) ||
 					(e.required_actions && e.required_actions.length > 0) ||
@@ -436,7 +441,7 @@ export function createKnowledgeInjectorHook(
 			);
 
 			const lessonBlock = buildKnowledgeBlock(
-				entries,
+				filteredEntries,
 				lessonBudget,
 				config,
 				projectName,
@@ -506,7 +511,7 @@ export function createKnowledgeInjectorHook(
 			// Keyed by sessionID — the gate consults this exact key.
 			const sessionID = systemMsg?.info?.sessionID;
 			if (sessionID) {
-				const criticalIds = entries
+				const criticalIds = filteredEntries
 					.filter(
 						(e) =>
 							e.directive_priority === 'critical' && e.status !== 'archived',

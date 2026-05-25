@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swarm PR Review"
+  short_description: "Review PRs with high rigor"
+  default_prompt: "Use $swarm-pr-review to perform a deep review of this pull request."

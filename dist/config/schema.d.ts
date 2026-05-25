@@ -287,8 +287,8 @@ export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 export declare const AdversarialDetectionConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     policy: z.ZodDefault<z.ZodEnum<{
-        gate: "gate";
         ignore: "ignore";
+        gate: "gate";
         warn: "warn";
     }>>;
     pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
@@ -502,6 +502,31 @@ export declare const KnowledgeConfigSchema: z.ZodObject<{
     sweep_enabled: z.ZodDefault<z.ZodBoolean>;
 }, z.core.$strip>;
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
+export declare const MemoryConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    provider: z.ZodDefault<z.ZodLiteral<"local-jsonl">>;
+    storageDir: z.ZodDefault<z.ZodString>;
+    recall: z.ZodDefault<z.ZodObject<{
+        defaultMaxItems: z.ZodDefault<z.ZodNumber>;
+        defaultTokenBudget: z.ZodDefault<z.ZodNumber>;
+        minScore: z.ZodDefault<z.ZodNumber>;
+        injection: z.ZodDefault<z.ZodObject<{
+            enabled: z.ZodDefault<z.ZodBoolean>;
+            minScore: z.ZodDefault<z.ZodNumber>;
+            requireQuerySignal: z.ZodDefault<z.ZodBoolean>;
+            maxItems: z.ZodDefault<z.ZodNumber>;
+            tokenBudget: z.ZodDefault<z.ZodNumber>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    writes: z.ZodDefault<z.ZodObject<{
+        mode: z.ZodDefault<z.ZodLiteral<"propose">>;
+    }, z.core.$strip>>;
+    redaction: z.ZodDefault<z.ZodObject<{
+        rejectDurableSecrets: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    hardDelete: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
 export declare const CuratorConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     init_enabled: z.ZodDefault<z.ZodBoolean>;
@@ -1035,8 +1060,8 @@ export declare const PluginConfigSchema: z.ZodObject<{
     adversarial_detection: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         policy: z.ZodDefault<z.ZodEnum<{
-            gate: "gate";
             ignore: "ignore";
+            gate: "gate";
             warn: "warn";
         }>>;
         pairs: z.ZodDefault<z.ZodArray<z.ZodTuple<[z.ZodString, z.ZodString], null>>>;
@@ -1134,6 +1159,30 @@ export declare const PluginConfigSchema: z.ZodObject<{
         default_max_phases: z.ZodDefault<z.ZodNumber>;
         todo_max_phases: z.ZodDefault<z.ZodNumber>;
         sweep_enabled: z.ZodDefault<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    memory: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        provider: z.ZodDefault<z.ZodLiteral<"local-jsonl">>;
+        storageDir: z.ZodDefault<z.ZodString>;
+        recall: z.ZodDefault<z.ZodObject<{
+            defaultMaxItems: z.ZodDefault<z.ZodNumber>;
+            defaultTokenBudget: z.ZodDefault<z.ZodNumber>;
+            minScore: z.ZodDefault<z.ZodNumber>;
+            injection: z.ZodDefault<z.ZodObject<{
+                enabled: z.ZodDefault<z.ZodBoolean>;
+                minScore: z.ZodDefault<z.ZodNumber>;
+                requireQuerySignal: z.ZodDefault<z.ZodBoolean>;
+                maxItems: z.ZodDefault<z.ZodNumber>;
+                tokenBudget: z.ZodDefault<z.ZodNumber>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>>;
+        writes: z.ZodDefault<z.ZodObject<{
+            mode: z.ZodDefault<z.ZodLiteral<"propose">>;
+        }, z.core.$strip>>;
+        redaction: z.ZodDefault<z.ZodObject<{
+            rejectDurableSecrets: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>>;
+        hardDelete: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
     curator: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;

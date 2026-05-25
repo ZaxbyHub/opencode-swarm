@@ -5,6 +5,7 @@
  * Uses experimental.chat.messages.transform to provide non-blocking guidance.
  */
 import type { PluginConfig } from '../config';
+import type { AgentSessionState } from '../state';
 import type { DelegationEnvelope, EnvelopeValidationResult } from '../types/delegation.js';
 /**
  * v6.33.1 CRIT-1: Fallback map for declared coder scope by taskId.
@@ -53,6 +54,26 @@ interface MessageWithParts {
     info: MessageInfo;
     parts: MessagePart[];
 }
+declare function resolveDelegatedPlanTaskId(args: Record<string, unknown>, knownPlanTaskIds?: ReadonlySet<string>): string | null;
+/**
+ * Resolves the correct task ID for evidence recording by chaining:
+ * 1. Explicit task_id in direct args (structured field)
+ * 2. Prompt-text extraction via resolveDelegatedPlanTaskId (plan-aware)
+ * 3. Session-state fallback via getEvidenceTaskId
+ *
+ * This fixes parallel evidence recording where multiple reviewer/test_engineer
+ * agents are dispatched for different tasks from the same architect session.
+ * Issue #970.
+ */
+declare function resolveEvidenceTaskId(args: Record<string, unknown> | undefined, session: AgentSessionState, directory: string): Promise<string | null>;
+/**
+ * _internals export for testing — do not use in production code.
+ * Exposes resolveEvidenceTaskId and resolveDelegatedPlanTaskId for unit testing.
+ */
+export declare const _internals: {
+    resolveEvidenceTaskId: typeof resolveEvidenceTaskId;
+    resolveDelegatedPlanTaskId: typeof resolveDelegatedPlanTaskId;
+};
 /**
  * Creates the experimental.chat.messages.transform hook for delegation gating.
  * Inspects coder delegations and warns when tasks are oversized or batched.

@@ -218,6 +218,23 @@ describe('return check', () => {
 		expect(state?.status).toBe('paused');
 	});
 
+	test('throws when warning event write fails', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		fs.mkdirSync(path.join(tmpDir, '.swarm', 'events.jsonl'), {
+			recursive: true,
+		});
+		await expect(
+			hook.toolAfter(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
+				{ output: 'Done; tests were skipped due to time pressure.' },
+			),
+		).rejects.toThrow();
+	});
+
 	test('does not warn on benign return text', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
