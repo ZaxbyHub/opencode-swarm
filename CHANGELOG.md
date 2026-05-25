@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.33.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.3...v7.33.0) (2026-05-25)
+
+
+### Features
+
+* **sandbox:** filesystem write-authority enforcement for coder subprocesses ([12d6607](https://github.com/zaxbysauce/opencode-swarm/commit/12d6607d7a7a736ec33d939f05a4e3fdee34eed9))
+* **sandbox:** filesystem write-authority enforcement for coder subprocesses ([ecf378b](https://github.com/zaxbysauce/opencode-swarm/commit/ecf378b6bfa5c23c2c6795139516bed331895a23))
+
+
+### Bug Fixes
+
+* **test:** add mock.restore() cleanup to linux.test.ts wrapCommand describe block ([45e9376](https://github.com/zaxbysauce/opencode-swarm/commit/45e9376e83ddb9f3143d3f99a832caf4e4fbc408))
+
 ## [7.32.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.2...v7.32.3) (2026-05-25)
 
 
