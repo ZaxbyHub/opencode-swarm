@@ -135,10 +135,7 @@ describe('BubblewrapSandboxExecutor', () => {
 				'../../../src/sandbox/linux/bubblewrap-executor',
 				() => ({
 					BubblewrapSandboxExecutor,
-					_internals: {
-						..._internals,
-						probeBwrap: () => true,
-					},
+					_internals: { ..._internals, probeBwrap: () => true },
 				}),
 			);
 			executor = new BubblewrapSandboxExecutor(
