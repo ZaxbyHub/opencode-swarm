@@ -1,0 +1,105 @@
+# mock.module Allowlist — scripts/mock-allowlist.txt
+# One normalized target per line. Blank lines and # comments are ignored.
+# EXACT match only — each target must be listed individually.
+#
+# Normalization: strip leading ../ sequences -> replace with src/
+#                strip trailing .js
+# Example: '../../../src/plan/manager.js' -> 'src/plan/manager'
+#
+# To add a NEW mock target: append it here with a comment explaining why.
+# Prefer _internals DI seam for new code — mock.module is a legacy pattern.
+#
+# Last updated: 2026-05-25
+
+# --- Node builtins ---
+node:child_process
+node:fs
+node:fs/promises
+node:path
+
+# --- src/agents ---
+src/agents/critic
+
+# --- src/background ---
+src/background/event-bus
+src/background/manager
+
+# --- src/build ---
+src/build/discovery
+
+# --- src/config ---
+src/config
+src/config/index
+src/config/schema
+
+# --- src/db ---
+src/db/qa-gate-profile
+
+# --- src/evidence ---
+src/evidence/manager
+
+# --- src/git ---
+src/git/branch
+
+# --- src/hooks ---
+src/hooks/curator
+src/hooks/curator-drift
+src/hooks/extractors
+src/hooks/hive-promoter
+src/hooks/knowledge-curator
+src/hooks/knowledge-migrator
+src/hooks/knowledge-reader
+src/hooks/knowledge-store
+src/hooks/knowledge-validator
+src/hooks/utils
+
+# --- src/lang ---
+src/lang/detector
+src/lang/registry
+
+# --- src/mutation ---
+src/mutation/equivalence
+
+# --- src/parallel ---
+src/parallel/file-locks
+
+# --- src/plan ---
+src/plan/checkpoint
+src/plan/ledger
+src/plan/manager
+
+# --- src/sast ---
+src/sast/rules/index
+src/sast/semgrep
+
+# --- src/services ---
+src/services/evidence-summary-service
+src/services/handoff-service
+src/services/run-memory
+src/services/skill-improver
+
+# --- src/session ---
+src/session/snapshot-writer
+
+# --- src/state ---
+src/state
+
+# --- src/telemetry ---
+src/telemetry
+
+# --- src/tools ---
+src/tools/co-change-analyzer
+src/tools/knowledge-recall
+src/tools/lint
+src/tools/quality-budget
+src/tools/sast-baseline
+src/tools/sast-scan
+src/tools/secretscan
+src/tools/write-retro
+
+# --- src/utils ---
+src/utils/bun-compat
+src/utils/logger
+src/utils/path-security
+src/utils/spec-hash
+src/utils
