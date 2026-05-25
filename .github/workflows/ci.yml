@@ -38,6 +38,9 @@ jobs:
       - name: Mock isolation compliance check
         shell: bash
         run: chmod +x scripts/check-mock-cleanup.sh && bash scripts/check-mock-cleanup.sh
+      - name: Engineering invariant checks
+        shell: bash
+        run: chmod +x scripts/check-invariants.sh && bash scripts/check-invariants.sh
 
   unit:
     needs: quality
