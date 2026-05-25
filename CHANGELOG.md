@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.35.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.34.0...v7.35.0) (2026-05-25)
+
+
+### Features
+
+* **skills:** add swarm-pr-feedback closure workflow ([9c6861c](https://github.com/zaxbysauce/opencode-swarm/commit/9c6861c46614e8cd95a0e6ff3f335192e2b82a7b))
+
 ## [7.34.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.33.2...v7.34.0) (2026-05-25)
 
 
