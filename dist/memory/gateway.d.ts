@@ -34,6 +34,7 @@ export declare class MemoryGateway {
     private readonly now;
     constructor(context: MemoryContext, options?: MemoryGatewayOptions);
     isEnabled(): boolean;
+    dispose(): Promise<void>;
     deriveAllowedScopes(): MemoryScopeRef[];
     recall(input: RecallMemoryInput): Promise<RecallBundle>;
     propose(input: ProposeMemoryInput): Promise<MemoryProposal>;

@@ -41,6 +41,7 @@ describe('swarm memory tools', () => {
 		recallInternals.loadPluginConfigWithMeta = mock(() => ({
 			config: { memory: { enabled: true } },
 		})) as any;
+		const dispose = mock(async () => {});
 		recallInternals.createMemoryGateway = mock(() => ({
 			recall: mock(async () => ({
 				id: 'bundle_20260524120000_abcdef12',
@@ -48,6 +49,7 @@ describe('swarm memory tools', () => {
 				tokenEstimate: 42,
 				promptBlock: '## Retrieved Swarm Memory\n- [mem_aaaaaaaaaaaaaaaa] fact',
 			})),
+			dispose,
 		})) as any;
 
 		const result = await swarm_memory_recall.execute(
@@ -60,6 +62,7 @@ describe('swarm memory tools', () => {
 		expect(parsed.success).toBe(true);
 		expect(parsed.memory_ids).toEqual(['mem_aaaaaaaaaaaaaaaa']);
 		expect(parsed.prompt_block).toContain('Retrieved Swarm Memory');
+		expect(dispose).toHaveBeenCalledTimes(1);
 	});
 
 	test('propose returns disabled without writing when memory is absent', async () => {
@@ -87,6 +90,7 @@ describe('swarm memory tools', () => {
 		proposeInternals.loadPluginConfigWithMeta = mock(() => ({
 			config: { memory: { enabled: true } },
 		})) as any;
+		const dispose = mock(async () => {});
 		proposeInternals.createMemoryGateway = mock(() => ({
 			propose: mock(async () => ({
 				id: 'prop_aaaaaaaaaaaaaaaa',
@@ -94,6 +98,7 @@ describe('swarm memory tools', () => {
 				operation: 'add',
 				proposedRecord: { id: 'mem_bbbbbbbbbbbbbbbb' },
 			})),
+			dispose,
 		})) as any;
 
 		const result = await swarm_memory_propose.execute(
@@ -113,5 +118,6 @@ describe('swarm memory tools', () => {
 		expect(parsed.proposal_id).toBe('prop_aaaaaaaaaaaaaaaa');
 		expect(parsed.memory_id).toBe('mem_bbbbbbbbbbbbbbbb');
 		expect(parsed.message).toContain('Durable memory was not written');
+		expect(dispose).toHaveBeenCalledTimes(1);
 	});
 });

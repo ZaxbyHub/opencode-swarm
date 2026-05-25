@@ -19,6 +19,7 @@ export interface MemoryRecallUsageEvent {
 export interface MemoryProvider {
     readonly name: string;
     initialize?(): Promise<void>;
+    close?(): Promise<void> | void;
     upsert(record: MemoryRecord): Promise<MemoryRecord>;
     get(id: string): Promise<MemoryRecord | null>;
     delete(id: string, reason?: string): Promise<void>;

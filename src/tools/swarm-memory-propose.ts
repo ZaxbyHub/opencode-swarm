@@ -103,23 +103,27 @@ export const swarm_memory_propose: ReturnType<typeof createSwarmTool> =
 					config: config.memory,
 				},
 			);
-			const proposal = await gateway.propose(parsed.data);
-			return JSON.stringify(
-				{
-					success: proposal.status !== 'rejected',
-					proposal_id: proposal.id,
-					status: proposal.status,
-					operation: proposal.operation,
-					memory_id: proposal.proposedRecord?.id,
-					rejection_reason: proposal.rejectionReason,
-					message:
-						proposal.status === 'pending'
-							? 'Memory proposal created. Durable memory was not written.'
-							: 'Memory proposal was captured with policy rejection metadata.',
-				},
-				null,
-				2,
-			);
+			try {
+				const proposal = await gateway.propose(parsed.data);
+				return JSON.stringify(
+					{
+						success: proposal.status !== 'rejected',
+						proposal_id: proposal.id,
+						status: proposal.status,
+						operation: proposal.operation,
+						memory_id: proposal.proposedRecord?.id,
+						rejection_reason: proposal.rejectionReason,
+						message:
+							proposal.status === 'pending'
+								? 'Memory proposal created. Durable memory was not written.'
+								: 'Memory proposal was captured with policy rejection metadata.',
+					},
+					null,
+					2,
+				);
+			} finally {
+				await gateway.dispose();
+			}
 		},
 	});
 

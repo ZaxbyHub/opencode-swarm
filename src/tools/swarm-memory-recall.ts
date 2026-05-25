@@ -65,23 +65,27 @@ export const swarm_memory_recall: ReturnType<typeof createSwarmTool> =
 					config: config.memory,
 				},
 			);
-			const bundle = await gateway.recall(parsed.data);
-			return JSON.stringify(
-				{
-					success: true,
-					bundle_id: bundle.id,
-					memory_ids: bundle.items.map((item) => item.record.id),
-					total: bundle.items.length,
-					token_estimate: bundle.tokenEstimate,
-					signals: bundle.items.map((item) => ({
-						memory_id: item.record.id,
-						...item.signals,
-					})),
-					prompt_block: bundle.promptBlock,
-				},
-				null,
-				2,
-			);
+			try {
+				const bundle = await gateway.recall(parsed.data);
+				return JSON.stringify(
+					{
+						success: true,
+						bundle_id: bundle.id,
+						memory_ids: bundle.items.map((item) => item.record.id),
+						total: bundle.items.length,
+						token_estimate: bundle.tokenEstimate,
+						signals: bundle.items.map((item) => ({
+							memory_id: item.record.id,
+							...item.signals,
+						})),
+						prompt_block: bundle.promptBlock,
+					},
+					null,
+					2,
+				);
+			} finally {
+				await gateway.dispose();
+			}
 		},
 	});
 

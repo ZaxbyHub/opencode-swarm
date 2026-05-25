@@ -83,6 +83,10 @@ export class MemoryGateway {
 		return this.config.enabled;
 	}
 
+	async dispose(): Promise<void> {
+		await this.provider.close?.();
+	}
+
 	deriveAllowedScopes(): MemoryScopeRef[] {
 		const resolvedRoot = path.resolve(this.context.directory);
 		const repoId = createStableId(
