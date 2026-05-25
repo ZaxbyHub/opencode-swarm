@@ -117,6 +117,18 @@ export interface SavePlanResult {
 	};
 }
 
+function executionProfilesEqual(
+	a: NonNullable<Plan['execution_profile']>,
+	b: NonNullable<Plan['execution_profile']>,
+): boolean {
+	return (
+		a.parallelization_enabled === b.parallelization_enabled &&
+		a.max_concurrent_tasks === b.max_concurrent_tasks &&
+		a.council_parallel === b.council_parallel &&
+		a.locked === b.locked
+	);
+}
+
 /**
  * Detect template placeholder content (e.g., [task], [Project], [description], [N]).
  * These patterns indicate the LLM reproduced template examples literally rather than
@@ -422,25 +434,50 @@ export async function executeSavePlan(
 			// Locked execution_profile enforcement — fail closed (unless reset_statuses clears it)
 			if (existing.execution_profile?.locked) {
 				if (args.execution_profile !== undefined && !args.reset_statuses) {
-					// Caller is trying to change a locked profile without reset → reject
-					return {
-						success: false,
-						message:
-							'EXECUTION_PROFILE_LOCKED: The execution_profile for this plan is locked and cannot be changed.',
-						errors: [
-							'execution_profile.locked is true — to change the profile you must first unlock it via a separate plan revision that explicitly sets locked: false, or reset the plan with reset_statuses.',
-						],
-						recovery_guidance:
-							'Remove the execution_profile field from this save_plan call to preserve the locked profile, ' +
-							'or use reset_statuses: true to start fresh (this clears the lock). ' +
-							'Never modify execution_profile directly in plan.json.',
-					};
+					const requestedProfile = ExecutionProfileSchema.safeParse({
+						...existing.execution_profile,
+						...args.execution_profile,
+					});
+					if (!requestedProfile.success) {
+						return {
+							success: false,
+							message: 'Invalid execution_profile: schema validation failed',
+							errors: requestedProfile.error.issues.map(
+								(i) => `${i.path.join('.')}: ${i.message}`,
+							),
+							recovery_guidance:
+								'Check execution_profile fields: parallelization_enabled (boolean), ' +
+								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean).',
+						};
+					}
+
+					if (
+						executionProfilesEqual(
+							existing.execution_profile,
+							requestedProfile.data,
+						)
+					) {
+						preservedExecutionProfile = existing.execution_profile;
+					} else {
+						// Caller is trying to change a locked profile without reset → reject
+						return {
+							success: false,
+							message:
+								'EXECUTION_PROFILE_LOCKED: The execution_profile for this plan is locked and cannot be changed.',
+							errors: [
+								'execution_profile.locked is true — to change the profile you must first unlock it via a separate plan revision that explicitly sets locked: false, or reset the plan with reset_statuses.',
+							],
+							recovery_guidance:
+								'Remove the execution_profile field from this save_plan call to preserve the locked profile, ' +
+								'or use reset_statuses: true to start fresh (this clears the lock). ' +
+								'Never modify execution_profile directly in plan.json.',
+						};
+					}
+				} else if (!args.reset_statuses) {
+					preservedExecutionProfile = existing.execution_profile;
 				}
 				// When reset_statuses is true, clear the lock (fresh start).
 				// Otherwise preserve the locked profile unchanged.
-				if (!args.reset_statuses) {
-					preservedExecutionProfile = existing.execution_profile;
-				}
 			} else {
 				// Profile is not locked — carry it forward if no new one provided
 				preservedExecutionProfile = existing.execution_profile;
@@ -450,9 +487,8 @@ export async function executeSavePlan(
 
 	// Step 3: Resolve the effective execution_profile for this save.
 	// Precedence: incoming args.execution_profile > preserved existing profile > undefined.
-	// The locked-profile guard above already rejected the case where args.execution_profile
-	// is provided for a locked plan, so reaching here with args.execution_profile set means
-	// the plan is NOT locked (or is brand new).
+	// The locked-profile guard above rejected changes to locked profiles, but
+	// permits idempotent no-op profile repeats so recovery retries can proceed.
 	let resolvedProfile: Plan['execution_profile'] = preservedExecutionProfile;
 	if (args.execution_profile !== undefined) {
 		// Merge incoming profile fields over the preserved base (if any)

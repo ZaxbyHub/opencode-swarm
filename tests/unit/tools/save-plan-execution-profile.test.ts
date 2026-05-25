@@ -97,7 +97,7 @@ describe('execution_profile: setting a profile on a new plan', () => {
 });
 
 describe('execution_profile: locked profile rejection (fail-closed)', () => {
-	test('second call with execution_profile on a locked plan is rejected', async () => {
+	test('second call with changed execution_profile on a locked plan is rejected', async () => {
 		// First call: set and lock the profile
 		const firstResult = await executeSavePlan(
 			makeArgs({
@@ -126,6 +126,58 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		expect(secondResult.message).toContain('EXECUTION_PROFILE_LOCKED');
 		expect(secondResult.errors).toBeDefined();
 		expect(secondResult.errors?.some((e) => e.includes('locked'))).toBe(true);
+	});
+
+	test('second call with identical execution_profile on a locked plan succeeds as no-op', async () => {
+		const profile = {
+			parallelization_enabled: true,
+			max_concurrent_tasks: 2,
+			council_parallel: false,
+			locked: true,
+		};
+		const firstResult = await executeSavePlan(
+			makeArgs({
+				working_directory: tmpDir,
+				execution_profile: profile,
+			}),
+		);
+		expect(firstResult.success).toBe(true);
+
+		const secondResult = await executeSavePlan(
+			makeArgs({
+				working_directory: tmpDir,
+				execution_profile: profile,
+			}),
+		);
+
+		expect(secondResult.success).toBe(true);
+		expect(secondResult.execution_profile).toEqual(profile);
+	});
+
+	test('second call with partial no-op execution_profile on a locked plan succeeds', async () => {
+		const firstResult = await executeSavePlan(
+			makeArgs({
+				working_directory: tmpDir,
+				execution_profile: {
+					parallelization_enabled: false,
+					max_concurrent_tasks: 1,
+					council_parallel: false,
+					locked: true,
+				},
+			}),
+		);
+		expect(firstResult.success).toBe(true);
+
+		const secondResult = await executeSavePlan(
+			makeArgs({
+				working_directory: tmpDir,
+				execution_profile: { locked: true },
+			}),
+		);
+
+		expect(secondResult.success).toBe(true);
+		expect(secondResult.execution_profile?.locked).toBe(true);
+		expect(secondResult.execution_profile?.parallelization_enabled).toBe(false);
 	});
 
 	test('second call without execution_profile on a locked plan succeeds', async () => {
