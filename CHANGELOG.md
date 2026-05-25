@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.32.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.1...v7.32.2) (2026-05-25)
+
+
+### Bug Fixes
+
+* **full-auto:** harden oversight gates with phase-exact evidence, fail-closed writes, and shared parser ([#1008](https://github.com/zaxbysauce/opencode-swarm/issues/1008)) ([68da309](https://github.com/zaxbysauce/opencode-swarm/commit/68da309ff981fe077d44ac400269cd7bebefc85b))
+
 ## [7.32.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.32.0...v7.32.1) (2026-05-24)
 
 
