@@ -257,6 +257,15 @@ describe('resolveCommand()', () => {
 			expect(result!.entry.subcommandOf).toBe('knowledge');
 		});
 
+		test('resolves memory subcommands', () => {
+			for (const subcommand of ['status', 'export', 'import', 'migrate']) {
+				const result = resolveCommand(['memory', subcommand]);
+				expect(result).not.toBeNull();
+				expect(result!.entry.subcommandOf).toBe('memory');
+				expect(result!.remainingArgs).toEqual([]);
+			}
+		});
+
 		test('resolves alias "diagnosis" → same category and aliasOf target as "diagnose"', () => {
 			const diagnoseResult = resolveCommand(['diagnose']);
 			const diagnosisResult = resolveCommand(['diagnosis']);
@@ -296,7 +305,7 @@ describe('resolveCommand()', () => {
 			const result = resolveCommand(['plan', 'xyz']);
 			expect(result).not.toBeNull();
 			expect(result!.entry.description).toBe(
-				'Show plan (optionally filter by phase number)',
+				'Show current plan (deprecated alias for /swarm show-plan)',
 			);
 			expect(result!.remainingArgs).toEqual(['xyz']);
 		});
@@ -341,6 +350,7 @@ describe('resolveCommand() — invariants', () => {
 			['config', 'doctor'],
 			['evidence', 'summary'],
 			['knowledge', 'migrate'],
+			['memory', 'status'],
 			['dark-matter'],
 			['council'],
 			['checkpoint', 'list'],

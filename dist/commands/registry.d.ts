@@ -422,6 +422,39 @@ export declare const COMMAND_REGISTRY: {
         readonly description: "List knowledge entries";
         readonly category: "utility";
     };
+    readonly memory: {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Show Swarm memory commands";
+        readonly category: "utility";
+    };
+    readonly 'memory status': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Show Swarm memory provider, JSONL, and migration status";
+        readonly subcommandOf: "memory";
+        readonly args: "";
+        readonly category: "diagnostics";
+    };
+    readonly 'memory export': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Export current Swarm memory to JSONL files";
+        readonly subcommandOf: "memory";
+        readonly args: "";
+        readonly category: "utility";
+    };
+    readonly 'memory import': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Import legacy JSONL memory into SQLite";
+        readonly subcommandOf: "memory";
+        readonly args: "";
+        readonly category: "utility";
+    };
+    readonly 'memory migrate': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Run the one-time legacy JSONL to SQLite migration";
+        readonly subcommandOf: "memory";
+        readonly args: "";
+        readonly category: "utility";
+    };
     readonly checkpoint: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Manage project checkpoints [save|restore|delete|list] <label>";

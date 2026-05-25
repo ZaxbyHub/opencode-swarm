@@ -38,8 +38,9 @@ function agents(): Record<string, AgentDefinition> {
 }
 
 describe('swarm_command tool', () => {
-	test('does not export a module-level singleton with an empty agent map', () => {
-		expect('swarm_command' in swarmCommandModule).toBe(false);
+	test('exports a static singleton for registration conformance', () => {
+		expect('swarm_command' in swarmCommandModule).toBe(true);
+		expect(swarmCommandModule.swarm_command).toBeDefined();
 	});
 
 	test('returns canonical agents output using the runtime agent map', async () => {

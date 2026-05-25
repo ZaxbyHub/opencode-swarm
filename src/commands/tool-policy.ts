@@ -24,6 +24,11 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'preflight',
 	'benchmark',
 	'knowledge',
+	'memory',
+	'memory status',
+	'memory export',
+	'memory import',
+	'memory migrate',
 	'sync-plan',
 	'export',
 	'list-agents',
@@ -48,6 +53,9 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'preflight',
 	'benchmark',
 	'knowledge',
+	'memory',
+	'memory status',
+	'memory export',
 	'sync-plan',
 	'export',
 ]);
@@ -66,6 +74,8 @@ export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
 	'reset-session',
 	'rollback',
 	'checkpoint',
+	'memory import',
+	'memory migrate',
 ]);
 
 const NO_ARGS = new Set([
@@ -80,6 +90,9 @@ const NO_ARGS = new Set([
 	'preflight',
 	'sync-plan',
 	'export',
+	'memory',
+	'memory status',
+	'memory export',
 ]);
 
 const SUMMARY_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -137,6 +150,15 @@ export function classifySwarmCommandToolUse(
 			allowed: false,
 			message:
 				'Only `/swarm knowledge` and `/swarm knowledge list` are available through swarm_command. Knowledge migrate/quarantine/restore are intentionally excluded.',
+		};
+	}
+
+	if (canonicalKey === 'memory') {
+		if (args.length === 0) return { allowed: true };
+		return {
+			allowed: false,
+			message:
+				'Use `/swarm memory status` or `/swarm memory export` through swarm_command. Memory import and migrate are intentionally excluded from chat-tool execution.',
 		};
 	}
 
@@ -213,12 +235,14 @@ export function classifySwarmCommandChatFallbackUse(
 	if (
 		canonicalKey === 'knowledge migrate' ||
 		canonicalKey === 'knowledge quarantine' ||
-		canonicalKey === 'knowledge restore'
+		canonicalKey === 'knowledge restore' ||
+		canonicalKey === 'memory import' ||
+		canonicalKey === 'memory migrate'
 	) {
 		return {
 			allowed: false,
 			message:
-				`/swarm ${canonicalKey} is not available through chat fallback because it mutates .swarm knowledge state. ` +
+				`/swarm ${canonicalKey} is not available through chat fallback because it mutates .swarm state. ` +
 				'Run the CLI command directly after confirming the intended state change.',
 		};
 	}

@@ -1095,7 +1095,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|memory|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1233,6 +1233,31 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm knowledge $ARGUMENTS',
 					description:
 						'Use /swarm knowledge for knowledge management (quarantine/restore/migrate)',
+				},
+				'swarm-memory': {
+					template: '/swarm memory $ARGUMENTS',
+					description:
+						'Use /swarm memory for memory status, JSONL export/import, and SQLite migration',
+				},
+				'swarm-memory-status': {
+					template: '/swarm memory status',
+					description:
+						'Use /swarm memory status to show provider and migration status',
+				},
+				'swarm-memory-export': {
+					template: '/swarm memory export',
+					description:
+						'Use /swarm memory export to write current memory to JSONL',
+				},
+				'swarm-memory-import': {
+					template: '/swarm memory import',
+					description:
+						'Use /swarm memory import to import legacy JSONL into SQLite',
+				},
+				'swarm-memory-migrate': {
+					template: '/swarm memory migrate',
+					description:
+						'Use /swarm memory migrate to run the one-time SQLite migration',
 				},
 				'swarm-curate': {
 					template: '/swarm curate',

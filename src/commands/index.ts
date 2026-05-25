@@ -62,6 +62,13 @@ export {
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
 } from './knowledge';
+export {
+	handleMemoryCommand,
+	handleMemoryExportCommand,
+	handleMemoryImportCommand,
+	handleMemoryMigrateCommand,
+	handleMemoryStatusCommand,
+} from './memory';
 export { handlePlanCommand } from './plan';
 export { handlePreflightCommand } from './preflight';
 export { handlePromoteCommand } from './promote';

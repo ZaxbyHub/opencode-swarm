@@ -17,7 +17,7 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 {
   "memory": {
     "enabled": true,
-    "provider": "local-jsonl",
+    "provider": "sqlite",
     "storageDir": ".swarm/memory",
     "sqlite": {
       "path": ".swarm/memory/memory.db",
@@ -38,36 +38,57 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 }
 ```
 
-`local-jsonl` remains the default provider. `sqlite` is available as an opt-in provider foundation for the same gateway behavior:
+`sqlite` is the default provider. `local-jsonl` remains available for legacy/debug mode:
 
 ```json
 {
   "memory": {
     "enabled": true,
-    "provider": "sqlite",
-    "sqlite": {
-      "path": ".swarm/memory/memory.db",
-      "busyTimeoutMs": 5000
-    }
+    "provider": "local-jsonl"
   }
 }
 ```
 
-Qdrant, embeddings, JSONL-to-SQLite migration, and curator approval are separate follow-up features. Recall injection uses the gateway/provider seam, so storage providers do not change agent behavior.
+Qdrant, embeddings, and curator approval are separate follow-up features. Recall injection uses the gateway/provider seam, so storage providers do not change agent behavior.
 
 ## Storage
 
 Local memory lives under the project root:
 
 ```text
+.swarm/memory/memory.db
 .swarm/memory/memories.jsonl
 .swarm/memory/proposals.jsonl
 .swarm/memory/audit.jsonl
 ```
 
-`memories.jsonl` stores durable records after they are curated or otherwise inserted through the gateway. `proposals.jsonl` stores pending or policy-rejected proposals from agents. `audit.jsonl` records upsert, delete, proposal, recall, and compaction events.
+SQLite stores the default durable state in `memory.db`. `memories.jsonl` and `proposals.jsonl` are still supported for legacy/debug mode, migration input, and JSONL export. `audit.jsonl` is used only by the JSONL provider.
 
 When `provider` is `sqlite`, the database defaults to `.swarm/memory/memory.db` and stores the provider tables `memory_items`, `memory_proposals`, `memory_events`, `memory_recall_usage`, and `schema_migrations`.
+
+## JSONL Migration And Export
+
+When SQLite initializes for a project, it checks for legacy `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` files. Valid records are imported into SQLite, the original JSONL files are copied to `.swarm/memory/backups/*.pre-sqlite-migration`, and the migration is marked complete in `schema_migrations` as `legacy_jsonl_import_complete`. The marker prevents automatic re-import on later runs.
+
+Invalid JSONL rows are not silently discarded. They are written to `.swarm/memory/migration-report.json` and shown by `/swarm memory status` and `/swarm memory migrate`.
+
+Memory commands:
+
+```text
+/swarm memory status
+/swarm memory export
+/swarm memory import
+/swarm memory migrate
+```
+
+`/swarm memory export` writes the current provider contents to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`. `/swarm memory import` explicitly imports the current legacy JSONL files into SQLite; use it for manual recovery or debug workflows after reviewing the source files.
+
+Rollback to JSONL provider:
+
+1. Stop using memory tools for the project.
+2. Restore the backup JSONL files from `.swarm/memory/backups/` to `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` if needed.
+3. Set `"memory.provider": "local-jsonl"` in `.opencode/opencode-swarm.json`.
+4. Keep or remove `.swarm/memory/memory.db` depending on whether you want to preserve the SQLite copy for future migration/debugging.
 
 Deletes tombstone records by default instead of physically erasing them. Hard delete is available only through internal provider configuration and is not exposed to normal agents.
 

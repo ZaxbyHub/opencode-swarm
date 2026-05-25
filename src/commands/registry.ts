@@ -30,6 +30,13 @@ import {
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
 } from './knowledge.js';
+import {
+	handleMemoryCommand,
+	handleMemoryExportCommand,
+	handleMemoryImportCommand,
+	handleMemoryMigrateCommand,
+	handleMemoryStatusCommand,
+} from './memory.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePrReviewCommand } from './pr-review.js';
 import { handlePreflightCommand } from './preflight.js';
@@ -705,6 +712,39 @@ export const COMMAND_REGISTRY = {
 	knowledge: {
 		handler: (ctx) => handleKnowledgeListCommand(ctx.directory, ctx.args),
 		description: 'List knowledge entries',
+		category: 'utility',
+	},
+	memory: {
+		handler: (ctx) => handleMemoryCommand(ctx.directory, ctx.args),
+		description: 'Show Swarm memory commands',
+		category: 'utility',
+	},
+	'memory status': {
+		handler: (ctx) => handleMemoryStatusCommand(ctx.directory, ctx.args),
+		description: 'Show Swarm memory provider, JSONL, and migration status',
+		subcommandOf: 'memory',
+		args: '',
+		category: 'diagnostics',
+	},
+	'memory export': {
+		handler: (ctx) => handleMemoryExportCommand(ctx.directory, ctx.args),
+		description: 'Export current Swarm memory to JSONL files',
+		subcommandOf: 'memory',
+		args: '',
+		category: 'utility',
+	},
+	'memory import': {
+		handler: (ctx) => handleMemoryImportCommand(ctx.directory, ctx.args),
+		description: 'Import legacy JSONL memory into SQLite',
+		subcommandOf: 'memory',
+		args: '',
+		category: 'utility',
+	},
+	'memory migrate': {
+		handler: (ctx) => handleMemoryMigrateCommand(ctx.directory, ctx.args),
+		description: 'Run the one-time legacy JSONL to SQLite migration',
+		subcommandOf: 'memory',
+		args: '',
 		category: 'utility',
 	},
 	checkpoint: {

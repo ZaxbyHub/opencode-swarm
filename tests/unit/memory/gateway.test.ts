@@ -38,7 +38,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -66,7 +66,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -92,7 +92,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -126,7 +126,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -160,7 +160,7 @@ describe('MemoryGateway', () => {
 			const gateway = new MemoryGateway(
 				{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 				{
-					config: { enabled: true },
+					config: { enabled: true, provider: 'local-jsonl' },
 					provider,
 					now: () => new Date('2026-05-24T12:00:00.000Z'),
 				},
@@ -205,7 +205,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				provider,
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
@@ -239,7 +239,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				provider,
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
@@ -265,7 +265,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -297,7 +297,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'critic' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -331,7 +331,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -363,7 +363,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -391,7 +391,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -424,7 +424,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -464,7 +464,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -491,7 +491,7 @@ describe('MemoryGateway', () => {
 	test('rejects durable add proposals without evidence refs', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { enabled: true } },
+			{ config: { enabled: true, provider: 'local-jsonl' } },
 		);
 
 		await expect(
@@ -507,7 +507,7 @@ describe('MemoryGateway', () => {
 	test('rejects update proposals without a target memory id', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { enabled: true } },
+			{ config: { enabled: true, provider: 'local-jsonl' } },
 		);
 
 		await expect(
@@ -524,7 +524,7 @@ describe('MemoryGateway', () => {
 	test('rejects merge proposals with fewer than two related memories', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { enabled: true } },
+			{ config: { enabled: true, provider: 'local-jsonl' } },
 		);
 
 		await expect(
@@ -552,7 +552,7 @@ describe('MemoryGateway', () => {
 		const gateway = new MemoryGateway(
 			{ directory: repoDir, sessionID: 'session-a', agentRole: 'coder' },
 			{
-				config: { enabled: true },
+				config: { enabled: true, provider: 'local-jsonl' },
 				now: () => new Date('2026-05-24T12:00:00.000Z'),
 			},
 		);
@@ -567,7 +567,7 @@ describe('MemoryGateway', () => {
 
 		const movedGateway = new MemoryGateway(
 			{ directory: movedRepoDir, sessionID: 'session-b', agentRole: 'coder' },
-			{ config: { enabled: true } },
+			{ config: { enabled: true, provider: 'local-jsonl' } },
 		);
 		const recall = await movedGateway.recall({
 			query: 'local memory reachable moves',

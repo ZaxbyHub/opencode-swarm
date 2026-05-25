@@ -6,13 +6,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	computeMemoryContentHash,
+	createConfiguredMemoryProvider,
 	createMemoryId,
 	createProposalId,
+	LEGACY_JSONL_MIGRATION_NAME,
+	LEGACY_JSONL_MIGRATION_VERSION,
 	LocalJsonlMemoryProvider,
 	type MemoryProposal,
 	type MemoryProposalStore,
 	type MemoryProvider,
 	type MemoryRecord,
+	readMigrationReport,
+	resolveMemoryConfig,
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
 
@@ -203,6 +208,18 @@ describe('MemoryProvider contract parity', () => {
 });
 
 describe('SQLiteMemoryProvider', () => {
+	test('is selected by the resolved default memory provider config', async () => {
+		const root = await providerRoot('sqlite-default');
+		const provider = track(
+			createConfiguredMemoryProvider(
+				root,
+				resolveMemoryConfig({ enabled: true }),
+			),
+		);
+
+		expect(provider.name).toBe('sqlite');
+	});
+
 	test('creates the required tables inside .swarm memory storage', async () => {
 		const root = await providerRoot('sqlite-schema');
 		const provider = track(
@@ -252,5 +269,85 @@ describe('SQLiteMemoryProvider', () => {
 
 		await expect(provider.initialize()).rejects.toThrow('path traversal');
 		expect(existsSync(path.join(root, 'memory.db'))).toBe(false);
+	});
+
+	test('migrates legacy JSONL once, backs it up, and reports invalid rows', async () => {
+		const root = await providerRoot('sqlite-jsonl-migration');
+		const memoryDir = path.join(root, '.swarm', 'memory');
+		await fs.mkdir(memoryDir, { recursive: true });
+		const record = makeRecord('Legacy JSONL memory migrates into SQLite.');
+		const laterRecord = makeRecord('Late JSONL rows are not auto imported.');
+		const proposal = makeProposal(record);
+		await fs.writeFile(
+			path.join(memoryDir, 'memories.jsonl'),
+			`${JSON.stringify(record)}\n{"not":"valid-memory"}\n`,
+			'utf-8',
+		);
+		await fs.writeFile(
+			path.join(memoryDir, 'proposals.jsonl'),
+			`${JSON.stringify(proposal)}\nnot-json\n`,
+			'utf-8',
+		);
+
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		);
+		await provider.initialize();
+
+		expect((await provider.list({})).map((item) => item.id)).toEqual([
+			record.id,
+		]);
+		expect(await provider.listProposals({ status: 'pending' })).toEqual([
+			proposal,
+		]);
+		expect(
+			existsSync(
+				path.join(memoryDir, 'backups', 'memories.jsonl.pre-sqlite-migration'),
+			),
+		).toBe(true);
+		expect(
+			existsSync(
+				path.join(memoryDir, 'backups', 'proposals.jsonl.pre-sqlite-migration'),
+			),
+		).toBe(true);
+		const report = await readMigrationReport(root);
+		expect(report?.importedMemories).toBe(1);
+		expect(report?.importedProposals).toBe(1);
+		expect(report?.invalidRows.map((row) => `${row.file}:${row.line}`)).toEqual(
+			['memories.jsonl:2', 'proposals.jsonl:2'],
+		);
+		provider.close?.();
+
+		await fs.appendFile(
+			path.join(memoryDir, 'memories.jsonl'),
+			`${JSON.stringify(laterRecord)}\n`,
+			'utf-8',
+		);
+		const reopened = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		);
+		await reopened.initialize();
+
+		expect((await reopened.list({})).map((item) => item.id)).toEqual([
+			record.id,
+		]);
+		reopened.close?.();
+
+		const db = new Database(path.join(memoryDir, 'memory.db'), {
+			readonly: true,
+		});
+		try {
+			const row = db
+				.query<{ version: number; name: string }, []>(
+					'SELECT version, name FROM schema_migrations WHERE name = "legacy_jsonl_import_complete"',
+				)
+				.get();
+			expect(row).toEqual({
+				version: LEGACY_JSONL_MIGRATION_VERSION,
+				name: LEGACY_JSONL_MIGRATION_NAME,
+			});
+		} finally {
+			db.close();
+		}
 	});
 });

@@ -24,6 +24,8 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('reset-session')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('rollback')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('checkpoint')).toBe(true);
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory import')).toBe(true);
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory migrate')).toBe(true);
 	});
 
 	describe('classifySwarmCommandToolUse — chat-tool path', () => {
@@ -99,6 +101,17 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			const result = classifySwarmCommandToolUse(resolve(['diagnose']));
 			expect(result.allowed).toBe(true);
 		});
+
+		test('memory status is allowed, but memory import is human-only', () => {
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'status'])).allowed,
+			).toBe(true);
+			const result = classifySwarmCommandToolUse(resolve(['memory', 'import']));
+			expect(result.allowed).toBe(false);
+			if (result.allowed === false) {
+				expect(result.message).toContain('human-only');
+			}
+		});
 	});
 
 	describe('classifySwarmCommandChatFallbackUse — user-typed slash path', () => {
@@ -122,6 +135,13 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		test('knowledge migrate stays blocked (pre-existing rule)', () => {
 			const result = classifySwarmCommandChatFallbackUse(
 				resolve(['knowledge', 'migrate']),
+			);
+			expect(result.allowed).toBe(false);
+		});
+
+		test('memory migrate stays blocked because it mutates .swarm state', () => {
+			const result = classifySwarmCommandChatFallbackUse(
+				resolve(['memory', 'migrate']),
 			);
 			expect(result.allowed).toBe(false);
 		});

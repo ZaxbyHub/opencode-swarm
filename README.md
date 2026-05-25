@@ -1018,6 +1018,10 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm knowledge migrate` | Migrate knowledge entries to the current format |
 | `/swarm knowledge quarantine [id]` | Move a knowledge entry to quarantine |
 | `/swarm knowledge restore [id]` | Restore a quarantined knowledge entry |
+| `/swarm memory status` | Show memory provider and JSONL migration status |
+| `/swarm memory export` | Export memory records and proposals to JSONL |
+| `/swarm memory import` | Import legacy JSONL memory into SQLite |
+| `/swarm memory migrate` | Run the one-time JSONL to SQLite migration |
 | `/swarm turbo` | Enable turbo mode for the current session (bypasses QA gates) |
 | `/swarm full-auto` | Toggle Full-Auto Mode for the current session [on|off] |
 | `/swarm checkpoint` | Save a git checkpoint for the current state |
@@ -1064,7 +1068,7 @@ bun test
 - [Installation Guide](docs/installation.md) — comprehensive reference
 - [Architecture Deep Dive](docs/architecture.md) — control model, pipeline, tools
 - [Design Rationale](docs/design-rationale.md) — why every major decision
-- [Commands Reference](docs/commands.md) — all 41 `/swarm` subcommands
+- [Commands Reference](docs/commands.md) — `/swarm` subcommands grouped by function
 - [Modes Guide](docs/modes.md) — session modes (Turbo, Full-Auto) and project modes (strict/balanced/fast)
 - [Configuration](docs/configuration.md) — all config keys and examples
 - [Planning Guide](docs/planning.md) — task format, phase structure, sizing

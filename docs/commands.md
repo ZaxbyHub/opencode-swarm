@@ -330,6 +330,26 @@ Move a knowledge entry to quarantine. Quarantined entries are excluded from agen
 
 Restore a quarantined entry back to active knowledge.
 
+### `/swarm memory`
+
+Show memory storage commands.
+
+### `/swarm memory status`
+
+Show the resolved memory provider, SQLite database path, legacy JSONL file status, and the latest migration report.
+
+### `/swarm memory export`
+
+Export current memory records and proposals to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`.
+
+### `/swarm memory import`
+
+Import `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` into SQLite. Invalid rows are reported with file and line number.
+
+### `/swarm memory migrate`
+
+Run the one-time legacy JSONL to SQLite migration. Original JSONL files are backed up under `.swarm/memory/backups/`, and the migration is marked in SQLite `schema_migrations`.
+
 ### `/swarm promote [--category <cat>] [--from-swarm <id>] <text>`
 
 Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson text directly or reference an existing swarm-level lesson by ID.

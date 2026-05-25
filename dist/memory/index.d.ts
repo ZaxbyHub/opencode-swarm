@@ -4,6 +4,7 @@ export { MemoryDisabledError, MemoryValidationError } from './errors';
 export type { MemoryGatewayOptions, ProposeMemoryInput, RecallMemoryInput, } from './gateway';
 export { createConfiguredMemoryProvider, createMemoryGateway, MemoryGateway, } from './gateway';
 export { createMemoryLifecycleHooks, type MemoryLifecycleHookOptions, type MemoryLifecycleHooks, } from './injector';
+export { backupLegacyJsonl, getLegacyJsonlFileStatus, type JsonlBackupResult, type JsonlImportPayload, type JsonlInvalidRow, type JsonlMigrationReport, LEGACY_JSONL_MIGRATION_NAME, LEGACY_JSONL_MIGRATION_VERSION, readLegacyJsonl, readMigrationReport, resolveMemoryStorageDir, resolveSqliteDatabasePath, writeJsonlExport, writeMigrationReport, } from './jsonl-migration';
 export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 export { buildRecallPromptBlock } from './prompt-block';
 export type { MemoryProposalStore, MemoryProvider } from './provider';

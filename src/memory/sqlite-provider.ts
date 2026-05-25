@@ -6,6 +6,15 @@ import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
 import { MemoryValidationError } from './errors';
+import {
+	backupLegacyJsonl,
+	type JsonlMigrationReport,
+	LEGACY_JSONL_MIGRATION_NAME,
+	LEGACY_JSONL_MIGRATION_VERSION,
+	readLegacyJsonl,
+	writeJsonlExport,
+	writeMigrationReport,
+} from './jsonl-migration';
 import type {
 	MemoryProposalStore,
 	MemoryProvider,
@@ -107,6 +116,18 @@ interface ProposalRow {
 	proposal_json: string;
 }
 
+interface MigrationRow {
+	version: number;
+	name: string;
+}
+
+export interface SQLiteJsonlImportResult {
+	importedMemories: number;
+	importedProposals: number;
+	invalidRows: JsonlMigrationReport['invalidRows'];
+	totalRows: number;
+}
+
 export class SQLiteMemoryProvider
 	implements MemoryProvider, MemoryProposalStore
 {
@@ -117,6 +138,7 @@ export class SQLiteMemoryProvider
 	private db: Database | null = null;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
+	private lastAutomaticJsonlMigration: SQLiteJsonlImportResult | null = null;
 
 	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
 		this.rootDirectory = rootDirectory;
@@ -166,6 +188,8 @@ export class SQLiteMemoryProvider
 		this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
 		this.db.run('PRAGMA foreign_keys = ON;');
 		this.runMigrations();
+		this.lastAutomaticJsonlMigration = null;
+		await this.migrateLegacyJsonlIfNeeded();
 		const memoryLoad = this.loadMemories();
 		const proposalLoad = this.loadProposals();
 		this.memories = new Map(
@@ -312,15 +336,7 @@ export class SQLiteMemoryProvider
 			});
 		}
 		this.proposals.set(next.id, next);
-		this.requireDb().run(
-			`INSERT OR REPLACE INTO memory_proposals (
-				id,
-				status,
-				created_at,
-				proposal_json
-			) VALUES (?, ?, ?, ?)`,
-			[next.id, next.status, next.createdAt, JSON.stringify(next)],
-		);
+		this.writeProposal(next);
 		await this.event('proposal', next.id);
 		return next;
 	}
@@ -344,6 +360,55 @@ export class SQLiteMemoryProvider
 		this.db.close();
 		this.db = null;
 		this.initialized = false;
+		this.lastAutomaticJsonlMigration = null;
+	}
+
+	async importJsonl(): Promise<SQLiteJsonlImportResult> {
+		const wasInitialized = this.initialized;
+		await this.initialize();
+		if (!wasInitialized && this.lastAutomaticJsonlMigration) {
+			return this.lastAutomaticJsonlMigration;
+		}
+		return this.importLegacyJsonlRows();
+	}
+
+	async exportJsonl(): Promise<{
+		directory: string;
+		memoriesPath: string;
+		proposalsPath: string;
+		memories: number;
+		proposals: number;
+	}> {
+		await this.initialize();
+		const memories = await this.list({ includeExpired: true });
+		const proposals = await this.listProposals();
+		const output = await writeJsonlExport(
+			this.rootDirectory,
+			this.config,
+			memories,
+			proposals,
+		);
+		return {
+			...output,
+			memories: memories.length,
+			proposals: proposals.length,
+		};
+	}
+
+	hasMigration(name: string): boolean {
+		const row = this.requireDb()
+			.query<MigrationRow, [string]>(
+				'SELECT version, name FROM schema_migrations WHERE name = ? LIMIT 1',
+			)
+			.get(name);
+		return Boolean(row);
+	}
+
+	markMigration(version: number, name: string): void {
+		this.requireDb().run(
+			'INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)',
+			[version, name],
+		);
 	}
 
 	private runMigrations(): void {
@@ -451,6 +516,69 @@ export class SQLiteMemoryProvider
 				JSON.stringify(record),
 			],
 		);
+	}
+
+	private writeProposal(proposal: MemoryProposal): void {
+		this.requireDb().run(
+			`INSERT OR REPLACE INTO memory_proposals (
+				id,
+				status,
+				created_at,
+				proposal_json
+			) VALUES (?, ?, ?, ?)`,
+			[
+				proposal.id,
+				proposal.status,
+				proposal.createdAt,
+				JSON.stringify(proposal),
+			],
+		);
+	}
+
+	private async migrateLegacyJsonlIfNeeded(): Promise<void> {
+		if (this.hasMigration(LEGACY_JSONL_MIGRATION_NAME)) return;
+		const backups = await backupLegacyJsonl(this.rootDirectory, this.config);
+		const result = await this.importLegacyJsonlRows();
+		this.lastAutomaticJsonlMigration = result;
+		this.markMigration(
+			LEGACY_JSONL_MIGRATION_VERSION,
+			LEGACY_JSONL_MIGRATION_NAME,
+		);
+		const report: JsonlMigrationReport = {
+			migration: LEGACY_JSONL_MIGRATION_NAME,
+			completedAt: new Date().toISOString(),
+			skipped: false,
+			importedMemories: result.importedMemories,
+			importedProposals: result.importedProposals,
+			invalidRows: result.invalidRows,
+			backups,
+		};
+		await writeMigrationReport(this.rootDirectory, report, this.config);
+		this.insertEvent(
+			'migration',
+			LEGACY_JSONL_MIGRATION_NAME,
+			JSON.stringify({
+				importedMemories: result.importedMemories,
+				importedProposals: result.importedProposals,
+				invalidRows: result.invalidRows.length,
+			}),
+		);
+	}
+
+	private async importLegacyJsonlRows(): Promise<SQLiteJsonlImportResult> {
+		const payload = await readLegacyJsonl(this.rootDirectory, this.config);
+		for (const record of payload.memories) {
+			this.writeMemory(record);
+		}
+		for (const proposal of payload.proposals) {
+			this.writeProposal(proposal);
+		}
+		return {
+			importedMemories: payload.memories.length,
+			importedProposals: payload.proposals.length,
+			invalidRows: payload.invalidRows,
+			totalRows: payload.totalRows,
+		};
 	}
 
 	private async event(

@@ -31,7 +31,7 @@ export interface MemoryConfig {
 
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	enabled: false,
-	provider: 'local-jsonl',
+	provider: 'sqlite',
 	storageDir: '.swarm/memory',
 	sqlite: {
 		path: '.swarm/memory/memory.db',

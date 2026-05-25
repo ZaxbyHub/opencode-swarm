@@ -5,7 +5,7 @@ category: added
 
 ## Summary
 
-Adds an opt-in SQLite memory provider behind the existing memory gateway/provider seam. `local-jsonl` remains the default provider, so existing agent prompts and default behavior are unchanged.
+Adds the SQLite memory provider behind the existing memory gateway/provider seam.
 
 ## Details
 
@@ -15,4 +15,4 @@ Adds an opt-in SQLite memory provider behind the existing memory gateway/provide
 
 ## Migration
 
-No migration is required. Existing memory storage remains local JSONL unless users explicitly set `memory.provider` to `"sqlite"`.
+SQLite is now the default memory provider. Existing JSONL storage is migrated by the SQLite default migration described in the companion pending release fragment.

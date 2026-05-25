@@ -1,7 +1,14 @@
 import { type MemoryConfig } from './config';
+import { type JsonlMigrationReport } from './jsonl-migration';
 import type { MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent } from './provider';
 import type { RecallScoringDiagnostics } from './scoring';
 import type { MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem } from './types';
+export interface SQLiteJsonlImportResult {
+    importedMemories: number;
+    importedProposals: number;
+    invalidRows: JsonlMigrationReport['invalidRows'];
+    totalRows: number;
+}
 export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryProposalStore {
     readonly name = "sqlite";
     private readonly rootDirectory;
@@ -10,6 +17,7 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
     private db;
     private memories;
     private proposals;
+    private lastAutomaticJsonlMigration;
     constructor(rootDirectory: string, config?: Partial<MemoryConfig>);
     private databasePath;
     initialize(): Promise<void>;
@@ -29,10 +37,23 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
         limit?: number;
     }): Promise<MemoryProposal[]>;
     close(): void;
+    importJsonl(): Promise<SQLiteJsonlImportResult>;
+    exportJsonl(): Promise<{
+        directory: string;
+        memoriesPath: string;
+        proposalsPath: string;
+        memories: number;
+        proposals: number;
+    }>;
+    hasMigration(name: string): boolean;
+    markMigration(version: number, name: string): void;
     private runMigrations;
     private loadMemories;
     private loadProposals;
     private writeMemory;
+    private writeProposal;
+    private migrateLegacyJsonlIfNeeded;
+    private importLegacyJsonlRows;
     private event;
     private insertEvent;
     private requireDb;
