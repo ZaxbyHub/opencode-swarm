@@ -1,16 +1,22 @@
 ---
-generated: true
-generator: skill-improver
-generator_version: "2026-05-25"
-source_entries:
-  - AGENTS.md#invariant-3
-  - docs/engineering-invariants.md#subsection-3
+name: subprocess-safety
+description: Guidelines for safe subprocess calls in opencode-swarm. Load before adding, modifying, or reviewing any file that calls spawn, spawnSync, bunSpawn, or child_process. Covers the six required properties, Windows portability, _internals DI seam pattern, and verification grep.
 ---
 
 # Subprocess Safety
 
-Load before modifying any file that calls `spawn`, `spawnSync`, `bunSpawn`,
-or `child_process` from Node/Bun.
+Read, in order:
+
+1. `AGENTS.md` (Invariant 3: subprocesses)
+2. `docs/engineering-invariants.md` (subsection 3)
+3. `.agents/skills/writing-tests/SKILL.md` if tests are touched
+4. `.opencode/skills/generated/mock-to-internals-migration/SKILL.md` if converting mock.module to _internals
+
+Codex-specific execution notes:
+- This skill consolidates AGENTS.md Invariant 3 into an actionable checklist.
+- The canonical spawn shape and six required properties are non-negotiable per AGENTS.md.
+- The CI quality job enforces these via `scripts/check-invariants.sh` (Check 1: subprocess timeout).
+- Violations are advisory in CI but blocking in code review.
 
 ## When to use this skill
 
