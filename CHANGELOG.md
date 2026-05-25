@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.33.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.33.1...v7.33.2) (2026-05-25)
+
+
+### Bug Fixes
+
+* **dark-matter:** prevent O(n²) memory explosion and repeated recomputation ([ed68563](https://github.com/zaxbysauce/opencode-swarm/commit/ed6856375e3aebf063394d189265b2534a3ba3d2))
+* **dark-matter:** prevent O(n²) memory explosion and repeated recomputation ([7a12da6](https://github.com/zaxbysauce/opencode-swarm/commit/7a12da621f69d073bc580cfeed8d908ddcc942a8))
+
 ## [7.33.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.33.0...v7.33.1) (2026-05-25)
 
 
