@@ -22,22 +22,19 @@ const isWindows = process.platform === 'win32';
 // Imports ΓÇö all three executors
 // ---------------------------------------------------------------------------
 
+import { SandboxError } from '../../../src/sandbox/executor';
 import {
 	BubblewrapSandboxExecutor,
 	_internals as bwrapInternals,
 } from '../../../src/sandbox/linux/bubblewrap-executor';
-
 import {
 	MacOSSandboxExecutor,
 	_internals as macosInternals,
 } from '../../../src/sandbox/macos/sandbox-exec-executor';
-
 import {
 	WindowsSandboxExecutor,
 	_internals as winInternals,
 } from '../../../src/sandbox/win32/restricted-token-executor';
-
-import { SandboxError } from '../../../src/sandbox/executor';
 
 // ---------------------------------------------------------------------------
 // Platform guards ΓÇö save/restore _internals probe functions
@@ -92,66 +89,44 @@ describe('Sandbox recovery scenarios', () => {
 	// ========================================================================
 
 	describe('Scenario 1 ΓÇö executor becomes unavailable mid-session', () => {
-		test.skipIf(isMac)(
-			'Bubblewrap: wrapCommand throws SandboxError when bwrap disappears mid-session',
+		// F-005 fix: Linux bubblewrap no longer re-probes in wrapCommand mid-session.
+		// The executor trusts _available set at construction. Caller should check
+		// isAvailable() before wrapCommand if mid-session detection is needed.
+		test.skipIf(isMac || isWindows)(
+			'Bubblewrap: wrapCommand trusts _available from construction (no mid-session re-probe)',
 			() => {
-				// Simulate bwrap being available at first, then vanishing
+				// Simulate bwrap being available at construction
 				let callCount = 0;
 				bwrapInternals.probeBwrap = mock(() => {
 					callCount++;
-					return callCount === 1; // available on first call, unavailable on second
+					return true; // Available at construction and stays available
 				});
 
 				const executor = new BubblewrapSandboxExecutor([]);
 
-				// If bwrap is not installed on this machine, executor is already disabled.
-				// wrapCommand must throw SandboxError instead of returning raw command.
+				// Guard: bwrap must be available for this test
 				if (!executor.isAvailable()) {
-					expect(() => executor.wrapCommand('echo first', [])).toThrow(
-						SandboxError,
-					);
 					return;
 				}
 
-				// First call — bwrap is available (constructor probe succeeded)
-				// wrapCommand re-checks via probeBwrap (2nd call, returns true)
-				const wasAvailable = executor.isAvailable();
-				expect(wasAvailable).toBe(true);
-
-				// Second call — probe now returns false, executor must throw SandboxError
-				expect(() => executor.wrapCommand('echo second', [])).toThrow(
-					SandboxError,
-				);
-				expect(executor.isAvailable()).toBe(false);
+				// wrapCommand should succeed since _available is true from construction
+				expect(() => executor.wrapCommand('echo hello', [])).not.toThrow();
+				expect(executor.isAvailable()).toBe(true);
 			},
 		);
 
-		test.skipIf(isMac)(
-			'Bubblewrap: isAvailable() returns false after mid-session probe failure',
+		test.skipIf(isMac || isWindows)(
+			'Bubblewrap: wrapCommand throws when executor unavailable at construction',
 			() => {
-				let probeCallCount = 0;
-				bwrapInternals.probeBwrap = mock(() => {
-					probeCallCount++;
-					// Available on first two calls (construction + first wrap), then fails
-					return probeCallCount < 3;
-				});
+				// Simulate bwrap being unavailable
+				bwrapInternals.probeBwrap = mock(() => false);
 
 				const executor = new BubblewrapSandboxExecutor([]);
 
-				// Guard: bwrap must be available initially for this mid-session test to be meaningful
-				if (!executor.isAvailable()) {
-					// bwrap not installed — mid-session transition cannot occur
-					return;
-				}
-
-				// First wrapCommand call — probe call 2, returns true
-				expect(() => executor.wrapCommand('echo hello', [])).not.toThrow();
-
-				// Second wrapCommand call — probe call 3, returns false, throws SandboxError
-				expect(() => executor.wrapCommand('echo again', [])).toThrow(
+				// wrapCommand must throw since _available is false
+				expect(() => executor.wrapCommand('echo hello', [])).toThrow(
 					SandboxError,
 				);
-				expect(executor.isAvailable()).toBe(false);
 			},
 		);
 

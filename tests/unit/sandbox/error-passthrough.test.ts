@@ -432,19 +432,17 @@ describe('SandboxCapabilityProbe ΓÇö binary-not-found handling', () => {
 		expect(result.mechanism.length).toBeGreaterThan(0);
 	});
 
-	test('windows probe always returns disabled without error', async () => {
+	test('windows probe returns enabled when cmd.exe available', async () => {
 		if (process.platform !== 'win32') {
-			return; // Skip on non-Windows
+			return; // Skip on non-Windows - cannot test Windows probe
 		}
 
 		const probe = new SandboxCapabilityProbe();
 		const result = await probe.detect();
 
-		expect(result.status).toBe('disabled');
+		// On a functioning Windows system cmd.exe should be available
+		expect(result.status).toBe('enabled');
 		expect(result.mechanism).toBe('PowerShell wrapper');
-		expect(result.error).toBe(
-			'Windows sandbox uses PowerShell-based wrapper; not a native OS sandbox mechanism',
-		);
 	});
 });
 

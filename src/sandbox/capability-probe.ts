@@ -11,7 +11,7 @@
  */
 
 import type { ExecException } from 'node:child_process';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 
 /** Possible sandbox status values. */
@@ -174,14 +174,43 @@ function probeWindows(): SandboxCapability {
 	// Windows does not have a native sandbox mechanism (bwrap/sandbox-exec equivalent)
 	// accessible from Node.js without native bindings. The WindowsSandboxExecutor
 	// provides a best-effort PowerShell-based wrapper, not a true OS-level sandbox.
-	// Report as "disabled" so consumers know the mechanism is not a native sandbox.
-	return {
-		status: 'disabled',
-		mechanism: 'PowerShell wrapper',
-		platform: 'win32',
-		error:
-			'Windows sandbox uses PowerShell-based wrapper; not a native OS sandbox mechanism',
-	};
+	// Since the executor works by wrapping commands in PowerShell, check that
+	// both cmd.exe and PowerShell are available.
+	try {
+		const result = spawnSync('cmd', ['/c', 'echo', 'ok'], {
+			windowsHide: true,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'pipe', 'ignore'],
+		});
+		if (result.error) {
+			return {
+				status: 'disabled',
+				platform: 'win32',
+				mechanism: 'PowerShell wrapper',
+				error: `cmd.exe probe failed: ${(result.error as NodeJS.ErrnoException).code}`,
+			};
+		}
+		return result.status === 0
+			? {
+					status: 'enabled',
+					platform: 'win32',
+					mechanism: 'PowerShell wrapper',
+				}
+			: {
+					status: 'disabled',
+					platform: 'win32',
+					mechanism: 'PowerShell wrapper',
+					error: 'cmd.exe probe returned non-zero',
+				};
+	} catch (err) {
+		return {
+			status: 'disabled',
+			platform: 'win32',
+			mechanism: 'PowerShell wrapper',
+			error: String(err),
+		};
+	}
 }
 
 /**

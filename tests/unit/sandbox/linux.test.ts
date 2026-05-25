@@ -31,6 +31,7 @@ function makeTempDir(): string {
 // bubblewrap-executor.ts ΓÇö import (module-level, not mocked)
 // ---------------------------------------------------------------------------
 
+import { SandboxError } from '../../../src/sandbox/executor';
 import {
 	_internals,
 	BubblewrapSandboxExecutor,
@@ -38,8 +39,6 @@ import {
 	// indirectly via isAvailable() and wrapCommand() respectively.
 	// _internals.probeBwrap is used to simulate ENOENT/EACCES/ENOSPC errors.
 } from '../../../src/sandbox/linux/bubblewrap-executor';
-
-import { SandboxError } from '../../../src/sandbox/executor';
 
 // ---------------------------------------------------------------------------
 // edge-cases.ts ΓÇö import (module-level, not mocked)

@@ -15,7 +15,7 @@ import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
+import { warn } from '../../utils/logger';
 import { SandboxError, type SandboxExecutor } from '../executor';
 
 /**
@@ -41,13 +41,13 @@ function probeSandboxExec(): boolean {
 				| string
 				| undefined;
 			if (code && SANDBOX_UNAVAILABLE_CODES.has(code)) {
-				console.warn(
-					`[sandbox-exec] Sandbox disabled: sandbox-exec error (${code}). Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox disabled: sandbox-exec error (${code}). Falling through to tool-layer enforcement.`,
 				);
 				return false;
 			}
-			console.warn(
-				`[sandbox-exec] Sandbox disabled: spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
 			);
 			return false;
 		}
@@ -55,8 +55,8 @@ function probeSandboxExec(): boolean {
 		return result.status === 0;
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
-		console.warn(
-			`[sandbox-exec] Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
 		);
 		return false;
 	}
@@ -163,8 +163,8 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		try {
 			if (!_internals.probeSandboxExec()) {
 				this._disabledReason = 'sandbox-exec not available or not functional';
-				console.warn(
-					`[sandbox-exec] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 				);
 			} else {
 				this._available = true;
@@ -173,8 +173,8 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			const message = err instanceof Error ? err.message : String(err);
 			this._disabledReason = `constructor threw: ${message}`;
 			this._available = false;
-			console.warn(
-				`[sandbox-exec] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 			);
 		}
 	}
@@ -192,8 +192,8 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	disable(reason: string): void {
 		this._disabledReason = reason;
 		this._available = false;
-		console.warn(
-			`[sandbox-exec] Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
 		);
 	}
 
@@ -209,22 +209,16 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
 		// Re-check availability before each wrap
 		if (!this._available) {
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		if (!_internals.probeSandboxExec()) {
 			this._available = false;
 			this._disabledReason = 'sandbox-exec became unavailable between calls';
-			console.warn(
-				`[sandbox-exec] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 			);
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		const temp = tempDir ?? this._tempDir ?? os.tmpdir();
@@ -243,13 +237,10 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			writeFileSync(profilePath, profile, { mode: 0o600 });
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
-			console.warn(
-				`[sandbox-exec] Sandbox disabled: failed to write profile (${message}). Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: failed to write profile (${message}). Falling through to tool-layer enforcement.`,
 			);
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		// sandbox-exec -f <profile> bash -c '<command>'

@@ -18,6 +18,8 @@
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
+import * as path from 'node:path';
+import { warn } from '../../utils/logger';
 import type { SandboxExecutor } from '../executor';
 import { SandboxError } from '../executor';
 import { detectPowerShellEscape } from './edge-cases';
@@ -56,13 +58,13 @@ function probeWindowsSandbox(): boolean {
 				| string
 				| undefined;
 			if (code && SANDBOX_UNAVAILABLE_CODES.has(code)) {
-				console.warn(
-					`[restricted-token] Sandbox disabled: spawn error (${code}). Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox disabled: spawn error (${code}). Falling through to tool-layer enforcement.`,
 				);
 				return false;
 			}
-			console.warn(
-				`[restricted-token] Sandbox disabled: spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
 			);
 			return false;
 		}
@@ -70,8 +72,8 @@ function probeWindowsSandbox(): boolean {
 		return result.status === 0;
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
-		console.warn(
-			`[restricted-token] Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
 		);
 		return false;
 	}
@@ -109,12 +111,15 @@ function isPathInScopes(command: string, scopes: string[]): boolean {
 	const paths = command.match(pathPattern) || [];
 	if (paths.length === 0) return true; // No paths detected, allow
 
+	// Normalize extracted paths with resolve to eliminate ..\ traversal before comparison
+	const normalizedPaths = paths.map((p) => path.win32.resolve(p));
+
 	// Normalize scopes for comparison (lowercase, trailing slashes removed)
 	const normalizedScopes = scopes.map((s) =>
 		s.toLowerCase().replace(/\\+$/, ''),
 	);
 
-	return paths.every((p) => {
+	return normalizedPaths.every((p) => {
 		const lower = p.toLowerCase();
 		return normalizedScopes.some((scope) => lower.startsWith(scope));
 	});
@@ -153,8 +158,8 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 				this._available = false;
 				this._disabledReason =
 					'Windows sandbox not available or not functional';
-				console.warn(
-					`[restricted-token] Sandbox unavailable: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox unavailable: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 				);
 			} else {
 				this._available = true;
@@ -163,8 +168,8 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 			const message = err instanceof Error ? err.message : String(err);
 			this._available = false;
 			this._disabledReason = `constructor probe threw: ${message}`;
-			console.warn(
-				`[restricted-token] Sandbox unavailable: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox unavailable: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 			);
 		}
 	}
@@ -188,8 +193,8 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 	disable(reason: string): void {
 		this._disabled = true;
 		this._disabledReason = reason;
-		console.warn(
-			`[restricted-token] Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
 		);
 	}
 
@@ -211,23 +216,17 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
 		// Throw when disabled or unavailable
 		if (!this.isAvailable()) {
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		// Re-check availability before each wrap — sandbox may become unavailable mid-session
 		if (!_internals.probeWindowsSandbox()) {
 			this._available = false;
 			this._disabledReason = 'Windows sandbox became unavailable between calls';
-			console.warn(
-				`[restricted-token] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 			);
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		const temp = tempDir ?? this._tempDir ?? os.tmpdir();

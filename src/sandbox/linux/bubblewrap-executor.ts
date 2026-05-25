@@ -7,7 +7,7 @@
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
-
+import { warn } from '../../utils/logger';
 import { SandboxError, type SandboxExecutor } from '../executor';
 
 /** Magic exit code bwrap returns when --version is passed */
@@ -38,14 +38,14 @@ function probeBwrap(): boolean {
 				| string
 				| undefined;
 			if (code && BWRAP_UNAVAILABLE_CODES.has(code)) {
-				console.warn(
-					`[bubblewrap] Sandbox disabled: bwrap error (${code}). Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox disabled: bwrap error (${code}). Falling through to tool-layer enforcement.`,
 				);
 				return false;
 			}
 			// Other spawn errors (e.g., ENOMEM) — treat as unavailable
-			console.warn(
-				`[bubblewrap] Sandbox disabled: bwrap spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: bwrap spawn error (${result.error.message}). Falling through to tool-layer enforcement.`,
 			);
 			return false;
 		}
@@ -56,8 +56,8 @@ function probeBwrap(): boolean {
 	} catch (err: unknown) {
 		// Unexpected exception — treat as unavailable
 		const message = err instanceof Error ? err.message : String(err);
-		console.warn(
-			`[bubblewrap] Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: probe threw (${message}). Falling through to tool-layer enforcement.`,
 		);
 		return false;
 	}
@@ -112,8 +112,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 		try {
 			if (!_internals.probeBwrap()) {
 				this._disabledReason = 'bwrap not available or not functional';
-				console.warn(
-					`[bubblewrap] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+				warn(
+					`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 				);
 			} else {
 				this._available = true;
@@ -122,8 +122,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			const message = err instanceof Error ? err.message : String(err);
 			this._disabledReason = `constructor threw: ${message}`;
 			this._available = false;
-			console.warn(
-				`[bubblewrap] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
+			warn(
+				`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
 			);
 		}
 	}
@@ -148,8 +148,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 	disable(reason: string): void {
 		this._available = false;
 		this._disabledReason = reason;
-		console.warn(
-			`[bubblewrap] Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
+		warn(
+			`Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
 		);
 	}
 
@@ -165,22 +165,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 	wrapCommand(command: string, scopePaths: string[], tempDir?: string): string {
 		// Re-check availability before each wrap — bwrap may become unavailable mid-session
 		if (!this._available) {
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
-		}
-
-		if (!_internals.probeBwrap()) {
-			this._available = false;
-			this._disabledReason = 'bwrap became unavailable between calls';
-			console.warn(
-				`[bubblewrap] Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
-			);
-			throw new SandboxError(
-				'Sandbox not available',
-				'SANDBOX_UNAVAILABLE',
-			);
+			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		const temp = tempDir ?? this._tempDir ?? '/tmp';
@@ -202,6 +187,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'--die-with-parent',
 			'--new-session',
 			...bindArgs,
+			'--dev',
+			'/dev',
 			'--size',
 			'500M',
 			'--tmpfs',

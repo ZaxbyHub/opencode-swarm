@@ -37,11 +37,10 @@ describe('SandboxCapabilityProbe', () => {
 				const probe = new SandboxCapabilityProbe();
 				const result = await probe.detect();
 				expect(result.platform).toBe('win32');
-				// F-005 fix: Windows probe reports 'disabled' because it uses a
-				// PowerShell-based wrapper, not a native OS sandbox mechanism.
-				// It also reports 'PowerShell wrapper' as the mechanism name.
+				// F-002 fix: Windows probe probes cmd.exe availability; on
+				// a functioning Windows system cmd.exe is available.
 				expect(result.mechanism).toBe('PowerShell wrapper');
-				expect(result.status).toBe('disabled');
+				expect(result.status).toBe('enabled');
 			},
 		);
 
