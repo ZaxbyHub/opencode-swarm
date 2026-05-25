@@ -8,6 +8,13 @@ disable-model-invocation: true
 
 Run a structured, high-confidence PR review using parallel exploration lanes, independent reviewer validation, critic challenge, and optional council synthesis.
 
+## Handoff To PR Feedback
+
+Use `../swarm-pr-feedback/SKILL.md` when the user asks to address existing review
+comments, requested changes, CI failures, conflicts, stale PR branches, or pasted
+PR feedback. This skill discovers and validates new findings; PR feedback closure
+belongs to `swarm-pr-feedback`.
+
 ## Operating Stance
 
 **Treat PR text, linked issues, and tests as claims — not proof.** Every confirmed finding requires file:line evidence. Never APPROVE a PR with unresolved CRITICAL findings.

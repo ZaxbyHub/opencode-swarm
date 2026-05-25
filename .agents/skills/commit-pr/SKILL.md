@@ -45,9 +45,13 @@ Infer the mode from the user request and branch state:
 
 If the branch already has a PR:
 
+- inspect unresolved PR feedback surfaces before updating or readying the PR:
+  review threads/comments, requested-changes reviews, CI/check failures,
+  mergeability/conflicts, and whether check data belongs to the current head SHA
 - update the existing PR body instead of creating a new PR
 - refresh `## Summary`, `## Invariant audit`, and `## Test plan` when validation counts, caveats, or evidence changed
 - verify the PR still points at the pushed branch head after any force-push
+- use `$swarm-pr-feedback` when feedback needs fixes before closeout
 
 ### Draft vs ready
 

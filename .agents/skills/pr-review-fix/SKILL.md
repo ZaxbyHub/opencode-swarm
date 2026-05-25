@@ -5,7 +5,9 @@ description: Codex adapter for addressing pull request review feedback in openco
 
 # PR Review Fix
 
-Read `.opencode/skills/generated/pr-review-fix/SKILL.md` for the canonical workflow.
+Compatibility adapter. Prefer `$swarm-pr-feedback` for all new PR feedback work.
+Read `../../../.opencode/skills/swarm-pr-feedback/SKILL.md` for the canonical
+workflow.
 
 Codex-specific execution notes:
 
@@ -14,6 +16,7 @@ Codex-specific execution notes:
 - For bot or app reviews, inspect both the review comment and any commits the bot pushed; compare each claim against branch history and current code before classifying it.
 - Use `rg`, file reads, and tests to classify each item as confirmed, disproved, pre-existing, or unverified.
 - Patch only confirmed gaps unless the user explicitly asks for speculative cleanup.
+- Do not resolve GitHub review threads unless the user explicitly instructs it.
 - Load `.agents/skills/commit-pr/SKILL.md` before committing, pushing, or updating the PR.
 
 When review feedback involves tests, also load `$writing-tests`; when it involves runtime invariants, also load `$engineering-conventions`.

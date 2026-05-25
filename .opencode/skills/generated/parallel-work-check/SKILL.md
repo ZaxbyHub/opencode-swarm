@@ -106,7 +106,8 @@ The parallel-work-check skill is referenced by other skills that start work on a
 
 | Skill | Usage |
 |-------|-------|
-| [.opencode/skills/generated/pr-review-fix/SKILL.md](../pr-review-fix/SKILL.md) | Checks before starting PR review fixes — ensures no parallel work has already addressed the same findings |
+| [.opencode/skills/swarm-pr-feedback/SKILL.md](../../swarm-pr-feedback/SKILL.md) | Checks before starting PR feedback fixes — ensures no parallel work has already addressed the same findings |
+| [.opencode/skills/generated/pr-review-fix/SKILL.md](../pr-review-fix/SKILL.md) | Legacy compatibility path that delegates to swarm-pr-feedback |
 | [.claude/skills/swarm-implement/SKILL.md](../../../../.claude/skills/swarm-implement/SKILL.md) | Checks before implementation Phase 1 — ensures the branch is up-to-date before planning |
 | Any skill that starts work on an existing branch | Run the parallel-work-check protocol before beginning fixes or implementation |
 

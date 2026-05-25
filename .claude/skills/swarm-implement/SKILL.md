@@ -154,6 +154,15 @@ In the main thread, summarize:
 - final remaining risks
 - whether the task is actually complete
 
+Before declaring completion, run a no-unwired/no-deferred gate:
+
+- every new behavior is wired through config, registration, docs, tests, generated
+  artifacts, and release notes as applicable,
+- no code path, command, skill, or documented feature is left unwired,
+- no work is deferred or declared out of scope without explicit user instruction,
+- no scope decision was made silently,
+- validation evidence covers every touched user-facing or runtime surface.
+
 ## Hard rules
 - Do not let implementation context self-approve high-risk work.
 - Do not skip reviewer validation for high-risk work.
@@ -161,6 +170,8 @@ In the main thread, summarize:
 - Do not let perceived repo size or task size compress the workflow.
 - If quality and speed conflict, quality wins.
 - If extra validation does not materially improve quality, keep the path lightweight.
+- Never ship unwired code, silently defer work, or make scope decisions without
+  explicit user instruction.
 
 ## Suggested subagent prompts
 

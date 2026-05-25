@@ -14,5 +14,9 @@ Codex-specific execution notes:
 - Use `apply_patch` for manual edits.
 - Use focused shell validation after each meaningful change.
 - Bring in narrower skills as needed: `$engineering-conventions`, `$writing-tests`, `$running-tests`, `$qa-sweep`, or `$issue-tracer`.
+- Before calling work complete, run a no-unwired/no-deferred gate: verify every
+  new behavior is wired through config/registration/docs/tests/generated
+  artifacts as applicable, no work was deferred or declared out of scope without
+  explicit user instruction, and scope decisions were not made silently.
 
 Do not invoke OpenCode `/swarm` commands from Codex unless the user explicitly asks to operate OpenCode Swarm itself.

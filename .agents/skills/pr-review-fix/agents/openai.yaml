@@ -1,4 +1,4 @@
 interface:
   display_name: "PR Review Fix"
-  short_description: "Verify and fix review feedback"
-  default_prompt: "Use $pr-review-fix to verify and address these PR review comments."
+  short_description: "Legacy PR feedback adapter"
+  default_prompt: "Use $swarm-pr-feedback to verify and address these PR review comments."

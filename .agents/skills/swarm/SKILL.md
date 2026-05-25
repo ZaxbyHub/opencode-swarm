@@ -15,4 +15,6 @@ Codex-specific execution notes:
 - Add independent review pressure through `$qa-sweep`, `$swarm-pr-review`, or self-critic checks when subagents are unavailable.
 - Keep the user looped in with short progress updates during longer work.
 
-For implementation tasks, prefer `$swarm-implement`; for PR review, prefer `$swarm-pr-review`; for bug tracing, prefer `$issue-tracer`.
+For implementation tasks, prefer `$swarm-implement`; for fresh PR review, prefer
+`$swarm-pr-review`; for known PR feedback closure, prefer
+`$swarm-pr-feedback`; for bug tracing, prefer `$issue-tracer`.

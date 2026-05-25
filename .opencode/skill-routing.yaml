@@ -11,6 +11,8 @@ description: >
 
 routing:
   coder:
+    - path: .opencode/skills/swarm-pr-feedback/SKILL.md
+      keywords: ["pr feedback", "review comments", "review thread", "requested changes", "ci failure", "check failure", "conflict", "merge conflict", "mergeability", "stale branch"]
     - path: .claude/skills/writing-tests/SKILL.md
       keywords: ["test", "testing", "writing tests"]
     - path: .claude/skills/engineering-conventions/SKILL.md
@@ -31,6 +33,8 @@ routing:
       keywords: ["research", "investigate", "domain"]
 
   reviewer:
+    - path: .opencode/skills/swarm-pr-feedback/SKILL.md
+      keywords: ["pr feedback", "review comments", "review thread", "requested changes", "ci failure", "check failure", "conflict", "merge conflict", "mergeability", "stale branch"]
     - path: .claude/skills/engineering-conventions/SKILL.md
       keywords: ["engineering", "conventions", "invariants"]
     - path: .claude/skills/swarm-pr-review/SKILL.md
@@ -41,6 +45,8 @@ routing:
       keywords: ["test", "running tests"]
 
   test_engineer:
+    - path: .opencode/skills/swarm-pr-feedback/SKILL.md
+      keywords: ["pr feedback", "review comments", "review thread", "requested changes", "ci failure", "check failure"]
     - path: .claude/skills/writing-tests/SKILL.md
       keywords: ["test", "testing", "writing tests"]
     - path: .opencode/skills/writing-tests/SKILL.md

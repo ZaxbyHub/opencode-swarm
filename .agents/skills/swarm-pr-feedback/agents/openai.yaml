@@ -1,0 +1,5 @@
+interface:
+  display_name: "Swarm PR Feedback"
+  short_description: "Verify and close PR feedback"
+  default_prompt: "Use $swarm-pr-feedback to ingest, verify, and address all PR feedback."
+

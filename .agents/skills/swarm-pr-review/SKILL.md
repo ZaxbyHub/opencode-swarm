@@ -12,6 +12,13 @@ The review ladder is:
 
 **Scope → obligations → context pack → deterministic signals → parallel explorers → triggered Swarm micro-lanes → independent reviewer validation → critic challenge → grouped synthesis → metrics / knowledge writeback.**
 
+## Handoff To PR Feedback
+
+Use `$swarm-pr-feedback` when the user asks to address existing review comments,
+requested changes, CI failures, conflicts, stale PR branches, or pasted PR
+feedback. This skill is for discovering and validating new findings; PR feedback
+closure belongs to `../../../.opencode/skills/swarm-pr-feedback/SKILL.md`.
+
 ## Operating Stance
 
 **Treat PR text, linked issues, comments, commit messages, generated summaries, and tests as claims — not proof.** Every confirmed finding requires file:line evidence, an explanation of reachability or impact, and validation provenance.

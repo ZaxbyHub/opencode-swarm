@@ -303,10 +303,12 @@ If the PR merged before this was done, post the missing issue comment immediatel
 If a PR already exists for the branch:
 
 1. do not open a second PR
-2. update the existing PR body when summary, invariant evidence, test counts, caveats, or pre-existing failure notes changed
-3. keep the PR draft while follow-up edits are still expected or required checks are still pending
-4. mark the PR ready only after the body is current and required remote checks are green, unless the user explicitly wants it ready earlier
-5. after any follow-up push or force-push, verify the PR head matches the expected commit and that reported checks belong to the current `headRefOid`:
+2. inspect unresolved PR feedback surfaces before updating or readying the PR: review threads/comments, requested-changes reviews, CI/check failures, mergeability/conflicts, and whether check data belongs to the current head SHA
+3. use `../swarm-pr-feedback/SKILL.md` when feedback needs fixes before closeout
+4. update the existing PR body when summary, invariant evidence, test counts, caveats, or pre-existing failure notes changed
+5. keep the PR draft while follow-up edits are still expected or required checks are still pending
+6. mark the PR ready only after the body is current and required remote checks are green, unless the user explicitly wants it ready earlier
+7. after any follow-up push or force-push, verify the PR head matches the expected commit and that reported checks belong to the current `headRefOid`:
 
 ```powershell
 gh pr view <number> --json headRefOid,body,isDraft,state,statusCheckRollup,url
