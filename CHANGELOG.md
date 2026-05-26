@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.36.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.35.0...v7.36.0) (2026-05-26)
+
+
+### Features
+
+* **memory:** add curator-approved memory decision workflow ([e67e0d0](https://github.com/zaxbysauce/opencode-swarm/commit/e67e0d0c19005a7fb57a16bcac3eebc8aab17f18))
+* **memory:** add curator-approved memory decision workflow ([78796d8](https://github.com/zaxbysauce/opencode-swarm/commit/78796d8fe8e46bf7991f41617b443d953a6fef9f))
+
+
+### Bug Fixes
+
+* **ci:** use find instead of shopt globstar for macOS bash 3.2 compat ([5678a4f](https://github.com/zaxbysauce/opencode-swarm/commit/5678a4fa1f10a308c61920a8f51d2183192c8bce))
+* **sandbox:** resolve PR [#1015](https://github.com/zaxbysauce/opencode-swarm/issues/1015) review findings — F-001 through F-007, F-005, F-007 ([b24b483](https://github.com/zaxbysauce/opencode-swarm/commit/b24b483fe2df54d224f0f09fae3ece15de31833f))
+* **sandbox:** resolve review findings — /dev mount, Windows probe, path traversal, redundant probe, logger ([39cb628](https://github.com/zaxbysauce/opencode-swarm/commit/39cb62880cc64ce43c09324775e151ed01deebed))
+* **test:** force single-line mock.module with biome-ignore for invariant check ([1a2196c](https://github.com/zaxbysauce/opencode-swarm/commit/1a2196c6025477a294378dbdbcf80bf344857483))
+* **test:** single-line mock.module target for invariant check ([83b6db7](https://github.com/zaxbysauce/opencode-swarm/commit/83b6db7285f1cea2c774ed37397f517c5542dc5c))
+
 ## [7.35.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.34.0...v7.35.0) (2026-05-25)
 
 
