@@ -4,10 +4,13 @@ import { DURABLE_MEMORY_KINDS, EVIDENCE_REQUIRED_KINDS } from './config';
 import { MemoryValidationError } from './errors';
 import { containsSecret } from './redaction';
 import type {
+	CuratorMemoryDecision,
 	MemoryKind,
+	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
+	NewMemoryRecord,
 } from './types';
 
 export const MemoryScopeTypeSchema = z.enum([
@@ -128,6 +131,84 @@ export const MemoryProposalSchema = z
 		metadata: z.record(z.string(), z.unknown()),
 	})
 	.strict();
+
+export const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord> = z
+	.object({
+		scope: MemoryScopeRefSchema.optional(),
+		kind: MemoryKindSchema,
+		text: z.string().min(1).max(2000),
+		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
+		confidence: z.number().min(0).max(1).optional(),
+		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
+		source: MemorySourceSchema.optional(),
+		expiresAt: z.string().datetime().optional(),
+		metadata: z.record(z.string(), z.unknown()).optional(),
+	})
+	.strict();
+
+export const MemoryPatchSchema: z.ZodType<MemoryPatch> = z
+	.object({
+		scope: MemoryScopeRefSchema.optional(),
+		kind: MemoryKindSchema.optional(),
+		text: z.string().min(1).max(2000).optional(),
+		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
+		confidence: z.number().min(0).max(1).optional(),
+		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
+		source: MemorySourceSchema.optional(),
+		expiresAt: z.string().datetime().optional(),
+		metadata: z.record(z.string(), z.unknown()).optional(),
+	})
+	.strict()
+	.refine((patch) => Object.keys(patch).length > 0, {
+		message: 'memory patch must not be empty',
+	});
+
+const ProposalIdSchema = z.string().regex(/^prop_[a-f0-9]{16}$/);
+const MemoryIdSchema = z.string().regex(/^mem_[a-f0-9]{16}$/);
+const CuratorDecisionReasonSchema = z.string().min(1).max(2000);
+
+export const CuratorMemoryDecisionSchema: z.ZodType<CuratorMemoryDecision> =
+	z.discriminatedUnion('action', [
+		z
+			.object({
+				action: z.literal('add'),
+				proposalId: ProposalIdSchema,
+				memory: NewMemoryRecordSchema,
+			})
+			.strict(),
+		z
+			.object({
+				action: z.literal('update'),
+				proposalId: ProposalIdSchema,
+				targetMemoryId: MemoryIdSchema,
+				patch: MemoryPatchSchema,
+				reason: CuratorDecisionReasonSchema,
+			})
+			.strict(),
+		z
+			.object({
+				action: z.literal('supersede'),
+				proposalId: ProposalIdSchema,
+				oldMemoryId: MemoryIdSchema,
+				replacement: NewMemoryRecordSchema,
+				reason: CuratorDecisionReasonSchema,
+			})
+			.strict(),
+		z
+			.object({
+				action: z.literal('reject'),
+				proposalId: ProposalIdSchema,
+				reason: CuratorDecisionReasonSchema,
+			})
+			.strict(),
+		z
+			.object({
+				action: z.literal('noop'),
+				proposalId: ProposalIdSchema,
+				reason: CuratorDecisionReasonSchema,
+			})
+			.strict(),
+	]);
 
 export function normalizeMemoryText(text: string): string {
 	return text.replace(/\s+/g, ' ').trim();
@@ -275,4 +356,10 @@ export function validateMemoryProposal(
 	proposal: MemoryProposal,
 ): MemoryProposal {
 	return MemoryProposalSchema.parse(proposal);
+}
+
+export function validateCuratorMemoryDecision(
+	decision: unknown,
+): CuratorMemoryDecision {
+	return CuratorMemoryDecisionSchema.parse(decision);
 }

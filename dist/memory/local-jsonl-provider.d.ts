@@ -1,7 +1,7 @@
 import { type MemoryConfig } from './config';
 import type { MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent } from './provider';
 import type { RecallScoringDiagnostics } from './scoring';
-import type { MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem } from './types';
+import type { AppliedMemoryChange, MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem, ResolvedCuratorMemoryDecision } from './types';
 export declare class LocalJsonlMemoryProvider implements MemoryProvider, MemoryProposalStore {
     readonly name = "local-jsonl";
     private readonly rootDirectory;
@@ -27,6 +27,9 @@ export declare class LocalJsonlMemoryProvider implements MemoryProvider, MemoryP
         status?: MemoryProposal['status'];
         limit?: number;
     }): Promise<MemoryProposal[]>;
+    applyCuratorDecision(decision: ResolvedCuratorMemoryDecision): Promise<AppliedMemoryChange>;
     compact(): Promise<void>;
     private audit;
+    private activeMemory;
+    private validateDecisionMemory;
 }

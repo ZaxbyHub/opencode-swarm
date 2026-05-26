@@ -1,6 +1,9 @@
 import { z } from 'zod';
-import type { ProposeMemoryInput } from '../memory/gateway';
-import { MemoryKindSchema } from '../memory/schema';
+import type { CuratorMemoryDecision, ProposeMemoryInput } from '../memory';
+import {
+	CuratorMemoryDecisionSchema,
+	MemoryKindSchema,
+} from '../memory/schema';
 
 const AgentMemoryProposalSchema = z
 	.object({
@@ -27,8 +30,22 @@ export const AgentOutputMemorySchema = z
 	})
 	.passthrough();
 
+export const CuratorOutputMemoryDecisionSchema = z
+	.object({
+		curatorMemoryDecisions: z
+			.array(CuratorMemoryDecisionSchema)
+			.max(20)
+			.optional(),
+	})
+	.passthrough();
+
 export interface ExtractedAgentMemoryProposals {
 	proposals: ProposeMemoryInput[];
+	error?: string;
+}
+
+export interface ExtractedCuratorMemoryDecisions {
+	decisions: CuratorMemoryDecision[];
 	error?: string;
 }
 
@@ -51,6 +68,27 @@ export function extractMemoryProposalsFromAgentOutput(
 		}
 	}
 	return { proposals: [] };
+}
+
+export function extractCuratorMemoryDecisionsFromAgentOutput(
+	outputText: string,
+): ExtractedCuratorMemoryDecisions {
+	const candidates = candidateJsonBlocks(outputText);
+	for (const candidate of candidates) {
+		const parsedJson = parseJsonObject(candidate);
+		if (parsedJson === null) continue;
+		const parsed = CuratorOutputMemoryDecisionSchema.safeParse(parsedJson);
+		if (!parsed.success) {
+			return {
+				decisions: [],
+				error: parsed.error.issues.map((issue) => issue.message).join('; '),
+			};
+		}
+		if (parsed.data.curatorMemoryDecisions) {
+			return { decisions: parsed.data.curatorMemoryDecisions };
+		}
+	}
+	return { decisions: [] };
 }
 
 function candidateJsonBlocks(outputText: string): string[] {

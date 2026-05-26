@@ -103,6 +103,14 @@ Record:
 
 If scope cannot be determined, review the narrowest safe scope available and state the limitation.
 
+### Pre-flight git ref availability
+
+Before launching explorers (Phase 3), confirm the PR branch refs are available:
+- If `head_ref` is a remote branch that is not checked out locally, fetch it via `git fetch origin <head_ref>`
+- Explicitly pass the commit range (`base_ref..head_ref`) in every explorer delegation so explorers read from the correct revision
+
+If refs cannot be fetched, state the limitation in the context pack.
+
 ---
 
 # Default Review Workflow
@@ -207,6 +215,20 @@ For each obligation, record:
 
 Tests are claims. A passing or added test does not prove the obligation unless the reviewer inspects the assertion strength and relevant code path.
 
+### Quantitative claim verification
+
+PR body numerical claims (test counts, coverage percentages, assertion counts, performance benchmarks) are obligations, not proof. For each quantitative claim:
+
+1. Extract the claim and its source (PR body, comment, commit message).
+2. Verify against actual tool output or CI artifacts when available.
+3. If the claim cannot be independently verified, mark the obligation `UNVERIFIABLE` with reason.
+4. If the claim is disproved by evidence, create a finding linking the discrepancy.
+
+Common patterns to verify:
+- "N tests pass" → count actual test results from CI logs or test runner output
+- "N% coverage" → compare against coverage report
+- "No regressions" → verify against test runner failure count
+
 ---
 
 ## Phase 2: Deterministic Signal Ingestion
@@ -262,7 +284,7 @@ Explorers optimize for recall. Over-reporting is expected. Explorers produce can
 | Lane 2: Security and trust boundaries | Injection, authz/authn bypass, SSRF, path traversal, secret exposure, unsafe deserialization, prompt injection | untrusted input sources, sanitization, credential handling, permission boundary, private network access, output escaping |
 | Lane 3: Dependencies and deployment safety | Import changes, version bumps, lockfile drift, breaking APIs, package scripts, runtime assumptions | lockfile consistency, new transitive deps, Node/Bun/runtime compatibility, platform assumptions, license red flags |
 | Lane 4: Docs, intent, and drift | PR claims vs implementation, docs mismatch, migration/changelog gaps, stale examples | obligation mapping, changed behavior not documented, docs promising behavior not implemented |
-| Lane 5: Tests and falsifiability | Weak assertions, missing edge tests, flaky patterns, mock leakage, fixture drift | assertion strength, negative paths, isolation, deterministic timing, cross-platform path coverage |
+| Lane 5: Tests and falsifiability | Weak assertions, missing edge tests, flaky patterns, mock leakage, fixture drift | assertion strength, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks, `assertDoesNotThrow` wrapping trivial code), negative paths, isolation, deterministic timing, cross-platform path coverage |
 | Lane 6: Performance and architecture | Complexity regressions, memory leaks, over-coupling, inefficient graph scans, global mutable state | algorithmic deltas, caching, resource lifecycle, state ownership, architectural boundary violations |
 
 ### Explorer context contract
@@ -276,6 +298,7 @@ Every explorer must inspect or explicitly mark unavailable:
 5. the nearest relevant test or missing-test location,
 6. deterministic signal entries mapped to its files/symbols,
 7. relevant Swarm knowledge/evidence entries, if present.
+8. the commit range to analyze (`base_ref..head_ref`),
 
 Explorer output format:
 
@@ -537,6 +560,38 @@ Knowledge writeback rules:
 
 ---
 
+## Phase 11: Post-Fix Re-verification
+
+When the PR author pushes fixes after a review, perform a targeted re-verification before updating the verdict.
+
+### Re-verification scope
+
+Only re-verify findings the author claims to have fixed. Do not re-run the full review pipeline.
+
+### Re-verification steps
+
+1. For each finding the author claims fixed:
+   a. Read the changed file(s) from the updated branch at the specific lines referenced in the original finding.
+   b. Verify the fix addresses the root cause, not just the symptom.
+   c. Check that the fix does not introduce a new issue in the same area.
+2. Run CI checks on the updated branch to confirm no regressions.
+3. For findings the author did not address, carry forward the original finding with unchanged status.
+
+### Re-verification output
+
+```
+[REVERIFIED] | finding_id | FIXED / PARTIALLY_FIXED / NOT_FIXED / NEW_ISSUE | evidence | updated_severity
+```
+
+- `FIXED`: the root cause is resolved and no new issue introduced.
+- `PARTIALLY_FIXED`: the root cause is partially addressed or a residual concern remains.
+- `NOT_FIXED`: the root cause persists unchanged.
+- `NEW_ISSUE`: the fix introduced a new problem at the same location.
+
+Update the verdict only after re-verifying all previously blocking findings.
+
+---
+
 # Council Mode Workflow
 
 Council mode is opt-in only and adversarial.
@@ -639,6 +694,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] falsification probes included: ___
 [VALIDATION] grouped root-cause findings: ___
 [VALIDATION] metrics / knowledge writeback: ___
+[VALIDATION] all explorers verified to diff against PR branch, not HEAD: YES/NO
 ```
 
 If the reviewer returned `REJECTED` or `CONCERNS`, route the issue back to implementation context or mark the candidate invalid with reason. Do not silently downgrade a rejection.

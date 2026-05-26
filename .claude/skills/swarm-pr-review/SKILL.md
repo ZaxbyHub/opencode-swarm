@@ -79,6 +79,20 @@ For each obligation, record:
 - Verification status (UNVERIFIED → IN_PROGRESS → MET / NOT MET / UNVERIFIABLE)
 - Link to corresponding finding if non-met
 
+### Quantitative claim verification
+
+PR body numerical claims (test counts, coverage percentages, assertion counts, performance benchmarks) are obligations, not proof. For each quantitative claim:
+
+1. Extract the claim and its source (PR body, comment, commit message).
+2. Verify against actual tool output or CI artifacts when available.
+3. If the claim cannot be independently verified, mark the obligation `UNVERIFIABLE` with reason.
+4. If the claim is disproved by evidence, create a finding linking the discrepancy.
+
+Common patterns to verify:
+- "N tests pass" → count actual test results from CI logs or test runner output
+- "N% coverage" → compare against coverage report
+- "No regressions" → verify against test runner failure count
+
 ---
 
 ### Phase 2: Parallel Explorer Lanes (6 lanes, launch in single message)
@@ -91,7 +105,7 @@ Launch all 6 lanes in parallel in a **single message with multiple Agent tool ca
 | **Lane 2: Security** | Injection, auth bypass, secret exposure, privilege escalation, SSRF, path traversal, unsafe deserialization | Input sanitization, authnz enforcement points, credential handling, permission boundaries |
 | **Lane 3: Dependencies** | Import changes, version bumps, breaking API changes, new transitive deps, license issues | `package.json`/`requirements.txt`/Cargo.toml changes, lockfile drift, breaking API replacements |
 | **Lane 4: Docs vs Intent** | PR claims vs actual code changes, undocumented behavior, misleading variable names, absent changelog entries | Claims made in PR text vs what diff actually does, side effects not mentioned |
-| **Lane 5: Tests** | Coverage gaps, flaky patterns, weak assertions, test isolation violations, missing edge case tests | Assertion quality, mock isolation, happy-path-only coverage, missing error-path tests |
+| **Lane 5: Tests** | Coverage gaps, flaky patterns, weak assertions, test isolation violations, missing edge case tests | Assertion quality, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks, `assertDoesNotThrow` wrapping trivial code), mock isolation, happy-path-only coverage, missing error-path tests |
 | **Lane 6: Performance/Architecture** | Complexity changes, memory leaks, algorithmic regressions, coupling between modules, architectural debt | Cyclomatic complexity deltas, GC pressure, connection pool usage, shared mutable state |
 
 **Explorer output format per finding:**
@@ -202,6 +216,38 @@ When user requests council review or uses phrases like "independent review", "5-
 5. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL findings
 6. **Council findings are supplementary, not authoritative overrides.** Council may miss context the main thread has. Do not adopt council severities verbatim without independent validation.
 7. Final synthesis merges validated council findings with main-thread-only findings, clearly labeled by source
+
+---
+
+## Post-Fix Re-verification
+
+When the PR author pushes fixes after a review, perform a targeted re-verification before updating the verdict.
+
+### Re-verification scope
+
+Only re-verify findings the author claims to have fixed. Do not re-run the full review pipeline.
+
+### Re-verification steps
+
+1. For each finding the author claims fixed:
+   a. Read the changed file(s) from the updated branch at the specific lines referenced in the original finding.
+   b. Verify the fix addresses the root cause, not just the symptom.
+   c. Check that the fix does not introduce a new issue in the same area.
+2. Run CI checks on the updated branch to confirm no regressions.
+3. For findings the author did not address, carry forward the original finding with unchanged status.
+
+### Re-verification output
+
+```
+[REVERIFIED] | finding_id | FIXED / PARTIALLY_FIXED / NOT_FIXED / NEW_ISSUE | evidence | updated_severity
+```
+
+- `FIXED`: the root cause is resolved and no new issue introduced.
+- `PARTIALLY_FIXED`: the root cause is partially addressed or a residual concern remains.
+- `NOT_FIXED`: the root cause persists unchanged.
+- `NEW_ISSUE`: the fix introduced a new problem at the same location.
+
+Update the verdict only after re-verifying all previously blocking findings.
 
 ---
 

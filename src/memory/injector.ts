@@ -1,4 +1,7 @@
-import { extractMemoryProposalsFromAgentOutput } from '../agents/agent-output-schema';
+import {
+	extractCuratorMemoryDecisionsFromAgentOutput,
+	extractMemoryProposalsFromAgentOutput,
+} from '../agents/agent-output-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
 import { normalizeToolName } from '../hooks/normalize-tool-name';
@@ -39,7 +42,8 @@ export interface MemoryLifecycleHookOptions {
 	) => Pick<
 		MemoryGateway,
 		'isEnabled' | 'deriveAllowedScopes' | 'recall' | 'propose'
-	>;
+	> &
+		Partial<Pick<MemoryGateway, 'applyCuratorDecision' | 'dispose'>>;
 	appendRunLog?: typeof appendMemoryRunLog;
 }
 
@@ -124,11 +128,14 @@ async function captureTaskOutputProposals(
 	const outputText = (output as { output?: unknown })?.output;
 	if (
 		typeof outputText !== 'string' ||
-		!outputText.includes('memoryProposals')
+		(!outputText.includes('memoryProposals') &&
+			!outputText.includes('curatorMemoryDecisions'))
 	) {
 		return;
 	}
-	const extracted = extractMemoryProposalsFromAgentOutput(outputText);
+	const extracted = outputText.includes('memoryProposals')
+		? extractMemoryProposalsFromAgentOutput(outputText)
+		: { proposals: [] };
 	if (extracted.error) {
 		await internals.appendRunLog(options.directory, task.sessionID, {
 			event: 'proposal_rejected_by_validation',
@@ -139,7 +146,25 @@ async function captureTaskOutputProposals(
 		});
 		return;
 	}
-	if (extracted.proposals.length === 0) return;
+	const decisionExtraction = outputText.includes('curatorMemoryDecisions')
+		? extractCuratorMemoryDecisionsFromAgentOutput(outputText)
+		: { decisions: [] };
+	if (decisionExtraction.error) {
+		await internals.appendRunLog(options.directory, task.sessionID, {
+			event: 'curator_decision_rejected_by_validation',
+			runId: task.sessionID ?? 'unknown',
+			agentRole: task.agentRole,
+			agentId: task.agentRole,
+			rejectionReason: decisionExtraction.error,
+		});
+		return;
+	}
+	if (
+		extracted.proposals.length === 0 &&
+		decisionExtraction.decisions.length === 0
+	) {
+		return;
+	}
 	const gateway = internals.createGateway(
 		{
 			directory: options.directory,
@@ -150,30 +175,98 @@ async function captureTaskOutputProposals(
 		},
 		{ config: options.config },
 	);
-	if (!gateway.isEnabled()) return;
-	for (const proposalInput of extracted.proposals) {
-		try {
-			const proposal = await gateway.propose(proposalInput);
-			await internals.appendRunLog(options.directory, task.sessionID, {
-				event:
-					proposal.status === 'pending'
-						? 'proposal_created'
-						: 'proposal_rejected_by_validation',
-				runId: task.sessionID ?? 'unknown',
-				agentRole: task.agentRole,
-				agentId: task.agentRole,
-				proposalId: proposal.id,
-				rejectionReason: proposal.rejectionReason,
-			});
-		} catch (err) {
-			await internals.appendRunLog(options.directory, task.sessionID, {
-				event: 'proposal_rejected_by_validation',
-				runId: task.sessionID ?? 'unknown',
-				agentRole: task.agentRole,
-				agentId: task.agentRole,
-				rejectionReason: err instanceof Error ? err.message : String(err),
-			});
+	if (!gateway.isEnabled()) {
+		await gateway.dispose?.();
+		return;
+	}
+	try {
+		for (const proposalInput of extracted.proposals) {
+			try {
+				const proposal = await gateway.propose(proposalInput);
+				await internals.appendRunLog(options.directory, task.sessionID, {
+					event:
+						proposal.status === 'pending'
+							? 'proposal_created'
+							: 'proposal_rejected_by_validation',
+					runId: task.sessionID ?? 'unknown',
+					agentRole: task.agentRole,
+					agentId: task.agentRole,
+					proposalId: proposal.id,
+					rejectionReason: proposal.rejectionReason,
+				});
+			} catch (err) {
+				await internals.appendRunLog(options.directory, task.sessionID, {
+					event: 'proposal_rejected_by_validation',
+					runId: task.sessionID ?? 'unknown',
+					agentRole: task.agentRole,
+					agentId: task.agentRole,
+					rejectionReason: err instanceof Error ? err.message : String(err),
+				});
+			}
 		}
+		if (
+			decisionExtraction.decisions.length > 0 &&
+			!isCuratorAgent(task.agentRole)
+		) {
+			await internals.appendRunLog(options.directory, task.sessionID, {
+				event: 'curator_decision_rejected_by_validation',
+				runId: task.sessionID ?? 'unknown',
+				agentRole: task.agentRole,
+				agentId: task.agentRole,
+				rejectionReason: 'only curator agents may emit curatorMemoryDecisions',
+			});
+			return;
+		}
+		if (decisionExtraction.decisions.length > 0) {
+			const applyCuratorDecisionMethod = gateway.applyCuratorDecision;
+			if (!applyCuratorDecisionMethod) {
+				await internals.appendRunLog(options.directory, task.sessionID, {
+					event: 'curator_decision_rejected_by_validation',
+					runId: task.sessionID ?? 'unknown',
+					agentRole: task.agentRole,
+					agentId: task.agentRole,
+					rejectionReason: 'memory gateway does not support curator decisions',
+				});
+				return;
+			}
+			const applyCuratorDecision = applyCuratorDecisionMethod.bind(gateway);
+			for (const decision of decisionExtraction.decisions) {
+				try {
+					const change = await applyCuratorDecision(decision);
+					await internals.appendRunLog(options.directory, task.sessionID, {
+						event: 'curator_decision_applied',
+						runId: task.sessionID ?? 'unknown',
+						agentRole: task.agentRole,
+						agentId: task.agentRole,
+						proposalId: change.proposalId,
+						memoryIds: [
+							change.memoryId,
+							change.targetMemoryId,
+							change.oldMemoryId,
+							change.replacementMemoryId,
+						].filter((id): id is string => Boolean(id)),
+						rejectionReason: change.reason,
+						metadata: {
+							action: change.action,
+							proposalStatus: change.proposalStatus,
+							eventId: change.eventId,
+						},
+					});
+				} catch (err) {
+					await internals.appendRunLog(options.directory, task.sessionID, {
+						event: 'curator_decision_rejected_by_validation',
+						runId: task.sessionID ?? 'unknown',
+						agentRole: task.agentRole,
+						agentId: task.agentRole,
+						proposalId: decision.proposalId,
+						rejectionReason: err instanceof Error ? err.message : String(err),
+						metadata: { action: decision.action },
+					});
+				}
+			}
+		}
+	} finally {
+		await gateway.dispose?.();
 	}
 }
 
@@ -330,6 +423,14 @@ function parseTaskToolInput(input: unknown): ParsedTaskInput | null {
 		agentRole: stripKnownSwarmPrefix(target),
 		prompt,
 	};
+}
+
+function isCuratorAgent(agentRole: string): boolean {
+	return (
+		agentRole === 'curator' ||
+		agentRole === 'curator_init' ||
+		agentRole === 'curator_phase'
+	);
 }
 
 function messagesContainRecall(messages: unknown[]): boolean {

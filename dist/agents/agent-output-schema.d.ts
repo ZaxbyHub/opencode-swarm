@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ProposeMemoryInput } from '../memory/gateway';
+import type { CuratorMemoryDecision, ProposeMemoryInput } from '../memory';
 export declare const AgentOutputMemorySchema: z.ZodObject<{
     memoryProposals: z.ZodOptional<z.ZodArray<z.ZodObject<{
         operation: z.ZodEnum<{
@@ -31,8 +31,16 @@ export declare const AgentOutputMemorySchema: z.ZodObject<{
         evidenceRefs: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strict>>>;
 }, z.core.$loose>;
+export declare const CuratorOutputMemoryDecisionSchema: z.ZodObject<{
+    curatorMemoryDecisions: z.ZodOptional<z.ZodArray<z.ZodType<CuratorMemoryDecision, unknown, z.core.$ZodTypeInternals<CuratorMemoryDecision, unknown>>>>;
+}, z.core.$loose>;
 export interface ExtractedAgentMemoryProposals {
     proposals: ProposeMemoryInput[];
     error?: string;
 }
+export interface ExtractedCuratorMemoryDecisions {
+    decisions: CuratorMemoryDecision[];
+    error?: string;
+}
 export declare function extractMemoryProposalsFromAgentOutput(outputText: string): ExtractedAgentMemoryProposals;
+export declare function extractCuratorMemoryDecisionsFromAgentOutput(outputText: string): ExtractedCuratorMemoryDecisions;

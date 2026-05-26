@@ -204,8 +204,343 @@ describe('MemoryProvider contract parity', () => {
 					proposal,
 				]);
 			});
+
+			test('applies curator add decisions and durably marks proposals applied', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const record = makeRecord('Curator approved this memory.');
+				const proposal = makeProposal(record);
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'add',
+					proposalId: proposal.id,
+					memory: record,
+				});
+
+				expect(change).toMatchObject({
+					action: 'add',
+					proposalId: proposal.id,
+					proposalStatus: 'applied',
+					memoryId: record.id,
+				});
+				expect(await provider.list({})).toEqual([
+					expect.objectContaining({ id: record.id, text: record.text }),
+				]);
+				const reloaded = track(providerCase.reopen(root));
+				expect(await reloaded.list({})).toEqual([
+					expect.objectContaining({ id: record.id, text: record.text }),
+				]);
+				expect(await reloaded.listProposals({ status: 'applied' })).toEqual([
+					expect.objectContaining({
+						id: proposal.id,
+						status: 'applied',
+						reviewer: 'curator_agent',
+					}),
+				]);
+			});
+
+			test('applies curator reject decisions without durable memory writes', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const proposal = makeProposal(makeRecord('Rejected memory candidate.'));
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'reject',
+					proposalId: proposal.id,
+					reason: 'Insufficient evidence.',
+				});
+
+				expect(change).toMatchObject({
+					action: 'reject',
+					proposalId: proposal.id,
+					proposalStatus: 'rejected',
+					reason: 'Insufficient evidence.',
+				});
+				expect(await provider.list({})).toHaveLength(0);
+				expect(await provider.listProposals({ status: 'rejected' })).toEqual([
+					expect.objectContaining({
+						id: proposal.id,
+						status: 'rejected',
+						reviewer: 'curator_agent',
+						rejectionReason: 'Insufficient evidence.',
+					}),
+				]);
+			});
+
+			test('applies curator noop decisions as durable proposal decisions only', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const proposal = makeProposal(makeRecord('Noop memory candidate.'));
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'noop',
+					proposalId: proposal.id,
+					reason: 'Already captured by existing memory.',
+				});
+
+				expect(change).toMatchObject({
+					action: 'noop',
+					proposalId: proposal.id,
+					proposalStatus: 'applied',
+					reason: 'Already captured by existing memory.',
+				});
+				expect(await provider.list({})).toHaveLength(0);
+				expect(await provider.listProposals({ status: 'applied' })).toEqual([
+					expect.objectContaining({
+						id: proposal.id,
+						status: 'applied',
+						reviewer: 'curator_agent',
+						metadata: expect.objectContaining({
+							curatorDecision: expect.objectContaining({
+								action: 'noop',
+								reason: 'Already captured by existing memory.',
+							}),
+						}),
+					}),
+				]);
+			});
+
+			test('applies curator update decisions with partial patch merging', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const existing = {
+					...makeRecord('Keep using bun --smol for memory tests.'),
+					tags: ['testing', 'memory'],
+					metadata: { source: 'original' },
+				};
+				await provider.upsert(existing);
+				const proposal: MemoryProposal = {
+					...makeProposal(existing),
+					operation: 'update',
+					targetMemoryId: existing.id,
+				};
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'update',
+					proposalId: proposal.id,
+					targetMemoryId: existing.id,
+					patch: {
+						confidence: 0.72,
+						tags: ['Memory Review', 'testing'],
+						metadata: { reviewed: true },
+					},
+					reason: 'Curator adjusted confidence and tags.',
+				});
+
+				expect(change).toMatchObject({
+					action: 'update',
+					proposalId: proposal.id,
+					proposalStatus: 'applied',
+					memoryId: existing.id,
+					targetMemoryId: existing.id,
+				});
+				const oldAfterUpdate = await provider.get(existing.id);
+				expect(oldAfterUpdate).toMatchObject({
+					id: existing.id,
+					text: existing.text,
+					confidence: 0.72,
+					tags: ['memory-review', 'testing'],
+					metadata: { source: 'original', reviewed: true },
+				});
+			});
+
+			test('content-changing curator updates tombstone the old memory id', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const existing = makeRecord('Run the outdated memory command.');
+				await provider.upsert(existing);
+				const proposal: MemoryProposal = {
+					...makeProposal(existing),
+					operation: 'update',
+					targetMemoryId: existing.id,
+				};
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'update',
+					proposalId: proposal.id,
+					targetMemoryId: existing.id,
+					patch: {
+						text: 'Run the current memory command.',
+						metadata: { reviewed: true },
+					},
+					reason: 'The command changed.',
+				});
+
+				expect(change?.memoryId).toBeDefined();
+				expect(change?.memoryId).not.toBe(existing.id);
+				const oldAfterUpdate = await provider.get(existing.id);
+				expect(oldAfterUpdate?.id).toBe(existing.id);
+				expect(oldAfterUpdate?.metadata.deleted).toBe(true);
+				expect(oldAfterUpdate?.metadata.deleteReason).toBe(
+					'The command changed.',
+				);
+				expect(oldAfterUpdate?.metadata.updateReplacementId).toBe(
+					change?.memoryId,
+				);
+				const listed = await provider.list({});
+				expect(listed.map((item) => item.id)).toEqual([change?.memoryId]);
+				const recall = await provider.recall({
+					query: 'current memory command',
+					scopes: [existing.scope],
+					maxItems: 5,
+					tokenBudget: 1000,
+					minScore: 0,
+				});
+				expect(recall.map((item) => item.record.id)).toEqual([
+					change?.memoryId,
+				]);
+			});
+
+			test('superseded memories stop appearing in recall and list results', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const oldMemory = makeRecord('Use the old memory command.');
+				const replacement = makeRecord('Use the new memory command.');
+				await provider.upsert(oldMemory);
+				const proposal = {
+					...makeProposal(replacement),
+					operation: 'supersede' as const,
+					targetMemoryId: oldMemory.id,
+				};
+				await provider.createProposal(proposal);
+
+				const change = await provider.applyCuratorDecision?.({
+					action: 'supersede',
+					proposalId: proposal.id,
+					oldMemoryId: oldMemory.id,
+					replacement,
+					reason: 'The command changed.',
+				});
+
+				expect(change).toMatchObject({
+					action: 'supersede',
+					oldMemoryId: oldMemory.id,
+					replacementMemoryId: replacement.id,
+					proposalStatus: 'applied',
+				});
+				expect((await provider.get(oldMemory.id))?.supersededBy).toBe(
+					replacement.id,
+				);
+				expect((await provider.list({})).map((item) => item.id)).toEqual([
+					replacement.id,
+				]);
+				const recall = await provider.recall({
+					query: 'memory command',
+					scopes: [oldMemory.scope],
+					maxItems: 5,
+					tokenBudget: 1000,
+					minScore: 0,
+				});
+				expect(recall.map((item) => item.record.id)).toEqual([replacement.id]);
+			});
+
+			test('rejects curator decisions that target a different memory than the proposal', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const oldMemory = makeRecord('Original memory target.');
+				const otherMemory = makeRecord('Different memory target.');
+				const replacement = makeRecord('Replacement memory target.');
+				await provider.upsert(oldMemory);
+				await provider.upsert(otherMemory);
+				const proposal = {
+					...makeProposal(replacement),
+					operation: 'supersede' as const,
+					targetMemoryId: oldMemory.id,
+				};
+				await provider.createProposal(proposal);
+
+				await expect(
+					provider.applyCuratorDecision?.({
+						action: 'supersede',
+						proposalId: proposal.id,
+						oldMemoryId: otherMemory.id,
+						replacement,
+						reason: 'Wrong target must be rejected.',
+					}),
+				).rejects.toThrow('target does not match');
+
+				expect(await provider.listProposals({ status: 'pending' })).toEqual([
+					proposal,
+				]);
+				expect(
+					(await provider.get(otherMemory.id))?.supersededBy,
+				).toBeUndefined();
+			});
+
+			test('rejects curator decisions whose action does not match the proposal operation', async () => {
+				const root = await providerRoot(providerCase.name);
+				const provider = track(providerCase.create(root));
+				const existing = makeRecord('Update action mismatch source.');
+				const approved = makeRecord('Action mismatch approved memory.');
+				await provider.upsert(existing);
+				const proposal: MemoryProposal = {
+					...makeProposal(approved),
+					operation: 'update',
+					targetMemoryId: existing.id,
+				};
+				await provider.createProposal(proposal);
+
+				await expect(
+					provider.applyCuratorDecision?.({
+						action: 'add',
+						proposalId: proposal.id,
+						memory: approved,
+					}),
+				).rejects.toThrow('does not match update proposal');
+
+				expect(await provider.listProposals({ status: 'pending' })).toEqual([
+					proposal,
+				]);
+				expect(await provider.get(approved.id)).toBeNull();
+			});
 		});
 	}
+});
+
+describe('LocalJsonlMemoryProvider', () => {
+	test('event-logs curator decisions with the structured provider payload', async () => {
+		const root = await providerRoot('local-jsonl-events');
+		const provider = track(
+			new LocalJsonlMemoryProvider(root, { enabled: true }),
+		);
+		const record = makeRecord('Local JSONL logs curator decisions.');
+		const proposal = makeProposal(record);
+		await provider.createProposal(proposal);
+
+		const change = await provider.applyCuratorDecision({
+			action: 'add',
+			proposalId: proposal.id,
+			memory: record,
+		});
+
+		const auditPath = path.join(root, '.swarm', 'memory', 'audit.jsonl');
+		const events = (await fs.readFile(auditPath, 'utf-8'))
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		const decisionEvent = events.find(
+			(event) => event.operation === 'curator_decision',
+		);
+		expect(decisionEvent).toMatchObject({
+			targetId: proposal.id,
+			eventJson: {
+				action: 'add',
+				proposalId: proposal.id,
+				proposalOperation: 'add',
+				memoryId: record.id,
+			},
+		});
+		expect(decisionEvent.reason).toBeUndefined();
+		expect(change).toMatchObject({
+			action: 'add',
+			memoryId: record.id,
+		});
+	});
 });
 
 describe('SQLiteMemoryProvider', () => {
@@ -645,6 +980,95 @@ describe('SQLiteMemoryProvider', () => {
 			expect(ftsCount).toBe(1);
 		} finally {
 			verifyDb.close();
+		}
+	});
+
+	test('event-logs every curator decision in SQLite', async () => {
+		const root = await providerRoot('sqlite-decision-events');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		);
+		const record = makeRecord('SQLite logs curator decisions.');
+		const proposal = makeProposal(record);
+		await provider.createProposal(proposal);
+
+		const change = await provider.applyCuratorDecision({
+			action: 'add',
+			proposalId: proposal.id,
+			memory: record,
+		});
+		provider.close?.();
+
+		const db = new Database(path.join(root, '.swarm', 'memory', 'memory.db'), {
+			readonly: true,
+		});
+		try {
+			const row = db
+				.query<
+					{
+						operation: string;
+						target_id: string;
+						event_json: string;
+					},
+					[]
+				>(
+					'SELECT operation, target_id, event_json FROM memory_events WHERE id = ?',
+				)
+				.get(change.eventId ?? '');
+			expect(row?.operation).toBe('curator_decision');
+			expect(row?.target_id).toBe(proposal.id);
+			expect(JSON.parse(row?.event_json ?? '{}')).toMatchObject({
+				action: 'add',
+				proposalId: proposal.id,
+				proposalOperation: 'add',
+				memoryId: record.id,
+			});
+		} finally {
+			db.close();
+		}
+	});
+
+	test('curator decision application is atomic when validation fails', async () => {
+		const root = await providerRoot('sqlite-decision-atomic');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		);
+		const record = makeRecord(
+			'Invalid approved memory is rejected atomically.',
+		);
+		const proposal = makeProposal(record);
+		await provider.createProposal(proposal);
+
+		await expect(
+			provider.applyCuratorDecision({
+				action: 'add',
+				proposalId: proposal.id,
+				memory: {
+					...record,
+					contentHash:
+						'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+				},
+			}),
+		).rejects.toThrow('contentHash does not match');
+
+		expect(await provider.list({})).toEqual([]);
+		expect(await provider.listProposals({ status: 'pending' })).toEqual([
+			proposal,
+		]);
+		provider.close?.();
+
+		const db = new Database(path.join(root, '.swarm', 'memory', 'memory.db'), {
+			readonly: true,
+		});
+		try {
+			const row = db
+				.query<{ count: number }, []>(
+					"SELECT COUNT(*) as count FROM memory_events WHERE operation = 'curator_decision'",
+				)
+				.get();
+			expect(row?.count).toBe(0);
+		} finally {
+			db.close();
 		}
 	});
 });

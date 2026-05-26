@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type {
+	CuratorMemoryDecision,
 	MemoryLifecycleHookOptions,
 	ProposeMemoryInput,
 	RecallMemoryInput,
@@ -82,6 +83,13 @@ function makeHooks(
 	enabled = true,
 	options: {
 		propose?: (input: ProposeMemoryInput) => Promise<MemoryProposal>;
+		applyDecision?: (input: CuratorMemoryDecision) => Promise<{
+			action: CuratorMemoryDecision['action'];
+			proposalId: string;
+			proposalStatus: MemoryProposal['status'];
+			appliedAt: string;
+			memoryId?: string;
+		}>;
 		activeAgent?: string;
 		config?: MemoryLifecycleHookOptions['config'];
 	} = {},
@@ -89,10 +97,12 @@ function makeHooks(
 	hooks: ReturnType<typeof createMemoryLifecycleHooks>;
 	recalls: RecallMemoryInput[];
 	proposals: ProposeMemoryInput[];
+	decisions: CuratorMemoryDecision[];
 	logs: unknown[];
 } {
 	const recalls: RecallMemoryInput[] = [];
 	const proposals: ProposeMemoryInput[] = [];
+	const decisions: CuratorMemoryDecision[] = [];
 	const logs: unknown[] = [];
 	const createGateway: MemoryLifecycleHookOptions['createGateway'] = () => ({
 		isEnabled: () => enabled,
@@ -116,6 +126,18 @@ function makeHooks(
 			};
 			return proposal;
 		},
+		applyCuratorDecision: async (input) => {
+			if (options.applyDecision) return options.applyDecision(input);
+			decisions.push(input);
+			return {
+				action: input.action,
+				proposalId: input.proposalId,
+				proposalStatus: input.action === 'reject' ? 'rejected' : 'applied',
+				appliedAt: '2026-05-24T00:00:00.000Z',
+				memoryId: input.action === 'add' ? 'mem_1111111111111111' : undefined,
+			};
+		},
+		dispose: async () => {},
 	});
 	const hooks = createMemoryLifecycleHooks({
 		directory: 'C:/repo-a',
@@ -126,7 +148,7 @@ function makeHooks(
 			logs.push(event);
 		},
 	});
-	return { hooks, recalls, proposals, logs };
+	return { hooks, recalls, proposals, decisions, logs };
 }
 
 describe('memory recall role profiles', () => {
@@ -508,6 +530,151 @@ describe('memory lifecycle injection', () => {
 				expect.objectContaining({
 					event: 'proposal_created',
 					proposalId: 'prop_1111111111111111',
+				}),
+			]),
+		);
+	});
+
+	test('curator Task output decisions are applied through the gateway', async () => {
+		const { hooks, decisions, logs } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'unused')),
+		);
+
+		await hooks.toolAfter(
+			{
+				tool: 'task',
+				sessionID: 'session-a',
+				args: { subagent_type: 'curator_phase', prompt: 'TASK: review memory' },
+			},
+			{
+				output: JSON.stringify({
+					curatorMemoryDecisions: [
+						{
+							action: 'add',
+							proposalId: 'prop_1111111111111111',
+							memory: {
+								kind: 'repo_convention',
+								text: 'This repo uses bun.',
+								source: { type: 'file', filePath: 'package.json' },
+							},
+						},
+					],
+				}),
+			},
+		);
+
+		expect(decisions).toHaveLength(1);
+		expect(decisions[0].action).toBe('add');
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'curator_decision_applied',
+					proposalId: 'prop_1111111111111111',
+				}),
+			]),
+		);
+	});
+
+	test('curator decision application preserves the gateway method receiver', async () => {
+		const logs: unknown[] = [];
+		const applied: CuratorMemoryDecision[] = [];
+		const hooks = createMemoryLifecycleHooks({
+			directory: 'C:/repo-a',
+			config: { enabled: true },
+			createGateway: () =>
+				({
+					receiverMarker: true,
+					isEnabled: () => true,
+					deriveAllowedScopes: () => allowedScopes,
+					recall: async () =>
+						makeBundle(makeRecord('repo_convention', 'unused')),
+					propose: async () => {
+						throw new Error('unexpected proposal call');
+					},
+					async applyCuratorDecision(
+						this: { receiverMarker?: boolean },
+						input,
+					) {
+						if (this.receiverMarker !== true) {
+							throw new Error('lost gateway receiver');
+						}
+						applied.push(input);
+						return {
+							action: input.action,
+							proposalId: input.proposalId,
+							proposalStatus: 'applied',
+							appliedAt: '2026-05-24T00:00:00.000Z',
+						};
+					},
+					dispose: async () => {},
+				}) as MemoryLifecycleHookOptions['createGateway'] extends (
+					...args: never[]
+				) => infer T
+					? T
+					: never,
+			appendRunLog: async (_directory, _runId, event) => {
+				logs.push(event);
+			},
+		});
+
+		await hooks.toolAfter(
+			{
+				tool: 'task',
+				sessionID: 'session-a',
+				args: { subagent_type: 'curator_phase', prompt: 'TASK: review memory' },
+			},
+			{
+				output: JSON.stringify({
+					curatorMemoryDecisions: [
+						{
+							action: 'reject',
+							proposalId: 'prop_1111111111111111',
+							reason: 'Not durable enough.',
+						},
+					],
+				}),
+			},
+		);
+
+		expect(applied).toHaveLength(1);
+		expect(logs).not.toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ rejectionReason: 'lost gateway receiver' }),
+			]),
+		);
+	});
+
+	test('normal Task agents cannot apply curator memory decisions', async () => {
+		const { hooks, decisions, logs } = makeHooks(
+			makeBundle(makeRecord('repo_convention', 'unused')),
+		);
+
+		await hooks.toolAfter(
+			{
+				tool: 'task',
+				sessionID: 'session-a',
+				args: { subagent_type: 'coder', prompt: 'TASK: implement' },
+			},
+			{
+				output: JSON.stringify({
+					curatorMemoryDecisions: [
+						{
+							action: 'reject',
+							proposalId: 'prop_1111111111111111',
+							reason: 'Not durable enough.',
+						},
+					],
+				}),
+			},
+		);
+
+		expect(decisions).toHaveLength(0);
+		expect(logs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					event: 'curator_decision_rejected_by_validation',
+					rejectionReason:
+						'only curator agents may emit curatorMemoryDecisions',
 				}),
 			]),
 		);

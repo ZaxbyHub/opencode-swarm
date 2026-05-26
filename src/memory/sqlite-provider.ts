@@ -5,6 +5,13 @@ import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
+import {
+	applyPatchToMemory,
+	buildCuratorDecisionEvent,
+	curatorDecisionReason,
+	markProposalReviewed,
+	validateDecisionMatchesProposal,
+} from './curator-decision-helpers';
 import { MemoryValidationError } from './errors';
 import {
 	backupLegacyJsonl,
@@ -24,11 +31,13 @@ import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import { scopeAllowed, scoreMemoryRecordsWithDiagnostics } from './scoring';
 import type {
+	AppliedMemoryChange,
 	MemoryListFilter,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
 	RecallResultItem,
+	ResolvedCuratorMemoryDecision,
 } from './types';
 
 // See src/db/project-db.ts for the portability rationale. The main plugin bundle
@@ -48,6 +57,7 @@ type EventOperation =
 	| 'proposal'
 	| 'recall'
 	| 'migration'
+	| 'curator_decision'
 	| 'invalid_load';
 
 interface Migration {
@@ -166,6 +176,13 @@ interface FtsCandidateRow {
 interface ProposalRow {
 	id: string;
 	proposal_json: string;
+}
+
+interface DecisionTransactionResult {
+	change: AppliedMemoryChange;
+	proposal: MemoryProposal;
+	memories: MemoryRecord[];
+	removeMemoryIds: string[];
 }
 
 interface MigrationRow {
@@ -412,6 +429,44 @@ export class SQLiteMemoryProvider
 		}
 		proposals.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 		return proposals.slice(0, filter.limit ?? proposals.length);
+	}
+
+	async applyCuratorDecision(
+		decision: ResolvedCuratorMemoryDecision,
+	): Promise<AppliedMemoryChange> {
+		await this.initialize();
+		const db = this.requireDb();
+		const apply = db.transaction((): DecisionTransactionResult => {
+			const appliedAt = new Date().toISOString();
+			const proposal = this.readPendingProposal(decision.proposalId);
+			validateDecisionMatchesProposal(decision, proposal);
+			const result = this.applyDecisionToStorage(decision, proposal, appliedAt);
+			this.writeProposal(result.proposal);
+			const eventId = randomUUID();
+			const eventJson = JSON.stringify(
+				buildCuratorDecisionEvent(result.change, proposal),
+			);
+			this.insertEvent(
+				'curator_decision',
+				decision.proposalId,
+				result.change.reason,
+				eventJson,
+				eventId,
+			);
+			return {
+				...result,
+				change: { ...result.change, eventId },
+			};
+		});
+		const result = apply();
+		this.proposals.set(result.proposal.id, result.proposal);
+		for (const id of result.removeMemoryIds) {
+			this.memories.delete(id);
+		}
+		for (const memory of result.memories) {
+			this.memories.set(memory.id, memory);
+		}
+		return result.change;
 	}
 
 	close(): void {
@@ -751,6 +806,158 @@ export class SQLiteMemoryProvider
 		);
 	}
 
+	private applyDecisionToStorage(
+		decision: ResolvedCuratorMemoryDecision,
+		proposal: MemoryProposal,
+		appliedAt: string,
+	): Omit<DecisionTransactionResult, 'change'> & {
+		change: Omit<AppliedMemoryChange, 'eventId'>;
+	} {
+		const memories: MemoryRecord[] = [];
+		const removeMemoryIds: string[] = [];
+		let memoryId: string | undefined;
+		let targetMemoryId: string | undefined;
+		let oldMemoryId: string | undefined;
+		let replacementMemoryId: string | undefined;
+
+		if (decision.action === 'add') {
+			const memory = this.validateDecisionMemory({
+				...decision.memory,
+				updatedAt: appliedAt,
+			});
+			this.writeMemory(memory);
+			memories.push(memory);
+			memoryId = memory.id;
+		} else if (decision.action === 'update') {
+			const existing = this.readActiveMemory(decision.targetMemoryId);
+			const updated = this.validateDecisionMemory(
+				applyPatchToMemory(existing, decision.patch, appliedAt),
+			);
+			if (updated.id !== existing.id) {
+				// Update replacements are linked through updateReplacementId; the
+				// supersedes graph is reserved for explicit supersede decisions.
+				const tombstone = this.validateDecisionMemory({
+					...existing,
+					updatedAt: appliedAt,
+					metadata: {
+						...existing.metadata,
+						deleted: true,
+						deleteReason: decision.reason,
+						updateReplacementId: updated.id,
+					},
+				});
+				this.writeMemory(tombstone);
+				memories.push(tombstone);
+			}
+			this.writeMemory(updated);
+			memories.push(updated);
+			memoryId = updated.id;
+			targetMemoryId = existing.id;
+		} else if (decision.action === 'supersede') {
+			const oldMemory = this.readActiveMemory(decision.oldMemoryId);
+			const replacement = this.validateDecisionMemory({
+				...decision.replacement,
+				updatedAt: appliedAt,
+				supersedes: Array.from(
+					new Set([...(decision.replacement.supersedes ?? []), oldMemory.id]),
+				),
+			});
+			const superseded = this.validateDecisionMemory({
+				...oldMemory,
+				updatedAt: appliedAt,
+				supersededBy: replacement.id,
+				metadata: {
+					...oldMemory.metadata,
+					supersedeReason: decision.reason,
+				},
+			});
+			this.writeMemory(superseded);
+			this.writeMemory(replacement);
+			memories.push(superseded, replacement);
+			oldMemoryId = oldMemory.id;
+			replacementMemoryId = replacement.id;
+			memoryId = replacement.id;
+		}
+
+		const proposalStatus =
+			decision.action === 'reject' ? 'rejected' : 'applied';
+		const reviewedProposal = markProposalReviewed(
+			proposal,
+			decision,
+			proposalStatus,
+			appliedAt,
+			{
+				memoryId,
+				targetMemoryId,
+				oldMemoryId,
+				replacementMemoryId,
+			},
+		);
+		const change: Omit<AppliedMemoryChange, 'eventId'> = {
+			action: decision.action,
+			proposalId: decision.proposalId,
+			proposalStatus,
+			appliedAt,
+			memoryId,
+			targetMemoryId,
+			oldMemoryId,
+			replacementMemoryId,
+			reason: curatorDecisionReason(decision),
+		};
+		return {
+			change,
+			proposal: reviewedProposal,
+			memories,
+			removeMemoryIds,
+		};
+	}
+
+	private readPendingProposal(proposalId: string): MemoryProposal {
+		const row = this.requireDb()
+			.query<ProposalRow, [string]>(
+				'SELECT id, proposal_json FROM memory_proposals WHERE id = ? LIMIT 1',
+			)
+			.get(proposalId);
+		if (!row) {
+			throw new MemoryValidationError('memory proposal was not found');
+		}
+		const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
+		if (proposal.status !== 'pending') {
+			throw new MemoryValidationError('memory proposal is not pending');
+		}
+		if (proposal.proposedRecord) {
+			validateMemoryRecordRules(proposal.proposedRecord, {
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+			});
+		}
+		return proposal;
+	}
+
+	private readActiveMemory(memoryId: string): MemoryRecord {
+		const row = this.requireDb()
+			.query<MemoryItemRow, [string]>(
+				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
+			)
+			.get(memoryId);
+		if (!row) {
+			throw new MemoryValidationError('target memory was not found');
+		}
+		const memory = this.validateDecisionMemory(JSON.parse(row.record_json));
+		if (memory.metadata.deleted === true) {
+			throw new MemoryValidationError('target memory is deleted');
+		}
+		if (memory.supersededBy) {
+			throw new MemoryValidationError('target memory is superseded');
+		}
+		return memory;
+	}
+
+	private validateDecisionMemory(record: MemoryRecord): MemoryRecord {
+		return validateMemoryRecordRules(record, {
+			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+		});
+	}
+
 	private async migrateLegacyJsonlIfNeeded(): Promise<void> {
 		if (this.hasMigration(LEGACY_JSONL_MIGRATION_NAME)) return;
 		const backups = await backupLegacyJsonl(this.rootDirectory, this.config);
@@ -809,6 +1016,8 @@ export class SQLiteMemoryProvider
 		operation: EventOperation,
 		targetId: string,
 		reason?: string,
+		eventJson?: string,
+		id = randomUUID(),
 	): void {
 		this.requireDb().run(
 			`INSERT INTO memory_events (
@@ -820,12 +1029,12 @@ export class SQLiteMemoryProvider
 				event_json
 			) VALUES (?, ?, ?, ?, ?, ?)`,
 			[
-				randomUUID(),
+				id,
 				operation,
 				targetId,
 				reason ?? null,
 				new Date().toISOString(),
-				reason ? JSON.stringify({ reason }) : null,
+				eventJson ?? (reason ? JSON.stringify({ reason }) : null),
 			],
 		);
 	}

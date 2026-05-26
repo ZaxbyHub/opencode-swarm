@@ -1,6 +1,6 @@
 import { type MemoryConfig } from './config';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
-import type { MemoryContext, MemoryKind, MemoryProposal, MemoryRecord, MemoryScopeRef, MemorySource, RecallBundle, RecallMode } from './types';
+import type { AppliedMemoryChange, CuratorMemoryDecision, MemoryContext, MemoryKind, MemoryProposal, MemoryRecord, MemoryScopeRef, MemorySource, RecallBundle, RecallMode } from './types';
 export interface MemoryGatewayOptions {
     config?: Partial<MemoryConfig>;
     provider?: MemoryProvider & Partial<MemoryProposalStore>;
@@ -39,6 +39,7 @@ export declare class MemoryGateway {
     recall(input: RecallMemoryInput): Promise<RecallBundle>;
     propose(input: ProposeMemoryInput): Promise<MemoryProposal>;
     upsertCurated(record: MemoryRecord): Promise<MemoryRecord>;
+    applyCuratorDecision(decision: CuratorMemoryDecision): Promise<AppliedMemoryChange>;
     createRecord(input: {
         kind: MemoryKind;
         text: string;
@@ -50,6 +51,9 @@ export declare class MemoryGateway {
         tags?: string[];
         metadata?: Record<string, unknown>;
     }): MemoryRecord;
+    private resolveCuratorDecision;
+    private createRecordFromNew;
+    private resolveRecordScope;
     private assertEnabled;
 }
 export declare function createMemoryGateway(context: MemoryContext, options?: MemoryGatewayOptions): MemoryGateway;

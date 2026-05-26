@@ -1,5 +1,5 @@
 import type { RecallScoringDiagnostics } from './scoring';
-import type { MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem } from './types';
+import type { AppliedMemoryChange, MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem, ResolvedCuratorMemoryDecision } from './types';
 export interface MemoryRecallResult {
     items: RecallResultItem[];
     diagnostics?: RecallScoringDiagnostics;
@@ -34,4 +34,5 @@ export interface MemoryProposalStore {
         status?: MemoryProposal['status'];
         limit?: number;
     }): Promise<MemoryProposal[]>;
+    applyCuratorDecision?(decision: ResolvedCuratorMemoryDecision): Promise<AppliedMemoryChange>;
 }

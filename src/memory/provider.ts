@@ -1,10 +1,12 @@
 import type { RecallScoringDiagnostics } from './scoring';
 import type {
+	AppliedMemoryChange,
 	MemoryListFilter,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
 	RecallResultItem,
+	ResolvedCuratorMemoryDecision,
 } from './types';
 
 export interface MemoryRecallResult {
@@ -44,4 +46,7 @@ export interface MemoryProposalStore {
 		status?: MemoryProposal['status'];
 		limit?: number;
 	}): Promise<MemoryProposal[]>;
+	applyCuratorDecision?(
+		decision: ResolvedCuratorMemoryDecision,
+	): Promise<AppliedMemoryChange>;
 }

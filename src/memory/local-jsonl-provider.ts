@@ -10,6 +10,13 @@ import {
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
+import {
+	applyPatchToMemory,
+	buildCuratorDecisionEvent,
+	curatorDecisionReason,
+	markProposalReviewed,
+	validateDecisionMatchesProposal,
+} from './curator-decision-helpers';
 import { MemoryValidationError } from './errors';
 import type {
 	MemoryProposalStore,
@@ -20,11 +27,13 @@ import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import { scopeAllowed, scoreMemoryRecordsWithDiagnostics } from './scoring';
 import type {
+	AppliedMemoryChange,
 	MemoryListFilter,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
 	RecallResultItem,
+	ResolvedCuratorMemoryDecision,
 } from './types';
 
 type AuditOperation =
@@ -32,6 +41,7 @@ type AuditOperation =
 	| 'delete'
 	| 'proposal'
 	| 'recall'
+	| 'curator_decision'
 	| 'compact'
 	| 'invalid_load';
 
@@ -40,6 +50,7 @@ interface AuditEvent {
 	operation: AuditOperation;
 	targetId: string;
 	reason?: string;
+	eventJson?: unknown;
 	timestamp: string;
 }
 
@@ -246,6 +257,116 @@ export class LocalJsonlMemoryProvider
 		return proposals.slice(0, filter.limit ?? proposals.length);
 	}
 
+	async applyCuratorDecision(
+		decision: ResolvedCuratorMemoryDecision,
+	): Promise<AppliedMemoryChange> {
+		await this.initialize();
+		const appliedAt = new Date().toISOString();
+		const proposal = this.proposals.get(decision.proposalId);
+		if (!proposal) {
+			throw new MemoryValidationError('memory proposal was not found');
+		}
+		if (proposal.status !== 'pending') {
+			throw new MemoryValidationError('memory proposal is not pending');
+		}
+		validateDecisionMatchesProposal(decision, proposal);
+
+		let memoryId: string | undefined;
+		let targetMemoryId: string | undefined;
+		let oldMemoryId: string | undefined;
+		let replacementMemoryId: string | undefined;
+
+		if (decision.action === 'add') {
+			const memory = this.validateDecisionMemory({
+				...decision.memory,
+				updatedAt: appliedAt,
+			});
+			this.memories.set(memory.id, memory);
+			await appendJsonl(this.pathFor('memories'), memory);
+			memoryId = memory.id;
+		} else if (decision.action === 'update') {
+			const existing = this.activeMemory(decision.targetMemoryId);
+			const updated = this.validateDecisionMemory(
+				applyPatchToMemory(existing, decision.patch, appliedAt),
+			);
+			if (updated.id !== existing.id) {
+				// Update replacements are linked through updateReplacementId; the
+				// supersedes graph is reserved for explicit supersede decisions.
+				const tombstone = this.validateDecisionMemory({
+					...existing,
+					updatedAt: appliedAt,
+					metadata: {
+						...existing.metadata,
+						deleted: true,
+						deleteReason: decision.reason,
+						updateReplacementId: updated.id,
+					},
+				});
+				this.memories.set(tombstone.id, tombstone);
+				await appendJsonl(this.pathFor('memories'), tombstone);
+			}
+			this.memories.set(updated.id, updated);
+			await appendJsonl(this.pathFor('memories'), updated);
+			memoryId = updated.id;
+			targetMemoryId = existing.id;
+		} else if (decision.action === 'supersede') {
+			const oldMemory = this.activeMemory(decision.oldMemoryId);
+			const replacement = this.validateDecisionMemory({
+				...decision.replacement,
+				updatedAt: appliedAt,
+				supersedes: Array.from(
+					new Set([...(decision.replacement.supersedes ?? []), oldMemory.id]),
+				),
+			});
+			const superseded = this.validateDecisionMemory({
+				...oldMemory,
+				updatedAt: appliedAt,
+				supersededBy: replacement.id,
+				metadata: {
+					...oldMemory.metadata,
+					supersedeReason: decision.reason,
+				},
+			});
+			this.memories.set(superseded.id, superseded);
+			this.memories.set(replacement.id, replacement);
+			await appendJsonl(this.pathFor('memories'), superseded);
+			await appendJsonl(this.pathFor('memories'), replacement);
+			oldMemoryId = oldMemory.id;
+			replacementMemoryId = replacement.id;
+			memoryId = replacement.id;
+		}
+
+		const proposalStatus =
+			decision.action === 'reject' ? 'rejected' : 'applied';
+		const reviewedProposal = markProposalReviewed(
+			proposal,
+			decision,
+			proposalStatus,
+			appliedAt,
+			{ memoryId, targetMemoryId, oldMemoryId, replacementMemoryId },
+		);
+		this.proposals.set(reviewedProposal.id, reviewedProposal);
+		await appendJsonl(this.pathFor('proposals'), reviewedProposal);
+		const change: AppliedMemoryChange = {
+			action: decision.action,
+			proposalId: decision.proposalId,
+			proposalStatus,
+			appliedAt,
+			memoryId,
+			targetMemoryId,
+			oldMemoryId,
+			replacementMemoryId,
+			reason: curatorDecisionReason(decision),
+		};
+		await this.audit(
+			'curator_decision',
+			decision.proposalId,
+			change.reason,
+			buildCuratorDecisionEvent(change, proposal),
+		);
+		return change;
+	}
+
 	async compact(): Promise<void> {
 		await this.initialize();
 		await writeJsonlAtomic(
@@ -259,15 +380,37 @@ export class LocalJsonlMemoryProvider
 		operation: AuditOperation,
 		targetId: string,
 		reason?: string,
+		eventJson?: unknown,
 	): Promise<void> {
 		const event: AuditEvent = {
 			id: randomUUID(),
 			operation,
 			targetId,
 			reason,
+			eventJson,
 			timestamp: new Date().toISOString(),
 		};
 		await appendJsonl(this.pathFor('audit'), event);
+	}
+
+	private activeMemory(memoryId: string): MemoryRecord {
+		const memory = this.memories.get(memoryId);
+		if (!memory) {
+			throw new MemoryValidationError('target memory was not found');
+		}
+		if (memory.metadata.deleted === true) {
+			throw new MemoryValidationError('target memory is deleted');
+		}
+		if (memory.supersededBy) {
+			throw new MemoryValidationError('target memory is superseded');
+		}
+		return memory;
+	}
+
+	private validateDecisionMemory(record: MemoryRecord): MemoryRecord {
+		return validateMemoryRecordRules(record, {
+			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+		});
 	}
 }
 

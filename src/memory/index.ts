@@ -55,21 +55,27 @@ export {
 	createProposalId,
 	isExpired,
 	normalizeMemoryText,
+	validateCuratorMemoryDecision,
 	validateMemoryProposal,
 	validateMemoryRecordRules,
 } from './schema';
 export { SQLiteMemoryProvider } from './sqlite-provider';
 export type {
+	AppliedMemoryChange,
+	CuratorMemoryDecision,
 	MemoryContext,
 	MemoryKind,
 	MemoryListFilter,
+	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
 	MemoryScopeType,
+	NewMemoryRecord,
 	RecallBundle,
 	RecallInjectionSkipReason,
 	RecallMode,
 	RecallRequest,
 	RecallResultItem,
+	ResolvedCuratorMemoryDecision,
 } from './types';

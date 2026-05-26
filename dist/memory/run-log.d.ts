@@ -1,4 +1,4 @@
-export type MemoryRunLogEventName = 'recall_requested' | 'recall_returned' | 'prompt_injection_skipped' | 'prompt_injected' | 'proposal_created' | 'proposal_rejected_by_validation';
+export type MemoryRunLogEventName = 'recall_requested' | 'recall_returned' | 'prompt_injection_skipped' | 'prompt_injected' | 'proposal_created' | 'proposal_rejected_by_validation' | 'curator_decision_applied' | 'curator_decision_rejected_by_validation';
 export interface MemoryRunLogEvent {
     event: MemoryRunLogEventName;
     runId: string;

@@ -193,6 +193,108 @@ describe('MemoryGateway', () => {
 		}
 	});
 
+	test('applyCuratorDecision materializes approved proposals into durable memory', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{
+				config: { enabled: true, provider: 'sqlite' },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		try {
+			const proposal = await gateway.propose({
+				operation: 'add',
+				kind: 'repo_convention',
+				text: 'Curator-approved memory uses SQLite.',
+				rationale: 'Pending proposal needs review.',
+				evidenceRefs: ['docs/memory.md'],
+			});
+
+			const change = await gateway.applyCuratorDecision({
+				action: 'add',
+				proposalId: proposal.id,
+				memory: {
+					kind: 'repo_convention',
+					text: 'Curator-approved memory uses SQLite.',
+					source: { type: 'file', filePath: 'docs/memory.md' },
+					confidence: 0.95,
+					tags: ['memory', 'sqlite'],
+				},
+			});
+			const recall = await gateway.recall({
+				query: 'curator approved SQLite memory',
+				minScore: 0,
+			});
+
+			expect(change).toMatchObject({
+				action: 'add',
+				proposalId: proposal.id,
+				proposalStatus: 'applied',
+			});
+			expect(recall.items.map((item) => item.record.id)).toEqual([
+				change.memoryId,
+			]);
+		} finally {
+			await gateway.dispose();
+		}
+	});
+
+	test('applyCuratorDecision schema rejects malformed curator output', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{ config: { enabled: true, provider: 'sqlite' } },
+		);
+		try {
+			await expect(
+				gateway.applyCuratorDecision({
+					action: 'reject',
+					proposalId: 'not-a-proposal-id',
+					reason: 'Invalid id should fail schema validation.',
+				} as any),
+			).rejects.toThrow();
+		} finally {
+			await gateway.dispose();
+		}
+	});
+
+	test('applyCuratorDecision rejects memory scopes outside the gateway context', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{
+				config: { enabled: true, provider: 'sqlite' },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		try {
+			const proposal = await gateway.propose({
+				operation: 'add',
+				kind: 'repo_convention',
+				text: 'Curator scope hardening is enforced.',
+				rationale: 'Pending proposal needs review.',
+				evidenceRefs: ['docs/memory.md'],
+			});
+
+			await expect(
+				gateway.applyCuratorDecision({
+					action: 'add',
+					proposalId: proposal.id,
+					memory: {
+						scope: {
+							type: 'repository',
+							repoId: 'different-repository',
+							repoRoot: path.join(tmpDir, '..', 'different-repository'),
+						},
+						kind: 'repo_convention',
+						text: 'Curator scope hardening is enforced.',
+						source: { type: 'file', filePath: 'docs/memory.md' },
+					},
+				}),
+			).rejects.toThrow('memory scope is not allowed');
+		} finally {
+			await gateway.dispose();
+		}
+	});
+
 	test('recall no-ops when provider omits optional usage recording', async () => {
 		const provider: MemoryProvider = {
 			name: 'fake-no-usage-recording',

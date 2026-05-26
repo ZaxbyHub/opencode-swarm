@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MemoryKind, MemoryProposal, MemoryRecord, MemoryScopeRef } from './types';
+import type { CuratorMemoryDecision, MemoryKind, MemoryPatch, MemoryProposal, MemoryRecord, MemoryScopeRef, NewMemoryRecord } from './types';
 export declare const MemoryScopeTypeSchema: z.ZodEnum<{
     agent: "agent";
     project: "project";
@@ -230,6 +230,9 @@ export declare const MemoryProposalSchema: z.ZodObject<{
     createdAt: z.ZodString;
     metadata: z.ZodRecord<z.ZodString, z.ZodUnknown>;
 }, z.core.$strict>;
+export declare const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord>;
+export declare const MemoryPatchSchema: z.ZodType<MemoryPatch>;
+export declare const CuratorMemoryDecisionSchema: z.ZodType<CuratorMemoryDecision>;
 export declare function normalizeMemoryText(text: string): string;
 export declare function stableScopeKey(scope: MemoryScopeRef): string;
 export declare function computeMemoryContentHash(recordLike: {
@@ -254,3 +257,4 @@ export declare function validateMemoryRecordRules(record: MemoryRecord, options:
     rejectDurableSecrets: boolean;
 }): MemoryRecord;
 export declare function validateMemoryProposal(proposal: MemoryProposal): MemoryProposal;
+export declare function validateCuratorMemoryDecision(decision: unknown): CuratorMemoryDecision;

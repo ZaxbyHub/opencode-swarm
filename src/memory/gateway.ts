@@ -17,17 +17,22 @@ import {
 	createMemoryId,
 	createProposalId,
 	normalizeMemoryText,
+	validateCuratorMemoryDecision,
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import { SQLiteMemoryProvider } from './sqlite-provider';
 import type {
+	AppliedMemoryChange,
+	CuratorMemoryDecision,
 	MemoryContext,
 	MemoryKind,
+	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
 	MemorySource,
+	NewMemoryRecord,
 	RecallBundle,
 	RecallInjectionSkipReason,
 	RecallMode,
@@ -319,6 +324,20 @@ export class MemoryGateway {
 		return this.provider.upsert(parsed);
 	}
 
+	async applyCuratorDecision(
+		decision: CuratorMemoryDecision,
+	): Promise<AppliedMemoryChange> {
+		this.assertEnabled();
+		if (!this.provider.applyCuratorDecision) {
+			throw new MemoryValidationError(
+				'memory provider does not support curator decisions',
+			);
+		}
+		const parsed = validateCuratorMemoryDecision(decision);
+		const resolved = this.resolveCuratorDecision(parsed);
+		return this.provider.applyCuratorDecision(resolved);
+	}
+
 	createRecord(input: {
 		kind: MemoryKind;
 		text: string;
@@ -332,7 +351,7 @@ export class MemoryGateway {
 	}): MemoryRecord {
 		const now = this.now().toISOString();
 		const text = normalizeMemoryText(input.text);
-		const scope = input.scope ?? this.deriveAllowedScopes()[1];
+		const scope = this.resolveRecordScope(input.scope);
 		const kind = input.kind;
 		const stability =
 			input.stability ?? (kind === 'scratch' ? 'ephemeral' : 'durable');
@@ -359,6 +378,85 @@ export class MemoryGateway {
 			metadata: input.metadata ?? {},
 		};
 		return record;
+	}
+
+	private resolveCuratorDecision(decision: CuratorMemoryDecision) {
+		switch (decision.action) {
+			case 'add':
+				return {
+					action: 'add' as const,
+					proposalId: decision.proposalId,
+					memory: this.createRecordFromNew(decision.memory),
+				};
+			case 'supersede':
+				return {
+					action: 'supersede' as const,
+					proposalId: decision.proposalId,
+					oldMemoryId: decision.oldMemoryId,
+					replacement: this.createRecordFromNew(decision.replacement),
+					reason: normalizeMemoryText(decision.reason),
+				};
+			case 'update': {
+				const patch = normalizeMemoryPatch(decision.patch);
+				if (patch.scope) {
+					patch.scope = this.resolveRecordScope(patch.scope);
+				}
+				return {
+					action: 'update' as const,
+					proposalId: decision.proposalId,
+					targetMemoryId: decision.targetMemoryId,
+					patch,
+					reason: normalizeMemoryText(decision.reason),
+				};
+			}
+			case 'reject':
+			case 'noop':
+				return {
+					action: decision.action,
+					proposalId: decision.proposalId,
+					reason: normalizeMemoryText(decision.reason),
+				};
+		}
+	}
+
+	private createRecordFromNew(input: NewMemoryRecord): MemoryRecord {
+		const record = this.createRecord({
+			kind: input.kind,
+			text: input.text,
+			scope: input.scope,
+			tags: input.tags,
+			confidence: input.confidence,
+			stability: input.stability,
+			source: input.source,
+			metadata: input.metadata,
+		});
+		const next = input.expiresAt
+			? { ...record, expiresAt: input.expiresAt }
+			: record;
+		return validateMemoryRecordRules(next, {
+			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+		});
+	}
+
+	private resolveRecordScope(scope?: MemoryScopeRef): MemoryScopeRef {
+		const allowedScopes = this.deriveAllowedScopes();
+		if (!scope) {
+			// Curator-supplied NewMemoryRecord omits scope by default; bind it to
+			// the repository scope derived from this gateway context.
+			const defaultScope = allowedScopes[1] ?? allowedScopes[0];
+			if (!defaultScope) {
+				throw new MemoryValidationError(
+					'memory scope is not available for this context',
+				);
+			}
+			return defaultScope;
+		}
+		validateRequestedScopes(
+			[scope],
+			allowedScopes,
+			'memory scope is not allowed for this context',
+		);
+		return scope;
 	}
 
 	private assertEnabled(): void {
@@ -433,6 +531,7 @@ function readGitRemoteUrl(directory: string): string | undefined {
 function validateRequestedScopes(
 	requested: MemoryScopeRef[],
 	allowed: MemoryScopeRef[],
+	disallowedMessage = 'recall scope is not allowed for this context',
 ): MemoryScopeRef[] {
 	if (requested.length === 0) {
 		throw new MemoryValidationError('recall scopes must not be empty');
@@ -440,9 +539,7 @@ function validateRequestedScopes(
 	const allowedKeys = new Set(allowed.map(scopeKey));
 	for (const scope of requested) {
 		if (!allowedKeys.has(scopeKey(scope))) {
-			throw new MemoryValidationError(
-				'recall scope is not allowed for this context',
-			);
+			throw new MemoryValidationError(disallowedMessage);
 		}
 	}
 	return requested;
@@ -501,6 +598,15 @@ function normalizeTags(tags: string[]): string[] {
 				.filter(Boolean),
 		),
 	).slice(0, 32);
+}
+
+function normalizeMemoryPatch(patch: MemoryPatch): MemoryPatch {
+	return {
+		...patch,
+		text:
+			patch.text === undefined ? undefined : normalizeMemoryText(patch.text),
+		tags: patch.tags === undefined ? undefined : normalizeTags(patch.tags),
+	};
 }
 
 function inferTags(text: string): string[] {

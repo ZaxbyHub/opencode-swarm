@@ -2,7 +2,7 @@ import { type MemoryConfig } from './config';
 import { type JsonlMigrationReport } from './jsonl-migration';
 import type { MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent } from './provider';
 import type { RecallScoringDiagnostics } from './scoring';
-import type { MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem } from './types';
+import type { AppliedMemoryChange, MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem, ResolvedCuratorMemoryDecision } from './types';
 export interface SQLiteJsonlImportResult {
     importedMemories: number;
     importedProposals: number;
@@ -37,6 +37,7 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
         status?: MemoryProposal['status'];
         limit?: number;
     }): Promise<MemoryProposal[]>;
+    applyCuratorDecision(decision: ResolvedCuratorMemoryDecision): Promise<AppliedMemoryChange>;
     close(): void;
     importJsonl(): Promise<SQLiteJsonlImportResult>;
     exportJsonl(): Promise<{
@@ -62,6 +63,10 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
     private writeMemoryFts;
     private deleteMemoryFts;
     private writeProposal;
+    private applyDecisionToStorage;
+    private readPendingProposal;
+    private readActiveMemory;
+    private validateDecisionMemory;
     private migrateLegacyJsonlIfNeeded;
     private importLegacyJsonlRows;
     private event;

@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.35.0",
+    version: "7.36.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -46250,7 +46250,7 @@ function validateMemoryRecordRules(record3, options) {
 function validateMemoryProposal(proposal) {
   return MemoryProposalSchema.parse(proposal);
 }
-var MemoryScopeTypeSchema, MemoryScopeRefSchema, MemoryKindSchema, MemorySourceSchema, MemoryRecordSchema, MemoryProposalSchema;
+var MemoryScopeTypeSchema, MemoryScopeRefSchema, MemoryKindSchema, MemorySourceSchema, MemoryRecordSchema, MemoryProposalSchema, NewMemoryRecordSchema, MemoryPatchSchema, ProposalIdSchema, MemoryIdSchema, CuratorDecisionReasonSchema, CuratorMemoryDecisionSchema;
 var init_schema2 = __esm(() => {
   init_zod();
   init_config3();
@@ -46357,6 +46357,138 @@ var init_schema2 = __esm(() => {
     createdAt: exports_external.string().datetime(),
     metadata: exports_external.record(exports_external.string(), exports_external.unknown())
   }).strict();
+  NewMemoryRecordSchema = exports_external.object({
+    scope: MemoryScopeRefSchema.optional(),
+    kind: MemoryKindSchema,
+    text: exports_external.string().min(1).max(2000),
+    tags: exports_external.array(exports_external.string().min(1).max(64)).max(32).optional(),
+    confidence: exports_external.number().min(0).max(1).optional(),
+    stability: exports_external.enum(["ephemeral", "session", "durable"]).optional(),
+    source: MemorySourceSchema.optional(),
+    expiresAt: exports_external.string().datetime().optional(),
+    metadata: exports_external.record(exports_external.string(), exports_external.unknown()).optional()
+  }).strict();
+  MemoryPatchSchema = exports_external.object({
+    scope: MemoryScopeRefSchema.optional(),
+    kind: MemoryKindSchema.optional(),
+    text: exports_external.string().min(1).max(2000).optional(),
+    tags: exports_external.array(exports_external.string().min(1).max(64)).max(32).optional(),
+    confidence: exports_external.number().min(0).max(1).optional(),
+    stability: exports_external.enum(["ephemeral", "session", "durable"]).optional(),
+    source: MemorySourceSchema.optional(),
+    expiresAt: exports_external.string().datetime().optional(),
+    metadata: exports_external.record(exports_external.string(), exports_external.unknown()).optional()
+  }).strict().refine((patch) => Object.keys(patch).length > 0, {
+    message: "memory patch must not be empty"
+  });
+  ProposalIdSchema = exports_external.string().regex(/^prop_[a-f0-9]{16}$/);
+  MemoryIdSchema = exports_external.string().regex(/^mem_[a-f0-9]{16}$/);
+  CuratorDecisionReasonSchema = exports_external.string().min(1).max(2000);
+  CuratorMemoryDecisionSchema = exports_external.discriminatedUnion("action", [
+    exports_external.object({
+      action: exports_external.literal("add"),
+      proposalId: ProposalIdSchema,
+      memory: NewMemoryRecordSchema
+    }).strict(),
+    exports_external.object({
+      action: exports_external.literal("update"),
+      proposalId: ProposalIdSchema,
+      targetMemoryId: MemoryIdSchema,
+      patch: MemoryPatchSchema,
+      reason: CuratorDecisionReasonSchema
+    }).strict(),
+    exports_external.object({
+      action: exports_external.literal("supersede"),
+      proposalId: ProposalIdSchema,
+      oldMemoryId: MemoryIdSchema,
+      replacement: NewMemoryRecordSchema,
+      reason: CuratorDecisionReasonSchema
+    }).strict(),
+    exports_external.object({
+      action: exports_external.literal("reject"),
+      proposalId: ProposalIdSchema,
+      reason: CuratorDecisionReasonSchema
+    }).strict(),
+    exports_external.object({
+      action: exports_external.literal("noop"),
+      proposalId: ProposalIdSchema,
+      reason: CuratorDecisionReasonSchema
+    }).strict()
+  ]);
+});
+
+// src/memory/curator-decision-helpers.ts
+function validateDecisionMatchesProposal(decision, proposal) {
+  if (decision.action === "add" && proposal.operation !== "add" || decision.action === "update" && proposal.operation !== "update" || decision.action === "supersede" && proposal.operation !== "supersede") {
+    throw new MemoryValidationError(`curator ${decision.action} decision does not match ${proposal.operation} proposal`);
+  }
+  if (decision.action === "update" && proposal.targetMemoryId && proposal.targetMemoryId !== decision.targetMemoryId) {
+    throw new MemoryValidationError("curator update decision target does not match proposal target");
+  }
+  if (decision.action === "supersede" && proposal.targetMemoryId && proposal.targetMemoryId !== decision.oldMemoryId) {
+    throw new MemoryValidationError("curator supersede decision target does not match proposal target");
+  }
+}
+function applyPatchToMemory(existing, patch, updatedAt) {
+  const base = {
+    scope: patch.scope ?? existing.scope,
+    kind: patch.kind ?? existing.kind,
+    text: patch.text === undefined ? existing.text : normalizeMemoryText(patch.text)
+  };
+  const tags = patch.tags === undefined ? existing.tags : normalizeTags(patch.tags);
+  return {
+    ...existing,
+    ...patch,
+    ...base,
+    id: createMemoryId(base),
+    tags,
+    updatedAt,
+    contentHash: computeMemoryContentHash(base),
+    metadata: patch.metadata === undefined ? existing.metadata : { ...existing.metadata, ...patch.metadata }
+  };
+}
+function markProposalReviewed(proposal, decision, status, reviewedAt, ids) {
+  const reason = curatorDecisionReason(decision);
+  return validateMemoryProposal({
+    ...proposal,
+    status,
+    reviewer: "curator_agent",
+    reviewedAt,
+    rejectionReason: decision.action === "reject" ? reason : undefined,
+    metadata: {
+      ...proposal.metadata,
+      curatorDecision: {
+        action: decision.action,
+        reason,
+        ...ids,
+        appliedAt: reviewedAt
+      }
+    }
+  });
+}
+function curatorDecisionReason(decision) {
+  switch (decision.action) {
+    case "add":
+      return;
+    case "update":
+    case "supersede":
+    case "reject":
+    case "noop":
+      return decision.reason;
+  }
+}
+function buildCuratorDecisionEvent(change, proposal) {
+  return {
+    ...change,
+    proposalOperation: proposal.operation
+  };
+}
+function normalizeTags(tags) {
+  return Array.from(new Set(tags.map((tag) => tag.toLowerCase().replace(/[^\w-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "")).filter(Boolean))).slice(0, 32);
+}
+var init_curator_decision_helpers = __esm(() => {
+  init_errors6();
+  init_schema2();
 });
 
 // src/memory/role-profiles.ts
@@ -46796,20 +46928,125 @@ class LocalJsonlMemoryProvider {
     proposals.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return proposals.slice(0, filter.limit ?? proposals.length);
   }
+  async applyCuratorDecision(decision) {
+    await this.initialize();
+    const appliedAt = new Date().toISOString();
+    const proposal = this.proposals.get(decision.proposalId);
+    if (!proposal) {
+      throw new MemoryValidationError("memory proposal was not found");
+    }
+    if (proposal.status !== "pending") {
+      throw new MemoryValidationError("memory proposal is not pending");
+    }
+    validateDecisionMatchesProposal(decision, proposal);
+    let memoryId;
+    let targetMemoryId;
+    let oldMemoryId;
+    let replacementMemoryId;
+    if (decision.action === "add") {
+      const memory = this.validateDecisionMemory({
+        ...decision.memory,
+        updatedAt: appliedAt
+      });
+      this.memories.set(memory.id, memory);
+      await appendJsonl(this.pathFor("memories"), memory);
+      memoryId = memory.id;
+    } else if (decision.action === "update") {
+      const existing = this.activeMemory(decision.targetMemoryId);
+      const updated = this.validateDecisionMemory(applyPatchToMemory(existing, decision.patch, appliedAt));
+      if (updated.id !== existing.id) {
+        const tombstone = this.validateDecisionMemory({
+          ...existing,
+          updatedAt: appliedAt,
+          metadata: {
+            ...existing.metadata,
+            deleted: true,
+            deleteReason: decision.reason,
+            updateReplacementId: updated.id
+          }
+        });
+        this.memories.set(tombstone.id, tombstone);
+        await appendJsonl(this.pathFor("memories"), tombstone);
+      }
+      this.memories.set(updated.id, updated);
+      await appendJsonl(this.pathFor("memories"), updated);
+      memoryId = updated.id;
+      targetMemoryId = existing.id;
+    } else if (decision.action === "supersede") {
+      const oldMemory = this.activeMemory(decision.oldMemoryId);
+      const replacement = this.validateDecisionMemory({
+        ...decision.replacement,
+        updatedAt: appliedAt,
+        supersedes: Array.from(new Set([...decision.replacement.supersedes ?? [], oldMemory.id]))
+      });
+      const superseded = this.validateDecisionMemory({
+        ...oldMemory,
+        updatedAt: appliedAt,
+        supersededBy: replacement.id,
+        metadata: {
+          ...oldMemory.metadata,
+          supersedeReason: decision.reason
+        }
+      });
+      this.memories.set(superseded.id, superseded);
+      this.memories.set(replacement.id, replacement);
+      await appendJsonl(this.pathFor("memories"), superseded);
+      await appendJsonl(this.pathFor("memories"), replacement);
+      oldMemoryId = oldMemory.id;
+      replacementMemoryId = replacement.id;
+      memoryId = replacement.id;
+    }
+    const proposalStatus = decision.action === "reject" ? "rejected" : "applied";
+    const reviewedProposal = markProposalReviewed(proposal, decision, proposalStatus, appliedAt, { memoryId, targetMemoryId, oldMemoryId, replacementMemoryId });
+    this.proposals.set(reviewedProposal.id, reviewedProposal);
+    await appendJsonl(this.pathFor("proposals"), reviewedProposal);
+    const change = {
+      action: decision.action,
+      proposalId: decision.proposalId,
+      proposalStatus,
+      appliedAt,
+      memoryId,
+      targetMemoryId,
+      oldMemoryId,
+      replacementMemoryId,
+      reason: curatorDecisionReason(decision)
+    };
+    await this.audit("curator_decision", decision.proposalId, change.reason, buildCuratorDecisionEvent(change, proposal));
+    return change;
+  }
   async compact() {
     await this.initialize();
     await writeJsonlAtomic(this.pathFor("memories"), Array.from(this.memories.values()));
     await this.audit("compact", "memories");
   }
-  async audit(operation, targetId, reason) {
+  async audit(operation, targetId, reason, eventJson) {
     const event = {
       id: randomUUID3(),
       operation,
       targetId,
       reason,
+      eventJson,
       timestamp: new Date().toISOString()
     };
     await appendJsonl(this.pathFor("audit"), event);
+  }
+  activeMemory(memoryId) {
+    const memory = this.memories.get(memoryId);
+    if (!memory) {
+      throw new MemoryValidationError("target memory was not found");
+    }
+    if (memory.metadata.deleted === true) {
+      throw new MemoryValidationError("target memory is deleted");
+    }
+    if (memory.supersededBy) {
+      throw new MemoryValidationError("target memory is superseded");
+    }
+    return memory;
+  }
+  validateDecisionMemory(record3) {
+    return validateMemoryRecordRules(record3, {
+      rejectDurableSecrets: this.config.redaction.rejectDurableSecrets
+    });
   }
 }
 function validateLoadedMemories(values, config3) {
@@ -46877,6 +47114,7 @@ async function writeJsonlAtomic(filePath, values) {
 var init_local_jsonl_provider = __esm(() => {
   init_utils2();
   init_config3();
+  init_curator_decision_helpers();
   init_errors6();
   init_schema2();
   init_scoring();
@@ -47284,6 +47522,33 @@ class SQLiteMemoryProvider {
     proposals.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return proposals.slice(0, filter.limit ?? proposals.length);
   }
+  async applyCuratorDecision(decision) {
+    await this.initialize();
+    const db = this.requireDb();
+    const apply = db.transaction(() => {
+      const appliedAt = new Date().toISOString();
+      const proposal = this.readPendingProposal(decision.proposalId);
+      validateDecisionMatchesProposal(decision, proposal);
+      const result2 = this.applyDecisionToStorage(decision, proposal, appliedAt);
+      this.writeProposal(result2.proposal);
+      const eventId = randomUUID4();
+      const eventJson = JSON.stringify(buildCuratorDecisionEvent(result2.change, proposal));
+      this.insertEvent("curator_decision", decision.proposalId, result2.change.reason, eventJson, eventId);
+      return {
+        ...result2,
+        change: { ...result2.change, eventId }
+      };
+    });
+    const result = apply();
+    this.proposals.set(result.proposal.id, result.proposal);
+    for (const id of result.removeMemoryIds) {
+      this.memories.delete(id);
+    }
+    for (const memory of result.memories) {
+      this.memories.set(memory.id, memory);
+    }
+    return result.change;
+  }
   close() {
     if (!this.db)
       return;
@@ -47533,6 +47798,125 @@ class SQLiteMemoryProvider {
       JSON.stringify(proposal)
     ]);
   }
+  applyDecisionToStorage(decision, proposal, appliedAt) {
+    const memories = [];
+    const removeMemoryIds = [];
+    let memoryId;
+    let targetMemoryId;
+    let oldMemoryId;
+    let replacementMemoryId;
+    if (decision.action === "add") {
+      const memory = this.validateDecisionMemory({
+        ...decision.memory,
+        updatedAt: appliedAt
+      });
+      this.writeMemory(memory);
+      memories.push(memory);
+      memoryId = memory.id;
+    } else if (decision.action === "update") {
+      const existing = this.readActiveMemory(decision.targetMemoryId);
+      const updated = this.validateDecisionMemory(applyPatchToMemory(existing, decision.patch, appliedAt));
+      if (updated.id !== existing.id) {
+        const tombstone = this.validateDecisionMemory({
+          ...existing,
+          updatedAt: appliedAt,
+          metadata: {
+            ...existing.metadata,
+            deleted: true,
+            deleteReason: decision.reason,
+            updateReplacementId: updated.id
+          }
+        });
+        this.writeMemory(tombstone);
+        memories.push(tombstone);
+      }
+      this.writeMemory(updated);
+      memories.push(updated);
+      memoryId = updated.id;
+      targetMemoryId = existing.id;
+    } else if (decision.action === "supersede") {
+      const oldMemory = this.readActiveMemory(decision.oldMemoryId);
+      const replacement = this.validateDecisionMemory({
+        ...decision.replacement,
+        updatedAt: appliedAt,
+        supersedes: Array.from(new Set([...decision.replacement.supersedes ?? [], oldMemory.id]))
+      });
+      const superseded = this.validateDecisionMemory({
+        ...oldMemory,
+        updatedAt: appliedAt,
+        supersededBy: replacement.id,
+        metadata: {
+          ...oldMemory.metadata,
+          supersedeReason: decision.reason
+        }
+      });
+      this.writeMemory(superseded);
+      this.writeMemory(replacement);
+      memories.push(superseded, replacement);
+      oldMemoryId = oldMemory.id;
+      replacementMemoryId = replacement.id;
+      memoryId = replacement.id;
+    }
+    const proposalStatus = decision.action === "reject" ? "rejected" : "applied";
+    const reviewedProposal = markProposalReviewed(proposal, decision, proposalStatus, appliedAt, {
+      memoryId,
+      targetMemoryId,
+      oldMemoryId,
+      replacementMemoryId
+    });
+    const change = {
+      action: decision.action,
+      proposalId: decision.proposalId,
+      proposalStatus,
+      appliedAt,
+      memoryId,
+      targetMemoryId,
+      oldMemoryId,
+      replacementMemoryId,
+      reason: curatorDecisionReason(decision)
+    };
+    return {
+      change,
+      proposal: reviewedProposal,
+      memories,
+      removeMemoryIds
+    };
+  }
+  readPendingProposal(proposalId) {
+    const row = this.requireDb().query("SELECT id, proposal_json FROM memory_proposals WHERE id = ? LIMIT 1").get(proposalId);
+    if (!row) {
+      throw new MemoryValidationError("memory proposal was not found");
+    }
+    const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
+    if (proposal.status !== "pending") {
+      throw new MemoryValidationError("memory proposal is not pending");
+    }
+    if (proposal.proposedRecord) {
+      validateMemoryRecordRules(proposal.proposedRecord, {
+        rejectDurableSecrets: this.config.redaction.rejectDurableSecrets
+      });
+    }
+    return proposal;
+  }
+  readActiveMemory(memoryId) {
+    const row = this.requireDb().query("SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1").get(memoryId);
+    if (!row) {
+      throw new MemoryValidationError("target memory was not found");
+    }
+    const memory = this.validateDecisionMemory(JSON.parse(row.record_json));
+    if (memory.metadata.deleted === true) {
+      throw new MemoryValidationError("target memory is deleted");
+    }
+    if (memory.supersededBy) {
+      throw new MemoryValidationError("target memory is superseded");
+    }
+    return memory;
+  }
+  validateDecisionMemory(record3) {
+    return validateMemoryRecordRules(record3, {
+      rejectDurableSecrets: this.config.redaction.rejectDurableSecrets
+    });
+  }
   async migrateLegacyJsonlIfNeeded() {
     if (this.hasMigration(LEGACY_JSONL_MIGRATION_NAME))
       return;
@@ -47574,7 +47958,7 @@ class SQLiteMemoryProvider {
   async event(operation, targetId, reason) {
     this.insertEvent(operation, targetId, reason);
   }
-  insertEvent(operation, targetId, reason) {
+  insertEvent(operation, targetId, reason, eventJson, id = randomUUID4()) {
     this.requireDb().run(`INSERT INTO memory_events (
 				id,
 				operation,
@@ -47583,12 +47967,12 @@ class SQLiteMemoryProvider {
 				timestamp,
 				event_json
 			) VALUES (?, ?, ?, ?, ?, ?)`, [
-      randomUUID4(),
+      id,
       operation,
       targetId,
       reason ?? null,
       new Date().toISOString(),
-      reason ? JSON.stringify({ reason }) : null
+      eventJson ?? (reason ? JSON.stringify({ reason }) : null)
     ]);
   }
   requireDb() {
@@ -47666,6 +48050,7 @@ var _DatabaseCtor2 = null, FTS_SCHEMA_MIGRATION_VERSION = 3, FTS_SCHEMA_MIGRATIO
 var init_sqlite_provider = __esm(() => {
   init_utils2();
   init_config3();
+  init_curator_decision_helpers();
   init_errors6();
   init_jsonl_migration();
   init_schema2();
@@ -47811,7 +48196,7 @@ var init_gateway = __esm(() => {
 });
 
 // src/agents/agent-output-schema.ts
-var AgentMemoryProposalSchema, AgentOutputMemorySchema;
+var AgentMemoryProposalSchema, AgentOutputMemorySchema, CuratorOutputMemoryDecisionSchema;
 var init_agent_output_schema = __esm(() => {
   init_zod();
   init_schema2();
@@ -47833,6 +48218,9 @@ var init_agent_output_schema = __esm(() => {
   }).strict();
   AgentOutputMemorySchema = exports_external.object({
     memoryProposals: exports_external.array(AgentMemoryProposalSchema).max(20).optional()
+  }).passthrough();
+  CuratorOutputMemoryDecisionSchema = exports_external.object({
+    curatorMemoryDecisions: exports_external.array(CuratorMemoryDecisionSchema).max(20).optional()
   }).passthrough();
 });
 

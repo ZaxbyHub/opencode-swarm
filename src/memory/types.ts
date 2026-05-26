@@ -89,6 +89,84 @@ export interface MemoryProposal {
 	metadata: Record<string, unknown>;
 }
 
+export interface NewMemoryRecord {
+	scope?: MemoryScopeRef;
+	kind: MemoryKind;
+	text: string;
+	tags?: string[];
+	confidence?: number;
+	stability?: MemoryRecord['stability'];
+	source?: MemorySource;
+	expiresAt?: string;
+	metadata?: Record<string, unknown>;
+}
+
+export type MemoryPatch = Partial<
+	Pick<
+		NewMemoryRecord,
+		| 'scope'
+		| 'kind'
+		| 'text'
+		| 'tags'
+		| 'confidence'
+		| 'stability'
+		| 'source'
+		| 'expiresAt'
+		| 'metadata'
+	>
+>;
+
+export type CuratorMemoryDecision =
+	| { action: 'add'; proposalId: string; memory: NewMemoryRecord }
+	| {
+			action: 'update';
+			proposalId: string;
+			targetMemoryId: string;
+			patch: MemoryPatch;
+			reason: string;
+	  }
+	| {
+			action: 'supersede';
+			proposalId: string;
+			oldMemoryId: string;
+			replacement: NewMemoryRecord;
+			reason: string;
+	  }
+	| { action: 'reject'; proposalId: string; reason: string }
+	| { action: 'noop'; proposalId: string; reason: string };
+
+export type ResolvedCuratorMemoryDecision =
+	| { action: 'add'; proposalId: string; memory: MemoryRecord }
+	| {
+			action: 'update';
+			proposalId: string;
+			targetMemoryId: string;
+			patch: MemoryPatch;
+			reason: string;
+	  }
+	| {
+			action: 'supersede';
+			proposalId: string;
+			oldMemoryId: string;
+			replacement: MemoryRecord;
+			reason: string;
+	  }
+	| { action: 'reject'; proposalId: string; reason: string }
+	| { action: 'noop'; proposalId: string; reason: string };
+
+export interface AppliedMemoryChange {
+	action: CuratorMemoryDecision['action'];
+	proposalId: string;
+	proposalStatus: MemoryProposal['status'];
+	appliedAt: string;
+	eventId?: string;
+	memoryId?: string;
+	targetMemoryId?: string;
+	oldMemoryId?: string;
+	replacementMemoryId?: string;
+	reason?: string;
+}
+
 export type RecallMode = 'manual' | 'injection' | 'curator' | 'evaluation';
 export type RecallInjectionSkipReason =
 	| 'disabled'

@@ -14,7 +14,7 @@ export interface MemoryLifecycleHookOptions {
         runId?: string;
     }, options: {
         config?: Partial<MemoryConfig>;
-    }) => Pick<MemoryGateway, 'isEnabled' | 'deriveAllowedScopes' | 'recall' | 'propose'>;
+    }) => Pick<MemoryGateway, 'isEnabled' | 'deriveAllowedScopes' | 'recall' | 'propose'> & Partial<Pick<MemoryGateway, 'applyCuratorDecision' | 'dispose'>>;
     appendRunLog?: typeof appendMemoryRunLog;
 }
 export interface MemoryLifecycleHooks {

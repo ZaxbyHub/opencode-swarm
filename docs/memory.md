@@ -49,7 +49,7 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 }
 ```
 
-Qdrant, embeddings, and curator approval are separate follow-up features. Recall injection uses the gateway/provider seam, so storage providers do not change agent behavior.
+Qdrant and embeddings are separate follow-up features. Recall injection uses the gateway/provider seam, so storage providers do not change agent behavior.
 
 ## Storage
 
@@ -170,11 +170,15 @@ Normal agents only propose memory:
 }
 ```
 
-The proposal is stored as `pending` in `proposals.jsonl`. It is not durable memory until reviewed by a future curator workflow or another trusted gateway caller.
+The proposal is stored as `pending`. It is not durable memory until reviewed by the curator decision path or another trusted gateway caller.
 
 If proposal text contains a likely secret, Swarm stores the proposal only with the secret redacted and marks it rejected by `auto_policy`.
 
 Agents may also return an optional JSON `memoryProposals` array in Task output. The controller validates those proposals through `MemoryGateway.propose`; invalid proposals are logged and dropped without crashing the run. This path still creates pending proposals only.
+
+Curator agents may return an optional JSON `curatorMemoryDecisions` array in Task output. The controller accepts that key only from curator roles, schema-validates each decision, and applies it through `MemoryGateway.applyCuratorDecision`. Supported decisions are `add`, `update`, `supersede`, `reject`, and `noop`.
+
+In SQLite, decision application is transactional: Swarm loads the pending proposal, validates the decision and resulting memory record, applies the memory change, updates proposal status, and appends a `curator_decision` event in one transaction. Superseded memories are marked with `supersededBy` and stop appearing in recall.
 
 ## Secret Handling
 
