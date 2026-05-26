@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.38.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.37.0...v7.38.0) (2026-05-26)
+
+
+### Features
+
+* **memory:** add recall evaluation harness ([79961df](https://github.com/zaxbysauce/opencode-swarm/commit/79961dfb007382112fc56bda80d7447996d15a4a))
+* **memory:** add recall evaluation harness ([ff24e5a](https://github.com/zaxbysauce/opencode-swarm/commit/ff24e5a174d2ce2eada40cd79ed706ceb8342257))
+
+
+### Bug Fixes
+
+* **memory:** address recall evaluation feedback ([cd33480](https://github.com/zaxbysauce/opencode-swarm/commit/cd3348084fe68170a70835a97c3269fa8cb534b6))
+
 ## [7.37.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.36.0...v7.37.0) (2026-05-26)
 
 
