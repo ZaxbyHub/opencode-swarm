@@ -58,8 +58,9 @@ Rules:
 - Split compound comments into separate ledger items only when they require
   different evidence or fixes.
 - Keep duplicate symptoms linked to one root cause rather than deleting them.
-- Include conflicts, stale branch state, obsolete older-head CI, generated
-  `dist` drift, and other CI failures as first-class ledger items.
+- Include conflicts, stale branch state, obsolete older-head CI,
+  generated-output (`dist/`) drift, and other CI failures as first-class ledger
+  items.
 - Use explicit IDs for non-review feedback when useful, for example
   `CONFLICT-001` for merge/base drift and `CI-001` for check failures, so PR
   bodies can show exactly how operational blockers were closed.

@@ -198,7 +198,7 @@ If the failure reproduces on `main`, document it under `## Pre-existing failures
 `dist-check` is a **hard gate**. Unlike test failures, a `dist-check` failure is never "pre-existing" and must be resolved before the PR merges.
 
 - **If your PR touches `src/`**: You must run `bun run build`, verify `git diff -- dist/` shows only expected changes from your source edits, and commit `dist/` in the same PR.
-- **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has dist drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
+- **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has generated-output (`dist/`) drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
 - **Never** commit rebuilt `dist/` solely to make CI green when your PR does not touch source files.
 - **If CI `dist-check` fails after a source-touching PR already rebuilt `dist/` locally**: inspect the CI log before classifying the failure, then refresh dependency-generated output with `bun install --frozen-lockfile --force`, rerun `bun run build`, verify the `dist/` diff is expected, and commit the regenerated files. Stale nested dependencies can make local `dist/` output differ from CI even when the build command succeeds.
 
@@ -216,7 +216,8 @@ git diff --check
 
 On Windows, if the forced install causes `EPERM` while later commands read
 `node_modules`, treat it as host permission friction first: rerun the exact
-focused command with approved access before diagnosing a code or test failure.
+focused command that failed, such as the build, import, or focused test command,
+with approved access before diagnosing a code or test failure.
 
 ## Step 4 - Workflow changes
 

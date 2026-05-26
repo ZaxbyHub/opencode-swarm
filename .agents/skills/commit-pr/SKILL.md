@@ -71,7 +71,7 @@ When the user asks to open, ship, ready, or close out a PR:
 3. if a required job is `cancelled` and downstream jobs are `skipped`, inspect the run and rerun failed/cancelled jobs
 4. if an obsolete older-head run is already failed or still consuming concurrency, inspect it before cancellation and cancel only when it is no longer the PR head under validation
 5. wait for required checks to finish when practical
-6. after conflict resolution, verify GitHub reports both `mergeable: MERGEABLE` and `mergeStateStatus: CLEAN`; local conflict-marker cleanup is not enough
+6. after conflict resolution, verify GitHub reports both `mergeable: MERGEABLE` and `mergeStateStatus: CLEAN`; local conflict-marker cleanup is not enough, and branch drift must appear in the closure ledger when it affected the PR
 7. when `gh pr checks` looks stale, inspect the workflow run directly with `gh run view <run-id> --json headSha,status,conclusion,jobs,url`, and keep watching downstream integration/smoke jobs after unit jobs pass
 8. if you edit the PR body after checks are green, expect PR Standards/title checks to rerun and re-check before calling the PR green
 9. do not call the PR merge-ready while a required check is `cancelled`, `skipped`, `in_progress`, or otherwise non-green unless the user explicitly accepts that state
@@ -81,11 +81,11 @@ Recommended commands:
 ```powershell
 gh pr view <number> --json body,headRefName,headRefOid,isDraft,mergeable,mergeStateStatus,state,statusCheckRollup,url
 gh pr checks <number> --watch --fail-fast
-gh run view <run-id> --json headSha,jobs,status,conclusion,url
+gh run view <run-id> --json headSha,status,conclusion,jobs,url
 gh run rerun <run-id> --failed
 ```
 
-For CI `dist-check` failures on source-touching PRs, inspect the CI log first. If the failure is generated bundle drift from stale local dependencies, refresh with `bun install --frozen-lockfile --force`, run `bun run build`, verify the `dist/` diff, and commit the regenerated files instead of calling the check pre-existing.
+For CI `dist-check` failures on source-touching PRs, inspect the CI log first. If the failure is generated-output (`dist/`) drift from stale local dependencies, use the canonical executable recovery sequence in the source-of-truth skill, verify the `dist/` diff, and commit the regenerated files instead of calling the check pre-existing.
 
 After a forced install on Windows, `EPERM` while reading refreshed `node_modules`
 is usually host friction; rerun the exact focused command with approved access
