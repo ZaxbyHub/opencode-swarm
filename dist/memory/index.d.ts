@@ -1,10 +1,10 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
 export { MemoryDisabledError, MemoryValidationError } from './errors';
+export { evaluateMemoryRecallFixtures, loadRecallEvaluationFixtures, type RecallEvaluationMetrics, type RecallEvaluationMode, type RecallEvaluationOptions, type RecallEvaluationProviderName, type RecallEvaluationReport, type RecallEvaluationRun, } from './evaluation';
 export type { MemoryGatewayOptions, ProposeMemoryInput, RecallMemoryInput, } from './gateway';
 export { createConfiguredMemoryProvider, createMemoryGateway, MemoryGateway, } from './gateway';
 export { createMemoryLifecycleHooks, type MemoryLifecycleHookOptions, type MemoryLifecycleHooks, } from './injector';
-export { evaluateMemoryRecallFixtures, loadRecallEvaluationFixtures, type RecallEvaluationMetrics, type RecallEvaluationMode, type RecallEvaluationOptions, type RecallEvaluationProviderName, type RecallEvaluationReport, type RecallEvaluationRun, } from './evaluation';
 export { backupLegacyJsonl, getLegacyJsonlFileStatus, type JsonlBackupResult, type JsonlImportPayload, type JsonlInvalidRow, type JsonlMigrationReport, LEGACY_JSONL_MIGRATION_NAME, LEGACY_JSONL_MIGRATION_VERSION, readLegacyJsonl, readMigrationReport, resolveMemoryStorageDir, resolveSqliteDatabasePath, writeJsonlExport, writeMigrationReport, } from './jsonl-migration';
 export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 export { buildRecallPromptBlock } from './prompt-block';

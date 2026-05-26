@@ -80,11 +80,12 @@ Memory commands:
 /swarm memory import
 /swarm memory migrate
 /swarm memory evaluate --json
+/swarm memory evaluate --json --fixtures tests/fixtures/memory-recall
 ```
 
 `/swarm memory export` writes the current provider contents to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`. `/swarm memory import` explicitly imports the current legacy JSONL files into SQLite; use it for manual recovery or debug workflows after reviewing the source files.
 
-`/swarm memory evaluate --json` runs the golden recall fixtures under `tests/fixtures/memory-recall` against both `local-jsonl` and `sqlite`, across manual, injection, and curator recall modes. The JSON report includes `precision@k`, `recall@k`, `injection_count`, `noisy_injection_count`, `same_scope_noise_count`, `cross_scope_leak_count`, and `stale_memory_count`.
+`/swarm memory evaluate --json` runs the golden recall fixtures under `tests/fixtures/memory-recall` against both `local-jsonl` and `sqlite`, across manual, injection, and curator recall modes. Pass `--fixtures <directory>` to evaluate a different fixture directory from an interactive CLI run. The JSON report includes `precision@k`, `recall@k`, `injection_count`, `noisy_injection_count`, `same_scope_noise_count`, `cross_scope_leak_count`, and `stale_memory_count`.
 
 Rollback to JSONL provider:
 

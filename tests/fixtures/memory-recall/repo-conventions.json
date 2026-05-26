@@ -1,64 +1,64 @@
 {
-  "name": "repo-conventions",
-  "query": "bun smol focused memory tests",
-  "task": "Run focused bun smol memory tests for provider contract coverage.",
-  "agentRole": "coder",
-  "scopes": [
-    {
-      "type": "repository",
-      "repoId": "opencode-swarm"
-    }
-  ],
-  "kinds": ["test_pattern", "repo_convention"],
-  "k": 3,
-  "maxItems": 3,
-  "tokenBudget": 1000,
-  "expectedLabels": ["bun-focused-tests"],
-  "records": [
-    {
-      "label": "bun-focused-tests",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "test_pattern",
-      "text": "This repo runs focused tests with bun --smol test <file> --timeout 30000.",
-      "tags": ["bun", "testing", "focused"],
-      "confidence": 0.95,
-      "source": {
-        "type": "file",
-        "filePath": "TESTING.md"
-      }
-    },
-    {
-      "label": "release-fragment-noise",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "repo_convention",
-      "text": "User-visible changes include a pending release fragment before publishing.",
-      "tags": ["release"],
-      "confidence": 0.9,
-      "source": {
-        "type": "file",
-        "filePath": "contributing.md"
-      }
-    },
-    {
-      "label": "cross-repo-bun-tests",
-      "scope": {
-        "type": "repository",
-        "repoId": "other-repo"
-      },
-      "kind": "test_pattern",
-      "text": "Other repo also runs focused bun smol memory tests.",
-      "tags": ["bun", "testing"],
-      "confidence": 1,
-      "source": {
-        "type": "manual",
-        "ref": "other-repo"
-      }
-    }
-  ]
+	"name": "repo-conventions",
+	"query": "bun smol focused memory tests",
+	"task": "Run focused bun smol memory tests for provider contract coverage.",
+	"agentRole": "coder",
+	"scopes": [
+		{
+			"type": "repository",
+			"repoId": "opencode-swarm"
+		}
+	],
+	"kinds": ["test_pattern", "repo_convention"],
+	"k": 3,
+	"maxItems": 3,
+	"tokenBudget": 1000,
+	"expectedLabels": ["bun-focused-tests"],
+	"records": [
+		{
+			"label": "bun-focused-tests",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "test_pattern",
+			"text": "This repo runs focused tests with bun --smol test <file> --timeout 30000.",
+			"tags": ["bun", "testing", "focused"],
+			"confidence": 0.95,
+			"source": {
+				"type": "file",
+				"filePath": "TESTING.md"
+			}
+		},
+		{
+			"label": "release-fragment-noise",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "User-visible changes include a pending release fragment before publishing.",
+			"tags": ["release"],
+			"confidence": 0.9,
+			"source": {
+				"type": "file",
+				"filePath": "contributing.md"
+			}
+		},
+		{
+			"label": "cross-repo-bun-tests",
+			"scope": {
+				"type": "repository",
+				"repoId": "other-repo"
+			},
+			"kind": "test_pattern",
+			"text": "Other repo also runs focused bun smol memory tests.",
+			"tags": ["bun", "testing"],
+			"confidence": 1,
+			"source": {
+				"type": "manual",
+				"ref": "other-repo"
+			}
+		}
+	]
 }

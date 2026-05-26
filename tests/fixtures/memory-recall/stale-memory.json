@@ -1,88 +1,88 @@
 {
-  "name": "stale-memory",
-  "query": "current memory command JSONL backups",
-  "task": "Find the current memory command for JSONL backups, ignoring stale deleted commands.",
-  "agentRole": "architect",
-  "scopes": [
-    {
-      "type": "repository",
-      "repoId": "opencode-swarm"
-    }
-  ],
-  "kinds": ["repo_convention"],
-  "k": 3,
-  "maxItems": 3,
-  "tokenBudget": 1000,
-  "expectedLabels": ["current-memory-export"],
-  "records": [
-    {
-      "label": "current-memory-export",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "repo_convention",
-      "text": "The current memory command for JSONL backups is /swarm memory export.",
-      "tags": ["memory", "jsonl", "backup", "current"],
-      "confidence": 0.94,
-      "source": {
-        "type": "file",
-        "filePath": "docs/memory.md"
-      }
-    },
-    {
-      "label": "superseded-memory-dump",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "repo_convention",
-      "text": "The old memory command for JSONL backups is /swarm memory dump.",
-      "tags": ["memory", "jsonl", "backup", "old"],
-      "confidence": 1,
-      "source": {
-        "type": "manual",
-        "ref": "legacy-note"
-      },
-      "state": {
-        "supersededByLabel": "current-memory-export"
-      }
-    },
-    {
-      "label": "deleted-memory-copy",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "repo_convention",
-      "text": "The deleted memory command for JSONL backups is /swarm memory copy.",
-      "tags": ["memory", "jsonl", "backup", "deleted"],
-      "confidence": 1,
-      "source": {
-        "type": "manual",
-        "ref": "deleted-note"
-      },
-      "state": {
-        "deleted": true
-      }
-    },
-    {
-      "label": "expired-memory-archive",
-      "scope": {
-        "type": "repository",
-        "repoId": "opencode-swarm"
-      },
-      "kind": "repo_convention",
-      "text": "The expired memory command for JSONL backups is /swarm memory archive.",
-      "tags": ["memory", "jsonl", "backup", "expired"],
-      "confidence": 1,
-      "source": {
-        "type": "manual",
-        "ref": "expired-note"
-      },
-      "state": {
-        "expiresAt": "2020-01-01T00:00:00.000Z"
-      }
-    }
-  ]
+	"name": "stale-memory",
+	"query": "current memory command JSONL backups",
+	"task": "Find the current memory command for JSONL backups, ignoring stale deleted commands.",
+	"agentRole": "architect",
+	"scopes": [
+		{
+			"type": "repository",
+			"repoId": "opencode-swarm"
+		}
+	],
+	"kinds": ["repo_convention"],
+	"k": 3,
+	"maxItems": 3,
+	"tokenBudget": 1000,
+	"expectedLabels": ["current-memory-export"],
+	"records": [
+		{
+			"label": "current-memory-export",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "The current memory command for JSONL backups is /swarm memory export.",
+			"tags": ["memory", "jsonl", "backup", "current"],
+			"confidence": 0.94,
+			"source": {
+				"type": "file",
+				"filePath": "docs/memory.md"
+			}
+		},
+		{
+			"label": "superseded-memory-dump",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "The old memory command for JSONL backups is /swarm memory dump.",
+			"tags": ["memory", "jsonl", "backup", "old"],
+			"confidence": 1,
+			"source": {
+				"type": "manual",
+				"ref": "legacy-note"
+			},
+			"state": {
+				"supersededByLabel": "current-memory-export"
+			}
+		},
+		{
+			"label": "deleted-memory-copy",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "The deleted memory command for JSONL backups is /swarm memory copy.",
+			"tags": ["memory", "jsonl", "backup", "deleted"],
+			"confidence": 1,
+			"source": {
+				"type": "manual",
+				"ref": "deleted-note"
+			},
+			"state": {
+				"deleted": true
+			}
+		},
+		{
+			"label": "expired-memory-archive",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "The expired memory command for JSONL backups is /swarm memory archive.",
+			"tags": ["memory", "jsonl", "backup", "expired"],
+			"confidence": 1,
+			"source": {
+				"type": "manual",
+				"ref": "expired-note"
+			},
+			"state": {
+				"expiresAt": "2020-01-01T00:00:00.000Z"
+			}
+		}
+	]
 }

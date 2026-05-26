@@ -48196,56 +48196,6 @@ var init_gateway = __esm(() => {
   gitRemoteUrlCache = new Map;
 });
 
-// src/agents/agent-output-schema.ts
-var AgentMemoryProposalSchema, AgentOutputMemorySchema, CuratorOutputMemoryDecisionSchema;
-var init_agent_output_schema = __esm(() => {
-  init_zod();
-  init_schema2();
-  AgentMemoryProposalSchema = exports_external.object({
-    operation: exports_external.enum([
-      "add",
-      "update",
-      "delete",
-      "ignore",
-      "merge",
-      "supersede"
-    ]),
-    kind: MemoryKindSchema.optional(),
-    text: exports_external.string().min(1).max(2000).optional(),
-    targetMemoryId: exports_external.string().optional(),
-    relatedMemoryIds: exports_external.array(exports_external.string()).optional(),
-    rationale: exports_external.string().min(1).max(2000),
-    evidenceRefs: exports_external.array(exports_external.string().min(1).max(500)).max(20).optional()
-  }).strict();
-  AgentOutputMemorySchema = exports_external.object({
-    memoryProposals: exports_external.array(AgentMemoryProposalSchema).max(20).optional()
-  }).passthrough();
-  CuratorOutputMemoryDecisionSchema = exports_external.object({
-    curatorMemoryDecisions: exports_external.array(CuratorMemoryDecisionSchema).max(20).optional()
-  }).passthrough();
-});
-
-// src/memory/recall-planner.ts
-var init_recall_planner = __esm(() => {
-  init_role_profiles();
-});
-
-// src/memory/run-log.ts
-var init_run_log = __esm(() => {
-  init_utils2();
-});
-
-// src/memory/injector.ts
-var init_injector = __esm(() => {
-  init_agent_output_schema();
-  init_schema();
-  init_normalize_tool_name();
-  init_config3();
-  init_gateway();
-  init_recall_planner();
-  init_run_log();
-});
-
 // src/memory/evaluation.ts
 import * as fs12 from "fs/promises";
 import * as os7 from "os";
@@ -48485,13 +48435,76 @@ function validateFixture(value, file3) {
   if (!Array.isArray(fixture.scopes) || fixture.scopes.length === 0) {
     throw new Error(`memory recall fixture ${file3} must define scopes`);
   }
+  const scopes = fixture.scopes.map((scope, index) => validateScope(scope, file3, `scope #${index + 1}`));
   if (!Array.isArray(fixture.expectedLabels) || fixture.expectedLabels.length === 0) {
     throw new Error(`memory recall fixture ${file3} must define expectedLabels`);
   }
+  const expectedLabels = fixture.expectedLabels.map((label, index) => {
+    if (typeof label !== "string" || !label) {
+      throw new Error(`memory recall fixture ${file3} expectedLabels #${index + 1} must be a non-empty string`);
+    }
+    return label;
+  });
   if (!Array.isArray(fixture.records) || fixture.records.length === 0) {
     throw new Error(`memory recall fixture ${file3} must define records`);
   }
-  return fixture;
+  const records = fixture.records.map((record3, index) => validateFixtureRecord(record3, file3, index));
+  return {
+    ...fixture,
+    name: fixture.name,
+    query: fixture.query,
+    scopes,
+    expectedLabels,
+    records
+  };
+}
+function validateFixtureRecord(value, file3, index) {
+  if (!value || typeof value !== "object") {
+    throw new Error(`memory recall fixture ${file3} record #${index + 1} must be an object`);
+  }
+  const record3 = value;
+  const labelForError = typeof record3.label === "string" && record3.label ? record3.label : `#${index + 1}`;
+  if (typeof record3.label !== "string" || !record3.label) {
+    throw new Error(`memory recall fixture ${file3} record ${labelForError} is missing label`);
+  }
+  const scope = validateScope(record3.scope, file3, `record ${record3.label}`);
+  if (!("kind" in record3) || record3.kind === "") {
+    throw new Error(`memory recall fixture ${file3} record ${record3.label} is missing kind`);
+  }
+  if (typeof record3.kind !== "string") {
+    throw new Error(`memory recall fixture ${file3} record ${record3.label} has invalid kind`);
+  }
+  const parsedKind = MemoryKindSchema.safeParse(record3.kind);
+  if (!parsedKind.success) {
+    throw new Error(`memory recall fixture ${file3} record ${record3.label} has invalid kind`);
+  }
+  if (!("text" in record3) || record3.text === "") {
+    throw new Error(`memory recall fixture ${file3} record ${record3.label} is missing text`);
+  }
+  if (typeof record3.text !== "string") {
+    throw new Error(`memory recall fixture ${file3} record ${record3.label} has invalid text`);
+  }
+  return {
+    ...record3,
+    label: record3.label,
+    scope,
+    kind: parsedKind.data,
+    text: record3.text
+  };
+}
+function validateScope(value, file3, descriptor) {
+  if (!value || typeof value !== "object") {
+    throw new Error(`memory recall fixture ${file3} ${descriptor} is missing scope`);
+  }
+  const scope = value;
+  if (typeof scope.type !== "string") {
+    throw new Error(`memory recall fixture ${file3} ${descriptor} has invalid scope type`);
+  }
+  const parsed = MemoryScopeRefSchema.safeParse(scope);
+  if (!parsed.success) {
+    throw new Error(`memory recall fixture ${file3} ${descriptor} has invalid scope`);
+  }
+  return parsed.data;
 }
 var DEFAULT_PROVIDERS, DEFAULT_MODES, DEFAULT_TIMESTAMP = "2026-05-26T12:00:00.000Z";
 var init_evaluation = __esm(() => {
@@ -48502,16 +48515,70 @@ var init_evaluation = __esm(() => {
     "local-jsonl",
     "sqlite"
   ];
-  DEFAULT_MODES = ["manual", "injection", "curator"];
+  DEFAULT_MODES = [
+    "manual",
+    "injection",
+    "curator"
+  ];
+});
+
+// src/agents/agent-output-schema.ts
+var AgentMemoryProposalSchema, AgentOutputMemorySchema, CuratorOutputMemoryDecisionSchema;
+var init_agent_output_schema = __esm(() => {
+  init_zod();
+  init_schema2();
+  AgentMemoryProposalSchema = exports_external.object({
+    operation: exports_external.enum([
+      "add",
+      "update",
+      "delete",
+      "ignore",
+      "merge",
+      "supersede"
+    ]),
+    kind: MemoryKindSchema.optional(),
+    text: exports_external.string().min(1).max(2000).optional(),
+    targetMemoryId: exports_external.string().optional(),
+    relatedMemoryIds: exports_external.array(exports_external.string()).optional(),
+    rationale: exports_external.string().min(1).max(2000),
+    evidenceRefs: exports_external.array(exports_external.string().min(1).max(500)).max(20).optional()
+  }).strict();
+  AgentOutputMemorySchema = exports_external.object({
+    memoryProposals: exports_external.array(AgentMemoryProposalSchema).max(20).optional()
+  }).passthrough();
+  CuratorOutputMemoryDecisionSchema = exports_external.object({
+    curatorMemoryDecisions: exports_external.array(CuratorMemoryDecisionSchema).max(20).optional()
+  }).passthrough();
+});
+
+// src/memory/recall-planner.ts
+var init_recall_planner = __esm(() => {
+  init_role_profiles();
+});
+
+// src/memory/run-log.ts
+var init_run_log = __esm(() => {
+  init_utils2();
+});
+
+// src/memory/injector.ts
+var init_injector = __esm(() => {
+  init_agent_output_schema();
+  init_schema();
+  init_normalize_tool_name();
+  init_config3();
+  init_gateway();
+  init_recall_planner();
+  init_run_log();
 });
 
 // src/memory/index.ts
 var init_memory = __esm(() => {
   init_config3();
   init_errors6();
+  init_evaluation();
   init_gateway();
   init_injector();
-  init_evaluation();
   init_jsonl_migration();
   init_local_jsonl_provider();
   init_prompt_block();
@@ -48525,8 +48592,8 @@ var init_memory = __esm(() => {
 
 // src/commands/memory.ts
 import { existsSync as existsSync20 } from "fs";
-import { fileURLToPath as fileURLToPath2 } from "url";
 import * as path33 from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
 async function handleMemoryCommand(_directory, _args) {
   return [
     "## Swarm Memory",
@@ -48674,7 +48741,7 @@ function parseEvaluateArgs(directory, args) {
       json3 = true;
       continue;
     }
-    if (arg === "--fixtures" || arg === "--fixture-dir") {
+    if (arg === "--fixtures") {
       const next = args[i + 1];
       if (!next) {
         return {

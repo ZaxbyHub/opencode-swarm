@@ -7,6 +7,8 @@ import type { MemoryProvider } from './provider';
 import {
 	computeMemoryContentHash,
 	createMemoryId,
+	MemoryKindSchema,
+	MemoryScopeRefSchema,
 	stableScopeKey,
 	validateMemoryRecordRules,
 } from './schema';
@@ -107,7 +109,11 @@ const DEFAULT_PROVIDERS: RecallEvaluationProviderName[] = [
 	'local-jsonl',
 	'sqlite',
 ];
-const DEFAULT_MODES: RecallEvaluationMode[] = ['manual', 'injection', 'curator'];
+const DEFAULT_MODES: RecallEvaluationMode[] = [
+	'manual',
+	'injection',
+	'curator',
+];
 const DEFAULT_TIMESTAMP = '2026-05-26T12:00:00.000Z';
 
 export async function evaluateMemoryRecallFixtures(
@@ -407,11 +413,14 @@ function summarizeRuns(
 	};
 }
 
-function validateFixture(value: unknown, file: string): RecallEvaluationFixture {
+function validateFixture(
+	value: unknown,
+	file: string,
+): RecallEvaluationFixture {
 	if (!value || typeof value !== 'object') {
 		throw new Error(`memory recall fixture ${file} must be an object`);
 	}
-	const fixture = value as RecallEvaluationFixture;
+	const fixture = value as Record<string, unknown>;
 	if (typeof fixture.name !== 'string' || !fixture.name) {
 		throw new Error(`memory recall fixture ${file} is missing name`);
 	}
@@ -421,16 +430,119 @@ function validateFixture(value: unknown, file: string): RecallEvaluationFixture 
 	if (!Array.isArray(fixture.scopes) || fixture.scopes.length === 0) {
 		throw new Error(`memory recall fixture ${file} must define scopes`);
 	}
+	const scopes = fixture.scopes.map((scope, index) =>
+		validateScope(scope, file, `scope #${index + 1}`),
+	);
 	if (
 		!Array.isArray(fixture.expectedLabels) ||
 		fixture.expectedLabels.length === 0
 	) {
-		throw new Error(
-			`memory recall fixture ${file} must define expectedLabels`,
-		);
+		throw new Error(`memory recall fixture ${file} must define expectedLabels`);
 	}
+	const expectedLabels = fixture.expectedLabels.map((label, index) => {
+		if (typeof label !== 'string' || !label) {
+			throw new Error(
+				`memory recall fixture ${file} expectedLabels #${index + 1} must be a non-empty string`,
+			);
+		}
+		return label;
+	});
 	if (!Array.isArray(fixture.records) || fixture.records.length === 0) {
 		throw new Error(`memory recall fixture ${file} must define records`);
 	}
-	return fixture;
+	const records = fixture.records.map((record, index) =>
+		validateFixtureRecord(record, file, index),
+	);
+	return {
+		...(fixture as Omit<
+			RecallEvaluationFixture,
+			'name' | 'query' | 'scopes' | 'expectedLabels' | 'records'
+		>),
+		name: fixture.name,
+		query: fixture.query,
+		scopes,
+		expectedLabels,
+		records,
+	};
+}
+
+function validateFixtureRecord(
+	value: unknown,
+	file: string,
+	index: number,
+): FixtureRecord {
+	if (!value || typeof value !== 'object') {
+		throw new Error(
+			`memory recall fixture ${file} record #${index + 1} must be an object`,
+		);
+	}
+	const record = value as Record<string, unknown>;
+	const labelForError =
+		typeof record.label === 'string' && record.label
+			? record.label
+			: `#${index + 1}`;
+	if (typeof record.label !== 'string' || !record.label) {
+		throw new Error(
+			`memory recall fixture ${file} record ${labelForError} is missing label`,
+		);
+	}
+	const scope = validateScope(record.scope, file, `record ${record.label}`);
+	if (!('kind' in record) || record.kind === '') {
+		throw new Error(
+			`memory recall fixture ${file} record ${record.label} is missing kind`,
+		);
+	}
+	if (typeof record.kind !== 'string') {
+		throw new Error(
+			`memory recall fixture ${file} record ${record.label} has invalid kind`,
+		);
+	}
+	const parsedKind = MemoryKindSchema.safeParse(record.kind);
+	if (!parsedKind.success) {
+		throw new Error(
+			`memory recall fixture ${file} record ${record.label} has invalid kind`,
+		);
+	}
+	if (!('text' in record) || record.text === '') {
+		throw new Error(
+			`memory recall fixture ${file} record ${record.label} is missing text`,
+		);
+	}
+	if (typeof record.text !== 'string') {
+		throw new Error(
+			`memory recall fixture ${file} record ${record.label} has invalid text`,
+		);
+	}
+	return {
+		...(record as Omit<FixtureRecord, 'label' | 'scope' | 'kind' | 'text'>),
+		label: record.label,
+		scope,
+		kind: parsedKind.data,
+		text: record.text,
+	};
+}
+
+function validateScope(
+	value: unknown,
+	file: string,
+	descriptor: string,
+): MemoryScopeRef {
+	if (!value || typeof value !== 'object') {
+		throw new Error(
+			`memory recall fixture ${file} ${descriptor} is missing scope`,
+		);
+	}
+	const scope = value as Record<string, unknown>;
+	if (typeof scope.type !== 'string') {
+		throw new Error(
+			`memory recall fixture ${file} ${descriptor} has invalid scope type`,
+		);
+	}
+	const parsed = MemoryScopeRefSchema.safeParse(scope);
+	if (!parsed.success) {
+		throw new Error(
+			`memory recall fixture ${file} ${descriptor} has invalid scope`,
+		);
+	}
+	return parsed.data;
 }

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
 import {
 	createConfiguredMemoryProvider,
@@ -214,7 +214,7 @@ function parseEvaluateArgs(
 			json = true;
 			continue;
 		}
-		if (arg === '--fixtures' || arg === '--fixture-dir') {
+		if (arg === '--fixtures') {
 			const next = args[i + 1];
 			if (!next) {
 				return {
@@ -227,8 +227,7 @@ function parseEvaluateArgs(
 			continue;
 		}
 		return {
-			error:
-				'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]',
+			error: 'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]',
 		};
 	}
 	return { json, fixtureDirectory };

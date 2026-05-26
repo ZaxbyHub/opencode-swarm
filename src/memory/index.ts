@@ -1,6 +1,16 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
 export { MemoryDisabledError, MemoryValidationError } from './errors';
+export {
+	evaluateMemoryRecallFixtures,
+	loadRecallEvaluationFixtures,
+	type RecallEvaluationMetrics,
+	type RecallEvaluationMode,
+	type RecallEvaluationOptions,
+	type RecallEvaluationProviderName,
+	type RecallEvaluationReport,
+	type RecallEvaluationRun,
+} from './evaluation';
 export type {
 	MemoryGatewayOptions,
 	ProposeMemoryInput,
@@ -16,16 +26,6 @@ export {
 	type MemoryLifecycleHookOptions,
 	type MemoryLifecycleHooks,
 } from './injector';
-export {
-	evaluateMemoryRecallFixtures,
-	loadRecallEvaluationFixtures,
-	type RecallEvaluationMetrics,
-	type RecallEvaluationMode,
-	type RecallEvaluationOptions,
-	type RecallEvaluationProviderName,
-	type RecallEvaluationReport,
-	type RecallEvaluationRun,
-} from './evaluation';
 export {
 	backupLegacyJsonl,
 	getLegacyJsonlFileStatus,

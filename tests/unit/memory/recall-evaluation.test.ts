@@ -5,8 +5,8 @@ import * as path from 'node:path';
 import {
 	createMemoryGateway,
 	evaluateMemoryRecallFixtures,
-	loadRecallEvaluationFixtures,
 	LocalJsonlMemoryProvider,
+	loadRecallEvaluationFixtures,
 } from '../../../src/memory';
 
 const fixtureDirectory = path.resolve('tests', 'fixtures', 'memory-recall');
@@ -29,6 +29,67 @@ describe('memory recall evaluation harness', () => {
 			'stale-memory',
 			'testing-patterns',
 		]);
+	});
+
+	test('returns no fixtures for an empty fixture directory', async () => {
+		const emptyDirectory = await createFixtureDirectory({});
+
+		await expect(loadRecallEvaluationFixtures(emptyDirectory)).resolves.toEqual(
+			[],
+		);
+	});
+
+	test('throws when the fixture directory is missing', async () => {
+		await expect(
+			loadRecallEvaluationFixtures(
+				path.join(
+					os.tmpdir(),
+					`swarm-memory-recall-missing-${Date.now()}-${Math.random()}`,
+				),
+			),
+		).rejects.toThrow();
+	});
+
+	test('regression: malformed fixture records fail with record-specific validation (F-001)', async () => {
+		const malformedDirectory = await createFixtureDirectory({
+			'malformed-records.json': {
+				name: 'malformed-records',
+				query: 'missing record fields',
+				scopes: [{ type: 'repository', repoId: 'opencode-swarm' }],
+				expectedLabels: ['x'],
+				records: [{ label: 'x' }],
+			},
+		});
+
+		await expect(
+			loadRecallEvaluationFixtures(malformedDirectory),
+		).rejects.toThrow(
+			'memory recall fixture malformed-records.json record x is missing scope',
+		);
+	});
+
+	test('regression: malformed fixture records report invalid kind and text precisely (F-001)', async () => {
+		const invalidKindDirectory = await createFixtureDirectory({
+			'invalid-kind.json': validFixture({
+				kind: 'bogus',
+			}),
+		});
+		const invalidTextDirectory = await createFixtureDirectory({
+			'invalid-text.json': validFixture({
+				text: 123,
+			}),
+		});
+
+		await expect(
+			loadRecallEvaluationFixtures(invalidKindDirectory),
+		).rejects.toThrow(
+			'memory recall fixture invalid-kind.json record x has invalid kind',
+		);
+		await expect(
+			loadRecallEvaluationFixtures(invalidTextDirectory),
+		).rejects.toThrow(
+			'memory recall fixture invalid-text.json record x has invalid text',
+		);
 	});
 
 	test('reports recall metrics across providers and recall modes as JSON-safe data', async () => {
@@ -128,9 +189,7 @@ describe('memory recall evaluation harness', () => {
 					minScore: mode === 'injection' ? 0.25 : 0,
 					requireQuerySignal: mode === 'injection',
 				});
-				expect(bundle.items.map((item) => item.record.id)).toEqual([
-					record.id,
-				]);
+				expect(bundle.items.map((item) => item.record.id)).toEqual([record.id]);
 				expect(bundle.promptBlock).toContain('Retrieved Swarm Memory');
 			}
 		} finally {
@@ -170,3 +229,38 @@ describe('memory recall evaluation harness', () => {
 		}
 	});
 });
+
+async function createFixtureDirectory(
+	files: Record<string, unknown>,
+): Promise<string> {
+	const root = await fs.realpath(
+		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-memory-fixtures-')),
+	);
+	tmpRoots.push(root);
+	for (const [file, value] of Object.entries(files)) {
+		await fs.writeFile(
+			path.join(root, file),
+			`${JSON.stringify(value, null, 2)}\n`,
+			'utf-8',
+		);
+	}
+	return root;
+}
+
+function validFixture(recordOverrides: Record<string, unknown>): unknown {
+	return {
+		name: 'invalid-record',
+		query: 'invalid record fields',
+		scopes: [{ type: 'repository', repoId: 'opencode-swarm' }],
+		expectedLabels: ['x'],
+		records: [
+			{
+				label: 'x',
+				scope: { type: 'repository', repoId: 'opencode-swarm' },
+				kind: 'test_pattern',
+				text: 'Valid fixture text before override.',
+				...recordOverrides,
+			},
+		],
+	};
+}

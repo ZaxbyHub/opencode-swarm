@@ -107,6 +107,9 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 				classifySwarmCommandToolUse(resolve(['memory', 'status'])).allowed,
 			).toBe(true);
 			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'evaluate'])).allowed,
+			).toBe(true);
+			expect(
 				classifySwarmCommandToolUse(resolve(['memory', 'evaluate', '--json']))
 					.allowed,
 			).toBe(true);
