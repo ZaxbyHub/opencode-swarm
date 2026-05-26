@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	handleMemoryExportCommand,
+	handleMemoryEvaluateCommand,
 	handleMemoryImportCommand,
 	handleMemoryStatusCommand,
 } from '../../../src/commands/memory';
@@ -97,6 +98,20 @@ describe('/swarm memory commands', () => {
 		expect(output).toContain('Invalid rows: `2`');
 		expect(output).toContain('memories.jsonl:2');
 		expect(output).toContain('proposals.jsonl:2');
+	});
+
+	test('evaluate emits a parseable JSON recall report', async () => {
+		const output = await handleMemoryEvaluateCommand(tmpDir, ['--json']);
+		const report = JSON.parse(output);
+
+		expect(report.summary.fixture_count).toBe(5);
+		expect(report.summary.run_count).toBe(30);
+		expect(report.summary.noisy_injection_count).toBe(0);
+		expect(report.summary.same_scope_noise_count).toBeGreaterThan(0);
+		expect(report.summary.cross_scope_leak_count).toBe(0);
+		expect(report.summary.stale_memory_count).toBe(0);
+		expect(report.summary).toHaveProperty('precision@k');
+		expect(report.summary).toHaveProperty('recall@k');
 	});
 });
 

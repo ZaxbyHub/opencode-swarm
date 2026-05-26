@@ -106,6 +106,15 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			expect(
 				classifySwarmCommandToolUse(resolve(['memory', 'status'])).allowed,
 			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'evaluate', '--json']))
+					.allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['memory', 'evaluate', '--fixtures', 'custom']),
+				).allowed,
+			).toBe(false);
 			const result = classifySwarmCommandToolUse(resolve(['memory', 'import']));
 			expect(result.allowed).toBe(false);
 			if (result.allowed === false) {

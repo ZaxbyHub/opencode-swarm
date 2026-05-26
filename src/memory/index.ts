@@ -17,6 +17,16 @@ export {
 	type MemoryLifecycleHooks,
 } from './injector';
 export {
+	evaluateMemoryRecallFixtures,
+	loadRecallEvaluationFixtures,
+	type RecallEvaluationMetrics,
+	type RecallEvaluationMode,
+	type RecallEvaluationOptions,
+	type RecallEvaluationProviderName,
+	type RecallEvaluationReport,
+	type RecallEvaluationRun,
+} from './evaluation';
+export {
 	backupLegacyJsonl,
 	getLegacyJsonlFileStatus,
 	type JsonlBackupResult,

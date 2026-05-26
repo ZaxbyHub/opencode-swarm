@@ -441,6 +441,13 @@ export declare const COMMAND_REGISTRY: {
         readonly args: "";
         readonly category: "utility";
     };
+    readonly 'memory evaluate': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Run golden Swarm memory recall evaluation fixtures";
+        readonly subcommandOf: "memory";
+        readonly args: "--json, --fixtures <directory>";
+        readonly category: "diagnostics";
+    };
     readonly 'memory import': {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Import legacy JSONL memory into SQLite";

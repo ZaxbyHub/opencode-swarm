@@ -33,6 +33,7 @@
 	"files": [
 		"dist",
 		"dist/lang/grammars",
+		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"
 	],

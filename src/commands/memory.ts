@@ -1,8 +1,11 @@
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import * as path from 'node:path';
 import { loadPluginConfig } from '../config/loader';
 import {
 	createConfiguredMemoryProvider,
 	DEFAULT_MEMORY_CONFIG,
+	evaluateMemoryRecallFixtures,
 	getLegacyJsonlFileStatus,
 	readMigrationReport,
 	resolveMemoryConfig,
@@ -16,6 +19,10 @@ import type { MemoryProposalStore, MemoryProvider } from '../memory/provider';
 
 type ExportableProvider = MemoryProvider & Partial<MemoryProposalStore>;
 
+const PACKAGE_ROOT = path.resolve(
+	resolvePackageRootFromModule(fileURLToPath(import.meta.url)),
+);
+
 export async function handleMemoryCommand(
 	_directory: string,
 	_args: string[],
@@ -27,6 +34,7 @@ export async function handleMemoryCommand(
 		'- `/swarm memory export` - export current memory and proposals to `.swarm/memory/export/*.jsonl`',
 		'- `/swarm memory import` - import `.swarm/memory/{memories,proposals}.jsonl` into SQLite',
 		'- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration',
+		'- `/swarm memory evaluate --json` - run the golden recall evaluation fixtures and emit a JSON report',
 	].join('\n');
 }
 
@@ -156,9 +164,86 @@ export async function handleMemoryExportCommand(
 	}
 }
 
+export async function handleMemoryEvaluateCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseEvaluateArgs(directory, args);
+	if ('error' in parsed) return parsed.error;
+	const report = await evaluateMemoryRecallFixtures({
+		fixtureDirectory: parsed.fixtureDirectory,
+	});
+	if (parsed.json) return `${JSON.stringify(report, null, 2)}\n`;
+	return [
+		'## Swarm Memory Recall Evaluation',
+		'',
+		`- Fixtures: \`${report.summary.fixture_count}\``,
+		`- Runs: \`${report.summary.run_count}\``,
+		`- Passed runs: \`${report.summary.passed_run_count}\``,
+		`- Precision@k: \`${report.summary['precision@k'].toFixed(3)}\``,
+		`- Recall@k: \`${report.summary['recall@k'].toFixed(3)}\``,
+		`- Injection count: \`${report.summary.injection_count}\``,
+		`- Noisy injections: \`${report.summary.noisy_injection_count}\``,
+		`- Same-scope noise: \`${report.summary.same_scope_noise_count}\``,
+		`- Cross-scope leaks: \`${report.summary.cross_scope_leak_count}\``,
+		`- Stale memories: \`${report.summary.stale_memory_count}\``,
+		'',
+		'Use `/swarm memory evaluate --json` for the full report.',
+	].join('\n');
+}
+
 function resolveCommandMemoryConfig(directory: string): MemoryConfig {
 	const loaded = loadPluginConfig(directory).memory;
 	return resolveMemoryConfig(loaded ?? DEFAULT_MEMORY_CONFIG);
+}
+
+function parseEvaluateArgs(
+	directory: string,
+	args: string[],
+): { json: boolean; fixtureDirectory: string } | { error: string } {
+	let json = false;
+	let fixtureDirectory = path.join(
+		PACKAGE_ROOT,
+		'tests',
+		'fixtures',
+		'memory-recall',
+	);
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === '--json') {
+			json = true;
+			continue;
+		}
+		if (arg === '--fixtures' || arg === '--fixture-dir') {
+			const next = args[i + 1];
+			if (!next) {
+				return {
+					error:
+						'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]',
+				};
+			}
+			fixtureDirectory = path.resolve(directory, next);
+			i++;
+			continue;
+		}
+		return {
+			error:
+				'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]',
+		};
+	}
+	return { json, fixtureDirectory };
+}
+
+function resolvePackageRootFromModule(modulePath: string): string {
+	const moduleDir = path.dirname(modulePath);
+	const leaf = path.basename(moduleDir);
+	if (leaf === 'commands' || leaf === 'cli') {
+		return path.resolve(moduleDir, '..', '..');
+	}
+	if (leaf === 'dist') {
+		return path.resolve(moduleDir, '..');
+	}
+	return path.resolve(moduleDir, '..');
 }
 
 function formatMigrationResult(

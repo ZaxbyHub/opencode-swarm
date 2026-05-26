@@ -1,0 +1,64 @@
+{
+  "name": "testing-patterns",
+  "query": "_internals dependency injection Bun mock isolation",
+  "task": "Add memory tests that preserve Bun mock isolation with dependency injection seams.",
+  "agentRole": "test_engineer",
+  "scopes": [
+    {
+      "type": "repository",
+      "repoId": "opencode-swarm"
+    }
+  ],
+  "kinds": ["test_pattern", "code_pattern"],
+  "k": 3,
+  "maxItems": 3,
+  "tokenBudget": 1000,
+  "expectedLabels": ["internals-mock-isolation"],
+  "records": [
+    {
+      "label": "internals-mock-isolation",
+      "scope": {
+        "type": "repository",
+        "repoId": "opencode-swarm"
+      },
+      "kind": "test_pattern",
+      "text": "Prefer _internals dependency injection seams over mock.module for Bun mock isolation in tests.",
+      "tags": ["bun", "mock", "isolation", "dependency-injection"],
+      "confidence": 0.96,
+      "source": {
+        "type": "file",
+        "filePath": ".opencode/skills/writing-tests/SKILL.md"
+      }
+    },
+    {
+      "label": "docs-output-noise",
+      "scope": {
+        "type": "repository",
+        "repoId": "opencode-swarm"
+      },
+      "kind": "code_pattern",
+      "text": "Documentation output should keep command examples concise and platform-specific.",
+      "tags": ["docs"],
+      "confidence": 0.8,
+      "source": {
+        "type": "file",
+        "filePath": "docs/memory.md"
+      }
+    },
+    {
+      "label": "cross-repo-internals",
+      "scope": {
+        "type": "repository",
+        "repoId": "other-repo"
+      },
+      "kind": "test_pattern",
+      "text": "Another repository uses _internals dependency injection for Bun mock isolation.",
+      "tags": ["bun", "mock", "isolation"],
+      "confidence": 1,
+      "source": {
+        "type": "manual",
+        "ref": "other-repo"
+      }
+    }
+  ]
+}

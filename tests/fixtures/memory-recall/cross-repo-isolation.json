@@ -1,0 +1,49 @@
+{
+  "name": "cross-repo-isolation",
+  "query": "basename VITE_APP_BASENAME subpath routing",
+  "task": "Recall the repository-specific basename subpath routing convention.",
+  "agentRole": "architect",
+  "scopes": [
+    {
+      "type": "repository",
+      "repoId": "opencode-swarm"
+    }
+  ],
+  "kinds": ["repo_convention", "architecture_decision"],
+  "k": 3,
+  "maxItems": 3,
+  "tokenBudget": 1000,
+  "expectedLabels": ["target-basename-routing"],
+  "records": [
+    {
+      "label": "target-basename-routing",
+      "scope": {
+        "type": "repository",
+        "repoId": "opencode-swarm"
+      },
+      "kind": "architecture_decision",
+      "text": "This repository evaluates basename and VITE_APP_BASENAME subpath routing notes only when scoped to this repo.",
+      "tags": ["basename", "subpath", "routing"],
+      "confidence": 0.9,
+      "source": {
+        "type": "manual",
+        "ref": "target-repo-note"
+      }
+    },
+    {
+      "label": "other-repo-basename-routing",
+      "scope": {
+        "type": "repository",
+        "repoId": "ragappv3"
+      },
+      "kind": "architecture_decision",
+      "text": "RAGAPPv3 uses VITE_APP_BASENAME for basename subpath routing.",
+      "tags": ["basename", "subpath", "routing"],
+      "confidence": 1,
+      "source": {
+        "type": "manual",
+        "ref": "other-repo-note"
+      }
+    }
+  ]
+}

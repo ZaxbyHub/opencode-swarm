@@ -27,6 +27,7 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'memory',
 	'memory status',
 	'memory export',
+	'memory evaluate',
 	'memory import',
 	'memory migrate',
 	'sync-plan',
@@ -56,6 +57,7 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'memory',
 	'memory status',
 	'memory export',
+	'memory evaluate',
 	'sync-plan',
 	'export',
 ]);
@@ -158,7 +160,17 @@ export function classifySwarmCommandToolUse(
 		return {
 			allowed: false,
 			message:
-				'Use `/swarm memory status` or `/swarm memory export` through swarm_command. Memory import and migrate are intentionally excluded from chat-tool execution.',
+				'Use `/swarm memory status`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import and migrate are intentionally excluded from chat-tool execution.',
+		};
+	}
+
+	if (canonicalKey === 'memory evaluate') {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		return {
+			allowed: false,
+			message:
+				'Usage through swarm_command: `/swarm memory evaluate --json`. Custom fixture directories are only available through direct user command execution.',
 		};
 	}
 

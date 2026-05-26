@@ -1249,6 +1249,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm memory export to write current memory to JSONL',
 				},
+				'swarm-memory-evaluate': {
+					template: '/swarm memory evaluate --json',
+					description:
+						'Use /swarm memory evaluate --json to generate the recall evaluation report',
+				},
 				'swarm-memory-import': {
 					template: '/swarm memory import',
 					description:

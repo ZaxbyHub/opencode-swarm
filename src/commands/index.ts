@@ -64,6 +64,7 @@ export {
 } from './knowledge';
 export {
 	handleMemoryCommand,
+	handleMemoryEvaluateCommand,
 	handleMemoryExportCommand,
 	handleMemoryImportCommand,
 	handleMemoryMigrateCommand,
