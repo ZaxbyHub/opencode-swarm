@@ -98,6 +98,7 @@ var init_package = __esm(() => {
       format: "biome format . --write",
       check: "biome check --write .",
       dev: "bun run build && opencode",
+      "package:smoke": "node scripts/package-smoke.mjs",
       prepublishOnly: "bun run build",
       "repro:704": "node scripts/repro-704.mjs"
     },
