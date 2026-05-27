@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.37.0",
+    version: "7.38.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -38878,6 +38878,110 @@ var init_close = __esm(() => {
   ];
 });
 
+// src/commands/concurrency.ts
+async function handleConcurrencyCommand(directory, args, sessionID) {
+  if (!sessionID || sessionID.trim() === "") {
+    return "Error: No active session context. Concurrency requires an active session. Use /swarm concurrency from within an OpenCode session, or start a session first.";
+  }
+  const session = getAgentSession(sessionID);
+  if (!session) {
+    return "Error: No active session. Concurrency requires an active session to operate.";
+  }
+  const arg0 = args[0]?.toLowerCase();
+  const arg1 = args[1];
+  const plan = await loadPlanJsonOnly(directory).catch(() => null);
+  const hasPlan = plan !== null && plan !== undefined;
+  if (arg0 === undefined) {
+    return [
+      "Concurrency commands:",
+      "  /swarm concurrency set <N|preset>  \u2014 Set session concurrency override (1-64 or min/medium/max)",
+      "  /swarm concurrency status          \u2014 Show effective concurrency",
+      "  /swarm concurrency reset           \u2014 Clear the override"
+    ].join(`
+`);
+  }
+  if (arg0 === "status") {
+    return buildStatusMessage(session, plan);
+  }
+  if (!hasPlan) {
+    if (arg0 === "set") {
+      return "No active plan. Concurrency override requires an active plan.";
+    }
+  }
+  if (arg0 === "reset") {
+    session.maxConcurrencyOverride = undefined;
+    return "Concurrency override cleared";
+  }
+  if (arg0 === "set") {
+    if (arg1 === undefined) {
+      return "Error: /swarm concurrency set requires a value. Usage: /swarm concurrency set <N|preset>";
+    }
+    return handleSetCommand(session, arg1);
+  }
+  return [
+    `Unknown concurrency subcommand: ${arg0}`,
+    "Usage: /swarm concurrency <set|status|reset>"
+  ].join(`
+`);
+}
+function handleSetCommand(session, value) {
+  const normalizedValue = value.toLowerCase();
+  if (normalizedValue in PRESETS) {
+    const presetConcurrency = PRESETS[normalizedValue];
+    session.maxConcurrencyOverride = presetConcurrency;
+    return `Concurrency override set to ${presetConcurrency} (${normalizedValue})`;
+  }
+  const numericValue = Number(value);
+  if (Number.isNaN(numericValue)) {
+    return `Invalid concurrency value: ${value}. Must be a number (1-64) or a preset (min, medium, max).`;
+  }
+  if (!Number.isInteger(numericValue)) {
+    return `Invalid concurrency value: ${value}. Must be a number (1-64) or a preset (min, medium, max).`;
+  }
+  if (numericValue < MIN_CONCURRENCY || numericValue > MAX_CONCURRENCY) {
+    return `Concurrency value ${value} is out of range. Must be between ${MIN_CONCURRENCY} and ${MAX_CONCURRENCY}.`;
+  }
+  session.maxConcurrencyOverride = numericValue;
+  return `Concurrency override set to ${numericValue}`;
+}
+function buildStatusMessage(session, plan) {
+  const overrideActive = session.maxConcurrencyOverride !== undefined;
+  const configuredOverride = session.maxConcurrencyOverride ?? "absent";
+  const hasPlan = plan !== null && plan !== undefined;
+  const planBaseline = hasPlan ? plan.execution_profile?.max_concurrent_tasks ?? 1 : 1;
+  const parallelizationEnabled = hasPlan ? plan.execution_profile?.parallelization_enabled ?? false : false;
+  const operationalEffective = !parallelizationEnabled ? 1 : session.maxConcurrencyOverride ?? planBaseline;
+  let description;
+  if (!hasPlan) {
+    description = "No active plan";
+  } else if (!parallelizationEnabled) {
+    description = "Parallelization disabled (always 1)";
+  } else if (overrideActive) {
+    description = `Override active (${session.maxConcurrencyOverride})`;
+  } else {
+    description = `Plan baseline (${planBaseline})`;
+  }
+  return [
+    `Concurrency: ${description}`,
+    `  override_active: ${overrideActive}`,
+    `  configured_override: ${configuredOverride}`,
+    `  plan_baseline: ${planBaseline}`,
+    `  operational_effective: ${operationalEffective}`,
+    `  parallelization_enabled: ${parallelizationEnabled}`
+  ].join(`
+`);
+}
+var PRESETS, MIN_CONCURRENCY = 1, MAX_CONCURRENCY = 64;
+var init_concurrency = __esm(() => {
+  init_manager();
+  init_state();
+  PRESETS = {
+    min: 1,
+    medium: 3,
+    max: 8
+  };
+});
+
 // src/commands/config.ts
 import * as os4 from "os";
 import * as path17 from "path";
@@ -44446,7 +44550,10 @@ function serializeAgentSession(s) {
     fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
     fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
     sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
-    ...Object.keys(stageBCompletion).length > 0 && { stageBCompletion }
+    ...Object.keys(stageBCompletion).length > 0 && { stageBCompletion },
+    ...s.maxConcurrencyOverride !== undefined && {
+      maxConcurrencyOverride: s.maxConcurrencyOverride
+    }
   };
 }
 async function writeSnapshot(directory, state) {
@@ -55717,7 +55824,7 @@ async function handleTurboCommand(directory, args, sessionID) {
   const arg0 = args[0]?.toLowerCase();
   const arg1 = args[1]?.toLowerCase();
   if (arg0 === "status") {
-    return buildStatusMessage(session, directory, sessionID);
+    return buildStatusMessage2(session, directory, sessionID);
   }
   const isTurboOn = session.turboMode;
   const isLeanActive = session.leanTurboActive === true;
@@ -55848,7 +55955,7 @@ function enableLeanTurbo(session, directory, sessionID) {
     `Full-Auto: ${fullAutoActive ? "active" : "inactive"})`
   ].join(" ");
 }
-function buildStatusMessage(session, directory, sessionID) {
+function buildStatusMessage2(session, directory, sessionID) {
   if (!session.turboMode) {
     return "Turbo: off";
   }
@@ -56296,7 +56403,6 @@ __export(exports_commands, {
   handleMemoryMigrateCommand: () => handleMemoryMigrateCommand,
   handleMemoryImportCommand: () => handleMemoryImportCommand,
   handleMemoryExportCommand: () => handleMemoryExportCommand,
-  handleMemoryEvaluateCommand: () => handleMemoryEvaluateCommand,
   handleMemoryCommand: () => handleMemoryCommand,
   handleKnowledgeRestoreCommand: () => handleKnowledgeRestoreCommand,
   handleKnowledgeQuarantineCommand: () => handleKnowledgeQuarantineCommand,
@@ -56316,6 +56422,7 @@ __export(exports_commands, {
   handleCurateCommand: () => handleCurateCommand,
   handleCouncilCommand: () => handleCouncilCommand,
   handleConfigCommand: () => handleConfigCommand,
+  handleConcurrencyCommand: () => handleConcurrencyCommand,
   handleCloseCommand: () => handleCloseCommand,
   handleClarifyCommand: () => handleClarifyCommand,
   handleCheckpointCommand: () => handleCheckpointCommand,
@@ -56562,6 +56669,7 @@ var init_commands = __esm(() => {
   init_close();
   init_command_dispatch();
   init_command_names();
+  init_concurrency();
   init_config2();
   init_council();
   init_curate();
@@ -56782,6 +56890,7 @@ var init_registry = __esm(() => {
   init_benchmark();
   init_checkpoint2();
   init_close();
+  init_concurrency();
   init_config2();
   init_council();
   init_curate();
@@ -57025,6 +57134,23 @@ var init_registry = __esm(() => {
       category: "core",
       aliasOf: "finalize",
       deprecated: true
+    },
+    concurrency: {
+      handler: (ctx) => handleConcurrencyCommand(ctx.directory, ctx.args, ctx.sessionID),
+      description: "Manage runtime concurrency override for plan execution [set|status|reset]",
+      args: "set <N|preset>, status, reset",
+      details: `Sets, queries, or clears a session-scoped concurrency override for max_concurrent_tasks during plan execution.
+When set, the override takes precedence over the plan's locked execution_profile.max_concurrent_tasks.
+` + `The override is session-scoped \u2014 it does not modify the plan and is cleared on session reset.
+` + `
+Subcommands:
+` + `  concurrency set <N>          \u2014 Set session concurrency to N (1-64)
+` + `  concurrency set <preset>      \u2014 Set to preset: min (1), medium (3), max (8)
+` + `  concurrency status            \u2014 Show effective concurrency (override, plan baseline, operational effective)
+` + `  concurrency reset             \u2014 Clear the session concurrency override
+` + `
+` + "Session-scoped \u2014 resets on new session.",
+      category: "utility"
     },
     simulate: {
       handler: (ctx) => handleSimulateCommand(ctx.directory, ctx.args),

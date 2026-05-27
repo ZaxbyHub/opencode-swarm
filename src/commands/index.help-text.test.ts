@@ -50,6 +50,14 @@ describe('buildHelpText()', () => {
 		});
 	});
 
+	describe('concurrency command', () => {
+		test('contains /swarm concurrency with its description', () => {
+			const concurrencyEntry = COMMAND_REGISTRY.concurrency;
+			expect(helpText).toContain('/swarm concurrency');
+			expect(helpText).toContain(concurrencyEntry.description);
+		});
+	});
+
 	describe('details text for commands with details', () => {
 		test('finalize command includes "Idempotent 4-stage" details', () => {
 			const finalizeEntry = COMMAND_REGISTRY.finalize;
