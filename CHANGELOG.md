@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.41.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.41.0...v7.41.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* **release:** trigger plan execute skill release ([#1050](https://github.com/zaxbysauce/opencode-swarm/issues/1050)) ([97c613f](https://github.com/zaxbysauce/opencode-swarm/commit/97c613f5c98cb058b0676e386ae4e811067d76c3))
+
 ## [7.41.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.40.0...v7.41.0) (2026-05-27)
 
 
