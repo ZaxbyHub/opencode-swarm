@@ -56,6 +56,10 @@ describe('knowledge-query tool verification tests', () => {
 		mock.module('../../../src/hooks/knowledge-store.js', () => ({
 			resolveHiveKnowledgePath: () =>
 				path.join(tmpDir, '.swarm', 'shared-learnings.jsonl'),
+			enforceKnowledgeCap: async () => {},
+			sweepAgedEntries: async () => {},
+			sweepStaleTodos: async () => {},
+			bumpKnowledgeConfidenceBatch: async () => {},
 		}));
 	});
 

@@ -58,6 +58,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 		}
 		return bigrams;
 	}),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 import { updateRetrievalOutcome } from '../../../src/hooks/knowledge-reader.js';

@@ -34,6 +34,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	rewriteKnowledge: vi.fn().mockResolvedValue(undefined),
 	findNearDuplicate: vi.fn().mockReturnValue(undefined),
 	computeConfidence: vi.fn().mockReturnValue(0.6),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Mock validateLesson

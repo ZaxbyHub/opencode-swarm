@@ -110,6 +110,10 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 				const union = new Set([...aArr, ...Array.from(b)]);
 				return intersection.size / union.size;
 			},
+			enforceKnowledgeCap: async () => {},
+			sweepAgedEntries: async () => {},
+			sweepStaleTodos: async () => {},
+			bumpKnowledgeConfidenceBatch: async () => {},
 		}));
 	});
 

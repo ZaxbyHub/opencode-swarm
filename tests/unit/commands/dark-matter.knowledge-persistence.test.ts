@@ -46,6 +46,10 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	findNearDuplicate: mockFindNearDuplicate,
 	computeConfidence: mockComputeConfidence,
 	inferTags: mockInferTags,
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Import AFTER mock setup
