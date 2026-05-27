@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.41.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.40.0...v7.41.0) (2026-05-27)
+
+
+### Features
+
+* separate evidence docs from durable memory ([#1045](https://github.com/zaxbysauce/opencode-swarm/issues/1045)) ([f0e1217](https://github.com/zaxbysauce/opencode-swarm/commit/f0e121782f2f4cd35840f82700a784fddd270343))
+
 ## [7.40.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.39.0...v7.40.0) (2026-05-27)
 
 
