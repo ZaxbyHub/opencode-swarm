@@ -34,6 +34,10 @@ const mockReadKnowledge = mock(
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: mockReadKnowledge,
 	resolveSwarmKnowledgePath: (_dir: string) => `${_dir}/.swarm/knowledge.jsonl`,
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({

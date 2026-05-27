@@ -34,6 +34,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	findNearDuplicate: (...args: unknown[]) => mockFindNearDuplicate(...args),
 	inferTags: (...args: unknown[]) => mockInferTags(...args),
 	normalize: (...args: unknown[]) => mockNormalize(...args),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 vi.mock('../../../src/hooks/knowledge-validator.js', () => ({

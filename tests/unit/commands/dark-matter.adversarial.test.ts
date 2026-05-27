@@ -36,6 +36,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	findNearDuplicate: vi.fn(() => undefined),
 	computeConfidence: vi.fn(() => 0.5),
 	inferTags: vi.fn(() => []),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 describe('handleDarkMatterCommand (adversarial)', () => {

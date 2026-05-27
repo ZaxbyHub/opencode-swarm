@@ -13,7 +13,7 @@
  *   - file writes are atomic (write to .tmp, rename)
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -115,40 +115,69 @@ export async function selectCandidateEntries(
 }
 
 // ============================================================================
-// Clustering
+// Clustering — Jaccard-based fuzzy tag clustering
 // ============================================================================
 
-function clusterKey(e: KnowledgeEntryBase): string {
-	const t = (e.triggers ?? [])
-		.map((s) => s.toLowerCase())
-		.sort()
-		.join('|');
-	if (t) return `trigger:${t}`;
-	const tools = (e.applies_to_tools ?? []).map((s) => s.toLowerCase()).sort();
-	const agents = (e.applies_to_agents ?? []).map((s) => s.toLowerCase()).sort();
-	if (tools.length > 0 || agents.length > 0) {
-		return `tool-agent:${tools.join('+')}::${agents.join('+')}`;
+/** Minimum cluster size: single-entry clusters are dropped. */
+const MIN_CLUSTER_SIZE = 2;
+
+/** Jaccard similarity threshold for merging entries into an existing cluster. */
+const JACCARD_THRESHOLD = 0.5;
+
+/**
+ * Compute Jaccard similarity between two tag sets.
+ * Returns 0 when both sets are empty (avoids division by zero).
+ */
+function jaccardSimilarity(setA: string[], setB: string[]): number {
+	const normA = setA.map((s) => s.toLowerCase());
+	const normB = setB.map((s) => s.toLowerCase());
+	const setANorm = new Set(normA);
+	const setBNorm = new Set(normB);
+	if (setANorm.size === 0 && setBNorm.size === 0) return 0;
+	let intersection = 0;
+	for (const t of setANorm) {
+		if (setBNorm.has(t)) intersection++;
 	}
-	const tagSig = e.tags
-		.slice(0, 3)
-		.map((s) => s.toLowerCase())
-		.sort()
-		.join(',');
-	return `cat:${e.category}:${tagSig}`;
+	const union = setANorm.size + setBNorm.size - intersection;
+	return union === 0 ? 0 : intersection / union;
 }
 
 export function clusterEntries(
 	entries: KnowledgeEntryBase[],
 ): KnowledgeCluster[] {
-	const groups = new Map<string, KnowledgeEntryBase[]>();
-	for (const e of entries) {
-		const k = clusterKey(e);
-		const arr = groups.get(k) ?? [];
-		arr.push(e);
-		groups.set(k, arr);
+	// Greedy Jaccard-based clustering: each cluster tracks the union of all
+	// member tags as its representative tag set. Entries are assigned to the
+	// best-matching cluster whose Jaccard similarity >= JACCARD_THRESHOLD.
+	interface TagCluster {
+		members: KnowledgeEntryBase[];
+		repTags: Set<string>;
 	}
-	const clusters: KnowledgeCluster[] = [];
-	for (const [key, arr] of groups) {
+	const clusters: TagCluster[] = [];
+
+	for (const e of entries) {
+		const eTags = (e.tags ?? []).map((t) => t.toLowerCase());
+		let bestIdx = -1;
+		let bestScore = 0;
+		for (let i = 0; i < clusters.length; i++) {
+			const score = jaccardSimilarity(eTags, [...clusters[i].repTags]);
+			if (score > bestScore) {
+				bestScore = score;
+				bestIdx = i;
+			}
+		}
+		if (bestIdx >= 0 && bestScore >= JACCARD_THRESHOLD) {
+			clusters[bestIdx].members.push(e);
+			for (const t of eTags) clusters[bestIdx].repTags.add(t);
+		} else {
+			clusters.push({ members: [e], repTags: new Set(eTags) });
+		}
+	}
+
+	// Build KnowledgeCluster objects, filtering out small clusters
+	const result: KnowledgeCluster[] = [];
+	for (const c of clusters) {
+		if (c.members.length < MIN_CLUSTER_SIZE) continue;
+		const arr = c.members;
 		const triggers = uniqueStrings(arr.flatMap((e) => e.triggers ?? []));
 		const required = uniqueStrings(
 			arr.flatMap((e) => e.required_actions ?? []),
@@ -173,10 +202,10 @@ export function clusterEntries(
 			triggers[0] ??
 			required[0] ??
 			`Lessons: ${arr[0]?.category ?? 'general'} (${arr.length})`;
-		clusters.push({
+		result.push({
 			slug: isValidSlug(slug)
 				? slug
-				: sanitizeSlug(`cluster-${key.slice(0, 12)}`),
+				: sanitizeSlug(`cluster-${slugSeed.slice(0, 12)}`),
 			title,
 			entries: arr,
 			triggers,
@@ -187,14 +216,15 @@ export function clusterEntries(
 			avgConfidence: avgConf,
 		});
 	}
+
 	// Stable order: largest, highest-confidence first
-	clusters.sort(
+	result.sort(
 		(a, b) =>
 			b.entries.length - a.entries.length ||
 			b.avgConfidence - a.avgConfidence ||
 			a.slug.localeCompare(b.slug),
 	);
-	return clusters;
+	return result;
 }
 
 function uniqueStrings(arr: string[]): string[] {
@@ -601,7 +631,17 @@ export async function activateProposal(
 			};
 		}
 	}
-	const proposalContent = await readFile(from, 'utf-8');
+	let proposalContent: string;
+	try {
+		proposalContent = await readFile(from, 'utf-8');
+	} catch (readErr) {
+		return {
+			activated: false,
+			from,
+			to,
+			reason: `proposal not found or already activated: ${readErr instanceof Error ? readErr.message : String(readErr)}`,
+		};
+	}
 	// Re-stamp status: active in frontmatter (proposals carry status: draft).
 	const flipped = proposalContent.replace(
 		/^status:\s*draft\s*$/m,
@@ -625,6 +665,11 @@ export async function activateProposal(
 	}
 	try {
 		await stampSourceEntries(directory, cleanSlug, fm.sourceKnowledgeIds);
+		try {
+			_internals.unlinkSync(from);
+		} catch {
+			/* best-effort: proposal already gone or permissions */
+		}
 		return {
 			activated: true,
 			from,
@@ -669,6 +714,8 @@ export async function listSkills(directory: string): Promise<{
 		const entries = await fs.readdir(activeDir, { withFileTypes: true });
 		for (const e of entries) {
 			if (!e.isDirectory()) continue;
+			const retiredMarker = path.join(activeDir, e.name, 'retired.marker');
+			if (existsSync(retiredMarker)) continue;
 			const skillPath = path.join(activeDir, e.name, 'SKILL.md');
 			if (existsSync(skillPath)) {
 				result.active.push({
@@ -708,6 +755,299 @@ export async function inspectSkill(
 }
 
 // ============================================================================
+// Retire
+// ============================================================================
+
+export async function retireSkill(
+	directory: string,
+	slug: string,
+	reason?: string,
+): Promise<{
+	retired: boolean;
+	path: string;
+	markerPath: string;
+	reason?: string;
+}> {
+	const cleanSlug = sanitizeSlug(slug);
+	if (!isValidSlug(cleanSlug)) {
+		return {
+			retired: false,
+			path: activePath(directory, cleanSlug),
+			markerPath: path.join(
+				directory,
+				'.opencode',
+				'skills',
+				'generated',
+				cleanSlug,
+				'retired.marker',
+			),
+			reason: 'invalid slug',
+		};
+	}
+	const skillPath = activePath(directory, cleanSlug);
+	if (!existsSync(skillPath)) {
+		return {
+			retired: false,
+			path: skillPath,
+			markerPath: path.join(
+				directory,
+				'.opencode',
+				'skills',
+				'generated',
+				cleanSlug,
+				'retired.marker',
+			),
+			reason: 'active skill not found',
+		};
+	}
+	const markerDir = path.join(
+		directory,
+		'.opencode',
+		'skills',
+		'generated',
+		cleanSlug,
+	);
+	const markerPath = path.join(markerDir, 'retired.marker');
+	const markerContent = JSON.stringify({
+		retiredAt: new Date().toISOString(),
+		reason: reason ?? 'manual_retire',
+	});
+	await mkdir(markerDir, { recursive: true });
+	await writeFile(markerPath, markerContent, 'utf-8');
+	return {
+		retired: true,
+		path: skillPath,
+		markerPath,
+		reason,
+	};
+}
+
+// ============================================================================
+// Regenerate
+// ============================================================================
+
+export async function regenerateSkill(
+	directory: string,
+	slug: string,
+): Promise<{
+	regenerated: boolean;
+	path: string;
+	entryCount: number;
+	reason?: string;
+	retired?: boolean;
+}> {
+	const cleanSlug = sanitizeSlug(slug);
+	if (!isValidSlug(cleanSlug)) {
+		return {
+			regenerated: false,
+			path: activePath(directory, cleanSlug),
+			entryCount: 0,
+			reason: 'invalid slug',
+		};
+	}
+
+	const skillPath = activePath(directory, cleanSlug);
+	if (!existsSync(skillPath)) {
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason: 'active skill not found',
+		};
+	}
+
+	let existingContent: string;
+	try {
+		existingContent = await readFile(skillPath, 'utf-8');
+	} catch (err) {
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason: `read failed: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+
+	const fm = parseDraftFrontmatter(existingContent);
+	let matchedEntries: KnowledgeEntryBase[] = [];
+
+	if (fm && fm.sourceKnowledgeIds.length > 0) {
+		// Resolve source entries from frontmatter IDs
+		try {
+			const swarm = await readKnowledge<SwarmKnowledgeEntry>(
+				resolveSwarmKnowledgePath(directory),
+			);
+			const hivePath = resolveHiveKnowledgePath();
+			const hive = existsSync(hivePath)
+				? await readKnowledge<HiveKnowledgeEntry>(hivePath)
+				: [];
+			const all: KnowledgeEntryBase[] = [...swarm, ...hive];
+			const idSet = new Set(fm.sourceKnowledgeIds);
+			matchedEntries = all.filter((e) => idSet.has(e.id));
+
+			// Early retirement: if ALL source entries are archived, retire
+			// immediately — BEFORE any re-clustering fallback. Archived
+			// entries ARE matched entries, so we must check here.
+			if (
+				matchedEntries.length === idSet.size &&
+				idSet.size > 0 &&
+				matchedEntries.every((e) => e.status === 'archived')
+			) {
+				try {
+					await _internals.retireSkill(
+						directory,
+						cleanSlug,
+						'auto-retire: all source knowledge entries archived at regeneration time',
+					);
+				} catch {
+					/* best effort */
+				}
+				return {
+					regenerated: false,
+					path: skillPath,
+					entryCount: 0,
+					reason: 'all source knowledge archived — skill retired',
+					retired: true,
+				};
+			}
+		} catch (err) {
+			return {
+				regenerated: false,
+				path: skillPath,
+				entryCount: 0,
+				reason: `knowledge read failed: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	}
+
+	// Filter out archived entries — only regenerate from active knowledge.
+	// The early-retirement check above handles the exact case where every
+	// source ID matched and all were archived.  This filter handles the
+	// partial case: some source IDs missing from the store, or a mix of
+	// archived and active entries.
+	if (matchedEntries.length > 0) {
+		const activeEntries = matchedEntries.filter((e) => e.status !== 'archived');
+		if (activeEntries.length === 0) {
+			// All matched entries were archived — retire the skill.
+			// (Reached when some source IDs had no matching entry, so the
+			// early-retirement check above did not fire.)
+			try {
+				await _internals.retireSkill(
+					directory,
+					cleanSlug,
+					'auto-retire: all matched source knowledge entries archived at regeneration time',
+				);
+			} catch {
+				/* best effort */
+			}
+			return {
+				regenerated: false,
+				path: skillPath,
+				entryCount: 0,
+				reason: 'all matched source knowledge archived — skill retired',
+				retired: true,
+			};
+		}
+		matchedEntries = activeEntries;
+	}
+
+	if (!matchedEntries || matchedEntries.length === 0) {
+		// Re-cluster from scratch using candidate selection with slug as keyword hint
+		try {
+			const candidates = await selectCandidateEntries(directory, {
+				minConfidence: 0.7,
+				minConfirmations: 1,
+			});
+			// Use the slug as a fuzzy tag match — filter entries whose tags or lesson
+			// contain slug-derived tokens as a best-effort re-cluster hint.
+			const slugTokens = cleanSlug.split('-').filter((t) => t.length > 1);
+			matchedEntries = candidates.filter((e) => {
+				const text =
+					`${e.lesson} ${(e.tags ?? []).join(' ')} ${e.category}`.toLowerCase();
+				return slugTokens.some((tok) => text.includes(tok));
+			});
+		} catch (err) {
+			return {
+				regenerated: false,
+				path: skillPath,
+				entryCount: 0,
+				reason: `candidate selection failed: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	}
+
+	if (matchedEntries.length === 0) {
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason: 'no matching knowledge entries found for re-clustering',
+		};
+	}
+
+	// Build a single cluster from the matched entries
+	const triggers = uniqueStrings(
+		matchedEntries.flatMap((e) => e.triggers ?? []),
+	);
+	const required = uniqueStrings(
+		matchedEntries.flatMap((e) => e.required_actions ?? []),
+	);
+	const forbidden = uniqueStrings(
+		matchedEntries.flatMap((e) => e.forbidden_actions ?? []),
+	);
+	const agents = uniqueStrings(
+		matchedEntries.flatMap((e) => e.applies_to_agents ?? []),
+	);
+	const checks = uniqueStrings(
+		matchedEntries.flatMap((e) => e.verification_checks ?? []),
+	);
+	const avgConf =
+		matchedEntries.reduce((s, e) => s + e.confidence, 0) /
+		Math.max(1, matchedEntries.length);
+	const title =
+		fm?.name ??
+		triggers[0] ??
+		required[0] ??
+		`Lessons: ${matchedEntries[0]?.category ?? 'general'} (${matchedEntries.length})`;
+
+	const cluster: KnowledgeCluster = {
+		slug: cleanSlug,
+		title,
+		entries: matchedEntries,
+		triggers,
+		required_actions: required,
+		forbidden_actions: forbidden,
+		target_agents: agents,
+		verification_checks: checks,
+		avgConfidence: avgConf,
+	};
+
+	const content = renderSkillMarkdown(cluster, 'active');
+	try {
+		await atomicWrite(skillPath, content);
+		// Re-stamp source entries
+		await stampSourceEntries(
+			directory,
+			cleanSlug,
+			matchedEntries.map((e) => e.id),
+		);
+	} catch (writeErr) {
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason: `write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
+		};
+	}
+
+	return {
+		regenerated: true,
+		path: skillPath,
+		entryCount: matchedEntries.length,
+	};
+}
+
+// ============================================================================
 // DI seam
 // ============================================================================
 
@@ -716,6 +1056,7 @@ export const _internals = {
 	isValidSlug,
 	selectCandidateEntries,
 	clusterEntries,
+	jaccardSimilarity,
 	renderSkillMarkdown,
 	generateSkills,
 	activateProposal,
@@ -723,6 +1064,9 @@ export const _internals = {
 	inspectSkill,
 	stampSourceEntries,
 	parseDraftFrontmatter,
+	retireSkill,
+	regenerateSkill,
+	unlinkSync,
 };
 
 void warn; // reserved for future error reporting

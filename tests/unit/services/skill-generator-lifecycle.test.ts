@@ -260,6 +260,45 @@ describe('activateProposal stamps source knowledge entries', () => {
 	});
 });
 
+describe('activateProposal proposal deletion', () => {
+	it('deletes the proposal file after successful activation', async () => {
+		await seed([makeEntry('d1'), makeEntry('d2')]);
+		const draft = await generateSkills({ directory: tmp, mode: 'draft' });
+		expect(draft.written.length).toBeGreaterThan(0);
+		const slug = draft.written[0].slug;
+		const fromPath = path.join(
+			tmp,
+			'.swarm',
+			'skills',
+			'proposals',
+			`${slug}.md`,
+		);
+		expect(existsSync(fromPath)).toBe(true);
+
+		const result = await activateProposal(tmp, slug);
+		expect(result.activated).toBe(true);
+		expect(existsSync(fromPath)).toBe(false);
+	});
+
+	it('activation succeeds even if unlink fails (best-effort deletion)', async () => {
+		await seed([makeEntry('b1'), makeEntry('b2')]);
+		const draft = await generateSkills({ directory: tmp, mode: 'draft' });
+		expect(draft.written.length).toBeGreaterThan(0);
+		const slug = draft.written[0].slug;
+
+		// Simulate unlink failure by temporarily replacing the function in the module
+		const original = _internals.unlinkSync;
+		_internals.unlinkSync = () => {
+			throw new Error('simulated ENOENT');
+		};
+
+		const result = await activateProposal(tmp, slug);
+		expect(result.activated).toBe(true);
+
+		_internals.unlinkSync = original;
+	});
+});
+
 describe('stampSourceEntries refactored signature', () => {
 	it('takes (directory, slug, ids[]) and is callable from outside', async () => {
 		await seed([makeEntry('q1'), makeEntry('q2')]);

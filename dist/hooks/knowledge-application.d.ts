@@ -65,6 +65,7 @@ export interface KnowledgeApplicationConfig {
     min_confidence: number;
     critical_requires_ack: boolean;
     require_skill_refs: boolean;
+    high_risk_tools?: string[];
 }
 export declare const DEFAULT_KNOWLEDGE_APPLICATION_CONFIG: KnowledgeApplicationConfig;
 export interface GateResult {

@@ -48,6 +48,8 @@ export const HIGH_RISK_TOOLS = new Set([
 	'phase_complete',
 	'task',
 	'Task',
+	'skill_regenerate',
+	'skill_retire',
 ]);
 
 export interface GateInput {
@@ -69,7 +71,11 @@ export async function knowledgeApplicationGateBefore(
 	if (!config.enabled) return;
 
 	const toolName = typeof input.tool === 'string' ? input.tool : '';
-	if (!HIGH_RISK_TOOLS.has(toolName)) return;
+	// Use config-provided tools, falling back to the hardcoded default set
+	const riskTools = config.high_risk_tools
+		? new Set(config.high_risk_tools)
+		: HIGH_RISK_TOOLS;
+	if (!riskTools.has(toolName)) return;
 
 	const agentRaw = typeof input.agent === 'string' ? input.agent : '';
 	if (!agentRaw) return;
@@ -83,13 +89,26 @@ export async function knowledgeApplicationGateBefore(
 		// every tool invocation. Reaching this branch means the contract has
 		// been violated (test stub, runtime bug, or hostile caller). Fail
 		// closed in enforce mode — silently allowing the call would defeat
-		// the gate. Warn mode still proceeds without recording an event so
-		// we cannot later attribute a violation to a non-existent session.
+		// the gate. Warn mode proceeds after logging a warning event to
+		// events.jsonl for diagnostics.
 		if (config.mode === 'enforce') {
 			throw new Error(
 				'KNOWLEDGE_ENFORCE_GATE_DENY: missing sessionID on tool.execute.before; refusing to evaluate critical-directive ack state',
 			);
 		}
+		// Log warning event for missing sessionID (warn mode only)
+		void _internals
+			.writeWarnEvent(directory, {
+				timestamp: new Date().toISOString(),
+				event: 'knowledge_application_gate_warn',
+				tool: toolName,
+				agent: agentRaw,
+				reason: 'missing_sessionID',
+				mode: config.mode,
+			})
+			.catch(() => {
+				/* never block tool path */
+			});
 		return;
 	}
 

@@ -12,6 +12,7 @@ import {
 	applyCuratorKnowledgeUpdates,
 	runCuratorPhase,
 } from '../hooks/curator';
+import { filterPhaseEvents } from '../hooks/curator.js';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
 import type { KnowledgeRecommendation } from '../hooks/curator-types.js';
 import {
@@ -19,6 +20,7 @@ import {
 	buildRejectedReceipt,
 	persistReviewReceipt,
 } from '../hooks/review-receipt.js';
+import { readSwarmFileAsync } from '../hooks/utils.js';
 import { createSwarmTool } from './create-tool';
 
 export const curator_analyze: ReturnType<typeof createSwarmTool> =
@@ -129,6 +131,37 @@ export const curator_analyze: ReturnType<typeof createSwarmTool> =
 					config.knowledge ?? {},
 				);
 
+				// Resolve agents dispatched from phase events (best-effort, fail-open)
+				let agentsDispatched: string[] = [];
+				try {
+					const eventsContent = await readSwarmFileAsync(
+						directory,
+						'events.jsonl',
+					);
+					if (eventsContent) {
+						const phaseEvents = filterPhaseEvents(
+							eventsContent,
+							typedArgs.phase,
+						);
+						const agentSet = new Set<string>();
+						for (const evt of phaseEvents) {
+							const record = evt as Record<string, unknown>;
+							if (typeof record.agent === 'string' && record.agent.length > 0) {
+								agentSet.add(record.agent);
+							}
+							// phase_complete event with agents_dispatched array
+							if (Array.isArray(record.agents_dispatched)) {
+								for (const a of record.agents_dispatched) {
+									if (typeof a === 'string') agentSet.add(a);
+								}
+							}
+						}
+						agentsDispatched = Array.from(agentSet).sort();
+					}
+				} catch {
+					// best effort — fall back to empty
+				}
+
 				// Run the curator phase analysis (collects digest + compliance)
 				const llmDelegate = createCuratorLLMDelegate(
 					directory,
@@ -138,7 +171,7 @@ export const curator_analyze: ReturnType<typeof createSwarmTool> =
 				const curatorResult = await runCuratorPhase(
 					directory,
 					typedArgs.phase,
-					[], // agentsDispatched — empty for on-demand analysis
+					agentsDispatched,
 					curatorConfig,
 					{},
 					llmDelegate,

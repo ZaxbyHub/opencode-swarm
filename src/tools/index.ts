@@ -92,6 +92,8 @@ export { skill_generate } from './skill-generate';
 export { skill_improve } from './skill-improve';
 export { skill_inspect } from './skill-inspect';
 export { skill_list } from './skill-list';
+export { skill_regenerate } from './skill-regenerate';
+export { skill_retire } from './skill-retire';
 export { spec_write } from './spec-write';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 export { summarize_work } from './summarize-work';

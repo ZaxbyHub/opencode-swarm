@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import {
+	_internals,
 	activateProposal,
 	clusterEntries,
 	generateSkills,
@@ -225,5 +226,217 @@ describe('listSkills + inspectSkill + activateProposal', () => {
 		expect(activate.activated).toBe(true);
 		const list2 = await listSkills(tmp);
 		expect(list2.active.length).toBe(1);
+	});
+});
+
+// ============================================================================
+// jaccardSimilarity tests
+// ============================================================================
+
+const { jaccardSimilarity } = _internals;
+
+describe('jaccardSimilarity', () => {
+	it('identical sets return 1.0', () => {
+		expect(jaccardSimilarity(['a', 'b', 'c'], ['a', 'b', 'c'])).toBe(1.0);
+	});
+
+	it('disjoint sets return 0.0', () => {
+		expect(jaccardSimilarity(['a', 'b'], ['c', 'd'])).toBe(0.0);
+	});
+
+	it('partial overlap returns correct ratio', () => {
+		// {a,b,c} ∩ {b,c,d} = {b,c} = 2; union = 4; 2/4 = 0.5
+		expect(jaccardSimilarity(['a', 'b', 'c'], ['b', 'c', 'd'])).toBe(0.5);
+	});
+
+	it('both empty sets return 0.0', () => {
+		expect(jaccardSimilarity([], [])).toBe(0.0);
+	});
+
+	it('one empty set returns 0.0', () => {
+		expect(jaccardSimilarity([], ['a', 'b'])).toBe(0.0);
+		expect(jaccardSimilarity(['a', 'b'], [])).toBe(0.0);
+	});
+
+	it('case insensitive: {A,B} vs {a,b} returns 1.0', () => {
+		expect(jaccardSimilarity(['A', 'B'], ['a', 'b'])).toBe(1.0);
+	});
+
+	it('three-way overlap computes correctly', () => {
+		// {a,b} ∩ {b,c} = {b} = 1; union = 3; 1/3 ≈ 0.333
+		expect(jaccardSimilarity(['a', 'b'], ['b', 'c'])).toBeCloseTo(1 / 3);
+	});
+
+	it('subset larger set: {a,b} ⊂ {a,b,c} → 2/3', () => {
+		expect(jaccardSimilarity(['a', 'b'], ['a', 'b', 'c'])).toBeCloseTo(2 / 3);
+	});
+});
+
+// ============================================================================
+// clusterEntries — minimum cluster size tests
+// ============================================================================
+
+describe('clusterEntries (min cluster size)', () => {
+	it('single entry produces no clusters (dropped by min size guard)', () => {
+		const result = clusterEntries([makeEntry('solo', { tags: ['solo'] })]);
+		expect(result).toEqual([]);
+	});
+
+	it('two entries with similar tags produce one cluster', () => {
+		// {a,b,c} vs {a,b,d} → intersection={a,b}=2, union=4 → 0.5 (meets threshold)
+		const result = clusterEntries([
+			makeEntry('x1', { tags: ['testing', 'debugging', 'logging'] }),
+			makeEntry('x2', { tags: ['testing', 'debugging', 'profiling'] }),
+		]);
+		expect(result.length).toBe(1);
+		expect(result[0].entries).toHaveLength(2);
+	});
+
+	it('two entries with completely different tags both dropped (no cluster reaches size 2)', () => {
+		const result = clusterEntries([
+			makeEntry('y1', { tags: ['javascript'] }),
+			makeEntry('y2', { tags: ['python'] }),
+		]);
+		// Both singletons dropped by MIN_CLUSTER_SIZE guard
+		expect(result).toEqual([]);
+	});
+
+	it('three entries: two with overlapping tags form a pair, singleton dropped', () => {
+		const result = clusterEntries([
+			makeEntry('z1', { tags: ['security'] }),
+			makeEntry('z2', { tags: ['security', 'auth'] }),
+			makeEntry('z3', { tags: ['security', 'auth', 'jwt'] }),
+		]);
+		// All three share 'security' tag, so greedy clustering puts them together
+		expect(result.length).toBe(1);
+		expect(result[0].entries).toHaveLength(3);
+	});
+
+	it('four entries: two pairs with different tag domains produce two clusters', () => {
+		// Pair 1: {rust,memory,safety} vs {rust,memory,concurrency} → Jaccard = 2/4 = 0.5
+		// Pair 2: {python,types,async} vs {python,types,gunicorn} → Jaccard = 2/4 = 0.5
+		// Cross-pair Jaccard is 0 (no overlap) → stays separate
+		const result = clusterEntries([
+			makeEntry('w1', { tags: ['rust', 'memory', 'safety'] }),
+			makeEntry('w2', { tags: ['rust', 'memory', 'concurrency'] }),
+			makeEntry('w3', { tags: ['python', 'types', 'async'] }),
+			makeEntry('w4', { tags: ['python', 'types', 'gunicorn'] }),
+		]);
+		expect(result.length).toBe(2);
+		// Both clusters have size 2 — sorted by length desc, then confidence
+		const sorted = [...result].sort((a, b) => a.slug.localeCompare(b.slug));
+		expect(sorted[0].entries).toHaveLength(2);
+		expect(sorted[1].entries).toHaveLength(2);
+	});
+});
+
+// ============================================================================
+// clusterEntries — Jaccard threshold tests
+// ============================================================================
+
+describe('clusterEntries (Jaccard threshold)', () => {
+	it('tags with Jaccard >= 0.5 are grouped together', () => {
+		// {a,b,c} vs {b,c,d} → Jaccard = 2/4 = 0.5 (meets threshold)
+		const result = clusterEntries([
+			makeEntry('t1', { tags: ['a', 'b', 'c'] }),
+			makeEntry('t2', { tags: ['b', 'c', 'd'] }),
+		]);
+		expect(result.length).toBe(1);
+		expect(result[0].entries).toHaveLength(2);
+	});
+
+	it('tags with Jaccard < 0.5 are NOT grouped (separate clusters)', () => {
+		// {a,b} vs {c,d} → Jaccard = 0 (below threshold)
+		// Each forms its own singleton → both dropped by min size
+		const result = clusterEntries([
+			makeEntry('u1', { tags: ['a', 'b'] }),
+			makeEntry('u2', { tags: ['c', 'd'] }),
+		]);
+		expect(result).toEqual([]);
+	});
+
+	it('boundary case: Jaccard exactly 0.5 is grouped (>= threshold)', () => {
+		// {a,b} vs {b,c} → intersection=1, union=3 → 1/3 ≈ 0.333 (below 0.5)
+		// Use {a,b,c} vs {c,d,e}: intersection=1, union=5 → 1/5 = 0.2 (below)
+		// {a,b,c} vs {b,c,d}: intersection=2, union=4 → 2/4 = 0.5 (at threshold)
+		const result = clusterEntries([
+			makeEntry('v1', { tags: ['a', 'b', 'c'] }),
+			makeEntry('v2', { tags: ['b', 'c', 'd'] }),
+		]);
+		expect(result.length).toBe(1);
+		expect(result[0].entries).toHaveLength(2);
+	});
+});
+
+// ============================================================================
+// clusterEntries — output format tests
+// ============================================================================
+
+describe('clusterEntries (output format)', () => {
+	it('output has correct KnowledgeCluster shape', () => {
+		const result = clusterEntries([
+			makeEntry('s1', {
+				tags: ['format'],
+				triggers: ['trigger1'],
+				required_actions: ['action1'],
+				forbidden_actions: ['forbidden1'],
+				applies_to_agents: ['coder'],
+				verification_checks: ['check1'],
+				confidence: 0.9,
+			}),
+			makeEntry('s2', {
+				tags: ['format'],
+				triggers: ['trigger2'],
+				required_actions: ['action2'],
+				forbidden_actions: [],
+				applies_to_agents: [],
+				verification_checks: [],
+				confidence: 0.8,
+			}),
+		]);
+		expect(result.length).toBe(1);
+		const cluster = result[0];
+		expect(cluster.slug).toBeString();
+		expect(cluster.title).toBeString();
+		expect(cluster.entries).toBeArray();
+		expect(cluster.entries).toHaveLength(2);
+		expect(cluster.triggers).toEqual(['trigger1', 'trigger2']);
+		expect(cluster.required_actions).toEqual(['action1', 'action2']);
+		expect(cluster.forbidden_actions).toEqual(['forbidden1']);
+		expect(cluster.target_agents).toEqual(['coder']);
+		expect(cluster.verification_checks).toEqual(['check1']);
+		expect(typeof cluster.avgConfidence).toBe('number');
+	});
+
+	it('clusters sorted: largest first, then highest confidence, then slug', () => {
+		const result = clusterEntries([
+			makeEntry('m1', { tags: ['solo1'], confidence: 0.5 }),
+			makeEntry('m2', { tags: ['solo2'], confidence: 0.7 }),
+			makeEntry('m3', { tags: ['solo3'], confidence: 0.9 }),
+			makeEntry('m4', { tags: ['solo4'], confidence: 0.95 }),
+		]);
+		// All singletons → all dropped → empty
+		expect(result).toEqual([]);
+	});
+
+	it('triggers aggregated from all member entries', () => {
+		const result = clusterEntries([
+			makeEntry('agg1', { tags: ['x'], triggers: ['alpha', 'beta'] }),
+			makeEntry('agg2', { tags: ['x'], triggers: ['beta', 'gamma'] }),
+		]);
+		expect(result.length).toBe(1);
+		// deduplicated and ordered by insertion (beta appears in both)
+		expect(result[0].triggers).toContain('alpha');
+		expect(result[0].triggers).toContain('beta');
+		expect(result[0].triggers).toContain('gamma');
+	});
+
+	it('avgConfidence is mean of member entry confidences', () => {
+		const result = clusterEntries([
+			makeEntry('conf1', { tags: ['z'], confidence: 0.8 }),
+			makeEntry('conf2', { tags: ['z'], confidence: 1.0 }),
+		]);
+		expect(result.length).toBe(1);
+		expect(result[0].avgConfidence).toBeCloseTo(0.9);
 	});
 });

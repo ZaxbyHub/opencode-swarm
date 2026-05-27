@@ -11,6 +11,10 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: (path: string) => mockReadKnowledge(path),
 	resolveSwarmKnowledgePath: (dir: string) =>
 		mockResolveSwarmKnowledgePath(dir),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Mock knowledge-validator module

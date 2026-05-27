@@ -110,6 +110,12 @@ export const _internals = {
 	buildDriftInjectionText,
 };
 
+/** Extract FR-### requirement IDs from text (e.g., FR-001, FR-012). */
+function extractRequirementIds(text: string): string[] {
+	const matches = text.match(/FR-\d{3,}/g);
+	return matches ? [...new Set(matches)] : [];
+}
+
 /**
  * Deterministic drift check for the given phase.
  * Builds a structured DriftReport from curator data, plan, spec, and prior reports.
@@ -142,26 +148,62 @@ export async function runDeterministicDriftCheck(
 			(obs) => obs.severity === 'warning',
 		);
 
-		// Compute alignment from compliance + plan presence
+		// Compute alignment from spec coverage + compliance observations
 		let alignment: DriftReport['alignment'] = 'ALIGNED';
 		let driftScore = 0;
+
+		// Extract requirement IDs from spec for coverage analysis
+		const specRequirements = specMd ? extractRequirementIds(specMd) : [];
+		const planRequirements = planMd ? extractRequirementIds(planMd) : [];
+		const digestRequirements = extractRequirementIds(
+			JSON.stringify(curatorResult.digest) +
+				JSON.stringify(curatorResult.compliance) +
+				JSON.stringify(curatorResult.knowledge_recommendations ?? []),
+		);
 
 		if (!planMd) {
 			// No plan — cannot assess alignment
 			alignment = 'MINOR_DRIFT';
 			driftScore = 0.3;
-		} else if (warningCompliance.length >= 3) {
-			alignment = 'MAJOR_DRIFT';
-			driftScore = Math.min(0.9, 0.5 + warningCompliance.length * 0.1);
-		} else if (warningCompliance.length >= 1 || complianceCount >= 3) {
-			alignment = 'MINOR_DRIFT';
-			driftScore = Math.min(0.49, 0.2 + complianceCount * 0.05);
-		}
+		} else if (specRequirements.length > 0) {
+			// Spec-based drift: check how many spec requirements are covered
+			const coveredInPlan = specRequirements.filter((fr) =>
+				planRequirements.includes(fr),
+			);
+			const coveredInDigest = specRequirements.filter((fr) =>
+				digestRequirements.includes(fr),
+			);
+			const specCoverageRatio = coveredInPlan.length / specRequirements.length;
+			const implementationRatio =
+				coveredInDigest.length / specRequirements.length;
 
-		// 5. Build injection summary (will be truncated by buildDriftInjectionText later)
-		const priorSummaries = priorReports
-			.map((r) => r.injection_summary)
-			.filter(Boolean);
+			if (specCoverageRatio < 0.5) {
+				// Less than half of spec requirements appear in plan
+				alignment = 'MAJOR_DRIFT';
+				driftScore = Math.min(0.9, 0.6 + (1 - specCoverageRatio) * 0.3);
+			} else if (warningCompliance.length >= 3) {
+				// Compliance severity takes priority — multiple serious warnings
+				alignment = 'MAJOR_DRIFT';
+				driftScore = Math.min(0.9, 0.5 + warningCompliance.length * 0.1);
+			} else if (warningCompliance.length >= 1 || complianceCount >= 3) {
+				// Some compliance concerns — minor drift
+				alignment = 'MINOR_DRIFT';
+				driftScore = Math.min(0.49, 0.2 + complianceCount * 0.05);
+			} else if (implementationRatio < 0.5) {
+				// Plan covers requirements but implementation doesn't reference them
+				alignment = 'MINOR_DRIFT';
+				driftScore = Math.min(0.6, 0.2 + (1 - implementationRatio) * 0.3);
+			}
+		} else {
+			// No spec — fall back to compliance-count-based drift
+			if (warningCompliance.length >= 3) {
+				alignment = 'MAJOR_DRIFT';
+				driftScore = Math.min(0.9, 0.5 + warningCompliance.length * 0.1);
+			} else if (warningCompliance.length >= 1 || complianceCount >= 3) {
+				alignment = 'MINOR_DRIFT';
+				driftScore = Math.min(0.49, 0.2 + complianceCount * 0.05);
+			}
+		}
 
 		const keyCorrections = warningCompliance.map((obs) => obs.description);
 		const firstDeviation =
@@ -173,25 +215,19 @@ export async function runDeterministicDriftCheck(
 					}
 				: null;
 
-		// 6. Build CURATOR_DRIFT payload for context (stored in injection_summary)
-		const payloadLines = [
-			`CURATOR_DIGEST: ${JSON.stringify(curatorResult.digest)}`,
-			`CURATOR_COMPLIANCE: ${JSON.stringify(curatorResult.compliance)}`,
-			`PLAN: ${planMd ?? 'none'}`,
-			`SPEC: ${specMd ?? 'none'}`,
-			`PRIOR_DRIFT_REPORTS: ${JSON.stringify(priorSummaries)}`,
-		];
-		const payload = payloadLines.join('\n');
-
-		// 7. Compute requirements stats from plan
+		// 6. Compute requirements stats from plan
 		const requirementsChecked = curatorResult.digest.tasks_total;
 		const requirementsSatisfied = curatorResult.digest.tasks_completed;
 
-		const injectionSummaryRaw = `Phase ${phase}: ${alignment} (${driftScore.toFixed(2)}) — ${
+		const coverageNote =
+			specRequirements.length > 0
+				? ` [${digestRequirements.filter((fr) => specRequirements.includes(fr)).length}/${specRequirements.length} FRs covered]`
+				: '';
+		const injectionSummaryRaw = `Phase ${phase}: ${alignment} (${driftScore.toFixed(2)})${coverageNote} — ${
 			firstDeviation ? firstDeviation.description : 'all requirements on track'
 		}.${keyCorrections.length > 0 ? `Correction: ${keyCorrections[0] ?? ''}.` : ''}`;
 
-		// 8. Truncate injection_summary to config.drift_inject_max_chars
+		// 7. Truncate injection_summary to config.drift_inject_max_chars
 		const injectionSummary = injectionSummaryRaw.slice(
 			0,
 			config.drift_inject_max_chars,
@@ -215,10 +251,10 @@ export async function runDeterministicDriftCheck(
 			injection_summary: injectionSummary,
 		};
 
-		// 9. Write drift report
+		// 8. Write drift report
 		const reportPath = await _internals.writeDriftReport(directory, report);
 
-		// 10. Emit curator.drift.completed event
+		// 9. Emit curator.drift.completed event
 		getGlobalEventBus().publish('curator.drift.completed', {
 			phase,
 			alignment,
@@ -236,11 +272,8 @@ export async function runDeterministicDriftCheck(
 			}
 		}
 
-		// 11. Build injection text using the raw injection summary
+		// 10. Build injection text using the raw injection summary
 		const injectionText = injectionSummary;
-
-		// Suppress payload in production result (it is for context only)
-		void payload;
 
 		return {
 			phase,

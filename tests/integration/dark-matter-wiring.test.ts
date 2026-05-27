@@ -74,6 +74,10 @@ mock.module('../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
 	readKnowledge: mockReadKnowledge,
 	appendKnowledge: mockAppendKnowledge,
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Import after mock setup

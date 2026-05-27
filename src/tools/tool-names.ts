@@ -69,6 +69,8 @@ export type ToolName =
 	| 'skill_list'
 	| 'skill_apply'
 	| 'skill_inspect'
+	| 'skill_regenerate'
+	| 'skill_retire'
 	| 'skill_improve'
 	| 'spec_write'
 	| 'knowledge_ack'
@@ -150,6 +152,8 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'skill_list',
 	'skill_apply',
 	'skill_inspect',
+	'skill_regenerate',
+	'skill_retire',
 	'skill_improve',
 	'spec_write',
 	'knowledge_ack',

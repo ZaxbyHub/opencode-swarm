@@ -8,6 +8,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bumpKnowledgeConfidenceBatch } from './knowledge-store.js';
 import { validateSwarmPath } from './utils.js';
 
 // ============================================================================
@@ -88,6 +89,9 @@ export const _internals = {
 	openSync: fs.openSync.bind(fs),
 	readSync: fs.readSync.bind(fs),
 	closeSync: fs.closeSync.bind(fs),
+	resolveSourceKnowledgeIds,
+	applySkillUsageFeedback,
+	parseGeneratedFromKnowledge,
 };
 
 // ============================================================================
@@ -370,4 +374,226 @@ export function pruneSkillUsageLog(
 	}
 
 	return { pruned, remaining: surviving.length };
+}
+
+// ============================================================================
+// Frontmatter parsing — source knowledge IDs
+// ============================================================================
+
+/**
+ * Read a SKILL.md file and extract the `generated_from_knowledge` UUIDs
+ * from its YAML frontmatter.
+ *
+ * Expected frontmatter shape:
+ * ```yaml
+ * ---
+ * name: some-skill
+ * generated_from_knowledge:
+ *   - uuid-1
+ *   - uuid-2
+ * ---
+ * ```
+ *
+ * Returns an empty array if the file doesn't exist, has no frontmatter,
+ * or the `generated_from_knowledge` key is absent.
+ */
+export async function resolveSourceKnowledgeIds(
+	directory: string,
+	skillPath: string,
+): Promise<string[]> {
+	try {
+		// Strip file: protocol prefix from skill path (e.g., "file:.opencode/skills/...")
+		let cleanPath = skillPath;
+		if (cleanPath.startsWith('file:')) {
+			cleanPath = cleanPath.slice(5);
+		}
+
+		// Reject path traversal sequences
+		if (/\.\.[/\\]/.test(cleanPath)) {
+			return [];
+		}
+
+		// Resolve to absolute and validate containment under directory
+		const absolute = path.normalize(
+			path.isAbsolute(cleanPath)
+				? cleanPath
+				: path.resolve(directory, cleanPath),
+		);
+		const baseDir = path.normalize(path.resolve(directory));
+
+		// Ensure the resolved path starts with the project directory
+		const isContained =
+			process.platform === 'win32'
+				? absolute.toLowerCase().startsWith((baseDir + path.sep).toLowerCase())
+				: absolute.startsWith(baseDir + path.sep);
+
+		if (!isContained) {
+			return [];
+		}
+
+		if (!_internals.existsSync(absolute)) {
+			return [];
+		}
+
+		const content = _internals.readFileSync(absolute, 'utf-8');
+		return parseGeneratedFromKnowledge(content);
+	} catch (err) {
+		console.warn(
+			'[skill-usage-log] resolveSourceKnowledgeIds failed (fail-open):',
+			err instanceof Error ? err.message : String(err),
+		);
+		return [];
+	}
+}
+
+/**
+ * Pure helper: parse `generated_from_knowledge:` YAML list from frontmatter.
+ * Uses a minimal regex-based parser — the SKILL.md format is well-known and narrow.
+ * Does NOT use a full YAML parser to avoid adding a dependency.
+ */
+function parseGeneratedFromKnowledge(content: string): string[] {
+	// Match frontmatter block (between --- delimiters at start of file)
+	const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+	if (!frontmatterMatch) return [];
+
+	const body = frontmatterMatch[1];
+	const ids: string[] = [];
+
+	// Match UUID-style entries under generated_from_knowledge:
+	// Supports both "  - uuid" and "  - uuid  # comment" formats
+	const sectionRegex =
+		/generated_from_knowledge\s*:\s*\n((?:\s+-\s+\S+[^\n]*\n?)+)/;
+	const sectionMatch = body.match(sectionRegex);
+	if (!sectionMatch) return [];
+
+	const lines = sectionMatch[1].split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('-')) continue;
+		// Extract the UUID — take the first token after "- "
+		const parts = trimmed.slice(1).trim().split(/\s+/);
+		if (parts.length > 0 && parts[0].length > 0) {
+			ids.push(parts[0]);
+		}
+	}
+
+	return ids;
+}
+
+// ============================================================================
+// Feedback bridge — wire skill usage to knowledge confidence
+// ============================================================================
+
+/** Confidence boost applied per compliant skill usage cycle. */
+const COMPLIANCE_BOOST = 0.05;
+
+/** Confidence decay applied per violation cycle. */
+const VIOLATION_DECAY = 0.1;
+
+/**
+ * Read skill-usage entries, resolve source knowledge IDs for each skill,
+ * and apply confidence bumps/decays to the originating knowledge entries.
+ *
+ * For each unique skillPath with at least one compliance or violation entry:
+ * 1. Resolve source knowledge UUIDs from the skill's SKILL.md frontmatter.
+ * 2. Count compliant and violation events for that skill.
+ * 3. Compute net delta: if compliant count > violation count → +0.05; else → -0.1.
+ * 4. Call `bumpKnowledgeConfidenceBatch` with the aggregated deltas.
+ *
+ * @param directory       - Project root directory.
+ * @param options.sinceTimestamp - Optional ISO 8601 cutoff; only process entries after this time.
+ * @returns Count of processed skills and total confidence bumps/decays applied.
+ */
+export async function applySkillUsageFeedback(
+	directory: string,
+	options?: { sinceTimestamp?: string },
+): Promise<{ processed: number; bumps: number }> {
+	let processed = 0;
+	let bumps = 0;
+
+	try {
+		const allEntries = readSkillUsageEntries(directory);
+
+		// Filter to entries with actionable compliance verdicts
+		const actionable = allEntries.filter((e) => {
+			if (
+				e.complianceVerdict !== 'compliant' &&
+				e.complianceVerdict !== 'violation'
+			) {
+				return false;
+			}
+			if (options?.sinceTimestamp && e.timestamp <= options.sinceTimestamp) {
+				return false;
+			}
+			return true;
+		});
+
+		if (actionable.length === 0) {
+			return { processed: 0, bumps: 0 };
+		}
+
+		// Group by skillPath
+		const groups = new Map<string, typeof actionable>();
+		for (const entry of actionable) {
+			const list = groups.get(entry.skillPath);
+			if (list) list.push(entry);
+			else groups.set(entry.skillPath, [entry]);
+		}
+
+		// Collect all deltas across all skills, then batch-apply once
+		const allDeltas: Array<{ id: string; delta: number }> = [];
+
+		for (const [skillPath, entries] of Array.from(groups)) {
+			let compliantCount = 0;
+			let violationCount = 0;
+
+			for (const entry of entries) {
+				if (entry.complianceVerdict === 'compliant') compliantCount++;
+				else if (entry.complianceVerdict === 'violation') violationCount++;
+			}
+
+			// Skip skills with no actionable verdicts (shouldn't happen due to filter, but defensive)
+			if (compliantCount === 0 && violationCount === 0) continue;
+
+			const delta =
+				compliantCount > violationCount ? COMPLIANCE_BOOST : -VIOLATION_DECAY;
+
+			// Resolve source knowledge IDs from the skill's SKILL.md
+			const sourceIds = await resolveSourceKnowledgeIds(directory, skillPath);
+			if (sourceIds.length === 0) continue;
+
+			for (const id of sourceIds) {
+				allDeltas.push({ id, delta });
+			}
+
+			processed++;
+			bumps += sourceIds.length;
+		}
+
+		// Aggregate deltas by knowledge ID to prevent unbounded stacking
+		// when the same knowledge ID appears in multiple skills' lists
+		const aggregated = new Map<string, number>();
+		for (const { id, delta } of allDeltas) {
+			aggregated.set(id, (aggregated.get(id) ?? 0) + delta);
+		}
+		// Clamp each net delta to allowed per-cycle bounds [+0.05, -0.1]
+		const clampedDeltas = Array.from(aggregated.entries()).map(
+			([id, netDelta]) => ({
+				id,
+				delta: Math.max(-VIOLATION_DECAY, Math.min(COMPLIANCE_BOOST, netDelta)),
+			}),
+		);
+
+		// Batch-apply clamped deltas in a single call
+		if (clampedDeltas.length > 0) {
+			await bumpKnowledgeConfidenceBatch(directory, clampedDeltas);
+		}
+	} catch (err) {
+		console.warn(
+			'[skill-usage-log] applySkillUsageFeedback failed (fail-open):',
+			err instanceof Error ? err.message : String(err),
+		);
+	}
+
+	return { processed, bumps };
 }

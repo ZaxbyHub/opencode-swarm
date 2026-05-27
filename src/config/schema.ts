@@ -1094,6 +1094,16 @@ export const KnowledgeApplicationConfigSchema = z.object({
 	critical_requires_ack: z.boolean().default(true),
 	/** Critical directives that reference a generated skill must include the skill via SKILLS:. */
 	require_skill_refs: z.boolean().default(true),
+	/** Tool names that require knowledge-directive acknowledgment. Defaults to save_plan, update_task_status, phase_complete, task, Task. */
+	high_risk_tools: z
+		.array(z.string())
+		.default([
+			'save_plan',
+			'update_task_status',
+			'phase_complete',
+			'task',
+			'Task',
+		]),
 });
 
 export type KnowledgeApplicationConfig = z.infer<
