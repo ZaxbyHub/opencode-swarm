@@ -65,6 +65,14 @@ describe('SME_PROMPT — Research Caching', () => {
 	it('12. CACHE-UPDATE format includes date placeholder [YYYY-MM-DD]', () => {
 		expect(prompt).toContain('[YYYY-MM-DD]');
 	});
+
+	it('13. SME cites evidence-cache refs for external evidence', () => {
+		expect(prompt).toContain('EVIDENCE_REFS');
+		expect(prompt).toContain('evidence-cache:<id>');
+		expect(prompt).toContain(
+			'Raw docs/search snippets are evidence, not memory',
+		);
+	});
 });
 
 describe('SME_PROMPT — Research Caching adversarial', () => {

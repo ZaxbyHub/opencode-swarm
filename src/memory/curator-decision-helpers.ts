@@ -1,3 +1,4 @@
+import { DURABLE_MEMORY_KINDS } from './config';
 import { MemoryValidationError } from './errors';
 import {
 	computeMemoryContentHash,
@@ -12,6 +13,8 @@ import type {
 	MemoryRecord,
 	ResolvedCuratorMemoryDecision,
 } from './types';
+
+export const CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH = 500;
 
 export function validateDecisionMatchesProposal(
 	decision: ResolvedCuratorMemoryDecision,
@@ -42,6 +45,27 @@ export function validateDecisionMatchesProposal(
 	) {
 		throw new MemoryValidationError(
 			'curator supersede decision target does not match proposal target',
+		);
+	}
+}
+
+export function validateCuratorPromotableMemory(record: MemoryRecord): void {
+	if (record.stability !== 'durable') {
+		throw new MemoryValidationError(
+			'curator memory promotions must be durable facts',
+		);
+	}
+	if (!DURABLE_MEMORY_KINDS.has(record.kind)) {
+		throw new MemoryValidationError(
+			'curator memory promotions must use durable fact kinds; store raw docs, search results, and other bulky source material as evidence records instead',
+		);
+	}
+	if (
+		normalizeMemoryText(record.text).length >
+		CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH
+	) {
+		throw new MemoryValidationError(
+			`curator memory promotions must be concise durable facts under ${CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH} characters`,
 		);
 	}
 }

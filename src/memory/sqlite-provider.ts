@@ -10,6 +10,7 @@ import {
 	buildCuratorDecisionEvent,
 	curatorDecisionReason,
 	markProposalReviewed,
+	validateCuratorPromotableMemory,
 	validateDecisionMatchesProposal,
 } from './curator-decision-helpers';
 import { MemoryValidationError } from './errors';
@@ -933,6 +934,7 @@ export class SQLiteMemoryProvider
 				...decision.memory,
 				updatedAt: appliedAt,
 			});
+			validateCuratorPromotableMemory(memory);
 			this.writeMemory(memory);
 			memories.push(memory);
 			memoryId = memory.id;
@@ -941,6 +943,7 @@ export class SQLiteMemoryProvider
 			const updated = this.validateDecisionMemory(
 				applyPatchToMemory(existing, decision.patch, appliedAt),
 			);
+			validateCuratorPromotableMemory(updated);
 			if (updated.id !== existing.id) {
 				// Update replacements are linked through updateReplacementId; the
 				// supersedes graph is reserved for explicit supersede decisions.
@@ -970,6 +973,7 @@ export class SQLiteMemoryProvider
 					new Set([...(decision.replacement.supersedes ?? []), oldMemory.id]),
 				),
 			});
+			validateCuratorPromotableMemory(replacement);
 			const superseded = this.validateDecisionMemory({
 				...oldMemory,
 				updatedAt: appliedAt,

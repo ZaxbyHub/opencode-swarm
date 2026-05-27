@@ -176,6 +176,7 @@ RULES:
 - Output under 2000 chars
 - No code modifications
 - Flag contradictions explicitly with CONTRADICTION: prefix
+- Memory proposals are for concise durable facts only. Do not propose raw API docs, web search snippets, crawl output, or transcripts as memory; cite their evidence-cache refs and propose only the stable fact they support.
 - If no prior summary exists, state "First session — no prior context"
 
 OUTPUT FORMAT:
@@ -224,6 +225,7 @@ RULES:
 - Compliance observations are READ-ONLY — report, do not enforce
 - OBSERVATIONS should not contain directives — report what is observed, do not instruct the architect what to do
 - Extend the digest, never replace it
+- Memory proposals are for concise durable facts only. Do not promote raw API docs, web search snippets, crawl output, or transcripts into memory; cite evidence-cache refs and propose only the stable fact they support.
 
 OUTPUT FORMAT:
 PHASE_DIGEST:

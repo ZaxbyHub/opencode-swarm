@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.39.0",
+    version: "7.40.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -45793,6 +45793,17 @@ function validateDecisionMatchesProposal(decision, proposal) {
     throw new MemoryValidationError("curator supersede decision target does not match proposal target");
   }
 }
+function validateCuratorPromotableMemory(record3) {
+  if (record3.stability !== "durable") {
+    throw new MemoryValidationError("curator memory promotions must be durable facts");
+  }
+  if (!DURABLE_MEMORY_KINDS.has(record3.kind)) {
+    throw new MemoryValidationError("curator memory promotions must use durable fact kinds; store raw docs, search results, and other bulky source material as evidence records instead");
+  }
+  if (normalizeMemoryText(record3.text).length > CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH) {
+    throw new MemoryValidationError(`curator memory promotions must be concise durable facts under ${CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH} characters`);
+  }
+}
 function applyPatchToMemory(existing, patch, updatedAt) {
   const base = {
     scope: patch.scope ?? existing.scope,
@@ -45850,7 +45861,9 @@ function buildCuratorDecisionEvent(change, proposal) {
 function normalizeTags(tags) {
   return Array.from(new Set(tags.map((tag) => tag.toLowerCase().replace(/[^\w-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "")).filter(Boolean))).slice(0, 32);
 }
+var CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH = 500;
 var init_curator_decision_helpers = __esm(() => {
+  init_config3();
   init_errors6();
   init_schema2();
 });
@@ -46480,12 +46493,14 @@ class LocalJsonlMemoryProvider {
         ...decision.memory,
         updatedAt: appliedAt
       });
+      validateCuratorPromotableMemory(memory);
       this.memories.set(memory.id, memory);
       await appendJsonl(this.pathFor("memories"), memory);
       memoryId = memory.id;
     } else if (decision.action === "update") {
       const existing = this.activeMemory(decision.targetMemoryId);
       const updated = this.validateDecisionMemory(applyPatchToMemory(existing, decision.patch, appliedAt));
+      validateCuratorPromotableMemory(updated);
       if (updated.id !== existing.id) {
         const tombstone = this.validateDecisionMemory({
           ...existing,
@@ -46511,6 +46526,7 @@ class LocalJsonlMemoryProvider {
         updatedAt: appliedAt,
         supersedes: Array.from(new Set([...decision.replacement.supersedes ?? [], oldMemory.id]))
       });
+      validateCuratorPromotableMemory(replacement);
       const superseded = this.validateDecisionMemory({
         ...oldMemory,
         updatedAt: appliedAt,
@@ -47490,12 +47506,14 @@ class SQLiteMemoryProvider {
         ...decision.memory,
         updatedAt: appliedAt
       });
+      validateCuratorPromotableMemory(memory);
       this.writeMemory(memory);
       memories.push(memory);
       memoryId = memory.id;
     } else if (decision.action === "update") {
       const existing = this.readActiveMemory(decision.targetMemoryId);
       const updated = this.validateDecisionMemory(applyPatchToMemory(existing, decision.patch, appliedAt));
+      validateCuratorPromotableMemory(updated);
       if (updated.id !== existing.id) {
         const tombstone = this.validateDecisionMemory({
           ...existing,
@@ -47521,6 +47539,7 @@ class SQLiteMemoryProvider {
         updatedAt: appliedAt,
         supersedes: Array.from(new Set([...decision.replacement.supersedes ?? [], oldMemory.id]))
       });
+      validateCuratorPromotableMemory(replacement);
       const superseded = this.validateDecisionMemory({
         ...oldMemory,
         updatedAt: appliedAt,

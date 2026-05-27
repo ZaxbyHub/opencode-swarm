@@ -239,6 +239,79 @@ describe('MemoryGateway', () => {
 		}
 	});
 
+	test('applyCuratorDecision rejects raw API evidence as durable memory', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{
+				config: { enabled: true, provider: 'sqlite' },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		try {
+			const proposal = await gateway.propose({
+				operation: 'add',
+				kind: 'api_finding',
+				text: 'The API docs say Vitest exposes describe, test, and expect.',
+				rationale: 'Raw API docs should stay in the evidence cache.',
+				evidenceRefs: ['evidence-cache:evd_1111111111111111'],
+			});
+
+			await expect(
+				gateway.applyCuratorDecision({
+					action: 'add',
+					proposalId: proposal.id,
+					memory: {
+						kind: 'api_finding',
+						text: 'The API docs say Vitest exposes describe, test, and expect.',
+						source: {
+							type: 'manual',
+							ref: 'evidence-cache:evd_1111111111111111',
+						},
+					},
+				}),
+			).rejects.toThrow('evidence records');
+		} finally {
+			await gateway.dispose();
+		}
+	});
+
+	test('applyCuratorDecision rejects verbose durable memory promotions', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{
+				config: { enabled: true, provider: 'sqlite' },
+				now: () => new Date('2026-05-24T12:00:00.000Z'),
+			},
+		);
+		try {
+			const longFact = `This repository uses Vitest for frontend unit tests. ${'Extra copied documentation. '.repeat(24)}`;
+			const proposal = await gateway.propose({
+				operation: 'add',
+				kind: 'repo_convention',
+				text: longFact,
+				rationale: 'Verbose docs should not be promoted as memory.',
+				evidenceRefs: ['evidence-cache:evd_2222222222222222'],
+			});
+
+			await expect(
+				gateway.applyCuratorDecision({
+					action: 'add',
+					proposalId: proposal.id,
+					memory: {
+						kind: 'repo_convention',
+						text: longFact,
+						source: {
+							type: 'manual',
+							ref: 'evidence-cache:evd_2222222222222222',
+						},
+					},
+				}),
+			).rejects.toThrow('concise durable facts');
+		} finally {
+			await gateway.dispose();
+		}
+	});
+
 	test('applyCuratorDecision schema rejects malformed curator output', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },

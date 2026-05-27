@@ -18,6 +18,7 @@ import {
 	WebSearchConfigError,
 	WebSearchError,
 } from '../council/web-search-provider';
+import { writeEvidenceDocuments } from '../evidence/documents';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -33,7 +34,18 @@ interface WebSearchOk {
 	success: true;
 	query: string;
 	totalResults: number;
-	results: Array<{ title: string; url: string; snippet: string }>;
+	results: Array<{
+		title: string;
+		url: string;
+		snippet: string;
+		evidenceRef?: string;
+	}>;
+	evidence: {
+		stored: boolean;
+		path?: string;
+		refs: string[];
+		error?: string;
+	};
 }
 
 interface WebSearchFail {
@@ -126,6 +138,11 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 
 		try {
 			const results = await provider.search(parsed.data.query, maxResults);
+			const evidence = await captureSearchEvidence(
+				dirResult.directory,
+				parsed.data.query,
+				results,
+			);
 			const ok: WebSearchOk = {
 				success: true,
 				query: parsed.data.query,
@@ -134,7 +151,14 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 					title,
 					url,
 					snippet,
+					evidenceRef: evidence.refByUrl.get(url),
 				})),
+				evidence: {
+					stored: evidence.stored,
+					path: evidence.path,
+					refs: evidence.refs,
+					error: evidence.error,
+				},
 			};
 			return JSON.stringify(ok, null, 2);
 		} catch (err) {
@@ -147,3 +171,52 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 		}
 	},
 });
+
+async function captureSearchEvidence(
+	directory: string,
+	query: string,
+	results: Array<{ title: string; url: string; snippet: string }>,
+): Promise<{
+	stored: boolean;
+	path?: string;
+	refs: string[];
+	refByUrl: Map<string, string>;
+	error?: string;
+}> {
+	try {
+		const written = await _internals.writeEvidenceDocuments(
+			directory,
+			results.map((result) => ({
+				sourceType: 'web_search',
+				query,
+				title: result.title,
+				url: result.url,
+				snippet: result.snippet,
+				createdBy: 'web_search',
+			})),
+		);
+		const refByUrl = new Map<string, string>();
+		for (const record of written.records) {
+			if (record.url) refByUrl.set(record.url, record.ref);
+		}
+		return {
+			stored: written.records.length > 0,
+			path: written.path,
+			refs: written.refs,
+			refByUrl,
+		};
+	} catch (err) {
+		return {
+			stored: false,
+			refs: [],
+			refByUrl: new Map(),
+			error: err instanceof Error ? err.message : String(err),
+		};
+	}
+}
+
+export const _internals: {
+	writeEvidenceDocuments: typeof writeEvidenceDocuments;
+} = {
+	writeEvidenceDocuments,
+};

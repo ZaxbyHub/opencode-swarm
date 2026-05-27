@@ -68,6 +68,7 @@ API: [exact names/signatures/versions to use]
 PLATFORM: [cross-platform notes if OS-interaction APIs]
 GOTCHAS: [common pitfalls or edge cases]
 DEPS: [required dependencies/tools]
+EVIDENCE_REFS: [cite evidence-cache:<id>, URL, file, or doc refs used; use "none" if no external evidence was available]
 
 ## DOMAIN CHECKLISTS
 Apply the relevant checklist when the DOMAIN matches:
@@ -106,7 +107,8 @@ Cache lookup steps:
 1. If \`.swarm/context.md\` does not exist: proceed with fresh research.
 2. If the \`## Research Sources\` section is absent: proceed with fresh research.
 3. If URL/topic IS listed in ## Research Sources: reuse cached summary — no re-fetch needed.
-4. If cache miss (URL/topic not listed): fetch URL, then append this line at the end of your response:
+4. If fresh search/API-doc/crawl evidence is provided, cite its \`evidence-cache:<id>\` refs in EVIDENCE_REFS. Raw docs/search snippets are evidence, not memory.
+5. If cache miss (URL/topic not listed): fetch URL, then append this line at the end of your response:
    CACHE-UPDATE: [YYYY-MM-DD] | [URL or topic] | [one-line summary of finding]
    The Architect will save this line to .swarm/context.md ## Research Sources. Do NOT write to any file yourself.
 

@@ -38,6 +38,13 @@ describe('curator-agent.ts', () => {
 			const agent = createCuratorAgent(TEST_MODEL);
 			expect(agent.config.prompt).toBe(CURATOR_INIT_PROMPT);
 		});
+
+		test('curator prompts keep raw docs/search output in evidence cache', () => {
+			expect(CURATOR_INIT_PROMPT).toContain('concise durable facts only');
+			expect(CURATOR_INIT_PROMPT).toContain('evidence-cache refs');
+			expect(CURATOR_PHASE_PROMPT).toContain('concise durable facts only');
+			expect(CURATOR_PHASE_PROMPT).toContain('evidence-cache refs');
+		});
 	});
 
 	// ============================================================
