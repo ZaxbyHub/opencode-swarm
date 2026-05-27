@@ -278,6 +278,8 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'skill_list',
 		'skill_apply',
 		'skill_inspect',
+		'skill_regenerate',
+		'skill_retire',
 		'skill_improve',
 		'knowledge_ack',
 		'summarize_work',
@@ -664,6 +666,10 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	skill_apply: 'activate a draft skill proposal',
 	skill_inspect: 'inspect the content and source entries of a skill file',
 	skill_improve: 'run the skill_improver agent to review and refine skills',
+	skill_regenerate:
+		'regenerate an active skill by re-clustering its source knowledge entries and updating the SKILL.md in place',
+	skill_retire:
+		'retire a generated skill by adding a retired.marker file; retired skills are excluded from scoring and injection',
 	spec_write: 'author or update .swarm/spec.md for the current project',
 	knowledge_ack:
 		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',

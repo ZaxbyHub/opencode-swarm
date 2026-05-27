@@ -337,6 +337,9 @@ export function discoverAvailableSkills(directory: string): string[] {
 		for (const entry of entries) {
 			if (entry.startsWith('.')) continue;
 			const skillDir = path.join(rootPath, entry);
+			// Skip retired skills
+			if (_internals.existsSync(path.join(skillDir, 'retired.marker')))
+				continue;
 			const skillFile = path.join(skillDir, 'SKILL.md');
 			try {
 				if (
@@ -717,6 +720,10 @@ export async function skillPropagationGateBefore(
 			// Create a set of existing paths for fast lookup
 			const existingPaths = new Set(scored.map((s) => s.skillPath));
 			for (const routingPath of routingPaths) {
+				// Skip retired skills (retired.marker in containing directory)
+				const routedSkillDir = path.dirname(path.join(directory, routingPath));
+				if (_internals.existsSync(path.join(routedSkillDir, 'retired.marker')))
+					continue;
 				if (!existingPaths.has(routingPath)) {
 					scored.push({
 						skillPath: routingPath,
@@ -768,23 +775,18 @@ export async function skillPropagationGateBefore(
 				const newSection = `${sectionHeader}\n${formattedIndex}\n`;
 
 				let updatedContent: string;
-				if (existingContent.includes(sectionHeader)) {
-					// Replace existing ## Available Skills section
-					const sectionStart = existingContent.indexOf(sectionHeader);
-					const sectionEnd = existingContent.indexOf(
-						'\n## ',
-						sectionStart + sectionHeader.length,
+				// Regex: match ## Available Skills heading + everything until the next ## heading or end of string
+				const sectionRegex = new RegExp(
+					`^${sectionHeader.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b[^\\n]*(?:\\n(?!##)[^\\n]*)*`,
+					'm',
+				);
+
+				if (sectionRegex.test(existingContent)) {
+					// Replace existing section using regex
+					updatedContent = existingContent.replace(
+						sectionRegex,
+						newSection.trimEnd(),
 					);
-					if (sectionEnd !== -1) {
-						updatedContent =
-							existingContent.slice(0, sectionStart) +
-							newSection +
-							existingContent.slice(sectionEnd + 1);
-					} else {
-						// Section at end of file, no following heading
-						updatedContent =
-							existingContent.slice(0, sectionStart) + newSection;
-					}
 				} else {
 					// Append new section
 					if (existingContent.length > 0 && !existingContent.endsWith('\n')) {

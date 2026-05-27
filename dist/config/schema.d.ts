@@ -590,6 +590,7 @@ export declare const KnowledgeApplicationConfigSchema: z.ZodObject<{
     min_confidence: z.ZodDefault<z.ZodNumber>;
     critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
     require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+    high_risk_tools: z.ZodDefault<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export type KnowledgeApplicationConfig = z.infer<typeof KnowledgeApplicationConfigSchema>;
 export declare const SkillImproverConfigSchema: z.ZodObject<{
@@ -1272,6 +1273,7 @@ export declare const PluginConfigSchema: z.ZodObject<{
         min_confidence: z.ZodDefault<z.ZodNumber>;
         critical_requires_ack: z.ZodDefault<z.ZodBoolean>;
         require_skill_refs: z.ZodDefault<z.ZodBoolean>;
+        high_risk_tools: z.ZodDefault<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
     skill_improver: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;

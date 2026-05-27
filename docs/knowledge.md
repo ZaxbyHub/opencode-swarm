@@ -356,13 +356,20 @@ generatedSkillPath, sessionId}`.
   "mode": "warn",            // 'warn' (default) advises; 'enforce' blocks
   "min_confidence": 0.85,
   "critical_requires_ack": true,
-  "require_skill_refs": true
+  "require_skill_refs": true,
+  "high_risk_tools": ["save_plan", "update_task_status", "phase_complete", "task", "Task"]
 }
 ```
 
 In `enforce` mode the gate (`gateKnowledgeApplication` in
 `src/hooks/knowledge-application.ts`) blocks high-risk actions when a critical
 directive was shown but received no acknowledgment.
+
+**`high_risk_tools`** — optionally override the set of tools that trigger the
+acknowledgment gate. When absent, defaults to `["save_plan",
+"update_task_status", "phase_complete", "task", "Task"]`. Narrow the list to
+reduce noise; expand it to cover additional tools that should require knowledge
+directive acknowledgment before executing.
 
 ---
 

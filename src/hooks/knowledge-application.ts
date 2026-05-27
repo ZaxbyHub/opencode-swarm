@@ -373,6 +373,7 @@ export interface KnowledgeApplicationConfig {
 	min_confidence: number;
 	critical_requires_ack: boolean;
 	require_skill_refs: boolean;
+	high_risk_tools?: string[];
 }
 
 export const DEFAULT_KNOWLEDGE_APPLICATION_CONFIG: KnowledgeApplicationConfig =
@@ -382,6 +383,13 @@ export const DEFAULT_KNOWLEDGE_APPLICATION_CONFIG: KnowledgeApplicationConfig =
 		min_confidence: 0.85,
 		critical_requires_ack: true,
 		require_skill_refs: true,
+		high_risk_tools: [
+			'save_plan',
+			'update_task_status',
+			'phase_complete',
+			'task',
+			'Task',
+		],
 	};
 
 export interface GateResult {

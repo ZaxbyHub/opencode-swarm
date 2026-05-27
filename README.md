@@ -603,6 +603,22 @@ routing:
 
 Routing skills are merged with scored recommendations, with explicitly routed skills receiving a boosted score (0.9) to prioritize them.
 
+### Skill Lifecycle Management
+
+Swarm provides tools for managing generated skill lifecycles:
+
+- **`skill_retire`** — Retires an active generated skill by creating a `retired.marker` file in its directory. Retired skills are excluded from discovery, scoring, and injection. The SKILL.md file is preserved for auditability. Use `skill_retire(slug, reason?)` to retire a skill, or pass a reason for tracking purposes.
+
+- **`skill_regenerate`** — Re-clusters the source knowledge entries for an active skill and updates the SKILL.md in place. Reads the existing SKILL.md frontmatter to identify source knowledge IDs, resolves current entries from knowledge stores, and re-renders the skill content. Falls back to fuzzy slug-based re-clustering if source IDs yield no matches. Skills whose source knowledge is entirely archived are automatically retired during regeneration.
+
+- **Auto-retire health check** — During each curator phase run, skills are automatically evaluated for retirement when:
+  - The skill's violation rate exceeds 30% (based on skill-usage.jsonl compliance verdicts)
+  - All of the skill's source knowledge entries have been archived
+
+  Auto-retired skills are noted in the phase digest summary. The check is non-blocking — errors are caught and logged without failing the curator.
+
+- **Proposal cleanup** — When a draft skill proposal is activated via `skill_apply`, the source proposal file is deleted as part of the activation process (best-effort; permission errors are logged but do not block activation).
+
 ### Configuration Reference
 
 | Key | Type | Default | Description |

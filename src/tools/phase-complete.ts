@@ -42,6 +42,10 @@ import {
 	buildRejectedReceipt,
 	persistReviewReceipt,
 } from '../hooks/review-receipt.js';
+import {
+	applySkillUsageFeedback,
+	pruneSkillUsageLog,
+} from '../hooks/skill-usage-log.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
@@ -1899,8 +1903,15 @@ export async function executePhaseComplete(
 						? ` (${curatorResult.compliance.length} compliance observation(s))`
 						: '';
 
+				// Only suggest curator_analyze when there are unapplied recommendations
+				const hasRecommendations =
+					curatorResult.knowledge_recommendations.length > 0;
+				const analyzeHint = hasRecommendations
+					? ' Call curator_analyze with recommendations to apply knowledge updates from this phase.'
+					: '';
+
 				callerSessionState.pendingAdvisoryMessages.push(
-					`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped. Call curator_analyze with recommendations to apply knowledge updates from this phase.`,
+					`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped.${analyzeHint}`,
 				);
 
 				// Check for drift advisories from prior deterministic drift checks
@@ -1937,6 +1948,62 @@ export async function executePhaseComplete(
 		safeWarn(
 			'[phase_complete] Curator pipeline error (non-blocking):',
 			curatorError,
+		);
+	}
+
+	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
+	// Uses a marker file to avoid reprocessing historical entries on every call.
+	// Errors never block phase_complete.
+	try {
+		const markerPath = validateSwarmPath(
+			dir,
+			'skill-usage-last-processed.json',
+		);
+		let sinceTimestamp: string | undefined;
+		try {
+			const markerData = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+			sinceTimestamp = markerData.lastProcessedTimestamp;
+		} catch {
+			// marker doesn't exist yet — process all entries
+		}
+
+		const feedbackResult = await applySkillUsageFeedback(dir, {
+			sinceTimestamp,
+		});
+
+		// Write marker after successful feedback (best-effort)
+		try {
+			fs.writeFileSync(
+				markerPath,
+				JSON.stringify({ lastProcessedTimestamp: new Date().toISOString() }),
+				'utf-8',
+			);
+		} catch {
+			// best-effort marker write — fail-open
+		}
+
+		if (feedbackResult.processed > 0) {
+			const sessionState = swarmState.agentSessions.get(sessionID);
+			if (sessionState) {
+				sessionState.pendingAdvisoryMessages ??= [];
+				sessionState.pendingAdvisoryMessages.push(
+					`[FEEDBACK] Skill usage feedback: ${feedbackResult.processed} skills processed, ${feedbackResult.bumps} confidence updates applied.`,
+				);
+			}
+		}
+	} catch (skillUsageError) {
+		safeWarn(
+			'[phase_complete] Skill usage feedback error (non-blocking):',
+			skillUsageError,
+		);
+	}
+
+	try {
+		pruneSkillUsageLog(dir, 500);
+	} catch (skillPruneError) {
+		safeWarn(
+			'[phase_complete] Skill usage log pruning error (non-blocking):',
+			skillPruneError,
 		);
 	}
 

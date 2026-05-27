@@ -35,6 +35,11 @@ import {
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import {
+	listSkills,
+	parseDraftFrontmatter,
+	retireSkill,
+} from '../services/skill-generator.js';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
@@ -50,14 +55,17 @@ import type {
 import {
 	appendKnowledge,
 	readKnowledge,
+	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
 } from './knowledge-store.js';
 import type {
+	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { validateLesson } from './knowledge-validator.js';
+import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 /**
@@ -86,7 +94,103 @@ export const _internals = {
 	filterPhaseEvents,
 	checkPhaseCompliance,
 	normalizeAgentName,
+	autoRetireSkills,
+	readSkillUsageEntries,
+	listSkills,
+	parseDraftFrontmatter,
+	retireSkill,
+	readFileAsync: (filePath: string, encoding: string) =>
+		import('node:fs/promises').then((fs) =>
+			fs.readFile(filePath, encoding as BufferEncoding),
+		),
+	readKnowledge,
 };
+
+/**
+ * Auto-retire generated skills whose violation rate exceeds 30% or
+ * whose source knowledge entries are all archived.
+ *
+ * Non-blocking: errors are caught and logged but never propagated.
+ * Returns an array of observation strings to include in the phase digest.
+ */
+async function autoRetireSkills(
+	directory: string,
+	curatorKnowledgePath: string,
+): Promise<string[]> {
+	const observations: string[] = [];
+	try {
+		const skillListResult = await _internals.listSkills(directory);
+		const usageEntries = _internals.readSkillUsageEntries(directory);
+
+		for (const active of skillListResult.active) {
+			const skillUsage = usageEntries.filter((e) => {
+				let p = e.skillPath;
+				if (p.startsWith('file:')) p = p.slice(5);
+				// Normalize both paths to forward slashes for comparison
+				const normalizedUsage = p.replace(/\\/g, '/');
+				const normalizedActive = active.path.replace(/\\/g, '/');
+				// Exact match, or suffix match for relative vs absolute paths
+				if (normalizedUsage === normalizedActive) return true;
+				if (normalizedActive.endsWith(`/${normalizedUsage}`)) return true;
+				if (normalizedUsage.endsWith(`/${normalizedActive}`)) return true;
+				return false;
+			});
+
+			const violations = skillUsage.filter(
+				(e) => e.complianceVerdict === 'violation',
+			).length;
+			const violationRate =
+				skillUsage.length > 0 ? violations / skillUsage.length : 0;
+
+			// Check if all source knowledge is archived
+			let allArchived = false;
+			try {
+				const content = await _internals.readFileAsync(active.path, 'utf-8');
+				const fm = _internals.parseDraftFrontmatter(content);
+				if (fm && fm.sourceKnowledgeIds.length > 0) {
+					const swarmKnowledge =
+						await _internals.readKnowledge<SwarmKnowledgeEntry>(
+							curatorKnowledgePath,
+						);
+					let hiveKnowledge: HiveKnowledgeEntry[] = [];
+					try {
+						const hivePath = resolveHiveKnowledgePath();
+						if (fs.existsSync(hivePath)) {
+							hiveKnowledge =
+								await _internals.readKnowledge<HiveKnowledgeEntry>(hivePath);
+						}
+					} catch {
+						/* hive not available — non-blocking */
+					}
+					const allKnowledge = [...swarmKnowledge, ...hiveKnowledge];
+					const sourceIds = new Set(fm.sourceKnowledgeIds);
+					const sources = allKnowledge.filter((e) => sourceIds.has(e.id));
+					allArchived =
+						sources.length === sourceIds.size &&
+						sources.every((e) => e.status === 'archived');
+				}
+			} catch {
+				/* best effort frontmatter read */
+			}
+
+			if (violationRate > 0.3 || allArchived) {
+				const reason =
+					violationRate > 0.3
+						? `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`
+						: 'auto-retire: all source knowledge entries archived';
+				await _internals.retireSkill(directory, active.slug, reason);
+				observations.push(`Skill '${active.slug}' auto-retired: ${reason}`);
+				logger.warn(`[curator] ${observations[observations.length - 1]}`);
+			}
+		}
+	} catch (autoRetireErr) {
+		// Non-blocking — log but don't fail curator
+		logger.warn(
+			`[curator] auto-retire health check failed: ${autoRetireErr instanceof Error ? autoRetireErr.message : String(autoRetireErr)}`,
+		);
+	}
+	return observations;
+}
 
 /**
  * Parse OBSERVATIONS section from curator LLM output.
@@ -860,6 +964,7 @@ export async function runCuratorPhase(
 				),
 				knowledge_recommendations: [],
 				summary_updated: false,
+				already_digested: true,
 			};
 		}
 
@@ -1056,6 +1161,30 @@ export async function runCuratorPhase(
 
 		await _internals.writeCuratorSummary(directory, updatedSummary);
 
+		// 7b. Persist knowledge application findings to per-phase evidence.
+		if (knowledgeApplicationFindings.length > 0) {
+			try {
+				const evidenceDir = path.join(
+					directory,
+					'.swarm',
+					'evidence',
+					String(phase),
+				);
+				fs.mkdirSync(evidenceDir, { recursive: true });
+				const findingsPath = path.join(evidenceDir, 'curator-findings.json');
+				const tmpPath = `${findingsPath}.tmp.${Date.now()}`;
+				fs.writeFileSync(
+					tmpPath,
+					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
+				);
+				fs.renameSync(tmpPath, findingsPath);
+			} catch (err) {
+				logger.warn(
+					`[curator] failed to persist application findings: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+
 		// 8. Write compliance observations to events.jsonl as curator_compliance events
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
 		for (const obs of complianceObservations) {
@@ -1102,6 +1231,20 @@ export async function runCuratorPhase(
 			}
 		}
 
+		// 9. Auto-retire health check for generated skills.
+		// Retires skills whose violation rate exceeds 30% or whose source
+		// knowledge entries are all archived. Non-blocking: errors are
+		// caught internally and logged without failing the curator.
+		const autoRetireObservations = await _internals.autoRetireSkills(
+			directory,
+			curatorKnowledgePath,
+		);
+		if (autoRetireObservations.length > 0) {
+			// Append auto-retire observations to the phase digest summary
+			const retireNote = ` [${autoRetireObservations.length} skill(s) auto-retired]`;
+			phaseDigest.summary += retireNote;
+		}
+
 		const result: CuratorPhaseResult = {
 			phase,
 			digest: phaseDigest,
@@ -1112,7 +1255,7 @@ export async function runCuratorPhase(
 			skill_candidates: skillCandidates,
 		};
 
-		// 9. Emit event
+		// 10. Emit event
 		getGlobalEventBus().publish('curator.phase.completed', {
 			phase,
 			compliance_count: complianceObservations.length,

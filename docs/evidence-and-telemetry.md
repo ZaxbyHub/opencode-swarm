@@ -147,6 +147,28 @@ Written to `.swarm/curator-summary.json` after the curator runs each phase (`src
 
 ---
 
+## Curator Findings
+
+Written to `.swarm/evidence/{phase}/curator-findings.json` when the curator LLM emits structured `knowledge_application_findings` blocks (`src/hooks/curator.ts`):
+
+```json
+{
+  "findings": [
+    {
+      "knowledge_id": "abc-123",
+      "expected_behavior": "save_plan requires knowledge directive ack",
+      "observed_behavior": "save_plan called without ack",
+      "verdict": "violated",
+      "evidence_refs": ["task:1.1", "event:save_plan"]
+    }
+  ]
+}
+```
+
+Written atomically (tmp+rename) only when findings are present. Verdict values: `applied`, `ignored`, `violated`, `not_applicable`.
+
+---
+
 ## Drift Reports
 
 Per-phase plan-vs-reality reports at `.swarm/drift-report-phase-<N>.json` (`src/hooks/curator-types.ts:57`):
@@ -173,6 +195,19 @@ Per-phase plan-vs-reality reports at `.swarm/drift-report-phase-<N>.json` (`src/
 ```
 
 Alignment values: `ALIGNED`, `MINOR_DRIFT`, `MAJOR_DRIFT`, `OFF_SPEC`.
+
+**Drift scoring logic** (`src/hooks/curator-drift.ts`):
+
+1. Extracts FR-### requirement IDs from `spec.md`, `plan.md`, and the curator digest
+2. Computes spec coverage ratio: how many spec requirements appear in the plan and digest
+3. Alignment determination:
+   - `<50%` spec coverage in plan → `MAJOR_DRIFT`
+   - `3+` serious compliance warnings → `MAJOR_DRIFT` (takes priority)
+   - `1+` warning or `3+` compliance issues → `MINOR_DRIFT`
+   - Plan covers requirements but digest doesn't reference them → `MINOR_DRIFT`
+   - No spec present → falls back to compliance-count scoring
+
+When spec requirements are present, `injection_summary` includes a coverage note like `[3/12 FRs covered]`.
 
 ---
 
