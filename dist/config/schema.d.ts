@@ -557,6 +557,30 @@ export declare const CuratorConfigSchema: z.ZodObject<{
     min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
+/**
+ * Architectural supervision (issue #893): hierarchical summary review. Agents emit
+ * short structured summaries (summarize_work) that roll up per phase; an expensive
+ * read-only critic (critic_architecture_supervisor) reviews the compressed summaries to
+ * catch cross-task contradictions, drift, and repeated failure loops. The agent itself
+ * is configured via the normal critic override flow; this block configures the feature
+ * and the cheap aggregation pass (not an agent model).
+ */
+export declare const ArchitecturalSupervisionConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    mode: z.ZodDefault<z.ZodEnum<{
+        gate: "gate";
+        advisory: "advisory";
+    }>>;
+    run_on: z.ZodDefault<z.ZodEnum<{
+        phase_complete: "phase_complete";
+    }>>;
+    summary_model: z.ZodOptional<z.ZodString>;
+    max_agent_summary_words: z.ZodDefault<z.ZodNumber>;
+    max_phase_summary_words: z.ZodDefault<z.ZodNumber>;
+    allow_concerns_to_complete: z.ZodDefault<z.ZodBoolean>;
+    persist_knowledge_recommendations: z.ZodDefault<z.ZodBoolean>;
+}, z.core.$strip>;
+export type ArchitecturalSupervisionConfig = z.infer<typeof ArchitecturalSupervisionConfigSchema>;
 export declare const KnowledgeApplicationConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     mode: z.ZodDefault<z.ZodEnum<{
@@ -1223,6 +1247,21 @@ export declare const PluginConfigSchema: z.ZodObject<{
         }>>;
         min_skill_confidence: z.ZodDefault<z.ZodNumber>;
         min_skill_confirmations: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strip>>;
+    architectural_supervision: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        mode: z.ZodDefault<z.ZodEnum<{
+            gate: "gate";
+            advisory: "advisory";
+        }>>;
+        run_on: z.ZodDefault<z.ZodEnum<{
+            phase_complete: "phase_complete";
+        }>>;
+        summary_model: z.ZodOptional<z.ZodString>;
+        max_agent_summary_words: z.ZodDefault<z.ZodNumber>;
+        max_phase_summary_words: z.ZodDefault<z.ZodNumber>;
+        allow_concerns_to_complete: z.ZodDefault<z.ZodBoolean>;
+        persist_knowledge_recommendations: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
     knowledge_application: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;

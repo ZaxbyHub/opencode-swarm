@@ -13,6 +13,7 @@ export const ALL_SUBAGENT_NAMES = [
 	'critic_sounding_board',
 	'critic_drift_verifier',
 	'critic_hallucination_verifier',
+	'critic_architecture_supervisor',
 	'curator_init',
 	'curator_phase',
 	'council_generalist',
@@ -279,6 +280,8 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'skill_inspect',
 		'skill_improve',
 		'knowledge_ack',
+		'summarize_work',
+		'write_architecture_supervisor_evidence',
 		'swarm_command',
 		'lean_turbo_plan_lanes',
 		'lean_turbo_acquire_locks',
@@ -302,6 +305,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'doc_scan',
 		'knowledge_recall',
 		'repo_map',
+		'summarize_work',
 		'swarm_command',
 	],
 	coder: [
@@ -317,6 +321,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'knowledge_add',
 		'knowledge_recall',
 		'repo_map',
+		'summarize_work',
 		'swarm_command',
 	],
 	test_engineer: [
@@ -333,6 +338,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'build_check',
 		'syntax_check',
 		'search',
+		'summarize_work',
 		'swarm_command',
 	],
 	sme: [
@@ -345,6 +351,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'search',
 		'symbols',
 		'knowledge_recall',
+		'summarize_work',
 		'swarm_command',
 	],
 	reviewer: [
@@ -416,6 +423,13 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'req_coverage',
 		'repo_map',
 	],
+	critic_architecture_supervisor: [
+		// Summary-only review (issue #893): reads compressed summaries and knowledge,
+		// emits a verdict. Read-only — never writes, edits, or patches.
+		'retrieve_summary',
+		'knowledge_recall',
+		'repo_map',
+	],
 	critic_oversight: [
 		// Read-only verification tools only. critic_oversight must never write,
 		// edit, patch, or mutate plan/evidence/gates — its output is a verdict.
@@ -451,6 +465,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'symbols',
 		'todo_extract',
 		'knowledge_recall',
+		'summarize_work',
 		'swarm_command',
 	],
 	designer: [
@@ -459,6 +474,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'search',
 		'symbols',
 		'knowledge_recall',
+		'summarize_work',
 		'swarm_command',
 	],
 	// Curator agents are read-only analysis roles.
@@ -519,6 +535,7 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	critic_sounding_board: ['swarm_memory_recall'],
 	critic_drift_verifier: ['swarm_memory_recall'],
 	critic_hallucination_verifier: ['swarm_memory_recall'],
+	critic_architecture_supervisor: ['swarm_memory_recall'],
 	docs: ['swarm_memory_recall', 'swarm_memory_propose'],
 	designer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	curator_init: ['swarm_memory_recall'],
@@ -613,6 +630,10 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	declare_council_criteria:
 		'pre-declare acceptance criteria for a task before the coder starts work; criteria are read back during council evaluation',
 	detect_domains: 'detect which SME domains are relevant for a given text',
+	summarize_work:
+		'emit a short structured summary of completed work (key decisions, assumptions, risks, constraints) at task completion; rolls up per phase for architecture-supervisor review. Advisory, never blocks.',
+	write_architecture_supervisor_evidence:
+		'persist the architecture supervisor verdict for a phase (architect MUST dispatch critic_architecture_supervisor first and collect its JSON verdict; this tool persists only, it does not contact the supervisor)',
 	extract_code_blocks:
 		'extract code blocks from text content and save them to files',
 	gitingest: 'fetch a GitHub repository full content via gitingest.com',
@@ -700,6 +721,9 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	critic_drift_verifier: 'opencode/gpt-5-nano',
 	critic_hallucination_verifier: 'opencode/gpt-5-nano',
 	critic_oversight: 'opencode/gpt-5-nano',
+	// Architecture supervisor is the expensive cross-task reviewer — inherits the
+	// critic model at runtime; this entry mirrors that for config/doc completeness.
+	critic_architecture_supervisor: 'opencode/big-pickle',
 	docs: 'opencode/big-pickle',
 	designer: 'opencode/big-pickle',
 
@@ -774,6 +798,10 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 	critic_oversight: {
 		model: 'opencode/gpt-5-nano',
 		fallback_models: ['opencode/big-pickle'],
+	},
+	critic_architecture_supervisor: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano'],
 	},
 	curator_init: {
 		model: 'opencode/gpt-5-nano',

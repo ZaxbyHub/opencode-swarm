@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.41.0",
+    version: "7.41.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16522,6 +16522,8 @@ var init_tool_names = __esm(() => {
     "swarm_memory_recall",
     "swarm_memory_propose",
     "swarm_command",
+    "summarize_work",
+    "write_architecture_supervisor_evidence",
     "lean_turbo_plan_lanes",
     "lean_turbo_acquire_locks",
     "lean_turbo_runner_status",
@@ -16578,6 +16580,7 @@ var init_constants = __esm(() => {
     "critic_sounding_board",
     "critic_drift_verifier",
     "critic_hallucination_verifier",
+    "critic_architecture_supervisor",
     "curator_init",
     "curator_phase",
     "council_generalist",
@@ -16774,6 +16777,8 @@ var init_constants = __esm(() => {
       "skill_inspect",
       "skill_improve",
       "knowledge_ack",
+      "summarize_work",
+      "write_architecture_supervisor_evidence",
       "swarm_command",
       "lean_turbo_plan_lanes",
       "lean_turbo_acquire_locks",
@@ -16797,6 +16802,7 @@ var init_constants = __esm(() => {
       "doc_scan",
       "knowledge_recall",
       "repo_map",
+      "summarize_work",
       "swarm_command"
     ],
     coder: [
@@ -16812,6 +16818,7 @@ var init_constants = __esm(() => {
       "knowledge_add",
       "knowledge_recall",
       "repo_map",
+      "summarize_work",
       "swarm_command"
     ],
     test_engineer: [
@@ -16828,6 +16835,7 @@ var init_constants = __esm(() => {
       "build_check",
       "syntax_check",
       "search",
+      "summarize_work",
       "swarm_command"
     ],
     sme: [
@@ -16840,6 +16848,7 @@ var init_constants = __esm(() => {
       "search",
       "symbols",
       "knowledge_recall",
+      "summarize_work",
       "swarm_command"
     ],
     reviewer: [
@@ -16911,6 +16920,11 @@ var init_constants = __esm(() => {
       "req_coverage",
       "repo_map"
     ],
+    critic_architecture_supervisor: [
+      "retrieve_summary",
+      "knowledge_recall",
+      "repo_map"
+    ],
     critic_oversight: [
       "diff",
       "diff_summary",
@@ -16944,6 +16958,7 @@ var init_constants = __esm(() => {
       "symbols",
       "todo_extract",
       "knowledge_recall",
+      "summarize_work",
       "swarm_command"
     ],
     designer: [
@@ -16952,6 +16967,7 @@ var init_constants = __esm(() => {
       "search",
       "symbols",
       "knowledge_recall",
+      "summarize_work",
       "swarm_command"
     ],
     curator_init: ["knowledge_recall"],
@@ -17032,6 +17048,8 @@ var init_constants = __esm(() => {
     submit_phase_council_verdicts: "submit pre-collected phase-level council member verdicts for holistic phase synthesis (architect MUST dispatch all 5 council members with phase-scoped context first; this tool synthesizes only, it does not contact members)",
     declare_council_criteria: "pre-declare acceptance criteria for a task before the coder starts work; criteria are read back during council evaluation",
     detect_domains: "detect which SME domains are relevant for a given text",
+    summarize_work: "emit a short structured summary of completed work (key decisions, assumptions, risks, constraints) at task completion; rolls up per phase for architecture-supervisor review. Advisory, never blocks.",
+    write_architecture_supervisor_evidence: "persist the architecture supervisor verdict for a phase (architect MUST dispatch critic_architecture_supervisor first and collect its JSON verdict; this tool persists only, it does not contact the supervisor)",
     extract_code_blocks: "extract code blocks from text content and save them to files",
     gitingest: "fetch a GitHub repository full content via gitingest.com",
     retrieve_summary: "retrieve the full content of a stored tool output summary",
@@ -17118,6 +17136,10 @@ var init_constants = __esm(() => {
       model: "opencode/gpt-5-nano",
       fallback_models: ["opencode/big-pickle"]
     },
+    critic_architecture_supervisor: {
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/gpt-5-nano"]
+    },
     curator_init: {
       model: "opencode/gpt-5-nano",
       fallback_models: ["opencode/big-pickle"]
@@ -17166,7 +17188,7 @@ function getCanonicalAgentRole(agentName, generatedAgentNames) {
 function stripKnownSwarmPrefix(agentName) {
   return getCanonicalAgentRole(agentName);
 }
-var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, MemoryConfigSchema, CuratorConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
+var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, MemoryConfigSchema, CuratorConfigSchema, ArchitecturalSupervisionConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
 var init_schema = __esm(() => {
   init_zod();
   init_constants();
@@ -17685,6 +17707,16 @@ var init_schema = __esm(() => {
     min_skill_confidence: exports_external.number().min(0).max(1).default(0.85),
     min_skill_confirmations: exports_external.number().int().min(1).max(50).default(2)
   });
+  ArchitecturalSupervisionConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(false),
+    mode: exports_external.enum(["advisory", "gate"]).default("advisory"),
+    run_on: exports_external.enum(["phase_complete"]).default("phase_complete"),
+    summary_model: exports_external.string().min(1).optional(),
+    max_agent_summary_words: exports_external.number().int().min(20).max(500).default(100),
+    max_phase_summary_words: exports_external.number().int().min(50).max(1000).default(250),
+    allow_concerns_to_complete: exports_external.boolean().default(true),
+    persist_knowledge_recommendations: exports_external.boolean().default(false)
+  });
   KnowledgeApplicationConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(true),
     mode: exports_external.enum(["warn", "enforce"]).default("warn"),
@@ -17879,6 +17911,7 @@ var init_schema = __esm(() => {
     knowledge: KnowledgeConfigSchema.optional(),
     memory: MemoryConfigSchema.optional(),
     curator: CuratorConfigSchema.optional(),
+    architectural_supervision: ArchitecturalSupervisionConfigSchema.optional(),
     knowledge_application: KnowledgeApplicationConfigSchema.optional(),
     skill_improver: SkillImproverConfigSchema.optional(),
     spec_writer: SpecWriterConfigSchema.optional(),
@@ -36769,7 +36802,7 @@ async function processRetractions(retractions, directory) {
     }
   }
 }
-async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, config3) {
+async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, config3, options) {
   const knowledgePath = resolveSwarmKnowledgePath(directory);
   const existingEntries = await readKnowledge(knowledgePath) ?? [];
   let stored = 0;
@@ -36851,7 +36884,9 @@ async function curateAndStoreSwarm(lessons, projectName, phaseInfo, directory, c
     existingEntries.push(entry);
   }
   await enforceKnowledgeCap(knowledgePath, config3.swarm_max_entries);
-  await _internals9.runAutoPromotion(directory, config3);
+  if (!options?.skipAutoPromotion) {
+    await _internals9.runAutoPromotion(directory, config3);
+  }
   return { stored, skipped, rejected };
 }
 async function runAutoPromotion(directory, config3) {
@@ -46038,7 +46073,7 @@ function normalizeMemoryAgentRole(agentRole) {
   const base = stripKnownSwarmPrefix(agentRole ?? "architect");
   if (base === "reviewer" || base === "test_engineer")
     return "qa";
-  if (base === "critic" || base === "critic_sounding_board" || base === "critic_drift_verifier" || base === "critic_hallucination_verifier") {
+  if (base === "critic" || base === "critic_sounding_board" || base === "critic_drift_verifier" || base === "critic_hallucination_verifier" || base === "critic_architecture_supervisor") {
     return "security";
   }
   if (base === "curator_init" || base === "curator_phase")

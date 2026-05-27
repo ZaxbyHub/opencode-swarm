@@ -155,6 +155,41 @@ describe('multi-swarm prefix registration for new agents', () => {
 		}
 	});
 
+	it('creates prefixed critic_architecture_supervisor in each swarm, inheriting the per-swarm critic model (#893)', () => {
+		const config = {
+			swarms: {
+				local: { name: 'Local' },
+				mega: {
+					name: 'Mega',
+					agents: { critic: { model: 'mega/critic-model' } },
+				},
+			},
+		} as unknown as PluginConfig;
+
+		const configs = getAgentConfigs(config);
+
+		for (const prefix of ['local', 'mega']) {
+			const name = `${prefix}_critic_architecture_supervisor`;
+			expect(configs[name]).toBeDefined();
+			expect(configs[name].mode).toBe('subagent');
+			expect(configs[name].model).toBeDefined();
+		}
+
+		// Per-swarm critic-model inheritance: mega overrides critic, local does not.
+		expect(configs.mega_critic_architecture_supervisor.model).toBe(
+			'mega/critic-model',
+		);
+		expect(configs.local_critic_architecture_supervisor.model).toBe(
+			'opencode/big-pickle',
+		);
+
+		// Invariant #11: at least one prefixed architect remains primary.
+		const primaryArchitects = Object.keys(configs).filter(
+			(n) => n.endsWith('_architect') && configs[n].mode === 'primary',
+		);
+		expect(primaryArchitects.length).toBeGreaterThan(0);
+	});
+
 	it('default (unprefixed) registration still produces skill_improver and spec_writer as subagents', () => {
 		const configs = getAgentConfigs();
 		expect(configs.skill_improver).toBeDefined();

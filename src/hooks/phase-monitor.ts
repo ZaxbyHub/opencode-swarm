@@ -119,6 +119,25 @@ export function createPhaseMonitorHook(
 			const previousPhase = lastKnownPhase;
 			lastKnownPhase = currentPhase;
 
+			// Architectural supervision (issue #893): cheap, deterministic rollup of the
+			// just-completed phase's agent summaries. Opt-in, isolated, and best-effort —
+			// must never disrupt preflight.
+			try {
+				const { loadPluginConfigWithMeta } = await import('../config/index.js');
+				const { config } = loadPluginConfigWithMeta(directory);
+				if (config.architectural_supervision?.enabled) {
+					const { aggregatePhaseSummary } = await import(
+						'../summaries/aggregate.js'
+					);
+					await aggregatePhaseSummary(directory, previousPhase, {
+						maxPhaseSummaryWords:
+							config.architectural_supervision.max_phase_summary_words,
+					});
+				}
+			} catch {
+				// summary aggregation failures must never propagate
+			}
+
 			// Count completed and total tasks for the previous phase
 			const phase = plan.phases.find((p) => p.id === previousPhase);
 			const completedTasks =

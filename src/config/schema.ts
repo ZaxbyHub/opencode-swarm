@@ -1051,6 +1051,37 @@ export const CuratorConfigSchema = z.object({
 
 export type CuratorConfig = z.infer<typeof CuratorConfigSchema>;
 
+/**
+ * Architectural supervision (issue #893): hierarchical summary review. Agents emit
+ * short structured summaries (summarize_work) that roll up per phase; an expensive
+ * read-only critic (critic_architecture_supervisor) reviews the compressed summaries to
+ * catch cross-task contradictions, drift, and repeated failure loops. The agent itself
+ * is configured via the normal critic override flow; this block configures the feature
+ * and the cheap aggregation pass (not an agent model).
+ */
+export const ArchitecturalSupervisionConfigSchema = z.object({
+	/** Enable summary aggregation and architecture-supervisor review. Default: false (opt-in). [Chunk B: consumed] */
+	enabled: z.boolean().default(false),
+	/** 'advisory' attaches findings but never blocks; 'gate' lets phase_complete block. Default: advisory. [Chunk D: consumed by the phase-complete gate] */
+	mode: z.enum(['advisory', 'gate']).default('advisory'),
+	/** When to run the expensive supervisor. [Declared for forward compatibility; only 'phase_complete' is supported and no code branches on this value yet] */
+	run_on: z.enum(['phase_complete']).default('phase_complete'),
+	/** Optional cheap model for an LLM compression pass over summaries (NOT the supervisor agent). [Declared for forward compatibility; aggregation is deterministic today — no behavior is implemented yet] */
+	summary_model: z.string().min(1).optional(),
+	/** Cap for per-agent summaries (words). Default: 100. [Chunk B: consumed by summarize_work] */
+	max_agent_summary_words: z.number().int().min(20).max(500).default(100),
+	/** Cap for the per-phase rollup summary (words). Default: 250. [Chunk B: consumed by aggregatePhaseSummary] */
+	max_phase_summary_words: z.number().int().min(50).max(1000).default(250),
+	/** Whether a CONCERNS verdict still allows phase_complete under gate mode. Default: true. [Chunk D: consumed by the phase-complete gate] */
+	allow_concerns_to_complete: z.boolean().default(true),
+	/** Propose supervisor knowledge recommendations as candidate knowledge. Default: false. [Chunk E: consumed by the feedback path] */
+	persist_knowledge_recommendations: z.boolean().default(false),
+});
+
+export type ArchitecturalSupervisionConfig = z.infer<
+	typeof ArchitecturalSupervisionConfigSchema
+>;
+
 // Knowledge-application enforcement configuration (v2)
 export const KnowledgeApplicationConfigSchema = z.object({
 	/** Enable application tracking + acknowledgment contract. Default: true */
@@ -1547,6 +1578,9 @@ export const PluginConfigSchema = z.object({
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),
+
+	// Architectural supervision — hierarchical summary review (issue #893)
+	architectural_supervision: ArchitecturalSupervisionConfigSchema.optional(),
 
 	// v2: Knowledge-application contract (warn|enforce, ack tracking)
 	knowledge_application: KnowledgeApplicationConfigSchema.optional(),

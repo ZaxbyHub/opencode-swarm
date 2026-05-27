@@ -22,10 +22,10 @@ describe('agent-categories', () => {
 	});
 
 	describe('AGENT_CATEGORY map', () => {
-		test('has exactly 12 entries', () => {
-			// v6.36.0: added critic_drift_verifier; v6.73.0: added critic_hallucination_verifier
+		test('has exactly 13 entries', () => {
+			// v6.36.0: added critic_drift_verifier; v6.73.0: added critic_hallucination_verifier; #893: added critic_architecture_supervisor
 			const entries = Object.entries(AGENT_CATEGORY);
-			expect(entries).toHaveLength(12);
+			expect(entries).toHaveLength(13);
 		});
 
 		test('architect maps to orchestrator', () => {

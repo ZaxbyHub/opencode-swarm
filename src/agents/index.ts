@@ -345,6 +345,7 @@ function createSwarmAgents(
 			pluginConfig?.council,
 			pluginConfig?.ui_review,
 			pluginConfig?.memory?.enabled === true,
+			pluginConfig?.architectural_supervision,
 		);
 		architect.name = prefixName('architect');
 
@@ -498,6 +499,20 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			'hallucination_verifier' as CriticRole,
 		);
 		critic.name = prefixName('critic_hallucination_verifier');
+		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5c-ter. Create Critic Architecture Supervisor (issue #893)
+	if (
+		!isAgentDisabled('critic_architecture_supervisor', swarmAgents, swarmPrefix)
+	) {
+		const critic = createCriticAgent(
+			swarmAgents?.critic_architecture_supervisor?.model ?? getModel('critic'),
+			undefined,
+			undefined,
+			'architecture_supervisor' as CriticRole,
+		);
+		critic.name = prefixName('critic_architecture_supervisor');
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 

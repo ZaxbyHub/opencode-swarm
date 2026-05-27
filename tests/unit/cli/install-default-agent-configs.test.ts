@@ -65,6 +65,7 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			'critic_sounding_board',
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
+			'critic_architecture_supervisor',
 			'critic_oversight',
 			'curator_init',
 			'curator_phase',
@@ -72,12 +73,12 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 			'spec_writer',
 		]);
 
-		test('contains all expected pipeline/QA/support agents (16 entries)', () => {
+		test('contains all expected pipeline/QA/support agents (17 entries)', () => {
 			const actualKeys = new Set(Object.keys(DEFAULT_AGENT_CONFIGS));
 			for (const agent of EXPECTED_AGENTS) {
 				expect(actualKeys).toContain(agent);
 			}
-			expect(Object.keys(DEFAULT_AGENT_CONFIGS)).toHaveLength(16);
+			expect(Object.keys(DEFAULT_AGENT_CONFIGS)).toHaveLength(17);
 		});
 
 		test('does NOT contain architect (orchestrator has no DEFAULT_AGENT_CONFIGS entry)', () => {

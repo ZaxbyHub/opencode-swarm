@@ -207,6 +207,29 @@ Optional knowledge-base curator that validates agent output against project know
 
 Curator is optional and disabled by default. When enabled, it writes `.swarm/curator-summary.json` and `.swarm/drift-report-phase-N.json` to track knowledge alignment and drift detection.
 
+### Architectural supervision
+
+Hierarchical summary review (issue #893). Agents emit short structured summaries via the
+`summarize_work` tool; these roll up per phase and are reviewed by the
+`critic_architecture_supervisor` critic role to catch cross-task contradictions, drift,
+and repeated failure loops. The supervisor agent inherits the `critic` model unless you
+override `agents.critic_architecture_supervisor.model`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master switch; enables per-phase summary aggregation |
+| `mode` | `advisory` \| `gate` | `advisory` | `advisory` never blocks; `gate` lets `phase_complete` block on a REJECT verdict |
+| `run_on` | `phase_complete` | `phase_complete` | When the expensive supervisor runs |
+| `summary_model` | string | _(unset)_ | Optional cheap model for an LLM compression pass (deterministic aggregation today) |
+| `max_agent_summary_words` | number | `100` | Word cap for per-agent summaries |
+| `max_phase_summary_words` | number | `250` | Word cap for the per-phase rollup |
+| `allow_concerns_to_complete` | boolean | `true` | Under `gate` mode, whether a CONCERNS verdict still allows completion |
+| `persist_knowledge_recommendations` | boolean | `false` | Propose supervisor knowledge recommendations as candidate knowledge |
+
+Disabled by default. When enabled, aggregation writes
+`.swarm/evidence/{phase}/phase-architecture-summary.json`; the supervisor (later chunk)
+writes `.swarm/evidence/{phase}/architecture-supervisor.json`.
+
 ### Memory
 
 Optional scoped memory substrate for recall and proposal-only memory writes.

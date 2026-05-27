@@ -11,7 +11,9 @@ export declare function isWriteToEvidenceFile(input: unknown): boolean;
  */
 export declare function curateAndStoreSwarm(lessons: string[], projectName: string, phaseInfo: {
     phase_number: number;
-}, directory: string, config: KnowledgeConfig): Promise<{
+}, directory: string, config: KnowledgeConfig, options?: {
+    skipAutoPromotion?: boolean;
+}): Promise<{
     stored: number;
     skipped: number;
     rejected: number;

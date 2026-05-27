@@ -294,6 +294,7 @@ export async function curateAndStoreSwarm(
 	phaseInfo: { phase_number: number },
 	directory: string,
 	config: KnowledgeConfig,
+	options?: { skipAutoPromotion?: boolean },
 ): Promise<{ stored: number; skipped: number; rejected: number }> {
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 	const existingEntries =
@@ -407,8 +408,13 @@ export async function curateAndStoreSwarm(
 	// Enforce swarm_max_entries cap (FIFO: drop oldest when exceeded)
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
 
-	// Run auto-promotion after processing all lessons
-	await _internals.runAutoPromotion(directory, config);
+	// Run auto-promotion after processing all lessons. Callers that only want to PROPOSE
+	// candidate knowledge (e.g. the architecture supervisor's recommendations) pass
+	// skipAutoPromotion to avoid promoting unrelated pre-existing candidates as a side
+	// effect of this write (issue #893).
+	if (!options?.skipAutoPromotion) {
+		await _internals.runAutoPromotion(directory, config);
+	}
 
 	return { stored, skipped, rejected };
 }

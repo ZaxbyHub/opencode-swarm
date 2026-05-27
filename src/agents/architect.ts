@@ -321,6 +321,8 @@ The ONLY valid completion signal is: all required gate agents returned positive 
 
 {{COUNCIL_WORKFLOW}}
 
+{{ARCH_SUPERVISION_WORKFLOW}}
+
 Emit 'architect_loop_detected' when triggering sounding board for 3rd time on same impasse.
 
 6g. **META.SUMMARY CONVENTION** — When emitting state updates to .swarm/ files or events.jsonl, include:
@@ -1397,6 +1399,57 @@ export interface UIReviewConfig {
 }
 
 /**
+ * Subset of PluginConfig.architectural_supervision needed to gate the architecture
+ * supervision workflow block in the architect prompt (issue #893). Only `enabled` and
+ * `mode` drive the prompt; word caps / feedback toggles are enforced elsewhere.
+ */
+export interface ArchitectureSupervisionWorkflowConfig {
+	enabled?: boolean;
+	mode?: 'advisory' | 'gate';
+}
+
+/**
+ * Build the architecture-supervision workflow block. Returns the full block when
+ * `enabled === true`, otherwise the empty string (byte-for-byte non-regression when the
+ * feature is off). Mirrors buildCouncilWorkflow's empty-string contract.
+ */
+export function buildArchitectureSupervisionWorkflow(
+	arch?: ArchitectureSupervisionWorkflowConfig,
+): string {
+	if (arch?.enabled !== true) return '';
+
+	const gateLine =
+		arch.mode === 'gate'
+			? 'Gate mode is ACTIVE: `phase_complete` will BLOCK on a missing/stale/REJECT verdict (and on CONCERNS when `allow_concerns_to_complete` is false). You MUST run this review before calling `phase_complete`.'
+			: 'Advisory mode: the review never blocks `phase_complete`, but you MUST still run it and act on REJECT/CONCERNS findings.';
+
+	return `## ARCHITECTURE SUPERVISION (summary-level cross-task review)
+
+When \`architectural_supervision\` is enabled, an expensive read-only supervisor reviews
+the COMPRESSED per-phase summaries (not code) to catch cross-task contradictions, drift,
+repeated failure loops, and knowledge gaps that no per-task reviewer sees. ${gateLine}
+
+### WORKER SUMMARIES (continuous)
+Every delegated worker should call \`summarize_work\` at task completion with a short
+(<=100 word) structured summary: key decisions, assumptions, risks, and any constraints
+observed/violated. Remind workers to do so in their task briefs. These roll up per phase
+automatically — advisory and never blocking.
+
+### MANDATORY SEQUENCE — at phase end, after Stage B passes, before \`phase_complete\`
+1. DISPATCH \`critic_architecture_supervisor\` as a single Agent task. Pass it the phase's
+   aggregated summary (\`.swarm/evidence/{phase}/phase-architecture-summary.json\`) plus the
+   per-agent summaries — NOT the code. It reads summaries only.
+2. COLLECT its strict-JSON verdict: \`{ verdict: APPROVE|CONCERNS|REJECT, findings[],
+   knowledge_recommendations[] }\`.
+3. PERSIST it by calling \`write_architecture_supervisor_evidence\` with that verdict,
+   findings, and knowledge_recommendations. This writes the sidecar the gate reads.
+4. Act on the verdict: address REJECT/CONCERNS findings before completing the phase.
+
+Do NOT dispatch the supervisor yourself as a reviewer of code — it is summary-only.
+\`write_architecture_supervisor_evidence\` persists only; it does not run the supervisor.`;
+}
+
+/**
  * Build the Work Complete Council four-phase workflow block. Returns the full
  * block text when council.enabled === true, otherwise the empty string. The
  * empty-string return path guarantees byte-for-byte non-regression when the
@@ -1832,6 +1885,7 @@ export function createArchitectAgent(
 	council?: CouncilWorkflowConfig,
 	uiReview?: UIReviewConfig,
 	memoryEnabled = false,
+	architecturalSupervision?: ArchitectureSupervisionWorkflowConfig,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -1894,6 +1948,24 @@ export function createArchitectAgent(
 	} else {
 		// Custom prompt without placeholder — append so council is still taught.
 		prompt = `${prompt ?? ''}\n\n${councilBlock}`;
+	}
+
+	// Architecture supervision workflow (issue #893) — same collapse-when-empty contract
+	// as council so a disabled feature leaves the prompt byte-for-byte unchanged.
+	const archBlock = buildArchitectureSupervisionWorkflow(
+		architecturalSupervision,
+	);
+	const hasArchPlaceholder =
+		prompt?.includes('{{ARCH_SUPERVISION_WORKFLOW}}') === true;
+	if (archBlock === '') {
+		prompt = prompt?.replace(
+			/\n\n\{\{ARCH_SUPERVISION_WORKFLOW\}\}\n\n/g,
+			'\n\n',
+		);
+	} else if (hasArchPlaceholder) {
+		prompt = prompt?.replace(/\{\{ARCH_SUPERVISION_WORKFLOW\}\}/g, archBlock);
+	} else {
+		prompt = `${prompt ?? ''}\n\n${archBlock}`;
 	}
 
 	// Handle adversarial testing conditional based on config

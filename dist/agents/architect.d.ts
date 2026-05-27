@@ -38,6 +38,21 @@ export interface UIReviewConfig {
     enabled?: boolean;
 }
 /**
+ * Subset of PluginConfig.architectural_supervision needed to gate the architecture
+ * supervision workflow block in the architect prompt (issue #893). Only `enabled` and
+ * `mode` drive the prompt; word caps / feedback toggles are enforced elsewhere.
+ */
+export interface ArchitectureSupervisionWorkflowConfig {
+    enabled?: boolean;
+    mode?: 'advisory' | 'gate';
+}
+/**
+ * Build the architecture-supervision workflow block. Returns the full block when
+ * `enabled === true`, otherwise the empty string (byte-for-byte non-regression when the
+ * feature is off). Mirrors buildCouncilWorkflow's empty-string contract.
+ */
+export declare function buildArchitectureSupervisionWorkflow(arch?: ArchitectureSupervisionWorkflowConfig): string;
+/**
  * Build the Work Complete Council four-phase workflow block. Returns the full
  * block text when council.enabled === true, otherwise the empty string. The
  * empty-string return path guarantees byte-for-byte non-regression when the
@@ -55,4 +70,4 @@ export declare function buildCouncilWorkflow(council?: CouncilWorkflowConfig): s
  * BRAINSTORM, and PLAN inline paths stay in lockstep.
  */
 export declare function buildQaGateSelectionDialogue(modeLabel: 'BRAINSTORM' | 'SPECIFY' | 'PLAN'): string;
-export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig, uiReview?: UIReviewConfig, memoryEnabled?: boolean): AgentDefinition;
+export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig, uiReview?: UIReviewConfig, memoryEnabled?: boolean, architecturalSupervision?: ArchitectureSupervisionWorkflowConfig): AgentDefinition;

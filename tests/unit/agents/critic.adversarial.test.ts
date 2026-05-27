@@ -381,11 +381,12 @@ describe('adversarial: createCriticAgent', () => {
 			expect(exports).not.toContain('CURATOR_DRIFT_PROMPT');
 		});
 
-		it('should only export the five expected prompt constants', async () => {
+		it('should only export the six expected prompt constants', async () => {
 			const mod = await import('../../../src/agents/critic');
 			const exports = Object.keys(mod);
 			const promptExports = exports.filter((e) => e.includes('PROMPT')).sort(); // Sort for consistent comparison
 			expect(promptExports).toEqual([
+				'ARCHITECTURE_SUPERVISOR_PROMPT',
 				'AUTONOMOUS_OVERSIGHT_PROMPT',
 				'HALLUCINATION_VERIFIER_PROMPT',
 				'PHASE_DRIFT_VERIFIER_PROMPT',

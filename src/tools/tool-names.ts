@@ -75,6 +75,8 @@ export type ToolName =
 	| 'swarm_memory_recall'
 	| 'swarm_memory_propose'
 	| 'swarm_command'
+	| 'summarize_work'
+	| 'write_architecture_supervisor_evidence'
 	| 'lean_turbo_plan_lanes'
 	| 'lean_turbo_acquire_locks'
 	| 'lean_turbo_runner_status'
@@ -154,6 +156,8 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'swarm_memory_recall',
 	'swarm_memory_propose',
 	'swarm_command',
+	'summarize_work',
+	'write_architecture_supervisor_evidence',
 	'lean_turbo_plan_lanes',
 	'lean_turbo_acquire_locks',
 	'lean_turbo_runner_status',

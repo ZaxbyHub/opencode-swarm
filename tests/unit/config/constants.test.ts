@@ -52,7 +52,8 @@ describe('constants.ts', () => {
 			expect(ALL_SUBAGENT_NAMES).toContain('council_domain_expert');
 			expect(ALL_SUBAGENT_NAMES).toContain('skill_improver');
 			expect(ALL_SUBAGENT_NAMES).toContain('spec_writer');
-			expect(ALL_SUBAGENT_NAMES).toHaveLength(19);
+			expect(ALL_SUBAGENT_NAMES).toContain('critic_architecture_supervisor');
+			expect(ALL_SUBAGENT_NAMES).toHaveLength(20);
 		});
 	});
 
@@ -65,7 +66,7 @@ describe('constants.ts', () => {
 			for (const name of ALL_SUBAGENT_NAMES) {
 				expect(ALL_AGENT_NAMES).toContain(name);
 			}
-			expect(ALL_AGENT_NAMES).toHaveLength(20);
+			expect(ALL_AGENT_NAMES).toHaveLength(21);
 		});
 	});
 
@@ -152,9 +153,9 @@ describe('constants.ts', () => {
 			}
 		});
 
-		it('has exactly 17 entries (16 subagents + default, no architect or council role-agents)', () => {
-			// v6.14: architect removed; v6.36.0: +critic_drift_verifier; v6.42.1: +curator_init/phase; v6.x.x: +critic_oversight; v6.72.x: +critic_hallucination_verifier; v7.0.2: council_member/moderator removed (council agents use reviewer/critic/sme model keys instead); v7.10.0: +skill_improver +spec_writer
-			expect(Object.keys(DEFAULT_MODELS)).toHaveLength(17);
+		it('has exactly 18 entries (17 subagents + default, no architect or council role-agents)', () => {
+			// v6.14: architect removed; v6.36.0: +critic_drift_verifier; v6.42.1: +curator_init/phase; v6.x.x: +critic_oversight; v6.72.x: +critic_hallucination_verifier; v7.0.2: council_member/moderator removed (council agents use reviewer/critic/sme model keys instead); v7.10.0: +skill_improver +spec_writer; #893: +critic_architecture_supervisor
+			expect(Object.keys(DEFAULT_MODELS)).toHaveLength(18);
 		});
 	});
 

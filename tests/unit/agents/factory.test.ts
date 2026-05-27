@@ -25,9 +25,9 @@ afterEach(() => {
 
 describe('createAgents', () => {
 	describe('no config', () => {
-		it('returns 16 agents (docs enabled by default, designer opt-in)', () => {
+		it('returns 17 agents (docs enabled by default, designer opt-in)', () => {
 			const agents = createAgents();
-			expect(agents).toHaveLength(16);
+			expect(agents).toHaveLength(17);
 		});
 
 		it('agent names are correct', () => {
@@ -37,6 +37,7 @@ describe('createAgents', () => {
 				'architect',
 				'coder',
 				'critic',
+				'critic_architecture_supervisor',
 				'critic_drift_verifier',
 				'critic_hallucination_verifier',
 				'critic_oversight',
@@ -322,8 +323,8 @@ describe('createAgents', () => {
 			const agents = createAgents(config as unknown as PluginConfig);
 			const sme = agents.find((a) => a.name === 'sme');
 			expect(sme).toBeUndefined();
-			// 16 agents - 1 disabled = 15 agents (docs still included by default)
-			expect(agents).toHaveLength(15);
+			// 17 agents - 1 disabled = 16 agents (docs still included by default)
+			expect(agents).toHaveLength(16);
 		});
 	});
 
@@ -341,6 +342,7 @@ describe('createAgents', () => {
 				'architect',
 				'coder',
 				'critic',
+				'critic_architecture_supervisor',
 				'critic_drift_verifier',
 				'critic_hallucination_verifier',
 				'critic_oversight',
@@ -373,6 +375,7 @@ describe('createAgents', () => {
 				'local_architect',
 				'local_coder',
 				'local_critic',
+				'local_critic_architecture_supervisor',
 				'local_critic_drift_verifier',
 				'local_critic_hallucination_verifier',
 				'local_critic_oversight',
@@ -570,7 +573,7 @@ describe('getAgentConfigs', () => {
 
 		const configs = getAgentConfigs(config as unknown as PluginConfig);
 		expect(configs.sme).toBeUndefined();
-		// 16 agents - 1 disabled = 15 agents (docs included by default)
-		expect(Object.keys(configs)).toHaveLength(15);
+		// 17 agents - 1 disabled = 16 agents (docs included by default)
+		expect(Object.keys(configs)).toHaveLength(16);
 	});
 });

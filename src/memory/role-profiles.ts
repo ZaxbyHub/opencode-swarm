@@ -96,7 +96,8 @@ export function normalizeMemoryAgentRole(
 		base === 'critic' ||
 		base === 'critic_sounding_board' ||
 		base === 'critic_drift_verifier' ||
-		base === 'critic_hallucination_verifier'
+		base === 'critic_hallucination_verifier' ||
+		base === 'critic_architecture_supervisor'
 	) {
 		return 'security';
 	}
