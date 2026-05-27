@@ -119,7 +119,18 @@ function createEvidenceDocumentId(input: {
 
 function normalizeEvidenceText(text: string): string {
 	const normalized = redactSecrets(text.replace(/\s+/g, ' ').trim());
-	return normalized.slice(0, MAX_EVIDENCE_TEXT_LENGTH);
+	return truncateEvidenceText(normalized, MAX_EVIDENCE_TEXT_LENGTH);
+}
+
+function truncateEvidenceText(text: string, maxLength: number): string {
+	if (text.length <= maxLength) return text;
+	const truncated = text.slice(0, maxLength);
+	const lastPlaceholderStart = truncated.lastIndexOf('[REDACTED:');
+	const lastPlaceholderEnd = truncated.lastIndexOf(']');
+	if (lastPlaceholderStart > lastPlaceholderEnd) {
+		return truncated.slice(0, lastPlaceholderStart).trimEnd();
+	}
+	return truncated;
 }
 
 function normalizeOptional(value: string | undefined): string | undefined {

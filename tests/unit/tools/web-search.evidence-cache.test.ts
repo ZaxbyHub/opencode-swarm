@@ -109,4 +109,84 @@ describe('web_search evidence cache integration', () => {
 			createdBy: 'web_search',
 		});
 	});
+
+	test('keeps evidence refs aligned when empty snippets are filtered out', async () => {
+		mockSearch.mockResolvedValue([
+			{
+				title: 'First',
+				url: 'https://example.test/a',
+				snippet: 'valid first result',
+			},
+			{
+				title: 'Blank',
+				url: 'https://example.test/b',
+				snippet: '   ',
+			},
+			{
+				title: 'Third',
+				url: 'https://example.test/c',
+				snippet: 'also valid third result',
+			},
+		]);
+		const { web_search } = await import('../../../src/tools/web-search.js');
+		const wrapped = web_search as unknown as {
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
+		};
+
+		const result = await wrapped.execute(
+			{ query: 'alignment docs', max_results: 3 },
+			{ directory: tmpDir },
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(true);
+		expect(parsed.evidence.refs).toHaveLength(2);
+		expect(parsed.results[0].evidenceRef).toBe(parsed.evidence.refs[0]);
+		expect(parsed.results[1].evidenceRef).toBeUndefined();
+		expect(parsed.results[2].evidenceRef).toBe(parsed.evidence.refs[1]);
+		expect(parsed.results[0].evidenceRef).not.toBe(
+			parsed.results[2].evidenceRef,
+		);
+
+		const cachePath = path.join(
+			tmpDir,
+			'.swarm',
+			'evidence-cache',
+			'documents.jsonl',
+		);
+		const rows = (await fs.readFile(cachePath, 'utf-8'))
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+
+		expect(rows.map((row) => [row.url, row.ref])).toEqual([
+			['https://example.test/a', parsed.results[0].evidenceRef],
+			['https://example.test/c', parsed.results[2].evidenceRef],
+		]);
+	});
+
+	test('returns structured disabled result when council general search is off', async () => {
+		mockLoadPluginConfig.mockReturnValue(
+			buildConfig({
+				enabled: false,
+			}),
+		);
+		const { web_search } = await import('../../../src/tools/web-search.js');
+		const wrapped = web_search as unknown as {
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
+		};
+
+		const result = await wrapped.execute(
+			{ query: 'vitest docs' },
+			{ directory: tmpDir },
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed).toMatchObject({
+			success: false,
+			reason: 'council_general_disabled',
+		});
+		expect(mockCreateProvider).not.toHaveBeenCalled();
+		expect(mockSearch).not.toHaveBeenCalled();
+	});
 });

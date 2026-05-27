@@ -57,7 +57,7 @@ export function validateCuratorPromotableMemory(record: MemoryRecord): void {
 	}
 	if (!DURABLE_MEMORY_KINDS.has(record.kind)) {
 		throw new MemoryValidationError(
-			'curator memory promotions must use durable fact kinds; store API docs, search results, and raw evidence in the evidence cache',
+			'curator memory promotions must use durable fact kinds; store raw docs, search results, and other bulky source material as evidence records instead',
 		);
 	}
 	if (

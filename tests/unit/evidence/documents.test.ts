@@ -75,4 +75,65 @@ describe('evidence document cache', () => {
 		expect(record?.text).toContain('[REDACTED:');
 		expect(record?.text).not.toContain('abcdefghijklmnopqrstuvwxyz12345');
 	});
+
+	test('returns an empty result without creating cache rows for empty inputs', async () => {
+		const tmpDir = await fs.realpath(
+			await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-evidence-empty-')),
+		);
+		try {
+			const result = await writeEvidenceDocuments(
+				tmpDir,
+				[],
+				() => new Date('2026-05-27T10:00:00.000Z'),
+			);
+
+			expect(result).toEqual({
+				path: '.swarm/evidence-cache/documents.jsonl',
+				records: [],
+				refs: [],
+			});
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('truncates oversized evidence text to the cache limit', () => {
+		const record = createEvidenceDocumentRecord(
+			{
+				sourceType: 'api_docs',
+				text: 'x'.repeat(5000),
+			},
+			'2026-05-27T10:00:00.000Z',
+		);
+
+		expect(record?.text).toHaveLength(4000);
+		expect(record?.text).toBe('x'.repeat(4000));
+	});
+
+	test('drops records when both text and snippet are empty', () => {
+		const record = createEvidenceDocumentRecord(
+			{
+				sourceType: 'crawl',
+				text: '',
+				snippet: '   ',
+			},
+			'2026-05-27T10:00:00.000Z',
+		);
+
+		expect(record).toBeNull();
+	});
+
+	test('does not truncate inside redaction placeholders', () => {
+		const record = createEvidenceDocumentRecord(
+			{
+				sourceType: 'manual',
+				text: `${'x'.repeat(3985)} Authorization: Bearer abcdefghijklmnopqrstuvwxyz12345`,
+			},
+			'2026-05-27T10:00:00.000Z',
+		);
+
+		expect(record?.text).toHaveLength(3985);
+		expect(record?.text).not.toContain('[REDACTED:');
+		expect(record?.text).not.toContain('abcdefghijklmnopqrstuvwxyz12345');
+	});
 });

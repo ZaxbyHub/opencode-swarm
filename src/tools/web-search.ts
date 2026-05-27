@@ -196,9 +196,8 @@ async function captureSearchEvidence(
 			})),
 		);
 		const refByUrl = new Map<string, string>();
-		for (const [index, result] of results.entries()) {
-			const ref = written.records[index]?.ref;
-			if (ref) refByUrl.set(result.url, ref);
+		for (const record of written.records) {
+			if (record.url) refByUrl.set(record.url, record.ref);
 		}
 		return {
 			stored: written.records.length > 0,

@@ -269,7 +269,7 @@ describe('MemoryGateway', () => {
 						},
 					},
 				}),
-			).rejects.toThrow('evidence cache');
+			).rejects.toThrow('evidence records');
 		} finally {
 			await gateway.dispose();
 		}

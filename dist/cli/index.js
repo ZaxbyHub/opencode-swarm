@@ -46557,7 +46557,7 @@ function validateCuratorPromotableMemory(record3) {
     throw new MemoryValidationError("curator memory promotions must be durable facts");
   }
   if (!DURABLE_MEMORY_KINDS.has(record3.kind)) {
-    throw new MemoryValidationError("curator memory promotions must use durable fact kinds; store API docs, search results, and raw evidence in the evidence cache");
+    throw new MemoryValidationError("curator memory promotions must use durable fact kinds; store raw docs, search results, and other bulky source material as evidence records instead");
   }
   if (normalizeMemoryText(record3.text).length > CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH) {
     throw new MemoryValidationError(`curator memory promotions must be concise durable facts under ${CURATOR_PROMOTED_MEMORY_MAX_TEXT_LENGTH} characters`);

@@ -133,7 +133,7 @@ If a durable fact matters, propose only the fact and cite the evidence ref:
 This repo uses Vitest for frontend unit tests. Evidence: evidence-cache:evd_...
 ```
 
-Supported kinds include:
+Proposal-accepted kinds include:
 
 - `user_preference`
 - `project_fact`
@@ -148,7 +148,24 @@ Supported kinds include:
 - `todo`
 - `scratch`
 
-Durable project, repository, API, evidence, and security memories require source evidence such as a file path, commit SHA, URL, test output reference, or manual reference.
+Curator-promoted durable memories are limited to concise durable fact kinds:
+
+- `user_preference`
+- `project_fact`
+- `architecture_decision`
+- `repo_convention`
+- `code_pattern`
+- `test_pattern`
+- `failure_pattern`
+- `security_note`
+
+Raw `api_finding` and `evidence` proposals are accepted as proposal records so
+they can be reviewed, rejected, or rephrased, but they are not directly
+promotable into durable memory. Keep raw API docs, search results, crawled
+pages, and bulky evidence in `.swarm/evidence-cache/documents.jsonl`; promote
+only the concise durable fact they support.
+
+Durable project, repository, and security memories require source evidence such as a file path, commit SHA, URL, test output reference, evidence ref, or manual reference.
 
 ## Scopes
 
