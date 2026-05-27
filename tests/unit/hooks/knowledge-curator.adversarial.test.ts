@@ -13,9 +13,13 @@ import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 // Create local mock variables for knowledge-store
 const mockAppendKnowledge = mock(async () => {});
 const mockAppendRejectedLesson = mock(async () => {});
-const mockFindNearDuplicate = mock((_s: string, _a: unknown[], _n: number) => undefined);
+const mockFindNearDuplicate = mock(
+	(_s: string, _a: unknown[], _n: number) => undefined,
+);
 const mockReadKnowledge = mock((_s: string) => Promise.resolve([]));
-const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) => Promise.resolve());
+const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) =>
+	Promise.resolve(),
+);
 const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
 const mockResolveSwarmRejectedPath = mock((_s: string) => '');
 const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
@@ -30,7 +34,11 @@ const mockValidateSwarmPath = mock((_d: string, _f: string) => '');
 
 // Create local mock variable for knowledge-validator
 const mockValidateLesson = mock(
-	(_l: string, _t: string[], _c: { category: string; scope: string; confidence: number }) => ({
+	(
+		_l: string,
+		_t: string[],
+		_c: { category: string; scope: string; confidence: number },
+	) => ({
 		valid: true,
 		layer: null,
 		reason: null,
@@ -128,7 +136,7 @@ ${bullets}
 // Tests
 // ============================================================================
 
-	describe('knowledge-curator (adversarial & edge cases)', () => {
+describe('knowledge-curator (adversarial & edge cases)', () => {
 	beforeEach(() => {
 		mockAppendKnowledge.mockClear();
 		mockAppendRejectedLesson.mockClear();

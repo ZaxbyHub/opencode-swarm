@@ -3,7 +3,15 @@
  * Tests the pruneSeenRetroSections() function and its behavior with time-based eviction.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from 'bun:test';
 
 // ============================================================================
 // Date.now() mocking setup
@@ -41,9 +49,13 @@ import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 const mockAppendKnowledge = mock(async () => {});
 const mockAppendRejectedLesson = mock(async () => {});
-const mockFindNearDuplicate = mock((_s: string, _a: unknown[], _n: number) => undefined);
+const mockFindNearDuplicate = mock(
+	(_s: string, _a: unknown[], _n: number) => undefined,
+);
 const mockReadKnowledge = mock((_s: string) => Promise.resolve([]));
-const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) => Promise.resolve());
+const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) =>
+	Promise.resolve(),
+);
 const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
 const mockResolveSwarmRejectedPath = mock((_s: string) => '');
 const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
@@ -56,7 +68,11 @@ const mockSafeHook = mock((fn: unknown) => fn);
 const mockValidateSwarmPath = mock((_d: string, _f: string) => '');
 
 const mockValidateLesson = mock(
-	(_l: string, _t: string[], _c: { category: string; scope: string; confidence: number }) => ({
+	(
+		_l: string,
+		_t: string[],
+		_c: { category: string; scope: string; confidence: number },
+	) => ({
 		valid: true,
 		layer: null,
 		reason: null,
@@ -69,8 +85,8 @@ const mockQuarantineEntry = mock(
 );
 const mockNormalize = mock((_s: string) => '');
 
-const mockUpdateRetrievalOutcome = mock((_s: string, _id: string, _b: boolean) =>
-	Promise.resolve(),
+const mockUpdateRetrievalOutcome = mock(
+	(_s: string, _id: string, _b: boolean) => Promise.resolve(),
 );
 
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
@@ -173,7 +189,7 @@ ${bullets}
 // Tests
 // ============================================================================
 
-	describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
+describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 	beforeEach(() => {
 		// Reset mock time
 		mockNow = 1000000000000;
