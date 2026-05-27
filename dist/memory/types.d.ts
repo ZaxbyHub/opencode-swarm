@@ -185,5 +185,6 @@ export interface MemoryListFilter {
     scopes?: MemoryScopeRef[];
     kinds?: MemoryKind[];
     includeExpired?: boolean;
+    includeInactive?: boolean;
     limit?: number;
 }

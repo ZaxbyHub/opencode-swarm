@@ -25,6 +25,10 @@ export interface MemoryConfig {
     redaction: {
         rejectDurableSecrets: boolean;
     };
+    maintenance: {
+        lowUtilityMaxConfidence: number;
+        lowUtilityMinAgeDays: number;
+    };
     hardDelete: boolean;
 }
 export declare const DEFAULT_MEMORY_CONFIG: MemoryConfig;

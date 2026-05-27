@@ -531,6 +531,10 @@ export declare const MemoryConfigSchema: z.ZodObject<{
     redaction: z.ZodDefault<z.ZodObject<{
         rejectDurableSecrets: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;
+    maintenance: z.ZodDefault<z.ZodObject<{
+        lowUtilityMaxConfidence: z.ZodDefault<z.ZodNumber>;
+        lowUtilityMinAgeDays: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strip>>;
     hardDelete: z.ZodDefault<z.ZodBoolean>;
 }, z.core.$strip>;
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
@@ -1195,6 +1199,10 @@ export declare const PluginConfigSchema: z.ZodObject<{
         }, z.core.$strip>>;
         redaction: z.ZodDefault<z.ZodObject<{
             rejectDurableSecrets: z.ZodDefault<z.ZodBoolean>;
+        }, z.core.$strip>>;
+        maintenance: z.ZodDefault<z.ZodObject<{
+            lowUtilityMaxConfidence: z.ZodDefault<z.ZodNumber>;
+            lowUtilityMinAgeDays: z.ZodDefault<z.ZodNumber>;
         }, z.core.$strip>>;
         hardDelete: z.ZodDefault<z.ZodBoolean>;
     }, z.core.$strip>>;

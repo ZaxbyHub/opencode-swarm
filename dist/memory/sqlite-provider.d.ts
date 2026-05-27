@@ -1,6 +1,6 @@
 import { type MemoryConfig } from './config';
 import { type JsonlMigrationReport } from './jsonl-migration';
-import type { MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent } from './provider';
+import type { MemoryCompactOptions, MemoryCompactResult, MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent, MemoryRecallUsageFilter } from './provider';
 import type { RecallScoringDiagnostics } from './scoring';
 import type { AppliedMemoryChange, MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem, ResolvedCuratorMemoryDecision } from './types';
 export interface SQLiteJsonlImportResult {
@@ -31,6 +31,7 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
         diagnostics: RecallScoringDiagnostics;
     }>;
     recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void>;
+    listRecallUsage(filter?: MemoryRecallUsageFilter): Promise<MemoryRecallUsageEvent[]>;
     list(filter?: MemoryListFilter): Promise<MemoryRecord[]>;
     createProposal(proposal: MemoryProposal): Promise<MemoryProposal>;
     listProposals(filter?: {
@@ -47,6 +48,7 @@ export declare class SQLiteMemoryProvider implements MemoryProvider, MemoryPropo
         memories: number;
         proposals: number;
     }>;
+    compactMaintenance(options?: MemoryCompactOptions): Promise<MemoryCompactResult>;
     hasMigration(name: string): boolean;
     markMigration(version: number, name: string): void;
     private selectRecallCandidates;

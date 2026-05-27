@@ -105,9 +105,17 @@ describe('LocalJsonlMemoryProvider', () => {
 			path.join(tmpDir, '.swarm', 'memory', 'audit.jsonl'),
 			'utf-8',
 		);
+		const usage = await provider.listRecallUsage();
 		expect(audit).toContain('"operation":"recall"');
 		expect(audit).toContain(repoA.id);
 		expect(audit).toContain('bundle_20260524_abcd');
+		expect(usage).toEqual([
+			expect.objectContaining({
+				bundleId: 'bundle_20260524_abcd',
+				memoryIds: [repoA.id],
+				agentRole: 'coder',
+			}),
+		]);
 	});
 
 	test('recall excludes expired records by default', async () => {

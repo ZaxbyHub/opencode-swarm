@@ -3,10 +3,15 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
 import {
+	buildMemoryMaintenanceReport,
 	createConfiguredMemoryProvider,
 	DEFAULT_MEMORY_CONFIG,
 	evaluateMemoryRecallFixtures,
 	getLegacyJsonlFileStatus,
+	type MemoryMaintenanceReport,
+	type MemoryRecallUsageByMemory,
+	type MemoryRecallUsageByRole,
+	type MemoryRecord,
 	readMigrationReport,
 	resolveMemoryConfig,
 	resolveMemoryStorageDir,
@@ -15,7 +20,11 @@ import {
 	writeJsonlExport,
 } from '../memory';
 import type { MemoryConfig } from '../memory/config';
-import type { MemoryProposalStore, MemoryProvider } from '../memory/provider';
+import type {
+	MemoryCompactResult,
+	MemoryProposalStore,
+	MemoryProvider,
+} from '../memory/provider';
 
 type ExportableProvider = MemoryProvider & Partial<MemoryProposalStore>;
 
@@ -31,6 +40,10 @@ export async function handleMemoryCommand(
 		'## Swarm Memory',
 		'',
 		'- `/swarm memory status` - show provider, SQLite path, JSONL files, and last migration report',
+		'- `/swarm memory pending` - show pending proposals and recent rejection reasons',
+		'- `/swarm memory recall-log` - summarize recall usage by agent role and memory ID',
+		'- `/swarm memory stale` - list expired scratch, superseded, deleted, and low-utility memories',
+		'- `/swarm memory compact` - dry-run compaction; pass `--confirm` to remove deleted, superseded, and expired scratch records',
 		'- `/swarm memory export` - export current memory and proposals to `.swarm/memory/export/*.jsonl`',
 		'- `/swarm memory import` - import `.swarm/memory/{memories,proposals}.jsonl` into SQLite',
 		'- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration',
@@ -56,6 +69,7 @@ export async function handleMemoryStatusCommand(
 		`- Storage: \`${storageDir}\``,
 		`- SQLite path: \`${sqlitePath}\``,
 		`- SQLite database exists: \`${existsSync(sqlitePath)}\``,
+		`- Automatic destructive cleanup: \`disabled\``,
 		'',
 		'### Legacy JSONL',
 	];
@@ -86,6 +100,143 @@ export async function handleMemoryStatusCommand(
 		}
 	}
 	return lines.join('\n');
+}
+
+export async function handleMemoryPendingCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage: 'Usage: /swarm memory pending [--limit <n>]',
+		allowConfirm: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const config = resolveCommandMemoryConfig(directory);
+	const provider = createMaintenanceProvider(directory, config);
+	try {
+		await provider.initialize?.();
+		const report = await buildMemoryMaintenanceReport(provider, {
+			...maintenanceReportOptions(config, parsed.limit),
+		});
+		const lines = [
+			'## Swarm Memory Pending',
+			'',
+			`- Pending proposals shown: \`${report.pendingProposals.length}\``,
+			`- Rejected proposal reasons shown: \`${report.rejectedProposalReasons.length}\``,
+		];
+		appendProposalLines(lines, 'Pending proposals', report.pendingProposals);
+		appendProposalLines(
+			lines,
+			'Rejected proposal reasons',
+			report.rejectedProposalReasons,
+		);
+		return lines.join('\n');
+	} finally {
+		await provider.close?.();
+	}
+}
+
+export async function handleMemoryRecallLogCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage: 'Usage: /swarm memory recall-log [--limit <n>]',
+		allowConfirm: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const config = resolveCommandMemoryConfig(directory);
+	const provider = createMaintenanceProvider(directory, config);
+	try {
+		await provider.initialize?.();
+		const report = await buildMemoryMaintenanceReport(provider, {
+			...maintenanceReportOptions(config, parsed.limit),
+		});
+		const lines = [
+			'## Swarm Memory Recall Log',
+			'',
+			`- Recall events scanned: \`${report.recallEventCount}\``,
+			`- Most-recalled memories shown: \`${report.mostRecalledMemories.length}\``,
+			`- Never-recalled memories shown: \`${report.neverRecalledMemories.length}\``,
+		];
+		appendRecallRoleLines(lines, report.recallByAgentRole);
+		appendRecallMemoryLines(lines, report.mostRecalledMemories);
+		appendMemoryLines(
+			lines,
+			'Never-recalled memories',
+			report.neverRecalledMemories,
+		);
+		return lines.join('\n');
+	} finally {
+		await provider.close?.();
+	}
+}
+
+export async function handleMemoryStaleCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage: 'Usage: /swarm memory stale [--limit <n>]',
+		allowConfirm: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const config = resolveCommandMemoryConfig(directory);
+	const provider = createMaintenanceProvider(directory, config);
+	try {
+		await provider.initialize?.();
+		const report = await buildMemoryMaintenanceReport(provider, {
+			...maintenanceReportOptions(config, parsed.limit),
+		});
+		const lines = [
+			'## Swarm Memory Stale',
+			'',
+			`- Active memories: \`${report.activeMemories}\``,
+			`- Expired scratch memories shown: \`${report.expiredScratchMemories.length}\``,
+			`- Deleted tombstones shown: \`${report.deletedMemories.length}\``,
+			`- Superseded memories shown: \`${report.supersededMemories.length}\``,
+			`- Low-utility memories shown: \`${report.lowUtilityMemories.length}\``,
+		];
+		appendMemoryLines(
+			lines,
+			'Expired scratch memories',
+			report.expiredScratchMemories,
+		);
+		appendMemoryLines(lines, 'Deleted tombstones', report.deletedMemories);
+		appendSupersededChains(lines, report);
+		appendMemoryLines(lines, 'Low-utility memories', report.lowUtilityMemories);
+		return lines.join('\n');
+	} finally {
+		await provider.close?.();
+	}
+}
+
+export async function handleMemoryCompactCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage: 'Usage: /swarm memory compact [--confirm]',
+		allowConfirm: true,
+		allowLimit: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const provider = createMaintenanceProvider(
+		directory,
+		resolveCommandMemoryConfig(directory),
+	);
+	try {
+		await provider.initialize?.();
+		if (!provider.compactMaintenance) {
+			return 'Memory provider does not support compaction.';
+		}
+		const result = await provider.compactMaintenance({
+			dryRun: !parsed.confirm,
+		});
+		return formatCompactResult(result, parsed.confirm);
+	} finally {
+		await provider.close?.();
+	}
 }
 
 export async function handleMemoryMigrateCommand(
@@ -164,6 +315,31 @@ export async function handleMemoryExportCommand(
 	}
 }
 
+function createMaintenanceProvider(
+	directory: string,
+	config: MemoryConfig,
+): ExportableProvider {
+	return createConfiguredMemoryProvider(
+		directory,
+		config,
+	) as ExportableProvider;
+}
+
+function maintenanceReportOptions(
+	config: MemoryConfig,
+	limit: number,
+): {
+	limit: number;
+	lowUtilityMaxConfidence: number;
+	lowUtilityMinAgeDays: number;
+} {
+	return {
+		limit,
+		lowUtilityMaxConfidence: config.maintenance.lowUtilityMaxConfidence,
+		lowUtilityMinAgeDays: config.maintenance.lowUtilityMinAgeDays,
+	};
+}
+
 export async function handleMemoryEvaluateCommand(
 	directory: string,
 	args: string[],
@@ -233,6 +409,31 @@ function parseEvaluateArgs(
 	return { json, fixtureDirectory };
 }
 
+function parseMaintenanceArgs(
+	args: string[],
+	options: { usage: string; allowConfirm: boolean; allowLimit?: boolean },
+): { limit: number; confirm: boolean } | { error: string } {
+	let limit = 20;
+	let confirm = false;
+	const allowLimit = options.allowLimit ?? true;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === '--confirm' && options.allowConfirm) {
+			confirm = true;
+			continue;
+		}
+		if (arg === '--limit' && allowLimit) {
+			const next = args[i + 1];
+			if (!next || !/^\d+$/.test(next)) return { error: options.usage };
+			limit = Math.min(100, Math.max(1, Number(next)));
+			i++;
+			continue;
+		}
+		return { error: options.usage };
+	}
+	return { limit, confirm };
+}
+
 function resolvePackageRootFromModule(modulePath: string): string {
 	const moduleDir = path.dirname(modulePath);
 	const leaf = path.basename(moduleDir);
@@ -289,4 +490,119 @@ function appendInvalidRows(
 	if (invalidRows.length > 20) {
 		lines.push(`- ... ${invalidRows.length - 20} more`);
 	}
+}
+
+function appendProposalLines(
+	lines: string[],
+	title: string,
+	proposals: MemoryMaintenanceReport['pendingProposals'],
+): void {
+	lines.push('', `### ${title}`);
+	if (proposals.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const proposal of proposals) {
+		const reason =
+			proposal.status === 'rejected'
+				? ` - ${proposal.rejectionReason ?? 'no reason recorded'}`
+				: '';
+		lines.push(
+			`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? 'new'} (${proposal.status})${reason}`,
+		);
+	}
+}
+
+function appendMemoryLines(
+	lines: string[],
+	title: string,
+	memories: MemoryRecord[],
+): void {
+	lines.push('', `### ${title}`);
+	if (memories.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const memory of memories) {
+		lines.push(
+			`- \`${memory.id}\` ${memory.kind} confidence=${memory.confidence.toFixed(2)} updated=${memory.updatedAt} - ${truncate(memory.text, 100)}`,
+		);
+	}
+}
+
+function appendRecallRoleLines(
+	lines: string[],
+	roles: MemoryRecallUsageByRole[],
+): void {
+	lines.push('', '### Recall by agent role');
+	if (roles.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const role of roles) {
+		const memoryCount = Object.keys(role.memoryIds).length;
+		lines.push(
+			`- \`${role.agentRole}\`: ${role.count} recall event(s), ${memoryCount} memory ID(s)`,
+		);
+	}
+}
+
+function appendRecallMemoryLines(
+	lines: string[],
+	memories: MemoryRecallUsageByMemory[],
+): void {
+	lines.push('', '### Most-recalled memories');
+	if (memories.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const memory of memories) {
+		lines.push(
+			`- \`${memory.memoryId}\`: ${memory.count} hit(s), last=${memory.lastRecalledAt}, avgScore=${memory.averageScore.toFixed(3)}`,
+		);
+	}
+}
+
+function appendSupersededChains(
+	lines: string[],
+	report: MemoryMaintenanceReport,
+): void {
+	lines.push('', '### Superseded chains');
+	if (report.supersededChains.length === 0) {
+		lines.push('- none');
+		return;
+	}
+	for (const chain of report.supersededChains) {
+		const reason = chain.reason ? ` - ${chain.reason}` : '';
+		lines.push(
+			`- ${chain.chain.map((id) => `\`${id}\``).join(' -> ')}${reason}`,
+		);
+	}
+}
+
+function formatCompactResult(
+	result: MemoryCompactResult,
+	confirmed: boolean,
+): string {
+	const lines = [
+		'## Swarm Memory Compact',
+		'',
+		`- Mode: \`${confirmed ? 'confirmed' : 'dry-run'}\``,
+		`- Deleted tombstones: \`${result.removedDeleted}\``,
+		`- Superseded records: \`${result.removedSuperseded}\``,
+		`- Expired scratch records: \`${result.removedExpiredScratch}\``,
+		`- Remaining memories: \`${result.remaining}\``,
+	];
+	if (!confirmed) {
+		lines.push(
+			'',
+			'No records were removed. Re-run `/swarm memory compact --confirm` to apply this compaction.',
+		);
+	}
+	return lines.join('\n');
+}
+
+function truncate(value: string, maxLength: number): string {
+	if (value.length <= maxLength) return value;
+	return `${value.slice(0, maxLength - 3)}...`;
 }

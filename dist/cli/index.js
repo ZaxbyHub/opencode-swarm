@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.37.0",
+    version: "7.39.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -18420,6 +18420,13 @@ var init_schema = __esm(() => {
     redaction: exports_external.object({
       rejectDurableSecrets: exports_external.boolean().default(true)
     }).default({ rejectDurableSecrets: true }),
+    maintenance: exports_external.object({
+      lowUtilityMaxConfidence: exports_external.number().min(0).max(1).default(0.45),
+      lowUtilityMinAgeDays: exports_external.number().int().min(1).max(3650).default(30)
+    }).default({
+      lowUtilityMaxConfidence: 0.45,
+      lowUtilityMinAgeDays: 30
+    }),
     hardDelete: exports_external.boolean().default(false)
   });
   CuratorConfigSchema = exports_external.object({
@@ -39637,6 +39644,110 @@ var init_close = __esm(() => {
   ];
 });
 
+// src/commands/concurrency.ts
+async function handleConcurrencyCommand(directory, args, sessionID) {
+  if (!sessionID || sessionID.trim() === "") {
+    return "Error: No active session context. Concurrency requires an active session. Use /swarm concurrency from within an OpenCode session, or start a session first.";
+  }
+  const session = getAgentSession(sessionID);
+  if (!session) {
+    return "Error: No active session. Concurrency requires an active session to operate.";
+  }
+  const arg0 = args[0]?.toLowerCase();
+  const arg1 = args[1];
+  const plan = await loadPlanJsonOnly(directory).catch(() => null);
+  const hasPlan = plan !== null && plan !== undefined;
+  if (arg0 === undefined) {
+    return [
+      "Concurrency commands:",
+      "  /swarm concurrency set <N|preset>  \u2014 Set session concurrency override (1-64 or min/medium/max)",
+      "  /swarm concurrency status          \u2014 Show effective concurrency",
+      "  /swarm concurrency reset           \u2014 Clear the override"
+    ].join(`
+`);
+  }
+  if (arg0 === "status") {
+    return buildStatusMessage(session, plan);
+  }
+  if (!hasPlan) {
+    if (arg0 === "set") {
+      return "No active plan. Concurrency override requires an active plan.";
+    }
+  }
+  if (arg0 === "reset") {
+    session.maxConcurrencyOverride = undefined;
+    return "Concurrency override cleared";
+  }
+  if (arg0 === "set") {
+    if (arg1 === undefined) {
+      return "Error: /swarm concurrency set requires a value. Usage: /swarm concurrency set <N|preset>";
+    }
+    return handleSetCommand(session, arg1);
+  }
+  return [
+    `Unknown concurrency subcommand: ${arg0}`,
+    "Usage: /swarm concurrency <set|status|reset>"
+  ].join(`
+`);
+}
+function handleSetCommand(session, value) {
+  const normalizedValue = value.toLowerCase();
+  if (normalizedValue in PRESETS) {
+    const presetConcurrency = PRESETS[normalizedValue];
+    session.maxConcurrencyOverride = presetConcurrency;
+    return `Concurrency override set to ${presetConcurrency} (${normalizedValue})`;
+  }
+  const numericValue = Number(value);
+  if (Number.isNaN(numericValue)) {
+    return `Invalid concurrency value: ${value}. Must be a number (1-64) or a preset (min, medium, max).`;
+  }
+  if (!Number.isInteger(numericValue)) {
+    return `Invalid concurrency value: ${value}. Must be a number (1-64) or a preset (min, medium, max).`;
+  }
+  if (numericValue < MIN_CONCURRENCY || numericValue > MAX_CONCURRENCY) {
+    return `Concurrency value ${value} is out of range. Must be between ${MIN_CONCURRENCY} and ${MAX_CONCURRENCY}.`;
+  }
+  session.maxConcurrencyOverride = numericValue;
+  return `Concurrency override set to ${numericValue}`;
+}
+function buildStatusMessage(session, plan) {
+  const overrideActive = session.maxConcurrencyOverride !== undefined;
+  const configuredOverride = session.maxConcurrencyOverride ?? "absent";
+  const hasPlan = plan !== null && plan !== undefined;
+  const planBaseline = hasPlan ? plan.execution_profile?.max_concurrent_tasks ?? 1 : 1;
+  const parallelizationEnabled = hasPlan ? plan.execution_profile?.parallelization_enabled ?? false : false;
+  const operationalEffective = !parallelizationEnabled ? 1 : session.maxConcurrencyOverride ?? planBaseline;
+  let description;
+  if (!hasPlan) {
+    description = "No active plan";
+  } else if (!parallelizationEnabled) {
+    description = "Parallelization disabled (always 1)";
+  } else if (overrideActive) {
+    description = `Override active (${session.maxConcurrencyOverride})`;
+  } else {
+    description = `Plan baseline (${planBaseline})`;
+  }
+  return [
+    `Concurrency: ${description}`,
+    `  override_active: ${overrideActive}`,
+    `  configured_override: ${configuredOverride}`,
+    `  plan_baseline: ${planBaseline}`,
+    `  operational_effective: ${operationalEffective}`,
+    `  parallelization_enabled: ${parallelizationEnabled}`
+  ].join(`
+`);
+}
+var PRESETS, MIN_CONCURRENCY = 1, MAX_CONCURRENCY = 64;
+var init_concurrency = __esm(() => {
+  init_manager();
+  init_state();
+  PRESETS = {
+    min: 1,
+    medium: 3,
+    max: 8
+  };
+});
+
 // src/commands/config.ts
 import * as os4 from "os";
 import * as path17 from "path";
@@ -45205,7 +45316,10 @@ function serializeAgentSession(s) {
     fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
     fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
     sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
-    ...Object.keys(stageBCompletion).length > 0 && { stageBCompletion }
+    ...Object.keys(stageBCompletion).length > 0 && { stageBCompletion },
+    ...s.maxConcurrencyOverride !== undefined && {
+      maxConcurrencyOverride: s.maxConcurrencyOverride
+    }
   };
 }
 async function writeSnapshot(directory, state) {
@@ -46078,6 +46192,10 @@ function resolveMemoryConfig(input) {
     redaction: {
       ...DEFAULT_MEMORY_CONFIG.redaction,
       ...input?.redaction ?? {}
+    },
+    maintenance: {
+      ...DEFAULT_MEMORY_CONFIG.maintenance,
+      ...input?.maintenance ?? {}
     }
   };
 }
@@ -46108,6 +46226,10 @@ var init_config3 = __esm(() => {
     },
     redaction: {
       rejectDurableSecrets: true
+    },
+    maintenance: {
+      lowUtilityMaxConfidence: 0.45,
+      lowUtilityMinAgeDays: 30
     },
     hardDelete: false
   };
@@ -46489,6 +46611,167 @@ function normalizeTags(tags) {
 }
 var init_curator_decision_helpers = __esm(() => {
   init_errors6();
+  init_schema2();
+});
+
+// src/memory/maintenance.ts
+async function buildMemoryMaintenanceReport(provider, options = {}) {
+  const now = options.now ?? new Date;
+  const limit = Math.max(1, Math.trunc(options.limit ?? 20));
+  const memories = await provider.list({
+    includeExpired: true,
+    includeInactive: true
+  });
+  const proposals = await loadMaintenanceProposals(provider, limit);
+  const recallUsage = provider.listRecallUsage ? await provider.listRecallUsage() : [];
+  const usageByMemory = summarizeRecallByMemory(recallUsage);
+  const usageByRole = summarizeRecallByRole(recallUsage);
+  const activeMemories = memories.filter((memory) => isActiveMemory(memory, now));
+  const deletedMemories = memories.filter((memory) => memory.metadata.deleted === true);
+  const expiredScratchMemories = memories.filter((memory) => memory.kind === "scratch" && isExpired(memory, now));
+  const supersededMemories = memories.filter((memory) => Boolean(memory.supersededBy));
+  const lowUtilityMemories = activeMemories.filter((memory) => isLowUtility(memory, usageByMemory, now, {
+    maxConfidence: options.lowUtilityMaxConfidence ?? DEFAULT_LOW_UTILITY_MAX_CONFIDENCE,
+    minAgeDays: options.lowUtilityMinAgeDays ?? DEFAULT_LOW_UTILITY_MIN_AGE_DAYS
+  })).sort(memorySort);
+  const neverRecalledMemories = activeMemories.filter((memory) => !usageByMemory.has(memory.id)).sort(memorySort);
+  const rejectedProposalReasons = proposals.filter((proposal) => proposal.status === "rejected").sort(proposalSort);
+  const pendingProposals = proposals.filter((proposal) => proposal.status === "pending").sort(proposalSort);
+  return {
+    generatedAt: now.toISOString(),
+    totalMemories: memories.length,
+    activeMemories: activeMemories.length,
+    deletedMemories: deletedMemories.slice(0, limit),
+    expiredScratchMemories: expiredScratchMemories.slice(0, limit),
+    supersededMemories: supersededMemories.slice(0, limit),
+    supersededChains: buildSupersededChains(memories).slice(0, limit),
+    lowUtilityMemories: lowUtilityMemories.slice(0, limit),
+    neverRecalledMemories: neverRecalledMemories.slice(0, limit),
+    mostRecalledMemories: Array.from(usageByMemory.values()).sort((a, b) => b.count - a.count || b.lastRecalledAt.localeCompare(a.lastRecalledAt) || a.memoryId.localeCompare(b.memoryId)).slice(0, limit),
+    recallByAgentRole: Array.from(usageByRole.values()).sort((a, b) => b.count - a.count || a.agentRole.localeCompare(b.agentRole)).slice(0, limit),
+    rejectedProposalReasons: rejectedProposalReasons.slice(0, limit),
+    pendingProposals: pendingProposals.slice(0, limit),
+    recallEventCount: recallUsage.length
+  };
+}
+function shouldCompactMemory(memory, now = new Date) {
+  if (memory.metadata.deleted === true)
+    return "deleted";
+  if (memory.supersededBy)
+    return "superseded";
+  if (memory.kind === "scratch" && isExpired(memory, now)) {
+    return "expired_scratch";
+  }
+  return null;
+}
+function isActiveMemory(memory, now) {
+  return memory.metadata.deleted !== true && !memory.supersededBy && !isExpired(memory, now);
+}
+function isLowUtility(memory, usageByMemory, now, options) {
+  if (usageByMemory.has(memory.id))
+    return false;
+  const updated = Date.parse(memory.updatedAt);
+  const ageDays = Number.isFinite(updated) ? (now.getTime() - updated) / (24 * 60 * 60 * 1000) : 0;
+  return memory.confidence <= options.maxConfidence || ageDays >= options.minAgeDays;
+}
+function summarizeRecallByMemory(usageEvents) {
+  const byMemory = new Map;
+  for (const event of usageEvents) {
+    event.memoryIds.forEach((memoryId, index) => {
+      const role = event.agentRole ?? "unknown";
+      const existing = byMemory.get(memoryId) ?? {
+        memoryId,
+        count: 0,
+        lastRecalledAt: event.timestamp,
+        agentRoles: {},
+        averageScore: 0,
+        scoreTotal: 0,
+        scoreCount: 0
+      };
+      existing.count++;
+      existing.lastRecalledAt = event.timestamp > existing.lastRecalledAt ? event.timestamp : existing.lastRecalledAt;
+      existing.agentRoles[role] = (existing.agentRoles[role] ?? 0) + 1;
+      const score = event.scores[index];
+      if (typeof score === "number" && Number.isFinite(score)) {
+        existing.scoreTotal += score;
+        existing.scoreCount++;
+        existing.averageScore = existing.scoreTotal / existing.scoreCount;
+      }
+      byMemory.set(memoryId, existing);
+    });
+  }
+  return new Map(Array.from(byMemory, ([memoryId, value]) => [
+    memoryId,
+    {
+      memoryId,
+      count: value.count,
+      lastRecalledAt: value.lastRecalledAt,
+      agentRoles: value.agentRoles,
+      averageScore: value.averageScore
+    }
+  ]));
+}
+async function loadMaintenanceProposals(provider, limit) {
+  if (!provider.listProposals)
+    return [];
+  const [pending, rejected, recent] = await Promise.all([
+    provider.listProposals({ status: "pending", limit }),
+    provider.listProposals({ status: "rejected", limit }),
+    provider.listProposals({ limit: Math.max(limit * 4, 100) })
+  ]);
+  const byId = new Map;
+  for (const proposal of [...pending, ...rejected, ...recent]) {
+    byId.set(proposal.id, proposal);
+  }
+  return Array.from(byId.values());
+}
+function summarizeRecallByRole(usageEvents) {
+  const byRole = new Map;
+  for (const event of usageEvents) {
+    const role = event.agentRole ?? "unknown";
+    const existing = byRole.get(role) ?? {
+      agentRole: role,
+      count: 0,
+      memoryIds: {}
+    };
+    existing.count++;
+    for (const memoryId of event.memoryIds) {
+      existing.memoryIds[memoryId] = (existing.memoryIds[memoryId] ?? 0) + 1;
+    }
+    byRole.set(role, existing);
+  }
+  return byRole;
+}
+function buildSupersededChains(memories) {
+  const byId = new Map(memories.map((memory) => [memory.id, memory]));
+  const supersededIds = new Set(memories.filter((memory) => memory.supersededBy).map((memory) => memory.id));
+  const roots = memories.filter((memory) => memory.supersededBy && !(memory.supersedes ?? []).some((id) => supersededIds.has(id)));
+  return roots.map((root) => {
+    const chain = [root.id];
+    const seen = new Set(chain);
+    let cursor = root;
+    while (cursor?.supersededBy && !seen.has(cursor.supersededBy)) {
+      chain.push(cursor.supersededBy);
+      seen.add(cursor.supersededBy);
+      cursor = byId.get(cursor.supersededBy);
+    }
+    return {
+      rootId: root.id,
+      chain,
+      reason: typeof root.metadata.supersedeReason === "string" ? root.metadata.supersedeReason : undefined
+    };
+  });
+}
+function memorySort(a, b) {
+  return b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id);
+}
+function proposalSort(a, b) {
+  const aTime = a.reviewedAt ?? a.createdAt;
+  const bTime = b.reviewedAt ?? b.createdAt;
+  return bTime.localeCompare(aTime) || a.id.localeCompare(b.id);
+}
+var DEFAULT_LOW_UTILITY_MAX_CONFIDENCE = 0.45, DEFAULT_LOW_UTILITY_MIN_AGE_DAYS = 30;
+var init_maintenance = __esm(() => {
   init_schema2();
 });
 
@@ -46879,16 +47162,21 @@ class LocalJsonlMemoryProvider {
   }
   async recordRecallUsage(event) {
     await this.initialize();
-    await this.audit("recall", event.bundleId, JSON.stringify({
-      query: event.query,
-      scopes: event.scopes,
-      kinds: event.kinds,
-      memoryIds: event.memoryIds,
-      scores: event.scores,
-      tokenEstimate: event.tokenEstimate,
-      agentRole: event.agentRole,
-      runId: event.runId
-    }));
+    await this.audit("recall", event.bundleId, undefined, event);
+  }
+  async listRecallUsage(filter = {}) {
+    await this.initialize();
+    const events = await readAuditEvents(this.pathFor("audit"));
+    const usage = [];
+    for (const event of events) {
+      if (event.operation !== "recall")
+        continue;
+      const parsed = parseRecallUsageEvent(event);
+      if (parsed)
+        usage.push(parsed);
+    }
+    usage.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return usage.slice(0, filter.limit ?? usage.length);
   }
   async list(filter = {}) {
     await this.initialize();
@@ -46908,7 +47196,9 @@ class LocalJsonlMemoryProvider {
         return !Number.isFinite(expires) || expires > now;
       });
     }
-    records = records.filter((record3) => !record3.supersededBy && record3.metadata.deleted !== true);
+    if (!filter.includeInactive) {
+      records = records.filter((record3) => !record3.supersededBy && record3.metadata.deleted !== true);
+    }
     records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return records.slice(0, filter.limit ?? records.length);
   }
@@ -47020,6 +47310,41 @@ class LocalJsonlMemoryProvider {
     await writeJsonlAtomic(this.pathFor("memories"), Array.from(this.memories.values()));
     await this.audit("compact", "memories");
   }
+  async compactMaintenance(options = {}) {
+    await this.initialize();
+    const now = options.now ? new Date(options.now) : new Date;
+    const kept = [];
+    const result = {
+      dryRun: options.dryRun !== false,
+      removedDeleted: 0,
+      removedSuperseded: 0,
+      removedExpiredScratch: 0,
+      remaining: 0
+    };
+    for (const memory of this.memories.values()) {
+      const compactReason = shouldCompactMemory(memory, now);
+      if (compactReason === "deleted") {
+        result.removedDeleted++;
+        continue;
+      }
+      if (compactReason === "superseded") {
+        result.removedSuperseded++;
+        continue;
+      }
+      if (compactReason === "expired_scratch") {
+        result.removedExpiredScratch++;
+        continue;
+      }
+      kept.push(memory);
+    }
+    result.remaining = kept.length;
+    if (result.dryRun)
+      return result;
+    this.memories = new Map(kept.map((memory) => [memory.id, memory]));
+    await writeJsonlAtomic(this.pathFor("memories"), kept);
+    await this.audit("compact", "memories", "removed deleted, superseded, and expired scratch memories", result);
+    return result;
+  }
   async audit(operation, targetId, reason, eventJson) {
     const event = {
       id: randomUUID3(),
@@ -47098,6 +47423,46 @@ async function readJsonl(filePath) {
   }
   return records;
 }
+async function readAuditEvents(filePath) {
+  const values = await readJsonl(filePath);
+  const events = [];
+  for (const value of values) {
+    if (!value || typeof value !== "object")
+      continue;
+    const candidate = value;
+    if (typeof candidate.id !== "string" || typeof candidate.operation !== "string" || typeof candidate.targetId !== "string" || typeof candidate.timestamp !== "string") {
+      continue;
+    }
+    events.push(candidate);
+  }
+  return events;
+}
+function parseRecallUsageEvent(event) {
+  const raw = event.eventJson ?? event.reason;
+  if (typeof raw !== "string" && (!raw || typeof raw !== "object")) {
+    return null;
+  }
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed.memoryIds) || typeof parsed.query !== "string") {
+      return null;
+    }
+    return {
+      bundleId: typeof parsed.bundleId === "string" ? parsed.bundleId : event.targetId,
+      query: parsed.query,
+      scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
+      kinds: Array.isArray(parsed.kinds) ? parsed.kinds : undefined,
+      memoryIds: parsed.memoryIds.filter((memoryId) => typeof memoryId === "string"),
+      scores: Array.isArray(parsed.scores) ? parsed.scores.filter((score) => typeof score === "number" && Number.isFinite(score)) : [],
+      tokenEstimate: typeof parsed.tokenEstimate === "number" ? parsed.tokenEstimate : 0,
+      agentRole: typeof parsed.agentRole === "string" ? parsed.agentRole : undefined,
+      runId: typeof parsed.runId === "string" ? parsed.runId : undefined,
+      timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : event.timestamp
+    };
+  } catch {
+    return null;
+  }
+}
 async function appendJsonl(filePath, value) {
   await mkdir8(path29.dirname(filePath), { recursive: true });
   await appendFile4(filePath, `${JSON.stringify(value)}
@@ -47117,6 +47482,7 @@ var init_local_jsonl_provider = __esm(() => {
   init_config3();
   init_curator_decision_helpers();
   init_errors6();
+  init_maintenance();
   init_schema2();
   init_scoring();
 });
@@ -47374,6 +47740,10 @@ class SQLiteMemoryProvider {
       redaction: {
         ...DEFAULT_MEMORY_CONFIG.redaction,
         ...config3.redaction ?? {}
+      },
+      maintenance: {
+        ...DEFAULT_MEMORY_CONFIG.maintenance,
+        ...config3.maintenance ?? {}
       }
     };
   }
@@ -47479,6 +47849,26 @@ class SQLiteMemoryProvider {
 			) VALUES (?, ?, ?, ?)`, [randomUUID4(), event.bundleId, event.timestamp, JSON.stringify(event)]);
     await this.event("recall", event.bundleId, JSON.stringify(event));
   }
+  async listRecallUsage(filter = {}) {
+    await this.initialize();
+    const rows = typeof filter.limit === "number" ? this.requireDb().query(`SELECT usage_json
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				LIMIT ?`).all(Math.max(1, Math.trunc(filter.limit))) : this.requireDb().query(`SELECT usage_json
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				`).all();
+    const events = [];
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.usage_json);
+        if (Array.isArray(parsed.memoryIds) && typeof parsed.query === "string") {
+          events.push(parsed);
+        }
+      } catch {}
+    }
+    return events;
+  }
   async list(filter = {}) {
     await this.initialize();
     let records = Array.from(this.memories.values());
@@ -47497,7 +47887,9 @@ class SQLiteMemoryProvider {
         return !Number.isFinite(expires) || expires > now;
       });
     }
-    records = records.filter((record3) => !record3.supersededBy && record3.metadata.deleted !== true);
+    if (!filter.includeInactive) {
+      records = records.filter((record3) => !record3.supersededBy && record3.metadata.deleted !== true);
+    }
     records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return records.slice(0, filter.limit ?? records.length);
   }
@@ -47577,6 +47969,52 @@ class SQLiteMemoryProvider {
       memories: memories.length,
       proposals: proposals.length
     };
+  }
+  async compactMaintenance(options = {}) {
+    await this.initialize();
+    const now = options.now ? new Date(options.now) : new Date;
+    const kept = [];
+    const removeIds = [];
+    const result = {
+      dryRun: options.dryRun !== false,
+      removedDeleted: 0,
+      removedSuperseded: 0,
+      removedExpiredScratch: 0,
+      remaining: 0
+    };
+    for (const memory of this.memories.values()) {
+      const compactReason = shouldCompactMemory(memory, now);
+      if (compactReason === "deleted") {
+        result.removedDeleted++;
+        removeIds.push(memory.id);
+        continue;
+      }
+      if (compactReason === "superseded") {
+        result.removedSuperseded++;
+        removeIds.push(memory.id);
+        continue;
+      }
+      if (compactReason === "expired_scratch") {
+        result.removedExpiredScratch++;
+        removeIds.push(memory.id);
+        continue;
+      }
+      kept.push(memory);
+    }
+    result.remaining = kept.length;
+    if (result.dryRun)
+      return result;
+    const db = this.requireDb();
+    const compact = db.transaction(() => {
+      for (const id of removeIds) {
+        db.run("DELETE FROM memory_items WHERE id = ?", [id]);
+        this.deleteMemoryFts(id);
+      }
+      this.insertEvent("compact", "memory_items", "removed deleted, superseded, and expired scratch memories", JSON.stringify(result));
+    });
+    compact();
+    this.memories = new Map(kept.map((memory) => [memory.id, memory]));
+    return result;
   }
   hasMigration(name) {
     const row = this.requireDb().query("SELECT version, name FROM schema_migrations WHERE name = ? LIMIT 1").get(name);
@@ -48054,6 +48492,7 @@ var init_sqlite_provider = __esm(() => {
   init_curator_decision_helpers();
   init_errors6();
   init_jsonl_migration();
+  init_maintenance();
   init_schema2();
   init_scoring();
   FTS_INDEX_COLUMNS = [
@@ -48581,6 +49020,7 @@ var init_memory = __esm(() => {
   init_injector();
   init_jsonl_migration();
   init_local_jsonl_provider();
+  init_maintenance();
   init_prompt_block();
   init_recall_planner();
   init_redaction();
@@ -48599,6 +49039,10 @@ async function handleMemoryCommand(_directory, _args) {
     "## Swarm Memory",
     "",
     "- `/swarm memory status` - show provider, SQLite path, JSONL files, and last migration report",
+    "- `/swarm memory pending` - show pending proposals and recent rejection reasons",
+    "- `/swarm memory recall-log` - summarize recall usage by agent role and memory ID",
+    "- `/swarm memory stale` - list expired scratch, superseded, deleted, and low-utility memories",
+    "- `/swarm memory compact` - dry-run compaction; pass `--confirm` to remove deleted, superseded, and expired scratch records",
     "- `/swarm memory export` - export current memory and proposals to `.swarm/memory/export/*.jsonl`",
     "- `/swarm memory import` - import `.swarm/memory/{memories,proposals}.jsonl` into SQLite",
     "- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration",
@@ -48620,6 +49064,7 @@ async function handleMemoryStatusCommand(directory, _args) {
     `- Storage: \`${storageDir}\``,
     `- SQLite path: \`${sqlitePath}\``,
     `- SQLite database exists: \`${existsSync20(sqlitePath)}\``,
+    `- Automatic destructive cleanup: \`disabled\``,
     "",
     "### Legacy JSONL"
   ];
@@ -48643,6 +49088,119 @@ async function handleMemoryStatusCommand(directory, _args) {
   }
   return lines.join(`
 `);
+}
+async function handleMemoryPendingCommand(directory, args) {
+  const parsed = parseMaintenanceArgs(args, {
+    usage: "Usage: /swarm memory pending [--limit <n>]",
+    allowConfirm: false
+  });
+  if ("error" in parsed)
+    return parsed.error;
+  const config3 = resolveCommandMemoryConfig(directory);
+  const provider = createMaintenanceProvider(directory, config3);
+  try {
+    await provider.initialize?.();
+    const report = await buildMemoryMaintenanceReport(provider, {
+      ...maintenanceReportOptions(config3, parsed.limit)
+    });
+    const lines = [
+      "## Swarm Memory Pending",
+      "",
+      `- Pending proposals shown: \`${report.pendingProposals.length}\``,
+      `- Rejected proposal reasons shown: \`${report.rejectedProposalReasons.length}\``
+    ];
+    appendProposalLines(lines, "Pending proposals", report.pendingProposals);
+    appendProposalLines(lines, "Rejected proposal reasons", report.rejectedProposalReasons);
+    return lines.join(`
+`);
+  } finally {
+    await provider.close?.();
+  }
+}
+async function handleMemoryRecallLogCommand(directory, args) {
+  const parsed = parseMaintenanceArgs(args, {
+    usage: "Usage: /swarm memory recall-log [--limit <n>]",
+    allowConfirm: false
+  });
+  if ("error" in parsed)
+    return parsed.error;
+  const config3 = resolveCommandMemoryConfig(directory);
+  const provider = createMaintenanceProvider(directory, config3);
+  try {
+    await provider.initialize?.();
+    const report = await buildMemoryMaintenanceReport(provider, {
+      ...maintenanceReportOptions(config3, parsed.limit)
+    });
+    const lines = [
+      "## Swarm Memory Recall Log",
+      "",
+      `- Recall events scanned: \`${report.recallEventCount}\``,
+      `- Most-recalled memories shown: \`${report.mostRecalledMemories.length}\``,
+      `- Never-recalled memories shown: \`${report.neverRecalledMemories.length}\``
+    ];
+    appendRecallRoleLines(lines, report.recallByAgentRole);
+    appendRecallMemoryLines(lines, report.mostRecalledMemories);
+    appendMemoryLines(lines, "Never-recalled memories", report.neverRecalledMemories);
+    return lines.join(`
+`);
+  } finally {
+    await provider.close?.();
+  }
+}
+async function handleMemoryStaleCommand(directory, args) {
+  const parsed = parseMaintenanceArgs(args, {
+    usage: "Usage: /swarm memory stale [--limit <n>]",
+    allowConfirm: false
+  });
+  if ("error" in parsed)
+    return parsed.error;
+  const config3 = resolveCommandMemoryConfig(directory);
+  const provider = createMaintenanceProvider(directory, config3);
+  try {
+    await provider.initialize?.();
+    const report = await buildMemoryMaintenanceReport(provider, {
+      ...maintenanceReportOptions(config3, parsed.limit)
+    });
+    const lines = [
+      "## Swarm Memory Stale",
+      "",
+      `- Active memories: \`${report.activeMemories}\``,
+      `- Expired scratch memories shown: \`${report.expiredScratchMemories.length}\``,
+      `- Deleted tombstones shown: \`${report.deletedMemories.length}\``,
+      `- Superseded memories shown: \`${report.supersededMemories.length}\``,
+      `- Low-utility memories shown: \`${report.lowUtilityMemories.length}\``
+    ];
+    appendMemoryLines(lines, "Expired scratch memories", report.expiredScratchMemories);
+    appendMemoryLines(lines, "Deleted tombstones", report.deletedMemories);
+    appendSupersededChains(lines, report);
+    appendMemoryLines(lines, "Low-utility memories", report.lowUtilityMemories);
+    return lines.join(`
+`);
+  } finally {
+    await provider.close?.();
+  }
+}
+async function handleMemoryCompactCommand(directory, args) {
+  const parsed = parseMaintenanceArgs(args, {
+    usage: "Usage: /swarm memory compact [--confirm]",
+    allowConfirm: true,
+    allowLimit: false
+  });
+  if ("error" in parsed)
+    return parsed.error;
+  const provider = createMaintenanceProvider(directory, resolveCommandMemoryConfig(directory));
+  try {
+    await provider.initialize?.();
+    if (!provider.compactMaintenance) {
+      return "Memory provider does not support compaction.";
+    }
+    const result = await provider.compactMaintenance({
+      dryRun: !parsed.confirm
+    });
+    return formatCompactResult(result, parsed.confirm);
+  } finally {
+    await provider.close?.();
+  }
 }
 async function handleMemoryMigrateCommand(directory, _args) {
   const config3 = {
@@ -48699,6 +49257,16 @@ async function handleMemoryExportCommand(directory, _args) {
   } finally {
     await provider.close?.();
   }
+}
+function createMaintenanceProvider(directory, config3) {
+  return createConfiguredMemoryProvider(directory, config3);
+}
+function maintenanceReportOptions(config3, limit) {
+  return {
+    limit,
+    lowUtilityMaxConfidence: config3.maintenance.lowUtilityMaxConfidence,
+    lowUtilityMinAgeDays: config3.maintenance.lowUtilityMinAgeDays
+  };
 }
 async function handleMemoryEvaluateCommand(directory, args) {
   const parsed = parseEvaluateArgs(directory, args);
@@ -48758,6 +49326,28 @@ function parseEvaluateArgs(directory, args) {
   }
   return { json: json3, fixtureDirectory };
 }
+function parseMaintenanceArgs(args, options) {
+  let limit = 20;
+  let confirm = false;
+  const allowLimit = options.allowLimit ?? true;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--confirm" && options.allowConfirm) {
+      confirm = true;
+      continue;
+    }
+    if (arg === "--limit" && allowLimit) {
+      const next = args[i + 1];
+      if (!next || !/^\d+$/.test(next))
+        return { error: options.usage };
+      limit = Math.min(100, Math.max(1, Number(next)));
+      i++;
+      continue;
+    }
+    return { error: options.usage };
+  }
+  return { limit, confirm };
+}
 function resolvePackageRootFromModule(modulePath) {
   const moduleDir = path33.dirname(modulePath);
   const leaf = path33.basename(moduleDir);
@@ -48807,6 +49397,80 @@ function appendInvalidRows(lines, invalidRows) {
   if (invalidRows.length > 20) {
     lines.push(`- ... ${invalidRows.length - 20} more`);
   }
+}
+function appendProposalLines(lines, title, proposals) {
+  lines.push("", `### ${title}`);
+  if (proposals.length === 0) {
+    lines.push("- none");
+    return;
+  }
+  for (const proposal of proposals) {
+    const reason = proposal.status === "rejected" ? ` - ${proposal.rejectionReason ?? "no reason recorded"}` : "";
+    lines.push(`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? "new"} (${proposal.status})${reason}`);
+  }
+}
+function appendMemoryLines(lines, title, memories) {
+  lines.push("", `### ${title}`);
+  if (memories.length === 0) {
+    lines.push("- none");
+    return;
+  }
+  for (const memory of memories) {
+    lines.push(`- \`${memory.id}\` ${memory.kind} confidence=${memory.confidence.toFixed(2)} updated=${memory.updatedAt} - ${truncate(memory.text, 100)}`);
+  }
+}
+function appendRecallRoleLines(lines, roles) {
+  lines.push("", "### Recall by agent role");
+  if (roles.length === 0) {
+    lines.push("- none");
+    return;
+  }
+  for (const role of roles) {
+    const memoryCount = Object.keys(role.memoryIds).length;
+    lines.push(`- \`${role.agentRole}\`: ${role.count} recall event(s), ${memoryCount} memory ID(s)`);
+  }
+}
+function appendRecallMemoryLines(lines, memories) {
+  lines.push("", "### Most-recalled memories");
+  if (memories.length === 0) {
+    lines.push("- none");
+    return;
+  }
+  for (const memory of memories) {
+    lines.push(`- \`${memory.memoryId}\`: ${memory.count} hit(s), last=${memory.lastRecalledAt}, avgScore=${memory.averageScore.toFixed(3)}`);
+  }
+}
+function appendSupersededChains(lines, report) {
+  lines.push("", "### Superseded chains");
+  if (report.supersededChains.length === 0) {
+    lines.push("- none");
+    return;
+  }
+  for (const chain of report.supersededChains) {
+    const reason = chain.reason ? ` - ${chain.reason}` : "";
+    lines.push(`- ${chain.chain.map((id) => `\`${id}\``).join(" -> ")}${reason}`);
+  }
+}
+function formatCompactResult(result, confirmed) {
+  const lines = [
+    "## Swarm Memory Compact",
+    "",
+    `- Mode: \`${confirmed ? "confirmed" : "dry-run"}\``,
+    `- Deleted tombstones: \`${result.removedDeleted}\``,
+    `- Superseded records: \`${result.removedSuperseded}\``,
+    `- Expired scratch records: \`${result.removedExpiredScratch}\``,
+    `- Remaining memories: \`${result.remaining}\``
+  ];
+  if (!confirmed) {
+    lines.push("", "No records were removed. Re-run `/swarm memory compact --confirm` to apply this compaction.");
+  }
+  return lines.join(`
+`);
+}
+function truncate(value, maxLength) {
+  if (value.length <= maxLength)
+    return value;
+  return `${value.slice(0, maxLength - 3)}...`;
 }
 var PACKAGE_ROOT;
 var init_memory2 = __esm(() => {
@@ -56476,7 +57140,7 @@ async function handleTurboCommand(directory, args, sessionID) {
   const arg0 = args[0]?.toLowerCase();
   const arg1 = args[1]?.toLowerCase();
   if (arg0 === "status") {
-    return buildStatusMessage(session, directory, sessionID);
+    return buildStatusMessage2(session, directory, sessionID);
   }
   const isTurboOn = session.turboMode;
   const isLeanActive = session.leanTurboActive === true;
@@ -56607,7 +57271,7 @@ function enableLeanTurbo(session, directory, sessionID) {
     `Full-Auto: ${fullAutoActive ? "active" : "inactive"})`
   ].join(" ");
 }
-function buildStatusMessage(session, directory, sessionID) {
+function buildStatusMessage2(session, directory, sessionID) {
   if (!session.turboMode) {
     return "Turbo: off";
   }
@@ -56867,7 +57531,7 @@ function classifySwarmCommandToolUse(resolved) {
       return { allowed: true };
     return {
       allowed: false,
-      message: "Use `/swarm memory status`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import and migrate are intentionally excluded from chat-tool execution."
+      message: "Use `/swarm memory status`, `/swarm memory pending`, `/swarm memory recall-log`, `/swarm memory stale`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import, migrate, and compact are intentionally excluded from chat-tool execution."
     };
   }
   if (canonicalKey === "memory evaluate") {
@@ -56878,6 +57542,17 @@ function classifySwarmCommandToolUse(resolved) {
     return {
       allowed: false,
       message: "Usage through swarm_command: `/swarm memory evaluate --json`. Custom fixture directories are only available through direct user command execution."
+    };
+  }
+  if (canonicalKey === "memory pending" || canonicalKey === "memory recall-log" || canonicalKey === "memory stale") {
+    if (args.length === 0)
+      return { allowed: true };
+    if (args.length === 2 && args[0] === "--limit" && /^\d+$/.test(args[1])) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      message: `Usage through swarm_command: \`/swarm ${canonicalKey}\` or ` + `\`/swarm ${canonicalKey} --limit <n>\`.`
     };
   }
   if (canonicalKey === "retrieve") {
@@ -56931,7 +57606,7 @@ function classifySwarmCommandChatFallbackUse(resolved) {
       message: "/swarm config doctor --fix is not available through chat fallback because it can modify configuration files. Run the CLI command directly when you intend to apply fixes."
     };
   }
-  if (canonicalKey === "knowledge migrate" || canonicalKey === "knowledge quarantine" || canonicalKey === "knowledge restore" || canonicalKey === "memory import" || canonicalKey === "memory migrate") {
+  if (canonicalKey === "knowledge migrate" || canonicalKey === "knowledge quarantine" || canonicalKey === "knowledge restore" || canonicalKey === "memory import" || canonicalKey === "memory migrate" || canonicalKey === "memory compact") {
     return {
       allowed: false,
       message: `/swarm ${canonicalKey} is not available through chat fallback because it mutates .swarm state. ` + "Run the CLI command directly after confirming the intended state change."
@@ -56964,6 +57639,10 @@ var init_tool_policy = __esm(() => {
     "knowledge",
     "memory",
     "memory status",
+    "memory pending",
+    "memory recall-log",
+    "memory compact",
+    "memory stale",
     "memory export",
     "memory evaluate",
     "memory import",
@@ -56990,6 +57669,9 @@ var init_tool_policy = __esm(() => {
     "knowledge",
     "memory",
     "memory status",
+    "memory pending",
+    "memory recall-log",
+    "memory stale",
     "memory export",
     "memory evaluate",
     "sync-plan",
@@ -57002,7 +57684,8 @@ var init_tool_policy = __esm(() => {
     "rollback",
     "checkpoint",
     "memory import",
-    "memory migrate"
+    "memory migrate",
+    "memory compact"
   ]);
   NO_ARGS = new Set([
     "agents",
@@ -57055,7 +57738,6 @@ __export(exports_commands, {
   handleMemoryMigrateCommand: () => handleMemoryMigrateCommand,
   handleMemoryImportCommand: () => handleMemoryImportCommand,
   handleMemoryExportCommand: () => handleMemoryExportCommand,
-  handleMemoryEvaluateCommand: () => handleMemoryEvaluateCommand,
   handleMemoryCommand: () => handleMemoryCommand,
   handleKnowledgeRestoreCommand: () => handleKnowledgeRestoreCommand,
   handleKnowledgeQuarantineCommand: () => handleKnowledgeQuarantineCommand,
@@ -57075,6 +57757,7 @@ __export(exports_commands, {
   handleCurateCommand: () => handleCurateCommand,
   handleCouncilCommand: () => handleCouncilCommand,
   handleConfigCommand: () => handleConfigCommand,
+  handleConcurrencyCommand: () => handleConcurrencyCommand,
   handleCloseCommand: () => handleCloseCommand,
   handleClarifyCommand: () => handleClarifyCommand,
   handleCheckpointCommand: () => handleCheckpointCommand,
@@ -57321,6 +58004,7 @@ var init_commands = __esm(() => {
   init_close();
   init_command_dispatch();
   init_command_names();
+  init_concurrency();
   init_config2();
   init_council();
   init_curate();
@@ -57541,6 +58225,7 @@ var init_registry = __esm(() => {
   init_benchmark();
   init_checkpoint2();
   init_close();
+  init_concurrency();
   init_config2();
   init_council();
   init_curate();
@@ -57785,6 +58470,23 @@ var init_registry = __esm(() => {
       aliasOf: "finalize",
       deprecated: true
     },
+    concurrency: {
+      handler: (ctx) => handleConcurrencyCommand(ctx.directory, ctx.args, ctx.sessionID),
+      description: "Manage runtime concurrency override for plan execution [set|status|reset]",
+      args: "set <N|preset>, status, reset",
+      details: `Sets, queries, or clears a session-scoped concurrency override for max_concurrent_tasks during plan execution.
+When set, the override takes precedence over the plan's locked execution_profile.max_concurrent_tasks.
+` + `The override is session-scoped \u2014 it does not modify the plan and is cleared on session reset.
+` + `
+Subcommands:
+` + `  concurrency set <N>          \u2014 Set session concurrency to N (1-64)
+` + `  concurrency set <preset>      \u2014 Set to preset: min (1), medium (3), max (8)
+` + `  concurrency status            \u2014 Show effective concurrency (override, plan baseline, operational effective)
+` + `  concurrency reset             \u2014 Clear the session concurrency override
+` + `
+` + "Session-scoped \u2014 resets on new session.",
+      category: "utility"
+    },
     simulate: {
       handler: (ctx) => handleSimulateCommand(ctx.directory, ctx.args),
       description: "Dry-run hidden coupling analysis with configurable thresholds",
@@ -57976,6 +58678,34 @@ Subcommands:
       description: "Show Swarm memory provider, JSONL, and migration status",
       subcommandOf: "memory",
       args: "",
+      category: "diagnostics"
+    },
+    "memory pending": {
+      handler: (ctx) => handleMemoryPendingCommand(ctx.directory, ctx.args),
+      description: "Show pending Swarm memory proposals and rejection reasons",
+      subcommandOf: "memory",
+      args: "--limit <n>",
+      category: "diagnostics"
+    },
+    "memory recall-log": {
+      handler: (ctx) => handleMemoryRecallLogCommand(ctx.directory, ctx.args),
+      description: "Summarize Swarm memory recall usage",
+      subcommandOf: "memory",
+      args: "--limit <n>",
+      category: "diagnostics"
+    },
+    "memory compact": {
+      handler: (ctx) => handleMemoryCompactCommand(ctx.directory, ctx.args),
+      description: "Compact deleted, superseded, and expired scratch memories",
+      subcommandOf: "memory",
+      args: "--confirm",
+      category: "utility"
+    },
+    "memory stale": {
+      handler: (ctx) => handleMemoryStaleCommand(ctx.directory, ctx.args),
+      description: "List stale and low-utility Swarm memories",
+      subcommandOf: "memory",
+      args: "--limit <n>",
       category: "diagnostics"
     },
     "memory export": {

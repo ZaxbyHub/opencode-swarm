@@ -26,6 +26,10 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'knowledge',
 	'memory',
 	'memory status',
+	'memory pending',
+	'memory recall-log',
+	'memory compact',
+	'memory stale',
 	'memory export',
 	'memory evaluate',
 	'memory import',
@@ -56,6 +60,9 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'knowledge',
 	'memory',
 	'memory status',
+	'memory pending',
+	'memory recall-log',
+	'memory stale',
 	'memory export',
 	'memory evaluate',
 	'sync-plan',
@@ -78,6 +85,7 @@ export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
 	'checkpoint',
 	'memory import',
 	'memory migrate',
+	'memory compact',
 ]);
 
 const NO_ARGS = new Set([
@@ -160,7 +168,7 @@ export function classifySwarmCommandToolUse(
 		return {
 			allowed: false,
 			message:
-				'Use `/swarm memory status`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import and migrate are intentionally excluded from chat-tool execution.',
+				'Use `/swarm memory status`, `/swarm memory pending`, `/swarm memory recall-log`, `/swarm memory stale`, `/swarm memory export`, or `/swarm memory evaluate --json` through swarm_command. Memory import, migrate, and compact are intentionally excluded from chat-tool execution.',
 		};
 	}
 
@@ -171,6 +179,23 @@ export function classifySwarmCommandToolUse(
 			allowed: false,
 			message:
 				'Usage through swarm_command: `/swarm memory evaluate --json`. Custom fixture directories are only available through direct user command execution.',
+		};
+	}
+
+	if (
+		canonicalKey === 'memory pending' ||
+		canonicalKey === 'memory recall-log' ||
+		canonicalKey === 'memory stale'
+	) {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 2 && args[0] === '--limit' && /^\d+$/.test(args[1])) {
+			return { allowed: true };
+		}
+		return {
+			allowed: false,
+			message:
+				`Usage through swarm_command: \`/swarm ${canonicalKey}\` or ` +
+				`\`/swarm ${canonicalKey} --limit <n>\`.`,
 		};
 	}
 
@@ -249,7 +274,8 @@ export function classifySwarmCommandChatFallbackUse(
 		canonicalKey === 'knowledge quarantine' ||
 		canonicalKey === 'knowledge restore' ||
 		canonicalKey === 'memory import' ||
-		canonicalKey === 'memory migrate'
+		canonicalKey === 'memory migrate' ||
+		canonicalKey === 'memory compact'
 	) {
 		return {
 			allowed: false,

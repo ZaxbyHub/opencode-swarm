@@ -22,10 +22,14 @@ import {
 	writeJsonlExport,
 	writeMigrationReport,
 } from './jsonl-migration';
+import { shouldCompactMemory } from './maintenance';
 import type {
+	MemoryCompactOptions,
+	MemoryCompactResult,
 	MemoryProposalStore,
 	MemoryProvider,
 	MemoryRecallUsageEvent,
+	MemoryRecallUsageFilter,
 } from './provider';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
@@ -57,6 +61,7 @@ type EventOperation =
 	| 'proposal'
 	| 'recall'
 	| 'migration'
+	| 'compact'
 	| 'curator_decision'
 	| 'invalid_load';
 
@@ -178,6 +183,10 @@ interface ProposalRow {
 	proposal_json: string;
 }
 
+interface RecallUsageRow {
+	usage_json: string;
+}
+
 interface DecisionTransactionResult {
 	change: AppliedMemoryChange;
 	proposal: MemoryProposal;
@@ -234,6 +243,10 @@ export class SQLiteMemoryProvider
 			redaction: {
 				...DEFAULT_MEMORY_CONFIG.redaction,
 				...(config.redaction ?? {}),
+			},
+			maintenance: {
+				...DEFAULT_MEMORY_CONFIG.maintenance,
+				...(config.maintenance ?? {}),
 			},
 		};
 	}
@@ -377,6 +390,45 @@ export class SQLiteMemoryProvider
 		await this.event('recall', event.bundleId, JSON.stringify(event));
 	}
 
+	async listRecallUsage(
+		filter: MemoryRecallUsageFilter = {},
+	): Promise<MemoryRecallUsageEvent[]> {
+		await this.initialize();
+		const rows =
+			typeof filter.limit === 'number'
+				? this.requireDb()
+						.query<RecallUsageRow, [number]>(
+							`SELECT usage_json
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				LIMIT ?`,
+						)
+						.all(Math.max(1, Math.trunc(filter.limit)))
+				: this.requireDb()
+						.query<RecallUsageRow, []>(
+							`SELECT usage_json
+				FROM memory_recall_usage
+				ORDER BY timestamp DESC
+				`,
+						)
+						.all();
+		const events: MemoryRecallUsageEvent[] = [];
+		for (const row of rows) {
+			try {
+				const parsed = JSON.parse(row.usage_json) as MemoryRecallUsageEvent;
+				if (
+					Array.isArray(parsed.memoryIds) &&
+					typeof parsed.query === 'string'
+				) {
+					events.push(parsed);
+				}
+			} catch {
+				// Ignore corrupt recall usage rows; maintenance reports are advisory.
+			}
+		}
+		return events;
+	}
+
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
 		await this.initialize();
 		let records = Array.from(this.memories.values());
@@ -396,9 +448,11 @@ export class SQLiteMemoryProvider
 				return !Number.isFinite(expires) || expires > now;
 			});
 		}
-		records = records.filter(
-			(record) => !record.supersededBy && record.metadata.deleted !== true,
-		);
+		if (!filter.includeInactive) {
+			records = records.filter(
+				(record) => !record.supersededBy && record.metadata.deleted !== true,
+			);
+		}
 		records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 		return records.slice(0, filter.limit ?? records.length);
 	}
@@ -508,6 +562,60 @@ export class SQLiteMemoryProvider
 			memories: memories.length,
 			proposals: proposals.length,
 		};
+	}
+
+	async compactMaintenance(
+		options: MemoryCompactOptions = {},
+	): Promise<MemoryCompactResult> {
+		await this.initialize();
+		const now = options.now ? new Date(options.now) : new Date();
+		const kept: MemoryRecord[] = [];
+		const removeIds: string[] = [];
+		const result: MemoryCompactResult = {
+			dryRun: options.dryRun !== false,
+			removedDeleted: 0,
+			removedSuperseded: 0,
+			removedExpiredScratch: 0,
+			remaining: 0,
+		};
+		for (const memory of this.memories.values()) {
+			const compactReason = shouldCompactMemory(memory, now);
+			if (compactReason === 'deleted') {
+				result.removedDeleted++;
+				removeIds.push(memory.id);
+				continue;
+			}
+			if (compactReason === 'superseded') {
+				result.removedSuperseded++;
+				removeIds.push(memory.id);
+				continue;
+			}
+			if (compactReason === 'expired_scratch') {
+				result.removedExpiredScratch++;
+				removeIds.push(memory.id);
+				continue;
+			}
+			kept.push(memory);
+		}
+		result.remaining = kept.length;
+		if (result.dryRun) return result;
+
+		const db = this.requireDb();
+		const compact = db.transaction(() => {
+			for (const id of removeIds) {
+				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
+				this.deleteMemoryFts(id);
+			}
+			this.insertEvent(
+				'compact',
+				'memory_items',
+				'removed deleted, superseded, and expired scratch memories',
+				JSON.stringify(result),
+			);
+		});
+		compact();
+		this.memories = new Map(kept.map((memory) => [memory.id, memory]));
+		return result;
 	}
 
 	hasMigration(name: string): boolean {

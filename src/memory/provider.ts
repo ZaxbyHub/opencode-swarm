@@ -27,6 +27,23 @@ export interface MemoryRecallUsageEvent {
 	timestamp: string;
 }
 
+export interface MemoryRecallUsageFilter {
+	limit?: number;
+}
+
+export interface MemoryCompactOptions {
+	dryRun?: boolean;
+	now?: string;
+}
+
+export interface MemoryCompactResult {
+	dryRun: boolean;
+	removedDeleted: number;
+	removedSuperseded: number;
+	removedExpiredScratch: number;
+	remaining: number;
+}
+
 export interface MemoryProvider {
 	readonly name: string;
 	initialize?(): Promise<void>;
@@ -37,6 +54,12 @@ export interface MemoryProvider {
 	recall(request: RecallRequest): Promise<RecallResultItem[]>;
 	recallWithDiagnostics?(request: RecallRequest): Promise<MemoryRecallResult>;
 	recordRecallUsage?(event: MemoryRecallUsageEvent): Promise<void>;
+	listRecallUsage?(
+		filter?: MemoryRecallUsageFilter,
+	): Promise<MemoryRecallUsageEvent[]>;
+	compactMaintenance?(
+		options?: MemoryCompactOptions,
+	): Promise<MemoryCompactResult>;
 	list(filter: MemoryListFilter): Promise<MemoryRecord[]>;
 }
 

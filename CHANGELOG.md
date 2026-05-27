@@ -1,5 +1,34 @@
 # Changelog
 
+## [7.40.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.39.0...v7.40.0) (2026-05-27)
+
+
+### Features
+
+* **memory:** add maintenance observability commands ([c9ffa6d](https://github.com/zaxbysauce/opencode-swarm/commit/c9ffa6d21aa5130767ce494a399cb2b92387c9e6))
+* **memory:** add maintenance observability commands ([3d2d155](https://github.com/zaxbysauce/opencode-swarm/commit/3d2d1552b3f6d24aa1a8a24f5c653b5f31e0f7d0))
+
+## [7.39.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.38.0...v7.39.0) (2026-05-27)
+
+
+### Features
+
+* **commands:** add /swarm concurrency command for runtime plan parallelism override ([401436f](https://github.com/zaxbysauce/opencode-swarm/commit/401436f87a76f8933dceae905e5e543616de24b9))
+* **commands:** add /swarm concurrency command for runtime plan parallelism override ([fb170d8](https://github.com/zaxbysauce/opencode-swarm/commit/fb170d82e137d7d70500330fa259e4cec65b4860))
+
+## [7.38.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.37.0...v7.38.0) (2026-05-26)
+
+
+### Features
+
+* **memory:** add recall evaluation harness ([79961df](https://github.com/zaxbysauce/opencode-swarm/commit/79961dfb007382112fc56bda80d7447996d15a4a))
+* **memory:** add recall evaluation harness ([ff24e5a](https://github.com/zaxbysauce/opencode-swarm/commit/ff24e5a174d2ce2eada40cd79ed706ceb8342257))
+
+
+### Bug Fixes
+
+* **memory:** address recall evaluation feedback ([cd33480](https://github.com/zaxbysauce/opencode-swarm/commit/cd3348084fe68170a70835a97c3269fa8cb534b6))
+
 ## [7.37.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.36.0...v7.37.0) (2026-05-26)
 
 

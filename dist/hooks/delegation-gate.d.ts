@@ -55,6 +55,7 @@ interface MessageWithParts {
     parts: MessagePart[];
 }
 declare function resolveDelegatedPlanTaskId(args: Record<string, unknown>, knownPlanTaskIds?: ReadonlySet<string>): string | null;
+declare function buildParallelExecutionGuidance(directory: string | undefined, sessionID: string, session: AgentSessionState): Promise<string | null>;
 /**
  * Resolves the correct task ID for evidence recording by chaining:
  * 1. Explicit task_id in direct args (structured field)
@@ -68,11 +69,13 @@ declare function resolveDelegatedPlanTaskId(args: Record<string, unknown>, known
 declare function resolveEvidenceTaskId(args: Record<string, unknown> | undefined, session: AgentSessionState, directory: string): Promise<string | null>;
 /**
  * _internals export for testing — do not use in production code.
- * Exposes resolveEvidenceTaskId and resolveDelegatedPlanTaskId for unit testing.
+ * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId, and
+ * buildParallelExecutionGuidance for unit testing.
  */
 export declare const _internals: {
     resolveEvidenceTaskId: typeof resolveEvidenceTaskId;
     resolveDelegatedPlanTaskId: typeof resolveDelegatedPlanTaskId;
+    buildParallelExecutionGuidance: typeof buildParallelExecutionGuidance;
 };
 /**
  * Creates the experimental.chat.messages.transform hook for delegation gating.

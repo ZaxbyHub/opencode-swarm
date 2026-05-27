@@ -184,6 +184,18 @@ Curator agents may return an optional JSON `curatorMemoryDecisions` array in Tas
 
 In SQLite, decision application is transactional: Swarm loads the pending proposal, validates the decision and resulting memory record, applies the memory change, updates proposal status, and appends a `curator_decision` event in one transaction. Superseded memories are marked with `supersededBy` and stop appearing in recall.
 
+## Maintenance and Observability
+
+Memory cleanup is explicit. Swarm does not automatically remove deleted, superseded, or expired scratch records. The command surface is safe by default:
+
+- `/swarm memory status` reports storage, migration, and cleanup mode.
+- `/swarm memory pending` lists pending proposals and recent rejected proposal reasons.
+- `/swarm memory recall-log` summarizes recall usage by agent role and memory ID, including most-recalled and never-recalled memories.
+- `/swarm memory stale` lists expired scratch memories, deleted tombstones, superseded chains, and low-utility memories.
+- `/swarm memory compact` is a dry run unless `--confirm` is passed. Confirmed compaction removes only deleted tombstones, superseded records, and expired scratch memories.
+
+Expired scratch memory is hidden from recall and normal list results by default. Superseded chains remain inspectable through `/swarm memory stale` before compaction.
+
 ## Secret Handling
 
 The detector is intentionally conservative and covers obvious cases:

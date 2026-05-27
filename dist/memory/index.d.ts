@@ -7,8 +7,9 @@ export { createConfiguredMemoryProvider, createMemoryGateway, MemoryGateway, } f
 export { createMemoryLifecycleHooks, type MemoryLifecycleHookOptions, type MemoryLifecycleHooks, } from './injector';
 export { backupLegacyJsonl, getLegacyJsonlFileStatus, type JsonlBackupResult, type JsonlImportPayload, type JsonlInvalidRow, type JsonlMigrationReport, LEGACY_JSONL_MIGRATION_NAME, LEGACY_JSONL_MIGRATION_VERSION, readLegacyJsonl, readMigrationReport, resolveMemoryStorageDir, resolveSqliteDatabasePath, writeJsonlExport, writeMigrationReport, } from './jsonl-migration';
 export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
+export { buildMemoryMaintenanceReport, type MemoryMaintenanceReport, type MemoryMaintenanceReportOptions, type MemoryRecallUsageByMemory, type MemoryRecallUsageByRole, type MemorySupersededChain, shouldCompactMemory, } from './maintenance';
 export { buildRecallPromptBlock } from './prompt-block';
-export type { MemoryProposalStore, MemoryProvider } from './provider';
+export type { MemoryCompactOptions, MemoryCompactResult, MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent, MemoryRecallUsageFilter, } from './provider';
 export { buildMemoryRecallPlan, type MemoryRecallPlan, type MemoryRecallPlannerInput, } from './recall-planner';
 export { findSecrets, redactSecrets } from './redaction';
 export { MEMORY_RECALL_PROFILES, type MemoryRecallProfile, normalizeMemoryAgentRole, resolveMemoryRecallProfile, } from './role-profiles';

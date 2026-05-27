@@ -1,5 +1,5 @@
 import { type MemoryConfig } from './config';
-import type { MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent } from './provider';
+import type { MemoryCompactOptions, MemoryCompactResult, MemoryProposalStore, MemoryProvider, MemoryRecallUsageEvent, MemoryRecallUsageFilter } from './provider';
 import type { RecallScoringDiagnostics } from './scoring';
 import type { AppliedMemoryChange, MemoryListFilter, MemoryProposal, MemoryRecord, RecallRequest, RecallResultItem, ResolvedCuratorMemoryDecision } from './types';
 export declare class LocalJsonlMemoryProvider implements MemoryProvider, MemoryProposalStore {
@@ -21,6 +21,7 @@ export declare class LocalJsonlMemoryProvider implements MemoryProvider, MemoryP
         diagnostics: RecallScoringDiagnostics;
     }>;
     recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void>;
+    listRecallUsage(filter?: MemoryRecallUsageFilter): Promise<MemoryRecallUsageEvent[]>;
     list(filter?: MemoryListFilter): Promise<MemoryRecord[]>;
     createProposal(proposal: MemoryProposal): Promise<MemoryProposal>;
     listProposals(filter?: {
@@ -29,6 +30,7 @@ export declare class LocalJsonlMemoryProvider implements MemoryProvider, MemoryP
     }): Promise<MemoryProposal[]>;
     applyCuratorDecision(decision: ResolvedCuratorMemoryDecision): Promise<AppliedMemoryChange>;
     compact(): Promise<void>;
+    compactMaintenance(options?: MemoryCompactOptions): Promise<MemoryCompactResult>;
     private audit;
     private activeMemory;
     private validateDecisionMemory;

@@ -43,8 +43,24 @@ export {
 	writeMigrationReport,
 } from './jsonl-migration';
 export { LocalJsonlMemoryProvider } from './local-jsonl-provider';
+export {
+	buildMemoryMaintenanceReport,
+	type MemoryMaintenanceReport,
+	type MemoryMaintenanceReportOptions,
+	type MemoryRecallUsageByMemory,
+	type MemoryRecallUsageByRole,
+	type MemorySupersededChain,
+	shouldCompactMemory,
+} from './maintenance';
 export { buildRecallPromptBlock } from './prompt-block';
-export type { MemoryProposalStore, MemoryProvider } from './provider';
+export type {
+	MemoryCompactOptions,
+	MemoryCompactResult,
+	MemoryProposalStore,
+	MemoryProvider,
+	MemoryRecallUsageEvent,
+	MemoryRecallUsageFilter,
+} from './provider';
 export {
 	buildMemoryRecallPlan,
 	type MemoryRecallPlan,

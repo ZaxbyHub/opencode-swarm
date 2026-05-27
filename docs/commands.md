@@ -338,6 +338,22 @@ Show memory storage commands.
 
 Show the resolved memory provider, SQLite database path, legacy JSONL file status, and the latest migration report.
 
+### `/swarm memory pending`
+
+Show pending memory proposals and recent rejected proposal reasons.
+
+### `/swarm memory recall-log`
+
+Summarize recall usage by agent role and memory ID. Also shows the most-recalled and never-recalled memories.
+
+### `/swarm memory stale`
+
+List expired scratch memories, deleted tombstones, superseded chains, and low-utility memories.
+
+### `/swarm memory compact`
+
+Dry-run compaction for deleted, superseded, and expired scratch memory records. Pass `--confirm` to apply the cleanup. There is no automatic destructive compaction.
+
 ### `/swarm memory export`
 
 Export current memory records and proposals to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`.

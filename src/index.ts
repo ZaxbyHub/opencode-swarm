@@ -1095,7 +1095,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|memory|curate|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1249,11 +1249,6 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm memory export to write current memory to JSONL',
 				},
-				'swarm-memory-evaluate': {
-					template: '/swarm memory evaluate --json',
-					description:
-						'Use /swarm memory evaluate --json to generate the recall evaluation report',
-				},
 				'swarm-memory-import': {
 					template: '/swarm memory import',
 					description:
@@ -1268,6 +1263,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm curate',
 					description:
 						'Use /swarm curate to curate knowledge artifacts and entries',
+				},
+				'swarm-concurrency': {
+					template: '/swarm concurrency $ARGUMENTS',
+					description:
+						'Use /swarm concurrency to manage runtime concurrency override for plan execution',
 				},
 				'swarm-turbo': {
 					template: '/swarm turbo',

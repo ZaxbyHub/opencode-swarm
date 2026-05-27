@@ -26,6 +26,10 @@ export interface MemoryConfig {
 	redaction: {
 		rejectDurableSecrets: boolean;
 	};
+	maintenance: {
+		lowUtilityMaxConfidence: number;
+		lowUtilityMinAgeDays: number;
+	};
 	hardDelete: boolean;
 }
 
@@ -54,6 +58,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	},
 	redaction: {
 		rejectDurableSecrets: true,
+	},
+	maintenance: {
+		lowUtilityMaxConfidence: 0.45,
+		lowUtilityMinAgeDays: 30,
 	},
 	hardDelete: false,
 };
@@ -100,6 +108,10 @@ export function resolveMemoryConfig(
 		redaction: {
 			...DEFAULT_MEMORY_CONFIG.redaction,
 			...(input?.redaction ?? {}),
+		},
+		maintenance: {
+			...DEFAULT_MEMORY_CONFIG.maintenance,
+			...(input?.maintenance ?? {}),
 		},
 	};
 }

@@ -37,6 +37,10 @@ describe('MemoryConfigSchema', () => {
 			},
 			writes: { mode: 'propose' },
 			redaction: { rejectDurableSecrets: true },
+			maintenance: {
+				lowUtilityMaxConfidence: 0.45,
+				lowUtilityMinAgeDays: 30,
+			},
 			hardDelete: false,
 		});
 	});
@@ -84,6 +88,25 @@ describe('MemoryConfigSchema', () => {
 		expect(() => MemoryConfigSchema.parse({ provider: 'qdrant' })).toThrow();
 		expect(() =>
 			MemoryConfigSchema.parse({ writes: { mode: 'direct' } }),
+		).toThrow();
+	});
+
+	test('accepts explicit maintenance thresholds for low-utility reporting', () => {
+		const parsed = MemoryConfigSchema.parse({
+			maintenance: {
+				lowUtilityMaxConfidence: 0.2,
+				lowUtilityMinAgeDays: 90,
+			},
+		});
+
+		expect(parsed.maintenance).toEqual({
+			lowUtilityMaxConfidence: 0.2,
+			lowUtilityMinAgeDays: 90,
+		});
+		expect(() =>
+			MemoryConfigSchema.parse({
+				maintenance: { lowUtilityMinAgeDays: 0 },
+			}),
 		).toThrow();
 	});
 

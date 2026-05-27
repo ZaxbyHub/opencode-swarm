@@ -76,6 +76,8 @@ export interface SerializedAgentSession {
 	sessionRehydratedAt?: number;
 	/** Stage B completion tracking: per-task set of completed Stage B agents. Optional for backward compat with old snapshots. */
 	stageBCompletion?: Record<string, string[]>;
+	/** Session-scoped concurrency override for max_concurrent_tasks (Issue #761) */
+	maxConcurrencyOverride?: number;
 }
 
 /**
@@ -216,6 +218,9 @@ export function serializeAgentSession(
 		fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		...(Object.keys(stageBCompletion).length > 0 && { stageBCompletion }),
+		...(s.maxConcurrencyOverride !== undefined && {
+			maxConcurrencyOverride: s.maxConcurrencyOverride,
+		}),
 	};
 }
 

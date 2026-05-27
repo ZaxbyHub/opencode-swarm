@@ -469,7 +469,11 @@ async function buildParallelExecutionGuidance(
 	const profile = plan.execution_profile;
 	const enabled = profile?.parallelization_enabled === true;
 	const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
-	if (!enabled || maxConcurrent <= 1) return null;
+	// Check for session-scoped concurrency override (Issue #761)
+	// Override only applies in standard mode — Lean Turbo short-circuits above.
+	const effectiveMaxConcurrent =
+		session?.maxConcurrencyOverride ?? maxConcurrent;
+	if (!enabled || effectiveMaxConcurrent <= 1) return null;
 
 	if (hasActiveLeanTurbo(sessionID)) {
 		return '[NEXT] Lean Turbo is active; use lean_turbo_run_phase and Lean Turbo lane guidance instead of standard execution-profile slot filling.';
@@ -502,9 +506,9 @@ async function buildParallelExecutionGuidance(
 		if (ACTIVE_PARALLEL_TASK_STATES.has(state)) occupied.add(taskId);
 	}
 
-	const availableSlots = Math.max(0, maxConcurrent - occupied.size);
+	const availableSlots = Math.max(0, effectiveMaxConcurrent - occupied.size);
 	if (availableSlots <= 0) {
-		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; all standard execution slots are occupied. Continue current active task gates before starting more coder work.`;
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; all standard execution slots are occupied. Continue current active task gates before starting more coder work.`;
 	}
 
 	const eligible = tasks
@@ -519,10 +523,10 @@ async function buildParallelExecutionGuidance(
 		.slice(0, availableSlots);
 
 	if (eligible.length === 0) {
-		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
 	}
 
-	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${maxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
+	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
 }
 
 function isParallelGuidancePhaseComplete(phase: Phase): boolean {
@@ -662,11 +666,13 @@ async function resolveEvidenceTaskId(
 
 /**
  * _internals export for testing — do not use in production code.
- * Exposes resolveEvidenceTaskId and resolveDelegatedPlanTaskId for unit testing.
+ * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId, and
+ * buildParallelExecutionGuidance for unit testing.
  */
 export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
+	buildParallelExecutionGuidance,
 };
 
 /**

@@ -258,7 +258,16 @@ describe('resolveCommand()', () => {
 		});
 
 		test('resolves memory subcommands', () => {
-			for (const subcommand of ['status', 'export', 'import', 'migrate']) {
+			for (const subcommand of [
+				'status',
+				'pending',
+				'recall-log',
+				'compact',
+				'stale',
+				'export',
+				'import',
+				'migrate',
+			]) {
 				const result = resolveCommand(['memory', subcommand]);
 				expect(result).not.toBeNull();
 				expect(result!.entry.subcommandOf).toBe('memory');

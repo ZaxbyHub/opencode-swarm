@@ -1003,6 +1003,15 @@ export const MemoryConfigSchema = z.object({
 			rejectDurableSecrets: z.boolean().default(true),
 		})
 		.default({ rejectDurableSecrets: true }),
+	maintenance: z
+		.object({
+			lowUtilityMaxConfidence: z.number().min(0).max(1).default(0.45),
+			lowUtilityMinAgeDays: z.number().int().min(1).max(3650).default(30),
+		})
+		.default({
+			lowUtilityMaxConfidence: 0.45,
+			lowUtilityMinAgeDays: 30,
+		}),
 	hardDelete: z.boolean().default(false),
 });
 

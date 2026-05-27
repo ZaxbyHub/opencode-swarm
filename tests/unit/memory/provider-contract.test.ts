@@ -170,6 +170,14 @@ describe('MemoryProvider contract parity', () => {
 				});
 
 				expect(results.map((item) => item.record.id)).toEqual([repoA.id]);
+				expect(await provider.listRecallUsage()).toEqual([
+					expect.objectContaining({
+						bundleId: 'bundle_20260524_abcd',
+						memoryIds: [repoA.id],
+						agentRole: 'coder',
+					}),
+				]);
+				expect(await provider.listRecallUsage({ limit: 1 })).toHaveLength(1);
 			});
 
 			test('tombstones deletes and refuses to upsert over tombstones', async () => {

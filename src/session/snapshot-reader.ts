@@ -175,6 +175,10 @@ export function deserializeAgentSession(
 		fullAutoInteractionCount: s.fullAutoInteractionCount ?? 0,
 		fullAutoDeadlockCount: s.fullAutoDeadlockCount ?? 0,
 		fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
+		maxConcurrencyOverride:
+			typeof s.maxConcurrencyOverride === 'number'
+				? Math.min(64, Math.max(1, s.maxConcurrencyOverride))
+				: undefined,
 		prmPatternCounts: new Map(),
 		prmEscalationLevel: 0,
 		prmLastPatternDetected: null,

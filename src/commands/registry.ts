@@ -8,6 +8,7 @@ import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
 import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
+import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
@@ -32,10 +33,14 @@ import {
 } from './knowledge.js';
 import {
 	handleMemoryCommand,
+	handleMemoryCompactCommand,
 	handleMemoryEvaluateCommand,
 	handleMemoryExportCommand,
 	handleMemoryImportCommand,
 	handleMemoryMigrateCommand,
+	handleMemoryPendingCommand,
+	handleMemoryRecallLogCommand,
+	handleMemoryStaleCommand,
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
@@ -494,6 +499,26 @@ export const COMMAND_REGISTRY = {
 		aliasOf: 'finalize',
 		deprecated: true,
 	},
+	concurrency: {
+		handler: (ctx) =>
+			handleConcurrencyCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Manage runtime concurrency override for plan execution [set|status|reset]',
+		args: 'set <N|preset>, status, reset',
+		details:
+			'Sets, queries, or clears a session-scoped concurrency override for max_concurrent_tasks during plan execution.\n' +
+			"When set, the override takes precedence over the plan's locked execution_profile.max_concurrent_tasks.\n" +
+			'The override is session-scoped — it does not modify the plan and is cleared on session reset.\n' +
+			'\n' +
+			'Subcommands:\n' +
+			'  concurrency set <N>          — Set session concurrency to N (1-64)\n' +
+			'  concurrency set <preset>      — Set to preset: min (1), medium (3), max (8)\n' +
+			'  concurrency status            — Show effective concurrency (override, plan baseline, operational effective)\n' +
+			'  concurrency reset             — Clear the session concurrency override\n' +
+			'\n' +
+			'Session-scoped — resets on new session.',
+		category: 'utility',
+	},
 	simulate: {
 		handler: (ctx) => handleSimulateCommand(ctx.directory, ctx.args),
 		description:
@@ -725,6 +750,34 @@ export const COMMAND_REGISTRY = {
 		description: 'Show Swarm memory provider, JSONL, and migration status',
 		subcommandOf: 'memory',
 		args: '',
+		category: 'diagnostics',
+	},
+	'memory pending': {
+		handler: (ctx) => handleMemoryPendingCommand(ctx.directory, ctx.args),
+		description: 'Show pending Swarm memory proposals and rejection reasons',
+		subcommandOf: 'memory',
+		args: '--limit <n>',
+		category: 'diagnostics',
+	},
+	'memory recall-log': {
+		handler: (ctx) => handleMemoryRecallLogCommand(ctx.directory, ctx.args),
+		description: 'Summarize Swarm memory recall usage',
+		subcommandOf: 'memory',
+		args: '--limit <n>',
+		category: 'diagnostics',
+	},
+	'memory compact': {
+		handler: (ctx) => handleMemoryCompactCommand(ctx.directory, ctx.args),
+		description: 'Compact deleted, superseded, and expired scratch memories',
+		subcommandOf: 'memory',
+		args: '--confirm',
+		category: 'utility',
+	},
+	'memory stale': {
+		handler: (ctx) => handleMemoryStaleCommand(ctx.directory, ctx.args),
+		description: 'List stale and low-utility Swarm memories',
+		subcommandOf: 'memory',
+		args: '--limit <n>',
 		category: 'diagnostics',
 	},
 	'memory export': {

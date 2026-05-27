@@ -165,6 +165,10 @@ export interface AgentSessionState {
     leanTurboActive?: boolean;
     /** Current phase number when Lean Turbo is active (for durable state sync). */
     leanTurboCurrentPhase?: number;
+    /** Session-scoped concurrency override for max_concurrent_tasks (Issue #761).
+     *  When set, overrides the plan's execution_profile.max_concurrent_tasks
+     *  for delegation-gate guidance. Cleared on session reset. */
+    maxConcurrencyOverride?: number;
     /** Session-level QA gate overrides layered on top of the spec-level profile.
      *  Overrides can only enable gates (true); false values are ignored by
      *  getEffectiveGates. Cleared on session reset. Optional for backwards

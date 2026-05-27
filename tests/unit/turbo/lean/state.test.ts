@@ -113,6 +113,115 @@ describe('Lean Turbo Session State', () => {
 			expect(session.leanTurboActive).toBe(false);
 		});
 	});
+
+	describe('maxConcurrencyOverride initialization', () => {
+		it('initializes maxConcurrencyOverride to undefined on new session via startAgentSession', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId);
+
+			expect(session).toBeDefined();
+			expect(session!.maxConcurrencyOverride).toBeUndefined();
+		});
+
+		it('initializes maxConcurrencyOverride to undefined via ensureAgentSession', () => {
+			ensureAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId);
+
+			expect(session).toBeDefined();
+			expect(session!.maxConcurrencyOverride).toBeUndefined();
+		});
+	});
+
+	describe('maxConcurrencyOverride mutation', () => {
+		it('allows setting maxConcurrencyOverride to a number', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+
+			session.maxConcurrencyOverride = 4;
+
+			expect(session.maxConcurrencyOverride).toBe(4);
+		});
+
+		it('allows updating maxConcurrencyOverride to a different number', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+
+			session.maxConcurrencyOverride = 2;
+			session.maxConcurrencyOverride = 8;
+
+			expect(session.maxConcurrencyOverride).toBe(8);
+		});
+
+		it('allows setting maxConcurrencyOverride to 0', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+
+			session.maxConcurrencyOverride = 0;
+
+			expect(session.maxConcurrencyOverride).toBe(0);
+		});
+	});
+
+	describe('maxConcurrencyOverride persistence across delegation cycles', () => {
+		it('maintains value across multiple ensureAgentSession calls (same session)', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+
+			// Set a value
+			session.maxConcurrencyOverride = 6;
+
+			// Simulate delegation cycle: architect delegates to coder, coder finishes,
+			// architect continues — each delegation calls ensureAgentSession
+			ensureAgentSession(sessionId, 'mega_coder');
+			ensureAgentSession(sessionId, 'mega_coder');
+			ensureAgentSession(sessionId, 'mega_coder');
+
+			const sameSession = getAgentSession(sessionId);
+			expect(sameSession!.maxConcurrencyOverride).toBe(6);
+		});
+
+		it('maintains value when switching agents within same session', () => {
+			startAgentSession(sessionId, 'architect');
+			const session = getAgentSession(sessionId)!;
+
+			session.maxConcurrencyOverride = 3;
+
+			// Switch to coder (same session, different agent)
+			ensureAgentSession(sessionId, 'mega_coder');
+
+			const sameSession = getAgentSession(sessionId);
+			expect(sameSession!.maxConcurrencyOverride).toBe(3);
+		});
+	});
+
+	describe('maxConcurrencyOverride cleared on session reset', () => {
+		it('maxConcurrencyOverride is undefined after resetSwarmState', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+
+			session.maxConcurrencyOverride = 5;
+			expect(session.maxConcurrencyOverride).toBe(5);
+
+			resetSwarmState();
+
+			// After reset, the session is gone
+			expect(getAgentSession(sessionId)).toBeUndefined();
+		});
+
+		it('new session after reset has undefined maxConcurrencyOverride', () => {
+			startAgentSession(sessionId, 'mega_coder');
+			const session = getAgentSession(sessionId)!;
+			session.maxConcurrencyOverride = 5;
+
+			resetSwarmState();
+
+			// Start fresh session with same ID
+			startAgentSession(sessionId, 'mega_coder');
+			const newSession = getAgentSession(sessionId);
+
+			expect(newSession!.maxConcurrencyOverride).toBeUndefined();
+		});
+	});
 });
 
 describe('Lean Turbo Durable State', () => {

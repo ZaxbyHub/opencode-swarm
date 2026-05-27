@@ -18,10 +18,14 @@ import {
 	validateDecisionMatchesProposal,
 } from './curator-decision-helpers';
 import { MemoryValidationError } from './errors';
+import { shouldCompactMemory } from './maintenance';
 import type {
+	MemoryCompactOptions,
+	MemoryCompactResult,
 	MemoryProposalStore,
 	MemoryProvider,
 	MemoryRecallUsageEvent,
+	MemoryRecallUsageFilter,
 } from './provider';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
@@ -192,20 +196,22 @@ export class LocalJsonlMemoryProvider
 
 	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {
 		await this.initialize();
-		await this.audit(
-			'recall',
-			event.bundleId,
-			JSON.stringify({
-				query: event.query,
-				scopes: event.scopes,
-				kinds: event.kinds,
-				memoryIds: event.memoryIds,
-				scores: event.scores,
-				tokenEstimate: event.tokenEstimate,
-				agentRole: event.agentRole,
-				runId: event.runId,
-			}),
-		);
+		await this.audit('recall', event.bundleId, undefined, event);
+	}
+
+	async listRecallUsage(
+		filter: MemoryRecallUsageFilter = {},
+	): Promise<MemoryRecallUsageEvent[]> {
+		await this.initialize();
+		const events = await readAuditEvents(this.pathFor('audit'));
+		const usage: MemoryRecallUsageEvent[] = [];
+		for (const event of events) {
+			if (event.operation !== 'recall') continue;
+			const parsed = parseRecallUsageEvent(event);
+			if (parsed) usage.push(parsed);
+		}
+		usage.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+		return usage.slice(0, filter.limit ?? usage.length);
 	}
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
@@ -227,9 +233,11 @@ export class LocalJsonlMemoryProvider
 				return !Number.isFinite(expires) || expires > now;
 			});
 		}
-		records = records.filter(
-			(record) => !record.supersededBy && record.metadata.deleted !== true,
-		);
+		if (!filter.includeInactive) {
+			records = records.filter(
+				(record) => !record.supersededBy && record.metadata.deleted !== true,
+			);
+		}
 		records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 		return records.slice(0, filter.limit ?? records.length);
 	}
@@ -376,6 +384,48 @@ export class LocalJsonlMemoryProvider
 		await this.audit('compact', 'memories');
 	}
 
+	async compactMaintenance(
+		options: MemoryCompactOptions = {},
+	): Promise<MemoryCompactResult> {
+		await this.initialize();
+		const now = options.now ? new Date(options.now) : new Date();
+		const kept: MemoryRecord[] = [];
+		const result: MemoryCompactResult = {
+			dryRun: options.dryRun !== false,
+			removedDeleted: 0,
+			removedSuperseded: 0,
+			removedExpiredScratch: 0,
+			remaining: 0,
+		};
+		for (const memory of this.memories.values()) {
+			const compactReason = shouldCompactMemory(memory, now);
+			if (compactReason === 'deleted') {
+				result.removedDeleted++;
+				continue;
+			}
+			if (compactReason === 'superseded') {
+				result.removedSuperseded++;
+				continue;
+			}
+			if (compactReason === 'expired_scratch') {
+				result.removedExpiredScratch++;
+				continue;
+			}
+			kept.push(memory);
+		}
+		result.remaining = kept.length;
+		if (result.dryRun) return result;
+		this.memories = new Map(kept.map((memory) => [memory.id, memory]));
+		await writeJsonlAtomic(this.pathFor('memories'), kept);
+		await this.audit(
+			'compact',
+			'memories',
+			'removed deleted, superseded, and expired scratch memories',
+			result,
+		);
+		return result;
+	}
+
 	private async audit(
 		operation: AuditOperation,
 		targetId: string,
@@ -473,6 +523,69 @@ async function readJsonl(filePath: string): Promise<unknown[]> {
 		}
 	}
 	return records;
+}
+
+async function readAuditEvents(filePath: string): Promise<AuditEvent[]> {
+	const values = await readJsonl(filePath);
+	const events: AuditEvent[] = [];
+	for (const value of values) {
+		if (!value || typeof value !== 'object') continue;
+		const candidate = value as Partial<AuditEvent>;
+		if (
+			typeof candidate.id !== 'string' ||
+			typeof candidate.operation !== 'string' ||
+			typeof candidate.targetId !== 'string' ||
+			typeof candidate.timestamp !== 'string'
+		) {
+			continue;
+		}
+		events.push(candidate as AuditEvent);
+	}
+	return events;
+}
+
+function parseRecallUsageEvent(
+	event: AuditEvent,
+): MemoryRecallUsageEvent | null {
+	const raw = event.eventJson ?? event.reason;
+	if (typeof raw !== 'string' && (!raw || typeof raw !== 'object')) {
+		return null;
+	}
+	try {
+		const parsed = (
+			typeof raw === 'string' ? JSON.parse(raw) : raw
+		) as Partial<MemoryRecallUsageEvent>;
+		if (!Array.isArray(parsed.memoryIds) || typeof parsed.query !== 'string') {
+			return null;
+		}
+		return {
+			bundleId:
+				typeof parsed.bundleId === 'string' ? parsed.bundleId : event.targetId,
+			query: parsed.query,
+			scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
+			kinds: Array.isArray(parsed.kinds) ? parsed.kinds : undefined,
+			memoryIds: parsed.memoryIds.filter(
+				(memoryId): memoryId is string => typeof memoryId === 'string',
+			),
+			scores: Array.isArray(parsed.scores)
+				? parsed.scores.filter(
+						(score): score is number =>
+							typeof score === 'number' && Number.isFinite(score),
+					)
+				: [],
+			tokenEstimate:
+				typeof parsed.tokenEstimate === 'number' ? parsed.tokenEstimate : 0,
+			agentRole:
+				typeof parsed.agentRole === 'string' ? parsed.agentRole : undefined,
+			runId: typeof parsed.runId === 'string' ? parsed.runId : undefined,
+			timestamp:
+				typeof parsed.timestamp === 'string'
+					? parsed.timestamp
+					: event.timestamp,
+		};
+	} catch {
+		return null;
+	}
 }
 
 async function appendJsonl(filePath: string, value: unknown): Promise<void> {

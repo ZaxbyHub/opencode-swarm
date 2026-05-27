@@ -26,6 +26,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('checkpoint')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory import')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory migrate')).toBe(true);
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory compact')).toBe(true);
 	});
 
 	describe('classifySwarmCommandToolUse — chat-tool path', () => {
@@ -102,10 +103,38 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			expect(result.allowed).toBe(true);
 		});
 
-		test('memory status is allowed, but memory import is human-only', () => {
+		test('memory read-only diagnostics are allowed, but mutating commands are human-only', () => {
 			expect(
 				classifySwarmCommandToolUse(resolve(['memory', 'status'])).allowed,
 			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'pending'])).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['memory', 'pending', '--limit', '5']),
+				).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'recall-log'])).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['memory', 'recall-log', '--limit', '5']),
+				).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'stale'])).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['memory', 'stale', '--limit', '5']),
+				).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['memory', 'stale', '--confirm']))
+					.allowed,
+			).toBe(false);
 			expect(
 				classifySwarmCommandToolUse(resolve(['memory', 'evaluate'])).allowed,
 			).toBe(true);
@@ -122,6 +151,13 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			expect(result.allowed).toBe(false);
 			if (result.allowed === false) {
 				expect(result.message).toContain('human-only');
+			}
+			const compactResult = classifySwarmCommandToolUse(
+				resolve(['memory', 'compact']),
+			);
+			expect(compactResult.allowed).toBe(false);
+			if (compactResult.allowed === false) {
+				expect(compactResult.message).toContain('human-only');
 			}
 		});
 	});
@@ -154,6 +190,13 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		test('memory migrate stays blocked because it mutates .swarm state', () => {
 			const result = classifySwarmCommandChatFallbackUse(
 				resolve(['memory', 'migrate']),
+			);
+			expect(result.allowed).toBe(false);
+		});
+
+		test('memory compact stays blocked because it mutates .swarm state', () => {
+			const result = classifySwarmCommandChatFallbackUse(
+				resolve(['memory', 'compact']),
 			);
 			expect(result.allowed).toBe(false);
 		});
