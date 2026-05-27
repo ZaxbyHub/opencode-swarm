@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.42.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.41.1...v7.42.0) (2026-05-27)
+
+
+### Features
+
+* **summaries:** hierarchical architecture supervisor with phase gating ([#893](https://github.com/zaxbysauce/opencode-swarm/issues/893)) ([#1053](https://github.com/zaxbysauce/opencode-swarm/issues/1053)) ([122dc20](https://github.com/zaxbysauce/opencode-swarm/commit/122dc20a663330fcce194950367afbea29c164f7))
+
 ## [7.41.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.41.0...v7.41.1) (2026-05-27)
 
 
