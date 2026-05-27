@@ -3,55 +3,52 @@
  * Tests the hook's handling of evidence JSON files in .swarm/evidence/retro-N/ directory.
  */
 
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createKnowledgeCuratorHook } from '../../../src/hooks/knowledge-curator.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 // Create local mock variables for knowledge-store
-const mockAppendKnowledge = vi.fn<[], Promise<void>>();
-const mockAppendRejectedLesson = vi.fn<[], Promise<void>>();
-const mockFindNearDuplicate = vi.fn<[string, unknown[], number], unknown>();
-const mockReadKnowledge = vi.fn<[string], Promise<unknown[]>>();
-const mockRewriteKnowledge = vi.fn<[string, unknown[]], Promise<void>>();
-const mockResolveSwarmKnowledgePath = vi.fn<[string], string>();
-const mockResolveSwarmRejectedPath = vi.fn<[string], string>();
-const mockResolveHiveKnowledgePath = vi.fn<[], string>();
-const mockComputeConfidence = vi.fn<[number, boolean], number>();
-const mockInferTags = vi.fn<[string], string[]>();
-const mockReadRetractionRecords = vi.fn<[string], Promise<unknown[]>>();
-const mockAppendRetractionRecord = vi.fn<[string, unknown], Promise<void>>();
+const mockAppendKnowledge = mock(async () => {});
+const mockAppendRejectedLesson = mock(async () => {});
+const mockFindNearDuplicate = mock((_s: string, _a: unknown[], _n: number) => undefined);
+const mockReadKnowledge = mock((_s: string) => Promise.resolve([]));
+const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) => Promise.resolve());
+const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
+const mockResolveSwarmRejectedPath = mock((_s: string) => '');
+const mockResolveHiveKnowledgePath = mock(() => '');
+const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
+const mockInferTags = mock((_s: string) => [] as string[]);
+const mockReadRetractionRecords = mock((_s: string) => Promise.resolve([]));
+const mockAppendRetractionRecord = mock((_s: string, _u: unknown) => Promise.resolve());
 
 // Create local mock variables for utils
-const mockReadSwarmFileAsync = vi.fn<
-	[string, string],
-	Promise<string | null>
->();
-const mockSafeHook = vi.fn<(fn: unknown) => unknown>();
-const mockValidateSwarmPath = vi.fn<[string, string], string>();
+const mockReadSwarmFileAsync = mock((_s: string, _f: string) =>
+	Promise.resolve(null as string | null),
+);
+const mockSafeHook = mock((fn: unknown) => fn);
+const mockValidateSwarmPath = mock((_d: string, _f: string) => '');
 
 // Create local mock variable for knowledge-validator
-const mockValidateLesson = vi.fn<
-	[string, string[], { category: string; scope: string; confidence: number }],
-	{
-		valid: boolean;
-		layer: number | null;
-		reason: string | null;
-		severity: string | null;
-	}
->();
-const mockQuarantineEntry = vi.fn<
-	[string, string, string, 'architect' | 'user' | 'auto'],
-	Promise<void>
->();
-const mockNormalize = vi.fn<[string], string>();
+const mockValidateLesson = mock(
+	(_l: string, _t: string[], _c: { category: string; scope: string; confidence: number }) => ({
+		valid: true,
+		layer: null,
+		reason: null,
+		severity: null,
+	}),
+);
+const mockQuarantineEntry = mock(
+	(_s: string, _e: string, _r: string, _who: 'architect' | 'user' | 'auto') =>
+		Promise.resolve(),
+);
+const mockNormalize = mock((_s: string) => '');
 
 // Create local mock variable for knowledge-reader
-const mockUpdateRetrievalOutcome = vi.fn<
-	[string, string, boolean],
-	Promise<void>
->();
+const mockUpdateRetrievalOutcome = mock((_s: string, _id: string, _b: boolean) =>
+	Promise.resolve(),
+);
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (...args: unknown[]) =>
 		mockValidateLesson(
 			...(args as [
@@ -66,12 +63,12 @@ vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
 		),
 }));
 
-vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
+mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	updateRetrievalOutcome: (...args: unknown[]) =>
 		mockUpdateRetrievalOutcome(...(args as [string, string, boolean])),
 }));
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: (...args: unknown[]) =>
 		mockResolveSwarmKnowledgePath(...(args as [string])),
 	resolveSwarmRejectedPath: (...args: unknown[]) =>
@@ -96,7 +93,7 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	normalize: (...args: unknown[]) => mockNormalize(...(args as [string])),
 }));
 
-vi.mock('../../../src/hooks/utils.js', () => ({
+mock.module('../../../src/hooks/utils.js', () => ({
 	readSwarmFileAsync: (...args: unknown[]) =>
 		mockReadSwarmFileAsync(...(args as [string, string])),
 	safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),
@@ -104,7 +101,7 @@ vi.mock('../../../src/hooks/utils.js', () => ({
 		mockValidateSwarmPath(...(args as [string, string])),
 }));
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (...args: unknown[]) =>
 		mockValidateLesson(
 			...(args as [
@@ -143,7 +140,25 @@ const defaultConfig: KnowledgeConfig = {
 
 describe('knowledge-curator - evidence file curation', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mockAppendKnowledge.mockClear();
+		mockAppendRejectedLesson.mockClear();
+		mockFindNearDuplicate.mockClear();
+		mockReadKnowledge.mockClear();
+		mockRewriteKnowledge.mockClear();
+		mockResolveSwarmKnowledgePath.mockClear();
+		mockResolveSwarmRejectedPath.mockClear();
+		mockResolveHiveKnowledgePath.mockClear();
+		mockComputeConfidence.mockClear();
+		mockInferTags.mockClear();
+		mockReadRetractionRecords.mockClear();
+		mockAppendRetractionRecord.mockClear();
+		mockReadSwarmFileAsync.mockClear();
+		mockSafeHook.mockClear();
+		mockValidateSwarmPath.mockClear();
+		mockValidateLesson.mockClear();
+		mockQuarantineEntry.mockClear();
+		mockNormalize.mockClear();
+		mockUpdateRetrievalOutcome.mockClear();
 		// Reset mock implementations to defaults
 		mockResolveSwarmKnowledgePath.mockReturnValue(
 			'/project/.swarm/knowledge.jsonl',

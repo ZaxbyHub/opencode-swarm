@@ -3,23 +3,22 @@
  * Tests the pruneSeenRetroSections() function and its behavior with time-based eviction.
  */
 
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 // ============================================================================
 // Date.now() mocking setup
 // ============================================================================
 
 let mockNow = Date.now();
-let originalDateNow: () => number;
+let dateNowSpy: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
-	originalDateNow = Date.now;
 	mockNow = 1000000000000; // Fixed base time
-	vi.spyOn(global.Date, 'now').mockImplementation(() => mockNow);
+	dateNowSpy = spyOn(global.Date, 'now').mockImplementation(() => mockNow);
 });
 
 afterEach(() => {
-	vi.restoreAllMocks();
+	dateNowSpy?.mockRestore();
 });
 
 function advanceTime(ms: number): void {
@@ -40,44 +39,41 @@ import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 // Other mocks
 // ============================================================================
 
-const mockAppendKnowledge = vi.fn<[], Promise<void>>();
-const mockAppendRejectedLesson = vi.fn<[], Promise<void>>();
-const mockFindNearDuplicate = vi.fn<[string, unknown[], number], unknown>();
-const mockReadKnowledge = vi.fn<[string], Promise<unknown[]>>();
-const mockRewriteKnowledge = vi.fn<[string, unknown[]], Promise<void>>();
-const mockResolveSwarmKnowledgePath = vi.fn<[string], string>();
-const mockResolveSwarmRejectedPath = vi.fn<[string], string>();
-const mockComputeConfidence = vi.fn<[number, boolean], number>();
-const mockInferTags = vi.fn<[string], string[]>();
+const mockAppendKnowledge = mock(async () => {});
+const mockAppendRejectedLesson = mock(async () => {});
+const mockFindNearDuplicate = mock((_s: string, _a: unknown[], _n: number) => undefined);
+const mockReadKnowledge = mock((_s: string) => Promise.resolve([]));
+const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) => Promise.resolve());
+const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
+const mockResolveSwarmRejectedPath = mock((_s: string) => '');
+const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
+const mockInferTags = mock((_s: string) => [] as string[]);
 
-const mockReadSwarmFileAsync = vi.fn<
-	[string, string],
-	Promise<string | null>
->();
-const mockSafeHook = vi.fn<(fn: unknown) => unknown>();
-const mockValidateSwarmPath = vi.fn<[string, string], string>();
+const mockReadSwarmFileAsync = mock((_s: string, _f: string) =>
+	Promise.resolve(null as string | null),
+);
+const mockSafeHook = mock((fn: unknown) => fn);
+const mockValidateSwarmPath = mock((_d: string, _f: string) => '');
 
-const mockValidateLesson = vi.fn<
-	[string, string[], { category: string; scope: string; confidence: number }],
-	{
-		valid: boolean;
-		layer: number | null;
-		reason: string | null;
-		severity: string | null;
-	}
->();
-const mockQuarantineEntry = vi.fn<
-	[string, string, string, 'architect' | 'user' | 'auto'],
-	Promise<void>
->();
-const mockNormalize = vi.fn<[string], string>();
+const mockValidateLesson = mock(
+	(_l: string, _t: string[], _c: { category: string; scope: string; confidence: number }) => ({
+		valid: true,
+		layer: null,
+		reason: null,
+		severity: null,
+	}),
+);
+const mockQuarantineEntry = mock(
+	(_s: string, _e: string, _r: string, _who: 'architect' | 'user' | 'auto') =>
+		Promise.resolve(),
+);
+const mockNormalize = mock((_s: string) => '');
 
-const mockUpdateRetrievalOutcome = vi.fn<
-	[string, string, boolean],
-	Promise<void>
->();
+const mockUpdateRetrievalOutcome = mock((_s: string, _id: string, _b: boolean) =>
+	Promise.resolve(),
+);
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (...args: unknown[]) =>
 		mockValidateLesson(
 			...(args as [
@@ -92,12 +88,12 @@ vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
 		),
 }));
 
-vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
+mock.module('../../../src/hooks/knowledge-reader.js', () => ({
 	updateRetrievalOutcome: (...args: unknown[]) =>
 		mockUpdateRetrievalOutcome(...(args as [string, string, boolean])),
 }));
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: (...args: unknown[]) =>
 		mockResolveSwarmKnowledgePath(...(args as [string])),
 	resolveSwarmRejectedPath: (...args: unknown[]) =>
@@ -126,7 +122,7 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	getPlatformConfigDir: () => '/tmp',
 }));
 
-vi.mock('../../../src/hooks/utils.js', () => ({
+mock.module('../../../src/hooks/utils.js', () => ({
 	readSwarmFileAsync: (...args: unknown[]) =>
 		mockReadSwarmFileAsync(...(args as [string, string])),
 	safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),
@@ -177,12 +173,27 @@ ${bullets}
 // Tests
 // ============================================================================
 
-describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
+	describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 	beforeEach(() => {
 		// Reset mock time
 		mockNow = 1000000000000;
 
-		vi.clearAllMocks();
+		mockAppendKnowledge.mockClear();
+		mockAppendRejectedLesson.mockClear();
+		mockFindNearDuplicate.mockClear();
+		mockReadKnowledge.mockClear();
+		mockRewriteKnowledge.mockClear();
+		mockResolveSwarmKnowledgePath.mockClear();
+		mockResolveSwarmRejectedPath.mockClear();
+		mockComputeConfidence.mockClear();
+		mockInferTags.mockClear();
+		mockReadSwarmFileAsync.mockClear();
+		mockSafeHook.mockClear();
+		mockValidateSwarmPath.mockClear();
+		mockValidateLesson.mockClear();
+		mockQuarantineEntry.mockClear();
+		mockNormalize.mockClear();
+		mockUpdateRetrievalOutcome.mockClear();
 
 		// Reset mock implementations to defaults
 		mockResolveSwarmKnowledgePath.mockReturnValue(
