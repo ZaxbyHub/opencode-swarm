@@ -23,7 +23,7 @@ CONSTRAINT: CLARIFY-SPEC must NEVER create a spec. If `.swarm/spec.md` does not 
    - ## ADDED Requirements: New requirements being added to the spec
    - ## MODIFIED Requirements: Existing requirements being revised (show old vs new)
    - ## REMOVED Requirements: Requirements being deleted (show what was removed)
-4. Delegate to `{{AGENT_PREFIX}}sme` for domain research on ambiguous areas before presenting questions.
+4. Delegate to `the active swarm's sme agent` for domain research on ambiguous areas before presenting questions.
 5. Present questions to the user ONE AT A TIME (max 8 per session):
    - Offer 2–4 multiple-choice options for each question
    - Mark the recommended option with reasoning (e.g., "Recommended: Option 2 because…")

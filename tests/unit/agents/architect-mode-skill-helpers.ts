@@ -87,14 +87,6 @@ export function withExtractedModeProtocols(prompt: string): string {
 	return result;
 }
 
-export function getExtractedPlanSection(prompt: string): string {
-	const start = prompt.indexOf('### MODE: PLAN');
-	const end = prompt.indexOf('### MODE: CRITIC-GATE', start);
-	const stub =
-		start === -1 ? '' : prompt.slice(start, end === -1 ? undefined : end);
-	return `${stub}\n${PLAN_PROTOCOL}`;
-}
-
 export function getExtractedExecuteSection(prompt: string): string {
 	const start = prompt.indexOf('### MODE: EXECUTE');
 	const end = prompt.indexOf('### MODE: PHASE-WRAP', start);

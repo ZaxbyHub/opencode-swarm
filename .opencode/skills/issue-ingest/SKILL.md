@@ -30,12 +30,12 @@ Flags parsed from signal:
 5. Exit when the Intake Note is complete or all missing fields are flagged.
 
 #### Phase 2: LOCALIZATION
-1. Delegate to `mega_explorer` to scan the codebase for code areas related to the issue's observed behavior.
+1. Delegate to `the active swarm's explorer agent` to scan the codebase for code areas related to the issue's observed behavior.
 2. Build 2–5 candidate hypotheses for root cause, each with:
    - **Location**: file(s) and function(s) most likely responsible
    - **Confidence**: composite score (stack-trace match 0.4, recency 0.25, call-graph proximity 0.2, test-failure correlation 0.15)
    - **Falsifiability**: a specific test or observation that would disprove this hypothesis
-3. Validate top-3 hypotheses in parallel using targeted `mega_sme` consultations.
+3. Validate top-3 hypotheses in parallel using targeted `the active swarm's sme agent` consultations.
 4. Prune to a single root cause hypothesis with supporting evidence.
 5. Exit when a root cause is identified with ≥70% confidence, or when all hypotheses are exhausted (report ambiguity).
 

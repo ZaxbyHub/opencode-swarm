@@ -18,8 +18,8 @@ Activates when: user asks to "specify", "define requirements", "write a spec", o
    - If NO: proceed to generation (step 2)
    - If this is called from the stale spec archival path (MODE: PLAN option 1) — archival was already completed; skip this check and proceed directly to generation (step 2)
 1b. Run CODEBASE REALITY CHECK for any codebase references mentioned by the user or implied by the feature. Skip if work is purely greenfield (no existing codebase to check). Report discrepancies before proceeding to explorer.
-2. Delegate to `{{AGENT_PREFIX}}explorer` to scan the codebase for relevant context (existing patterns, related code, affected areas).
-3. Delegate to `{{AGENT_PREFIX}}sme` for domain research on the feature area to surface known constraints, best practices, and integration concerns.
+2. Delegate to `the active swarm's explorer agent` to scan the codebase for relevant context (existing patterns, related code, affected areas).
+3. Delegate to `the active swarm's sme agent` for domain research on the feature area to surface known constraints, best practices, and integration concerns.
 4. Generate `.swarm/spec.md` capturing:
    - First line must be: `# Specification: <feature-name>`
    - Feature description: WHAT users need and WHY — never HOW to implement
@@ -116,7 +116,7 @@ Read the elected QA gates (parse the `## Pending QA Gate Selection` section from
 If `council_general_review` is true:
 1. Read `council.general` config. If `council.general.enabled` is not true OR no search API key is configured, surface to the user: "council_general_review gate is enabled but the General Council is not configured. Set council.general.enabled: true and configure a search API key in opencode-swarm.json, or unset council_general_review and re-run." Then stop.
 2. Run the Research Phase: formulate 1–3 targeted `web_search` queries grounded in the spec's domain, then compile a RESEARCH CONTEXT block (same format as MODE: COUNCIL step 2). If web_search fails, proceed without a context block.
-3. Dispatch `{{AGENT_PREFIX}}council_generalist`, `{{AGENT_PREFIX}}council_skeptic`, and `{{AGENT_PREFIX}}council_domain_expert` in PARALLEL — one message per agent, then STOP and wait. Pass: the spec text as the question, round number 1, the RESEARCH CONTEXT block, and the instruction "Cite from the RESEARCH CONTEXT for external evidence. Your memberId and role are hardcoded in your system prompt." Do NOT share other agents' perspectives at this stage.
+3. Dispatch `the active swarm's council_generalist agent`, `the active swarm's council_skeptic agent`, and `the active swarm's council_domain_expert agent` in PARALLEL — one message per agent, then STOP and wait. Pass: the spec text as the question, round number 1, the RESEARCH CONTEXT block, and the instruction "Cite from the RESEARCH CONTEXT for external evidence. Your memberId and role are hardcoded in your system prompt." Do NOT share other agents' perspectives at this stage.
 4. Collect all three JSON responses.
 5. Call `convene_general_council` with mode: 'spec_review', the spec as question, and the collected `round1Responses`. Omit `round2Responses` — spec review is a single-pass advisory, not a full deliberation.
 6. Read `consensusPoints` — incorporate unambiguous consensus directly into the spec.
@@ -166,7 +166,7 @@ EXTERNAL PLAN IMPORT PATH — when the user provides an existing implementation 
    - Phase structure should match `.swarm/plan.md` format
 5. Report gaps, format issues, and improvement suggestions to the user.
 6. Ask: "Should I also flesh out any areas that seem underspecified?"
-   - If yes: delegate to `{{AGENT_PREFIX}}sme` for targeted research on weak areas, then propose specific improvements.
+   - If yes: delegate to `the active swarm's sme agent` for targeted research on weak areas, then propose specific improvements.
 7. Output: both a `.swarm/spec.md` (extracted from the plan) and a validated version of the user's plan.
 
 EXTERNAL PLAN RULES:

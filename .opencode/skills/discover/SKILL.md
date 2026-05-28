@@ -9,7 +9,7 @@ description: >
 This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: DISCOVER
-Delegate to {{AGENT_PREFIX}}explorer. Wait for response.
+Delegate to the active swarm's explorer agent. Wait for response.
 For complex tasks, make a second explorer call focused on risk/gap analysis:
 - Hidden requirements, unstated assumptions, scope risks
 - Existing patterns that the implementation must follow

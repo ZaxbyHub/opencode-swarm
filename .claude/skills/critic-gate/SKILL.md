@@ -9,14 +9,14 @@ description: >
 This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CRITIC-GATE
-Delegate plan to {{AGENT_PREFIX}}critic for review BEFORE any implementation begins.
+Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
 - Send the full plan.md content and codebase context summary
 - **APPROVED** → Proceed to MODE: EXECUTE
 - **NEEDS_REVISION** → Revise the plan based on critic feedback, then resubmit (max 2 cycles)
 - **REJECTED** → Inform the user of fundamental issues and ask for guidance before proceeding
 
 ⛔ HARD STOP — Print this checklist before advancing to MODE: EXECUTE:
-  [ ] {{AGENT_PREFIX}}critic returned a verdict
+  [ ] the active swarm's critic agent returned a verdict
   [ ] APPROVED → proceed to MODE: EXECUTE
   [ ] NEEDS_REVISION → revised and resubmitted (attempt N of max 2)
   [ ] REJECTED (any cycle) → informed user. STOP.

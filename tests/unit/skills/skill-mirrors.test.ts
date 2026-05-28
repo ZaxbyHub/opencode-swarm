@@ -6,6 +6,11 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+const architectSource = readFileSync(
+	join(process.cwd(), 'src/agents/architect.ts'),
+	'utf-8',
+);
+
 const MIRRORED_ARCHITECT_MODE_SKILLS = [
 	[
 		'brainstorm',
@@ -101,4 +106,19 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 			expect(claudeSkill).toBe(opencodeSkill);
 		});
 	}
+
+	it('keeps mirrored skill list in sync with architect mode stubs', () => {
+		// Previous coverage used only this hardcoded list, so a new architect
+		// stub could reference a skill that was never checked for mirror parity.
+		const stubSlugs = [
+			...architectSource.matchAll(
+				/file:\.opencode\/skills\/([^/\s`]+)\/SKILL\.md/g,
+			),
+		].map((match) => match[1]);
+		const mirroredSlugs = MIRRORED_ARCHITECT_MODE_SKILLS.map(
+			([skillName]) => skillName,
+		);
+
+		expect([...new Set(stubSlugs)].sort()).toEqual([...mirroredSlugs].sort());
+	});
 });

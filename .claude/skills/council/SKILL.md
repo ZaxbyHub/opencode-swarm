@@ -34,7 +34,7 @@ RESEARCH CONTEXT
 If `web_search` returns no results or an error (check `result.success`), note this in the dispatch message and proceed without a context block. Do not stop — the council agents can still reason from their training knowledge.
 
 #### Round 1 — Parallel Independent Analysis
-3. Dispatch `{{AGENT_PREFIX}}council_generalist`, `{{AGENT_PREFIX}}council_skeptic`, and `{{AGENT_PREFIX}}council_domain_expert` in PARALLEL — one message per agent, then STOP and wait for all responses. Each dispatch message must include:
+3. Dispatch `the active swarm's council_generalist agent`, `the active swarm's council_skeptic agent`, and `the active swarm's council_domain_expert agent` in PARALLEL — one message per agent, then STOP and wait for all responses. Each dispatch message must include:
    - The question
    - Round number: 1
    - The full RESEARCH CONTEXT block from step 2

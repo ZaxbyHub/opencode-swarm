@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 /**
@@ -15,6 +17,10 @@ import { createArchitectAgent } from '../../../src/agents/architect';
 
 describe('RETROSPECTIVE GATE Verification (Task 1.2)', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
+	const phaseWrapSkill = readFileSync(
+		join(process.cwd(), '.opencode/skills/phase-wrap/SKILL.md'),
+		'utf-8',
+	);
 
 	test('1. ARCHITECT_PROMPT contains "## ⛔ RETROSPECTIVE GATE"', () => {
 		expect(prompt).toContain('## ⛔ RETROSPECTIVE GATE');
@@ -33,35 +39,40 @@ describe('RETROSPECTIVE GATE Verification (Task 1.2)', () => {
 		expect(prompt).toContain('RETROSPECTIVE_MISSING');
 	});
 
-	test('4. ARCHITECT_PROMPT contains retro-{N} path instruction', () => {
-		expect(prompt).toContain('retro-{N}');
+	test('4. ARCHITECT_PROMPT points to phase-wrap as retrospective source of truth', () => {
+		expect(prompt).toContain('file:.opencode/skills/phase-wrap/SKILL.md');
+		expect(prompt).toContain('follow its RETROSPECTIVE GATE section');
 	});
 
-	test('5. ARCHITECT_PROMPT contains "verdict": "pass" in the retro bundle example', () => {
-		expect(prompt).toContain('"verdict": "pass"');
+	test('5. phase-wrap skill contains retro-{N} path instruction', () => {
+		expect(phaseWrapSkill).toContain('retro-{N}');
 	});
 
-	test('6. ARCHITECT_PROMPT contains "type": "retrospective" in the retro bundle example', () => {
-		expect(prompt).toContain('"type": "retrospective"');
+	test('6. phase-wrap skill contains "verdict": "pass" in the retro bundle example', () => {
+		expect(phaseWrapSkill).toContain('"verdict": "pass"');
 	});
 
-	test('7. ARCHITECT_PROMPT contains "phase_number" field reference', () => {
-		expect(prompt).toContain('"phase_number"');
+	test('7. phase-wrap skill contains "type": "retrospective" in the retro bundle example', () => {
+		expect(phaseWrapSkill).toContain('"type": "retrospective"');
 	});
 
-	test('8. ARCHITECT_PROMPT does NOT contain single-brace {AGENT_PREFIX} (no regression)', () => {
+	test('8. phase-wrap skill contains "phase_number" field reference', () => {
+		expect(phaseWrapSkill).toContain('"phase_number"');
+	});
+
+	test('9. ARCHITECT_PROMPT does NOT contain single-brace {AGENT_PREFIX} (no regression)', () => {
 		// The correct form is double-brace {{AGENT_PREFIX}}
 		// Single-brace {AGENT_PREFIX} is a regression bug
 		expect(prompt).not.toMatch(/(?<!\{)\{AGENT_PREFIX\}(?!\})/);
 	});
 
-	test('9. ARCHITECT_PROMPT does NOT contain single-brace {SWARM_ID} (no regression)', () => {
+	test('10. ARCHITECT_PROMPT does NOT contain single-brace {SWARM_ID} (no regression)', () => {
 		// The correct form is double-brace {{SWARM_ID}}
 		// Single-brace {SWARM_ID} is a regression bug
 		expect(prompt).not.toMatch(/(?<!\{)\{SWARM_ID\}(?!\})/);
 	});
 
-	test('10. createArchitectAgent("gpt-4") returns an object with name: "architect"', () => {
+	test('11. createArchitectAgent("gpt-4") returns an object with name: "architect"', () => {
 		const agent = createArchitectAgent('gpt-4');
 		expect(agent).toBeDefined();
 		expect(agent.name).toBe('architect');

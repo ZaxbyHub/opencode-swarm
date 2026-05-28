@@ -36,7 +36,9 @@ describe('ARCHITECT WORKFLOW: Sequence Bypass Prevention', () => {
 		expect(prompt).toContain(
 			'**CRITIC GATE (Execute BEFORE any implementation work)**',
 		);
-		expect(prompt).toContain('Delegate plan to {{AGENT_PREFIX}}critic');
+		expect(prompt).toContain(
+			"Delegate plan to the active swarm's critic agent",
+		);
 		expect(prompt).toContain(
 			'ONLY AFTER critic approval: Proceed to implementation (MODE: EXECUTE)',
 		);
@@ -94,7 +96,7 @@ describe('ARCHITECT WORKFLOW: Gate Skipping Prevention', () => {
 
 	test('SECURITY: Cannot skip verification tests (Phase 5l)', () => {
 		expect(prompt).toContain(
-			'5l. {{AGENT_PREFIX}}test_engineer - Verification tests',
+			"5l. the active swarm's test_engineer agent - Verification tests",
 		);
 		expect(prompt).toContain('FAIL → return to coder');
 
@@ -107,9 +109,7 @@ describe('ARCHITECT WORKFLOW: Gate Skipping Prevention', () => {
 	});
 
 	test('SECURITY: Cannot skip adversarial tests (Phase 5m)', () => {
-		expect(prompt).toContain(
-			'5m. {{AGENT_PREFIX}}test_engineer - Adversarial tests',
-		);
+		expect(prompt).toContain('5m. ADVERSARIAL TEST STEP (config-specific)');
 		expect(prompt).toContain('FAIL → return to coder');
 
 		// Verify adversarial tests run AFTER verification tests
@@ -133,7 +133,7 @@ describe('ARCHITECT WORKFLOW: Gate Skipping Prevention', () => {
 		// Verify gates_passed logic controls progression
 		expect(prompt).toContain('gates_passed === false');
 		expect(prompt).toContain('gates_passed === true');
-		expect(prompt).toContain('proceed to {{AGENT_PREFIX}}reviewer');
+		expect(prompt).toContain("proceed to the active swarm's reviewer agent");
 	});
 
 	test('SECURITY: Cannot skip imports audit (Phase 5f)', () => {
@@ -160,7 +160,9 @@ describe('ARCHITECT WORKFLOW: Secretscan Bypass Prevention', () => {
 
 		// Verify it runs before reviewer
 		const preCheckPos = phase5Section.indexOf('pre_check_batch');
-		const reviewerPos = phase5Section.indexOf('{{AGENT_PREFIX}}reviewer');
+		const reviewerPos = phase5Section.indexOf(
+			"the active swarm's reviewer agent",
+		);
 		expect(reviewerPos).toBeGreaterThan(preCheckPos);
 	});
 
@@ -194,7 +196,7 @@ describe('ARCHITECT WORKFLOW: Reviewer Order Manipulation Prevention', () => {
 		const lintPos = prompt.indexOf('lint');
 		const secretscanPos = prompt.indexOf('secretscan');
 		const reviewerPos = prompt.indexOf(
-			'{{AGENT_PREFIX}}reviewer - General review',
+			"the active swarm's reviewer agent - General review",
 		);
 
 		expect(reviewerPos).toBeGreaterThan(diffPos);
@@ -205,14 +207,14 @@ describe('ARCHITECT WORKFLOW: Reviewer Order Manipulation Prevention', () => {
 
 	test('SECURITY: Security review runs AFTER general review (Phase 5k)', () => {
 		const generalReviewPos = prompt.indexOf(
-			'5j. {{AGENT_PREFIX}}reviewer - General review',
+			"5j. the active swarm's reviewer agent - General review",
 		);
 		const securityReviewPos = prompt.indexOf('Security gate');
 
 		expect(securityReviewPos).toBeGreaterThan(generalReviewPos);
 
 		// Security gate can still reject after general approval
-		expect(prompt).toContain('REJECTED (< {{QA_RETRY_LIMIT}}) → coder retry');
+		expect(prompt).toContain('REJECTED before the configured QA retry limit');
 	});
 
 	test('SECURITY: Reviewer cannot run before diff tool', () => {
@@ -221,7 +223,7 @@ describe('ARCHITECT WORKFLOW: Reviewer Order Manipulation Prevention', () => {
 		expect(prompt).toContain('5f. Run `imports` tool');
 		expect(prompt).toContain('5g. Run `lint`');
 		expect(prompt).toContain('5i. Run `pre_check_batch`');
-		expect(prompt).toContain('5j. {{AGENT_PREFIX}}reviewer');
+		expect(prompt).toContain("5j. the active swarm's reviewer agent");
 
 		// Sequential numbering enforces order
 		const phase5Section = EXECUTE_PROTOCOL;
@@ -532,7 +534,7 @@ describe('ARCHITECT WORKFLOW: Failure Counting Anti-Bypass (Phase 6)', () => {
 	test('SECURITY: Gated step cannot be skipped after retry', () => {
 		// All gates must pass before proceeding - retry doesn't skip gates
 		expect(prompt).toContain('gates_passed === true');
-		expect(prompt).toContain('proceed to {{AGENT_PREFIX}}reviewer');
+		expect(prompt).toContain("proceed to the active swarm's reviewer agent");
 
 		// Verify gates are re-checked after retry
 		const phase5Section = prompt.substring(

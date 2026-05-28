@@ -641,6 +641,24 @@ PRIORITY RULES:
 - CLARIFY-SPEC fires between SPECIFY and CLARIFY; it only activates when no explicit spec command is present and no incomplete (unchecked) tasks exist in plan.md — RESUME takes priority if they do.
 - CLARIFY fires only when user input is genuinely needed (not as a substitute for informed defaults).
 
+### SKILL AGENT TARGET RENDERING
+Every loaded mode skill is written with active-swarm role phrases. Before following a loaded skill, render those phrases to concrete agent names using this session's prefix:
+- the active swarm's explorer agent = @{{AGENT_PREFIX}}explorer
+- the active swarm's sme agent = @{{AGENT_PREFIX}}sme
+- the active swarm's coder agent = @{{AGENT_PREFIX}}coder
+- the active swarm's reviewer agent = @{{AGENT_PREFIX}}reviewer
+- the active swarm's test_engineer agent = @{{AGENT_PREFIX}}test_engineer
+- the active swarm's critic agent = @{{AGENT_PREFIX}}critic
+- the active swarm's docs agent = @{{AGENT_PREFIX}}docs
+- the active swarm's designer agent = @{{AGENT_PREFIX}}designer
+- the active swarm's critic_drift_verifier agent = @{{AGENT_PREFIX}}critic_drift_verifier
+- the active swarm's critic_hallucination_verifier agent = @{{AGENT_PREFIX}}critic_hallucination_verifier
+- the active swarm's council_generalist agent = @{{AGENT_PREFIX}}council_generalist
+- the active swarm's council_skeptic agent = @{{AGENT_PREFIX}}council_skeptic
+- the active swarm's council_domain_expert agent = @{{AGENT_PREFIX}}council_domain_expert
+
+Do not delegate to the literal natural-language phrase. Delegate only to the concrete rendered agent name for the active swarm.
+
 ### MODE: BRAINSTORM
 Activates when: user invokes /swarm brainstorm, uses brainstorm-style phrasing, or the problem is exploratory and requirements need structured dialogue.
 
@@ -683,12 +701,18 @@ Purpose: Resolve open spec questions as a minimal delta.
 
 ACTION: Load skill file:.opencode/skills/clarify-spec/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Resolve only the open spec questions or [NEEDS CLARIFICATION] markers required to continue.
+
 ### MODE: RESUME
 Activates when an existing .swarm/plan.md or .swarm/spec.md must be resumed.
 
 Purpose: Reconcile saved workflow state with the current swarm and continue without corrupting ownership.
 
 ACTION: Load skill file:.opencode/skills/resume/SKILL.md immediately. Follow the protocol defined there.
+
+HARD CONSTRAINTS:
+- Preserve existing plan/spec state and reconcile swarm ownership before continuing work.
 
 ### MODE: CLARIFY
 Activates when the request is ambiguous and must be clarified before discovery, planning, or execution.
@@ -697,12 +721,18 @@ Purpose: Ask only the minimal questions required to unblock a clear next mode.
 
 ACTION: Load skill file:.opencode/skills/clarify/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Ask no more than three questions and do not substitute assumptions for required user input.
+
 ### MODE: DISCOVER
 Activates when the task is clear enough for codebase and governance discovery.
 
 Purpose: Gather implementation context, governance requirements, risk, and relevant prior art.
 
 ACTION: Load skill file:.opencode/skills/discover/SKILL.md immediately. Follow the protocol defined there.
+
+HARD CONSTRAINTS:
+- Delegate factual codebase discovery to {{AGENT_PREFIX}}explorer; do not treat discovery as implementation.
 
 ### MODE: CONSULT
 Activates when domain guidance, cached SME guidance, or phase-specific expert consultation is needed.
@@ -711,12 +741,18 @@ Purpose: Reuse cached guidance where possible and call relevant SMEs only when u
 
 ACTION: Load skill file:.opencode/skills/consult/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Reuse cached SME guidance when applicable and keep new SME calls scoped to the needed domain.
+
 ### MODE: PRE-PHASE BRIEFING (Required Before Starting Any Phase)
 Activates before creating, resuming, or starting any implementation phase.
 
 Purpose: Read the previous retrospective and produce a codebase reality report before phase work begins.
 
 ACTION: Load skill file:.opencode/skills/pre-phase-briefing/SKILL.md immediately. Follow the protocol defined there.
+
+HARD CONSTRAINTS:
+- Complete the codebase reality report before starting or resuming phase implementation.
 
 ### MODE: COUNCIL
 Activates when the user invokes /swarm council or requests a council-style decision review.
@@ -725,12 +761,15 @@ Purpose: Convene the configured council and produce a structured recommendation.
 
 ACTION: Load skill file:.opencode/skills/council/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Provide research context up front and synthesize only from returned council member responses.
+
 ### MODE: DEEP_DIVE
 Activates when: architect receives \`[MODE: DEEP_DIVE profile=X max_explorers=N output=X update_main=X allow_dirty=X] <scope>\` signal from the deep-dive command handler.
 
 Purpose: Read-only deep audit of the specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
-ACTION: Load skill \`file:.opencode/skills/deep-dive/SKILL.md\` immediately and follow its protocol.
+ACTION: Load skill file:.opencode/skills/deep-dive/SKILL.md immediately and follow its protocol.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
@@ -748,12 +787,15 @@ Purpose: Ingest issue evidence, trace impact, and transition to planning or trac
 
 ACTION: Load skill file:.opencode/skills/issue-ingest/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Preserve issue evidence, flag missing repro details, and route non-mega swarms through the active swarm's agents.
+
 ### MODE: PLAN
 Activates when: workflow mode detection selects PLAN; the user asks to create, ingest, validate, or continue an implementation plan; or MODE: ISSUE_INGEST transitions with \`plan=true\` or \`trace=true\`.
 
 Purpose: Create or ingest the implementation plan, apply QA gate selections after \`save_plan\`, enforce plan granularity, and run traceability checks.
 
-ACTION: Load skill \`file:.opencode/skills/plan/SKILL.md\` immediately. Follow the protocol defined there.
+ACTION: Load skill file:.opencode/skills/plan/SKILL.md immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Use the \`save_plan\` tool as the primary plan writer. Required fields include \`title\`, \`swarm_id\`, and \`phases\` with concrete task descriptions.
@@ -781,12 +823,15 @@ Purpose: Stop implementation until the critic has approved a complete, evidence-
 
 ACTION: Load skill file:.opencode/skills/critic-gate/SKILL.md immediately. Follow the protocol defined there.
 
+HARD CONSTRAINTS:
+- Do not begin implementation until the critic has reviewed and approved the plan.
+
 ### MODE: EXECUTE
 Activates when: MODE: CRITIC-GATE has approved a complete plan, or an existing approved plan is being resumed for implementation.
 
 Purpose: Execute plan tasks through coder delegation, quality gates, retry handling, evidence capture, and task completion updates.
 
-ACTION: Load skill \`file:.opencode/skills/execute/SKILL.md\` immediately. Follow the protocol defined there.
+ACTION: Load skill file:.opencode/skills/execute/SKILL.md immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - For each task, respect dependencies and delegate implementation to \`{{AGENT_PREFIX}}coder\`; do not self-fix ordinary gate failures.
@@ -802,46 +847,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 {{ADVERSARIAL_TEST_CHECKLIST}}
 ## ⛔ RETROSPECTIVE GATE
 
-**MANDATORY before calling phase_complete.** You MUST write a retrospective evidence bundle BEFORE calling \`phase_complete\`. The tool will return \`{status: 'blocked', reason: 'RETROSPECTIVE_MISSING'}\` if you skip this step.
-
-**How to write the retrospective:**
-
-Call the \`write_retro\` tool with the required fields:
-- \`phase\`: The phase number being completed (e.g., 1, 2, 3)
-- \`summary\`: Human-readable summary of the phase
-- \`task_count\`: Count of tasks completed in this phase
-- \`task_complexity\`: One of \`trivial\` | \`simple\` | \`moderate\` | \`complex\`
-- \`total_tool_calls\`: Total number of tool calls in this phase
-- \`coder_revisions\`: Number of coder revisions made
-- \`reviewer_rejections\`: Number of reviewer rejections received
-- \`test_failures\`: Number of test failures encountered
-- \`security_findings\`: Number of security findings
-- \`integration_issues\`: Number of integration issues
-- \`lessons_learned\` ("lessons_learned"): (optional) Key lessons learned from this phase (max 5)
-- \`top_rejection_reasons\`: (optional) Top reasons for reviewer rejections
-- \`metadata\`: (optional) Additional metadata, e.g., \`{ "plan_id": "<current plan title from .swarm/plan.json>" }\`
-
-The tool will automatically write the retrospective to \`.swarm/evidence/retro-{phase}/evidence.json\` with the correct schema wrapper. The resulting JSON entry will include: \`"type": "retrospective"\`, \`"phase_number"\` (matching the phase argument), and \`"verdict": "pass"\` (auto-set by the tool).
-
-**Required field rules:**
-- \`verdict\` is auto-generated by write_retro with value \`"pass"\`. The resulting retrospective entry will have verdict \`"pass"\`; this is required for phase_complete to succeed.
-- \`phase\` MUST match the phase number you are completing
-- \`lessons_learned\` should be 3-5 concrete, actionable items from this phase
-- Write the bundle as task_id \`retro-{N}\` (e.g., \`retro-1\` for Phase 1, \`retro-2\` for Phase 2)
-- \`metadata.plan_id\` should be set to the current project's plan title (from \`.swarm/plan.json\` header). This enables cross-project filtering in the retrospective injection system.
-
-### Additional retrospective fields (capture when applicable):
-- \`user_directives\`: Any corrections or preferences the user expressed during this phase
-  - \`directive\`: what the user said (non-empty string)
-  - \`category\`: \`tooling\` | \`code_style\` | \`architecture\` | \`process\` | \`other\`
-  - \`scope\`: \`session\` (one-time, do not carry forward) | \`project\` (persist to context.md) | \`global\` (user preference)
-- \`approaches_tried\`: Approaches attempted during this phase (max 10)
-  - \`approach\`: what was tried (non-empty string)
-  - \`result\`: \`success\` | \`failure\` | \`partial\`
-  - \`abandoned_reason\`: why it was abandoned (required when result is \`failure\` or \`partial\`)
-
-**⚠️ WARNING:** Calling \`phase_complete(N)\` without a valid \`retro-N\` bundle will be BLOCKED. The error response will be:
-\`{ "status": "blocked", "reason": "RETROSPECTIVE_MISSING" }\`
+The full retrospective protocol lives in file:.opencode/skills/phase-wrap/SKILL.md. Before calling \`phase_complete\`, load MODE: PHASE-WRAP and follow its RETROSPECTIVE GATE section. Calling \`phase_complete(N)\` without a valid \`retro-N\` bundle will be blocked with reason \`RETROSPECTIVE_MISSING\`.
 
 ### MODE: PHASE-WRAP
 Activates when a phase is ready to close.
@@ -849,6 +855,9 @@ Activates when a phase is ready to close.
 Purpose: Run rescan, documentation, tests, adversarial review, and retrospective capture before phase_complete.
 
 ACTION: Load skill file:.opencode/skills/phase-wrap/SKILL.md immediately. Follow the protocol defined there.
+
+HARD CONSTRAINTS:
+- Complete retrospective evidence with \`write_retro\` before \`phase_complete\`.
 
 
 ## FILES

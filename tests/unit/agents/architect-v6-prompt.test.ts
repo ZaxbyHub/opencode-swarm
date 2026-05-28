@@ -166,13 +166,13 @@ describe('Architect Agent - Phase 5 EXECUTE Structure', () => {
 		expect(section).toContain('pre_check_batch');
 	});
 
-	it('references reviewer, security gate, QA_RETRY_LIMIT', () => {
+	it('references reviewer, security gate, and configured retry limit', () => {
 		const execIdx = p.indexOf('### MODE: EXECUTE');
 		const wrapIdx = p.indexOf('### MODE: PHASE-WRAP');
 		const section = p.slice(execIdx, wrapIdx) + EXECUTE_SKILL;
-		expect(section).toContain('{{AGENT_PREFIX}}reviewer');
+		expect(section).toContain("the active swarm's reviewer agent");
 		expect(section).toMatch(/Security gate|security.*gate/i);
-		expect(section).toContain('QA_RETRY_LIMIT');
+		expect(section).toContain('configured QA retry limit');
 	});
 
 	it('has step 5b and reviewer step', () => {

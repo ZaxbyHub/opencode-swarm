@@ -16,7 +16,7 @@ Use BRAINSTORM when requirements need to be drawn out through structured dialogu
 MODE: BRAINSTORM runs seven phases in strict order. Do not skip phases. Do not collapse phases. Each phase has a clear entry signal and a clear exit signal.
 
 **Phase 1: CONTEXT SCAN (architect + explorer, parallel).**
-- Delegate to `{{AGENT_PREFIX}}explorer` to map the relevant portion of the codebase. Scope the explorer to the area most likely affected by the topic.
+- Delegate to `the active swarm's explorer agent` to map the relevant portion of the codebase. Scope the explorer to the area most likely affected by the topic.
 - In parallel, read any existing `.swarm/spec.md`, `.swarm/plan.md`, and `.swarm/knowledge.jsonl` entries that are relevant.
 - Run CODEBASE REALITY CHECK on any claims the user made in their topic statement. Surface discrepancies before moving forward.
 - Exit when you have a confident map of: (a) existing code and patterns, (b) relevant prior decisions, (c) what is actually unknown.
@@ -30,7 +30,7 @@ MODE: BRAINSTORM runs seven phases in strict order. Do not skip phases. Do not c
 
 **Phase 3: APPROACHES (architect, optionally with SME).**
 - Produce 2-4 distinct candidate approaches. Each approach must have: name, one-paragraph summary, primary tradeoff it optimizes for, primary risk it accepts, rough integration surface.
-- For high-risk domains (auth, payments, data mutation, public API, schema, concurrency, security-sensitive parsing), delegate to `{{AGENT_PREFIX}}sme` for domain research first.
+- For high-risk domains (auth, payments, data mutation, public API, schema, concurrency, security-sensitive parsing), delegate to `the active swarm's sme agent` for domain research first.
 - Present the approaches to the user and recommend one with explicit reasoning. The user can pick, modify, or reject.
 - Exit when the user has chosen (or agreed to your recommended) approach.
 
@@ -43,7 +43,7 @@ MODE: BRAINSTORM runs seven phases in strict order. Do not skip phases. Do not c
 **Phase 5: SPEC WRITE + SELF-REVIEW (architect + reviewer).**
 - Generate `.swarm/spec.md` following the same SPEC CONTENT RULES that MODE: SPECIFY uses: WHAT/WHY only, no tech stack, no implementation details, FR-### / SC-### numbering, Given/When/Then scenarios, `[NEEDS CLARIFICATION]` markers (max 3).
 - Cross-reference design sections by name where relevant context helps (but keep HOW out of the spec).
-- Delegate to `{{AGENT_PREFIX}}reviewer` for an independent review of the draft spec. Reviewer must flag: requirements that encode HOW, untestable requirements, missing edge cases, silent assumptions.
+- Delegate to `the active swarm's reviewer agent` for an independent review of the draft spec. Reviewer must flag: requirements that encode HOW, untestable requirements, missing edge cases, silent assumptions.
 - Apply reviewer feedback. If reviewer rejects, iterate once and re-review. After two rounds, surface remaining disagreements to the user.
 - Write the final spec to `.swarm/spec.md`.
 - Exit when reviewer signs off (or user explicitly accepts remaining disagreements).

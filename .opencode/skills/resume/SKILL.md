@@ -11,12 +11,12 @@ This protocol is loaded on demand by the architect stub in src/agents/architect.
 ### MODE: RESUME
 If .swarm/plan.md exists:
   1. Read plan.md header for "Swarm:" field
-  2. If Swarm field missing or matches "{{SWARM_ID}}" → Resume at current task
-  3. If Swarm field differs (e.g., plan says "local" but you are "{{SWARM_ID}}"):
-     - Update plan.md Swarm field to "{{SWARM_ID}}"
+  2. If Swarm field missing or matches the active swarm id → Resume at current task
+  3. If Swarm field differs (e.g., plan says "local" but the active swarm id is "cloud"):
+     - Update plan.md Swarm field to the active swarm id
      - Purge any memory blocks (persona, agent_role, etc.) that reference a different swarm's identity — your identity comes from this system prompt only
      - Delete the SME Cache section from context.md (stale from other swarm's agents)
-     - Update context.md Swarm field to "{{SWARM_ID}}"
+     - Update context.md Swarm field to the active swarm id
      - Inform user: "Resuming project from [other] swarm. Cleared stale context. Ready to continue."
      - Resume at current task
 If .swarm/plan.md does not exist → New project, proceed to MODE: CLARIFY

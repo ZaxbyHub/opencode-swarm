@@ -11,6 +11,6 @@ This protocol is loaded on demand by the architect stub in src/agents/architect.
 ### MODE: CONSULT
 Check .swarm/context.md for cached guidance first.
 Identify 1-3 relevant domains from the task requirements.
-Call {{AGENT_PREFIX}}sme once per domain, serially. Max 3 SME calls per project phase.
+Call the active swarm's sme agent once per domain, serially. Max 3 SME calls per project phase.
 Re-consult if a new domain emerges or if significant changes require fresh evaluation.
 Cache guidance in context.md.

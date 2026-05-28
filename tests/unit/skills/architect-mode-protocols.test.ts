@@ -88,18 +88,46 @@ describe('architect MODE protocol skills', () => {
 	}
 
 	it('expands static QA gate dialogue in extracted dialogue-mode skills', () => {
-		const brainstorm = readFileSync(
-			join(process.cwd(), '.opencode/skills/brainstorm/SKILL.md'),
-			'utf-8',
+		const skillContents = MODE_SKILLS.map(([, slug]) =>
+			readFileSync(
+				join(process.cwd(), '.opencode/skills', slug, 'SKILL.md'),
+				'utf-8',
+			),
 		);
-		const specify = readFileSync(
-			join(process.cwd(), '.opencode/skills/specify/SKILL.md'),
-			'utf-8',
-		);
+		const brainstorm = skillContents[0];
+		const specify = skillContents[1];
 
-		expect(brainstorm).not.toContain('{{QA_GATE_DIALOGUE_BRAINSTORM}}');
-		expect(specify).not.toContain('{{QA_GATE_DIALOGUE_SPECIFY}}');
+		for (const skillContent of skillContents) {
+			expect(skillContent).not.toMatch(/\{\{QA_GATE_DIALOGUE_[A-Z_-]+\}\}/);
+		}
 		expect(brainstorm).toContain('Present the eleven gates');
 		expect(specify).toContain('Present the eleven gates');
+	});
+
+	it('does not leave renderer placeholders in runtime-loaded skill files', () => {
+		for (const root of ['.opencode/skills', '.claude/skills']) {
+			for (const [, slug] of MODE_SKILLS) {
+				const skillContent = readFileSync(
+					join(process.cwd(), root, slug, 'SKILL.md'),
+					'utf-8',
+				);
+
+				expect(skillContent).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
+				expect(skillContent).not.toContain('mega_explorer');
+				expect(skillContent).not.toContain('mega_sme');
+			}
+		}
+	});
+
+	it('keeps hard constraints on every architect mode stub', () => {
+		for (const [modeName] of MODE_SKILLS) {
+			const start = architectPrompt.indexOf(`### MODE: ${modeName}`);
+			const next = architectPrompt.indexOf('\n### MODE:', start + 1);
+			const end =
+				next === -1 ? architectPrompt.indexOf('\n## FILES', start) : next;
+			const stub = architectPrompt.slice(start, end === -1 ? undefined : end);
+
+			expect(stub).toContain('HARD CONSTRAINTS');
+		}
 	});
 });
