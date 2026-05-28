@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.44.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.0...v7.44.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **analyzer:** rank and return all fuzzy suffix matches in fallback impact lookup ([#1062](https://github.com/zaxbysauce/opencode-swarm/issues/1062)) ([861fbd5](https://github.com/zaxbysauce/opencode-swarm/commit/861fbd5cef4bceb800d5ae8bb12740650931be9b))
+
 ## [7.44.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.1...v7.44.0) (2026-05-28)
 
 
