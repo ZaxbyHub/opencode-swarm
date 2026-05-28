@@ -74,8 +74,6 @@ describe('architect prompt - MODE: BRAINSTORM Phase 6 QA gate selection', () => 
 			'QA gates elected in Phase 6 are persisted during MODE: PLAN',
 		);
 		expect(skill).toContain('ratchet-tighter from that point');
-		expect(skill).not.toContain(
-			'QA gates set in Phase 6 are ratchet-tighter',
-		);
+		expect(skill).not.toContain('QA gates set in Phase 6 are ratchet-tighter');
 	});
 });
