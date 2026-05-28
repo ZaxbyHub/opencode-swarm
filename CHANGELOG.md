@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.44.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.1...v7.44.0) (2026-05-28)
+
+
+### Features
+
+* **knowledge:** add event-sourced outcome tracking with closed feedback loop ([#1061](https://github.com/zaxbysauce/opencode-swarm/issues/1061)) ([29d5eac](https://github.com/zaxbysauce/opencode-swarm/commit/29d5eacc68858c7804e16b3b7895fe605275b0f7))
+
 ## [7.43.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.0...v7.43.1) (2026-05-28)
 
 
