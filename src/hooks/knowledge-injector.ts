@@ -22,13 +22,13 @@ import {
 	recordKnowledgeShown,
 } from './knowledge-application.js';
 import type { ProjectContext, RankedEntry } from './knowledge-reader.js';
-import { readContextualKnowledge } from './knowledge-reader.js';
 import { readRejectedLessons } from './knowledge-store.js';
 import type {
 	KnowledgeConfig,
 	KnowledgeRetrievalContext,
 	MessageWithParts,
 } from './knowledge-types.js';
+import { searchKnowledge } from './search-knowledge.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
 
 // ============================================================================
@@ -356,11 +356,15 @@ export function createKnowledgeInjectorHook(
 			};
 
 			// Retrieve action-aware ranked entries (uses triggers/applies_to/priority).
-			const entries = await readContextualKnowledge(
+			const search = await searchKnowledge({
 				directory,
 				config,
-				retrievalCtx,
-			);
+				context: retrievalCtx,
+				mode: 'auto_injection',
+				agent: 'architect',
+				sessionId: systemMsg?.info?.sessionID,
+			});
+			const entries = search.results;
 			// Filter to high-confidence entries only (confidence >= 0.8)
 			const filteredEntries = filterHighConfidenceKnowledge(entries);
 			// Track which IDs we showed so application-tracking can split shown from applied.

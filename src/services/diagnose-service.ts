@@ -10,6 +10,7 @@ import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js'
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { deferredWarnings } from './warning-buffer.js';
 
@@ -971,6 +972,10 @@ export async function getDiagnoseData(
 
 	// Check: Curator
 	checks.push(await checkCurator(directory));
+
+	// Check: Knowledge health (entry status breakdown, event volume, schema
+	// drift, stale-cache warning).
+	checks.push(await checkKnowledgeHealth(directory));
 
 	// Check: Agent Tool Snapshots
 	try {

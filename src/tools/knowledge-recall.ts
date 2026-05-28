@@ -1,17 +1,8 @@
 import { z } from 'zod';
-import {
-	jaccardBigram,
-	normalize,
-	readKnowledge,
-	readRetractionRecords,
-	resolveHiveKnowledgePath,
-	resolveSwarmKnowledgePath,
-	wordBigrams,
-} from '../hooks/knowledge-store.js';
-import type {
-	HiveKnowledgeEntry,
-	SwarmKnowledgeEntry,
-} from '../hooks/knowledge-types.js';
+import { loadPluginConfigWithMeta } from '../config';
+import { KnowledgeConfigSchema } from '../config/schema.js';
+import { searchKnowledge } from '../hooks/search-knowledge.js';
+import { computeKnowledgeDebug } from '../services/knowledge-diagnostics.js';
 import { createSwarmTool } from './create-tool.js';
 
 interface ScoredEntry {
@@ -25,14 +16,14 @@ interface ScoredEntry {
 interface KnowledgeRecallResult {
 	results: ScoredEntry[];
 	total: number;
+	trace_id?: string;
+	debug?: unknown;
 }
-
-const NORMAL_RETRIEVAL_STATUSES = new Set(['established', 'promoted']);
 
 export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Search the knowledge base for relevant past decisions, patterns, and lessons learned. Returns ranked results by semantic similarity.',
+			'Search the knowledge base for relevant past decisions, patterns, and lessons learned. Returns ranked results via the unified hybrid retrieval service and a trace_id for knowledge_receipt.',
 		args: {
 			query: z.string().min(3).describe('Natural language search query'),
 			top_n: z
@@ -46,12 +37,17 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				.enum(['all', 'swarm', 'hive'])
 				.optional()
 				.describe("Knowledge tier to search (default: 'all')"),
+			debug: z
+				.boolean()
+				.optional()
+				.describe('Include path/version/health debug metadata in the response'),
 		},
-		execute: async (args: unknown, directory: string): Promise<string> => {
+		execute: async (args: unknown, directory, ctx): Promise<string> => {
 			// Safe args extraction
 			let queryInput: unknown;
 			let topNInput: unknown;
 			let tierInput: unknown;
+			let debugInput: unknown;
 
 			try {
 				if (args && typeof args === 'object') {
@@ -59,10 +55,12 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					queryInput = obj.query;
 					topNInput = obj.top_n;
 					tierInput = obj.tier;
+					debugInput = obj.debug;
 				}
 			} catch {
 				// Malicious getter threw
 			}
+			const wantDebug = debugInput === true;
 
 			// Validate query
 			if (typeof queryInput !== 'string' || queryInput.length < 3) {
@@ -75,97 +73,59 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 
 			// Parse top_n with default
 			let topN = 5;
-			if (topNInput !== undefined) {
-				if (typeof topNInput === 'number' && Number.isInteger(topNInput)) {
-					topN = Math.max(1, Math.min(20, topNInput));
-				}
+			if (typeof topNInput === 'number' && Number.isInteger(topNInput)) {
+				topN = Math.max(1, Math.min(20, topNInput));
 			}
 
 			// Parse tier with default
 			let tier: 'all' | 'swarm' | 'hive' = 'all';
-			if (tierInput !== undefined && typeof tierInput === 'string') {
-				if (tierInput === 'swarm' || tierInput === 'hive') {
-					tier = tierInput;
-				}
+			if (tierInput === 'swarm' || tierInput === 'hive') {
+				tier = tierInput;
 			}
 
-			// Step 1: Read all entries from swarm and hive knowledge files
-			const swarmPath = resolveSwarmKnowledgePath(directory);
-			const hivePath = resolveHiveKnowledgePath();
-
-			const [swarmEntries, hiveEntries] = await Promise.all([
-				readKnowledge<SwarmKnowledgeEntry>(swarmPath),
-				readKnowledge<HiveKnowledgeEntry>(hivePath),
-			]);
-
-			// Step 2: Combine into single array based on tier filter
-			let entries: (SwarmKnowledgeEntry | HiveKnowledgeEntry)[] = [];
-			if (tier === 'all' || tier === 'swarm') {
-				entries = entries.concat(swarmEntries);
-			}
-			if (tier === 'all' || tier === 'hive') {
-				entries = entries.concat(hiveEntries);
+			// Load knowledge config (best-effort; defaults are safe).
+			let knowledgeConfig = KnowledgeConfigSchema.parse({});
+			try {
+				const { config } = loadPluginConfigWithMeta(directory);
+				knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+			} catch {
+				// fall back to schema defaults
 			}
 
-			// Step 3: Filter out entries that are not mature enough for normal recall.
-			const retractions = await readRetractionRecords(directory);
-			const suppressedLessons = new Set(
-				retractions
-					.map((record) => record.normalized_lesson)
-					.filter(
-						(value): value is string =>
-							typeof value === 'string' && value.length > 0,
-					),
-			);
-			entries = entries.filter(
-				(entry) =>
-					NORMAL_RETRIEVAL_STATUSES.has(entry.status) &&
-					!suppressedLessons.has(normalize(entry.lesson)),
-			);
-
-			// Step 3b: Empty store check
-			if (entries.length === 0) {
-				const result: KnowledgeRecallResult = { results: [], total: 0 };
-				return JSON.stringify(result);
-			}
-
-			// Step 4: Normalize query and generate bigrams
-			const normalizedQuery = normalize(queryInput);
-			const queryBigrams = wordBigrams(normalizedQuery);
-
-			// Step 5-6: Score each entry
-			const scoredEntries: ScoredEntry[] = entries.map((entry) => {
-				const entryText = `${entry.lesson} ${entry.tags.join(' ')} ${entry.category}`;
-				const entryBigrams = wordBigrams(entryText);
-
-				const textScore = jaccardBigram(queryBigrams, entryBigrams);
-
-				const boost =
-					entry.status === 'established'
-						? 0.1
-						: entry.status === 'promoted'
-							? 0.05
-							: 0;
-				const finalScore = textScore + boost;
-
-				return {
-					id: entry.id,
-					confidence: entry.confidence,
-					category: entry.category,
-					lesson: entry.lesson,
-					score: finalScore,
-				};
+			// Route through the unified retrieval service. It filters
+			// archived/quarantined, applies the hybrid score, emits the
+			// `retrieved` event, and returns a trace_id.
+			const { trace_id, results } = await searchKnowledge({
+				directory,
+				config: knowledgeConfig,
+				query: queryInput,
+				mode: 'manual',
+				agent: ctx?.agent ?? 'unknown',
+				sessionId: ctx?.sessionID ?? 'unknown',
+				tier,
+				maxResults: topN,
+				// Preserve pre-unification manual-recall semantics: an explicit query
+				// returns all scopes, reads hive regardless of the injection-only
+				// hive_enabled knob, and is not silently role-gated.
+				applyScopeFilter: false,
+				forceReadHive: true,
+				applyRoleScope: false,
 			});
 
-			// Step 7: Sort by score descending
-			scoredEntries.sort((a, b) => b.score - a.score);
+			const scored: ScoredEntry[] = results.map((e) => ({
+				id: e.id,
+				confidence: e.confidence,
+				category: e.category,
+				lesson: e.lesson,
+				score: e.finalScore,
+			}));
 
-			// Step 8: Return top N results
-			const topResults = scoredEntries.slice(0, topN);
 			const result: KnowledgeRecallResult = {
-				results: topResults,
-				total: topResults.length,
+				results: scored,
+				total: scored.length,
+				trace_id,
 			};
+			if (wantDebug) result.debug = await computeKnowledgeDebug(directory);
 
 			return JSON.stringify(result);
 		},

@@ -1,9 +1,11 @@
 /**
- * Tests for action-aware retrieval (readContextualKnowledge):
+ * Action-aware injection retrieval via the unified searchKnowledge service:
  *  - high-confidence trigger-matching directive forces inclusion
  *  - non-matching generic high-confidence lesson does not displace
  *  - active generated_skill reference surfaces
  *  - archived entries are excluded
+ *
+ * (Formerly tested readContextualKnowledge, which searchKnowledge replaced.)
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
@@ -12,9 +14,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
-import { readContextualKnowledge } from '../../../src/hooks/knowledge-reader';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import type {
+	KnowledgeConfig,
+	KnowledgeRetrievalContext,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
+import { searchKnowledge } from '../../../src/hooks/search-knowledge';
 
 let tmp: string;
 beforeEach(() => {
@@ -62,7 +68,25 @@ async function seed(es: SwarmKnowledgeEntry[]): Promise<void> {
 
 const cfg = KnowledgeConfigSchema.parse({});
 
-describe('readContextualKnowledge', () => {
+// Mirrors the injector: action-aware context, architect role (sees all),
+// swarm tier (isolates from the global hive), no event emission.
+async function inject(
+	ctx: KnowledgeRetrievalContext,
+	config: KnowledgeConfig = cfg,
+) {
+	const { results } = await searchKnowledge({
+		directory: tmp,
+		config,
+		context: ctx,
+		mode: 'auto_injection',
+		agent: 'architect',
+		tier: 'swarm',
+		emitEvent: false,
+	});
+	return results;
+}
+
+describe('searchKnowledge (action-aware injection)', () => {
 	it('forces inclusion of critical directive on tool/agent match', async () => {
 		await seed([
 			entry('11111111-1111-4111-9111-111111111111', {
@@ -82,9 +106,7 @@ describe('readContextualKnowledge', () => {
 				confidence: 0.92,
 			}),
 		]);
-		const result = await readContextualKnowledge(
-			tmp,
-			{ ...cfg, max_inject_count: 2 },
+		const result = await inject(
 			{
 				projectName: 't',
 				currentPhase: 'Phase 1',
@@ -92,6 +114,7 @@ describe('readContextualKnowledge', () => {
 				targetAgent: 'coder',
 				mode: 'delegation',
 			},
+			{ ...cfg, max_inject_count: 2 },
 		);
 		expect(result.map((r) => r.id)).toContain(
 			'11111111-1111-4111-9111-111111111111',
@@ -112,7 +135,7 @@ describe('readContextualKnowledge', () => {
 				confidence: 0.7,
 			}),
 		]);
-		const result = await readContextualKnowledge(tmp, cfg, {
+		const result = await inject({
 			projectName: 't',
 			currentPhase: 'Phase 1',
 		});
@@ -132,7 +155,7 @@ describe('readContextualKnowledge', () => {
 				status: 'established',
 			}),
 		]);
-		const result = await readContextualKnowledge(tmp, cfg, {
+		const result = await inject({
 			projectName: 't',
 			currentPhase: 'Phase 1',
 		});
@@ -156,7 +179,7 @@ describe('readContextualKnowledge', () => {
 				confidence: 0.85,
 			}),
 		]);
-		const result = await readContextualKnowledge(tmp, cfg, {
+		const result = await inject({
 			projectName: 't',
 			currentPhase: 'Phase 1',
 		});
@@ -177,15 +200,14 @@ describe('readContextualKnowledge', () => {
 				confidence: 0.99,
 			}),
 		]);
-		const result = await readContextualKnowledge(
-			tmp,
-			{ ...cfg, max_inject_count: 1 },
+		const result = await inject(
 			{
 				projectName: 't',
 				currentPhase: 'Phase 1',
 				currentTool: 'phase_complete',
 				mode: 'tool_before',
 			},
+			{ ...cfg, max_inject_count: 1 },
 		);
 		expect(result[0].id).toBe('match0001-0001-4000-9000-000000000001');
 	});

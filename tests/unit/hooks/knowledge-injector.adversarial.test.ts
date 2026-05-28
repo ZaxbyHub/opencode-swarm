@@ -68,12 +68,27 @@ const mockStripKnownSwarmPrefix = mock((name: string) => {
 const mockGetRunMemorySummary = mock(async () => null);
 
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
-	readContextualKnowledge: mockReadContextualKnowledge,
 	// Stubs for ESM named-import resolution — not called in adversarial tests.
 	readMergedKnowledge: async () => [],
 	updateRetrievalOutcome: async () => {},
 	scoreDirectiveAgainstContext: () => 0,
 	_internals: {},
+}));
+// The injector retrieves via searchKnowledge; delegate to the local retrieval
+// mock so per-test setups keep controlling the injected results.
+mock.module('../../../src/hooks/search-knowledge.js', () => ({
+	searchKnowledge: async (params: {
+		directory?: string;
+		config?: unknown;
+		context?: unknown;
+	}) => ({
+		trace_id: 'trace-test',
+		results: await mockReadContextualKnowledge(
+			params?.directory,
+			params?.config,
+			params?.context,
+		),
+	}),
 }));
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons: mockReadRejectedLessons,
@@ -100,6 +115,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	computeConfidence: () => 0.5,
 	inferTags: () => [],
 	getPlatformConfigDir: () => '/tmp',
+	computeOutcomeSignal: () => 0,
 	_internals: {},
 }));
 mock.module('../../../src/plan/manager.js', () => ({

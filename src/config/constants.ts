@@ -266,6 +266,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'knowledge_add',
 		'knowledge_recall',
 		'knowledge_remove',
+		'knowledge_archive',
 		'co_change_analyzer',
 		'suggest_patch',
 		'repo_map',
@@ -282,6 +283,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'skill_retire',
 		'skill_improve',
 		'knowledge_ack',
+		'knowledge_receipt',
 		'summarize_work',
 		'write_architecture_supervisor_evidence',
 		'swarm_command',
@@ -322,6 +324,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'syntax_check',
 		'knowledge_add',
 		'knowledge_recall',
+		'knowledge_receipt',
 		'repo_map',
 		'summarize_work',
 		'swarm_command',
@@ -621,6 +624,8 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	knowledge_recall: 'search the knowledge base for relevant past decisions',
 	knowledge_remove:
 		'delete an outdated swarm knowledge entry by ID (swarm tier only)',
+	knowledge_archive:
+		'archive (default), quarantine, or purge a swarm knowledge entry by ID with an immutable audit tombstone; purge requires an admin flag',
 	knowledge_query: 'query swarm or hive knowledge with optional filters',
 	co_change_analyzer: 'detect hidden couplings by analyzing git history',
 	check_gate_status: 'check the gate status of a specific task',
@@ -673,6 +678,8 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> = {
 	spec_write: 'author or update .swarm/spec.md for the current project',
 	knowledge_ack:
 		'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
+	knowledge_receipt:
+		'file a receipt for retrieved knowledge (applied/ignored/contradicted + new lessons), recorded as immutable knowledge events',
 	swarm_memory_recall:
 		'recall scoped Swarm memory for the current repository as untrusted background',
 	swarm_memory_propose:

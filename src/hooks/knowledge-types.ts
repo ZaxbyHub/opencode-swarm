@@ -51,6 +51,8 @@ export interface RetrievalOutcome {
 	ignored_count?: number;
 	/** v2: explicit/inferred violation count (KNOWLEDGE_VIOLATED: id reason=...). */
 	violated_count?: number;
+	/** v3: explicit contradiction count (entry contradicted by current evidence). */
+	contradicted_count?: number;
 	/** v2: phase-success count after a "shown" (replaces succeeded_after_count). */
 	succeeded_after_shown_count?: number;
 	/** v2: phase-failure count after a "shown" (replaces failed_after_count). */

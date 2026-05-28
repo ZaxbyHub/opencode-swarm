@@ -297,6 +297,7 @@ export async function readMergedKnowledge(
 	directory: string,
 	config: KnowledgeConfig,
 	context?: ProjectContext,
+	opts?: { skipScopeFilter?: boolean },
 ): Promise<RankedEntry[]> {
 	// Step 1: Read swarm entries
 	const swarmPath = resolveSwarmKnowledgePath(directory);
@@ -371,13 +372,16 @@ export async function readMergedKnowledge(
 			),
 	);
 
-	// Step 3.5: Apply scope_filter — exclude entries whose scope doesn't match
+	// Step 3.5: Apply scope_filter — exclude entries whose scope doesn't match.
+	// Manual recall opts out (skipScopeFilter) so an explicit text query can
+	// surface stack:/project:-scoped lessons, matching pre-unification behavior.
 	const scopeFilter = config.scope_filter ?? ['global'];
 	// Also filter out entries that are not mature enough for normal retrieval,
 	// and suppress lessons retracted by architect retrospectives.
 	const filtered = merged.filter(
 		(entry) =>
-			scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern) &&
+			(opts?.skipScopeFilter ||
+				scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern)) &&
 			NORMAL_RETRIEVAL_STATUSES.has(entry.status) &&
 			!suppressedLessons.has(normalize(entry.lesson)),
 	);
@@ -585,11 +589,8 @@ export async function updateRetrievalOutcome(
 }
 
 // ============================================================================
-// v2: Action-aware retrieval
+// v2: Action-aware directive scoring (consumed by the unified searchKnowledge)
 // ============================================================================
-
-/** Default min confidence for trigger/action match boost. */
-const DIRECTIVE_BOOST_MIN_CONFIDENCE = 0.75;
 
 function lc(s: string | undefined): string {
 	return (s ?? '').toLowerCase();
@@ -653,108 +654,16 @@ export function scoreDirectiveAgainstContext(
 	return { triggerHit, actionHit, agentHit, score: Math.min(1, score) };
 }
 
-/**
- * v2: Action-aware retrieval. Returns RankedEntry[] but uses the richer
- * KnowledgeRetrievalContext to bias ranking toward entries whose triggers,
- * applies_to_tools, applies_to_agents, or directive_priority match the
- * current decision point. Falls back to readMergedKnowledge ordering for
- * non-matching entries.
- */
-export async function readContextualKnowledge(
-	directory: string,
-	config: KnowledgeConfig,
-	ctx: KnowledgeRetrievalContext,
-): Promise<RankedEntry[]> {
-	// Step 1: get the legacy ranked merge using the projected ProjectContext shape.
-	const projected: ProjectContext = {
-		projectName: ctx.projectName ?? 'unknown',
-		currentPhase: ctx.currentPhase ?? 'Phase 0',
-		techStack: ctx.techStack,
-		recentErrors: [
-			...(ctx.recentReviewerFailures ?? []),
-			...(ctx.recentTestFailures ?? []),
-			...(ctx.recentToolErrors ?? []),
-		],
-	};
-	// Pull a wider window than max_inject so we have headroom to re-rank.
-	const wideCfg: KnowledgeConfig = {
-		...config,
-		max_inject_count: Math.max(20, config.max_inject_count ?? 5),
-	};
-	const candidates =
-		(await readMergedKnowledge(directory, wideCfg, projected)) ?? [];
-
-	// Step 2: re-rank using directive metadata.
-	const minConf =
-		typeof (config as { directive_min_confidence?: number })
-			.directive_min_confidence === 'number'
-			? (config as { directive_min_confidence?: number })
-					.directive_min_confidence!
-			: DIRECTIVE_BOOST_MIN_CONFIDENCE;
-
-	const rescored = candidates.map((entry) => {
-		const ds = scoreDirectiveAgainstContext(entry, ctx);
-		// High-confidence + action match → strong boost
-		const confBoost =
-			entry.confidence >= minConf && (ds.actionHit || ds.agentHit) ? 0.25 : 0;
-		const generatedSkillBoost =
-			entry.generated_skill_path && entry.status !== 'archived' ? 0.05 : 0;
-		const finalScore = Math.min(
-			1,
-			entry.finalScore + ds.score + confBoost + generatedSkillBoost,
-		);
-		return {
-			...entry,
-			finalScore,
-			__directive: ds,
-		} as RankedEntry & {
-			__directive: ReturnType<typeof scoreDirectiveAgainstContext>;
-		};
-	});
-
-	// Step 3: force-include critical+matching entries even if they would otherwise drop off.
-	rescored.sort((a, b) => b.finalScore - a.finalScore);
-	const max = config.max_inject_count ?? 5;
-	const top: typeof rescored = [];
-	const seen = new Set<string>();
-
-	// Pass A: critical + trigger/action matches first
-	for (const e of rescored) {
-		if (top.length >= max) break;
-		const ds = e.__directive;
-		const isCritical =
-			e.directive_priority === 'critical' &&
-			(ds.triggerHit || ds.actionHit || ds.agentHit);
-		if (isCritical && !seen.has(e.id)) {
-			top.push(e);
-			seen.add(e.id);
-		}
-	}
-	// Pass B: remaining by score
-	for (const e of rescored) {
-		if (top.length >= max) break;
-		if (!seen.has(e.id)) {
-			top.push(e);
-			seen.add(e.id);
-		}
-	}
-
-	// Strip private fields before returning
-	return top.map(({ __directive: _d, ...rest }) => rest as RankedEntry);
-}
-
 // ============================================================================
 // DI Seam — _internals
 // ============================================================================
 
 export const _internals: {
 	readMergedKnowledge: typeof readMergedKnowledge;
-	readContextualKnowledge: typeof readContextualKnowledge;
 	updateRetrievalOutcome: typeof updateRetrievalOutcome;
 	scoreDirectiveAgainstContext: typeof scoreDirectiveAgainstContext;
 } = {
 	readMergedKnowledge,
-	readContextualKnowledge,
 	updateRetrievalOutcome,
 	scoreDirectiveAgainstContext,
 };

@@ -74,6 +74,8 @@ export type ToolName =
 	| 'skill_improve'
 	| 'spec_write'
 	| 'knowledge_ack'
+	| 'knowledge_receipt'
+	| 'knowledge_archive'
 	| 'swarm_memory_recall'
 	| 'swarm_memory_propose'
 	| 'swarm_command'
@@ -157,6 +159,8 @@ export const TOOL_NAMES: readonly ToolName[] = [
 	'skill_improve',
 	'spec_write',
 	'knowledge_ack',
+	'knowledge_receipt',
+	'knowledge_archive',
 	'swarm_memory_recall',
 	'swarm_memory_propose',
 	'swarm_command',

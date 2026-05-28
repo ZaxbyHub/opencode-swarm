@@ -91,13 +91,13 @@ describe('test-runner.ts - Framework Detection', () => {
 	afterEach(() => {
 		process.chdir(originalCwd);
 		// Retry cleanup after a short delay
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore cleanup errors
 			}
-		}, 100);
+		})();
 	});
 
 	test('detects no framework when no config exists', async () => {
@@ -237,13 +237,13 @@ describe('test-runner.ts - Validation Tests (no execution)', () => {
 
 		process.chdir(originalCwd);
 		// Cleanup with delay
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 10000);
 
 	test('tool returns valid JSON structure for error case', async () => {
@@ -265,13 +265,13 @@ describe('test-runner.ts - Validation Tests (no execution)', () => {
 		expect(parsed.framework).toBe('none');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 10000);
 });
 
@@ -297,13 +297,13 @@ describe('test-runner.ts - Edge Cases', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	});
 
 	test('detectTestFramework correctly identifies vitest from package.json', async () => {
@@ -531,13 +531,13 @@ describe('test-runner.ts - Security Validation', () => {
 		);
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 10000);
 
 	test.skipIf(!hasPwsh)(
@@ -565,13 +565,13 @@ describe('test-runner.ts - Security Validation', () => {
 			expect(parsed.framework).toBe('pester');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		},
 		10000,
 	);
@@ -608,13 +608,13 @@ describe('test-runner.ts - Security Validation', () => {
 		);
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 10000);
 
 	test('tells graph scope callers to use convention for direct test files', async () => {
@@ -648,13 +648,13 @@ describe('test-runner.ts - Security Validation', () => {
 		);
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 10000);
 });
 
@@ -717,13 +717,13 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 			expect(parsed.error).toBeUndefined();
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		},
 		15000,
 	);
@@ -767,13 +767,13 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		expect(parsed.outcome).toBe('skip');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('rejects source file with no matching test file for graph scope', async () => {
@@ -816,13 +816,13 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		expect(parsed.outcome).toBe('skip');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				// Ignore
 			}
-		}, 100);
+		})();
 	}, 15000);
 });
 
@@ -882,13 +882,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 				// not about the guard
 
 				process.chdir(originalCwd);
-				setTimeout(() => {
+				(() => {
 					try {
 						fs.rmSync(tempDir, { recursive: true, force: true });
 					} catch {
 						// Ignore
 					}
-				}, 100);
+				})();
 			},
 			15000,
 		);
@@ -921,13 +921,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).toContain('No test framework detected');
 
 			process.chdir(savedCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(noFrameworkDir, { recursive: true, force: true });
 				} catch {
 					/* ignore */
 				}
-			}, 100);
+			})();
 		});
 
 		test('scope:"all" with allow_full_suite:true passes through zero-test-files guard', async () => {
@@ -956,13 +956,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).toContain('No test framework detected');
 
 			process.chdir(savedCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(noFrameworkDir, { recursive: true, force: true });
 				} catch {
 					/* ignore */
 				}
-			}, 100);
+			})();
 		});
 
 		test('scope:"all" with allow_full_suite:false returns error', async () => {
@@ -1024,13 +1024,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).not.toContain('allow_full_suite');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		}, 15000);
 
 		test('scope:"graph" without allow_full_suite works normally', async () => {
@@ -1068,13 +1068,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).not.toContain('allow_full_suite');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		}, 15000);
 
 		test('scope:"convention" with allow_full_suite:true still works normally', async () => {
@@ -1116,13 +1116,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).not.toContain('allow_full_suite');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		}, 15000);
 
 		test('scope:"graph" with allow_full_suite:true still works normally', async () => {
@@ -1160,13 +1160,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.error).not.toContain('allow_full_suite');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		}, 15000);
 
 		test('returns outcome "scope_exceeded" when too many test files resolved', async () => {
@@ -1212,13 +1212,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 			expect(parsed.message).toContain('Too many test files resolved');
 
 			process.chdir(originalCwd);
-			setTimeout(() => {
+			(() => {
 				try {
 					fs.rmSync(tempDir, { recursive: true, force: true });
 				} catch {
 					// Ignore
 				}
-			}, 100);
+			})();
 		}, 30000);
 
 		// Flaky on macOS/Windows: spawns vitest in temp dir without node_modules installed
@@ -1267,13 +1267,13 @@ describe('test-runner.ts - scope:"all" gated access (allow_full_suite)', () => {
 				expect(parsed.totals.failed).toBeGreaterThan(0);
 
 				process.chdir(originalCwd);
-				setTimeout(() => {
+				(() => {
 					try {
 						fs.rmSync(tempDir, { recursive: true, force: true });
 					} catch {
 						// Ignore
 					}
-				}, 100);
+				})();
 			},
 			15000,
 		);
@@ -1683,13 +1683,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.error).not.toContain('accepts at most');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "graph" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
@@ -1724,13 +1724,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.message).toContain('Call test_runner once per source file');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "graph" with many source files returns scope_exceeded before discovery fan-out', async () => {
@@ -1766,13 +1766,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.error).toContain('got 20');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "impact" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
@@ -1807,13 +1807,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.message).toContain('Call test_runner once per source file');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "convention" with 2 source files returns scope_exceeded before discovery', async () => {
@@ -1848,13 +1848,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.message).toContain('Call test_runner once per source file');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "convention" with 1 source file + 1 direct test file does NOT trigger source-file guard', async () => {
@@ -1890,13 +1890,13 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.error).not.toContain('accepts at most');
 
 		process.chdir(originalCwd);
-		setTimeout(() => {
+		(() => {
 			try {
 				fs.rmSync(tempDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
-		}, 100);
+		})();
 	}, 15000);
 
 	test('scope "all" blocked error does not recommend "graph" with multiple files', async () => {

@@ -95,13 +95,11 @@ describe('two-layer pre-resolution guard', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
-		setTimeout(() => {
-			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		}, 100);
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// Ignore cleanup errors
+		}
 	});
 
 	describe('Layer 1: MAX_SAFE_SOURCE_FILES guard (>1 source file → Layer 1 fires)', () => {

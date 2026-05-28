@@ -31,8 +31,35 @@ import type {
 // Mocks
 // ============================================================================
 
+// mock-prefixed control handle for the retrieval call; the searchKnowledge
+// mock delegates to it so per-test mockResolvedValue setups keep working.
+const mockRetrieve = vi.fn(async (): Promise<unknown[]> => []);
+
 vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
-	readContextualKnowledge: vi.fn(async () => []),
+	readMergedKnowledge: vi.fn(async () => []),
+	scoreDirectiveAgainstContext: vi.fn(() => ({
+		triggerHit: false,
+		actionHit: false,
+		agentHit: false,
+		score: 0,
+	})),
+}));
+vi.mock('../../../src/hooks/search-knowledge.js', () => ({
+	searchKnowledge: vi.fn(
+		async (params: {
+			directory?: string;
+			config?: unknown;
+			context?: unknown;
+		}) => ({
+			trace_id: 'trace-test',
+			results:
+				(await mockRetrieve(
+					params?.directory,
+					params?.config,
+					params?.context,
+				)) ?? [],
+		}),
+	),
 }));
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons: vi.fn(async () => []),
@@ -75,7 +102,6 @@ vi.mock('../../../src/hooks/utils.js', () => ({
 }));
 
 import { extractCurrentPhaseFromPlan } from '../../../src/hooks/extractors.js';
-import { readContextualKnowledge } from '../../../src/hooks/knowledge-reader.js';
 import { readRejectedLessons } from '../../../src/hooks/knowledge-store.js';
 import { loadPlan } from '../../../src/plan/manager.js';
 
@@ -167,9 +193,7 @@ describe('Knowledge injection allowlist — architect only', () => {
 			title: 'Test',
 			phases: [{ id: 1, name: 'Setup', tasks: [] }],
 		});
-		(readContextualKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([
-			makeEntry(),
-		]);
+		(mockRetrieve as ReturnType<typeof vi.fn>).mockResolvedValue([makeEntry()]);
 		(readRejectedLessons as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 		(extractCurrentPhaseFromPlan as ReturnType<typeof vi.fn>).mockReturnValue(
 			'Phase 1: Setup',

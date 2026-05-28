@@ -5,6 +5,7 @@ import {
 	appendRejectedLesson,
 	appendRetractionRecord,
 	computeConfidence,
+	computeOutcomeSignal,
 	enforceKnowledgeCap,
 	findNearDuplicate,
 	inferTags,
@@ -419,6 +420,12 @@ export async function curateAndStoreSwarm(
 	return { stored, skipped, rejected };
 }
 
+// A track-record signal at or below this (negatives clearly outweighing positives,
+// with enough corroborating evidence) blocks auto-promotion regardless of phase
+// confirmations or age. Tuned against computeOutcomeSignal's Laplace smoothing so a
+// lone ignore/contradiction does not block a well-confirmed entry.
+const OUTCOME_PROMOTION_BLOCK = -0.3;
+
 /**
  * Auto-promote swarm entries based on phase confirmations and age.
  */
@@ -435,6 +442,15 @@ export async function runAutoPromotion(
 	for (const entry of entries) {
 		// Skip already promoted entries
 		if (entry.status === 'promoted') continue;
+
+		// Event-sourced safety gate: a clearly negative track record blocks
+		// auto-promotion regardless of phase confirmations or age. Entries with no
+		// outcome history (signal 0) are unaffected, preserving prior behavior.
+		if (
+			computeOutcomeSignal(entry.retrieval_outcomes) <= OUTCOME_PROMOTION_BLOCK
+		) {
+			continue;
+		}
 
 		// Count distinct phase numbers
 		const distinctPhases = new Set(

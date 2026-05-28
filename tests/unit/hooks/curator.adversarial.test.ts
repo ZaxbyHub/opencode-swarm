@@ -6,7 +6,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -169,25 +175,22 @@ describe('curator.ts I/O - Adversarial Tests', () => {
 	});
 
 	describe('Empty string directory', () => {
-		const cwdSwarmDir = join(process.cwd(), '.swarm');
+		// readCuratorSummary('')/writeCuratorSummary('') fall back to cwd/.swarm.
+		// chdir into an isolated tmp dir so the test exercises that fallback
+		// WITHOUT ever touching the real <repo>/.swarm (which a prior bug deleted).
+		let cwdTmp: string;
+		let cwdOriginal: string;
 
 		beforeEach(() => {
-			try {
-				rmSync(join(cwdSwarmDir, 'curator-summary.json'), { force: true });
-				rmSync(cwdSwarmDir, { recursive: true, force: true });
-			} catch {
-				/* ignore */
-			}
-			const { mkdirSync } = require('node:fs');
-			mkdirSync(cwdSwarmDir, { recursive: true });
+			cwdOriginal = process.cwd();
+			cwdTmp = mkdtempSync(join(tmpdir(), 'curator-cwd-'));
+			process.chdir(cwdTmp);
+			mkdirSync(join(cwdTmp, '.swarm'), { recursive: true });
 		});
 
 		afterEach(() => {
-			try {
-				rmSync(join(cwdSwarmDir, 'curator-summary.json'), { force: true });
-			} catch {
-				/* ignore */
-			}
+			process.chdir(cwdOriginal);
+			rmSync(cwdTmp, { recursive: true, force: true });
 		});
 
 		it('should read from cwd/.swarm when directory is empty string', async () => {

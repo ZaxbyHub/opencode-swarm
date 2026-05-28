@@ -77,6 +77,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	computeOutcomeSignal: () => 0,
 }));
 
 // Mock knowledge-validator module
