@@ -16,8 +16,8 @@
  *   {@link appendKnowledgeEvent} throws and is intended for tests / callers that
  *   want explicit error handling.
  * - `.swarm/` containment (AGENTS.md invariant 4): the path is derived from the
- *   `directory` argument injected by `createSwarmTool` / hook constructors. No
- *   `process.cwd()` callers.
+ *   `directory` argument injected by `createSwarmTool` / hook constructors — never
+ *   from the process working directory.
  */
 import type { KnowledgeApplicationRecord } from './knowledge-types.js';
 /** Retrieval modes that surface knowledge to an agent. */

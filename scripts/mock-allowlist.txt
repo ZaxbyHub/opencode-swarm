@@ -54,6 +54,7 @@ src/hooks/knowledge-application
 src/hooks/knowledge-reader
 src/hooks/knowledge-store
 src/hooks/knowledge-validator
+src/hooks/search-knowledge
 src/hooks/skill-usage-log
 src/hooks/utils
 
