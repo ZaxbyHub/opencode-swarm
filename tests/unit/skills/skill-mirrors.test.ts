@@ -22,7 +22,11 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 		'.opencode/skills/clarify-spec/SKILL.md',
 		'.claude/skills/clarify-spec/SKILL.md',
 	],
-	['resume', '.opencode/skills/resume/SKILL.md', '.claude/skills/resume/SKILL.md'],
+	[
+		'resume',
+		'.opencode/skills/resume/SKILL.md',
+		'.claude/skills/resume/SKILL.md',
+	],
 	[
 		'clarify',
 		'.opencode/skills/clarify/SKILL.md',

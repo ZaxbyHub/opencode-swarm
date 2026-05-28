@@ -7,21 +7,41 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const MODE_SKILLS = [
-	['BRAINSTORM', 'brainstorm', ['Phase 1: CONTEXT SCAN', 'Phase 7: TRANSITION']],
+	[
+		'BRAINSTORM',
+		'brainstorm',
+		['Phase 1: CONTEXT SCAN', 'Phase 7: TRANSITION'],
+	],
 	['SPECIFY', 'specify', ['SPEC CONTENT RULES', 'EXTERNAL PLAN IMPORT PATH']],
 	['CLARIFY-SPEC', 'clarify-spec', ['[NEEDS CLARIFICATION]', 'delta format']],
 	['RESUME', 'resume', ['.swarm/plan.md exists', 'Swarm field differs']],
 	['CLARIFY', 'clarify', ['Ask up to 3 questions', 'Clear request']],
 	['DISCOVER', 'discover', ['governance', 'Project Governance']],
 	['CONSULT', 'consult', ['cached guidance', 'SME calls per project phase']],
-	['PRE-PHASE BRIEFING', 'pre-phase-briefing', ['Phase 2+', 'CODEBASE REALITY REPORT']],
+	[
+		'PRE-PHASE BRIEFING',
+		'pre-phase-briefing',
+		['Phase 2+', 'CODEBASE REALITY REPORT'],
+	],
 	['COUNCIL', 'council', ['RESEARCH CONTEXT', 'convene_general_council']],
-	['DEEP_DIVE', 'deep-dive', ['Step 0 — Parse Header', 'Step 7 — Final Report']],
+	[
+		'DEEP_DIVE',
+		'deep-dive',
+		['Step 0 — Parse Header', 'Step 7 — Final Report'],
+	],
 	['ISSUE_INGEST', 'issue-ingest', ['Phase 1: INTAKE', 'Phase 4: TRANSITION']],
 	['PLAN', 'plan', ['SPEC GATE', 'POST-SAVE_PLAN']],
 	['CRITIC-GATE', 'critic-gate', ['HARD STOP', 'CRITIC-GATE TRIGGER']],
-	['EXECUTE', 'execute', ['TASK COMPLETION GATE', 'ROLE-BOUNDARY CHANGE VALIDATION']],
-	['PHASE-WRAP', 'phase-wrap', ['CATASTROPHIC VIOLATION CHECK', 'phase_complete']],
+	[
+		'EXECUTE',
+		'execute',
+		['TASK COMPLETION GATE', 'ROLE-BOUNDARY CHANGE VALIDATION'],
+	],
+	[
+		'PHASE-WRAP',
+		'phase-wrap',
+		['CATASTROPHIC VIOLATION CHECK', 'phase_complete'],
+	],
 ] as const;
 
 const architectPrompt = readFileSync(
