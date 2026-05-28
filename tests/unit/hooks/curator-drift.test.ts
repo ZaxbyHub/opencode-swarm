@@ -772,6 +772,188 @@ describe('runDeterministicDriftCheck', () => {
 			expect(result.report.requirements_checked).toBe(12);
 			expect(result.report.requirements_satisfied).toBe(7);
 		});
+
+		// ========== Spec-based Drift Tests ==========
+
+		it('Spec-based MAJOR_DRIFT: spec has 3 FRs but plan only references 1 (coverage < 50%) → alignment=MAJOR_DRIFT', async () => {
+			// Write plan.md that only mentions FR-001
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'plan.md'),
+				'# Plan\n## Tasks\n- Task 1: implement FR-001',
+				'utf-8',
+			);
+			// Write spec.md that mentions FR-001, FR-002, FR-003
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'spec.md'),
+				'# Spec\n- FR-001: feature one\n- FR-002: feature two\n- FR-003: feature three',
+				'utf-8',
+			);
+
+			const curatorResult = makeCuratorResult({
+				phase: 1,
+				compliance: [], // no warnings — drift is driven by spec coverage
+				digest: {
+					tasks_completed: 10,
+					tasks_total: 10,
+					summary: 'all done',
+					agents_used: [],
+					key_decisions: [],
+					blockers_resolved: [],
+					phase: 1,
+					timestamp: new Date().toISOString(),
+				},
+			});
+			const config = makeCuratorConfig();
+
+			const result = await runDeterministicDriftCheck(
+				tmpDir,
+				1,
+				curatorResult,
+				config,
+			);
+
+			// 1/3 = 0.333 < 0.5 → MAJOR_DRIFT
+			expect(result.report.alignment).toBe('MAJOR_DRIFT');
+			// driftScore = min(0.9, 0.6 + (1 - 0.333) * 0.3) = min(0.9, 0.6 + 0.2) = 0.8
+			expect(result.report.drift_score).toBe(0.8);
+		});
+
+		it('Spec-based MINOR_DRIFT (implementation gap): all spec FRs in plan but none in curator digest → alignment=MINOR_DRIFT', async () => {
+			// Write plan.md that mentions FR-001, FR-002, FR-003
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'plan.md'),
+				'# Plan\n## Tasks\n- FR-001: implement\n- FR-002: implement\n- FR-003: implement',
+				'utf-8',
+			);
+			// Write spec.md with the same FRs
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'spec.md'),
+				'# Spec\n- FR-001: feature one\n- FR-002: feature two\n- FR-003: feature three',
+				'utf-8',
+			);
+
+			// curator digest does NOT mention any FRs (implementation gap)
+			const curatorResult = makeCuratorResult({
+				phase: 1,
+				compliance: [], // no warnings
+				digest: {
+					tasks_completed: 10,
+					tasks_total: 10,
+					summary: 'all done but FRs not referenced',
+					agents_used: [],
+					key_decisions: [],
+					blockers_resolved: [],
+					phase: 1,
+					timestamp: new Date().toISOString(),
+				},
+			});
+			const config = makeCuratorConfig();
+
+			const result = await runDeterministicDriftCheck(
+				tmpDir,
+				1,
+				curatorResult,
+				config,
+			);
+
+			// Plan covers all FRs (specCoverageRatio = 1.0, not < 0.5)
+			// But implementationRatio = 0/3 = 0 < 0.5 → MINOR_DRIFT
+			expect(result.report.alignment).toBe('MINOR_DRIFT');
+			// driftScore = min(0.6, 0.2 + (1 - 0) * 0.3) = min(0.6, 0.5) = 0.5
+			expect(result.report.drift_score).toBe(0.5);
+		});
+
+		it('No spec fallback: specMd is null/undefined → compliance-count-based drift (no spec FR logic)', async () => {
+			// plan.md exists so we don't hit the no-plan path
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'plan.md'),
+				'# Plan\n- Task 1\n- Task 2',
+				'utf-8',
+			);
+			// Do NOT write spec.md — specMd will be null
+
+			// 1 warning → should be MINOR_DRIFT under compliance-count logic
+			const curatorResult = makeCuratorResult({
+				phase: 1,
+				compliance: [
+					{
+						phase: 1,
+						timestamp: new Date().toISOString(),
+						type: 'missing_reviewer',
+						description: 'Reviewer not assigned',
+						severity: 'warning',
+					},
+				],
+				digest: {
+					tasks_completed: 8,
+					tasks_total: 10,
+					summary: 'mostly done',
+					agents_used: [],
+					key_decisions: [],
+					blockers_resolved: [],
+					phase: 1,
+					timestamp: new Date().toISOString(),
+				},
+			});
+			const config = makeCuratorConfig();
+
+			const result = await runDeterministicDriftCheck(
+				tmpDir,
+				1,
+				curatorResult,
+				config,
+			);
+
+			// Falls to compliance-count path (no specRequirements)
+			// 1 warning → MINOR_DRIFT with score 0.2 + 1*0.05 = 0.25
+			expect(result.report.alignment).toBe('MINOR_DRIFT');
+			expect(result.report.drift_score).toBe(0.25);
+		});
+
+		it('FR coverage note in injection_summary: spec exists → note includes "[N/M FRs covered]"', async () => {
+			// Write plan.md mentioning FR-001
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'plan.md'),
+				'# Plan\n- FR-001: implement',
+				'utf-8',
+			);
+			// Write spec.md with FR-001, FR-002
+			await fs.writeFile(
+				path.join(tmpDir, '.swarm', 'spec.md'),
+				'# Spec\n- FR-001: feature one\n- FR-002: feature two',
+				'utf-8',
+			);
+
+			// Curator digest mentions FR-001 (1 of 2 covered)
+			const curatorResult = makeCuratorResult({
+				phase: 1,
+				compliance: [],
+				digest: {
+					tasks_completed: 10,
+					tasks_total: 10,
+					summary: 'implemented FR-001',
+					agents_used: [],
+					key_decisions: [],
+					blockers_resolved: [],
+					phase: 1,
+					timestamp: new Date().toISOString(),
+				},
+			});
+			const config = makeCuratorConfig({ drift_inject_max_chars: 500 });
+
+			const result = await runDeterministicDriftCheck(
+				tmpDir,
+				1,
+				curatorResult,
+				config,
+			);
+
+			// FR-001 appears in both plan and digest; FR-002 in spec but not digest
+			// digestRequirements = [FR-001], specRequirements = [FR-001, FR-002]
+			// covered = FR-001 filtered by digestRequirements → 1
+			// note should be "[1/2 FRs covered]"
+			expect(result.report.injection_summary).toContain('[1/2 FRs covered]');
+		});
 	});
 
 	// ========== Adversarial Tests ==========

@@ -82,6 +82,7 @@ import {
 	skillPropagationGateBefore,
 	skillPropagationTransformScan,
 } from './hooks/skill-propagation-gate.js';
+import { readSkillMetadata } from './hooks/skill-scoring.js';
 import { appendSkillUsageEntry } from './hooks/skill-usage-log.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
@@ -154,6 +155,8 @@ import {
 	skill_improve,
 	skill_inspect,
 	skill_list,
+	skill_regenerate,
+	skill_retire,
 	spec_write,
 	submit_council_verdicts,
 	submit_phase_council_verdicts,
@@ -973,6 +976,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			skill_improve,
 			skill_inspect,
 			skill_list,
+			skill_regenerate,
+			skill_retire,
 			spec_write,
 			batch_symbols,
 			build_check,
@@ -1645,29 +1650,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 								// Take top 5 by score
 								const topSkills = qualified.slice(0, 5);
 
-								// Skill description mapping
-								const SKILL_DESCRIPTIONS: Record<string, string> = {
-									'writing-tests': 'Guidelines for writing tests',
-									'engineering-conventions':
-										'Engineering invariants and conventions',
-									'running-tests': 'Safe test execution patterns',
-									'commit-pr': 'Commit and PR workflow',
-									'swarm-implement': 'Swarm implementation workflow',
-									'issue-tracer': 'Issue investigation workflow',
-									'qa-sweep': 'QA sweep workflow',
-									'research-first': 'Research-driven approach',
-									'swarm-pr-review': 'PR review workflow',
-									'tech-debt-ci-review': 'Tech debt and CI review',
-									browse: 'Fast web browsing',
-									code: 'Expert coding workflow',
-									review: 'Pre-landing PR review',
-									'ci-failure-resolver': 'CI/CD failure resolution',
-								};
-
+								// Dynamic skill description from SKILL.md frontmatter
 								const skillPaths = topSkills
 									.map((s) => {
-										const dirName = path.basename(path.dirname(s.skillPath));
-										const desc = SKILL_DESCRIPTIONS[dirName] ?? dirName;
+										const meta = readSkillMetadata(s.skillPath, ctx.directory);
+										let desc = meta.description || '';
+										if (!desc || desc === 'No description provided') {
+											desc = path.basename(path.dirname(s.skillPath));
+										}
+										// Strip commas to prevent corruption of comma-delimited SKILLS: parsing
+										desc = desc.replace(/,/g, ';');
 										return `file:${s.skillPath} (-- ${desc})`;
 									})
 									.join(', ');

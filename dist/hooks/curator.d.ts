@@ -24,8 +24,11 @@
  * This dual dispatch means agent lists are incomplete — they capture factory-dispatched
  * curators but omit hook-dispatched ones. This is by design for hook-internal operations.
  */
+import { listSkills, parseDraftFrontmatter, retireSkill } from '../services/skill-generator.js';
 import type { ComplianceObservation, CuratorConfig, CuratorInitResult, CuratorPhaseResult, CuratorSummary, KnowledgeRecommendation } from './curator-types.js';
+import { readKnowledge } from './knowledge-store.js';
 import type { KnowledgeConfig } from './knowledge-types.js';
+import { readSkillUsageEntries } from './skill-usage-log.js';
 /**
  * Optional LLM delegate callback type.
  * Takes a system prompt and user input, returns the LLM output text.
@@ -39,7 +42,22 @@ export declare const _internals: {
     filterPhaseEvents: typeof filterPhaseEvents;
     checkPhaseCompliance: typeof checkPhaseCompliance;
     normalizeAgentName: typeof normalizeAgentName;
+    autoRetireSkills: typeof autoRetireSkills;
+    readSkillUsageEntries: typeof readSkillUsageEntries;
+    listSkills: typeof listSkills;
+    parseDraftFrontmatter: typeof parseDraftFrontmatter;
+    retireSkill: typeof retireSkill;
+    readFileAsync: (filePath: string, encoding: string) => Promise<string>;
+    readKnowledge: typeof readKnowledge;
 };
+/**
+ * Auto-retire generated skills whose violation rate exceeds 30% or
+ * whose source knowledge entries are all archived.
+ *
+ * Non-blocking: errors are caught and logged but never propagated.
+ * Returns an array of observation strings to include in the phase digest.
+ */
+declare function autoRetireSkills(directory: string, curatorKnowledgePath: string): Promise<string[]>;
 /**
  * Parse OBSERVATIONS section from curator LLM output.
  * Expected format per line: "- entry <uuid> (<observable>): [text]"

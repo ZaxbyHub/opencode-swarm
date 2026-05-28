@@ -108,6 +108,8 @@ export interface CuratorPhaseResult {
 	compliance: ComplianceObservation[];
 	knowledge_recommendations: KnowledgeRecommendation[];
 	summary_updated: boolean;
+	/** True when this phase was already digested in a prior call. */
+	already_digested?: boolean;
 	/** v2: per-knowledge-entry application audit (applied/ignored/violated/n/a). */
 	knowledge_application_findings?: KnowledgeApplicationFinding[];
 	/** v2: candidate clusters the curator suggests compiling into SKILL.md. */

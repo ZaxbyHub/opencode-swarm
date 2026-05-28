@@ -88,6 +88,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	normalizeEntry: (e: unknown) => e,
 	appendKnowledge: async () => {},
 	rewriteKnowledge: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},

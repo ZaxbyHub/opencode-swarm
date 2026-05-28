@@ -52,6 +52,10 @@ mock.module('../../../src/hooks/hive-promoter.js', () => ({
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: mockReadKnowledge,
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 mock.module('../../../src/evidence/manager.js', () => ({

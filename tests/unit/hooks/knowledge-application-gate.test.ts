@@ -122,25 +122,36 @@ describe('knowledgeApplicationGateBefore', () => {
 		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY.*missing sessionID/);
 	});
 
-	it('returns silently in warn mode when sessionID is missing AND writes no event', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'warn' },
+	it('returns silently in warn mode when sessionID is missing AND writes a warning event', async () => {
+		const { _internals } = await import(
+			'../../../src/hooks/knowledge-application-gate'
 		);
-		// give any fire-and-forget write a moment to land
-		await new Promise((r) => setTimeout(r, 30));
-		const eventsPath = path.join(tmp, '.swarm', 'events.jsonl');
-		// Either the file does not exist OR it does not contain an entry
-		// attributing this gate event to an unknown session.
-		if (existsSync(eventsPath)) {
-			const lines = readFileSync(eventsPath, 'utf-8').trim();
-			expect(lines).toBe('');
+		const origWriteWarnEvent = _internals.writeWarnEvent;
+		const writeSpy = mock(() => Promise.resolve());
+		_internals.writeWarnEvent = writeSpy;
+		try {
+			swarmState.currentCriticalShownIds.set('s1', {
+				ids: [ID_A],
+				generatedAt: Date.now(),
+			});
+			await knowledgeApplicationGateBefore(
+				tmp,
+				{ tool: 'save_plan', agent: 'architect' },
+				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'warn' },
+			);
+			// gate must NOT throw
+			expect(writeSpy).toHaveBeenCalledTimes(1);
+			const call = writeSpy.mock.calls[0]!;
+			expect(call[0]).toBe(tmp);
+			expect(call[1]).toMatchObject({
+				event: 'knowledge_application_gate_warn',
+				tool: 'save_plan',
+				reason: 'missing_sessionID',
+			});
+		} finally {
+			// restore original so other tests are unaffected
+			_internals.writeWarnEvent = origWriteWarnEvent;
+			mock.restore();
 		}
 	});
 
@@ -248,6 +259,41 @@ describe('knowledgeApplicationGateBefore', () => {
 				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
 			),
 		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
+	});
+
+	it('uses config.high_risk_tools when provided instead of default set', async () => {
+		swarmState.currentCriticalShownIds.set('s1', {
+			ids: [ID_A],
+			generatedAt: Date.now(),
+		});
+		// Custom config: only 'custom_tool' is high-risk — NOT 'save_plan'
+		const customConfig = {
+			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+			mode: 'enforce',
+			high_risk_tools: ['custom_tool'],
+		};
+		// Gate MUST throw for 'custom_tool' (it's in the custom set)
+		await expect(
+			knowledgeApplicationGateBefore(
+				tmp,
+				{
+					tool: 'custom_tool',
+					agent: 'architect',
+					sessionID: 's1',
+				},
+				customConfig,
+			),
+		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
+		// Gate must NOT throw for 'save_plan' (it's NOT in the custom set)
+		await knowledgeApplicationGateBefore(
+			tmp,
+			{
+				tool: 'save_plan',
+				agent: 'architect',
+				sessionID: 's1',
+			},
+			customConfig,
+		);
 	});
 });
 

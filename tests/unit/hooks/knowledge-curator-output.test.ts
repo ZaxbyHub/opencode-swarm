@@ -74,6 +74,9 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	inferTags: mockInferTags,
 	normalize: mockNormalize,
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Mock knowledge-validator module

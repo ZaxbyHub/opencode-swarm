@@ -55,6 +55,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
 	sweepStaleTodos: mock(async () => ({ swept: 0, remaining: 0 })),
 	sweepAgedEntries: mock(async () => ({ swept: 0, remaining: 0 })),
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 
 // Import AFTER mock setup

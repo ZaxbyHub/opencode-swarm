@@ -12,6 +12,7 @@
  *   - generated files always carry an explicit "<!-- generated -->" header
  *   - file writes are atomic (write to .tmp, rename)
  */
+import { unlinkSync } from 'node:fs';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
 export declare function sanitizeSlug(input: string): string;
 export declare function isValidSlug(slug: string): boolean;
@@ -35,6 +36,11 @@ export interface KnowledgeCluster {
     avgConfidence: number;
 }
 export declare function selectCandidateEntries(directory: string, opts: CandidateSelectionOptions): Promise<KnowledgeEntryBase[]>;
+/**
+ * Compute Jaccard similarity between two tag sets.
+ * Returns 0 when both sets are empty (avoids division by zero).
+ */
+declare function jaccardSimilarity(setA: string[], setB: string[]): number;
 export declare function clusterEntries(entries: KnowledgeEntryBase[]): KnowledgeCluster[];
 export declare function renderSkillMarkdown(cluster: KnowledgeCluster, mode?: GenerateMode): string;
 export type GenerateMode = 'draft' | 'active';
@@ -104,11 +110,25 @@ export declare function inspectSkill(directory: string, slug: string, prefer?: '
     content?: string;
     mode?: GenerateMode;
 }>;
+export declare function retireSkill(directory: string, slug: string, reason?: string): Promise<{
+    retired: boolean;
+    path: string;
+    markerPath: string;
+    reason?: string;
+}>;
+export declare function regenerateSkill(directory: string, slug: string): Promise<{
+    regenerated: boolean;
+    path: string;
+    entryCount: number;
+    reason?: string;
+    retired?: boolean;
+}>;
 export declare const _internals: {
     sanitizeSlug: typeof sanitizeSlug;
     isValidSlug: typeof isValidSlug;
     selectCandidateEntries: typeof selectCandidateEntries;
     clusterEntries: typeof clusterEntries;
+    jaccardSimilarity: typeof jaccardSimilarity;
     renderSkillMarkdown: typeof renderSkillMarkdown;
     generateSkills: typeof generateSkills;
     activateProposal: typeof activateProposal;
@@ -116,5 +136,8 @@ export declare const _internals: {
     inspectSkill: typeof inspectSkill;
     stampSourceEntries: typeof stampSourceEntries;
     parseDraftFrontmatter: typeof parseDraftFrontmatter;
+    retireSkill: typeof retireSkill;
+    regenerateSkill: typeof regenerateSkill;
+    unlinkSync: typeof unlinkSync;
 };
 export {};

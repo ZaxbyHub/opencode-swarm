@@ -22,6 +22,10 @@ vi.mock('../../src/hooks/knowledge-store', () => ({
 	resolveSwarmKnowledgePath: vi
 		.fn()
 		.mockReturnValue('/tmp/test/.swarm/knowledge.jsonl'),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 vi.mock('../../src/background/event-bus', () => ({
 	getGlobalEventBus: vi.fn().mockReturnValue({ publish: vi.fn() }),

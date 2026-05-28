@@ -19,6 +19,7 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { KNOWLEDGE_SCHEMA_VERSION } from './knowledge-types.js';
 import { validateLesson } from './knowledge-validator.js';
 
 // ============================================================================
@@ -200,7 +201,7 @@ export async function migrateContextToKnowledge(
 				succeeded_after_count: 0,
 				failed_after_count: 0,
 			},
-			schema_version: config.schema_version ?? 1,
+			schema_version: config.schema_version ?? KNOWLEDGE_SCHEMA_VERSION,
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
 			project_name: projectName,

@@ -4,11 +4,7 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { warn } from '../utils/logger.js';
-import {
-	appendKnowledge,
-	inferTags,
-	readKnowledge,
-} from './knowledge-store.js';
+import { inferTags, readKnowledge } from './knowledge-store.js';
 import type {
 	ActionableDirectiveFields,
 	DirectivePriority,
@@ -679,7 +675,11 @@ export async function quarantineEntry(
 			rejected_at: new Date().toISOString(),
 			rejection_layer: 3,
 		};
-		await appendKnowledge<RejectedLesson>(rejectedPath, rejectedRecord);
+		await appendFile(
+			rejectedPath,
+			`${JSON.stringify(rejectedRecord)}\n`,
+			'utf-8',
+		);
 	} finally {
 		if (release) {
 			await release();

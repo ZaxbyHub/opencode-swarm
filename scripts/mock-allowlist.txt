@@ -30,7 +30,9 @@ src/build/discovery
 # --- src/config ---
 src/config
 src/config/index
+src/config/index.ts
 src/config/schema
+src/config/schema.ts
 
 # --- src/db ---
 src/db/qa-gate-profile
@@ -48,9 +50,11 @@ src/hooks/extractors
 src/hooks/hive-promoter
 src/hooks/knowledge-curator
 src/hooks/knowledge-migrator
+src/hooks/knowledge-application
 src/hooks/knowledge-reader
 src/hooks/knowledge-store
 src/hooks/knowledge-validator
+src/hooks/skill-usage-log
 src/hooks/utils
 
 # --- src/lang ---
@@ -76,6 +80,7 @@ src/sast/semgrep
 src/services/evidence-summary-service
 src/services/handoff-service
 src/services/run-memory
+src/services/skill-generator
 src/services/skill-improver
 
 # --- src/session ---

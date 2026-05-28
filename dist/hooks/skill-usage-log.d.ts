@@ -66,6 +66,9 @@ export declare const _internals: {
     openSync: typeof fs.openSync;
     readSync: typeof fs.readSync;
     closeSync: typeof fs.closeSync;
+    resolveSourceKnowledgeIds: typeof resolveSourceKnowledgeIds;
+    applySkillUsageFeedback: typeof applySkillUsageFeedback;
+    parseGeneratedFromKnowledge: typeof parseGeneratedFromKnowledge;
 };
 /**
  * Validate and append a single skill-usage entry to the JSONL log.
@@ -107,3 +110,48 @@ export declare function readSkillUsageEntriesTail(directory: string, filters: {
  * @returns Stats about how many entries were pruned and how many remain.
  */
 export declare function pruneSkillUsageLog(directory: string, maxEntriesPerSkill?: number): PruneResult;
+/**
+ * Read a SKILL.md file and extract the `generated_from_knowledge` UUIDs
+ * from its YAML frontmatter.
+ *
+ * Expected frontmatter shape:
+ * ```yaml
+ * ---
+ * name: some-skill
+ * generated_from_knowledge:
+ *   - uuid-1
+ *   - uuid-2
+ * ---
+ * ```
+ *
+ * Returns an empty array if the file doesn't exist, has no frontmatter,
+ * or the `generated_from_knowledge` key is absent.
+ */
+export declare function resolveSourceKnowledgeIds(directory: string, skillPath: string): Promise<string[]>;
+/**
+ * Pure helper: parse `generated_from_knowledge:` YAML list from frontmatter.
+ * Uses a minimal regex-based parser — the SKILL.md format is well-known and narrow.
+ * Does NOT use a full YAML parser to avoid adding a dependency.
+ */
+declare function parseGeneratedFromKnowledge(content: string): string[];
+/**
+ * Read skill-usage entries, resolve source knowledge IDs for each skill,
+ * and apply confidence bumps/decays to the originating knowledge entries.
+ *
+ * For each unique skillPath with at least one compliance or violation entry:
+ * 1. Resolve source knowledge UUIDs from the skill's SKILL.md frontmatter.
+ * 2. Count compliant and violation events for that skill.
+ * 3. Compute net delta: if compliant count > violation count → +0.05; else → -0.1.
+ * 4. Call `bumpKnowledgeConfidenceBatch` with the aggregated deltas.
+ *
+ * @param directory       - Project root directory.
+ * @param options.sinceTimestamp - Optional ISO 8601 cutoff; only process entries after this time.
+ * @returns Count of processed skills and total confidence bumps/decays applied.
+ */
+export declare function applySkillUsageFeedback(directory: string, options?: {
+    sinceTimestamp?: string;
+}): Promise<{
+    processed: number;
+    bumps: number;
+}>;
+export {};

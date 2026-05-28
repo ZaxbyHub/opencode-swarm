@@ -5,6 +5,7 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import type {
 	ActionableDirectiveFields,
 	KnowledgeEntryBase,
@@ -231,17 +232,39 @@ export async function appendRetractionRecord(
 // ============================================================================
 
 // Append a single entry to a JSONL file, creating the directory if needed.
-// Uses OS-level atomic append — no lock needed for append-only operations.
+// Acquires the same directory-level lock as enforceKnowledgeCap and rewriteKnowledge
+// to prevent TOCTOU races: a concurrent cap enforcement must not interleave with
+// appends, and vice versa. The lock is on the directory (not the file) because
+// proper-lockfile requires the target to exist; the directory is guaranteed to
+// exist after mkdir.
 export async function appendKnowledge<T>(
 	filePath: string,
 	entry: T,
 ): Promise<void> {
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf-8');
+	const dir = path.dirname(filePath);
+	await mkdir(dir, { recursive: true });
+
+	let release: (() => Promise<void>) | null = null;
+	try {
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+		await appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf-8');
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock release failed — non-blocking */
+			}
+		}
+	}
 }
 
 // Rewrite the entire JSONL file with a new array of entries.
-// Uses proper-lockfile on the directory for crash-safe writes.
+// Uses proper-lockfile on the directory for concurrent-access safety.
+// The file write itself uses atomic temp-file + rename so readers never observe a torn file.
 // The lock is acquired on the DIRECTORY (not the file) because proper-lockfile requires
 // the target to exist. The directory is guaranteed to exist after mkdir.
 export async function rewriteKnowledge<T>(
@@ -260,7 +283,7 @@ export async function rewriteKnowledge<T>(
 		const content =
 			entries.map((e) => JSON.stringify(e)).join('\n') +
 			(entries.length > 0 ? '\n' : '');
-		await writeFile(filePath, content, 'utf-8');
+		await atomicWriteFile(filePath, content);
 	} finally {
 		if (release) {
 			try {
@@ -275,14 +298,42 @@ export async function rewriteKnowledge<T>(
 // Enforce a FIFO max-entries cap on a JSONL file.
 // If the file exceeds `maxEntries`, the oldest entries are dropped.
 // No-op when the file has fewer entries than the cap.
+// The full read-modify-write cycle is atomic under a directory lock to
+// prevent concurrent appendKnowledge from inserting entries that get
+// silently dropped by the rewrite (TOCTOU race condition).
 export async function enforceKnowledgeCap<T>(
 	filePath: string,
 	maxEntries: number,
 ): Promise<void> {
-	const entries = await readKnowledge<T>(filePath);
-	if (entries.length > maxEntries) {
-		const trimmed = entries.slice(entries.length - maxEntries);
-		await rewriteKnowledge(filePath, trimmed);
+	let release: (() => Promise<void>) | null = null;
+	try {
+		const dir = path.dirname(filePath);
+		// Ensure directory exists before acquiring lock (required by proper-lockfile).
+		await mkdir(dir, { recursive: true });
+		// Acquire directory lock for entire read-modify-write to prevent
+		// concurrent appendKnowledge from racing (TOCTOU race prevention)
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+
+		const entries = await readKnowledge<T>(filePath);
+		if (entries.length > maxEntries) {
+			const trimmed = entries.slice(entries.length - maxEntries);
+			// Write directly with the held lock (avoid nested lock via rewriteKnowledge).
+			const content =
+				trimmed.map((e) => JSON.stringify(e)).join('\n') +
+				(trimmed.length > 0 ? '\n' : '');
+			await writeFile(filePath, content, 'utf-8');
+		}
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				// Lock release failed — non-blocking
+			}
+		}
 	}
 }
 
@@ -540,6 +591,123 @@ export function inferTags(lesson: string): string[] {
 }
 
 // ============================================================================
+// Feedback Bridge — Confidence Bumping
+// ============================================================================
+
+/** Confidence floor (below this, entries are considered unreliable). */
+const CONFIDENCE_FLOOR = 0.1;
+
+/** Confidence ceiling (maximum possible value). */
+const CONFIDENCE_CEILING = 1.0;
+
+/**
+ * Batch-update confidence scores on knowledge entries identified by their UUIDs.
+ *
+ * For each delta, the function:
+ * 1. Searches the swarm knowledge file for an entry with the given `id`.
+ * 2. Falls back to the hive knowledge file if not found in swarm.
+ * 3. Clamps the resulting confidence to [0.1, 1.0].
+ * 4. Updates `confidence` and `updated_at`, then rewrites the file.
+ *
+ * The full read-modify-write cycle is atomic under a directory lock
+ * (same pattern as `enforceKnowledgeCap`). Errors are logged but never
+ * thrown — the function is fail-open.
+ *
+ * @param directory - Project root directory (used to resolve `.swarm/knowledge.jsonl`).
+ * @param deltas    - Array of {id, delta} tuples. Delta may be positive (boost) or negative (decay).
+ */
+export async function bumpKnowledgeConfidenceBatch(
+	directory: string,
+	deltas: Array<{ id: string; delta: number }>,
+): Promise<void> {
+	if (deltas.length === 0) return;
+
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	const hivePath = resolveHiveKnowledgePath();
+
+	try {
+		// --- Swarm pass ---
+		await applyConfidenceDeltas(swarmPath, deltas);
+
+		// --- Hive pass (only for IDs not found in swarm) ---
+		const swarmEntries = await readKnowledge<KnowledgeEntryBase>(swarmPath);
+		const swarmIds = new Set(swarmEntries.map((e) => e.id));
+		const hiveOnly = deltas.filter((d) => !swarmIds.has(d.id));
+		if (hiveOnly.length > 0) {
+			await applyConfidenceDeltas(hivePath, hiveOnly);
+		}
+	} catch (err) {
+		console.warn(
+			'[knowledge-store] bumpKnowledgeConfidenceBatch failed (fail-open):',
+			err instanceof Error ? err.message : String(err),
+		);
+	}
+}
+
+/**
+ * Internal helper: apply a set of confidence deltas to a single JSONL file.
+ * Acquires a directory lock for the full read-modify-write cycle.
+ */
+async function applyConfidenceDeltas(
+	filePath: string,
+	deltas: Array<{ id: string; delta: number }>,
+): Promise<void> {
+	const idDeltaMap = new Map<string, number>();
+	for (const d of deltas) {
+		const existing = idDeltaMap.get(d.id);
+		idDeltaMap.set(d.id, existing !== undefined ? existing + d.delta : d.delta);
+	}
+
+	let release: (() => Promise<void>) | null = null;
+	try {
+		const dir = path.dirname(filePath);
+		await mkdir(dir, { recursive: true });
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+
+		const entries = await readKnowledge<KnowledgeEntryBase>(filePath);
+		if (entries.length === 0) return;
+
+		const now = new Date().toISOString();
+		let mutated = false;
+
+		for (const entry of entries) {
+			const delta = idDeltaMap.get(entry.id);
+			if (delta === undefined) continue;
+
+			entry.confidence = Math.max(
+				CONFIDENCE_FLOOR,
+				Math.min(CONFIDENCE_CEILING, entry.confidence + delta),
+			);
+			entry.updated_at = now;
+			mutated = true;
+		}
+
+		if (mutated) {
+			const content =
+				entries.map((e) => JSON.stringify(e)).join('\n') +
+				(entries.length > 0 ? '\n' : '');
+			await writeFile(filePath, content, 'utf-8');
+		}
+	} catch (err) {
+		console.warn(
+			`[knowledge-store] applyConfidenceDeltas failed on ${filePath} (fail-open):`,
+			err instanceof Error ? err.message : String(err),
+		);
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock release failed — non-blocking */
+			}
+		}
+	}
+}
+
+// ============================================================================
 // DI Seam — _internals
 // ============================================================================
 
@@ -563,6 +731,7 @@ export const _internals: {
 	findNearDuplicate: typeof findNearDuplicate;
 	computeConfidence: typeof computeConfidence;
 	inferTags: typeof inferTags;
+	bumpKnowledgeConfidenceBatch: typeof bumpKnowledgeConfidenceBatch;
 } = {
 	getPlatformConfigDir,
 	resolveSwarmKnowledgePath,
@@ -583,4 +752,5 @@ export const _internals: {
 	findNearDuplicate,
 	computeConfidence,
 	inferTags,
+	bumpKnowledgeConfidenceBatch,
 };

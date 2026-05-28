@@ -36,6 +36,10 @@ vi.mock('../../../src/hooks/knowledge-reader.js', () => ({
 }));
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 	readRejectedLessons: vi.fn(async () => []),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
 }));
 vi.mock('../../../src/plan/manager.js', () => ({
 	loadPlan: vi.fn(async () => ({
