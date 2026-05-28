@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.43.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.0...v7.43.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **architect:** extract remaining mode protocols into skills ([#1060](https://github.com/zaxbysauce/opencode-swarm/issues/1060)) ([1e441b6](https://github.com/zaxbysauce/opencode-swarm/commit/1e441b618cd76fcf43cd0cb8649309900fb28774))
+
 ## [7.43.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.42.0...v7.43.0) (2026-05-27)
 
 
