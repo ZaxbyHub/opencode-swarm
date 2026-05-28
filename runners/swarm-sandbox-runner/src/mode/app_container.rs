@@ -12,31 +12,29 @@ use crate::temp_watcher::TempWatcher;
 #[cfg(windows)]
 pub fn is_available() -> bool {
     use windows::core::HSTRING;
+    use windows::Win32::Security::FreeSid;
     use windows::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
-    use windows::Win32::Security::{FreeSid, PSID};
 
     let probe_name = HSTRING::from("swarm.sandbox.ac-probe");
     unsafe {
         let _ = DeleteAppContainerProfile(&probe_name);
 
-        let mut sid = PSID::default();
-        let ok = CreateAppContainerProfile(
+        match CreateAppContainerProfile(
             &probe_name,
             &HSTRING::from("Probe"),
             &HSTRING::from("Probe"),
             None,
-            &mut sid,
-        );
-        if ok.is_ok() {
-            let _ = DeleteAppContainerProfile(&probe_name);
-            if !sid.is_invalid() {
-                FreeSid(sid);
+        ) {
+            Ok(sid) => {
+                let _ = DeleteAppContainerProfile(&probe_name);
+                if !sid.is_invalid() {
+                    FreeSid(sid);
+                }
+                true
             }
-            true
-        } else {
-            false
+            Err(_) => false,
         }
     }
 }
@@ -50,7 +48,7 @@ pub fn is_available() -> bool {
 pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, RunnerError> {
     use std::sync::Arc;
     use windows::core::{HSTRING, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -76,17 +74,15 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     }
 
     // Create AppContainer profile
-    let mut container_sid = PSID::default();
-    unsafe {
+    let container_sid = unsafe {
         CreateAppContainerProfile(
             &hprofile_name,
             &HSTRING::from("opencode-swarm sandbox"),
             &HSTRING::from(&format!("Sandbox for run {}", policy.run_id)),
             None,
-            &mut container_sid,
         )
-        .map_err(|e| RunnerError::OsApiFailure(format!("CreateAppContainerProfile: {e}")))?;
-    }
+        .map_err(|e| RunnerError::OsApiFailure(format!("CreateAppContainerProfile: {e}")))?
+    };
 
     // Ensure cleanup on all exit paths
     struct ProfileGuard {
@@ -250,7 +246,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     unsafe {
         CreateProcessW(
             None,
-            Some(PWSTR(cmd_wide.as_mut_ptr())),
+            PWSTR(cmd_wide.as_mut_ptr()),
             None,
             None,
             false,

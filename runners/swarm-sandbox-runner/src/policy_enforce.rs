@@ -83,7 +83,6 @@ pub fn enforce_symlink_egress(policy: &Policy, cwd: &str) -> Result<(), RunnerEr
     if !policy.deny_symlink_egress {
         return Ok(());
     }
-    use std::path::Path;
     let canonical = std::fs::canonicalize(cwd).map_err(|e| RunnerError::PolicyViolation {
         reason: format!("cannot canonicalize cwd for symlink egress check: {e}"),
     })?;

@@ -158,7 +158,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
         CreateProcessAsUserW(
             restricted_token,
             None,
-            Some(PWSTR(cmd_wide.as_mut_ptr())),
+            PWSTR(cmd_wide.as_mut_ptr()),
             None,
             None,
             false,

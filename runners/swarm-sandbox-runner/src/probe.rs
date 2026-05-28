@@ -123,10 +123,10 @@ fn get_integrity_level() -> String {
         let rid = *GetSidSubAuthority(sid, (sub_count - 1) as u32);
 
         match rid {
-            x if x == SECURITY_MANDATORY_LOW_RID.0 as u32 => "low".to_string(),
-            x if x == SECURITY_MANDATORY_MEDIUM_RID.0 as u32 => "medium".to_string(),
-            x if x == SECURITY_MANDATORY_HIGH_RID.0 as u32 => "high".to_string(),
-            x if x == SECURITY_MANDATORY_SYSTEM_RID.0 as u32 => "system".to_string(),
+            x if x == SECURITY_MANDATORY_LOW_RID as u32 => "low".to_string(),
+            x if x == SECURITY_MANDATORY_MEDIUM_RID as u32 => "medium".to_string(),
+            x if x == SECURITY_MANDATORY_HIGH_RID as u32 => "high".to_string(),
+            x if x == SECURITY_MANDATORY_SYSTEM_RID as u32 => "system".to_string(),
             other => format!("rid-{other}"),
         }
     }
@@ -164,10 +164,10 @@ fn get_os_version() -> String {
 #[cfg(windows)]
 fn probe_app_container() -> bool {
     use windows::core::HSTRING;
+    use windows::Win32::Security::FreeSid;
     use windows::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
-    use windows::Win32::Security::{FreeSid, PSID};
 
     let probe_name = HSTRING::from("swarm.sandbox.probe-test");
     let display_name = HSTRING::from("Probe Test");
@@ -176,18 +176,15 @@ fn probe_app_container() -> bool {
     unsafe {
         let _ = DeleteAppContainerProfile(&probe_name);
 
-        let mut sid = PSID::default();
-        let result =
-            CreateAppContainerProfile(&probe_name, &display_name, &description, None, &mut sid);
-
-        if result.is_ok() {
-            let _ = DeleteAppContainerProfile(&probe_name);
-            if !sid.is_invalid() {
-                FreeSid(sid);
+        match CreateAppContainerProfile(&probe_name, &display_name, &description, None) {
+            Ok(sid) => {
+                let _ = DeleteAppContainerProfile(&probe_name);
+                if !sid.is_invalid() {
+                    FreeSid(sid);
+                }
+                true
             }
-            true
-        } else {
-            false
+            Err(_) => false,
         }
     }
 }
