@@ -11,6 +11,7 @@ import {
 	inferTags,
 	jaccardBigram,
 	normalize,
+	normalizeEntry,
 	readKnowledge,
 	readRejectedLessons,
 	resolveHiveKnowledgePath,
@@ -224,6 +225,45 @@ describe('knowledge-store', () => {
 			const input = 'Hello, World! This is a TEST.';
 			const result = normalize(input);
 			expect(result).toBe('hello world this is a test');
+		});
+	});
+
+	describe('normalizeEntry — null retrieval_outcomes', () => {
+		it('backfills v2 counters when retrieval_outcomes is null (was previously skipped)', () => {
+			// Legacy entries on disk may have retrieval_outcomes: null.
+			// Pre-fix, normalizeEntry's `if (ro && typeof ro === 'object')` skipped
+			// the backfill silently — entries surfaced with null counters that
+			// downstream code (computeOutcomeSignal, ranking) couldn't read.
+			const raw = {
+				id: 'legacy-null',
+				lesson: 'older entry whose outcomes column is null',
+				tags: ['legacy'],
+				retrieval_outcomes: null,
+			};
+			const normalized = normalizeEntry(raw as unknown as typeof raw) as {
+				retrieval_outcomes: Record<string, number>;
+			};
+			expect(normalized.retrieval_outcomes).toBeDefined();
+			expect(typeof normalized.retrieval_outcomes).toBe('object');
+			expect(normalized.retrieval_outcomes.shown_count).toBe(0);
+			expect(normalized.retrieval_outcomes.applied_explicit_count).toBe(0);
+			expect(normalized.retrieval_outcomes.ignored_count).toBe(0);
+			expect(normalized.retrieval_outcomes.contradicted_count).toBe(0);
+			expect(normalized.retrieval_outcomes.succeeded_after_shown_count).toBe(0);
+			expect(normalized.retrieval_outcomes.failed_after_shown_count).toBe(0);
+		});
+
+		it('treats a non-object retrieval_outcomes (e.g. number) as null and backfills', () => {
+			const raw = {
+				id: 'legacy-bad-shape',
+				lesson: 'older entry with retrieval_outcomes set to a number',
+				retrieval_outcomes: 42,
+			};
+			const normalized = normalizeEntry(raw as unknown as typeof raw) as {
+				retrieval_outcomes: Record<string, number>;
+			};
+			expect(typeof normalized.retrieval_outcomes).toBe('object');
+			expect(normalized.retrieval_outcomes.shown_count).toBe(0);
 		});
 	});
 

@@ -126,8 +126,15 @@ export function normalizeEntry<T>(raw: T): T {
 	if (!raw || typeof raw !== 'object') return raw;
 	const obj = raw as unknown as Record<string, unknown>;
 	if (!('retrieval_outcomes' in obj)) return raw;
-	const ro = obj.retrieval_outcomes as Record<string, unknown> | null;
-	if (ro && typeof ro === 'object') {
+	// Legacy entries may have retrieval_outcomes: null or a non-object value.
+	// Replace null/non-object with an empty record so v2 backfill below runs
+	// and the entry surfaces with deterministic counters.
+	let ro = obj.retrieval_outcomes as Record<string, unknown> | null;
+	if (!ro || typeof ro !== 'object') {
+		ro = {};
+		obj.retrieval_outcomes = ro;
+	}
+	{
 		// Migrate: legacy 'applied_count' represented "shown" before v2.
 		// We preserve it as-is for backward compatibility, but ensure all v2
 		// counters exist with sane defaults.

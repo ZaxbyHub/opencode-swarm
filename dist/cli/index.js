@@ -35876,8 +35876,12 @@ function normalizeEntry(raw) {
   const obj = raw;
   if (!("retrieval_outcomes" in obj))
     return raw;
-  const ro = obj.retrieval_outcomes;
-  if (ro && typeof ro === "object") {
+  let ro = obj.retrieval_outcomes;
+  if (!ro || typeof ro !== "object") {
+    ro = {};
+    obj.retrieval_outcomes = ro;
+  }
+  {
     if (typeof ro.shown_count !== "number") {
       ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
     }
@@ -40296,6 +40300,7 @@ async function readKnowledgeEvents(directory) {
 var RECEIPT_EVENT_TYPES;
 var init_knowledge_events = __esm(() => {
   init_logger();
+  init_knowledge_store();
   RECEIPT_EVENT_TYPES = new Set([
     "acknowledged",
     "applied",

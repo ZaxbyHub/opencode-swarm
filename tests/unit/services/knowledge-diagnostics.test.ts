@@ -46,6 +46,8 @@ describe('knowledge-diagnostics', () => {
 	let dir: string;
 	let kp: string;
 	let prevXdgData: string | undefined;
+	let prevLocalAppData: string | undefined;
+	let prevHome: string | undefined;
 	beforeEach(() => {
 		dir = join(
 			tmpdir(),
@@ -54,13 +56,25 @@ describe('knowledge-diagnostics', () => {
 		mkdirSync(dir, { recursive: true });
 		kp = resolveSwarmKnowledgePath(dir);
 		// Isolate the global hive path to an empty temp location so the status
-		// breakdown is deterministic.
+		// breakdown is deterministic across platforms. resolveHiveKnowledgePath
+		// reads XDG_DATA_HOME (linux), LOCALAPPDATA (win32), and HOME (darwin) —
+		// override all three so the test passes on every host.
 		prevXdgData = process.env.XDG_DATA_HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
+		prevHome = process.env.HOME;
+		const isolatedHome = join(dir, 'home');
+		mkdirSync(isolatedHome, { recursive: true });
 		process.env.XDG_DATA_HOME = join(dir, 'xdg-data');
+		process.env.LOCALAPPDATA = join(dir, 'localappdata');
+		process.env.HOME = isolatedHome;
 	});
 	afterEach(() => {
 		if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdgData;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
 		rmSync(dir, { recursive: true, force: true });
 	});
 

@@ -25,7 +25,18 @@ import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { warn } from '../utils/logger.js';
+import { enforceKnowledgeCap } from './knowledge-store.js';
 import type { KnowledgeApplicationRecord } from './knowledge-types.js';
+
+/** Current event-log record schema version. Bump when the on-disk shape changes. */
+export const KNOWLEDGE_EVENT_SCHEMA_VERSION = 1;
+
+/**
+ * Soft cap on `.swarm/knowledge-events.jsonl` line count. Enforced FIFO after
+ * each append: oldest lines are trimmed when total exceeds the cap. Sized for
+ * months of activity on a typical project (~5k retrieval/receipt events).
+ */
+export const MAX_EVENT_LOG_ENTRIES = 5000;
 
 // ============================================================================
 // Event schema
@@ -42,6 +53,7 @@ export type RetrievalEventMode =
 /** A retrieval: a query returned a ranked set of knowledge entries. */
 export interface RetrievedEvent {
 	type: 'retrieved';
+	schema_version?: number;
 	event_id: string;
 	trace_id: string;
 	timestamp: string;
@@ -62,6 +74,7 @@ export interface RetrievedEvent {
 /** A receipt: an agent explicitly considered a specific knowledge entry. */
 export interface ReceiptEvent {
 	type: 'acknowledged' | 'applied' | 'ignored' | 'contradicted' | 'violated';
+	schema_version?: number;
 	event_id: string;
 	trace_id: string;
 	knowledge_id: string;
@@ -82,6 +95,7 @@ export interface ReceiptEvent {
 /** An outcome: a task/phase succeeded or failed, optionally attributed to an entry. */
 export interface OutcomeEvent {
 	type: 'outcome';
+	schema_version?: number;
 	event_id: string;
 	trace_id?: string;
 	knowledge_id?: string;
@@ -95,6 +109,7 @@ export interface OutcomeEvent {
 /** An audit tombstone: an entry was archived / quarantined / purged. */
 export interface ArchivedEvent {
 	type: 'archived';
+	schema_version?: number;
 	event_id: string;
 	timestamp: string;
 	entry_id: string;
@@ -160,9 +175,10 @@ export function newEventId(): string {
 	return randomUUID();
 }
 
-/** Fill in event_id / timestamp defaults without mutating the caller's object. */
+/** Fill in event_id / timestamp / schema_version defaults without mutating the caller's object. */
 function withDefaults(event: KnowledgeEventInput): KnowledgeEvent {
 	return {
+		schema_version: KNOWLEDGE_EVENT_SCHEMA_VERSION,
 		...event,
 		event_id: event.event_id || newEventId(),
 		timestamp: event.timestamp || new Date().toISOString(),
@@ -188,6 +204,18 @@ export async function appendKnowledgeEvent(
 	const filePath = resolveKnowledgeEventsPath(directory);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
+	// Best-effort FIFO trim once the log exceeds MAX_EVENT_LOG_ENTRIES.
+	// Fail-open: the append itself already succeeded; a failed trim is logged
+	// only by enforceKnowledgeCap's internal warnings and must not surface.
+	try {
+		await enforceKnowledgeCap(filePath, MAX_EVENT_LOG_ENTRIES);
+	} catch (err) {
+		warn(
+			`[knowledge-events] enforceKnowledgeCap failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
 	return populated;
 }
 
@@ -262,6 +290,12 @@ export interface CounterRollup {
 	contradicted_count: number;
 	succeeded_after_shown_count: number;
 	failed_after_shown_count: number;
+	/**
+	 * Count of partial outcomes. Tracked separately so it surfaces in
+	 * diagnostics but never contributes to `computeOutcomeSignal` (partial is
+	 * deliberately ambiguous — it neither rewards nor penalizes).
+	 */
+	partial_after_shown_count: number;
 	last_applied_at?: string;
 	last_acknowledged_at?: string;
 }
@@ -276,6 +310,7 @@ function emptyRollup(): CounterRollup {
 		contradicted_count: 0,
 		succeeded_after_shown_count: 0,
 		failed_after_shown_count: 0,
+		partial_after_shown_count: 0,
 	};
 }
 
@@ -359,6 +394,7 @@ export function recomputeCounters(
 				const r = get(map, e.knowledge_id);
 				if (e.outcome === 'success') r.succeeded_after_shown_count += 1;
 				else if (e.outcome === 'failure') r.failed_after_shown_count += 1;
+				else if (e.outcome === 'partial') r.partial_after_shown_count += 1;
 				break;
 			}
 			// 'archived' events do not contribute to retrieval counters.

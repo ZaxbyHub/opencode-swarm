@@ -20,11 +20,20 @@
  *   from the process working directory.
  */
 import type { KnowledgeApplicationRecord } from './knowledge-types.js';
+/** Current event-log record schema version. Bump when the on-disk shape changes. */
+export declare const KNOWLEDGE_EVENT_SCHEMA_VERSION = 1;
+/**
+ * Soft cap on `.swarm/knowledge-events.jsonl` line count. Enforced FIFO after
+ * each append: oldest lines are trimmed when total exceeds the cap. Sized for
+ * months of activity on a typical project (~5k retrieval/receipt events).
+ */
+export declare const MAX_EVENT_LOG_ENTRIES = 5000;
 /** Retrieval modes that surface knowledge to an agent. */
 export type RetrievalEventMode = 'manual' | 'auto_injection' | 'coder_context' | 'review_context' | 'curator';
 /** A retrieval: a query returned a ranked set of knowledge entries. */
 export interface RetrievedEvent {
     type: 'retrieved';
+    schema_version?: number;
     event_id: string;
     trace_id: string;
     timestamp: string;
@@ -44,6 +53,7 @@ export interface RetrievedEvent {
 /** A receipt: an agent explicitly considered a specific knowledge entry. */
 export interface ReceiptEvent {
     type: 'acknowledged' | 'applied' | 'ignored' | 'contradicted' | 'violated';
+    schema_version?: number;
     event_id: string;
     trace_id: string;
     knowledge_id: string;
@@ -63,6 +73,7 @@ export interface ReceiptEvent {
 /** An outcome: a task/phase succeeded or failed, optionally attributed to an entry. */
 export interface OutcomeEvent {
     type: 'outcome';
+    schema_version?: number;
     event_id: string;
     trace_id?: string;
     knowledge_id?: string;
@@ -75,6 +86,7 @@ export interface OutcomeEvent {
 /** An audit tombstone: an entry was archived / quarantined / purged. */
 export interface ArchivedEvent {
     type: 'archived';
+    schema_version?: number;
     event_id: string;
     timestamp: string;
     entry_id: string;
@@ -137,6 +149,12 @@ export interface CounterRollup {
     contradicted_count: number;
     succeeded_after_shown_count: number;
     failed_after_shown_count: number;
+    /**
+     * Count of partial outcomes. Tracked separately so it surfaces in
+     * diagnostics but never contributes to `computeOutcomeSignal` (partial is
+     * deliberately ambiguous — it neither rewards nor penalizes).
+     */
+    partial_after_shown_count: number;
     last_applied_at?: string;
     last_acknowledged_at?: string;
 }
