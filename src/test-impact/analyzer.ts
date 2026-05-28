@@ -31,6 +31,21 @@ function normalizePath(p: string): string {
 	return p.replace(/\\/g, '/');
 }
 
+// Rank helper: count matching directory/path segments from the tail.
+function sharedTrailingSegments(a: string, b: string): number {
+	const aParts = normalizePath(a).split('/').filter(Boolean);
+	const bParts = normalizePath(b).split('/').filter(Boolean);
+	let i = aParts.length - 1;
+	let j = bParts.length - 1;
+	let shared = 0;
+	while (i >= 0 && j >= 0 && aParts[i] === bParts[j]) {
+		shared++;
+		i--;
+		j--;
+	}
+	return shared;
+}
+
 function isCacheStale(
 	impactMap: Record<string, string[]>,
 	generatedAtMs: number,
@@ -576,27 +591,67 @@ export async function analyzeImpact(
 			if (budgetExceeded) break;
 		} else {
 			// Check with different path variations
-			let found = false;
-			for (const [sourcePath, tests] of Object.entries(impactMap)) {
+			const changedDir = normalizePath(path.dirname(normalizedChanged));
+			const changedInputDir = normalizePath(path.dirname(changedFile));
+			const suffixMatches = Object.entries(impactMap)
+				.filter(([sourcePath]) => {
+					return (
+						sourcePath.endsWith(changedFile) ||
+						changedFile.endsWith(sourcePath) ||
+						sourcePath.endsWith(normalizedChanged) ||
+						normalizedChanged.endsWith(sourcePath)
+					);
+				})
+				.sort(([sourceA], [sourceB]) => {
+					const sourceDirA = normalizePath(path.dirname(sourceA));
+					const sourceDirB = normalizePath(path.dirname(sourceB));
+					const exactA =
+						sourceDirA === changedDir ||
+						(changedInputDir !== '.' &&
+							(sourceDirA === changedInputDir ||
+								sourceDirA.endsWith(`/${changedInputDir}`)));
+					const exactB =
+						sourceDirB === changedDir ||
+						(changedInputDir !== '.' &&
+							(sourceDirB === changedInputDir ||
+								sourceDirB.endsWith(`/${changedInputDir}`)));
+					if (exactA !== exactB) return exactA ? -1 : 1;
+
+					const sharedA = Math.max(
+						sharedTrailingSegments(sourceDirA, changedDir),
+						changedInputDir === '.'
+							? 0
+							: sharedTrailingSegments(sourceDirA, changedInputDir),
+					);
+					const sharedB = Math.max(
+						sharedTrailingSegments(sourceDirB, changedDir),
+						changedInputDir === '.'
+							? 0
+							: sharedTrailingSegments(sourceDirB, changedInputDir),
+					);
+					const nearestA = sharedA > 0;
+					const nearestB = sharedB > 0;
+					if (nearestA !== nearestB) return nearestA ? -1 : 1;
+					if (sharedA !== sharedB) return sharedB - sharedA;
+					return sourceA.localeCompare(sourceB);
+				});
+			// A file is "found" if any suffix-matching map entry exists, regardless of
+			// whether budget allows all its tests to be collected.
+			const found = suffixMatches.length > 0;
+			for (const [, tests] of suffixMatches) {
 				if (budget !== undefined && visitedCount >= budget) {
 					budgetExceeded = true;
 					break;
 				}
-				if (
-					sourcePath.endsWith(changedFile) ||
-					changedFile.endsWith(sourcePath)
-				) {
-					for (const test of tests) {
-						if (budget !== undefined && visitedCount >= budget) {
-							budgetExceeded = true;
-							break;
-						}
-						impactedTestsSet.add(test);
-						visitedCount++;
+				for (const test of tests) {
+					if (budget !== undefined && visitedCount >= budget) {
+						budgetExceeded = true;
+						break;
 					}
-					if (budgetExceeded) break;
-					found = true;
+					impactedTestsSet.add(test);
+					visitedCount++;
 				}
+				if (budgetExceeded) break;
 			}
 			if (budgetExceeded) break;
 			if (!found) {

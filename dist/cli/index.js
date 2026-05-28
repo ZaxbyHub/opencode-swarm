@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.44.0",
+    version: "7.44.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -51529,6 +51529,19 @@ import path41 from "path";
 function normalizePath(p) {
   return p.replace(/\\/g, "/");
 }
+function sharedTrailingSegments(a, b) {
+  const aParts = normalizePath(a).split("/").filter(Boolean);
+  const bParts = normalizePath(b).split("/").filter(Boolean);
+  let i = aParts.length - 1;
+  let j = bParts.length - 1;
+  let shared = 0;
+  while (i >= 0 && j >= 0 && aParts[i] === bParts[j]) {
+    shared++;
+    i--;
+    j--;
+  }
+  return shared;
+}
 function isCacheStale(impactMap, generatedAtMs) {
   for (const sourcePath of Object.keys(impactMap)) {
     try {
@@ -51856,25 +51869,43 @@ async function analyzeImpact(changedFiles, cwd, budget) {
       if (budgetExceeded)
         break;
     } else {
-      let found = false;
-      for (const [sourcePath, tests2] of Object.entries(impactMap)) {
+      const changedDir = normalizePath(path41.dirname(normalizedChanged));
+      const changedInputDir = normalizePath(path41.dirname(changedFile));
+      const suffixMatches = Object.entries(impactMap).filter(([sourcePath]) => {
+        return sourcePath.endsWith(changedFile) || changedFile.endsWith(sourcePath) || sourcePath.endsWith(normalizedChanged) || normalizedChanged.endsWith(sourcePath);
+      }).sort(([sourceA], [sourceB]) => {
+        const sourceDirA = normalizePath(path41.dirname(sourceA));
+        const sourceDirB = normalizePath(path41.dirname(sourceB));
+        const exactA = sourceDirA === changedDir || changedInputDir !== "." && (sourceDirA === changedInputDir || sourceDirA.endsWith(`/${changedInputDir}`));
+        const exactB = sourceDirB === changedDir || changedInputDir !== "." && (sourceDirB === changedInputDir || sourceDirB.endsWith(`/${changedInputDir}`));
+        if (exactA !== exactB)
+          return exactA ? -1 : 1;
+        const sharedA = Math.max(sharedTrailingSegments(sourceDirA, changedDir), changedInputDir === "." ? 0 : sharedTrailingSegments(sourceDirA, changedInputDir));
+        const sharedB = Math.max(sharedTrailingSegments(sourceDirB, changedDir), changedInputDir === "." ? 0 : sharedTrailingSegments(sourceDirB, changedInputDir));
+        const nearestA = sharedA > 0;
+        const nearestB = sharedB > 0;
+        if (nearestA !== nearestB)
+          return nearestA ? -1 : 1;
+        if (sharedA !== sharedB)
+          return sharedB - sharedA;
+        return sourceA.localeCompare(sourceB);
+      });
+      const found = suffixMatches.length > 0;
+      for (const [, tests2] of suffixMatches) {
         if (budget !== undefined && visitedCount >= budget) {
           budgetExceeded = true;
           break;
         }
-        if (sourcePath.endsWith(changedFile) || changedFile.endsWith(sourcePath)) {
-          for (const test of tests2) {
-            if (budget !== undefined && visitedCount >= budget) {
-              budgetExceeded = true;
-              break;
-            }
-            impactedTestsSet.add(test);
-            visitedCount++;
-          }
-          if (budgetExceeded)
+        for (const test of tests2) {
+          if (budget !== undefined && visitedCount >= budget) {
+            budgetExceeded = true;
             break;
-          found = true;
+          }
+          impactedTestsSet.add(test);
+          visitedCount++;
         }
+        if (budgetExceeded)
+          break;
       }
       if (budgetExceeded)
         break;

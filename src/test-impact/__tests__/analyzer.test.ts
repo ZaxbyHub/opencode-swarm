@@ -458,6 +458,73 @@ test('util', () => { expect(util).toBe(1); });`,
 			expect(result.untestedFiles).toEqual([]);
 		});
 
+		test('returns all ranked fallback suffix matches', async () => {
+			const savedLoadImpactMap = analyzerInternals.loadImpactMap;
+			try {
+				const exactTest = path
+					.join(tempDir, 'tests', 'exact.test.ts')
+					.replace(/\\/g, '/');
+				const nearestTest = path
+					.join(tempDir, 'tests', 'nearest.test.ts')
+					.replace(/\\/g, '/');
+				const otherTest = path
+					.join(tempDir, 'tests', 'other.test.ts')
+					.replace(/\\/g, '/');
+
+				analyzerInternals.loadImpactMap = async () => ({
+					'src/unit/foo.ts': [exactTest],
+					'unit/foo.ts': [nearestTest],
+					'foo.ts': [otherTest],
+				});
+
+				const result = await analyzeImpact(['src/unit/foo.ts'], tempDir);
+
+				expect(result.impactedTests).toEqual([
+					exactTest,
+					nearestTest,
+					otherTest,
+				]);
+				expect(result.untestedFiles).toEqual([]);
+			} finally {
+				analyzerInternals.loadImpactMap = savedLoadImpactMap;
+			}
+		});
+
+		describe('fallback suffix matching — regression: found flag set before budget-exhaustion loop (F-002)', () => {
+			test('does not add file to untestedFiles when budget exhausted mid-fallback collection', async () => {
+				// Previous code: `found = true` was placed inside the loop after the inner
+				// test-adding loop completed. If budget was exhausted during the inner loop,
+				// `found` was never set. The outer `if (budgetExceeded) break` guard preserved
+				// correct behaviour, but the logic was fragile and unclear.
+				// Fixed to: `const found = suffixMatches.length > 0` before the loop.
+				const savedLoadImpactMap = analyzerInternals.loadImpactMap;
+				try {
+					const test1 = path
+						.join(tempDir, 'tests', 'a.test.ts')
+						.replace(/\\/g, '/');
+					const test2 = path
+						.join(tempDir, 'tests', 'b.test.ts')
+						.replace(/\\/g, '/');
+					const test3 = path
+						.join(tempDir, 'tests', 'c.test.ts')
+						.replace(/\\/g, '/');
+
+					analyzerInternals.loadImpactMap = async () => ({
+						'src/foo.ts': [test1, test2, test3],
+					});
+
+					// budget=2 allows only 2 of 3 tests; budget is exhausted mid-collection
+					const result = await analyzeImpact(['src/foo.ts'], tempDir, 2);
+
+					expect(result.untestedFiles).toEqual([]);
+					expect(result.budgetExceeded).toBe(true);
+					expect(result.impactedTests).toEqual([test1, test2]);
+				} finally {
+					analyzerInternals.loadImpactMap = savedLoadImpactMap;
+				}
+			});
+		});
+
 		test('handles empty changedFiles array', async () => {
 			const result = await analyzeImpact([], tempDir);
 
