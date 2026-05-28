@@ -35881,27 +35881,25 @@ function normalizeEntry(raw) {
     ro = {};
     obj.retrieval_outcomes = ro;
   }
-  {
-    if (typeof ro.shown_count !== "number") {
-      ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
-    }
-    if (typeof ro.acknowledged_count !== "number")
-      ro.acknowledged_count = 0;
-    if (typeof ro.applied_explicit_count !== "number") {
-      ro.applied_explicit_count = 0;
-    }
-    if (typeof ro.ignored_count !== "number")
-      ro.ignored_count = 0;
-    if (typeof ro.violated_count !== "number")
-      ro.violated_count = 0;
-    if (typeof ro.contradicted_count !== "number")
-      ro.contradicted_count = 0;
-    if (typeof ro.succeeded_after_shown_count !== "number") {
-      ro.succeeded_after_shown_count = typeof ro.succeeded_after_count === "number" ? ro.succeeded_after_count : 0;
-    }
-    if (typeof ro.failed_after_shown_count !== "number") {
-      ro.failed_after_shown_count = typeof ro.failed_after_count === "number" ? ro.failed_after_count : 0;
-    }
+  if (typeof ro.shown_count !== "number") {
+    ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
+  }
+  if (typeof ro.acknowledged_count !== "number")
+    ro.acknowledged_count = 0;
+  if (typeof ro.applied_explicit_count !== "number") {
+    ro.applied_explicit_count = 0;
+  }
+  if (typeof ro.ignored_count !== "number")
+    ro.ignored_count = 0;
+  if (typeof ro.violated_count !== "number")
+    ro.violated_count = 0;
+  if (typeof ro.contradicted_count !== "number")
+    ro.contradicted_count = 0;
+  if (typeof ro.succeeded_after_shown_count !== "number") {
+    ro.succeeded_after_shown_count = typeof ro.succeeded_after_count === "number" ? ro.succeeded_after_count : 0;
+  }
+  if (typeof ro.failed_after_shown_count !== "number") {
+    ro.failed_after_shown_count = typeof ro.failed_after_count === "number" ? ro.failed_after_count : 0;
   }
   try {
     if (typeof obj.encounter_score !== "number" || Number.isNaN(obj.encounter_score)) {

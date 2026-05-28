@@ -10,8 +10,57 @@ import {
 	type RiskLevel,
 } from '../diff/semantic-classifier.js';
 import { generateSummary } from '../diff/summary-generator.js';
+import {
+	GitBinaryMissingError,
+	isGitBinaryMissing,
+} from '../utils/git-binary-missing-error.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
+
+async function execGit(
+	workingDir: string,
+	args: string[],
+	options?: {
+		timeout?: number;
+		maxBuffer?: number;
+	},
+): Promise<string> {
+	try {
+		const stdout = await new Promise<string>((resolve, reject) => {
+			const execOpts: Record<string, unknown> = {
+				encoding: 'utf-8',
+				cwd: workingDir,
+				timeout: options?.timeout,
+				maxBuffer: options?.maxBuffer,
+				stdio: ['ignore', 'pipe', 'pipe'],
+			};
+			child_process.execFile(
+				'git',
+				args,
+				execOpts as any,
+				(
+					error: child_process.ExecFileException | null,
+					output: string,
+					_stderr: string,
+				) => {
+					if (error) {
+						reject(error);
+						return;
+					}
+					resolve(output ?? '');
+				},
+			);
+		});
+		return stdout;
+	} catch (err) {
+		if (isGitBinaryMissing(err)) {
+			throw new GitBinaryMissingError('git binary is not available', {
+				cause: err,
+			});
+		}
+		throw err;
+	}
+}
 
 export interface DiffSummaryArgs {
 	files: string[];
@@ -79,58 +128,38 @@ export const diff_summary: ReturnType<typeof createSwarmTool> = createSwarmTool(
 
 				for (const filePath of typedArgs.files) {
 					let astResult: ASTDiffResult | null = null;
-					let gitBinaryMissing = false;
-					let gitError: unknown = null;
 					let fileExistsInHead = false;
 
-					// Git cat-file check wrapped in its own try/catch to separate git ENOENT from file-read ENOENT
+					// Git cat-file check wrapped in its own try/catch to separate
+					// git binary errors from "file not in HEAD" errors.
 					try {
-						child_process.execFileSync(
-							'git',
-							['cat-file', '-e', `HEAD:${filePath}`],
-							{
-								encoding: 'utf-8',
-								timeout: 3000,
-								cwd: workingDir,
-								stdio: 'pipe',
-							},
-						);
+						await execGit(workingDir, ['cat-file', '-e', `HEAD:${filePath}`], {
+							timeout: 3000,
+						});
 						fileExistsInHead = true;
 					} catch (e: unknown) {
-						// If git binary itself is missing or crashed, that's critical
-						if (e && typeof e === 'object' && 'code' in e) {
-							const err = e as { code?: string; status?: number };
-							if (err.code === 'ENOENT') {
-								gitBinaryMissing = true;
-								gitError = e;
-							}
+						// If git binary itself is missing, that's critical
+						if (e instanceof GitBinaryMissingError) {
+							throw e;
 						}
 						// git ran but file not in HEAD — it's a new/untracked file
 						// fileExistsInHead stays false
 					}
 
-					// Propagate git binary ENOENT immediately — don't let it be caught by outer catch
-					if (gitBinaryMissing && gitError) {
-						throw gitError;
-					}
-
 					try {
 						let oldContent: string;
-						const newContent: string = fs.readFileSync(
+						const newContent: string = await fs.promises.readFile(
 							path.join(workingDir, filePath),
 							'utf-8',
 						);
 
 						if (fileExistsInHead) {
 							// File exists in HEAD, get old content
-							oldContent = child_process.execFileSync(
-								'git',
+							oldContent = await execGit(
+								workingDir,
 								['show', `HEAD:${filePath}`],
 								{
-									encoding: 'utf-8',
 									timeout: 5000,
-									cwd: workingDir,
-									stdio: 'pipe',
 									maxBuffer: 5 * 1024 * 1024,
 								},
 							);
@@ -140,7 +169,10 @@ export const diff_summary: ReturnType<typeof createSwarmTool> = createSwarmTool(
 						}
 
 						astResult = await computeASTDiff(filePath, oldContent, newContent);
-					} catch (_e: unknown) {
+					} catch (e: unknown) {
+						if (e instanceof GitBinaryMissingError) {
+							throw e;
+						}
 						// Silently skip: file-read errors (including deleted files) and parse failures
 						astResult = null;
 					}
