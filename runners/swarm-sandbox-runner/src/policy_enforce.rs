@@ -98,6 +98,7 @@ pub fn enforce_symlink_egress(policy: &Policy, cwd: &str) -> Result<(), RunnerEr
     let in_allowed = policy
         .workspace_roots
         .iter()
+        .chain(policy.writable_roots.iter())
         .chain(std::iter::once(&policy.temp_root))
         .any(|root| {
             // Canonicalize each root so 8.3 short names and symlinks resolve to the same

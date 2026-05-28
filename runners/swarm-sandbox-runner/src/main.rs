@@ -100,9 +100,5 @@ fn run_sandboxed(cli: &Cli) -> Result<(), RunnerError> {
     // Execute in sandbox
     let result = mode::execute(sandbox_mode, &policy, &cli.cmd)?;
 
-    if result.exit_code != 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    std::process::exit(result.exit_code);
 }

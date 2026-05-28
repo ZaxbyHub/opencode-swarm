@@ -308,6 +308,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
             let _ = CloseHandle(pi.hProcess);
             let _ = CloseHandle(pi.hThread);
         }
+        events::emit(&events::exit_event(66, None));
         return Err(RunnerError::WallClockTimeout {
             elapsed_ms: policy.wall_clock_timeout_ms,
         });
@@ -316,6 +317,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
             let _ = CloseHandle(pi.hProcess);
             let _ = CloseHandle(pi.hThread);
         }
+        events::emit(&events::exit_event(65, None));
         return Err(RunnerError::QuotaExceeded {
             kind: "temp_size".to_string(),
         });
