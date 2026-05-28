@@ -11,6 +11,8 @@ description: >
 
 Read-only deep audit of a specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
+### MODE: DEEP_DIVE
+
 ## Step 0 — Parse Header
 
 Parse the MODE: DEEP_DIVE header to extract:

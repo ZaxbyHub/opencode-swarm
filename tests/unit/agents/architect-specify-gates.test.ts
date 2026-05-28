@@ -4,26 +4,26 @@ import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 /**
- * MODE: SPECIFY step 5b — QA gate selection dialogue.
+ * MODE: SPECIFY step 5b - QA gate selection dialogue.
  *
- * SPECIFY runs BEFORE plan.json exists, so it must conduct the dialogue
- * with the user and stash the elections in `.swarm/context.md` rather than
- * persisting via `set_qa_gates` (which requires plan.json). MODE: PLAN
- * applies the elections after `save_plan` succeeds.
+ * The architect prompt now keeps only a mode stub; the full SPECIFY protocol
+ * lives in .opencode/skills/specify/SKILL.md.
  */
-describe('architect prompt — MODE: SPECIFY step 5b QA gate selection', () => {
+describe('architect prompt - MODE: SPECIFY step 5b QA gate selection', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt!;
+	const specifySkill = readFileSync(
+		join(process.cwd(), '.opencode/skills/specify/SKILL.md'),
+		'utf-8',
+	);
 	const planSkill = readFileSync(
 		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
 		'utf-8',
 	);
 
 	function getSpecifySection(): string {
-		// SPECIFY runs from "### MODE: SPECIFY" header through the next "### MODE:" header
-		const start = prompt.indexOf('### MODE: SPECIFY');
+		const start = specifySkill.indexOf('### MODE: SPECIFY');
 		expect(start).toBeGreaterThan(-1);
-		const after = prompt.indexOf('### MODE:', start + 1);
-		return prompt.substring(start, after === -1 ? prompt.length : after);
+		return specifySkill.substring(start);
 	}
 
 	test('SPECIFY block contains a step labeled "5b"', () => {

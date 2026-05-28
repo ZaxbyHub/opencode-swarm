@@ -1,23 +1,26 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 /**
- * MODE: BRAINSTORM Phase 6 — QA gate selection dialogue.
+ * MODE: BRAINSTORM Phase 6 - QA gate selection dialogue.
  *
- * Phase 6 used to autonomously select QA gates. Now it must ask the user
- * (one question per message, defaults pre-stated) and stash the elections
- * in `.swarm/context.md` rather than calling `set_qa_gates` directly
- * (plan.json does not exist at this point — `set_qa_gates` would fail).
- * MODE: PLAN persists the elections after `save_plan` succeeds.
+ * The architect prompt now keeps only a mode stub; the full BRAINSTORM
+ * protocol lives in .opencode/skills/brainstorm/SKILL.md.
  */
-describe('architect prompt — MODE: BRAINSTORM Phase 6 QA gate selection', () => {
+describe('architect prompt - MODE: BRAINSTORM Phase 6 QA gate selection', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt!;
+	const skill = readFileSync(
+		join(process.cwd(), '.opencode/skills/brainstorm/SKILL.md'),
+		'utf-8',
+	);
 
 	function getPhase6Section(): string {
-		const start = prompt.indexOf('**Phase 6:');
+		const start = skill.indexOf('**Phase 6:');
 		expect(start).toBeGreaterThan(-1);
-		const after = prompt.indexOf('**Phase 7:', start + 1);
-		return prompt.substring(start, after === -1 ? prompt.length : after);
+		const after = skill.indexOf('**Phase 7:', start + 1);
+		return skill.substring(start, after === -1 ? skill.length : after);
 	}
 
 	test('Phase 6 contains the user-facing dialogue lead-in', () => {
@@ -66,13 +69,13 @@ describe('architect prompt — MODE: BRAINSTORM Phase 6 QA gate selection', () =
 	});
 
 	test('BRAINSTORM RULES updated: gates persisted during MODE: PLAN are ratchet-tighter from that point', () => {
-		// The line replaced the original "QA gates set in Phase 6 are ratchet-tighter — you cannot undo them later in the session."
-		expect(prompt).toContain(
+		expect(prompt).toContain('file:.opencode/skills/brainstorm/SKILL.md');
+		expect(skill).toContain(
 			'QA gates elected in Phase 6 are persisted during MODE: PLAN',
 		);
-		expect(prompt).toContain('ratchet-tighter from that point');
-		expect(prompt).not.toContain(
-			'QA gates set in Phase 6 are ratchet-tighter — you cannot undo them later in the session.',
+		expect(skill).toContain('ratchet-tighter from that point');
+		expect(skill).not.toContain(
+			'QA gates set in Phase 6 are ratchet-tighter',
 		);
 	});
 });
