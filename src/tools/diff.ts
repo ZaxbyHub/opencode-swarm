@@ -71,6 +71,11 @@ export interface DiffResult {
 	astDiffs?: ASTDiffResult[];
 	semanticSummary?: SemanticDiffSummary;
 	markdownSummary?: string;
+	/**
+	 * @deprecated This field is no longer computed and will be removed in a future version.
+	 * It is retained for backward compatibility with existing consumers.
+	 */
+	astSkippedCount?: number;
 }
 
 export interface DiffErrorResult {
@@ -336,6 +341,10 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				}
 			}
 
+			// Compute deprecated astSkippedCount for backward compatibility
+			const astSkippedCount =
+				files.length > MAX_AST_FILES ? files.length - MAX_AST_FILES : 0;
+
 			const truncated = diffLines.length > MAX_DIFF_LINES;
 
 			const summary = truncated
@@ -350,6 +359,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				...(astDiffs.length > 0 ? { astDiffs } : {}),
 				...(semanticSummary ? { semanticSummary } : {}),
 				...(markdownSummary ? { markdownSummary } : {}),
+				...(astSkippedCount > 0 ? { astSkippedCount } : {}),
 			};
 
 			return JSON.stringify(result, null, 2);

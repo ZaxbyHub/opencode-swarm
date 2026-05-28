@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import * as path from 'node:path';
 import type { ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
@@ -717,9 +718,13 @@ describe('buildSemanticDiffBlock', () => {
 			'../semantic-diff-injection.js'
 		);
 
+		const mockDir = path.resolve('/safe/dir');
+		const linkedResolved = path.resolve(mockDir, 'linked.ts');
+		const outsideResolved = path.resolve('/outside/linked.ts');
+
 		mockRealpathSync.mockImplementation((inputPath: string) => {
-			if (inputPath === '/safe/dir') return '/safe/dir';
-			if (inputPath === '/safe/dir/linked.ts') return '/outside/linked.ts';
+			if (inputPath === mockDir) return mockDir;
+			if (inputPath === linkedResolved) return outsideResolved;
 			return inputPath;
 		});
 		mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
@@ -761,9 +766,12 @@ describe('buildSemanticDiffBlock', () => {
 			'../semantic-diff-injection.js'
 		);
 
+		const mockDir = path.resolve('/safe/dir');
+		const brokenResolved = path.resolve(mockDir, 'broken.ts');
+
 		mockRealpathSync.mockImplementation((inputPath: string) => {
-			if (inputPath === '/safe/dir') return '/safe/dir';
-			if (inputPath === '/safe/dir/broken.ts') {
+			if (inputPath === mockDir) return mockDir;
+			if (inputPath === brokenResolved) {
 				const err = new Error('ENOENT') as Error & { code: string };
 				err.code = 'ENOENT';
 				throw err;

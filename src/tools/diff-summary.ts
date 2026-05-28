@@ -27,18 +27,29 @@ async function execGit(
 ): Promise<string> {
 	try {
 		const stdout = await new Promise<string>((resolve, reject) => {
-			child_process.execFile('git', args, {
+			const execOpts: Record<string, unknown> = {
 				encoding: 'utf-8',
 				cwd: workingDir,
 				timeout: options?.timeout,
 				maxBuffer: options?.maxBuffer,
-			}, (error, output) => {
-				if (error) {
-					reject(error);
-					return;
-				}
-				resolve(output ?? '');
-			});
+				stdio: ['ignore', 'pipe', 'pipe'],
+			};
+			child_process.execFile(
+				'git',
+				args,
+				execOpts as any,
+				(
+					error: child_process.ExecFileException | null,
+					output: string,
+					_stderr: string,
+				) => {
+					if (error) {
+						reject(error);
+						return;
+					}
+					resolve(output ?? '');
+				},
+			);
 		});
 		return stdout;
 	} catch (err) {

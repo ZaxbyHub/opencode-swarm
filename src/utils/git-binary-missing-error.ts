@@ -1,7 +1,10 @@
 export class GitBinaryMissingError extends Error {
 	override readonly name = 'GitBinaryMissingError';
 
-	constructor(message = 'git binary is not available', options?: { cause?: unknown }) {
+	constructor(
+		message = 'git binary is not available',
+		options?: { cause?: unknown },
+	) {
 		super(message, options);
 	}
 }
