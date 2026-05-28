@@ -1,49 +1,85 @@
-﻿/**
+/**
  * Tests for Windows sandbox implementation:
- * - src/sandbox/win32/restricted-token-executor.ts (WindowsSandboxExecutor)
+ * - src/sandbox/win32/native-sandbox-executor.ts (NativeWindowsSandboxExecutor)
+ * - src/sandbox/win32/restricted-environment-executor.ts (legacy EnvironmentExecutor)
+ * - src/sandbox/win32/runner-client.ts (runner binary client)
  * - src/sandbox/win32/edge-cases.ts (Windows-specific security detection)
  *
  * Platform notes:
- * - Executor tests that use restricted-token are skipped on non-Windows platforms.
+ * - Executor tests that use native runner are skipped on non-Windows platforms.
  * - Edge case positive tests (detecting real escape patterns) are skipped on non-Windows.
  * - Edge case negative tests (verifying safe commands return false) run on all platforms.
- * - The executor throws on construction until Phase 4 implements the real executor.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 
 const isWin = process.platform === 'win32';
 
 // ---------------------------------------------------------------------------
-// Windows executor ΓÇö import (placeholder throws on construction)
+// Windows executor — NativeWindowsSandboxExecutor
 // ---------------------------------------------------------------------------
 
-// The actual implementation will be at src/sandbox/win32/restricted-token-executor.ts.
-// The placeholder throws on construction. Real tests will be uncommented
-// in Phase 4 when the implementation exists.
-import { WindowsSandboxExecutor } from '../../../src/sandbox/win32/restricted-token-executor';
+import { NativeWindowsSandboxExecutor } from '../../../src/sandbox/win32/native-sandbox-executor';
+import {
+	_resetProbeCache,
+	_internals as runnerInternals,
+} from '../../../src/sandbox/win32/runner-client';
+
+// Save real implementations
+const realFindRunnerBinary = runnerInternals.findRunnerBinary;
+const realSpawnRunner = runnerInternals.spawnRunner;
+
+afterEach(() => {
+	(
+		runnerInternals as { findRunnerBinary: typeof realFindRunnerBinary }
+	).findRunnerBinary = realFindRunnerBinary;
+	(runnerInternals as { spawnRunner: typeof realSpawnRunner }).spawnRunner =
+		realSpawnRunner;
+	_resetProbeCache();
+});
 
 // ---------------------------------------------------------------------------
-// Windows edge-cases ΓÇö real implementations
+// Windows edge-cases — real implementations
 // ---------------------------------------------------------------------------
 
 import * as edge from '../../../src/sandbox/win32/edge-cases';
 
 // ---------------------------------------------------------------------------
-// Test suite ΓÇö WindowsSandboxExecutor
+// Test suite — NativeWindowsSandboxExecutor
 // ---------------------------------------------------------------------------
 
-describe('WindowsSandboxExecutor', () => {
+describe('NativeWindowsSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
-	// 1. Constructor ΓÇö mechanism property
+	// 1. Constructor — mechanism property
 	// -----------------------------------------------------------------------
 
 	describe('constructor', () => {
-		test('mechanism property is powershell-wrapper when implemented (Phase 4)', () => {
-			// Once implemented:
-			// const executor = new WindowsSandboxExecutor([]);
-			// expect(executor.mechanism).toBe('powershell-wrapper');
-			expect(true).toBe(true); // Placeholder ΓÇö remove when Phase 4 implements
+		test.skipIf(!isWin)(
+			'mechanism property reflects runner availability',
+			() => {
+				// Mock runner as unavailable to test fallback
+				(
+					runnerInternals as { findRunnerBinary: () => string | null }
+				).findRunnerBinary = () => null;
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				// Without the runner binary, falls back to powershell-wrapper
+				expect(
+					executor.mechanism === 'powershell-wrapper' ||
+						executor.mechanism.startsWith('native-runner/'),
+				).toBe(true);
+			},
+		);
+
+		test.skipIf(!isWin)('strength is weak when runner binary missing', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			expect(executor.strength).toBe('weak');
 		});
 	});
 
@@ -53,23 +89,29 @@ describe('WindowsSandboxExecutor', () => {
 
 	describe('isAvailable()', () => {
 		test.skipIf(!isWin)(
-			'returns true on Windows when implemented (Phase 4)',
+			'returns true on Windows when PowerShell fallback works',
 			() => {
-				// Once implemented:
-				// const executor = new WindowsSandboxExecutor([]);
-				// expect(typeof executor.isAvailable()).toBe('boolean');
-				expect(true).toBe(true);
+				(
+					runnerInternals as { findRunnerBinary: () => string | null }
+				).findRunnerBinary = () => null;
+				_resetProbeCache();
+
+				const executor = new NativeWindowsSandboxExecutor([]);
+				expect(typeof executor.isAvailable()).toBe('boolean');
+				// Should be available at least via PowerShell fallback
+				expect(executor.isAvailable()).toBe(true);
 			},
 		);
 
 		test('returns false on non-Windows platforms', () => {
 			if (isWin) return;
-			// On non-Windows, restricted-token is not available.
-			// Contract: isAvailable() must return false without throwing on non-Windows.
-			// Once Phase 4 implements:
-			// const executor = new WindowsSandboxExecutor([]);
-			// expect(executor.isAvailable()).toBe(false);
-			expect(true).toBe(true);
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			expect(executor.isAvailable()).toBe(false);
 		});
 	});
 
@@ -78,35 +120,39 @@ describe('WindowsSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
 
 	describe('wrapCommand()', () => {
-		test.skipIf(!isWin)(
-			'wraps command with PowerShell sandbox when available (Phase 4)',
-			() => {
-				// Once implemented, wrapCommand should generate a PowerShell command
-				// that uses restricted-token or equivalent Windows sandboxing.
-				expect(true).toBe(true);
-			},
-		);
+		test.skipIf(!isWin)('wraps with PowerShell when runner unavailable', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
 
-		test.skipIf(!isWin)(
-			'returns raw command when executor is disabled (Phase 4)',
-			() => {
-				// Once implemented:
-				// const executor = new WindowsSandboxExecutor([]);
-				// executor.disable('test');
-				// expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-				expect(true).toBe(true);
-			},
-		);
+			const executor = new NativeWindowsSandboxExecutor([]);
+			if (executor.isAvailable()) {
+				const wrapped = executor.wrapCommand('echo hello', []);
+				expect(wrapped.toLowerCase()).toContain('powershell');
+			}
+		});
 
-		test('returns raw command when not available on non-Windows', () => {
+		test.skipIf(!isWin)('throws when executor is disabled', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			executor.disable('test');
+			expect(() => executor.wrapCommand('echo hello', [])).toThrow();
+		});
+
+		test('throws when not available on non-Windows', () => {
 			if (isWin) return;
-			// On non-Windows, wrapCommand should return the raw command (passthrough).
-			// Once Phase 4 implements:
-			// const executor = new WindowsSandboxExecutor([]);
-			// if (!executor.isAvailable()) {
-			//   expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-			// }
-			expect(true).toBe(true);
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			expect(() => executor.wrapCommand('echo hello', [])).toThrow();
 		});
 	});
 
@@ -115,25 +161,30 @@ describe('WindowsSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
 
 	describe('getEnvOverrides()', () => {
-		test.skipIf(!isWin)(
-			'returns env var scrubbing on Windows (Phase 4)',
-			() => {
-				// Windows sandbox should unset or scrub sensitive env vars.
-				// Once implemented:
-				// const executor = new WindowsSandboxExecutor([]);
-				// const env = executor.getEnvOverrides();
-				// expect(typeof env).toBe('object');
-				expect(true).toBe(true);
-			},
-		);
+		test.skipIf(!isWin)('returns env var scrubbing', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
 
-		test('returns empty object when not relevant (non-Windows)', () => {
-			if (isWin) return;
-			// On non-Windows, no Windows-specific env var scrubbing needed.
-			// Once Phase 4 implements:
-			// const executor = new WindowsSandboxExecutor([]);
-			// expect(executor.getEnvOverrides()).toEqual({});
-			expect(true).toBe(true);
+			const executor = new NativeWindowsSandboxExecutor([]);
+			const env = executor.getEnvOverrides();
+			expect(typeof env).toBe('object');
+			expect(env).toHaveProperty('PATH');
+			expect(env).toHaveProperty('LD_PRELOAD');
+		});
+
+		test('returns overrides regardless of platform', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			if (executor.isAvailable()) {
+				const env = executor.getEnvOverrides();
+				expect(typeof env).toBe('object');
+			}
 		});
 	});
 
@@ -142,30 +193,62 @@ describe('WindowsSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
 
 	describe('disable()', () => {
-		test.skipIf(!isWin)(
-			'sets _disabled = true and isAvailable() returns false (Phase 4)',
-			() => {
-				// Once implemented:
-				// const executor = new WindowsSandboxExecutor([]);
-				// executor.disable('test');
-				// expect(executor.isAvailable()).toBe(false);
-				expect(true).toBe(true);
-			},
-		);
+		test.skipIf(!isWin)('sets disabled and isAvailable() returns false', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
 
-		test('disable() is callable on non-Windows without throwing (Phase 4)', () => {
+			const executor = new NativeWindowsSandboxExecutor([]);
+			executor.disable('test');
+			expect(executor.isAvailable()).toBe(false);
+			expect(executor.strength).toBe('none');
+		});
+
+		test('disable() is callable on non-Windows without throwing', () => {
 			if (isWin) return;
-			// Once Phase 4 implements a non-throwing executor:
-			// const executor = new WindowsSandboxExecutor([]);
-			// executor.disable('test'); // should not throw
-			// expect(executor.isAvailable()).toBe(false);
-			expect(true).toBe(true);
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			executor.disable('test');
+			expect(executor.isAvailable()).toBe(false);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// 6. hasNativeRunner / probeResult
+	// -----------------------------------------------------------------------
+
+	describe('probeResult', () => {
+		test('probeResult is always defined', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			expect(executor.probeResult).toBeDefined();
+			expect(typeof executor.probeResult.available).toBe('boolean');
+			expect(typeof executor.probeResult.mode).toBe('string');
+		});
+
+		test('hasNativeRunner is false when binary missing', () => {
+			(
+				runnerInternals as { findRunnerBinary: () => string | null }
+			).findRunnerBinary = () => null;
+			_resetProbeCache();
+
+			const executor = new NativeWindowsSandboxExecutor([]);
+			expect(executor.hasNativeRunner).toBe(false);
 		});
 	});
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectPathTraversal
+// edge-cases — detectPathTraversal
 // Path traversal detection for Windows paths
 // ---------------------------------------------------------------------------
 
@@ -208,7 +291,7 @@ describe('detectPathTraversal', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectRegistryEscape
+// edge-cases — detectRegistryEscape
 // Windows registry escape detection
 // ---------------------------------------------------------------------------
 
@@ -266,7 +349,7 @@ describe('detectRegistryEscape', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectPowerShellEscape
+// edge-cases — detectPowerShellEscape
 // PowerShell escape and bypass detection
 // ---------------------------------------------------------------------------
 
@@ -344,7 +427,7 @@ describe('detectPowerShellEscape', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectWMIEscape
+// edge-cases — detectWMIEscape
 // WMI (Windows Management Instrumentation) escape detection
 // ---------------------------------------------------------------------------
 
@@ -413,7 +496,7 @@ describe('detectWMIEscape', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectServiceEscalation
+// edge-cases — detectServiceEscalation
 // Windows service privilege escalation detection
 // ---------------------------------------------------------------------------
 
@@ -480,7 +563,7 @@ describe('detectServiceEscalation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectDLLHijacking
+// edge-cases — detectDLLHijacking
 // DLL search order hijacking detection
 // ---------------------------------------------------------------------------
 
@@ -541,7 +624,7 @@ describe('detectDLLHijacking', () => {
 });
 
 // ---------------------------------------------------------------------------
-// edge-cases ΓÇö detectTokenManipulation
+// edge-cases — detectTokenManipulation
 // Windows access token manipulation detection
 // ---------------------------------------------------------------------------
 

@@ -558,8 +558,41 @@ jobs:
       - name: Laravel fixture detection and SAST coverage tests
         run: bun --smol test tests/unit/lang/laravel-fixture.test.ts --timeout 60000
 
+  rust-sandbox-runner:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runners/swarm-sandbox-runner/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('runners/swarm-sandbox-runner/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Check formatting
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo fmt --check
+      - name: Clippy lint
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run tests
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo test --all-targets
+      - name: Build release binary
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo build --release
+      - name: Probe smoke test
+        working-directory: runners/swarm-sandbox-runner
+        run: ./target/release/swarm-sandbox-runner.exe --probe
+
   smoke:
-    needs: [unit, integration, dist-check, package-check, php-validation]
+    needs: [unit, integration, dist-check, package-check, php-validation, rust-sandbox-runner]
     strategy:
       fail-fast: false
       matrix:

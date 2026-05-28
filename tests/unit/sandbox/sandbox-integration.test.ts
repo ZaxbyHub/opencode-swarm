@@ -54,10 +54,10 @@ async function getMacExecutor() {
 }
 
 async function getWindowsExecutor() {
-	const { WindowsSandboxExecutor } = await import(
-		'../../../src/sandbox/win32/restricted-token-executor'
+	const { NativeWindowsSandboxExecutor } = await import(
+		'../../../src/sandbox/win32/native-sandbox-executor'
 	);
-	return WindowsSandboxExecutor;
+	return NativeWindowsSandboxExecutor;
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,7 +1025,11 @@ describe('AC-009: Unsupported platform reports status clearly', () => {
 		if (isWindows) {
 			const Executor = await getWindowsExecutor();
 			const executor = new Executor([]);
-			expect(executor.mechanism).toBe('powershell-wrapper');
+			// Native runner or PowerShell fallback
+			expect(
+				executor.mechanism === 'powershell-wrapper' ||
+					executor.mechanism.startsWith('native-runner/'),
+			).toBe(true);
 		}
 	});
 });
