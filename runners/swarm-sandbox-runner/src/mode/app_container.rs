@@ -51,11 +51,11 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     use std::sync::Arc;
     use windows::core::{HSTRING, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
-    use windows::Win32::Security::*;
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
+    use windows::Win32::Security::*;
     use windows::Win32::System::Threading::*;
 
     if command.is_empty() {
