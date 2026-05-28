@@ -24,10 +24,7 @@ pub struct SandboxResult {
     pub mode: SandboxMode,
 }
 
-pub fn select_mode(
-    requested: &str,
-    policy: &Policy,
-) -> Result<SandboxMode, RunnerError> {
+pub fn select_mode(requested: &str, policy: &Policy) -> Result<SandboxMode, RunnerError> {
     match requested {
         "auto" => {
             if app_container::is_available() {

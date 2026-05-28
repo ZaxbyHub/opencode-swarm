@@ -5,7 +5,13 @@ pub fn grant_access(path: &str, sid_string: &str) -> Result<(), RunnerError> {
     use std::process::Command;
 
     let output = Command::new("icacls")
-        .args([path, "/grant", &format!("{sid_string}:(OI)(CI)F"), "/T", "/Q"])
+        .args([
+            path,
+            "/grant",
+            &format!("{sid_string}:(OI)(CI)F"),
+            "/T",
+            "/Q",
+        ])
         .output()
         .map_err(|e| RunnerError::OsApiFailure(format!("icacls grant: {e}")))?;
 
@@ -23,7 +29,13 @@ pub fn deny_write(path: &str, sid_string: &str) -> Result<(), RunnerError> {
     use std::process::Command;
 
     let output = Command::new("icacls")
-        .args([path, "/deny", &format!("{sid_string}:(OI)(CI)(W,D,DC)"), "/T", "/Q"])
+        .args([
+            path,
+            "/deny",
+            &format!("{sid_string}:(OI)(CI)(W,D,DC)"),
+            "/T",
+            "/Q",
+        ])
         .output()
         .map_err(|e| RunnerError::OsApiFailure(format!("icacls deny: {e}")))?;
 
@@ -61,8 +73,7 @@ pub fn setup_workspace_acls(
         }
     }
 
-    std::fs::create_dir_all(temp_root)
-        .map_err(|e| RunnerError::Io(e))?;
+    std::fs::create_dir_all(temp_root).map_err(|e| RunnerError::Io(e))?;
     grant_access(temp_root, sid_string)?;
 
     Ok(())
@@ -76,5 +87,7 @@ pub fn setup_workspace_acls(
     _temp_root: &str,
     _sid_string: &str,
 ) -> Result<(), RunnerError> {
-    Err(RunnerError::OsApiFailure("ACL setup requires Windows".into()))
+    Err(RunnerError::OsApiFailure(
+        "ACL setup requires Windows".into(),
+    ))
 }

@@ -12,7 +12,9 @@ use crate::temp_watcher::TempWatcher;
 #[cfg(windows)]
 pub fn is_available() -> bool {
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, TOKEN_ALL_ACCESS};
+    use windows::Win32::Security::{
+        CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, TOKEN_ALL_ACCESS,
+    };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
@@ -21,7 +23,14 @@ pub fn is_available() -> bool {
             return false;
         }
         let mut restricted = HANDLE::default();
-        let ok = CreateRestrictedToken(token, DISABLE_MAX_PRIVILEGE, None, None, None, &mut restricted);
+        let ok = CreateRestrictedToken(
+            token,
+            DISABLE_MAX_PRIVILEGE,
+            None,
+            None,
+            None,
+            &mut restricted,
+        );
         let _ = windows::Win32::Foundation::CloseHandle(token);
         if ok.is_ok() {
             let _ = windows::Win32::Foundation::CloseHandle(restricted);
@@ -40,12 +49,12 @@ pub fn is_available() -> bool {
 #[cfg(windows)]
 pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, RunnerError> {
     use std::sync::Arc;
+    use windows::core::HSTRING;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
     use windows::Win32::Security::{
         CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, TOKEN_ALL_ACCESS,
     };
     use windows::Win32::System::Threading::*;
-    use windows::core::HSTRING;
 
     if command.is_empty() {
         return Err(RunnerError::LauncherMisconfig("empty command".into()));
@@ -200,11 +209,9 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     }
 
     // 17. Wait for child with wall-clock timeout
-        // u32::MAX (0xFFFFFFFF) means INFINITE for WaitForSingleObject — cap at MAX-1
+    // u32::MAX (0xFFFFFFFF) means INFINITE for WaitForSingleObject — cap at MAX-1
     let timeout_ms = u32::try_from(policy.wall_clock_timeout_ms).unwrap_or(u32::MAX - 1);
-    let wait_result = unsafe {
-        WaitForSingleObject(pi.hProcess, timeout_ms)
-    };
+    let wait_result = unsafe { WaitForSingleObject(pi.hProcess, timeout_ms) };
 
     watcher.stop();
 

@@ -11,8 +11,8 @@ use crate::temp_watcher::TempWatcher;
 
 #[cfg(windows)]
 pub fn is_available() -> bool {
-    use windows::Win32::Security::{CreateAppContainerProfile, DeleteAppContainerProfile};
     use windows::core::HSTRING;
+    use windows::Win32::Security::{CreateAppContainerProfile, DeleteAppContainerProfile};
 
     let probe_name = HSTRING::from("swarm.sandbox.ac-probe");
     unsafe {
@@ -46,10 +46,10 @@ pub fn is_available() -> bool {
 #[cfg(windows)]
 pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, RunnerError> {
     use std::sync::Arc;
+    use windows::core::HSTRING;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, PSID, WAIT_TIMEOUT};
     use windows::Win32::Security::*;
     use windows::Win32::System::Threading::*;
-    use windows::core::HSTRING;
 
     if command.is_empty() {
         return Err(RunnerError::LauncherMisconfig("empty command".into()));
@@ -106,12 +106,12 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
         let mut string_sid = windows::core::PWSTR::null();
         ConvertSidToStringSidW(container_sid, &mut string_sid)
             .map_err(|e| RunnerError::OsApiFailure(format!("ConvertSidToStringSidW: {e}")))?;
-        let s = string_sid.to_string().map_err(|e| {
-            RunnerError::OsApiFailure(format!("SID string conversion: {e}"))
-        })?;
-        windows::Win32::System::Memory::LocalFree(
-            windows::Win32::Foundation::HLOCAL(string_sid.0 as *mut _),
-        );
+        let s = string_sid
+            .to_string()
+            .map_err(|e| RunnerError::OsApiFailure(format!("SID string conversion: {e}")))?;
+        windows::Win32::System::Memory::LocalFree(windows::Win32::Foundation::HLOCAL(
+            string_sid.0 as *mut _,
+        ));
         s
     };
 
@@ -286,7 +286,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     }
 
     // Wait
-        // u32::MAX (0xFFFFFFFF) means INFINITE for WaitForSingleObject — cap at MAX-1
+    // u32::MAX (0xFFFFFFFF) means INFINITE for WaitForSingleObject — cap at MAX-1
     let timeout_ms = u32::try_from(policy.wall_clock_timeout_ms).unwrap_or(u32::MAX - 1);
     let wait_result = unsafe { WaitForSingleObject(pi.hProcess, timeout_ms) };
 

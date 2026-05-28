@@ -87,13 +87,13 @@ fn check_admin() -> bool {
 #[cfg(windows)]
 fn get_integrity_level() -> String {
     use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Security::GetSidSubAuthority;
     use windows::Win32::Security::{
-        GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-        SECURITY_MANDATORY_HIGH_RID, SECURITY_MANDATORY_LOW_RID,
-        SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_SYSTEM_RID,
+        GetTokenInformation, TokenIntegrityLevel, SECURITY_MANDATORY_HIGH_RID,
+        SECURITY_MANDATORY_LOW_RID, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_SYSTEM_RID,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::Win32::Security::GetSidSubAuthority;
 
     unsafe {
         let mut token = HANDLE::default();
@@ -167,8 +167,8 @@ fn get_os_version() -> String {
 
 #[cfg(windows)]
 fn probe_app_container() -> bool {
-    use windows::Win32::Security::{CreateAppContainerProfile, DeleteAppContainerProfile};
     use windows::core::HSTRING;
+    use windows::Win32::Security::{CreateAppContainerProfile, DeleteAppContainerProfile};
 
     let probe_name = HSTRING::from("swarm.sandbox.probe-test");
     let display_name = HSTRING::from("Probe Test");
@@ -178,13 +178,8 @@ fn probe_app_container() -> bool {
         let _ = DeleteAppContainerProfile(&probe_name);
 
         let mut sid = windows::Win32::Foundation::PSID::default();
-        let result = CreateAppContainerProfile(
-            &probe_name,
-            &display_name,
-            &description,
-            None,
-            &mut sid,
-        );
+        let result =
+            CreateAppContainerProfile(&probe_name, &display_name, &description, None, &mut sid);
 
         if result.is_ok() {
             let _ = DeleteAppContainerProfile(&probe_name);
@@ -271,11 +266,11 @@ fn probe_restricted_token() -> bool {
 
 #[cfg(windows)]
 fn probe_private_desktop() -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS,
     };
-    use windows::core::HSTRING;
-    use windows::Win32::Security::SECURITY_ATTRIBUTES;
 
     unsafe {
         let name = HSTRING::from("swarm_probe_desktop");

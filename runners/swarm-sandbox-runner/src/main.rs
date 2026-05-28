@@ -7,7 +7,11 @@ use swarm_sandbox_runner::policy::Policy;
 use swarm_sandbox_runner::probe;
 
 #[derive(Parser)]
-#[command(name = "swarm-sandbox-runner", version, about = "Windows sandbox runner for opencode-swarm")]
+#[command(
+    name = "swarm-sandbox-runner",
+    version,
+    about = "Windows sandbox runner for opencode-swarm"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

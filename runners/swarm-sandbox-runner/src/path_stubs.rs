@@ -8,10 +8,7 @@ pub fn create_stub_dir(temp_root: &str, run_id: &str) -> Result<PathBuf, RunnerE
     Ok(stub_dir)
 }
 
-pub fn create_stubs(
-    stub_dir: &Path,
-    binaries: &[String],
-) -> Result<(), RunnerError> {
+pub fn create_stubs(stub_dir: &Path, binaries: &[String]) -> Result<(), RunnerError> {
     for bin_name in binaries {
         create_single_stub(stub_dir, bin_name)?;
     }

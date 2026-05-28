@@ -37,7 +37,11 @@ impl RunnerError {
     pub fn exit_code(&self) -> i32 {
         match self {
             RunnerError::ChildNonZero(code) => {
-                if *code == 0 { 1 } else { *code }
+                if *code == 0 {
+                    1
+                } else {
+                    *code
+                }
             }
             RunnerError::PolicyViolation { .. } => 64,
             RunnerError::QuotaExceeded { .. } => 65,

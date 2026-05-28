@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use swarm_sandbox_runner::mode;
 use swarm_sandbox_runner::mode::restricted_token;
 use swarm_sandbox_runner::policy::{NetworkMode, Policy};
-use std::collections::HashMap;
 
 fn test_policy(workspace: &str, temp: &str) -> Policy {
     Policy {
@@ -70,15 +70,17 @@ fn restricted_token_echo_exits_zero() {
     let temp = workspace.join("tmp");
     std::fs::create_dir_all(&temp).unwrap();
 
-    let policy = test_policy(
-        workspace.to_str().unwrap(),
-        temp.to_str().unwrap(),
-    );
+    let policy = test_policy(workspace.to_str().unwrap(), temp.to_str().unwrap());
 
     let result = mode::execute(
         mode::SandboxMode::RestrictedToken,
         &policy,
-        &["cmd.exe".to_string(), "/c".to_string(), "echo".to_string(), "hello".to_string()],
+        &[
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ],
     );
 
     let _ = std::fs::remove_dir_all(&workspace);

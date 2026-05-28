@@ -9,10 +9,8 @@ pub struct PrivateDesktop {
 #[cfg(windows)]
 impl PrivateDesktop {
     pub fn create(run_id: &str) -> Result<Self, RunnerError> {
-        use windows::Win32::System::StationsAndDesktops::{
-            CreateDesktopW, DESKTOP_CONTROL_FLAGS,
-        };
         use windows::core::HSTRING;
+        use windows::Win32::System::StationsAndDesktops::{CreateDesktopW, DESKTOP_CONTROL_FLAGS};
 
         let name = format!("swarm_sandbox_{run_id}");
         let hname = HSTRING::from(&name);

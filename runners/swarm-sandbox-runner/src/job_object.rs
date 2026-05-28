@@ -10,27 +10,20 @@ pub struct JobObject {
 
 #[cfg(windows)]
 impl JobObject {
-    pub fn create(
-        memory_cap: u64,
-        active_process_cap: u32,
-    ) -> Result<Self, RunnerError> {
-        use windows::Win32::System::JobObjects::*;
+    pub fn create(memory_cap: u64, active_process_cap: u32) -> Result<Self, RunnerError> {
         use windows::core::HSTRING;
+        use windows::Win32::System::JobObjects::*;
 
         unsafe {
-            let name = HSTRING::from(format!(
-                "swarm_sandbox_job_{}",
-                std::process::id()
-            ));
+            let name = HSTRING::from(format!("swarm_sandbox_job_{}", std::process::id()));
             let handle = CreateJobObjectW(None, &name)
                 .map_err(|e| RunnerError::OsApiFailure(format!("CreateJobObjectW: {e}")))?;
 
             let mut ext_info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
 
-            ext_info.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                    | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-                    | JOB_OBJECT_LIMIT_JOB_MEMORY;
+            ext_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | JOB_OBJECT_LIMIT_JOB_MEMORY;
 
             ext_info.BasicLimitInformation.ActiveProcessLimit = active_process_cap;
             ext_info.JobMemoryLimit = memory_cap as usize;
@@ -53,9 +46,8 @@ impl JobObject {
     pub fn assign_process(&self, process: HANDLE) -> Result<(), RunnerError> {
         use windows::Win32::System::JobObjects::AssignProcessToJobObject;
         unsafe {
-            AssignProcessToJobObject(self.handle, process).map_err(|e| {
-                RunnerError::OsApiFailure(format!("AssignProcessToJobObject: {e}"))
-            })
+            AssignProcessToJobObject(self.handle, process)
+                .map_err(|e| RunnerError::OsApiFailure(format!("AssignProcessToJobObject: {e}")))
         }
     }
 
@@ -87,10 +79,14 @@ pub struct JobObject;
 #[cfg(not(windows))]
 impl JobObject {
     pub fn create(_memory_cap: u64, _active_process_cap: u32) -> Result<Self, RunnerError> {
-        Err(RunnerError::OsApiFailure("Job Objects require Windows".into()))
+        Err(RunnerError::OsApiFailure(
+            "Job Objects require Windows".into(),
+        ))
     }
 
     pub fn terminate(&self, _exit_code: u32) -> Result<(), RunnerError> {
-        Err(RunnerError::OsApiFailure("Job Objects require Windows".into()))
+        Err(RunnerError::OsApiFailure(
+            "Job Objects require Windows".into(),
+        ))
     }
 }

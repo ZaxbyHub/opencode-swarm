@@ -17,7 +17,10 @@ pub fn enforce_deny_rules(policy: &Policy, command: &[String]) -> Result<(), Run
             });
         }
         if policy.deny_alternate_data_streams && has_ads(arg) {
-            events::emit(&events::denial_event("deny_alternate_data_stream", Some(arg)));
+            events::emit(&events::denial_event(
+                "deny_alternate_data_stream",
+                Some(arg),
+            ));
             return Err(RunnerError::PolicyViolation {
                 reason: format!("alternate data streams blocked by policy: {arg}"),
             });
