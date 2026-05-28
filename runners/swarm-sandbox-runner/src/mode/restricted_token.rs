@@ -130,8 +130,10 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
 
     // 9. Set up startup info — desktop HSTRING must outlive CreateProcess call
     let desktop_hstr = _desktop.as_ref().map(|d| HSTRING::from(d.desktop_string()));
-    let mut si = STARTUPINFOW::default();
-    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
     if let Some(ref hstr) = desktop_hstr {
         si.lpDesktop = windows::core::PWSTR(hstr.as_ptr() as *mut u16);
     }
