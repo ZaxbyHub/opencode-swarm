@@ -102,7 +102,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['explorer']).toEqual(expected);
 		});
 
-		it('coder should retain expected 14 tools', () => {
+		it('coder should retain expected 15 tools', () => {
 			const expected = [
 				'diff',
 				'imports',
@@ -115,6 +115,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'syntax_check',
 				'knowledge_add',
 				'knowledge_recall',
+				'knowledge_receipt',
 				'repo_map',
 				'summarize_work',
 				'swarm_command',
@@ -236,8 +237,8 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 	});
 
 	describe('BOUNDARY: architect tool count and composition', () => {
-		it('architect should have 73 tools', () => {
-			expect(AGENT_TOOL_MAP['architect'].length).toBe(73);
+		it('architect should have 77 tools', () => {
+			expect(AGENT_TOOL_MAP['architect'].length).toBe(77);
 		});
 
 		it('architect should include all orchestrator-specific tools', () => {
@@ -267,7 +268,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 		it('architect array should not have unexpected length changes', () => {
 			const originalLength = AGENT_TOOL_MAP['architect'].length;
 			// Verify current state matches expected
-			expect(originalLength).toBe(73);
+			expect(originalLength).toBe(77);
 		});
 	});
 });
