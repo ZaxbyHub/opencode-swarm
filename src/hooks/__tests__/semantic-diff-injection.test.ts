@@ -6,6 +6,7 @@ import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
 // Top-level mock function references (same pattern as diff-summary.test.ts)
 let mockExecFileSync: ReturnType<typeof vi.fn>;
 let mockReadFileSync: ReturnType<typeof vi.fn>;
+let mockRealpathSync: ReturnType<typeof vi.fn>;
 let mockComputeASTDiff: ReturnType<typeof vi.fn>;
 let mockClassifyChanges: ReturnType<typeof vi.fn>;
 let mockGenerateSummary: ReturnType<typeof vi.fn>;
@@ -22,6 +23,7 @@ describe('buildSemanticDiffBlock', () => {
 		// Create fresh mock functions
 		mockExecFileSync = vi.fn();
 		mockReadFileSync = vi.fn();
+		mockRealpathSync = vi.fn((p: string) => p);
 		mockComputeASTDiff = vi.fn();
 		mockClassifyChanges = vi.fn();
 		mockGenerateSummary = vi.fn();
@@ -35,10 +37,33 @@ describe('buildSemanticDiffBlock', () => {
 		// Mock the modules
 		vi.mock('node:child_process', () => ({
 			execFileSync: mockExecFileSync,
+			execFile: (
+				command: string,
+				args: string[],
+				options: unknown,
+				callback: (error: Error | null, stdout: string, stderr: string) => void,
+			) => {
+				try {
+					const stdout = mockExecFileSync(command, args, options);
+					callback(null, stdout ?? '', '');
+				} catch (error) {
+					callback(error as Error, '', '');
+				}
+			},
 		}));
 
 		vi.mock('node:fs', () => ({
 			readFileSync: mockReadFileSync,
+			realpathSync: mockRealpathSync,
+			promises: {
+				readFile: (filePath: string, encoding: BufferEncoding) => {
+					try {
+						return Promise.resolve(mockReadFileSync(filePath, encoding));
+					} catch (error) {
+						return Promise.reject(error);
+					}
+				},
+			},
 		}));
 
 		vi.mock('../../diff/ast-diff.js', () => ({
@@ -685,6 +710,71 @@ describe('buildSemanticDiffBlock', () => {
 			expect.any(String),
 			expect.any(String),
 		);
+	});
+
+	test('symlink escapes are silently skipped after realpath resolution', async () => {
+		const { buildSemanticDiffBlock } = await import(
+			'../semantic-diff-injection.js'
+		);
+
+		mockRealpathSync.mockImplementation((inputPath: string) => {
+			if (inputPath === '/safe/dir') return '/safe/dir';
+			if (inputPath === '/safe/dir/linked.ts') return '/outside/linked.ts';
+			return inputPath;
+		});
+		mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+			if (args[0] === 'cat-file') return '';
+			if (args[0] === 'show') return 'old';
+			return '';
+		});
+		mockReadFileSync.mockReturnValue('new');
+		mockComputeASTDiff.mockResolvedValue({
+			filePath: 'valid.ts',
+			language: 'typescript',
+			changes: [],
+			durationMs: 5,
+			usedAST: true,
+		});
+		mockGetCachedGraph.mockReturnValue(null);
+		mockClassifyChanges.mockReturnValue([]);
+		mockGenerateSummary.mockReturnValue({
+			totalFiles: 0,
+			totalChanges: 0,
+			byRisk: {},
+			byCategory: {},
+			metadata: { generatedAt: '', fileCount: 0 },
+		});
+		mockGenerateSummaryMarkdown.mockReturnValue('');
+
+		await buildSemanticDiffBlock('/safe/dir', ['linked.ts', 'valid.ts']);
+
+		expect(mockComputeASTDiff).toHaveBeenCalledTimes(1);
+		expect(mockComputeASTDiff).toHaveBeenCalledWith(
+			'valid.ts',
+			expect.any(String),
+			expect.any(String),
+		);
+	});
+
+	test('broken symlinks are skipped gracefully', async () => {
+		const { buildSemanticDiffBlock } = await import(
+			'../semantic-diff-injection.js'
+		);
+
+		mockRealpathSync.mockImplementation((inputPath: string) => {
+			if (inputPath === '/safe/dir') return '/safe/dir';
+			if (inputPath === '/safe/dir/broken.ts') {
+				const err = new Error('ENOENT') as Error & { code: string };
+				err.code = 'ENOENT';
+				throw err;
+			}
+			return inputPath;
+		});
+		mockGetCachedGraph.mockReturnValue(null);
+
+		const result = await buildSemanticDiffBlock('/safe/dir', ['broken.ts']);
+		expect(result).toBeNull();
+		expect(mockComputeASTDiff).not.toHaveBeenCalled();
 	});
 
 	describe('integration and edge cases', () => {

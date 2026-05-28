@@ -469,6 +469,23 @@ function extractSignature(
 		}
 	}
 
+	// Class rename support: capture class shape without class identifier.
+	// This allows class rename detection to compare declarations structurally.
+	if (
+		node.type === 'class_declaration' ||
+		node.type === 'class_definition' ||
+		node.type === 'class'
+	) {
+		const classBodyNode = node.children.find(
+			(c): c is SyntaxNodeRef =>
+				c !== null &&
+				(c.type === 'class_body' || c.type === 'declaration_list'),
+		);
+		if (classBodyNode) {
+			return classBodyNode.text;
+		}
+	}
+
 	return undefined;
 }
 
@@ -560,8 +577,12 @@ function findRenamedSymbol(
 	oldSymbols: SymbolInfo[],
 	matchedOldSymbols: Set<SymbolInfo>,
 ): SymbolInfo | null {
-	// Only detect renames for functions and types (not imports/exports)
-	if (newSymbol.category !== 'function' && newSymbol.category !== 'type') {
+	// Only detect renames for functions, types, and classes (not imports/exports)
+	if (
+		newSymbol.category !== 'function' &&
+		newSymbol.category !== 'type' &&
+		newSymbol.category !== 'class'
+	) {
 		return null;
 	}
 

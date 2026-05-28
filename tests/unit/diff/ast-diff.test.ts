@@ -298,6 +298,23 @@ describe('computeASTDiff', () => {
 		});
 	});
 
+	describe('rename detection', () => {
+		it('detects renamed class when class body remains stable', async () => {
+			const result = await computeASTDiff(
+				'test.ts',
+				'class OldName { value = 1; method(x: number) { return x + this.value; } }',
+				'class NewName { value = 1; method(x: number) { return x + this.value; } }',
+			);
+
+			const renamedClass = result.changes.find(
+				(change) => change.type === 'renamed' && change.category === 'class',
+			);
+			expect(renamedClass).toBeDefined();
+			expect(renamedClass?.name).toBe('NewName');
+			expect(renamedClass?.renamedFrom).toBe('OldName');
+		});
+	});
+
 	describe('500ms timeout works', () => {
 		it('falls back to raw diff on timeout', async () => {
 			// Create a very large file that will likely cause timeout

@@ -22,7 +22,45 @@ import {
 	type SemanticDiffSummary,
 } from '../diff/summary-generator.js';
 import { getImporters, normalizeGraphPath } from '../graph/graph-query.js';
+import {
+	GitBinaryMissingError,
+	isGitBinaryMissing,
+} from '../utils/git-binary-missing-error.js';
 import { getCachedGraph } from './repo-graph-injection.js';
+
+async function execGit(
+	directory: string,
+	args: string[],
+	options?: {
+		timeout?: number;
+		maxBuffer?: number;
+	},
+): Promise<string> {
+	try {
+		const stdout = await new Promise<string>((resolve, reject) => {
+			child_process.execFile('git', args, {
+				encoding: 'utf-8',
+				cwd: directory,
+				timeout: options?.timeout,
+				maxBuffer: options?.maxBuffer,
+			}, (error, output) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(output ?? '');
+			});
+		});
+		return stdout;
+	} catch (err) {
+		if (isGitBinaryMissing(err)) {
+			throw new GitBinaryMissingError('git binary is not available', {
+				cause: err,
+			});
+		}
+		throw err;
+	}
+}
 
 /**
  * Build a semantic diff summary block for the given changed files.
@@ -46,6 +84,8 @@ export async function buildSemanticDiffBlock(
 	if (changedFiles.length === 0) return null;
 
 	try {
+		const realDirectory = fs.realpathSync(directory);
+
 		// Cap to prevent excessive computation
 		const filesToProcess = changedFiles.slice(0, maxFiles);
 
@@ -68,12 +108,6 @@ export async function buildSemanticDiffBlock(
 		}
 
 		for (const filePath of filesToProcess) {
-			// Path traversal validation: ensure filePath doesn't escape directory.
-			// Uses lexical check (path.normalize + path.resolve + path.relative).
-			// NOTE: This validates lexically only — symlink-based escape is not checked
-			// because filePath comes from internal session state (declaredCoderScope),
-			// not arbitrary user input. If this function is ever exposed to untrusted
-			// input, add fs.realpathSync resolution for defense-in-depth.
 			const normalizedPath = path.normalize(filePath);
 			const resolvedPath = path.resolve(directory, normalizedPath);
 			const relativeToDir = path.relative(directory, resolvedPath);
@@ -81,26 +115,33 @@ export async function buildSemanticDiffBlock(
 				continue; // Skip files that escape the repo root
 			}
 
+			let realResolvedPath: string;
+			try {
+				realResolvedPath = fs.realpathSync(resolvedPath);
+			} catch {
+				// Broken symlink or missing file — skip gracefully
+				continue;
+			}
+
+			const realRelativeToDir = path.relative(realDirectory, realResolvedPath);
+			if (
+				realRelativeToDir.startsWith('..') ||
+				path.isAbsolute(realRelativeToDir)
+			) {
+				continue; // Symlink escapes repo root
+			}
+
 			try {
 				// Check if file exists in HEAD
 				let fileExistsInHead = false;
 				try {
-					child_process.execFileSync(
-						'git',
-						['cat-file', '-e', `HEAD:${filePath}`],
-						{
-							encoding: 'utf-8',
-							timeout: 3000,
-							cwd: directory,
-							stdio: 'pipe',
-						},
-					);
+					await execGit(directory, ['cat-file', '-e', `HEAD:${filePath}`], {
+						timeout: 3000,
+					});
 					fileExistsInHead = true;
 				} catch (err) {
 					// git binary ENOENT (missing binary) — abort immediately
-					if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-						(err as Error & { _gitBinaryMissing?: boolean })._gitBinaryMissing =
-							true;
+					if (err instanceof GitBinaryMissingError) {
 						throw err;
 					}
 					// Otherwise git ran but file not in HEAD — treat as new/untracked file
@@ -108,19 +149,13 @@ export async function buildSemanticDiffBlock(
 				}
 
 				const oldContent = fileExistsInHead
-					? child_process.execFileSync('git', ['show', `HEAD:${filePath}`], {
-							encoding: 'utf-8',
+					? await execGit(directory, ['show', `HEAD:${filePath}`], {
 							timeout: 5000,
-							cwd: directory,
-							stdio: 'pipe',
 							maxBuffer: 5 * 1024 * 1024,
 						})
 					: '';
 
-				const newContent = fs.readFileSync(
-					path.join(directory, filePath),
-					'utf-8',
-				);
+				const newContent = await fs.promises.readFile(realResolvedPath, 'utf-8');
 
 				const astResult = await computeASTDiff(
 					filePath,
@@ -136,11 +171,8 @@ export async function buildSemanticDiffBlock(
 				}
 			} catch (err) {
 				// Re-throw git binary ENOENT to outer catch (returns null for whole block)
-				// But NOT fs.readFileSync ENOENT (deleted files should be silently skipped)
-				if (
-					(err as NodeJS.ErrnoException).code === 'ENOENT' &&
-					(err as Error & { _gitBinaryMissing?: boolean })._gitBinaryMissing
-				) {
+				// But NOT fs.readFile ENOENT (deleted files should be silently skipped)
+				if (err instanceof GitBinaryMissingError) {
 					throw err;
 				}
 				// Parse failure, deleted file ENOENT, or other error — skip this file
