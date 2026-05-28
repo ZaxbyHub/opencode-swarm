@@ -86,9 +86,10 @@ pub fn enforce_symlink_egress(policy: &Policy, cwd: &str) -> Result<(), RunnerEr
     let canonical = std::fs::canonicalize(cwd).map_err(|e| RunnerError::PolicyViolation {
         reason: format!("cannot canonicalize cwd for symlink egress check: {e}"),
     })?;
-    // Windows std::fs::canonicalize prepends the verbatim path prefix \\?\ to bypass
-    // MAX_PATH limits.  Strip it so comparison against policy roots (stored as regular
-    // DOS paths without the prefix) works correctly.
+    // Windows std::fs::canonicalize prepends the verbatim path prefix \\?\ and resolves
+    // 8.3 short names (e.g. RUNNER~1 → runneradmin).  Strip the prefix and lowercase so
+    // we can compare consistently against policy roots (which may use the regular DOS form
+    // or 8.3 short names from %TEMP%).  Canonicalize the roots too for the same reasons.
     let canonical_lower = canonical.to_string_lossy().to_lowercase();
     let canonical_str = canonical_lower
         .strip_prefix("\\\\?\\")
@@ -99,19 +100,21 @@ pub fn enforce_symlink_egress(policy: &Policy, cwd: &str) -> Result<(), RunnerEr
         .iter()
         .chain(std::iter::once(&policy.temp_root))
         .any(|root| {
-            let root_lower = root.to_lowercase();
-            let root_cmp = root_lower
+            // Canonicalize each root so 8.3 short names and symlinks resolve to the same
+            // long-path form as the cwd.  Fall back to the raw value if the root doesn't
+            // exist on disk yet.
+            let root_resolved = std::fs::canonicalize(root)
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_else(|_| root.to_lowercase());
+            let root_cmp = root_resolved
                 .strip_prefix("\\\\?\\")
-                .unwrap_or(&root_lower)
+                .unwrap_or(&root_resolved)
                 .to_owned();
             canonical_str.starts_with(&root_cmp)
         });
 
     if !in_allowed {
-        events::emit(&events::denial_event(
-            "deny_symlink_egress",
-            Some(canonical_str),
-        ));
+        events::emit(&events::denial_event("deny_symlink_egress", Some(canonical_str)));
         return Err(RunnerError::PolicyViolation {
             reason: format!("cwd resolves outside allowed roots (symlink egress): {canonical_str}"),
         });
