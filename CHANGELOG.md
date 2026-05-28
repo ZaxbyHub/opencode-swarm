@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.45.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.1...v7.45.0) (2026-05-28)
+
+
+### Features
+
+* **diff:** harden semantic diff pipeline with symlink containment, typed git errors, async I/O, class rename ([1b623ff](https://github.com/zaxbysauce/opencode-swarm/commit/1b623ff47e37c3e14afcd22a95711132f464a728))
+
+
+### Bug Fixes
+
+* **test-runner:** restore allow_full_suite dual-guard and add selectHistoryForAnalysis tests ([#1063](https://github.com/zaxbysauce/opencode-swarm/issues/1063)) ([ec92616](https://github.com/zaxbysauce/opencode-swarm/commit/ec92616d435ccd636dddaa39610c106f67d9a251))
+
 ## [7.44.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.0...v7.44.1) (2026-05-28)
 
 
