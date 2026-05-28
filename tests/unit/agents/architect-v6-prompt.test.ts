@@ -17,6 +17,26 @@ const EXECUTE_SKILL = readFileSync(
 	join(process.cwd(), '.opencode/skills/execute/SKILL.md'),
 	'utf-8',
 );
+const SPECIFY_SKILL = readFileSync(
+	join(process.cwd(), '.opencode/skills/specify/SKILL.md'),
+	'utf-8',
+);
+const CLARIFY_SPEC_SKILL = readFileSync(
+	join(process.cwd(), '.opencode/skills/clarify-spec/SKILL.md'),
+	'utf-8',
+);
+const DISCOVER_SKILL = readFileSync(
+	join(process.cwd(), '.opencode/skills/discover/SKILL.md'),
+	'utf-8',
+);
+const CRITIC_GATE_SKILL = readFileSync(
+	join(process.cwd(), '.opencode/skills/critic-gate/SKILL.md'),
+	'utf-8',
+);
+const PHASE_WRAP_SKILL = readFileSync(
+	join(process.cwd(), '.opencode/skills/phase-wrap/SKILL.md'),
+	'utf-8',
+);
 
 // ==========================================
 // ARCHITECT AGENT - SMOKE TESTS
@@ -92,7 +112,8 @@ describe('Architect Agent - Key Structural Elements', () => {
 
 	it('HARD STOP in CRITIC-GATE', () => {
 		const idx = p.indexOf('### MODE: CRITIC-GATE');
-		expect(p.indexOf('HARD STOP', idx)).toBeGreaterThan(idx);
+		expect(idx).toBeGreaterThan(-1);
+		expect(CRITIC_GATE_SKILL).toContain('HARD STOP');
 	});
 
 	it('TASK COMPLETION GATE in EXECUTE', () => {
@@ -113,7 +134,7 @@ describe('Architect Agent - Key Structural Elements', () => {
 	});
 
 	it('CATASTROPHIC VIOLATION CHECK', () => {
-		expect(p.indexOf('CATASTROPHIC VIOLATION CHECK')).toBeGreaterThan(-1);
+		expect(PHASE_WRAP_SKILL).toContain('CATASTROPHIC VIOLATION CHECK');
 	});
 
 	it('EXPLICIT COMMAND OVERRIDE with priority 0', () => {
@@ -145,13 +166,13 @@ describe('Architect Agent - Phase 5 EXECUTE Structure', () => {
 		expect(section).toContain('pre_check_batch');
 	});
 
-	it('references reviewer, security gate, QA_RETRY_LIMIT', () => {
+	it('references reviewer, security gate, and configured retry limit', () => {
 		const execIdx = p.indexOf('### MODE: EXECUTE');
 		const wrapIdx = p.indexOf('### MODE: PHASE-WRAP');
 		const section = p.slice(execIdx, wrapIdx) + EXECUTE_SKILL;
-		expect(section).toContain('{{AGENT_PREFIX}}reviewer');
+		expect(section).toContain("the active swarm's reviewer agent");
 		expect(section).toMatch(/Security gate|security.*gate/i);
-		expect(section).toContain('QA_RETRY_LIMIT');
+		expect(section).toContain('configured QA retry limit');
 	});
 
 	it('has step 5b and reviewer step', () => {
@@ -168,12 +189,10 @@ describe('Architect Agent - Phase 6 PHASE-WRAP Structure', () => {
 
 	it('has PHASE-WRAP section with 5.5, retrospective, CATASTROPHIC VIOLATION CHECK', () => {
 		const idx = p.indexOf('### MODE: PHASE-WRAP');
-		const blockersIdx = p.indexOf('### Blockers', idx);
-		const section = p.slice(idx, blockersIdx > 0 ? blockersIdx : idx + 3000);
 		expect(idx).toBeGreaterThan(-1);
-		expect(section).toContain('5.5.');
-		expect(section).toMatch(/write.*retro|retrospective/i);
-		expect(section).toContain('CATASTROPHIC VIOLATION CHECK');
+		expect(PHASE_WRAP_SKILL).toContain('5.5.');
+		expect(PHASE_WRAP_SKILL).toMatch(/write.*retro|retrospective/i);
+		expect(PHASE_WRAP_SKILL).toContain('CATASTROPHIC VIOLATION CHECK');
 	});
 });
 
@@ -233,10 +252,8 @@ describe('Architect Agent - MODE: DISCOVER Structure', () => {
 
 	it('has DISCOVER section with governance reference', () => {
 		const idx = p.indexOf('### MODE: DISCOVER');
-		const next = p.indexOf('### MODE: CONSULT');
-		const section = p.slice(idx, next > 0 ? next : idx + 1500);
 		expect(idx).toBeGreaterThan(-1);
-		expect(section).toContain('governance');
+		expect(DISCOVER_SKILL).toContain('governance');
 	});
 });
 
@@ -245,12 +262,11 @@ describe('Architect Agent - MODE: SPECIFY Structure', () => {
 
 	it('has SPECIFY with FR-, SC-, spec-archive, ARCHIVE FIRST', () => {
 		const idx = p.indexOf('### MODE: SPECIFY');
-		const next = p.indexOf('### MODE: CLARIFY-SPEC');
-		const section = p.slice(idx, next > 0 ? next : idx + 2000);
-		expect(section).toContain('FR-');
-		expect(section).toContain('SC-');
-		expect(section).toContain('.swarm/spec-archive');
-		expect(section).toContain('ARCHIVE FIRST');
+		expect(idx).toBeGreaterThan(-1);
+		expect(SPECIFY_SKILL).toContain('FR-');
+		expect(SPECIFY_SKILL).toContain('SC-');
+		expect(SPECIFY_SKILL).toContain('.swarm/spec-archive');
+		expect(SPECIFY_SKILL).toContain('ARCHIVE FIRST');
 	});
 });
 
@@ -259,9 +275,8 @@ describe('Architect Agent - MODE: CLARIFY-SPEC Structure', () => {
 
 	it('has CLARIFY-SPEC with [NEEDS CLARIFICATION] markers', () => {
 		const idx = p.indexOf('### MODE: CLARIFY-SPEC');
-		const next = p.indexOf('### MODE: RESUME');
-		const section = p.slice(idx, next > 0 ? next : idx + 1500);
-		expect(section).toContain('[NEEDS CLARIFICATION]');
+		expect(idx).toBeGreaterThan(-1);
+		expect(CLARIFY_SPEC_SKILL).toContain('[NEEDS CLARIFICATION]');
 	});
 });
 
@@ -286,10 +301,9 @@ describe('Architect Agent - PHASE-WRAP 5.5 drift-check', () => {
 
 	it('has 5.5 with DRIFT-CHECK', () => {
 		const idx = p.indexOf('### MODE: PHASE-WRAP');
-		const blockersIdx = p.indexOf('### Blockers', idx);
-		const section = p.slice(idx, blockersIdx > 0 ? blockersIdx : idx + 3000);
-		expect(section).toContain('5.5.');
-		expect(section).toContain('DRIFT-CHECK');
+		expect(idx).toBeGreaterThan(-1);
+		expect(PHASE_WRAP_SKILL).toContain('5.5.');
+		expect(PHASE_WRAP_SKILL).toContain('DRIFT-CHECK');
 	});
 });
 

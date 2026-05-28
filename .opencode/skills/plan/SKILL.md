@@ -134,7 +134,7 @@ Do NOT call `set_qa_gates` until the user has responded.
 Then call `set_qa_gates` with the user's chosen flags.
 Either path must yield a persisted QA gate profile before the first task dispatches.
 
-⚠️ If `save_plan` is unavailable, delegate plan writing to {{AGENT_PREFIX}}coder:
+⚠️ If `save_plan` is unavailable, delegate plan writing to the active swarm's coder agent:
 ⚠️ Even in this fallback, you MUST call `declare_scope` for ".swarm/plan.md" BEFORE the coder delegation. Scope discipline applies to plan-writing delegations too. See Rule 1a.
 TASK: Write the implementation plan to .swarm/plan.md
 OUTPUT: .swarm/plan.md

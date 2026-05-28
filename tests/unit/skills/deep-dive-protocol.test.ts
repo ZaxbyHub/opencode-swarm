@@ -94,9 +94,9 @@ describe('.opencode/skills/deep-dive/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('reviewer');
 		});
 
-		it('contains exact text "2 parallel `{{AGENT_PREFIX}}reviewer` calls"', () => {
+		it('contains exact text "2 parallel `the active swarm\'s reviewer agent` calls"', () => {
 			expect(skillContent).toContain(
-				'2 parallel `{{AGENT_PREFIX}}reviewer` calls',
+				"2 parallel `the active swarm's reviewer agent` calls",
 			);
 		});
 	});
@@ -115,13 +115,13 @@ describe('.opencode/skills/deep-dive/SKILL.md protocol content', () => {
 		});
 	});
 
-	describe('8. {{AGENT_PREFIX}} references preserved', () => {
-		it('contains {{AGENT_PREFIX}}reviewer', () => {
-			expect(skillContent).toContain('{{AGENT_PREFIX}}reviewer');
+	describe('8. active swarm agent references preserved', () => {
+		it('contains active swarm reviewer', () => {
+			expect(skillContent).toContain("the active swarm's reviewer agent");
 		});
 
-		it('contains {{AGENT_PREFIX}}critic', () => {
-			expect(skillContent).toContain('{{AGENT_PREFIX}}critic');
+		it('contains active swarm critic', () => {
+			expect(skillContent).toContain("the active swarm's critic agent");
 		});
 	});
 

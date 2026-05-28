@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect';
-import { getExtractedExecuteSection } from './architect-mode-skill-helpers';
+import {
+	getExtractedExecuteSection,
+	PHASE_WRAP_PROTOCOL,
+} from './architect-mode-skill-helpers';
 
 /**
  * ADVERSARIAL TESTS for architect.ts
@@ -211,8 +214,7 @@ describe('createArchitectAgent - Adversarial Attack Vectors', () => {
 	});
 
 	describe('Attack Vector 6: Phase 6 step ordering (retrospective before summarize)', () => {
-		const agent = createArchitectAgent(testModel);
-		const prompt = agent.config.prompt!;
+		const phase6Section = PHASE_WRAP_PROTOCOL;
 
 		/**
 		 * ATTACK: Verify step ordering ensures evidence is persisted before user sees summary
@@ -222,26 +224,14 @@ describe('createArchitectAgent - Adversarial Attack Vectors', () => {
 		 *   - Audit trail is incomplete
 		 */
 		it('Phase 6 step 4 is "Write retrospective evidence"', () => {
-			const phase6Start = prompt.indexOf('### MODE: PHASE-WRAP');
-			const blockersStart = prompt.indexOf('### Blockers');
-			const phase6Section = prompt.slice(phase6Start, blockersStart);
-
 			expect(phase6Section).toContain('4. Write retrospective evidence');
 		});
 
 		it('Phase 6 step 6 is "Summarize to user"', () => {
-			const phase6Start = prompt.indexOf('### MODE: PHASE-WRAP');
-			const blockersStart = prompt.indexOf('### Blockers');
-			const phase6Section = prompt.slice(phase6Start, blockersStart);
-
 			expect(phase6Section).toContain('6. Summarize to user');
 		});
 
 		it('Step 4 appears BEFORE step 6 in Phase 6 (correct ordering)', () => {
-			const phase6Start = prompt.indexOf('### MODE: PHASE-WRAP');
-			const blockersStart = prompt.indexOf('### Blockers');
-			const phase6Section = prompt.slice(phase6Start, blockersStart);
-
 			const step4Index = phase6Section.indexOf('4. Write retrospective');
 			const step6Index = phase6Section.indexOf('6. Summarize');
 
@@ -251,10 +241,6 @@ describe('createArchitectAgent - Adversarial Attack Vectors', () => {
 		});
 
 		it('Evidence write happens before any user-facing summary', () => {
-			const phase6Start = prompt.indexOf('### MODE: PHASE-WRAP');
-			const blockersStart = prompt.indexOf('### Blockers');
-			const phase6Section = prompt.slice(phase6Start, blockersStart);
-
 			// Evidence manager is mentioned in step 4
 			expect(phase6Section).toContain('evidence manager');
 

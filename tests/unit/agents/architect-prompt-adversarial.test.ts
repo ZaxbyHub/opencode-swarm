@@ -825,7 +825,7 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 				nextSectionStart,
 			);
 
-			expect(fallbackDelegation).toContain('{{AGENT_PREFIX}}coder');
+			expect(fallbackDelegation).toContain("the active swarm's coder agent");
 			expect(fallbackDelegation).toContain('.swarm/plan.md');
 		});
 

@@ -11,6 +11,8 @@ description: >
 
 Read-only deep audit of a specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
+### MODE: DEEP_DIVE
+
 ## Step 0 — Parse Header
 
 Parse the MODE: DEEP_DIVE header to extract:
@@ -83,7 +85,7 @@ Explorers generate CANDIDATE FINDINGS only — they do NOT make verdicts. All fi
 
 ## Step 5 — Always 2 Parallel Reviewers
 
-Split the verified candidates into 2 shards of ≤10 candidates each. Dispatch 2 parallel `{{AGENT_PREFIX}}reviewer` calls.
+Split the verified candidates into 2 shards of ≤10 candidates each. Dispatch 2 parallel `the active swarm's reviewer agent` calls.
 
 Each reviewer receives:
 - Their shard of candidates (up to 10)
@@ -106,12 +108,12 @@ After both reviewers return, perform a lightweight sync pass:
 For verified findings rated HIGH or CRITICAL, dispatch sequential critic passes:
 
 **Pass 1 — False-positive / root-cause challenge:**
-- `{{AGENT_PREFIX}}critic` receives each HIGH/CRITICAL finding
+- `the active swarm's critic agent` receives each HIGH/CRITICAL finding
 - Challenge: "Is this a false positive? Is the root cause correctly identified? Provide verdict: SURVIVES / DOWNGRADE / REJECT"
 - Only findings that SURVIVE proceed to Pass 2
 
 **Pass 2 — Impact / severity challenge:**
-- `{{AGENT_PREFIX}}critic` receives surviving findings
+- `the active swarm's critic agent` receives surviving findings
 - Challenge: "Is the severity correctly rated? Could this be lower impact than claimed? Provide verdict: SURVIVES / DOWNGRADE / REJECT"
 - Final severity is the critic's assessed severity
 
