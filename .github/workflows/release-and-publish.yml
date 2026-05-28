@@ -35,7 +35,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
-          bun-version: "1.3.8"
+          bun-version: "1.3.13"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -56,7 +56,10 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build
-        run: bun run clean && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target bun --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run scripts/copy-grammars.ts --to-dist
+        run: bun run build
+
+      - name: Validate packed npm artifact
+        run: bun run package:smoke
 
       - name: Publish to npm
         run: |

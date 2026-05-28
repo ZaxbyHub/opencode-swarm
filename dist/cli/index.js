@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.42.0",
+    version: "7.43.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -98,6 +98,7 @@ var init_package = __esm(() => {
       format: "biome format . --write",
       check: "biome check --write .",
       dev: "bun run build && opencode",
+      "package:smoke": "node scripts/package-smoke.mjs",
       prepublishOnly: "bun run build",
       "repro:704": "node scripts/repro-704.mjs"
     },
