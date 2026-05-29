@@ -5,6 +5,7 @@
 
 ### Features
 
+* **architect:** replace max-3 clarification caps with critic-reviewed funnel ([#1071](https://github.com/zaxbysauce/opencode-swarm/issues/1071)) ([c165f7a](https://github.com/zaxbysauce/opencode-swarm/commit/c165f7a68a11d95289882fcfe02fca69b4b1f5e5))
 * **sandbox:** add native Windows sandbox runner (AppContainer + restricted token) ([#1068](https://github.com/zaxbysauce/opencode-swarm/issues/1068)) ([e40fd8e](https://github.com/zaxbysauce/opencode-swarm/commit/e40fd8e0525e2ba0b3e1d32b33336291df8a8b06))
 
 ## [7.45.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.1...v7.45.0) (2026-05-28)
