@@ -62,7 +62,7 @@ export declare const _internals: {
     renameSync: typeof fs.renameSync;
     mkdirSync: typeof fs.mkdirSync;
     existsSync: typeof fs.existsSync;
-    statSync: typeof fs.statSync;
+    statSync: any;
     openSync: typeof fs.openSync;
     readSync: typeof fs.readSync;
     closeSync: typeof fs.closeSync;

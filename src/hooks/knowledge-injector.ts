@@ -43,11 +43,7 @@ import { readSwarmFileAsync, safeHook } from './utils.js';
  * (📖, U+1F4DA) which was fragile across system encodings.
  */
 const INJECTION_SENTINEL = '\u200c[[KNOWLEDGE-INJECTED]]';
-
-interface KnowledgeBlock {
-	text: string;
-	ids: string[];
-}
+const defaultSearchKnowledge = searchKnowledge;
 
 /**
  * Builds a compact knowledge block from ranked entries, respecting a character budget.
@@ -65,12 +61,12 @@ function buildKnowledgeBlock(
 	charBudget: number,
 	cfg: KnowledgeConfig,
 	currentProject?: string,
-): KnowledgeBlock | null {
+): string | null {
 	if (entries.length === 0) return null;
 
 	const maxDisplayChars = cfg.max_lesson_display_chars ?? 120;
 
-	const records = entries.map((entry) => {
+	const lines: string[] = entries.map((entry) => {
 		const tier = entry.tier === 'hive' ? '[H]' : '[S]';
 		const confirmedBy = entry.confirmed_by?.length ?? 0;
 		const confirm =
@@ -91,24 +87,19 @@ function buildKnowledgeBlock(
 				? ` (from: ${sanitizeLessonForContext(rawSource)})`
 				: '';
 
-		return {
-			id: entry.id,
-			line: `${tier} ${lessonText}${source}${confirm}`,
-		};
+		return `${tier} ${lessonText}${source}${confirm}`;
 	});
 
 	const header = '\ud83d\udcda Lessons:\n';
 
 	// Trim whole entries from end if block exceeds charBudget
-	let block = `${header}\n${records.map((r) => r.line).join('\n')}`;
-	while (block.length > charBudget && records.length > 0) {
-		records.pop();
-		block = `${header}\n${records.map((r) => r.line).join('\n')}`;
+	let block = `${header}\n${lines.join('\n')}`;
+	while (block.length > charBudget && lines.length > 0) {
+		lines.pop();
+		block = `${header}\n${lines.join('\n')}`;
 	}
 
-	return records.length > 0
-		? { text: block, ids: records.map((r) => r.id) }
-		: null;
+	return lines.length > 0 ? block : null;
 }
 
 /**
@@ -120,10 +111,11 @@ function buildDirectiveBlock(
 	entries: RankedEntry[],
 	charBudget: number,
 	cfg: KnowledgeConfig,
-): KnowledgeBlock | null {
+): string | null {
 	if (entries.length === 0) return null;
 	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
-	const records: Array<{ id: string; lines: string[] }> = [];
+	const lines: string[] = [];
+	lines.push('<swarm_knowledge_directives>');
 	for (const e of entries) {
 		const trigger =
 			e.triggers && e.triggers.length > 0
@@ -150,32 +142,34 @@ function buildDirectiveBlock(
 		const priority = e.directive_priority ?? 'medium';
 		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
 		// Each directive is one record. Keep YAML-ish for parser-friendliness.
-		const lines = [
-			`- id: ${e.id}`,
-			`  confidence: ${Number(e.confidence).toFixed(2)}`,
-			`  priority: ${priority}`,
-			`  lesson: ${lesson}`,
-		];
+		lines.push(`- id: ${e.id}`);
+		lines.push(`  confidence: ${Number(e.confidence).toFixed(2)}`);
+		lines.push(`  priority: ${priority}`);
+		lines.push(`  lesson: ${lesson}`);
 		if (trigger) lines.push(`  trigger: ${trigger}`);
 		if (required) lines.push(`  required: ${required}`);
 		if (forbidden) lines.push(`  forbidden: ${forbidden}`);
 		if (skillRef) lines.push(`  skill: ${skillRef}`);
 		if (verification) lines.push(`  verification: ${verification}`);
-		records.push({ id: e.id, lines });
 	}
-	const render = () =>
-		[
-			'<swarm_knowledge_directives>',
-			...records.flatMap((r) => r.lines),
-			'</swarm_knowledge_directives>',
-		].join('\n');
-	let block = render();
-	while (block.length > charBudget && records.length > 0) {
-		records.pop();
-		block = render();
+	lines.push('</swarm_knowledge_directives>');
+	let block = lines.join('\n');
+	while (block.length > charBudget && lines.length > 3) {
+		// Pop the last directive record (find the last '- id:' line)
+		let lastIdx = -1;
+		for (let i = lines.length - 2; i >= 0; i--) {
+			if (lines[i].startsWith('- id:')) {
+				lastIdx = i;
+				break;
+			}
+		}
+		if (lastIdx < 0) break;
+		lines.splice(lastIdx, lines.length - 1 - lastIdx);
+		block = lines.join('\n');
 	}
-	if (records.length === 0) return null;
-	return { text: block, ids: records.map((r) => r.id) };
+	// If we trimmed everything to header+footer, return null.
+	if (lines.length <= 2) return null;
+	return block;
 }
 
 /** Sanitizes lesson text to prevent prompt injection into LLM context. */
@@ -207,14 +201,14 @@ function isOrchestratorAgent(agentName: string): boolean {
 function injectKnowledgeMessage(
 	output: { messages?: MessageWithParts[] },
 	text: string,
-): boolean {
-	if (!output.messages) return false;
+): void {
+	if (!output.messages) return;
 
 	// Idempotency guard: skip if already injected in this transform
 	const alreadyInjected = output.messages.some((m) =>
 		m.parts?.some((p) => p.text?.includes(INJECTION_SENTINEL)),
 	);
-	if (alreadyInjected) return false;
+	if (alreadyInjected) return;
 
 	// Insert just before the last user message (recency position).
 	// Avoids the "lost in the middle" attention dead zone that mid-array injection creates.
@@ -232,7 +226,6 @@ function injectKnowledgeMessage(
 	};
 
 	output.messages.splice(insertIdx, 0, knowledgeMessage);
-	return true;
 }
 
 // ============================================================================
@@ -365,7 +358,11 @@ export function createKnowledgeInjectorHook(
 			};
 
 			// Retrieve action-aware ranked entries (uses triggers/applies_to/priority).
-			const search = await _internals.searchKnowledge({
+			const searchFn =
+				_internals.searchKnowledge === defaultSearchKnowledge
+					? searchKnowledge
+					: _internals.searchKnowledge;
+			const search = await searchFn({
 				directory,
 				config,
 				context: retrievalCtx,
@@ -377,6 +374,8 @@ export function createKnowledgeInjectorHook(
 			const entries = search.results;
 			// Filter to high-confidence entries only (confidence >= 0.8)
 			const filteredEntries = filterHighConfidenceKnowledge(entries);
+			// Track which IDs we showed so application-tracking can split shown from applied.
+			cachedShownIds = filteredEntries.map((e) => e.id);
 
 			// Build drift/briefing preamble into a LOCAL variable so cachedInjectionText
 			// is never mutated before we know whether entries exist. This prevents the
@@ -464,14 +463,14 @@ export function createKnowledgeInjectorHook(
 
 			// 1a. Actionable directives (highest priority — architect must acknowledge).
 			if (directiveBlock) {
-				parts.push(directiveBlock.text);
-				remaining -= directiveBlock.text.length;
+				parts.push(directiveBlock);
+				remaining -= directiveBlock.length;
 			}
 
 			// 1b. Legacy lesson block (informational).
 			if (lessonBlock) {
-				parts.push(lessonBlock.text);
-				remaining -= lessonBlock.text.length;
+				parts.push(lessonBlock);
+				remaining -= lessonBlock.length;
 			}
 
 			// 2. Run memory
@@ -516,24 +515,17 @@ export function createKnowledgeInjectorHook(
 			}
 
 			cachedInjectionText = parts.join('\n\n');
-			cachedShownIds = Array.from(
-				new Set([...(directiveBlock?.ids ?? []), ...(lessonBlock?.ids ?? [])]),
-			);
-			const didInject = injectKnowledgeMessage(output, cachedInjectionText);
-			if (!didInject) return;
+			injectKnowledgeMessage(output, cachedInjectionText);
 
 			// v2: Populate in-memory currentCriticalShownIds so the toolBefore
 			// enforcement gate can read O(1) without re-scanning JSONL.
 			// Keyed by sessionID — the gate consults this exact key.
 			const sessionID = systemMsg?.info?.sessionID;
 			if (sessionID) {
-				const shownIdSet = new Set(cachedShownIds);
 				const criticalIds = filteredEntries
 					.filter(
 						(e) =>
-							shownIdSet.has(e.id) &&
-							e.directive_priority === 'critical' &&
-							e.status !== 'archived',
+							e.directive_priority === 'critical' && e.status !== 'archived',
 					)
 					.map((e) => e.id);
 				if (criticalIds.length > 0) {
