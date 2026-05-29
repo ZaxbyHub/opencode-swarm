@@ -125,6 +125,25 @@ mock.module('../../../src/utils/path-security', () => ({
 }));
 ```
 
+## Diagnosing Test Isolation Failures
+
+When test files pass individually but fail when run together, follow this protocol:
+
+1. **Isolate**: Run the failing file alone: `bun test <file>.test.ts --timeout 30000`
+2. **Pair**: Run it WITH its suspected polluting neighbor: `bun test <fileA>.test.ts <fileB>.test.ts`
+3. **Classify**:
+   - Both pass alone → fail together → **mock pollution** from neighbor
+   - Fails alone → **test logic bug** (not isolation issue)
+   - Passes alone + passes together but fails in full suite → **third-file pollution** (use binary search across directory)
+4. **For mock pollution**, check the neighbor for these patterns:
+   - `vi.mock()` or `mock.module()` inside `beforeEach()` (not at top level)
+   - `delete require.cache[...]` combined with re-import pattern
+   - These indicate hoist-time closure capture — see below
+5. **Specific symptom — closure capture failure**: `vi.mock()` captures closures at **hoist time** (before `beforeEach` runs). Reassigning `mockFn.mockImplementation(newFn)` in the test body does **NOT** update the hoisted closure — the mock still calls the original function.
+   - Symptom: `expect(mockFn).toHaveBeenCalledTimes(N)` fails with an unexpected count
+   - Symptom: `expect(mockFn).not.toHaveBeenCalled()` fails because the real function was called
+6. **Fix path**: Migrate the affected test file to `_internals` DI seam pattern per the `mock-to-internals-migration` skill. This eliminates both the `vi.mock()` call and the closure capture surface area.
+
 ## Two-Tier Mock Convention
 
 The codebase uses a two-tier strategy for mock isolation, plus a zero-mock testing pattern:
