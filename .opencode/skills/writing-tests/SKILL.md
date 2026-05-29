@@ -441,6 +441,29 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - **Do not test framework behavior.** "Zod schema parses valid input" tests Zod, not your schema.
 - **Do not test test utilities.** If it only exists to support other tests, it doesn't need its own test.
 - **Do not mock everything.** If every dependency is mocked, you're testing the mock setup. Prefer real dependencies for pure functions and only mock I/O boundaries (filesystem, network, timers).
+
+### Anchored Content Assertions
+
+When asserting that skill files, protocol docs, or structured markdown contain expected text, **anchor your assertions to the relevant section** rather than using bare `toContain()` on the full file content:
+
+```typescript
+// WEAK — passes even if the word appears in prose outside the intended section
+expect(content).toContain('DROP');
+
+// STRONG — fails if the structured section is removed or relocated
+const stage3Start = content.indexOf('#### Stage 3: Consult Critic Sounding Board');
+const stage4Start = content.indexOf('#### Stage 4: Surface User Decision Packet');
+const stage3Section = content.slice(stage3Start, stage4Start);
+expect(stage3Section).toContain('DROP');
+expect(stage3Section).toContain('ASK_USER');
+```
+
+**Why this matters:** A bare `toContain('DROP')` passes as long as the word appears anywhere in the file. If the structured outcomes section is deleted but a prose reference remains (e.g., "The critic may DROP irrelevant items"), the test still passes — silently hiding the removal. Section-anchored assertions fail when the content is actually removed from its intended location.
+
+Use this pattern for:
+- Critic outcome mappings in skill files (DROP, ASK_USER, RESOLVE, REPHRASE)
+- Classification category lists (self_resolved, user_decision, etc.)
+- Any structured section where word presence is necessary but position-dependent
 - **Do not hardcode version numbers.** Version bumps are automated — a test asserting `version === '6.31.3'` breaks on every release.
 - **Do not use `sleep` or `setTimeout` for synchronization.** Use explicit signals, resolved promises, or `Bun.sleep()` with tight bounds.
 - **Do not spawn `cat /dev/zero`, `yes`, or other infinite-output commands.** Use `sleep 30` for "blocking command" tests.
