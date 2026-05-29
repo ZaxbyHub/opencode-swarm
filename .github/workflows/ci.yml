@@ -137,9 +137,8 @@ jobs:
       - name: Unit tests (hooks - knowledge injector)
         shell: bash
         run: |
-          shopt -s extglob
           failed=0
-          for f in tests/unit/hooks/!(knowledge-injector.adversarial).test.ts; do
+          for f in tests/unit/hooks/knowledge-injector.test.ts tests/unit/hooks/knowledge-injector-allowlist.test.ts tests/unit/hooks/knowledge-injector-drift.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -149,9 +148,8 @@ jobs:
       - name: Unit tests (hooks - knowledge-curator)
         shell: bash
         run: |
-          shopt -s extglob
           failed=0
-          for f in tests/unit/hooks/!(knowledge-injector.adversarial|knowledge-curator-evidence-curation|knowledge-curator-ttl|knowledge-curator|knowledge-curator.adversarial|knowledge-curator-output).test.ts; do
+          for f in tests/unit/hooks/knowledge-curator.test.ts tests/unit/hooks/knowledge-curator-evidence-curation.test.ts tests/unit/hooks/knowledge-curator-evidence-predicate.test.ts tests/unit/hooks/knowledge-curator-outcome-promotion.test.ts tests/unit/hooks/knowledge-curator-output.test.ts tests/unit/hooks/knowledge-curator-ttl.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -263,13 +261,161 @@ jobs:
       - name: Unit tests (hooks - remaining)
         shell: bash
         run: |
-          shopt -s extglob
           set -o pipefail
           IFS=$'\n'
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
-          for f in tests/unit/hooks/advisory*.test.ts tests/unit/hooks/agent*.test.ts tests/unit/hooks/co-change*.test.ts tests/unit/hooks/compaction*.test.ts tests/unit/hooks/!(context-budget-log-reclassification).test.ts tests/unit/hooks/dark*.test.ts tests/unit/hooks/extractors*.test.ts tests/unit/hooks/!(full-auto-intercept|full-auto-intercept.adversarial|full-auto-intercept.dispatch).test.ts tests/unit/hooks/gate*.test.ts tests/unit/hooks/!(log-level-reclassification).test.ts tests/unit/hooks/message*.test.ts tests/unit/hooks/mode-*.test.ts tests/unit/hooks/!(model-limits-log-reclassification|model-limits-adversarial).test.ts tests/unit/hooks/phase*.test.ts tests/unit/hooks/pipeline*.test.ts tests/unit/hooks/plan*.test.ts tests/unit/hooks/review-receipt*.test.ts tests/unit/hooks/self*.test.ts tests/unit/hooks/steering*.test.ts tests/unit/hooks/system-message*.test.ts tests/unit/hooks/telemetry-guardrails*.test.ts tests/unit/hooks/tool*.test.ts tests/unit/hooks/trajectory*.test.ts tests/unit/hooks/!(utils).test.ts; do
+          for f in \
+            tests/unit/hooks/adversarial-detection-schema.adversarial.test.ts \
+            tests/unit/hooks/adversarial-detector-adversarial.test.ts \
+            tests/unit/hooks/adversarial-detector-pattern-attack.test.ts \
+            tests/unit/hooks/adversarial-detector-patterns.test.ts \
+            tests/unit/hooks/adversarial-detector-spiral-handler.test.ts \
+            tests/unit/hooks/adversarial-detector-task1-2.test.ts \
+            tests/unit/hooks/adversarial-detector-wiring.test.ts \
+            tests/unit/hooks/adversarial-detector.test.ts \
+            tests/unit/hooks/advisory-injection.test.ts \
+            tests/unit/hooks/agent-activity-adversarial.test.ts \
+            tests/unit/hooks/agent-activity-atomic-write.test.ts \
+            tests/unit/hooks/agent-activity.test.ts \
+            tests/unit/hooks/co-change-suggester-adversarial.test.ts \
+            tests/unit/hooks/co-change-suggester.test.ts \
+            tests/unit/hooks/compaction-customizer.test.ts \
+            tests/unit/hooks/context-budget.test.ts \
+            tests/unit/hooks/context-scoring.test.ts \
+            tests/unit/hooks/curator-atomic-write.test.ts \
+            tests/unit/hooks/curator-auto-retire.test.ts \
+            tests/unit/hooks/curator-coverage.test.ts \
+            tests/unit/hooks/curator-drift.test.ts \
+            tests/unit/hooks/curator-llm-factory.test.ts \
+            tests/unit/hooks/curator-role-normalization.test.ts \
+            tests/unit/hooks/curator-structured-blocks.test.ts \
+            tests/unit/hooks/curator.adversarial.test.ts \
+            tests/unit/hooks/curator.test.ts \
+            tests/unit/hooks/dark-matter-detector-adversarial.test.ts \
+            tests/unit/hooks/dark-matter-detector.test.ts \
+            tests/unit/hooks/delegation-gate-completion-gate.test.ts \
+            tests/unit/hooks/delegation-gate-council-fallback.test.ts \
+            tests/unit/hooks/delegation-gate-council-phase.test.ts \
+            tests/unit/hooks/delegation-gate-council.test.ts \
+            tests/unit/hooks/delegation-gate-envelope.test.ts \
+            tests/unit/hooks/delegation-gate-evidence-taskid.test.ts \
+            tests/unit/hooks/delegation-gate-plan-aware-filtering.test.ts \
+            tests/unit/hooks/delegation-gate-prior-coder.test.ts \
+            tests/unit/hooks/delegation-gate-reviewer-run.test.ts \
+            tests/unit/hooks/delegation-gate-scope.test.ts \
+            tests/unit/hooks/delegation-gate-stale-state.test.ts \
+            tests/unit/hooks/delegation-gate-state-machine.adversarial.test.ts \
+            tests/unit/hooks/delegation-gate-task-1-5.test.ts \
+            tests/unit/hooks/delegation-gate-tests-run.test.ts \
+            tests/unit/hooks/delegation-gate.adversarial.test.ts \
+            tests/unit/hooks/delegation-gate.directory-security.test.ts \
+            tests/unit/hooks/delegation-gate.evidence-task-id.test.ts \
+            tests/unit/hooks/delegation-gate.stage-b-parallel.adversarial.test.ts \
+            tests/unit/hooks/delegation-gate.test.ts \
+            tests/unit/hooks/delegation-sanitizer.test.ts \
+            tests/unit/hooks/delegation-tracker.adversarial.test.ts \
+            tests/unit/hooks/delegation-tracker.test.ts \
+            tests/unit/hooks/destructive-command-guard.test.ts \
+            tests/unit/hooks/destructive-command-lstat.test.ts \
+            tests/unit/hooks/destructive-command-swarm-cli-bypass.test.ts \
+            tests/unit/hooks/destructive-command-windows.test.ts \
+            tests/unit/hooks/destructive-command-wrapper-unwrap.test.ts \
+            tests/unit/hooks/extractors.test.ts \
+            tests/unit/hooks/full-auto-delegation.test.ts \
+            tests/unit/hooks/full-auto-input-probe.test.ts \
+            tests/unit/hooks/full-auto-permission-integration.test.ts \
+            tests/unit/hooks/full-auto-permission.test.ts \
+            tests/unit/hooks/gate-tracking.test.ts \
+            tests/unit/hooks/guardrails-architect-config-zone.adversarial.test.ts \
+            tests/unit/hooks/guardrails-attestation.test.ts \
+            tests/unit/hooks/guardrails-authority-enhanced.test.ts \
+            tests/unit/hooks/guardrails-authority.test.ts \
+            tests/unit/hooks/guardrails-catastrophic-warning.test.ts \
+            tests/unit/hooks/guardrails-coder-revisions.test.ts \
+            tests/unit/hooks/guardrails-codex-p1-fixes.test.ts \
+            tests/unit/hooks/guardrails-config-file-logging.test.ts \
+            tests/unit/hooks/guardrails-directory.adversarial.test.ts \
+            tests/unit/hooks/guardrails-directory.test.ts \
+            tests/unit/hooks/guardrails-disabled.test.ts \
+            tests/unit/hooks/guardrails-enforcement.test.ts \
+            tests/unit/hooks/guardrails-error-classification.test.ts \
+            tests/unit/hooks/guardrails-fallback.test.ts \
+            tests/unit/hooks/guardrails-loop-detection.test.ts \
+            tests/unit/hooks/guardrails-model-fallback.adversarial.test.ts \
+            tests/unit/hooks/guardrails-model-fallback.test.ts \
+            tests/unit/hooks/guardrails-modified-files.adversarial.test.ts \
+            tests/unit/hooks/guardrails-modified-files.test.ts \
+            tests/unit/hooks/guardrails-native-agents.test.ts \
+            tests/unit/hooks/guardrails-pathtraversal-adversarial.test.ts \
+            tests/unit/hooks/guardrails-plan-md-guard.test.ts \
+            tests/unit/hooks/guardrails-plan-md-protection.test.ts \
+            tests/unit/hooks/guardrails-pre-check-batch.test.ts \
+            tests/unit/hooks/guardrails-prompt-trimming.adversarial.test.ts \
+            tests/unit/hooks/guardrails-prompt-trimming.test.ts \
+            tests/unit/hooks/guardrails-runaway.test.ts \
+            tests/unit/hooks/guardrails-scope-check.adversarial.test.ts \
+            tests/unit/hooks/guardrails-scope-check.test.ts \
+            tests/unit/hooks/guardrails-self-coding-gate.test.ts \
+            tests/unit/hooks/guardrails-shell-write.test.ts \
+            tests/unit/hooks/guardrails-source-path.test.ts \
+            tests/unit/hooks/guardrails-subagent-advisory.test.ts \
+            tests/unit/hooks/guardrails-swarm-path-evasion.adversarial.test.ts \
+            tests/unit/hooks/guardrails-swarm-path-guard.test.ts \
+            tests/unit/hooks/guardrails-task-1-7-edge-case.test.ts \
+            tests/unit/hooks/guardrails-task23.adversarial.test.ts \
+            tests/unit/hooks/guardrails-test-suite-guard.adversarial.test.ts \
+            tests/unit/hooks/guardrails-test-suite-guard.test.ts \
+            tests/unit/hooks/guardrails-v612-adversarial.test.ts \
+            tests/unit/hooks/guardrails-v612-verification.test.ts \
+            tests/unit/hooks/guardrails-v622-adversarial.test.ts \
+            tests/unit/hooks/guardrails-zone-authority.test.ts \
+            tests/unit/hooks/guardrails.adversarial.test.ts \
+            tests/unit/hooks/guardrails.test.ts \
+            tests/unit/hooks/hive-promoter-task3-4.adversarial.test.ts \
+            tests/unit/hooks/hive-promoter.adversarial.test.ts \
+            tests/unit/hooks/hive-promoter.test.ts \
+            tests/unit/hooks/hook-composition.test.ts \
+            tests/unit/hooks/interpreter-gating.test.ts \
+            tests/unit/hooks/knowledge-application-gate.test.ts \
+            tests/unit/hooks/knowledge-application.test.ts \
+            tests/unit/hooks/knowledge-contextual-retrieval.test.ts \
+            tests/unit/hooks/knowledge-curator-evidence-predicate.test.ts \
+            tests/unit/hooks/knowledge-curator-outcome-promotion.test.ts \
+            tests/unit/hooks/knowledge-curator-skip-promotion.test.ts \
+            tests/unit/hooks/knowledge-events.test.ts \
+            tests/unit/hooks/knowledge-injector-allowlist.test.ts \
+            tests/unit/hooks/knowledge-injector-drift-adversarial.test.ts \
+            tests/unit/hooks/knowledge-injector-drift.test.ts \
+            tests/unit/hooks/knowledge-injector.test.ts \
+            tests/unit/hooks/knowledge-migrator.adversarial.test.ts \
+            tests/unit/hooks/knowledge-migrator.external.test.ts \
+            tests/unit/hooks/knowledge-migrator.test.ts \
+            tests/unit/hooks/knowledge-quarantine.adversarial.test.ts \
+            tests/unit/hooks/knowledge-quarantine.test.ts \
+            tests/unit/hooks/knowledge-reader-key-normalization.test.ts \
+            tests/unit/hooks/knowledge-reader.test.ts \
+            tests/unit/hooks/knowledge-registration.test.ts \
+            tests/unit/hooks/knowledge-schema-v2.test.ts \
+            tests/unit/hooks/knowledge-store-caps.test.ts \
+            tests/unit/hooks/knowledge-store-normalize-entry.adversarial.test.ts \
+            tests/unit/hooks/knowledge-store-normalize-entry.test.ts \
+            tests/unit/hooks/knowledge-store-sweep.test.ts \
+            tests/unit/hooks/knowledge-store.test.ts \
+            tests/unit/hooks/knowledge-types.adversarial.test.ts \
+            tests/unit/hooks/knowledge-types.test.ts \
+            tests/unit/hooks/knowledge-validator.adversarial.test.ts \
+            tests/unit/hooks/knowledge-validator.test.ts \
+            tests/unit/hooks/system-enhancer-v62.test.ts \
+            tests/unit/hooks/system-enhancer.test.ts \
+            tests/unit/hooks/system-message-consolidation.test.ts \
+            tests/unit/hooks/telemetry-guardrails-wiring.test.ts \
+            tests/unit/hooks/tool-summarizer-exempt.adversarial.test.ts \
+            tests/unit/hooks/tool-summarizer-exempt.test.ts \
+            tests/unit/hooks/tool-summarizer.test.ts \
+            tests/unit/hooks/trajectory-logger.test.ts \
+            tests/unit/hooks/write-lstat-authority.test.ts; do
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
