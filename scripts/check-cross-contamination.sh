@@ -32,8 +32,8 @@ for pair in "${PAIRS[@]}"; do
   if [ $exit_code -ne 0 ]; then
     actual=$(grep -oP '^\s*\d+ pass' "$tmp" | grep -oP '\d+' || echo "0")
 
-    if [ "$actual" -le "$known_expected" ]; then
-      # Pass count is at or below the known baseline — this is a NEW regression
+    if [ "$actual" -lt "$known_expected" ]; then
+      # Pass count dropped below the known baseline — this is a NEW regression
       echo "::error title=Cross-contamination regression::Co-run of $file_a + $file_b: expected ${expected} pass (${expected_a}+${expected_b}), got ${actual} pass. Previously known baseline was ${known_expected}. A new mock.module or vi.mock() leak was introduced."
       echo ""
       echo "Test pair: $file_a + $file_b"
