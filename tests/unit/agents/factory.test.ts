@@ -410,6 +410,31 @@ describe('createAgents', () => {
 			);
 			expect(cloudArchitect?.config.prompt).toContain('cloud_');
 		});
+
+		it('non-default swarm renders loaded skill agent targets to concrete prefixed names', () => {
+			const config = {
+				swarms: {
+					cloud: {
+						name: 'Cloud',
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const cloudArchitect = agents.find((a) => a.name === 'cloud_architect');
+			const prompt = cloudArchitect?.config.prompt ?? '';
+
+			expect(prompt).toContain("the active swarm's coder agent = @cloud_coder");
+			expect(prompt).toContain(
+				"the active swarm's reviewer agent = @cloud_reviewer",
+			);
+			expect(prompt).toContain(
+				"the active swarm's critic_drift_verifier agent = @cloud_critic_drift_verifier",
+			);
+			expect(prompt).not.toContain(
+				"the active swarm's coder agent = @{{AGENT_PREFIX}}coder",
+			);
+		});
 	});
 
 	describe('architect template replacement', () => {

@@ -20,6 +20,7 @@ import {
 	rewriteKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
+import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MODES = ['archive', 'quarantine', 'purge'] as const;
@@ -104,6 +105,14 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			let nextEntries: SwarmKnowledgeEntry[];
 			let resultStatus: string;
 			if (mode === 'purge') {
+				// Defense-in-depth: hard-delete is irreversible. Emit a prominent
+				// warning even though allow_purge:true was already required. The
+				// archived event below is the audit trail.
+				warn(
+					`[knowledge_archive] PURGE: hard-deleting entry id=${id} actor=${
+						ctx?.agent ?? 'unknown'
+					} reason=${reason}`,
+				);
 				nextEntries = entries.filter((e) => e.id !== id);
 				resultStatus = 'purged';
 			} else {

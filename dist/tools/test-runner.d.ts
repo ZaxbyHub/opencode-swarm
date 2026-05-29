@@ -1,4 +1,5 @@
 import type { tool } from '@opencode-ai/plugin';
+import { getAllHistory, type TestRunRecord } from '../test-impact/history-store.js';
 export declare const MAX_OUTPUT_BYTES = 512000;
 export declare const MAX_COMMAND_LENGTH = 500;
 export declare const DEFAULT_TIMEOUT_MS = 60000;
@@ -127,4 +128,10 @@ export declare function isLanguageSpecificTestFile(basename: string): boolean;
  */
 export declare function getTestFilesFromConvention(sourceFiles: string[], workingDir?: string): string[];
 export declare function runTests(framework: TestFramework, scope: 'all' | 'convention' | 'graph' | 'impact', files: string[], coverage: boolean, timeout_ms: number, cwd: string): Promise<TestResult>;
+declare function selectHistoryForAnalysis(history: ReturnType<typeof getAllHistory>): TestRunRecord[];
 export declare const test_runner: ReturnType<typeof tool>;
+export declare const _internals: {
+    readonly selectHistoryForAnalysis: typeof selectHistoryForAnalysis;
+    readonly AGGREGATE_TEST_NAME: "(aggregate)";
+};
+export {};

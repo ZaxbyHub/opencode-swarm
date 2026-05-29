@@ -1981,11 +1981,14 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							taskSession.lastDelegationReason = 'critic_consultation';
 						} else {
 							// Parsing failed — inject a fallback so the architect is not left without
-							// guidance. Expected format: "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
+							// guidance. Use conservative behavior: treat as REPHRASE (needs review)
+							// rather than silently approving. Expected format:
+							// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
 							taskSession.pendingAdvisoryMessages.push(
 								`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
 									`critic_sounding_board response (${rawResponse.length} chars). ` +
-									`Treat as APPROVED and proceed, but review the raw response for manual guidance.`,
+									`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
+									`Do not silently accept as resolved.`,
 							);
 						}
 					}

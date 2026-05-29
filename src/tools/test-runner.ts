@@ -2760,3 +2760,8 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(result, null, 2);
 	},
 });
+
+export const _internals = {
+	selectHistoryForAnalysis,
+	AGGREGATE_TEST_NAME,
+} as const;

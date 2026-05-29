@@ -22,7 +22,7 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('RETRY PROTOCOL');
 			expect(skillContent).toContain('GATE FAILURE RESPONSE RULES');
 			expect(skillContent).toContain(
-				'You MUST return to {{AGENT_PREFIX}}coder',
+				"You MUST return to the active swarm's coder agent",
 			);
 		});
 

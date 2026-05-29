@@ -69,11 +69,11 @@ describe('ARCHITECT QA GATE: pre_check_batch Integration', () => {
 		// Must have gates_passed === false branch (return to coder, no reviewer)
 		expect(prompt).toContain('gates_passed === false');
 		expect(prompt).toContain('return to coder');
-		expect(prompt).toContain('Do NOT call {{AGENT_PREFIX}}reviewer');
+		expect(prompt).toContain("Do NOT call the active swarm's reviewer agent");
 
 		// Must have gates_passed === true branch (proceed to reviewer)
 		expect(prompt).toContain('gates_passed === true');
-		expect(prompt).toContain('proceed to {{AGENT_PREFIX}}reviewer');
+		expect(prompt).toContain("proceed to the active swarm's reviewer agent");
 	});
 
 	test('pre_check_batch runs AFTER build_check in Phase 5', () => {
@@ -115,8 +115,10 @@ describe('ARCHITECT QA GATE: pre_check_batch Integration', () => {
 		);
 
 		expect(preCheckStep).toContain('gates_passed === false');
-		expect(preCheckStep).toContain('{{AGENT_PREFIX}}coder'); // "return structured rejection to coder"
-		expect(preCheckStep).toContain('Do NOT call {{AGENT_PREFIX}}reviewer');
+		expect(preCheckStep).toContain("the active swarm's coder agent"); // "return structured rejection to coder"
+		expect(preCheckStep).toContain(
+			"Do NOT call the active swarm's reviewer agent",
+		);
 	});
 
 	test('pre_check_batch gates_passed === true proceeds to reviewer', () => {
@@ -132,7 +134,9 @@ describe('ARCHITECT QA GATE: pre_check_batch Integration', () => {
 		);
 
 		expect(preCheckStep).toContain('gates_passed === true');
-		expect(preCheckStep).toContain('proceed to {{AGENT_PREFIX}}reviewer');
+		expect(preCheckStep).toContain(
+			"proceed to the active swarm's reviewer agent",
+		);
 	});
 
 	test('pre_check_batch cannot be skipped in QA sequence', () => {
@@ -254,11 +258,15 @@ describe('ARCHITECT QA GATE: pre_check_batch Anti-Bypass', () => {
 
 		// pre_check_batch: gates_passed === false → return to coder (no reviewer)
 		expect(preCheckStep).toContain('gates_passed === false');
-		expect(preCheckStep).toContain('Do NOT call {{AGENT_PREFIX}}reviewer');
+		expect(preCheckStep).toContain(
+			"Do NOT call the active swarm's reviewer agent",
+		);
 
 		// pre_check_batch: gates_passed === true → proceed to reviewer
 		expect(preCheckStep).toContain('gates_passed === true');
-		expect(preCheckStep).toContain('proceed to {{AGENT_PREFIX}}reviewer');
+		expect(preCheckStep).toContain(
+			"proceed to the active swarm's reviewer agent",
+		);
 	});
 
 	test('pre_check_batch runs four tools in parallel (not sequential)', () => {

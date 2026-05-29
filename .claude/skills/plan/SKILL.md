@@ -39,6 +39,103 @@ This is a SOFT gate. When the user chooses "Skip and plan directly", proceed to 
 
 Run CODEBASE REALITY CHECK scoped to codebase elements referenced in spec.md or user constraints. Discrepancies must be reflected in the generated plan.
 
+### CLARIFICATION FUNNEL (pre-save_plan)
+
+Before calling `save_plan` — whether creating a new plan or finalizing an external plan ingestion — the architect MUST run this four-stage clarification funnel. The goal is to limit unnecessary user interruption, not planning completeness.
+
+#### Stage 1: Inventory All Material Uncertainties
+
+Identify ALL uncertainties that could affect the plan. There is NO hard cap on the internal inventory. Cover at minimum:
+
+- Scope boundaries: what is in or out
+- Data loss or destructive behavior
+- Security/privacy risk tolerance
+- Backward compatibility or migration policy
+- Cost/performance tradeoffs
+- User-visible behavior and UX choices
+- Release/rollout strategy
+- QA policy: gate selection and enforcement strictness
+- Architecture choices among materially different paths
+- Dependency or platform assumptions
+- Operational complexity
+
+#### Stage 2: Classify Each Uncertainty
+
+Classify each item as exactly one of:
+
+- `self_resolved`: answered from the user request, spec, plan, codebase reality check, `.swarm/context.md`, repo conventions, or an informed default. **If the default is not directly supported by user request, spec, or recorded context, classify as `user_decision` rather than `self_resolved`.**
+- `critic_resolved`: sent to Critic Sounding Board and resolved by the critic.
+- `research_needed`: needs SME/explorer/domain lookup before user escalation.
+- `user_decision`: only the user can decide because it affects product scope, risk tolerance, policy, budget, UX, rollout, or destructive behavior.
+- `deferred_nonblocking`: useful follow-up detail that does not block a correct initial plan and can be explicitly recorded as an assumption or follow-up.
+
+#### Stage 3: Consult Critic Sounding Board Before User Escalation
+
+Before asking the user any planning clarification question, the architect MUST consult `critic_sounding_board` with the candidate question set and context.
+
+For each item classified as `research_needed` or `user_decision` in Stage 2, send it to the critic. The critic responds with a verdict from `SoundingBoardVerdict` (see `src/agents/critic.ts`). The mapping between critic verdicts and funnel actions is:
+
+| Critic Verdict (SoundingBoardVerdict) | Funnel Action | Meaning |
+|---|---|---|
+| `UNNECESSARY` | DROP | Item is unnecessary or answerable from existing context |
+| `RESOLVE` | RESOLVE | Critic supplies the answer or recommended default |
+| `REPHRASE` | REPHRASE | Question is valid but should be clearer, narrower, or grouped |
+| `APPROVED` | ASK_USER | User decision is genuinely required |
+
+**Hard constraint:** Items in the Always-Surface Categories list (below) MUST NOT receive `UNNECESSARY`/`DROP` from the critic — only `REPHRASE` or `APPROVED`/`ASK_USER` are allowed. If the critic attempts to `UNNECESSARY`/`DROP` an always-surface item, override to `APPROVED`/`ASK_USER`.
+
+**Overconfidence guard:** If the critic attempts to self-resolve an item by supplying an answer (verdict `RESOLVE`) but the underlying default is not directly supported by user request, spec, or recorded context, the architect MUST classify the item as `user_decision` rather than `self_resolved`. Unsupported defaults must not be silently accepted.
+
+Update classifications based on critic response:
+
+- `UNNECESSARY`/`DROP` → reclassify as `self_resolved` and record the reason.
+- `RESOLVE` → reclassify as `critic_resolved` and record the answer as an assumption.
+- `REPHRASE` → update the question wording and keep as candidate.
+- `APPROVED`/`ASK_USER` → confirm as `user_decision`.
+
+The architect MUST update the plan's assumptions with all resolved items before proceeding to Stage 4.
+
+Exception: QA gate selection questions are already mandatory user decisions (enforced by the save_plan tool itself) and do NOT need to go through the funnel. QA gate selection is always a direct user dialogue.
+
+#### Stage 4: Surface User Decision Packet
+
+If any items remain classified as `user_decision` after Stage 3, present them as a structured decision packet — NOT as an arbitrary subset or a single question.
+
+The packet MUST include for each decision:
+
+- Category grouping (scope, security, compatibility, performance, UX, rollout, QA policy)
+- Why the decision matters
+- Recommended default when safe
+- Options being weighed
+- Impact of accepting the default
+- Blocking vs optional marker
+
+The architect MAY ask questions one at a time in interactive mode, but MUST preserve and report the full unresolved list. The architect MUST NOT drop unresolved decisions because of a session question cap.
+
+#### Always-Surface Categories
+
+The critic may improve wording or confirm prior context, but these categories MUST be surfaced to the user unless already explicitly answered by the user or by recorded context:
+
+- Scope boundaries: what is in or out
+- Data loss or destructive behavior
+- Security/privacy risk tolerance
+- Backward compatibility or migration policy
+- Breaking changes to existing APIs, contracts, or interfaces
+- New dependency additions or version changes
+- Deprecation decisions for existing features or APIs
+- Cross-platform impact (Windows/macOS/Linux differences)
+- Cost/performance tradeoffs
+- User-visible behavior and UX choices
+- Release/rollout strategy
+- Optional QA gates or stricter enforcement modes
+- Any choice that changes whether the work is advisory vs hard-blocking
+
+#### Assumptions Recording
+
+All items resolved in Stages 2-3 (self_resolved, critic_resolved, deferred_nonblocking) MUST be recorded as explicit assumptions in `.swarm/context.md` under `## Decisions` before calling `save_plan`. Silently dropping resolved uncertainties is a protocol violation — every uncertainty that entered the funnel must have a recorded outcome.
+
+The plan generated by `save_plan` MUST include explicit assumptions and remaining unresolved decisions in the task descriptions or acceptance criteria — not silently omit them.
+
 Use the `save_plan` tool to create the implementation plan. Required parameters:
 - `title`: The real project name from the spec (NOT a placeholder like [Project])
 - `swarm_id`: The swarm identifier (e.g. "mega", "local", "paid")
@@ -134,7 +231,7 @@ Do NOT call `set_qa_gates` until the user has responded.
 Then call `set_qa_gates` with the user's chosen flags.
 Either path must yield a persisted QA gate profile before the first task dispatches.
 
-⚠️ If `save_plan` is unavailable, delegate plan writing to {{AGENT_PREFIX}}coder:
+⚠️ If `save_plan` is unavailable, delegate plan writing to the active swarm's coder agent:
 ⚠️ Even in this fallback, you MUST call `declare_scope` for ".swarm/plan.md" BEFORE the coder delegation. Scope discipline applies to plan-writing delegations too. See Rule 1a.
 TASK: Write the implementation plan to .swarm/plan.md
 OUTPUT: .swarm/plan.md
@@ -181,3 +278,16 @@ TRACEABILITY CHECK (run after plan is written, when spec.md exists):
 - Every task MUST reference its source FR-### in the description or acceptance field → tasks with no FR = potential gold-plating, flag to critic
 - Report: "TRACEABILITY: <N> FRs mapped, <M> unmapped FRs (gap), <K> tasks with no FR mapping (gold-plating risk)"
 - If no spec.md: skip this check silently.
+
+### Transition to CRITIC-GATE
+
+After the QA gate selection has been persisted via `set_qa_gates` and the TRACEABILITY CHECK is complete:
+
+1. If `critic_pre_plan` is enabled (default: ON): the plan MUST be reviewed by the critic before any implementation begins.
+2. Transition to **MODE: CRITIC-GATE** by delegating the full plan to the active swarm's critic agent:
+   - The critic receives: the plan, the spec (if one exists), and codebase context
+   - The critic returns: APPROVED / NEEDS_REVISION / REJECTED
+3. Wait for the critic's verdict before proceeding to MODE: EXECUTE.
+4. If the critic approves: proceed to MODE: EXECUTE for implementation.
+5. If the critic requests revision (NEEDS_REVISION): revise the plan and re-submit to the critic (max 2 cycles).
+6. If the critic rejects after 2 cycles: escalate to the user with a full explanation.

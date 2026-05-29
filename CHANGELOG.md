@@ -1,5 +1,52 @@
 # Changelog
 
+## [7.46.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.0...v7.46.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* **architect:** add explicit CRITIC-GATE transition and complete critic funnel routing ([#1072](https://github.com/zaxbysauce/opencode-swarm/issues/1072)) ([0e2210f](https://github.com/zaxbysauce/opencode-swarm/commit/0e2210fb4a1fd8cce7df6fe68d66de093bd2ec07))
+
+## [7.46.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.45.0...v7.46.0) (2026-05-29)
+
+
+### Features
+
+* **sandbox:** add native Windows sandbox runner (AppContainer + restricted token) ([#1068](https://github.com/zaxbysauce/opencode-swarm/issues/1068)) ([e40fd8e](https://github.com/zaxbysauce/opencode-swarm/commit/e40fd8e0525e2ba0b3e1d32b33336291df8a8b06))
+
+## [7.45.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.1...v7.45.0) (2026-05-28)
+
+
+### Features
+
+* **diff:** harden semantic diff pipeline with symlink containment, typed git errors, async I/O, class rename ([1b623ff](https://github.com/zaxbysauce/opencode-swarm/commit/1b623ff47e37c3e14afcd22a95711132f464a728))
+
+
+### Bug Fixes
+
+* **test-runner:** restore allow_full_suite dual-guard and add selectHistoryForAnalysis tests ([#1063](https://github.com/zaxbysauce/opencode-swarm/issues/1063)) ([ec92616](https://github.com/zaxbysauce/opencode-swarm/commit/ec92616d435ccd636dddaa39610c106f67d9a251))
+
+## [7.44.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.44.0...v7.44.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **analyzer:** rank and return all fuzzy suffix matches in fallback impact lookup ([#1062](https://github.com/zaxbysauce/opencode-swarm/issues/1062)) ([861fbd5](https://github.com/zaxbysauce/opencode-swarm/commit/861fbd5cef4bceb800d5ae8bb12740650931be9b))
+
+## [7.44.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.1...v7.44.0) (2026-05-28)
+
+
+### Features
+
+* **knowledge:** add event-sourced outcome tracking with closed feedback loop ([#1061](https://github.com/zaxbysauce/opencode-swarm/issues/1061)) ([29d5eac](https://github.com/zaxbysauce/opencode-swarm/commit/29d5eacc68858c7804e16b3b7895fe605275b0f7))
+
+## [7.43.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.43.0...v7.43.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **architect:** extract remaining mode protocols into skills ([#1060](https://github.com/zaxbysauce/opencode-swarm/issues/1060)) ([1e441b6](https://github.com/zaxbysauce/opencode-swarm/commit/1e441b618cd76fcf43cd0cb8649309900fb28774))
+
 ## [7.43.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.42.0...v7.43.0) (2026-05-27)
 
 

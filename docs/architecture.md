@@ -200,8 +200,12 @@ Is .swarm/plan.md present?
 Is the user request clear?
 ├── YES → Proceed to Phase 2
 │
-└── NO  → Ask up to 3 clarifying questions
-          Wait for answers
+└── NO  → Run clarification funnel:
+          1. Inventory all uncertainties (no cap)
+          2. Classify each (self_resolved / critic_resolved /
+             research_needed / user_decision / deferred_nonblocking)
+          3. Consult critic_sounding_board
+          4. Surface only surviving decisions as packet
           Then proceed
 ```
 

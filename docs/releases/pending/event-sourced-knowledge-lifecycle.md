@@ -28,10 +28,6 @@ event (with `result_ids`, `ranks`, and `scores`), returning the `trace_id`. The
 phase-start knowledge injector records an equivalent `retrieved` event so manual
 and automatic retrieval share one history.
 
-Auto-injection now records retrieval events only after confidence filtering and
-context-budget trimming, so `shown_count` reflects the entries actually injected
-into the architect context rather than every preliminary search hit.
-
 ### New `knowledge_archive` tool (archival-by-default removal)
 
 `knowledge_archive` replaces hard deletion as the recommended removal path. It
@@ -79,9 +75,6 @@ unchanged and critical directives are still force-included. Manual recall opts
 out of scope/hive/role gating so an explicit query keeps surfacing all scopes,
 hive entries, and role-scoped lessons as before. `normalizeEntry` now defaults
 malformed `tags`/`lesson` fields so one corrupt entry can't fail an entire read.
-Ranking and auto-promotion read the recomputed event/legacy rollup at runtime,
-so explicit `knowledge_receipt` feedback affects future retrieval ordering and
-promotion safety gates immediately even before on-disk counters are reconciled.
 
 ## Why
 

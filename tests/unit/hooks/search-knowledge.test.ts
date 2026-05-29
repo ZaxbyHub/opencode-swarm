@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
@@ -50,7 +50,11 @@ describe('searchKnowledge (unified retrieval)', () => {
 	let kp: string;
 	let prevXdg: string | undefined;
 	beforeEach(() => {
-		dir = realpathSync(mkdtempSync(join(tmpdir(), 'swarm-search-')));
+		dir = join(
+			tmpdir(),
+			`swarm-search-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(dir, { recursive: true });
 		kp = resolveSwarmKnowledgePath(dir);
 		prevXdg = process.env.XDG_DATA_HOME;
 		process.env.XDG_DATA_HOME = join(dir, 'xdg');

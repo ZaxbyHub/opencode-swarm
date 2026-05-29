@@ -280,11 +280,13 @@ change after this release.
 
 ## Action-aware retrieval
 
-The injector now uses `readContextualKnowledge(directory, config, ctx)` where
-`ctx` carries the current phase, task id, tool/action name, target agent,
+The injector now uses
+`searchKnowledge({ directory, config, context: ctx, mode: 'auto_injection', agent: 'architect' })`
+where `ctx` carries the current phase, task id, tool/action name, target agent,
 file paths, recent reviewer/test failures, declared scope, and a `mode` value
 (`phase_start`, `delegation`, `tool_before`, `phase_complete`, `manual_recall`,
-`curator`).
+`curator`). The unified `searchKnowledge` service supersedes the earlier
+`readContextualKnowledge` helper and is also used by `knowledge_recall`.
 
 Ranking rules:
 

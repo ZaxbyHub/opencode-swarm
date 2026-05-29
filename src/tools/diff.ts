@@ -71,6 +71,10 @@ export interface DiffResult {
 	astDiffs?: ASTDiffResult[];
 	semanticSummary?: SemanticDiffSummary;
 	markdownSummary?: string;
+	/**
+	 * @deprecated This field is no longer computed and will be removed in a future version.
+	 * It is retained for backward compatibility with existing consumers.
+	 */
 	astSkippedCount?: number;
 }
 
@@ -219,8 +223,6 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			// Try AST diff for richer structural analysis on each changed file
 			const astDiffs: ASTDiffResult[] = [];
 			const filesForAST = files.slice(0, MAX_AST_FILES);
-			const astSkippedCount =
-				files.length > MAX_AST_FILES ? files.length - MAX_AST_FILES : 0;
 
 			// Helper: check if a ref:path exists using git cat-file -e
 			function fileExistsInRef(refPath: string): boolean {
@@ -338,6 +340,10 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					// Markdown generation failed — continue without markdown summary
 				}
 			}
+
+			// Compute deprecated astSkippedCount for backward compatibility
+			const astSkippedCount =
+				files.length > MAX_AST_FILES ? files.length - MAX_AST_FILES : 0;
 
 			const truncated = diffLines.length > MAX_DIFF_LINES;
 

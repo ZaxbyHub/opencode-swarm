@@ -126,32 +126,37 @@ export function normalizeEntry<T>(raw: T): T {
 	if (!raw || typeof raw !== 'object') return raw;
 	const obj = raw as unknown as Record<string, unknown>;
 	if (!('retrieval_outcomes' in obj)) return raw;
-	const ro = obj.retrieval_outcomes as Record<string, unknown> | null;
-	if (ro && typeof ro === 'object') {
-		// Migrate: legacy 'applied_count' represented "shown" before v2.
-		// We preserve it as-is for backward compatibility, but ensure all v2
-		// counters exist with sane defaults.
-		if (typeof ro.shown_count !== 'number') {
-			ro.shown_count =
-				typeof ro.applied_count === 'number' ? ro.applied_count : 0;
-		}
-		if (typeof ro.acknowledged_count !== 'number') ro.acknowledged_count = 0;
-		if (typeof ro.applied_explicit_count !== 'number') {
-			ro.applied_explicit_count = 0;
-		}
-		if (typeof ro.ignored_count !== 'number') ro.ignored_count = 0;
-		if (typeof ro.violated_count !== 'number') ro.violated_count = 0;
-		if (typeof ro.contradicted_count !== 'number') ro.contradicted_count = 0;
-		if (typeof ro.succeeded_after_shown_count !== 'number') {
-			ro.succeeded_after_shown_count =
-				typeof ro.succeeded_after_count === 'number'
-					? ro.succeeded_after_count
-					: 0;
-		}
-		if (typeof ro.failed_after_shown_count !== 'number') {
-			ro.failed_after_shown_count =
-				typeof ro.failed_after_count === 'number' ? ro.failed_after_count : 0;
-		}
+	// Legacy entries may have retrieval_outcomes: null or a non-object value.
+	// Replace null/non-object with an empty record so v2 backfill below runs
+	// and the entry surfaces with deterministic counters.
+	let ro = obj.retrieval_outcomes as Record<string, unknown> | null;
+	if (!ro || typeof ro !== 'object') {
+		ro = {};
+		obj.retrieval_outcomes = ro;
+	}
+	// Migrate: legacy 'applied_count' represented "shown" before v2.
+	// We preserve it as-is for backward compatibility, but ensure all v2
+	// counters exist with sane defaults.
+	if (typeof ro.shown_count !== 'number') {
+		ro.shown_count =
+			typeof ro.applied_count === 'number' ? ro.applied_count : 0;
+	}
+	if (typeof ro.acknowledged_count !== 'number') ro.acknowledged_count = 0;
+	if (typeof ro.applied_explicit_count !== 'number') {
+		ro.applied_explicit_count = 0;
+	}
+	if (typeof ro.ignored_count !== 'number') ro.ignored_count = 0;
+	if (typeof ro.violated_count !== 'number') ro.violated_count = 0;
+	if (typeof ro.contradicted_count !== 'number') ro.contradicted_count = 0;
+	if (typeof ro.succeeded_after_shown_count !== 'number') {
+		ro.succeeded_after_shown_count =
+			typeof ro.succeeded_after_count === 'number'
+				? ro.succeeded_after_count
+				: 0;
+	}
+	if (typeof ro.failed_after_shown_count !== 'number') {
+		ro.failed_after_shown_count =
+			typeof ro.failed_after_count === 'number' ? ro.failed_after_count : 0;
 	}
 	// Backfill encounter_score for entries created before this field existed.
 	// Legacy hive entries may lack encounter_score; default to 0 per spec FR-002.

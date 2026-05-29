@@ -145,6 +145,7 @@ async function _createWindowsExecutor(): Promise<SandboxExecutor | null> {
 	}
 
 	try {
+		// Primary: NativeWindowsSandboxExecutor (tries runner binary, falls back to PowerShell)
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const { WindowsSandboxExecutor } = require('./executors/windows');
 		return new WindowsSandboxExecutor([]);

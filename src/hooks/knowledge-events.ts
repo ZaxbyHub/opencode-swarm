@@ -22,7 +22,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { warn } from '../utils/logger.js';
@@ -30,6 +30,16 @@ import type {
 	KnowledgeApplicationRecord,
 	RetrievalOutcome,
 } from './knowledge-types.js';
+
+/** Current event-log record schema version. Bump when the on-disk shape changes. */
+export const KNOWLEDGE_EVENT_SCHEMA_VERSION = 1;
+
+/**
+ * Soft cap on `.swarm/knowledge-events.jsonl` line count. Enforced FIFO after
+ * each append: oldest lines are trimmed when total exceeds the cap. Sized for
+ * months of activity on a typical project (~5k retrieval/receipt events).
+ */
+export const MAX_EVENT_LOG_ENTRIES = 5000;
 
 // ============================================================================
 // Event schema
@@ -46,6 +56,7 @@ export type RetrievalEventMode =
 /** A retrieval: a query returned a ranked set of knowledge entries. */
 export interface RetrievedEvent {
 	type: 'retrieved';
+	schema_version?: number;
 	event_id: string;
 	trace_id: string;
 	timestamp: string;
@@ -66,6 +77,7 @@ export interface RetrievedEvent {
 /** A receipt: an agent explicitly considered a specific knowledge entry. */
 export interface ReceiptEvent {
 	type: 'acknowledged' | 'applied' | 'ignored' | 'contradicted' | 'violated';
+	schema_version?: number;
 	event_id: string;
 	trace_id: string;
 	knowledge_id: string;
@@ -86,6 +98,7 @@ export interface ReceiptEvent {
 /** An outcome: a task/phase succeeded or failed, optionally attributed to an entry. */
 export interface OutcomeEvent {
 	type: 'outcome';
+	schema_version?: number;
 	event_id: string;
 	trace_id?: string;
 	knowledge_id?: string;
@@ -99,6 +112,7 @@ export interface OutcomeEvent {
 /** An audit tombstone: an entry was archived / quarantined / purged. */
 export interface ArchivedEvent {
 	type: 'archived';
+	schema_version?: number;
 	event_id: string;
 	timestamp: string;
 	entry_id: string;
@@ -169,9 +183,10 @@ export function newEventId(): string {
 	return randomUUID();
 }
 
-/** Fill in event_id / timestamp defaults without mutating the caller's object. */
+/** Fill in event_id / timestamp / schema_version defaults without mutating the caller's object. */
 function withDefaults(event: KnowledgeEventInput): KnowledgeEvent {
 	return {
+		schema_version: KNOWLEDGE_EVENT_SCHEMA_VERSION,
 		...event,
 		event_id: event.event_id || newEventId(),
 		timestamp: event.timestamp || new Date().toISOString(),
@@ -200,9 +215,28 @@ export async function appendKnowledgeEvent(
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(dirPath, {
-			retries: { retries: 20, minTimeout: 10, maxTimeout: 100 },
+			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 		});
 		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
+		// Best-effort FIFO trim once the log exceeds MAX_EVENT_LOG_ENTRIES.
+		// Done under the same lock as append so we avoid lock nesting and keep
+		// append+trim race-free for concurrent writers.
+		try {
+			const content = await readFile(filePath, 'utf-8');
+			const lines = content
+				.split('\n')
+				.filter((line) => line.trim().length > 0);
+			if (lines.length > MAX_EVENT_LOG_ENTRIES) {
+				const trimmed = lines.slice(lines.length - MAX_EVENT_LOG_ENTRIES);
+				await writeFile(filePath, `${trimmed.join('\n')}\n`, 'utf-8');
+			}
+		} catch (err) {
+			warn(
+				`[knowledge-events] local cap trim failed (non-fatal): ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
 	} finally {
 		if (release) await release().catch(() => {});
 	}
@@ -308,6 +342,12 @@ export interface CounterRollup {
 	contradicted_count: number;
 	succeeded_after_shown_count: number;
 	failed_after_shown_count: number;
+	/**
+	 * Count of partial outcomes. Tracked separately so it surfaces in
+	 * diagnostics but never contributes to `computeOutcomeSignal` (partial is
+	 * deliberately ambiguous — it neither rewards nor penalizes).
+	 */
+	partial_after_shown_count: number;
 	last_applied_at?: string;
 	last_acknowledged_at?: string;
 }
@@ -322,6 +362,7 @@ function emptyRollup(): CounterRollup {
 		contradicted_count: 0,
 		succeeded_after_shown_count: 0,
 		failed_after_shown_count: 0,
+		partial_after_shown_count: 0,
 	};
 }
 
@@ -351,9 +392,10 @@ function maxIso(current: string | undefined, candidate: string): string {
  * and has no event-log counterpart; the event-sourced equivalents come from the
  * separate `knowledge_receipt` tool. So the race-free rule is:
  *
- *   - legacy `shown`: folded only for entries that do not have a `retrieved`
- *     event. This preserves pre-migration history for untouched entries while
- *     avoiding a double-count for entries dual-written by the injector.
+ *   - legacy `shown`: folded ONLY when the event log contains no `retrieved`
+ *     event (i.e. a pure pre-migration install). Once any `retrieved` event
+ *     exists, `shown_count` is derived from events alone, eliminating the
+ *     timestamp-race double-count.
  *   - legacy non-`shown` verbs: always folded (no event counterpart, so no
  *     double count), preserving pre-migration history.
  *
@@ -404,6 +446,7 @@ export function recomputeCounters(
 				const r = get(map, e.knowledge_id);
 				if (e.outcome === 'success') r.succeeded_after_shown_count += 1;
 				else if (e.outcome === 'failure') r.failed_after_shown_count += 1;
+				else if (e.outcome === 'partial') r.partial_after_shown_count += 1;
 				break;
 			}
 			// 'archived' events do not contribute to retrieval counters.

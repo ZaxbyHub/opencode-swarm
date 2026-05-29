@@ -125,6 +125,25 @@ mock.module('../../../src/utils/path-security', () => ({
 }));
 ```
 
+## Diagnosing Test Isolation Failures
+
+When test files pass individually but fail when run together, follow this protocol:
+
+1. **Isolate**: Run the failing file alone: `bun test <file>.test.ts --timeout 30000`
+2. **Pair**: Run it WITH its suspected polluting neighbor: `bun test <fileA>.test.ts <fileB>.test.ts`
+3. **Classify**:
+   - Both pass alone → fail together → **mock pollution** from neighbor
+   - Fails alone → **test logic bug** (not isolation issue)
+   - Passes alone + passes together but fails in full suite → **third-file pollution** (use binary search across directory)
+4. **For mock pollution**, check the neighbor for these patterns:
+   - `vi.mock()` or `mock.module()` inside `beforeEach()` (not at top level)
+   - `delete require.cache[...]` combined with re-import pattern
+   - These indicate hoist-time closure capture — see below
+5. **Specific symptom — closure capture failure**: `vi.mock()` captures closures at **hoist time** (before `beforeEach` runs). Reassigning `mockFn.mockImplementation(newFn)` in the test body does **NOT** update the hoisted closure — the mock still calls the original function.
+   - Symptom: `expect(mockFn).toHaveBeenCalledTimes(N)` fails with an unexpected count
+   - Symptom: `expect(mockFn).not.toHaveBeenCalled()` fails because the real function was called
+6. **Fix path**: Migrate the affected test file to `_internals` DI seam pattern per the `mock-to-internals-migration` skill. This eliminates both the `vi.mock()` call and the closure capture surface area.
+
 ## Two-Tier Mock Convention
 
 The codebase uses a two-tier strategy for mock isolation, plus a zero-mock testing pattern:
@@ -313,6 +332,69 @@ Some test files use top-level `mock.module` that must persist across all tests i
 
 - `src/__tests__/preflight-phase.test.ts` — mocks `plan/manager` and `preflight-service`
 
+## Cross-Platform Test Patterns
+
+Tests run on all three CI platforms (ubuntu, macos, windows). Path and filesystem behavior
+differs between them. Follow these patterns to prevent platform-specific failures:
+
+### Mock keys with filesystem paths
+
+**Never hardcode Unix-format paths as mock keys.** On Windows, `path.resolve('/dir', 'file')`
+produces drive-letter-prefixed paths like `D:\dir\file`, not `/dir/file`. A mock that checks
+for `/dir/file` will silently never match, causing the test to behave differently on Windows.
+
+**Use `path.resolve()` to construct mock keys the same way the source code does:**
+
+```typescript
+// ❌ WRONG — fails on Windows (mock expects '/safe/dir/linked.ts',
+//    but path.resolve('/safe/dir', 'linked.ts') = 'D:\safe\dir\linked.ts')
+mockRealpathSync.mockImplementation((inputPath: string) => {
+  if (inputPath === '/safe/dir') return '/safe/dir';
+  if (inputPath === '/safe/dir/linked.ts') return '/outside/linked.ts';
+  return inputPath;
+});
+
+// ✅ CORRECT — path.resolve produces matching keys on all platforms
+const mockDir = path.resolve('/safe/dir');
+const linkedResolved = path.resolve(mockDir, 'linked.ts');
+const outsideResolved = path.resolve('/outside/linked.ts');
+
+// mockRealpathSync is a mock() function (bun:test) — see mocking patterns above
+mockRealpathSync.mockImplementation((inputPath: string) => {
+  if (inputPath === mockDir) return mockDir;
+  if (inputPath === linkedResolved) return outsideResolved;
+  return inputPath;
+});
+```
+
+### Symlink behavior differences
+
+- On Windows, `fs.symlinkSync` for directories creates **junctions** by default, which
+  resolve differently than POSIX symlinks. Junction creation may require administrator
+  elevation on older Node.js versions.
+- `fs.realpathSync` on a broken symlink throws `ENOENT` on POSIX but may throw
+  `EINVAL` on Windows, depending on symlink type.
+- Use `test.skipIf(process.platform === 'win32')` for tests that directly manipulate
+  filesystem symlinks, unless the test's purpose is explicitly to verify cross-platform
+  symlink behavior.
+
+### Temporary directory patterns
+
+- Use `os.tmpdir()` + `path.join()` for temp paths. **Never** hardcode `/tmp` or `C:\`.
+- Wrap `mkdtempSync` in `realpathSync` if the result is `chdir`'d on macOS (temp
+  dirs are often symlinked to `/private/var/...`).
+- Clean up temp dirs in `afterEach` or `afterAll` using the `rm` utility with
+  `{ force: true, recursive: true }`.
+
+### Line ending normalization
+
+Git on Windows converts LF to CRLF by default. Tests that compare file contents
+byte-by-byte against expected strings must normalize line endings:
+
+```typescript
+const actual = readFileSync(path, 'utf-8').replace(/\r\n/g, '\n');
+```
+
 ## CI Pipeline Structure
 
 The CI runs on three platforms (ubuntu, macos, windows). Tests are split into sequential steps within each platform's job.
@@ -422,11 +504,37 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - **Do not test framework behavior.** "Zod schema parses valid input" tests Zod, not your schema.
 - **Do not test test utilities.** If it only exists to support other tests, it doesn't need its own test.
 - **Do not mock everything.** If every dependency is mocked, you're testing the mock setup. Prefer real dependencies for pure functions and only mock I/O boundaries (filesystem, network, timers).
+
+### Anchored Content Assertions
+
+When asserting that skill files, protocol docs, or structured markdown contain expected text, **anchor your assertions to the relevant section** rather than using bare `toContain()` on the full file content:
+
+```typescript
+// WEAK — passes even if the word appears in prose outside the intended section
+expect(content).toContain('DROP');
+
+// STRONG — fails if the structured section is removed or relocated
+const stage3Start = content.indexOf('#### Stage 3: Consult Critic Sounding Board');
+const stage4Start = content.indexOf('#### Stage 4: Surface User Decision Packet');
+const stage3Section = content.slice(stage3Start, stage4Start);
+expect(stage3Section).toContain('DROP');
+expect(stage3Section).toContain('ASK_USER');
+```
+
+**Why this matters:** A bare `toContain('DROP')` passes as long as the word appears anywhere in the file. If the structured outcomes section is deleted but a prose reference remains (e.g., "The critic may DROP irrelevant items"), the test still passes — silently hiding the removal. Section-anchored assertions fail when the content is actually removed from its intended location.
+
+Use this pattern for:
+- Critic outcome mappings in skill files (DROP, ASK_USER, RESOLVE, REPHRASE)
+- Classification category lists (self_resolved, user_decision, etc.)
+- Any structured section where word presence is necessary but position-dependent
 - **Do not hardcode version numbers.** Version bumps are automated — a test asserting `version === '6.31.3'` breaks on every release.
 - **Do not use `sleep` or `setTimeout` for synchronization.** Use explicit signals, resolved promises, or `Bun.sleep()` with tight bounds.
 - **Do not spawn `cat /dev/zero`, `yes`, or other infinite-output commands.** Use `sleep 30` for "blocking command" tests.
 
 ## Cross-Platform Requirements
+
+> **See also**: [Cross-Platform Test Patterns](#cross-platform-test-patterns) above for detailed
+> guidance on mock keys, symlink behavior, temp directories, and line endings.
 
 All tests must pass on Linux, macOS, and Windows unless explicitly gated with:
 ```typescript

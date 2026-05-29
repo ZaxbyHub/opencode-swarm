@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.43.0",
+    version: "7.46.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -36635,28 +36635,30 @@ function normalizeEntry(raw) {
   const obj = raw;
   if (!("retrieval_outcomes" in obj))
     return raw;
-  const ro = obj.retrieval_outcomes;
-  if (ro && typeof ro === "object") {
-    if (typeof ro.shown_count !== "number") {
-      ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
-    }
-    if (typeof ro.acknowledged_count !== "number")
-      ro.acknowledged_count = 0;
-    if (typeof ro.applied_explicit_count !== "number") {
-      ro.applied_explicit_count = 0;
-    }
-    if (typeof ro.ignored_count !== "number")
-      ro.ignored_count = 0;
-    if (typeof ro.violated_count !== "number")
-      ro.violated_count = 0;
-    if (typeof ro.contradicted_count !== "number")
-      ro.contradicted_count = 0;
-    if (typeof ro.succeeded_after_shown_count !== "number") {
-      ro.succeeded_after_shown_count = typeof ro.succeeded_after_count === "number" ? ro.succeeded_after_count : 0;
-    }
-    if (typeof ro.failed_after_shown_count !== "number") {
-      ro.failed_after_shown_count = typeof ro.failed_after_count === "number" ? ro.failed_after_count : 0;
-    }
+  let ro = obj.retrieval_outcomes;
+  if (!ro || typeof ro !== "object") {
+    ro = {};
+    obj.retrieval_outcomes = ro;
+  }
+  if (typeof ro.shown_count !== "number") {
+    ro.shown_count = typeof ro.applied_count === "number" ? ro.applied_count : 0;
+  }
+  if (typeof ro.acknowledged_count !== "number")
+    ro.acknowledged_count = 0;
+  if (typeof ro.applied_explicit_count !== "number") {
+    ro.applied_explicit_count = 0;
+  }
+  if (typeof ro.ignored_count !== "number")
+    ro.ignored_count = 0;
+  if (typeof ro.violated_count !== "number")
+    ro.violated_count = 0;
+  if (typeof ro.contradicted_count !== "number")
+    ro.contradicted_count = 0;
+  if (typeof ro.succeeded_after_shown_count !== "number") {
+    ro.succeeded_after_shown_count = typeof ro.succeeded_after_count === "number" ? ro.succeeded_after_count : 0;
+  }
+  if (typeof ro.failed_after_shown_count !== "number") {
+    ro.failed_after_shown_count = typeof ro.failed_after_count === "number" ? ro.failed_after_count : 0;
   }
   try {
     if (typeof obj.encounter_score !== "number" || Number.isNaN(obj.encounter_score)) {
@@ -38109,7 +38111,7 @@ var init_hive_promoter = __esm(() => {
 
 // src/hooks/knowledge-events.ts
 import { existsSync as existsSync10 } from "fs";
-import { appendFile as appendFile4, mkdir as mkdir5, readFile as readFile5 } from "fs/promises";
+import { appendFile as appendFile4, mkdir as mkdir5, readFile as readFile5, writeFile as writeFile6 } from "fs/promises";
 import * as path16 from "path";
 function resolveKnowledgeEventsPath(directory) {
   return path16.join(directory, ".swarm", "knowledge-events.jsonl");
@@ -38164,7 +38166,8 @@ function emptyRollup() {
     violated_count: 0,
     contradicted_count: 0,
     succeeded_after_shown_count: 0,
-    failed_after_shown_count: 0
+    failed_after_shown_count: 0,
+    partial_after_shown_count: 0
   };
 }
 function get(map3, id) {
@@ -38221,6 +38224,8 @@ function recomputeCounters(events, legacyRecords = []) {
           r.succeeded_after_shown_count += 1;
         else if (e.outcome === "failure")
           r.failed_after_shown_count += 1;
+        else if (e.outcome === "partial")
+          r.partial_after_shown_count += 1;
         break;
       }
     }
@@ -38760,7 +38765,7 @@ var init_skill_improver_llm_factory = __esm(() => {
 
 // src/services/skill-improver-quota.ts
 import { existsSync as existsSync11 } from "fs";
-import { mkdir as mkdir6, readFile as readFile6, rename as rename4, writeFile as writeFile6 } from "fs/promises";
+import { mkdir as mkdir6, readFile as readFile6, rename as rename4, writeFile as writeFile7 } from "fs/promises";
 import * as path17 from "path";
 async function acquireLock(dir) {
   const acquire = import_proper_lockfile6.default.lock(dir, LOCK_RETRY_OPTS);
@@ -38807,7 +38812,7 @@ async function readState(filePath) {
 async function writeState(filePath, state) {
   await mkdir6(path17.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp-${process.pid}`;
-  await writeFile6(tmp, JSON.stringify(state, null, 2), "utf-8");
+  await writeFile7(tmp, JSON.stringify(state, null, 2), "utf-8");
   await rename4(tmp, filePath);
 }
 async function getQuotaState(directory, opts) {
@@ -38894,7 +38899,7 @@ var init_skill_improver_quota = __esm(() => {
 
 // src/services/skill-improver.ts
 import { existsSync as existsSync12 } from "fs";
-import { mkdir as mkdir7, rename as rename5, writeFile as writeFile7 } from "fs/promises";
+import { mkdir as mkdir7, rename as rename5, writeFile as writeFile8 } from "fs/promises";
 import * as path18 from "path";
 function timestampSlug(d) {
   return d.toISOString().replace(/[:.]/g, "-");
@@ -38902,7 +38907,7 @@ function timestampSlug(d) {
 async function atomicWrite2(p, content) {
   await mkdir7(path18.dirname(p), { recursive: true });
   const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile7(tmp, content, "utf-8");
+  await writeFile8(tmp, content, "utf-8");
   await rename5(tmp, p);
 }
 async function gatherInventory(directory) {
@@ -46520,7 +46525,7 @@ var KNOWLEDGE_SCHEMA_VERSION = 2;
 // src/hooks/knowledge-migrator.ts
 import { randomUUID as randomUUID3 } from "crypto";
 import { existsSync as existsSync20, readFileSync as readFileSync14 } from "fs";
-import { mkdir as mkdir8, readFile as readFile9, writeFile as writeFile8 } from "fs/promises";
+import { mkdir as mkdir8, readFile as readFile9, writeFile as writeFile9 } from "fs/promises";
 import * as path30 from "path";
 async function migrateKnowledgeToExternal(_directory, _config) {
   return {
@@ -46751,7 +46756,7 @@ async function writeSentinel(sentinelPath, migrated, dropped) {
     migration_tool: "knowledge-migrator.ts"
   };
   await mkdir8(path30.dirname(sentinelPath), { recursive: true });
-  await writeFile8(sentinelPath, JSON.stringify(sentinel, null, 2), "utf-8");
+  await writeFile9(sentinelPath, JSON.stringify(sentinel, null, 2), "utf-8");
 }
 var _internals19;
 var init_knowledge_migrator = __esm(() => {
@@ -47804,7 +47809,7 @@ import {
   mkdir as mkdir9,
   readFile as readFile10,
   rename as rename6,
-  writeFile as writeFile9
+  writeFile as writeFile10
 } from "fs/promises";
 import * as path31 from "path";
 
@@ -48215,7 +48220,7 @@ async function writeJsonlAtomic(filePath, values) {
   const content = values.map((value) => JSON.stringify(value)).join(`
 `) + (values.length > 0 ? `
 ` : "");
-  await writeFile9(tmp, content, "utf-8");
+  await writeFile10(tmp, content, "utf-8");
   await rename6(tmp, filePath);
 }
 var init_local_jsonl_provider = __esm(() => {
@@ -48236,7 +48241,7 @@ var init_prompt_block = __esm(() => {
 
 // src/memory/jsonl-migration.ts
 import { existsSync as existsSync22 } from "fs";
-import { copyFile, mkdir as mkdir10, readFile as readFile11, stat as stat3, writeFile as writeFile10 } from "fs/promises";
+import { copyFile, mkdir as mkdir10, readFile as readFile11, stat as stat3, writeFile as writeFile11 } from "fs/promises";
 import * as path32 from "path";
 function resolveMemoryStorageDir(rootDirectory, config3 = {}) {
   const resolved = resolveConfig(config3);
@@ -48284,14 +48289,14 @@ async function writeJsonlExport(rootDirectory, config3, memories, proposals) {
   await mkdir10(exportDir, { recursive: true });
   const memoriesPath = path32.join(exportDir, "memories.jsonl");
   const proposalsPath = path32.join(exportDir, "proposals.jsonl");
-  await writeFile10(memoriesPath, toJsonl(memories), "utf-8");
-  await writeFile10(proposalsPath, toJsonl(proposals), "utf-8");
+  await writeFile11(memoriesPath, toJsonl(memories), "utf-8");
+  await writeFile11(proposalsPath, toJsonl(proposals), "utf-8");
   return { directory: exportDir, memoriesPath, proposalsPath };
 }
 async function writeMigrationReport(rootDirectory, report, config3 = {}) {
   const reportPath = path32.join(resolveMemoryStorageDir(rootDirectory, config3), "migration-report.json");
   await mkdir10(path32.dirname(reportPath), { recursive: true });
-  await writeFile10(reportPath, `${JSON.stringify(report, null, 2)}
+  await writeFile11(reportPath, `${JSON.stringify(report, null, 2)}
 `, "utf-8");
   return reportPath;
 }
@@ -52428,6 +52433,19 @@ import path41 from "path";
 function normalizePath(p) {
   return p.replace(/\\/g, "/");
 }
+function sharedTrailingSegments(a, b) {
+  const aParts = normalizePath(a).split("/").filter(Boolean);
+  const bParts = normalizePath(b).split("/").filter(Boolean);
+  let i = aParts.length - 1;
+  let j = bParts.length - 1;
+  let shared = 0;
+  while (i >= 0 && j >= 0 && aParts[i] === bParts[j]) {
+    shared++;
+    i--;
+    j--;
+  }
+  return shared;
+}
 function isCacheStale(impactMap, generatedAtMs) {
   for (const sourcePath of Object.keys(impactMap)) {
     try {
@@ -52755,25 +52773,43 @@ async function analyzeImpact(changedFiles, cwd, budget) {
       if (budgetExceeded)
         break;
     } else {
-      let found = false;
-      for (const [sourcePath, tests2] of Object.entries(impactMap)) {
+      const changedDir = normalizePath(path41.dirname(normalizedChanged));
+      const changedInputDir = normalizePath(path41.dirname(changedFile));
+      const suffixMatches = Object.entries(impactMap).filter(([sourcePath]) => {
+        return sourcePath.endsWith(changedFile) || changedFile.endsWith(sourcePath) || sourcePath.endsWith(normalizedChanged) || normalizedChanged.endsWith(sourcePath);
+      }).sort(([sourceA], [sourceB]) => {
+        const sourceDirA = normalizePath(path41.dirname(sourceA));
+        const sourceDirB = normalizePath(path41.dirname(sourceB));
+        const exactA = sourceDirA === changedDir || changedInputDir !== "." && (sourceDirA === changedInputDir || sourceDirA.endsWith(`/${changedInputDir}`));
+        const exactB = sourceDirB === changedDir || changedInputDir !== "." && (sourceDirB === changedInputDir || sourceDirB.endsWith(`/${changedInputDir}`));
+        if (exactA !== exactB)
+          return exactA ? -1 : 1;
+        const sharedA = Math.max(sharedTrailingSegments(sourceDirA, changedDir), changedInputDir === "." ? 0 : sharedTrailingSegments(sourceDirA, changedInputDir));
+        const sharedB = Math.max(sharedTrailingSegments(sourceDirB, changedDir), changedInputDir === "." ? 0 : sharedTrailingSegments(sourceDirB, changedInputDir));
+        const nearestA = sharedA > 0;
+        const nearestB = sharedB > 0;
+        if (nearestA !== nearestB)
+          return nearestA ? -1 : 1;
+        if (sharedA !== sharedB)
+          return sharedB - sharedA;
+        return sourceA.localeCompare(sourceB);
+      });
+      const found = suffixMatches.length > 0;
+      for (const [, tests2] of suffixMatches) {
         if (budget !== undefined && visitedCount >= budget) {
           budgetExceeded = true;
           break;
         }
-        if (sourcePath.endsWith(changedFile) || changedFile.endsWith(sourcePath)) {
-          for (const test of tests2) {
-            if (budget !== undefined && visitedCount >= budget) {
-              budgetExceeded = true;
-              break;
-            }
-            impactedTestsSet.add(test);
-            visitedCount++;
-          }
-          if (budgetExceeded)
+        for (const test of tests2) {
+          if (budget !== undefined && visitedCount >= budget) {
+            budgetExceeded = true;
             break;
-          found = true;
+          }
+          impactedTestsSet.add(test);
+          visitedCount++;
         }
+        if (budgetExceeded)
+          break;
       }
       if (budgetExceeded)
         break;

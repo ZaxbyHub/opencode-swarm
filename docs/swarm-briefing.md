@@ -145,14 +145,18 @@ Given [context], when [action], then [outcome].
 - [edge case or failure mode]
 
 ## Open Questions
-- [NEEDS CLARIFICATION]: [question — max 3 markers]
+- [NEEDS CLARIFICATION]: [question — surfaced only after clarification funnel]
+  - Category: [scope | security | compatibility | performance | UX | rollout | QA policy]
+  - Blocking: [yes | no]
+  - Recommended default: [when safe to default]
+  - Impact of accepting default: [brief description]
 ```
 
 ### Naming Conventions
 
 - **`FR-###`** — Functional Requirements: what the system MUST or SHOULD do
 - **`SC-###`** — Success Criteria: how you know the feature is working
-- **`[NEEDS CLARIFICATION]`** — Uncertainty marker placed by the architect when an assumption could change scope, security impact, or core behavior. Use `/swarm clarify` to resolve.
+- **`[NEEDS CLARIFICATION]`** — Uncertainty marker placed by the architect only for items that survive the clarification funnel (inventory → classify → consult critic → surface decisions). Use `/swarm clarify` to resolve.
 
 ### What the Spec MUST NOT Contain
 

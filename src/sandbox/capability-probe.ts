@@ -171,11 +171,24 @@ async function probeMacOS(): Promise<SandboxCapability> {
 
 /** Probe for Windows sandbox support. */
 function probeWindows(): SandboxCapability {
-	// Windows does not have a native sandbox mechanism (bwrap/sandbox-exec equivalent)
-	// accessible from Node.js without native bindings. The WindowsSandboxExecutor
-	// provides a best-effort PowerShell-based wrapper, not a true OS-level sandbox.
-	// Since the executor works by wrapping commands in PowerShell, check that
-	// both cmd.exe and PowerShell are available.
+	// First, try the native runner binary for true OS-level sandboxing.
+	// If unavailable, fall back to the PowerShell-based wrapper.
+	try {
+		const { probe: runnerProbe } = require('./win32/runner-client');
+		const result = runnerProbe();
+		if (result.available) {
+			return {
+				status: 'enabled',
+				platform: 'win32',
+				mechanism: `native-runner/${result.mode}`,
+			};
+		}
+	} catch {
+		// Runner client not available — fall through to PowerShell check
+	}
+
+	// Fallback: check that cmd.exe and PowerShell are available for the
+	// environment-restriction executor (weak sandbox).
 	try {
 		const result = spawnSync('cmd', ['/c', 'echo', 'ok'], {
 			windowsHide: true,

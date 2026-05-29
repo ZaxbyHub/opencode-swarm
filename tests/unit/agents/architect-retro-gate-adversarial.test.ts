@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 /**
@@ -15,6 +17,14 @@ describe('architect.ts — RETROSPECTIVE GATE Adversarial Tests', () => {
 	const retroGateHeader = '## ⛔ RETROSPECTIVE GATE';
 	const phaseWrapHeader = '### MODE: PHASE-WRAP';
 	const filesHeader = '## FILES';
+	const phaseWrapSkill = readFileSync(
+		join(process.cwd(), '.opencode/skills/phase-wrap/SKILL.md'),
+		'utf-8',
+	);
+	const phaseWrapRetroContent = phaseWrapSkill.slice(
+		phaseWrapSkill.indexOf(retroGateHeader),
+		phaseWrapSkill.indexOf(phaseWrapHeader),
+	);
 
 	describe('Attack 1: Template literal syntax corruption', () => {
 		it('SHOULD FAIL: prompt contains unescaped bare backtick that would break template literal', () => {
@@ -89,59 +99,26 @@ describe('architect.ts — RETROSPECTIVE GATE Adversarial Tests', () => {
 
 	describe('Attack 3: Empty or insufficient RETROSPECTIVE GATE section', () => {
 		it('SHOULD FAIL: RETROSPECTIVE GATE section is not empty (minimum 100 chars)', () => {
-			const retroGateIndex = ARCHITECT_PROMPT.indexOf(retroGateHeader);
-			const nextSectionIndex = ARCHITECT_PROMPT.indexOf(phaseWrapHeader);
-
-			expect(retroGateIndex).toBeGreaterThanOrEqual(0);
-			expect(nextSectionIndex).toBeGreaterThan(retroGateIndex);
-
-			// Extract content between retro gate header and next section
-			const retroGateContent = ARCHITECT_PROMPT.slice(
-				retroGateIndex + retroGateHeader.length,
-				nextSectionIndex,
-			);
-
 			// Must be at least 100 characters
-			const isEmpty = retroGateContent.length < 100;
+			const isEmpty = phaseWrapRetroContent.length < 100;
 			expect(isEmpty).toBe(false);
-			expect(retroGateContent.length).toBeGreaterThanOrEqual(100);
+			expect(phaseWrapRetroContent.length).toBeGreaterThanOrEqual(100);
 		});
 	});
 
 	describe('Attack 4: Missing phase_complete reference', () => {
 		it('SHOULD FAIL: phase_complete is NOT mentioned in RETROSPECTIVE GATE', () => {
-			const retroGateIndex = ARCHITECT_PROMPT.indexOf(retroGateHeader);
-			const nextSectionIndex = ARCHITECT_PROMPT.indexOf(phaseWrapHeader);
-
-			expect(retroGateIndex).toBeGreaterThanOrEqual(0);
-			expect(nextSectionIndex).toBeGreaterThan(retroGateIndex);
-
-			const retroGateContent = ARCHITECT_PROMPT.slice(
-				retroGateIndex,
-				nextSectionIndex,
-			);
-
 			// Check that phase_complete is mentioned
-			const hasPhaseComplete = retroGateContent.includes('phase_complete');
+			const hasPhaseComplete = phaseWrapRetroContent.includes('phase_complete');
 			expect(hasPhaseComplete).toBe(true);
 		});
 	});
 
 	describe('Attack 5: Missing lessons_learned field in JSON example', () => {
 		it('SHOULD FAIL: Retro bundle JSON example does NOT contain lessons_learned field', () => {
-			const retroGateIndex = ARCHITECT_PROMPT.indexOf(retroGateHeader);
-			const nextSectionIndex = ARCHITECT_PROMPT.indexOf(phaseWrapHeader);
-
-			expect(retroGateIndex).toBeGreaterThanOrEqual(0);
-			expect(nextSectionIndex).toBeGreaterThan(retroGateIndex);
-
-			const retroGateContent = ARCHITECT_PROMPT.slice(
-				retroGateIndex,
-				nextSectionIndex,
-			);
-
 			// Check that lessons_learned is in the JSON example
-			const hasLessonsLearned = retroGateContent.includes('"lessons_learned"');
+			const hasLessonsLearned =
+				phaseWrapRetroContent.includes('"lessons_learned"');
 			expect(hasLessonsLearned).toBe(true);
 		});
 	});

@@ -100,10 +100,32 @@ describe('diff_summary ADVERSARIAL security tests', () => {
 
 		vi.mock('node:child_process', () => ({
 			execFileSync: mockExecFileSync,
+			execFile: (
+				command: string,
+				args: string[],
+				options: unknown,
+				callback: (error: Error | null, stdout: string, stderr: string) => void,
+			) => {
+				try {
+					const stdout = mockExecFileSync(command, args, options);
+					callback(null, stdout ?? '', '');
+				} catch (error) {
+					callback(error as Error, '', '');
+				}
+			},
 		}));
 
 		vi.mock('node:fs', () => ({
 			readFileSync: mockReadFileSync,
+			promises: {
+				readFile: (filePath: string, encoding: BufferEncoding) => {
+					try {
+						return Promise.resolve(mockReadFileSync(filePath, encoding));
+					} catch (error) {
+						return Promise.reject(error);
+					}
+				},
+			},
 		}));
 
 		vi.mock('../../diff/ast-diff.js', () => ({

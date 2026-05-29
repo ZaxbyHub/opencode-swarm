@@ -13,6 +13,10 @@ export interface DiffResult {
     astDiffs?: ASTDiffResult[];
     semanticSummary?: SemanticDiffSummary;
     markdownSummary?: string;
+    /**
+     * @deprecated This field is no longer computed and will be removed in a future version.
+     * It is retained for backward compatibility with existing consumers.
+     */
     astSkippedCount?: number;
 }
 export interface DiffErrorResult {

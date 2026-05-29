@@ -2,9 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
-	realpathSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
@@ -12,7 +10,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	appendKnowledgeEvent,
+	KNOWLEDGE_EVENT_SCHEMA_VERSION,
 	type KnowledgeEvent,
+	MAX_EVENT_LOG_ENTRIES,
 	readKnowledgeEvents,
 	recomputeCounters,
 	recordKnowledgeEvent,
@@ -21,7 +21,12 @@ import {
 import type { KnowledgeApplicationRecord } from '../../../src/hooks/knowledge-types';
 
 function tmp(): string {
-	return realpathSync(mkdtempSync(join(tmpdir(), 'swarm-kevents-')));
+	const dir = join(
+		tmpdir(),
+		`swarm-kevents-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+	);
+	mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 describe('knowledge-events: append + read', () => {
@@ -152,6 +157,80 @@ describe('knowledge-events: append + read', () => {
 		} as unknown as KnowledgeEvent);
 		expect(result).toBeNull();
 	});
+
+	it('stamps schema_version on every written event', async () => {
+		const written = await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-sv',
+			session_id: 's',
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'manual',
+			result_ids: [],
+			ranks: {},
+			scores: {},
+		} as unknown as KnowledgeEvent);
+		expect(written.schema_version).toBe(KNOWLEDGE_EVENT_SCHEMA_VERSION);
+
+		// And on the persisted line, so future readers can detect the shape.
+		const filePath = resolveKnowledgeEventsPath(dir);
+		const line = readFileSync(filePath, 'utf-8').trim().split('\n')[0];
+		const parsed = JSON.parse(line);
+		expect(parsed.schema_version).toBe(KNOWLEDGE_EVENT_SCHEMA_VERSION);
+	});
+
+	it('enforces a FIFO cap of MAX_EVENT_LOG_ENTRIES (oldest trimmed)', async () => {
+		// MAX_EVENT_LOG_ENTRIES is too large to write in a unit test; this verifies
+		// the cap behavior with a tiny synthetic file: write MAX+5 lines directly
+		// and confirm that one more append triggers trim down to MAX.
+		const filePath = resolveKnowledgeEventsPath(dir);
+		mkdirSync(join(dir, '.swarm'), { recursive: true });
+		const lines: string[] = [];
+		for (let i = 0; i < MAX_EVENT_LOG_ENTRIES + 5; i++) {
+			lines.push(
+				JSON.stringify({
+					type: 'retrieved',
+					schema_version: KNOWLEDGE_EVENT_SCHEMA_VERSION,
+					event_id: `e-${i}`,
+					trace_id: `t-${i}`,
+					timestamp: new Date(2024, 0, 1, 0, 0, i).toISOString(),
+					session_id: 's',
+					agent: 'architect',
+					query: 'q',
+					retrieval_mode: 'manual',
+					result_ids: [],
+					ranks: {},
+					scores: {},
+				}),
+			);
+		}
+		writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf-8');
+
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-trigger',
+			session_id: 's',
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'manual',
+			result_ids: [],
+			ranks: {},
+			scores: {},
+		} as unknown as KnowledgeEvent);
+
+		const all = await readKnowledgeEvents(dir);
+		// Cap is honored — the oldest entries were trimmed.
+		expect(all.length).toBe(MAX_EVENT_LOG_ENTRIES);
+		// The newest record (the one we just appended) is preserved.
+		const newest = all[all.length - 1] as {
+			trace_id?: string;
+		};
+		expect(newest.trace_id).toBe('t-trigger');
+		// The very oldest entries are gone (e-0 was trimmed).
+		expect(
+			all.some((e) => (e as { event_id?: string }).event_id === 'e-0'),
+		).toBe(false);
+	});
 });
 
 describe('knowledge-events: recomputeCounters', () => {
@@ -230,7 +309,7 @@ describe('knowledge-events: recomputeCounters', () => {
 		expect(r?.last_acknowledged_at).toBe('2024-02-01T00:00:00.000Z');
 	});
 
-	it('attributes outcome events to succeeded/failed counters and ignores partial', () => {
+	it('attributes outcome events to succeeded/failed/partial counters separately', () => {
 		const mk = (
 			outcome: 'success' | 'failure' | 'partial',
 			ts: string,
@@ -247,10 +326,15 @@ describe('knowledge-events: recomputeCounters', () => {
 			mk('success', '2024-01-02T00:00:00.000Z'),
 			mk('failure', '2024-01-03T00:00:00.000Z'),
 			mk('partial', '2024-01-04T00:00:00.000Z'),
+			mk('partial', '2024-01-05T00:00:00.000Z'),
 		]);
 		const r = map.get('k1');
 		expect(r?.succeeded_after_shown_count).toBe(2);
 		expect(r?.failed_after_shown_count).toBe(1);
+		// 'partial' outcomes are tracked in their own counter so they surface in
+		// diagnostics but do NOT contribute to computeOutcomeSignal (deliberately
+		// neutral — partial is ambiguous).
+		expect(r?.partial_after_shown_count).toBe(2);
 	});
 
 	it('ignores outcome events without a knowledge_id', () => {

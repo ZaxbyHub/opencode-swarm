@@ -41,6 +41,9 @@ jobs:
       - name: Engineering invariant checks
         shell: bash
         run: chmod +x scripts/check-invariants.sh && bash scripts/check-invariants.sh
+      - name: Cross-contamination check (mock.module / vi.mock leaks)
+        shell: bash
+        run: chmod +x scripts/check-cross-contamination.sh && bash scripts/check-cross-contamination.sh
 
   unit:
     needs: quality
@@ -461,13 +464,20 @@ jobs:
           # while Linux bun produces node_modules/PACKAGE.
           # After build, dist/ has clean Linux paths. We must normalize the committed
           # (git index) side before comparing, not the freshly built working tree.
+          #
+          # Also normalize var __dirname = "..." values: bun ESM bundles embed the
+          # build-time source path, which differs between Windows and Linux builders.
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           dist_committed="$tmpdir/dist-committed"
           mkdir -p "$dist_committed"
           git archive HEAD dist/ | tar -x -C "$dist_committed"
           find "$dist_committed/dist/" -name "*.js" -type f -exec sed -i \
             -e 's|node_modules/\.bun/[^/]\+/node_modules/|node_modules/|g' \
-            -e 's/\r$//' {} +
+            -e 's/\r$//' \
+            -e 's|var __dirname = "[^"]*"|var __dirname = "__DIRNAME_NORMALIZED__"|g' {} +
+          # Normalize __dirname in the freshly built dist too (Linux vs Windows paths).
+          find dist/ -name "*.js" -type f -exec sed -i \
+            -e 's|var __dirname = "[^"]*"|var __dirname = "__DIRNAME_NORMALIZED__"|g' {} +
           # Remove gitignored paths from the freshly built dist before comparing.
           # These are intentionally excluded from commits (see .gitignore lines 29-35).
           rm -rf dist/build/ dist/quality/ dist/sbom/
@@ -475,7 +485,17 @@ jobs:
                 dist/tools/quality-budget.d.ts dist/tools/sbom-generate.d.ts
           diff -r "$dist_committed/dist/" dist/ || {
             echo "ERROR: dist/ has uncommitted changes after build."
-            echo "Run 'bun run build' locally and commit the updated dist/."
+            echo ""
+            echo "Recovery (run these commands in order):"
+            echo "  1. bun install --frozen-lockfile --force  # refresh nested deps to match CI"
+            echo "  2. bun run build                         # regenerate dist/"
+            echo "  3. Verify the dist/ diff is expected: git diff -- dist/"
+            echo "  4. Commit the regenerated dist/ and push"
+            echo ""
+            echo "Common causes:"
+            echo "  - Local bun version differs from CI (CI pins bun 1.3.13)"
+            echo "  - Nested dependency versions differ between local and CI install"
+            echo "  - Stale dist/ after rebase on a newer origin/main"
             exit 1
           }
           rm -rf "$dist_committed"
@@ -558,8 +578,41 @@ jobs:
       - name: Laravel fixture detection and SAST coverage tests
         run: bun --smol test tests/unit/lang/laravel-fixture.test.ts --timeout 60000
 
+  rust-sandbox-runner:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runners/swarm-sandbox-runner/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('runners/swarm-sandbox-runner/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Check formatting
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo fmt --check
+      - name: Clippy lint
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run tests
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo test --all-targets
+      - name: Build release binary
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo build --release
+      - name: Probe smoke test
+        working-directory: runners/swarm-sandbox-runner
+        run: ./target/release/swarm-sandbox-runner.exe --probe
+
   smoke:
-    needs: [unit, integration, dist-check, package-check, php-validation]
+    needs: [unit, integration, dist-check, package-check, php-validation, rust-sandbox-runner]
     strategy:
       fail-fast: false
       matrix:

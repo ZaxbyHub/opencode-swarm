@@ -189,6 +189,7 @@ Do NOT change these helpers to use the DI seam.
 | Using `type SpawnSyncFn` import from `node:child_process` | Type export doesn't exist at runtime; build fails |
 | Forgetting to restore `_internals.spawnSync` | Subsequent tests or other files get the mock |
 | Using async `fs.rm` in `afterEach` without `await` | Temp directories not cleaned up; use `rmSync` |
+| Forgetting vi.mock() captures closures at hoist-time | Reassigning mockFn.mockImplementation(newFn) in test body does NOT update the hoisted closure — mock still calls original function. Symptom: toHaveBeenCalledTimes(N) fails unexpectedly. Fix: use _internals seam instead |
 | Converting `initGitRepo`-style helpers | These need the REAL subprocess; keep them as `require()` |
 
 ## Verification checklist
