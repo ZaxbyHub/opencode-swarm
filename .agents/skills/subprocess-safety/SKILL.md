@@ -68,6 +68,32 @@ try {
 | stdout/stderr bounded | Yes | Never leave piped stream unattended on long-running child |
 | `proc.kill()` in `finally` | Yes | Outer withTimeout lets awaiter proceed but doesn't abort child |
 
+## execFile callback vs execFileSync distinction
+
+`child_process.execFile` (callback form) and `child_process.execFileSync` have different
+default stdio behavior:
+
+| API | Default stdin | Risk |
+|-----|---------------|------|
+| `execFileSync` | `'inherit'` | Child inherits parent stdin — **v7.3.3 vector** on Windows/Bun if stdin is never closed |
+| `execFile` (callback) | `'pipe'` | Child gets an internal pipe — lower risk but still not ideal for defense-in-depth |
+
+**Key differences from the canonical spawn pattern:**
+
+1. **`proc.kill()` in `finally` (line 69)**: Not applicable to callback-form `execFile`.
+   The function does not return a `ChildProcess` reference. Instead, the `timeout`
+   option triggers internal `SIGTERM` when exceeded. The callback is invoked only
+   after the process exits — no zombie risk.
+
+2. **`stdin: 'ignore'` (line 66)**: Technically default-safe for callback `execFile`
+   (stdin is piped, not inherited). However, always add `stdio: ['ignore', 'pipe', 'pipe']`
+   for defense-in-depth and consistency with `execFileSync` calls. Note: Bun's
+   TypeScript definitions do not include `stdio` in `ExecFileOptions` — use
+   `execOpts as any` when passing stdio to callback-form `execFile`.
+
+3. **`execFileSync` should always use `stdio: ['ignore', 'pipe', 'pipe']`** to
+   prevent the stdin-inheritance hang on Windows/Bun (v7.3.3).
+
 ## Windows-specific notes
 
 - `.cmd` extensions: npm/bun binaries on Windows are `.cmd` wrappers. Resolve
@@ -113,9 +139,9 @@ grep -n "bunSpawn\|spawn(\|spawnSync(" src/<changed>/*.ts
 
 Every match MUST have all of:
 1. `timeout` set to a concrete millisecond value
-2. `stdin: 'ignore'` (unless intentionally interactive)
+2. `stdin: 'ignore'` (unless intentionally interactive; note: callback-form `execFile` uses `stdio: ['ignore', 'pipe', 'pipe']` instead)
 3. `cwd` or `git -C <directory>` for explicit working directory
-4. `proc.kill()` in a `finally` block or equivalent cleanup path
+4. `proc.kill()` in a `finally` block or equivalent cleanup path (exception: callback-form `execFile` manages cleanup internally via `timeout` option)
 
 ## Historical failures
 
