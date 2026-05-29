@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.46.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.0...v7.46.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* **architect:** add explicit CRITIC-GATE transition and complete critic funnel routing ([#1072](https://github.com/zaxbysauce/opencode-swarm/issues/1072)) ([0e2210f](https://github.com/zaxbysauce/opencode-swarm/commit/0e2210fb4a1fd8cce7df6fe68d66de093bd2ec07))
+
 ## [7.46.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.45.0...v7.46.0) (2026-05-29)
 
 
