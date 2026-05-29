@@ -50,7 +50,7 @@ describe('PLAN→CRITIC-GATE transition in plan skill', () => {
 
 		expect(planSkill).toMatch(/Transition to CRITIC-GATE/i);
 		expect(planSkill).toMatch(
-			/enter MODE: CRITIC-GATE|transition to MODE: CRITIC-GATE/i,
+			/transition to .*MODE: CRITIC-GATE|Transition to CRITIC-GATE/i,
 		);
 	});
 

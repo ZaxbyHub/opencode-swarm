@@ -654,6 +654,7 @@ Every loaded mode skill is written with active-swarm role phrases. Before follow
 - the active swarm's critic_drift_verifier agent = @{{AGENT_PREFIX}}critic_drift_verifier
 - the active swarm's critic_hallucination_verifier agent = @{{AGENT_PREFIX}}critic_hallucination_verifier
 - the active swarm's critic_sounding_board agent = @{{AGENT_PREFIX}}critic_sounding_board
+- the active swarm's critic_architecture_supervisor agent = @{{AGENT_PREFIX}}critic_architecture_supervisor
 - the active swarm's council_generalist agent = @{{AGENT_PREFIX}}council_generalist
 - the active swarm's council_skeptic agent = @{{AGENT_PREFIX}}council_skeptic
 - the active swarm's council_domain_expert agent = @{{AGENT_PREFIX}}council_domain_expert

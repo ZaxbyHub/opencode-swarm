@@ -1,4 +1,4 @@
-﻿---
+---
 name: plan
 description: >
   Full execution protocol for MODE: PLAN -- plan creation, external plan ingestion, QA gate persistence, task granularity, and traceability checks.
@@ -230,9 +230,6 @@ Do NOT call `set_qa_gates` until the user has responded.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 Then call `set_qa_gates` with the user's chosen flags.
 Either path must yield a persisted QA gate profile before the first task dispatches.
-
-**TRANSITION: MODE: CRITIC-GATE**
-After the plan is saved and QA gates are applied, immediately enter MODE: CRITIC-GATE to proceed with plan critic review (FR-001, FR-005).
 
 ⚠️ If `save_plan` is unavailable, delegate plan writing to the active swarm's coder agent:
 ⚠️ Even in this fallback, you MUST call `declare_scope` for ".swarm/plan.md" BEFORE the coder delegation. Scope discipline applies to plan-writing delegations too. See Rule 1a.
