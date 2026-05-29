@@ -28,7 +28,7 @@ bun --smol test tests/unit/hooks --timeout 120000
 bun --smol test tests/unit/cli --timeout 120000
 ```
 
-**Do not run `bun --smol test tests/unit/tools` as a single batch.** Mock modules leak across files in Bun's `--smol` mode, causing false failures. The CI uses per-file isolation loops for steps 4-6 (tools, services, state/agents).
+**Do not run `bun --smol test tests/unit/tools` or `tests/unit/hooks` as a single batch.** Mock modules leak across files in Bun's `--smol` mode, causing false failures. The CI uses per-file isolation loops for the 15 mock.module hook files (step 1a) and steps 4-6 (tools, services, state/agents), while other hook tests remain in batch groups (step 1b).
 
 **Bun v1.3.13+:** The `--isolate` flag is available for local development to run each test file in a fresh global environment. However, CI currently uses `--smol` with per-file isolation loops, which achieves the same mock isolation goal. You may use `--isolate` locally, but the CI pipeline will continue using `--smol` with per-file loops for consistency.
 
@@ -74,8 +74,9 @@ import { execFileSync } from 'node:child_process';
 ### CI Pipeline Steps
 
 | Step | Directories | Isolation |
-|------|-------------|-----------|
-| 1 | hooks (Linux/macOS only) | Batch per-group |
+|------|-------------|----------|
+| 1a | hooks (mock.module files — 15 files) | Per-file isolation (dedicated step) |
+| 1b | hooks (remaining groups) | Batch per-group |
 | 2 | cli | Batch |
 | 3 | commands, config | Batch |
 | 4 | tools | Per-file loop |

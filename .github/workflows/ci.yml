@@ -137,8 +137,9 @@ jobs:
       - name: Unit tests (hooks - knowledge injector)
         shell: bash
         run: |
+          shopt -s extglob
           failed=0
-          for f in tests/unit/hooks/knowledge-injector*.test.ts; do
+          for f in tests/unit/hooks/!(knowledge-injector.adversarial).test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -148,11 +149,48 @@ jobs:
       - name: Unit tests (hooks - knowledge-curator)
         shell: bash
         run: |
+          shopt -s extglob
           failed=0
-          for f in tests/unit/hooks/knowledge-curator*.test.ts; do
+          for f in tests/unit/hooks/!(knowledge-injector.adversarial|knowledge-curator-evidence-curation|knowledge-curator-ttl|knowledge-curator|knowledge-curator.adversarial|knowledge-curator-output).test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
+            fi
+          done
+          exit $failed
+      - name: Unit tests (hooks - mock.module isolation)
+        shell: bash
+        run: |
+          set -o pipefail
+          IFS=$'\n'
+          failed=0
+          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
+          for f in \
+            tests/unit/hooks/knowledge-injector.adversarial.test.ts \
+            tests/unit/hooks/knowledge-curator.test.ts \
+            tests/unit/hooks/knowledge-curator-evidence-curation.test.ts \
+            tests/unit/hooks/knowledge-curator-ttl.test.ts \
+            tests/unit/hooks/knowledge-curator.adversarial.test.ts \
+            tests/unit/hooks/knowledge-curator-output.test.ts \
+            tests/unit/hooks/full-auto-intercept.test.ts \
+            tests/unit/hooks/full-auto-intercept.adversarial.test.ts \
+            tests/unit/hooks/full-auto-intercept.dispatch.test.ts \
+            tests/unit/hooks/utils.test.ts \
+            tests/unit/hooks/system-enhancer-coder-context.test.ts \
+            tests/unit/hooks/model-limits-log-reclassification.test.ts \
+            tests/unit/hooks/model-limits-adversarial.test.ts \
+            tests/unit/hooks/log-level-reclassification.test.ts \
+            tests/unit/hooks/context-budget-log-reclassification.test.ts; do
+            [ -f "$f" ] || continue
+            tmp="$tmpdir/bun-out-$$-${f##*/}"
+            exit_code=0
+            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+                echo "::error file=$f::FAILED: $f"
+                failed=1
+              fi
             fi
           done
           exit $failed
@@ -193,7 +231,7 @@ jobs:
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/system-enhancer-adversarial.attack.test.ts tests/unit/hooks/system-enhancer-adversarial.test.ts tests/unit/hooks/system-enhancer-coder-context.test.ts tests/unit/hooks/system-enhancer-compaction.test.ts tests/unit/hooks/system-enhancer-context-budget-wiring.test.ts tests/unit/hooks/system-enhancer-drift.test.ts tests/unit/hooks/system-enhancer-evidence.adversarial.test.ts tests/unit/hooks/system-enhancer-evidence.test.ts tests/unit/hooks/system-enhancer-handoff.test.ts tests/unit/hooks/system-enhancer-hf1b-adversarial.test.ts tests/unit/hooks/system-enhancer-hf1b.test.ts tests/unit/hooks/system-enhancer-lang-constraints-adversarial.test.ts tests/unit/hooks/system-enhancer-lang-constraints.test.ts tests/unit/hooks/system-enhancer-retro.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist-adversarial.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist.test.ts tests/unit/hooks/system-enhancer-test-constraints.test.ts tests/unit/hooks/system-enhancer-v6.test.ts tests/unit/hooks/system-enhancer-v61.test.ts tests/unit/hooks/system-enhancer-v62-adversarial.test.ts tests/unit/hooks/system-enhancer-v62.test.ts tests/unit/hooks/system-enhancer.test.ts; do
+          for f in tests/unit/hooks/system-enhancer-adversarial.attack.test.ts tests/unit/hooks/system-enhancer-adversarial.test.ts tests/unit/hooks/system-enhancer-compaction.test.ts tests/unit/hooks/system-enhancer-context-budget-wiring.test.ts tests/unit/hooks/system-enhancer-drift.test.ts tests/unit/hooks/system-enhancer-evidence.adversarial.test.ts tests/unit/hooks/system-enhancer-evidence.test.ts tests/unit/hooks/system-enhancer-handoff.test.ts tests/unit/hooks/system-enhancer-hf1b-adversarial.test.ts tests/unit/hooks/system-enhancer-hf1b.test.ts tests/unit/hooks/system-enhancer-lang-constraints-adversarial.test.ts tests/unit/hooks/system-enhancer-lang-constraints.test.ts tests/unit/hooks/system-enhancer-retro.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist-adversarial.test.ts tests/unit/hooks/system-enhancer-reviewer-checklist.test.ts tests/unit/hooks/system-enhancer-test-constraints.test.ts tests/unit/hooks/system-enhancer-v6.test.ts tests/unit/hooks/system-enhancer-v61.test.ts tests/unit/hooks/system-enhancer-v62-adversarial.test.ts tests/unit/hooks/system-enhancer-v62.test.ts tests/unit/hooks/system-enhancer.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -225,12 +263,13 @@ jobs:
       - name: Unit tests (hooks - remaining)
         shell: bash
         run: |
+          shopt -s extglob
           set -o pipefail
           IFS=$'\n'
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
-          for f in tests/unit/hooks/advisory*.test.ts tests/unit/hooks/agent*.test.ts tests/unit/hooks/co-change*.test.ts tests/unit/hooks/compaction*.test.ts tests/unit/hooks/context*.test.ts tests/unit/hooks/dark*.test.ts tests/unit/hooks/extractors*.test.ts tests/unit/hooks/full-auto*.test.ts tests/unit/hooks/gate*.test.ts tests/unit/hooks/log*.test.ts tests/unit/hooks/message*.test.ts tests/unit/hooks/mode-*.test.ts tests/unit/hooks/model*.test.ts tests/unit/hooks/phase*.test.ts tests/unit/hooks/pipeline*.test.ts tests/unit/hooks/plan*.test.ts tests/unit/hooks/review-receipt*.test.ts tests/unit/hooks/self*.test.ts tests/unit/hooks/steering*.test.ts tests/unit/hooks/system-message*.test.ts tests/unit/hooks/telemetry-guardrails*.test.ts tests/unit/hooks/tool*.test.ts tests/unit/hooks/trajectory*.test.ts tests/unit/hooks/utils*.test.ts; do
+          for f in tests/unit/hooks/advisory*.test.ts tests/unit/hooks/agent*.test.ts tests/unit/hooks/co-change*.test.ts tests/unit/hooks/compaction*.test.ts tests/unit/hooks/!(context-budget-log-reclassification).test.ts tests/unit/hooks/dark*.test.ts tests/unit/hooks/extractors*.test.ts tests/unit/hooks/!(full-auto-intercept|full-auto-intercept.adversarial|full-auto-intercept.dispatch).test.ts tests/unit/hooks/gate*.test.ts tests/unit/hooks/!(log-level-reclassification).test.ts tests/unit/hooks/message*.test.ts tests/unit/hooks/mode-*.test.ts tests/unit/hooks/!(model-limits-log-reclassification|model-limits-adversarial).test.ts tests/unit/hooks/phase*.test.ts tests/unit/hooks/pipeline*.test.ts tests/unit/hooks/plan*.test.ts tests/unit/hooks/review-receipt*.test.ts tests/unit/hooks/self*.test.ts tests/unit/hooks/steering*.test.ts tests/unit/hooks/system-message*.test.ts tests/unit/hooks/telemetry-guardrails*.test.ts tests/unit/hooks/tool*.test.ts tests/unit/hooks/trajectory*.test.ts tests/unit/hooks/!(utils).test.ts; do
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
