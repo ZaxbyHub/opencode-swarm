@@ -31,6 +31,7 @@ import {
 	normalizeGraphPath,
 	updateGraphMetadata,
 } from './types';
+import { safeRealpathSync } from './safe-realpath';
 import {
 	validateGraphEdge,
 	validateGraphNode,
@@ -179,22 +180,19 @@ export function resolveModuleSpecifier(
 			// SECURITY: Resolve symlinks to get the real path, then verify the
 			// real path is still within the workspace boundary. This prevents
 			// symlink-based workspace escape attacks.
-			let realResolved: string;
-			try {
-				realResolved = realpathSync(resolved);
-			} catch {
-				// realpath fails for non-existent paths - use resolved as fallback
-				// but only if it passes the non-realpath boundary check below
-				realResolved = resolved;
+			const initialRealResolved = safeRealpathSync(resolved, resolved);
+			if (initialRealResolved === null) {
+				return null;
 			}
+			let realResolved = initialRealResolved;
 
 			// Get the realpath of the workspace root to compare consistently
-			let realRoot: string;
-			try {
-				realRoot = realpathSync(workspaceRoot);
-			} catch {
-				// Fall back to normalized path if realpath fails
-				realRoot = path.normalize(workspaceRoot);
+			const realRoot = safeRealpathSync(
+				workspaceRoot,
+				path.normalize(workspaceRoot),
+			);
+			if (realRoot === null) {
+				return null;
 			}
 
 			// Try to resolve the extensionless path to a real file.
@@ -221,11 +219,11 @@ export function resolveModuleSpecifier(
 				}
 				if (found) {
 					// Re-resolve symlinks for the found file
-					try {
-						realResolved = realpathSync(found);
-					} catch {
-						realResolved = found;
+					const foundRealPath = safeRealpathSync(found, found);
+					if (foundRealPath === null) {
+						return null;
 					}
+					realResolved = foundRealPath;
 					// Update resolved to the found path so the return value has the extension
 					resolved = found;
 				} else {

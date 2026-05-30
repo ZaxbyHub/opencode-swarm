@@ -6,7 +6,7 @@
  * cache. Symlink resolution guards against workspace-escape attacks.
  */
 
-import { constants, existsSync, realpathSync } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../../hooks/utils';
@@ -25,6 +25,7 @@ import {
 	REPO_GRAPH_FILENAME,
 	updateGraphMetadata,
 } from './types';
+import { safeRealpathSync } from './safe-realpath';
 import {
 	validateGraphEdge,
 	validateGraphNode,
@@ -254,19 +255,20 @@ export async function saveGraph(
 	// This prevents a TOCTOU attack where a graph saved for one workspace could
 	// be swapped with a graph from another workspace.
 	const normalizedWorkspace = path.normalize(workspace);
-	let realWorkspace: string;
-	try {
-		realWorkspace = realpathSync(workspace);
-	} catch {
-		realWorkspace = normalizedWorkspace;
+	const realWorkspace = safeRealpathSync(workspace, normalizedWorkspace);
+	if (realWorkspace === null) {
+		throw new Error(`Unable to resolve workspace real path: ${workspace}`);
 	}
 
 	const normalizedGraphRoot = path.normalize(graph.workspaceRoot);
-	let realGraphRoot: string;
-	try {
-		realGraphRoot = realpathSync(graph.workspaceRoot);
-	} catch {
-		realGraphRoot = normalizedGraphRoot;
+	const realGraphRoot = safeRealpathSync(
+		graph.workspaceRoot,
+		normalizedGraphRoot,
+	);
+	if (realGraphRoot === null) {
+		throw new Error(
+			`Unable to resolve graph workspaceRoot real path: ${graph.workspaceRoot}`,
+		);
 	}
 
 	if (path.normalize(realWorkspace) !== path.normalize(realGraphRoot)) {
