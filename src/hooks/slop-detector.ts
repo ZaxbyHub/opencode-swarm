@@ -19,6 +19,8 @@ const WRITE_EDIT_TOOLS = new Set([
 /**
  * Regex that matches new export declarations in a unified diff (+lines).
  * Shared by checkDeadExports and checkDuplicateUtility so updates apply to both.
+ * The `g` flag is required: String.prototype.matchAll() throws TypeError without it.
+ * The `m` flag makes `^` match at each line start within the diff content.
  */
 const NEW_EXPORT_RE =
 	/^\+(?:export)\s+(?:function|class|const|type|interface)\s+(\w{3,})/gm;
