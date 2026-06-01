@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.46.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.4...v7.46.5) (2026-06-01)
+
+
+### Bug Fixes
+
+* resolve PR [#712](https://github.com/zaxbysauce/opencode-swarm/issues/712) follow-up items (regex dedup, test gaps, redundant test) ([#1087](https://github.com/zaxbysauce/opencode-swarm/issues/1087)) ([3852078](https://github.com/zaxbysauce/opencode-swarm/commit/38520787acf93145db6e6bdad73eba5258119397))
+
 ## [7.46.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.3...v7.46.4) (2026-06-01)
 
 
