@@ -69,7 +69,7 @@ describe('writeProjectConfigIfNew', () => {
 		const mtimeBefore = fs.statSync(configPath(dir)).mtimeMs;
 
 		// Small delay to ensure mtime would differ if the file were rewritten
-		Bun.sleepSync(20);
+		Bun.sleepSync(50);
 		writeProjectConfigIfNew(dir);
 
 		expect(fs.statSync(configPath(dir)).mtimeMs).toBe(mtimeBefore);
@@ -95,16 +95,16 @@ describe('writeProjectConfigIfNew', () => {
 				if (String(p).endsWith('opencode-swarm.json')) return false;
 				return origExists(p);
 			};
-			fs.mkdirSync = function(p, ...args) {
+			fs.mkdirSync = function(p, ...mkdirArgs) {
 				if (String(p).endsWith('.opencode')) {
 					throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
 				}
-				return origMkdir(p, ...args);
+				return origMkdir(p, ...mkdirArgs);
 			};
 			// Inline copy of writeProjectConfigIfNew (uses patched fs via require)
 			const path = require('node:path');
 			const STARTER_CONTENT = '{}\\n';
-			function writeProjectConfigIfNew(directory, quiet) {
+			function writeProjectConfigIfNew(directory, _quiet) {
 				try {
 					const opencodeDir = path.join(directory, '.opencode');
 					const dest = path.join(opencodeDir, 'opencode-swarm.json');
@@ -120,13 +120,62 @@ describe('writeProjectConfigIfNew', () => {
 		`;
 
 		const result = await new Promise<{ code: number }>((resolve) => {
-			const child = spawn('bun', ['--eval', script], { cwd: dir });
+			const child = spawn(process.execPath, ['--eval', script], { cwd: dir });
 			child.on('close', (code) => resolve({ code: code ?? 0 }));
 		});
 
 		// Plugin must not crash — exit 0
 		expect(result.code).toBe(0);
 		// File should not have been created
+		expect(fs.existsSync(configPath(dir))).toBe(false);
+	});
+
+	// 7b. Non-fatal when writeFileSync fails (e.g. ENOSPC)
+	test('7b. non-fatal when writeFileSync fails (ENOSPC)', async () => {
+		const script = `
+			const fs = require('node:fs');
+			const origWriteFileSync = fs.writeFileSync.bind(fs);
+			const origExists = fs.existsSync.bind(fs);
+			fs.existsSync = function(p) {
+				if (String(p).endsWith('opencode-swarm.json')) return false;
+				return origExists(p);
+			};
+			fs.writeFileSync = function(p, ...writeArgs) {
+				if (String(p).endsWith('opencode-swarm.json')) {
+					throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+				}
+				return origWriteFileSync(p, ...writeArgs);
+			};
+			const path = require('node:path');
+			const STARTER_CONTENT = '{}\\n';
+			function writeProjectConfigIfNew(directory, _quiet) {
+				try {
+					const opencodeDir = path.join(directory, '.opencode');
+					const dest = path.join(opencodeDir, 'opencode-swarm.json');
+					if (!fs.existsSync(opencodeDir)) {
+						fs.mkdirSync(opencodeDir, { recursive: true });
+					}
+					try {
+						fs.writeFileSync(dest, STARTER_CONTENT, { encoding: 'utf-8', flag: 'wx' });
+					} catch {}
+				} catch {}
+			}
+			writeProjectConfigIfNew(${JSON.stringify(dir)});
+		`;
+
+		const result = await new Promise<{ code: number }>((resolve) => {
+			const child = spawn(process.execPath, ['--eval', script], { cwd: dir });
+			child.on('close', (code) => resolve({ code: code ?? 0 }));
+		});
+
+		expect(result.code).toBe(0);
+		expect(fs.existsSync(configPath(dir))).toBe(false);
+	});
+
+	// 7c. Non-fatal when .opencode exists as a file (mkdir ENOTDIR-style path)
+	test('7c. non-fatal when .opencode is a file', () => {
+		fs.writeFileSync(path.join(dir, '.opencode'), 'not-a-dir', 'utf-8');
+		expect(() => writeProjectConfigIfNew(dir)).not.toThrow();
 		expect(fs.existsSync(configPath(dir))).toBe(false);
 	});
 
