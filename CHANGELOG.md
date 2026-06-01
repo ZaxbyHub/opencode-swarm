@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.46.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.3...v7.46.4) (2026-06-01)
+
+
+### Bug Fixes
+
+* **turbo:** migrate turbo-lean tests to `_internals` seam and correct `standard off` docs ([#1086](https://github.com/zaxbysauce/opencode-swarm/issues/1086)) ([0b51b62](https://github.com/zaxbysauce/opencode-swarm/commit/0b51b62838174515194c05af1f414ad852c5dab1))
+
 ## [7.46.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.2...v7.46.3) (2026-06-01)
 
 
