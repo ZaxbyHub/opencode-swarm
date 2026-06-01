@@ -354,6 +354,35 @@ If GitHub still reports `DIRTY`, `BLOCKED`, or stale checks after local conflict
 resolution, fetch current `origin/main` again and re-evaluate before claiming the
 conflict is resolved.
 
+### GitHub auto-merge race condition
+
+When `main` advances while your PR is open, GitHub's PR sync machinery may
+**automatically push a merge commit to your branch** in the window between when
+you fetch and when you push. This is distinct from a conflict — it is GitHub
+creating a merge commit on your behalf without rebuilding generated outputs
+(`dist/`, lockfiles, etc.).
+
+Symptoms:
+- `git push` is rejected with "fetch first" even though you just fetched
+- `git log HEAD..origin/<branch>` shows a commit authored by GitHub/the repo owner with message `Merge branch 'main' into <branch>`
+- CI `dist-check` fails on that auto-merge commit because it was not rebuilt
+
+Recovery:
+```bash
+git fetch origin <branch>
+git log HEAD..origin/<branch>   # confirm it's only the GitHub auto-merge
+# Your local commit is correct (it has the rebuilt dist/). Force-push it:
+git push origin <branch> --force-with-lease
+```
+
+After force-pushing, verify the PR head SHA updated and cancel any CI run
+targeting the superseded auto-merge SHA to unblock concurrency:
+
+```powershell
+gh run list --branch <branch> --limit 5 --json databaseId,headSha,status,workflowName
+gh run cancel <stale-run-id>
+```
+
 ### Check closeout
 
 `gh pr checks --watch --fail-fast` is useful but can lag or flatten matrix and
@@ -412,4 +441,5 @@ Do not call the PR green or merge-ready while a required job is `cancelled`, `sk
 - [ ] if this was review follow-up, the PR body was refreshed to match current evidence
 - [ ] if the PR resolves an issue, the issue comment was posted with PR link, what changed, how to use it, and migration notes
 - [ ] if any required job was cancelled and dependent jobs skipped, the run was rerun or the non-green state was explicitly accepted by the user
+- [ ] for high-risk work (security, isolation, IPC, auth, payments, migrations), an independent adversarial review subagent ran before the final substantive push and all confirmed findings were addressed — if this was not done before pushing, run the review now and force-push a corrected commit before marking the PR ready
 - [ ] all required CI checks are green before calling the PR merge-ready

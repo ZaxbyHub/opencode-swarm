@@ -31,6 +31,8 @@ The review agent must:
 - Verify documented behavior vs. actual code behavior
 - Surface every edge case not explicitly covered
 
+**Timing requirement:** Phase 2 must complete and all confirmed findings must be addressed **before the commit you intend as the final substantive push**. Do not defer this to "after CI passes" — CI passing on a buggy commit does not retroactively make the review optional. For high-risk work (security, isolation, IPC contracts, auth, payments), this is a hard gate with no exceptions.
+
 ### Phase 3 — Completeness Verification
 Spawn a SECOND independent agent to verify original planned work vs. delivered work:
 > "Assume nothing was completed correctly or fully. Map every originally planned item to actual
