@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.46.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.2...v7.46.3) (2026-06-01)
+
+
+### Bug Fixes
+
+* **repo-graph:** harden realpath handling with shared ENOENT-only fallback and DI seams ([#1084](https://github.com/zaxbysauce/opencode-swarm/issues/1084)) ([318274b](https://github.com/zaxbysauce/opencode-swarm/commit/318274b8dfb46b4eacd1f70bce93a0e955be7257))
+
 ## [7.46.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.1...v7.46.2) (2026-06-01)
 
 
