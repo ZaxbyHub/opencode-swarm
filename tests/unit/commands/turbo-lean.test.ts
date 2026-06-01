@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleTurboCommand } from '../../../src/commands/turbo';
+import { _internals, handleTurboCommand } from '../../../src/commands/turbo';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -23,18 +23,24 @@ import * as leanState from '../../../src/turbo/lean/state';
 
 const mockLoadPluginConfigWithMeta = mock(() => ({
 	config: {},
-	meta: { path: '/tmp/test' },
-}));
-
-mock.module('../../../src/config', () => ({
-	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+	loadedFromFile: false,
 }));
 
 const SESSION_ID = 'sess-turbo-lean';
 
 let tmpDir: string;
+let originalLoadPluginConfigWithMeta:
+	| typeof _internals.loadPluginConfigWithMeta
+	| undefined;
 
 beforeEach(() => {
+	originalLoadPluginConfigWithMeta = _internals.loadPluginConfigWithMeta;
+	_internals.loadPluginConfigWithMeta = mockLoadPluginConfigWithMeta;
+	mockLoadPluginConfigWithMeta.mockImplementation(() => ({
+		config: {},
+		loadedFromFile: false,
+	}));
+
 	tmpDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'turbo-lean-cmd-')),
 	);
@@ -46,7 +52,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	mock.restore();
+	if (originalLoadPluginConfigWithMeta) {
+		_internals.loadPluginConfigWithMeta = originalLoadPluginConfigWithMeta;
+	}
+	mockLoadPluginConfigWithMeta.mockReset();
 	swarmState.agentSessions.delete(SESSION_ID);
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -282,7 +291,7 @@ describe('subcommands — standard / lean / status', () => {
 					},
 				},
 			},
-			meta: { path: '/tmp/test' },
+			loadedFromFile: false,
 		});
 
 		const out = await handleTurboCommand(tmpDir, ['on'], SESSION_ID);
@@ -309,7 +318,7 @@ describe('subcommands — standard / lean / status', () => {
 					},
 				},
 			},
-			meta: { path: '/tmp/test' },
+			loadedFromFile: false,
 		});
 
 		const out = await handleTurboCommand(

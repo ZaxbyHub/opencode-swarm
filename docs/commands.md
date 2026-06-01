@@ -232,7 +232,7 @@ Session-scoped; resets on new session.
 /swarm turbo lean off     # disable Lean Turbo
 /swarm turbo lean         # toggle Lean Turbo explicitly
 /swarm turbo standard on  # force standard turbo
-/swarm turbo standard off # disable standard turbo
+/swarm turbo standard off # disable all turbo modes (standard + lean)
 /swarm turbo status       # show detailed status
 ```
 

@@ -684,7 +684,7 @@ export const COMMAND_REGISTRY = {
 			'  turbo lean off     — disable Lean Turbo\n' +
 			'  turbo lean         — toggle Lean Turbo on/off\n' +
 			'  turbo standard on  — force standard turbo (disables lean even if config says lean)\n' +
-			'  turbo standard off — disable standard turbo (falls back to lean if config strategy is lean)\n' +
+			'  turbo standard off — disable all turbo modes (standard + lean)\n' +
 			'  turbo status       — show detailed status including active strategy and lanes\n' +
 			'\n' +
 			'Session-scoped — resets on new session.',

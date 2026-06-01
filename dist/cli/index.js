@@ -58640,7 +58640,7 @@ Subcommands:
 ` + `  turbo lean off     \u2014 disable Lean Turbo
 ` + `  turbo lean         \u2014 toggle Lean Turbo on/off
 ` + `  turbo standard on  \u2014 force standard turbo (disables lean even if config says lean)
-` + `  turbo standard off \u2014 disable standard turbo (falls back to lean if config strategy is lean)
+` + `  turbo standard off \u2014 disable all turbo modes (standard + lean)
 ` + `  turbo status       \u2014 show detailed status including active strategy and lanes
 ` + `
 ` + "Session-scoped \u2014 resets on new session.",
