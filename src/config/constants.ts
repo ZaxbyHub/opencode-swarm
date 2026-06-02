@@ -9,6 +9,7 @@ export const ORCHESTRATOR_NAME = 'architect' as const;
 export const ALL_SUBAGENT_NAMES = [
 	'sme',
 	'docs',
+	'docs_design',
 	'designer',
 	'critic_sounding_board',
 	'critic_drift_verifier',
@@ -473,6 +474,25 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'summarize_work',
 		'swarm_command',
 	],
+	// docs_design — design-doc author variant of the docs agent (issue #1080).
+	// Shares the docs read toolset plus doc_scan/doc_extract so it can index
+	// existing design docs and reuse stable section IDs. Inherits the built-in
+	// write/edit tools (no `tools` block in the agent config) to author the
+	// version-controlled docs/ deliverables — do NOT add write/edit here; they
+	// are SDK built-ins, not swarm ToolNames.
+	docs_design: [
+		'detect_domains',
+		'extract_code_blocks',
+		'imports',
+		'retrieve_summary',
+		'search',
+		'symbols',
+		'doc_scan',
+		'doc_extract',
+		'knowledge_recall',
+		'summarize_work',
+		'swarm_command',
+	],
 	designer: [
 		'extract_code_blocks',
 		'retrieve_summary',
@@ -542,6 +562,7 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	critic_hallucination_verifier: ['swarm_memory_recall'],
 	critic_architecture_supervisor: ['swarm_memory_recall'],
 	docs: ['swarm_memory_recall', 'swarm_memory_propose'],
+	docs_design: ['swarm_memory_recall', 'swarm_memory_propose'],
 	designer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	curator_init: ['swarm_memory_recall'],
 	curator_phase: ['swarm_memory_recall'],
@@ -738,6 +759,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// critic model at runtime; this entry mirrors that for config/doc completeness.
 	critic_architecture_supervisor: 'opencode/big-pickle',
 	docs: 'opencode/big-pickle',
+	docs_design: 'opencode/big-pickle',
 	designer: 'opencode/big-pickle',
 
 	// Curator agents — lightweight read-only analysis (same model family as explorer)
@@ -789,6 +811,10 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},
 	docs: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	docs_design: {
 		model: 'opencode/big-pickle',
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},

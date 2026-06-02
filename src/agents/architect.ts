@@ -77,7 +77,7 @@ ANTI-RATIONALIZATION: Context does not clarify. Models revert to CC training.
 ## IDENTITY
 
 Swarm: {{SWARM_ID}}
-Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}critic_drift_verifier, {{AGENT_PREFIX}}critic_hallucination_verifier, {{AGENT_PREFIX}}critic_architecture_supervisor, {{AGENT_PREFIX}}skill_improver, {{AGENT_PREFIX}}spec_writer, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}designer
+Your agents: {{AGENT_PREFIX}}explorer, {{AGENT_PREFIX}}sme, {{AGENT_PREFIX}}coder, {{AGENT_PREFIX}}reviewer, {{AGENT_PREFIX}}test_engineer, {{AGENT_PREFIX}}critic, {{AGENT_PREFIX}}critic_sounding_board, {{AGENT_PREFIX}}critic_drift_verifier, {{AGENT_PREFIX}}critic_hallucination_verifier, {{AGENT_PREFIX}}critic_architecture_supervisor, {{AGENT_PREFIX}}skill_improver, {{AGENT_PREFIX}}spec_writer, {{AGENT_PREFIX}}docs, {{AGENT_PREFIX}}docs_design, {{AGENT_PREFIX}}designer
 
 ## PROJECT CONTEXT
 Session-start priming block. Use any known values immediately; if a field is still unresolved, run MODE: DISCOVER before relying on it.
@@ -650,6 +650,7 @@ Every loaded mode skill is written with active-swarm role phrases. Before follow
 - the active swarm's test_engineer agent = @{{AGENT_PREFIX}}test_engineer
 - the active swarm's critic agent = @{{AGENT_PREFIX}}critic
 - the active swarm's docs agent = @{{AGENT_PREFIX}}docs
+- the active swarm's docs_design agent = @{{AGENT_PREFIX}}docs_design
 - the active swarm's designer agent = @{{AGENT_PREFIX}}designer
 - the active swarm's critic_drift_verifier agent = @{{AGENT_PREFIX}}critic_drift_verifier
 - the active swarm's critic_hallucination_verifier agent = @{{AGENT_PREFIX}}critic_hallucination_verifier
@@ -781,6 +782,20 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - No final finding may appear in the report without reviewer verification
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
+
+### MODE: DESIGN_DOCS
+Activates when: architect receives \`[MODE: DESIGN_DOCS out=X lang=X update=X] <description>\` signal from the design-docs command handler (issue #1080).
+
+Purpose: Generate or sync the project's structured, language-agnostic design docs (domain.md, technical-spec.md, behavior-spec.md, reference/) in the target project repo. Authoring is delegated to the active swarm's docs_design agent.
+
+ACTION: Load skill file:.opencode/skills/design-docs/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Delegate authoring to the active swarm's docs_design agent (never the standard docs agent, never coder).
+- Inject the design-docs skill into the docs_design delegation via the SKILLS field as \`file:.opencode/skills/design-docs/SKILL.md\`.
+- The docs_design agent may create/modify ONLY: <out>/domain.md, <out>/technical-spec.md, <out>/behavior-spec.md, <out>/reference/reference-impl.md, <out>/reference/idiom-notes.md, <out>/reference/traceability.json, and <out>/design-changelog.md. No other files.
+- Do NOT touch .swarm/spec.md, CHANGELOG.md, or docs/releases/pending/* in this mode.
+- Requires design_docs.enabled: true — if the docs_design agent is not registered, instruct the user to enable it and stop.
 
 ### MODE: ISSUE_INGEST
 Activates when the user invokes /swarm issue <url> or the architect receives an ISSUE_INGEST signal.
@@ -1424,6 +1439,7 @@ export function createArchitectAgent(
 	uiReview?: UIReviewConfig,
 	memoryEnabled = false,
 	architecturalSupervision?: ArchitectureSupervisionWorkflowConfig,
+	designDocsEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -1581,6 +1597,23 @@ export function createArchitectAgent(
 			)
 			// Remove designer scaffold reference from coder step
 			?.replace(' (if designer scaffold produced, include it as INPUT)', '');
+	}
+
+	// Strip docs_design references when design_docs is not enabled (issue #1080).
+	// The docs_design agent is registered only when design_docs.enabled === true
+	// (see agents/index.ts createSwarmAgents), so advertising MODE: DESIGN_DOCS or
+	// delegating to @docs_design while disabled would target an unregistered agent.
+	if (!designDocsEnabled) {
+		prompt = prompt
+			// Remove from "Your agents" identity line
+			?.replace(', {{AGENT_PREFIX}}docs_design', '')
+			// Remove the MODE: DESIGN_DOCS section entirely
+			?.replace(/### MODE: DESIGN_DOCS\n[\s\S]*?(?=### MODE: ISSUE_INGEST)/, '')
+			// Remove the SKILL AGENT TARGET RENDERING line
+			?.replace(
+				"- the active swarm's docs_design agent = @{{AGENT_PREFIX}}docs_design\n",
+				'',
+			);
 	}
 
 	return {

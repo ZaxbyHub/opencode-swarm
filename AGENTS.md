@@ -57,6 +57,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
 - User-supplied `working_directory` must resolve to the project root, never a subdirectory. See v6.82.2 (`#577`): `save_plan` and the shared `resolveWorkingDirectory` helper anchor inputs.
 - No tool may create `.swarm/` under `src/`, `tests/`, `packages/*`, or any arbitrary `cwd`. New-directory checks must be explicit.
 - `.swarm/` must not become Git pollution. The `ensureSwarmGitExcluded` flow (v7.3.3) keeps the project's `.git/info/exclude` honest; do not bypass it.
+- **Exception — version-controlled deliverables:** documentation the docs agent authors into the project repo is *output*, not runtime state. The `docs` agent already writes README/CHANGELOG; the `docs_design` agent (issue #1080, opt-in) writes design docs under `design_docs.out_dir` (default `docs/`). These are intentionally committed and are exempt from `.swarm/` containment. Their *runtime drift signal* (`.swarm/doc-drift-phase-N.json`) stays under `.swarm/`.
 
 ### 5. Plan durability — ledger is authoritative
 

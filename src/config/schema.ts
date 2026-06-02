@@ -455,6 +455,40 @@ export const DocsConfigSchema = z.object({
 
 export type DocsConfig = z.infer<typeof DocsConfigSchema>;
 
+// Structured design-doc generation configuration (issue #1080 — opt-in).
+// Drives the docs_design agent (a design-doc-author role variant of the docs
+// agent) and the per-phase design-doc drift check. Disabled by default so
+// repos that do not use it are completely unaffected.
+export const DesignDocsConfigSchema = z.object({
+	enabled: z.boolean().default(false),
+	// Output directory (relative to project root) for the generated, version-
+	// controlled design docs: domain.md, technical-spec.md, behavior-spec.md,
+	// and reference/{reference-impl,idiom-notes}.md. Must be a project-relative
+	// path with no traversal — it is resolved against the project root by the
+	// drift check and the docs_design agent.
+	out_dir: z
+		.string()
+		.default('docs')
+		.refine(
+			(v) =>
+				v.length > 0 &&
+				v !== '.' &&
+				!v.includes('..') &&
+				!v.startsWith('/') &&
+				!v.startsWith('\\') &&
+				!/^[A-Za-z]:/.test(v),
+			{
+				message:
+					'design_docs.out_dir must be a non-empty project-relative path with no "..", leading slash, or drive letter',
+			},
+		),
+	// Optional target implementation language for the reference/ docs. When
+	// omitted, the agent infers it from the codebase.
+	language: z.string().optional(),
+});
+
+export type DesignDocsConfig = z.infer<typeof DesignDocsConfigSchema>;
+
 // UI/UX review configuration (designer agent — opt-in)
 export const UIReviewConfigSchema = z.object({
 	enabled: z.boolean().default(false),
@@ -1560,6 +1594,9 @@ export const PluginConfigSchema = z.object({
 
 	// Documentation synthesizer configuration
 	docs: DocsConfigSchema.optional(),
+
+	// Structured design-doc generation (issue #1080 — docs_design agent, opt-in)
+	design_docs: DesignDocsConfigSchema.optional(),
 
 	// UI/UX review configuration (designer agent)
 	ui_review: UIReviewConfigSchema.optional(),

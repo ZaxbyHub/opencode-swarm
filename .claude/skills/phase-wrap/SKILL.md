@@ -53,10 +53,11 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
 
 ### MODE: PHASE-WRAP
 1. the active swarm's explorer agent - Rescan
-2. the active swarm's docs agent - Update documentation for all changes in this phase. Provide:
+2. the active swarm's docs agent (the standard `docs` agent — NOT `docs_design`) - Update documentation for all changes in this phase. Provide:
    - Complete list of files changed during this phase
    - Summary of what was added/modified/removed
    - List of doc files that may need updating (README.md, CONTRIBUTING.md, docs/)
+   Do NOT dispatch `docs_design` here. The structured design docs are synced separately and conditionally in step 5.58.
 3. Update context.md
 4. Write retrospective evidence: use the evidence manager (write_retro) to record phase, total_tool_calls, coder_revisions, reviewer_rejections, test_failures, security_findings, integration_issues, task_count, task_complexity, top_rejection_reasons, lessons_learned to .swarm/evidence/. Reset Phase Metrics in context.md to 0.
 4.5. Run `evidence_check` to verify all completed tasks have required evidence (review + test). If gaps found, note in retrospective lessons_learned. Optionally run `pkg_audit` if dependencies were modified during this phase. Optionally run `schema_drift` if API routes were modified during this phase.
@@ -87,6 +88,7 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    6. If verdict is WARN: non-blocking — proceed to step 5.6 with a warning to the user.
    7. If verdict is PASS: proceed to step 5.6.
    NOTE: This step is enforced by the plugin. If `mutation_test` is enabled and `.swarm/evidence/{phase}/mutation-gate.json` is missing or has a 'fail' verdict, phase_complete will be BLOCKED.
+5.58. **Design-doc sync (conditional on `design_docs.enabled` — issue #1080)**: If `design_docs.enabled` is not true, skip silently. Otherwise: `phase_complete` runs a deterministic, non-blocking design-doc drift check and writes `.swarm/doc-drift-phase-{phase}.json`. If its verdict is `DOC_STALE`, enter MODE: DESIGN_DOCS in sync mode for the stale sections only — delegate to the active swarm's `docs_design` agent (NOT the standard `docs` agent) with the changed files + the stale section IDs, and have it update the affected docs and append a `design-changelog.md` entry. This is advisory and NON-BLOCKING — never hold up phase_complete on design-doc lag, and never write `.swarm/spec.md`, `CHANGELOG.md`, or `docs/releases/pending/*` here.
 5.6. **Mandatory gate evidence**: Before calling phase_complete, ensure:
    - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate)
    - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when .swarm/spec.md exists

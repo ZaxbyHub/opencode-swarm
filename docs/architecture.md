@@ -177,6 +177,7 @@ All directive language (must, should, needs, verdict, review needed, dead) was r
 - Documentation synthesizer
 - Automatically updates READMEs, API docs, and guides based on implementation changes
 - Runs in Phase 6 as part of project wrap-up
+- **`docs_design` role variant** (opt-in via `design_docs.enabled`, issue #1080): the same agent in a design-doc-author role. Generates/syncs language-agnostic design docs (`domain.md`, `technical-spec.md`, `behavior-spec.md`, `reference/*`) for the project under build via `/swarm design-docs` (`MODE: DESIGN_DOCS`). A deterministic, fail-open per-phase drift check (`src/hooks/design-doc-drift.ts`) writes `.swarm/doc-drift-phase-N.json` and advises a sync when docs fall behind code/spec.
 
 ---
 

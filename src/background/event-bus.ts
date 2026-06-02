@@ -39,6 +39,7 @@ export type AutomationEventType =
 	| 'curator.phase.llm_completed'
 	| 'curator.phase.llm_fallback'
 	| 'curator.drift.completed'
+	| 'curator.docdrift.completed'
 	| 'curator.error';
 
 /** Base automation event */

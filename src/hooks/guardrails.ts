@@ -4720,6 +4720,23 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 		allowedGlobs: ['**/docs/**', '**/*.md', '**/*.mdx', '**/*.rst'],
 		blockedZones: ['generated'],
 	},
+	// Design-doc author variant (issue #1080). Same documentation surface as
+	// `docs`, plus its machine-readable `reference/traceability.json` registry
+	// (a .json, not matched by the markdown globs). This rule is what lets
+	// docs_design write its deliverables AND constrains it to doc-like files —
+	// source writes (src/**, etc.) remain denied. Without this entry the
+	// file-authority guard rejects every docs_design write as "Unknown agent".
+	docs_design: {
+		allowedPrefix: ['docs/', '.swarm/outputs/'],
+		allowedGlobs: [
+			'**/docs/**',
+			'**/*.md',
+			'**/*.mdx',
+			'**/*.rst',
+			'**/reference/traceability.json',
+		],
+		blockedZones: ['generated'],
+	},
 	designer: {
 		allowedPrefix: ['docs/', '.swarm/outputs/'],
 		// v7.x (#bug-test-engineer-write-access follow-up): same reasoning as docs —

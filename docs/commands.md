@@ -176,6 +176,45 @@ Read-only codebase audit using parallel explorer waves with independent reviewer
 
 **No-args behavior:** prints a usage string. The command never throws on bad input.
 
+### `/swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]`
+
+Generate or sync structured, language-agnostic design docs for the project under build (issue #1080). Delegates to the `docs_design` agent (a role variant of the docs agent) via `MODE: DESIGN_DOCS`.
+
+**Requires** `design_docs.enabled: true` in `opencode-swarm.json`.
+
+| Alias |
+|-------|
+| `/swarm design docs` |
+
+**Command forms:**
+- `/swarm design-docs "terminal GitHub PR client"` — generate fresh docs under `docs/`
+- `/swarm design-docs auth-service --lang rust` — generate with Rust reference docs
+- `/swarm design docs --update --out design` — sync existing docs in `design/`
+
+**Generated layout** (under `<out>`, default `docs/`):
+
+| File | Contents |
+|------|----------|
+| `domain.md` | 100% language-agnostic entities, fields, and domain invariants (IDs `D-###`) |
+| `technical-spec.md` | Language-agnostic architecture, contract shapes, invariants, + traceability table (IDs `S-###`) |
+| `behavior-spec.md` | Given/When/Then conformance specs (IDs `B-###`) |
+| `reference/reference-impl.md` | All language/framework-specific signatures, code, SQL (IDs `R-###`) |
+| `reference/idiom-notes.md` | Reference-implementation idiom examples |
+| `reference/traceability.json` | Machine-readable section-ID registry (drift source of truth) |
+| `design-changelog.md` | Append-only log of design-doc changes (separate from release notes) |
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--out <dir>` | `docs` | Output directory (project-relative) |
+| `--lang <name>` | inferred | Target language for `reference/` docs |
+| `--update` | — | Sync existing docs to current code/spec instead of generating fresh |
+
+**Drift sync:** when `design_docs.enabled`, `phase_complete` runs a deterministic, non-blocking design-doc drift check (`.swarm/doc-drift-phase-N.json`) and advises a `docs_design` sync when docs fall behind code/spec. Advisory only — never blocks phase completion.
+
+**No-args behavior:** prints a usage string (unless `--update` is given). The command never throws on bad input.
+
 ### `/swarm issue <issue-url|owner/repo#N|N> [--plan] [--trace] [--no-repro]`
 
 Ingest a GitHub issue into the swarm workflow for root-cause localization and resolution spec generation.

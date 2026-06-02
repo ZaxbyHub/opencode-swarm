@@ -70,4 +70,4 @@ export declare function buildCouncilWorkflow(council?: CouncilWorkflowConfig): s
  * BRAINSTORM, and PLAN inline paths stay in lockstep.
  */
 export declare function buildQaGateSelectionDialogue(modeLabel: 'BRAINSTORM' | 'SPECIFY' | 'PLAN'): string;
-export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig, uiReview?: UIReviewConfig, memoryEnabled?: boolean, architecturalSupervision?: ArchitectureSupervisionWorkflowConfig): AgentDefinition;
+export declare function createArchitectAgent(model: string, customPrompt?: string, customAppendPrompt?: string, adversarialTesting?: AdversarialTestingConfig, council?: CouncilWorkflowConfig, uiReview?: UIReviewConfig, memoryEnabled?: boolean, architecturalSupervision?: ArchitectureSupervisionWorkflowConfig, designDocsEnabled?: boolean): AgentDefinition;

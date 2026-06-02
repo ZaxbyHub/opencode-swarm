@@ -322,6 +322,20 @@ export declare const COMMAND_REGISTRY: {
         readonly category: "agent";
         readonly aliasOf: "deep-dive";
     };
+    readonly 'design-docs': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Generate or sync language-agnostic design docs (domain, technical-spec, behavior-spec, reference/) for the project under build [description]";
+        readonly args: "<description> [--out <dir>] [--lang <name>] [--update]";
+        readonly details: "Triggers the architect to enter MODE: DESIGN_DOCS — delegates to the docs_design agent to author/sync docs/domain.md, docs/technical-spec.md, docs/behavior-spec.md, and docs/reference/* (plus reference/traceability.json and design-changelog.md). Normative docs are 100% language-agnostic; all framework-specific material is quarantined under reference/. --update syncs existing docs to current code/spec instead of generating fresh. Requires design_docs.enabled: true.";
+        readonly category: "agent";
+    };
+    readonly 'design docs': {
+        readonly handler: (ctx: CommandContext) => Promise<string>;
+        readonly description: "Alias for /swarm design-docs — generate or sync design docs";
+        readonly args: "<description> [--out <dir>] [--lang <name>] [--update]";
+        readonly category: "agent";
+        readonly aliasOf: "design-docs";
+    };
     readonly issue: {
         readonly handler: (ctx: CommandContext) => Promise<string>;
         readonly description: "Ingest a GitHub issue into the swarm workflow [url] [--plan] [--trace] [--no-repro]";

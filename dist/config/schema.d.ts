@@ -308,6 +308,12 @@ export declare const DocsConfigSchema: z.ZodObject<{
     doc_patterns: z.ZodDefault<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export type DocsConfig = z.infer<typeof DocsConfigSchema>;
+export declare const DesignDocsConfigSchema: z.ZodObject<{
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    out_dir: z.ZodDefault<z.ZodString>;
+    language: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export type DesignDocsConfig = z.infer<typeof DesignDocsConfigSchema>;
 export declare const UIReviewConfigSchema: z.ZodObject<{
     enabled: z.ZodDefault<z.ZodBoolean>;
     trigger_paths: z.ZodDefault<z.ZodArray<z.ZodString>>;
@@ -1109,6 +1115,11 @@ export declare const PluginConfigSchema: z.ZodObject<{
     docs: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;
         doc_patterns: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>>;
+    design_docs: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodDefault<z.ZodBoolean>;
+        out_dir: z.ZodDefault<z.ZodString>;
+        language: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     ui_review: z.ZodOptional<z.ZodObject<{
         enabled: z.ZodDefault<z.ZodBoolean>;

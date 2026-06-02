@@ -83,6 +83,32 @@ export interface DriftReport {
 	injection_summary: string;
 }
 
+/**
+ * Design-doc drift report (issue #1080) — produced by the deterministic
+ * design-doc drift check at phase wrap. Compares the generated design docs
+ * (domain/technical-spec/behavior-spec/reference) against code/spec mtimes via
+ * the traceability registry. Advisory only — never blocks phase completion.
+ */
+export interface DocDriftReport {
+	schema_version: 1;
+	phase: number;
+	timestamp: string; // ISO 8601
+	/** Output directory the docs were checked under (project-relative). */
+	out_dir: string;
+	/** Overall verdict for the phase. */
+	verdict: 'DOC_FRESH' | 'DOC_STALE' | 'NO_DOCS';
+	/** Sections whose owning doc is older than a mapped code anchor or the spec. */
+	stale_sections: Array<{
+		section_id: string;
+		doc: string;
+		reason: string;
+	}>;
+	/** Expected design docs that are missing from out_dir. */
+	missing_docs: string[];
+	/** Design docs that were found and checked. */
+	checked_docs: string[];
+}
+
 export interface CuratorConfig {
 	enabled: boolean;
 	init_enabled: boolean;

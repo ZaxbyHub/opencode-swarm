@@ -346,6 +346,7 @@ function createSwarmAgents(
 			pluginConfig?.ui_review,
 			pluginConfig?.memory?.enabled === true,
 			pluginConfig?.architectural_supervision,
+			pluginConfig?.design_docs?.enabled === true,
 		);
 		architect.name = prefixName('architect');
 
@@ -662,6 +663,26 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		docs.name = prefixName('docs');
 		agents.push(applyOverrides(docs, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 8b. Create Docs (Design-Doc Author) variant — opt-in, only when
+	// design_docs.enabled === true (issue #1080). Shares the docs agent base via
+	// the 'design_docs' role, mirroring how critic role variants are registered.
+	// Runs only via /swarm design-docs or the PHASE-WRAP design-doc sync sub-step;
+	// it is NOT swept into the standard docs auto-dispatch.
+	if (
+		pluginConfig?.design_docs?.enabled === true &&
+		!isAgentDisabled('docs_design', swarmAgents, swarmPrefix)
+	) {
+		const docsDesignPrompts = getPrompts('docs_design');
+		const docsDesign = createDocsAgent(
+			getModel('docs_design'),
+			docsDesignPrompts.prompt,
+			docsDesignPrompts.appendPrompt,
+			'design_docs',
+		);
+		docsDesign.name = prefixName('docs_design');
+		agents.push(applyOverrides(docsDesign, swarmAgents, swarmPrefix, quiet));
 	}
 
 	// 9. Create Designer agent (opt-in — only when ui_review.enabled === true)

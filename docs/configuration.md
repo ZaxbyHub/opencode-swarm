@@ -230,6 +230,26 @@ Disabled by default. When enabled, aggregation writes
 `.swarm/evidence/{phase}/phase-architecture-summary.json`; the supervisor (later chunk)
 writes `.swarm/evidence/{phase}/architecture-supervisor.json`.
 
+### Design docs (`design_docs`)
+
+Structured, language-agnostic design-doc generation for the project under build
+(issue #1080). When enabled, the opt-in `docs_design` agent (a role variant of the
+docs agent) is registered, the `/swarm design-docs` command becomes actionable, and
+`phase_complete` runs a deterministic, non-blocking design-doc drift check.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master switch; registers the `docs_design` agent and enables the drift check |
+| `out_dir` | string | `docs` | Project-relative output directory for the generated docs |
+| `language` | string | _(unset)_ | Optional target language for the `reference/` docs; inferred when unset |
+
+Disabled by default. When enabled, the `docs_design` agent writes
+`<out_dir>/{domain,technical-spec,behavior-spec}.md`,
+`<out_dir>/reference/{reference-impl,idiom-notes}.md`,
+`<out_dir>/reference/traceability.json`, and `<out_dir>/design-changelog.md` into the
+target repo; the drift check writes `.swarm/doc-drift-phase-N.json`. See
+[Commands → `/swarm design-docs`](commands.md).
+
 ### Memory
 
 Optional scoped memory substrate for recall and proposal-only memory writes.

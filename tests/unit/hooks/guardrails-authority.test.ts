@@ -78,6 +78,59 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 		});
 	});
 
+	describe('docs_design authority (issue #1080)', () => {
+		it('is a KNOWN agent — not rejected as "Unknown agent"', () => {
+			// Regression guard: docs_design must have an authority rule, otherwise
+			// every design-doc write is hard-blocked as "Unknown agent: docs_design".
+			const result = checkFileAuthority(
+				'docs_design',
+				'docs/domain.md',
+				tempDir,
+			);
+			if (isDenied(result)) {
+				expect(result.reason).not.toContain('Unknown agent');
+			}
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows writing its markdown design docs', () => {
+			for (const p of [
+				'docs/domain.md',
+				'docs/technical-spec.md',
+				'docs/behavior-spec.md',
+				'docs/reference/reference-impl.md',
+				'docs/design-changelog.md',
+			]) {
+				expect(checkFileAuthority('docs_design', p, tempDir).allowed).toBe(
+					true,
+				);
+			}
+		});
+
+		it('allows writing the reference/traceability.json registry', () => {
+			const result = checkFileAuthority(
+				'docs_design',
+				'docs/reference/traceability.json',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows a custom out_dir markdown doc', () => {
+			const result = checkFileAuthority(
+				'docs_design',
+				'design/technical-spec.md',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('BLOCKS writing source code (constrained to doc-like files)', () => {
+			const result = checkFileAuthority('docs_design', 'src/foo.ts', tempDir);
+			expect(result.allowed).toBe(false);
+		});
+	});
+
 	describe('Coder blocked from evidence/', () => {
 		it('blocks coder from writing to .swarm/evidence/', () => {
 			const result = checkFileAuthority(

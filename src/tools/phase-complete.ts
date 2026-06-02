@@ -1951,6 +1951,39 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Design-doc drift (issue #1080): opt-in, advisory, never blocks phase_complete.
+	// Deterministically compares the generated design docs against code/spec mtimes
+	// via the traceability registry and, when stale, advises the architect to run a
+	// docs_design sync (MODE: DESIGN_DOCS --update). It does NOT auto-dispatch the
+	// standard docs agent and does NOT gate completion.
+	try {
+		if (config.design_docs?.enabled === true) {
+			const outDir = config.design_docs.out_dir ?? 'docs';
+			const { runDesignDocDriftCheck } = await import(
+				'../hooks/design-doc-drift'
+			);
+			const docReport = await runDesignDocDriftCheck(dir, phase, outDir);
+			if (docReport?.verdict === 'DOC_STALE') {
+				const callerSessionState = swarmState.agentSessions.get(sessionID);
+				if (callerSessionState) {
+					callerSessionState.pendingAdvisoryMessages ??= [];
+					const staleIds = docReport.stale_sections
+						.map((s) => s.section_id)
+						.slice(0, 8)
+						.join(', ');
+					callerSessionState.pendingAdvisoryMessages.push(
+						`[DESIGN-DOC DRIFT (phase ${phase})]: ${docReport.stale_sections.length} design-doc section(s) are stale (${staleIds}). Run /swarm design-docs --update to sync ${outDir}/ and append a design-changelog entry. Advisory only — does not block completion.`,
+					);
+				}
+			}
+		}
+	} catch (docDriftError) {
+		safeWarn(
+			'[phase_complete] Design-doc drift check error (non-blocking):',
+			docDriftError,
+		);
+	}
+
 	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
 	// Uses a marker file to avoid reprocessing historical entries on every call.
 	// Errors never block phase_complete.

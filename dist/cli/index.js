@@ -16581,6 +16581,7 @@ var init_constants = __esm(() => {
   ALL_SUBAGENT_NAMES = [
     "sme",
     "docs",
+    "docs_design",
     "designer",
     "critic_sounding_board",
     "critic_drift_verifier",
@@ -16971,6 +16972,19 @@ var init_constants = __esm(() => {
       "summarize_work",
       "swarm_command"
     ],
+    docs_design: [
+      "detect_domains",
+      "extract_code_blocks",
+      "imports",
+      "retrieve_summary",
+      "search",
+      "symbols",
+      "doc_scan",
+      "doc_extract",
+      "knowledge_recall",
+      "summarize_work",
+      "swarm_command"
+    ],
     designer: [
       "extract_code_blocks",
       "retrieve_summary",
@@ -17130,6 +17144,10 @@ var init_constants = __esm(() => {
       model: "opencode/big-pickle",
       fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
     },
+    docs_design: {
+      model: "opencode/big-pickle",
+      fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
+    },
     designer: {
       model: "opencode/big-pickle",
       fallback_models: ["opencode/gpt-5-nano", "opencode/big-pickle"]
@@ -17202,7 +17220,7 @@ function getCanonicalAgentRole(agentName, generatedAgentNames) {
 function stripKnownSwarmPrefix(agentName) {
   return getCanonicalAgentRole(agentName);
 }
-var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, MemoryConfigSchema, CuratorConfigSchema, ArchitecturalSupervisionConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
+var SEPARATORS, CANONICAL_ROLES_LONGEST_FIRST, CANONICAL_ROLES_SET, AgentOverrideConfigSchema, SwarmConfigSchema, HooksConfigSchema, ScoringWeightsSchema, DecisionDecaySchema, TokenRatiosSchema, ScoringConfigSchema, ContextBudgetConfigSchema, EvidenceConfigSchema, GateFeatureSchema, PlaceholderScanConfigSchema, QualityBudgetConfigSchema, GateConfigSchema, PipelineConfigSchema, PhaseCompleteConfigSchema, SummaryConfigSchema, ReviewPassesConfigSchema, AdversarialDetectionConfigSchema, AdversarialTestingConfigSchemaBase, AdversarialTestingConfigSchema, IntegrationAnalysisConfigSchema, DocsConfigSchema, DesignDocsConfigSchema, UIReviewConfigSchema, CompactionAdvisoryConfigSchema, LintConfigSchema, SecretscanConfigSchema, GuardrailsProfileSchema, DEFAULT_AGENT_PROFILES, DEFAULT_ARCHITECT_PROFILE, GuardrailsConfigSchema, WatchdogConfigSchema, SelfReviewConfigSchema, ToolFilterConfigSchema, PlanCursorConfigSchema, CheckpointConfigSchema, AutomationModeSchema, AutomationCapabilitiesSchema, AutomationConfigSchemaBase, AutomationConfigSchema, KnowledgeConfigSchema, MemoryConfigSchema, CuratorConfigSchema, ArchitecturalSupervisionConfigSchema, KnowledgeApplicationConfigSchema, SkillImproverConfigSchema, SpecWriterConfigSchema, SlopDetectorConfigSchema, IncrementalVerifyConfigSchema, CompactionConfigSchema, PrmConfigSchema, AgentAuthorityRuleSchema, AuthorityConfigSchema, GeneralCouncilMemberConfigSchema, GeneralCouncilConfigSchema, CouncilConfigSchema, ParallelizationConfigSchema, LeanTurboConfigSchema, StandardTurboConfigSchema, LeanTurboStrategyConfigSchema, TurboConfigSchema, PluginConfigSchema;
 var init_schema = __esm(() => {
   init_zod();
   init_constants();
@@ -17399,6 +17417,13 @@ var init_schema = __esm(() => {
       "docs/**/*.rst",
       "**/CHANGELOG.md"
     ])
+  });
+  DesignDocsConfigSchema = exports_external.object({
+    enabled: exports_external.boolean().default(false),
+    out_dir: exports_external.string().default("docs").refine((v) => v.length > 0 && v !== "." && !v.includes("..") && !v.startsWith("/") && !v.startsWith("\\") && !/^[A-Za-z]:/.test(v), {
+      message: 'design_docs.out_dir must be a non-empty project-relative path with no "..", leading slash, or drive letter'
+    }),
+    language: exports_external.string().optional()
   });
   UIReviewConfigSchema = exports_external.object({
     enabled: exports_external.boolean().default(false),
@@ -17923,6 +17948,7 @@ var init_schema = __esm(() => {
     adversarial_testing: AdversarialTestingConfigSchema.optional(),
     integration_analysis: IntegrationAnalysisConfigSchema.optional(),
     docs: DocsConfigSchema.optional(),
+    design_docs: DesignDocsConfigSchema.optional(),
     ui_review: UIReviewConfigSchema.optional(),
     compaction_advisory: CompactionAdvisoryConfigSchema.optional(),
     lint: LintConfigSchema.optional(),
@@ -21341,6 +21367,9 @@ ${HARD_RULES}
 var init_critic = () => {};
 // src/agents/curator-agent.ts
 var init_curator_agent = () => {};
+// src/agents/docs.ts
+var init_docs = () => {};
+
 // src/agents/reviewer.ts
 var init_reviewer = () => {};
 // src/agents/index.ts
@@ -21354,11 +21383,13 @@ var init_agents2 = __esm(() => {
   init_council_prompts();
   init_critic();
   init_curator_agent();
+  init_docs();
   init_reviewer();
   init_architect();
   init_council_prompts();
   init_critic();
   init_curator_agent();
+  init_docs();
   init_reviewer();
   warnedAgents = new Set;
   KNOWN_VARIANT_VALUES = new Set([
@@ -40234,6 +40265,119 @@ var init_deep_dive = __esm(() => {
   ]);
 });
 
+// src/commands/design-docs.ts
+function sanitizeDescription(raw) {
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  const stripped = collapsed.replace(/\[\s*MODE\s*:[^\]]*\]/gi, "");
+  const normalized = stripped.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_DESC_LEN)
+    return normalized;
+  return `${normalized.slice(0, MAX_DESC_LEN)}\u2026`;
+}
+function cleanFlagValue(raw) {
+  if (raw.includes("[") || raw.includes("]") || /\s/.test(raw))
+    return null;
+  if (/\[\s*MODE\s*:/i.test(raw))
+    return null;
+  return raw;
+}
+function parseArgs3(args) {
+  const result = {
+    out: "docs",
+    lang: "auto",
+    update: false,
+    rest: []
+  };
+  let i = 0;
+  while (i < args.length) {
+    const token = args[i];
+    if (token === "--out") {
+      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args[++i];
+      const clean = cleanFlagValue(value);
+      if (clean === null || value.includes("..") || value.startsWith("/") || value.startsWith("\\") || /^[A-Za-z]:/.test(value)) {
+        return {
+          ...result,
+          error: `Invalid --out value "${value}". Must be a project-relative directory with no brackets or spaces.`
+        };
+      }
+      const trimmed = clean.replace(/[/\\]+$/, "");
+      if (!trimmed || trimmed === ".") {
+        return {
+          ...result,
+          error: `Invalid --out value "${value}". Must name a non-empty subdirectory.`
+        };
+      }
+      result.out = trimmed;
+    } else if (token === "--lang") {
+      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+        return { ...result, error: `Flag "${token}" requires a value` };
+      }
+      const value = args[++i];
+      const clean = cleanFlagValue(value);
+      if (clean === null) {
+        return {
+          ...result,
+          error: `Invalid --lang value "${value}". Must be a single token with no brackets or spaces.`
+        };
+      }
+      result.lang = clean;
+    } else if (token === "--update") {
+      result.update = true;
+    } else if (token.startsWith("--")) {
+      return { ...result, error: `Unknown flag "${token}"` };
+    } else {
+      result.rest.push(token);
+    }
+    i++;
+  }
+  return result;
+}
+async function handleDesignDocsCommand(directory, args) {
+  const parsed = parseArgs3(args);
+  if (parsed.error) {
+    return `Error: ${parsed.error}
+
+${USAGE3}`;
+  }
+  try {
+    const { config: config3 } = loadPluginConfigWithMeta(directory);
+    if (config3.design_docs?.enabled !== true) {
+      return "Error: design docs are disabled. Set `design_docs.enabled: true` in " + `opencode-swarm.json to enable the docs_design agent and this command.
+
+` + USAGE3;
+    }
+  } catch {}
+  const description = sanitizeDescription(parsed.rest.join(" "));
+  if (!description && !parsed.update) {
+    return USAGE3;
+  }
+  const header = `[MODE: DESIGN_DOCS out=${parsed.out} lang=${parsed.lang} update=${parsed.update}] ${description}`;
+  return header.trimEnd();
+}
+var MAX_DESC_LEN = 2000, USAGE3 = `Usage: /swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]
+
+Generate or sync language-agnostic design docs for the project under build:
+  <out>/domain.md, <out>/technical-spec.md, <out>/behavior-spec.md,
+  <out>/reference/{reference-impl,idiom-notes}.md, <out>/reference/traceability.json
+
+Requires design_docs.enabled: true in opencode-swarm.json.
+
+Examples:
+  /swarm design-docs "terminal GitHub PR client"
+  /swarm design-docs auth-service --lang rust
+  /swarm design docs --update --out design
+
+Flags:
+  --out <dir>     output directory (default "docs")
+  --lang <name>   target language for the reference/ docs (default: inferred)
+  --update        sync existing docs to current code/spec instead of generating fresh`;
+var init_design_docs = __esm(() => {
+  init_config();
+});
+
 // src/config/cache-paths.ts
 import * as os5 from "os";
 import * as path23 from "path";
@@ -45621,7 +45765,7 @@ function validateAndSanitizeUrl(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs3(args) {
+function parseArgs4(args) {
   const out = {
     plan: false,
     trace: false,
@@ -45712,24 +45856,24 @@ function parseGitRemoteUrl(remoteUrl) {
   return null;
 }
 function handleIssueCommand(_directory, args) {
-  const parsed = parseArgs3(args);
+  const parsed = parseArgs4(args);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE3;
+    return USAGE4;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const issueInfo = parseIssueRef(isFullUrl ? sanitizeUrl(rawInput) : rawInput);
   if (!issueInfo) {
     return `Error: Could not parse issue reference from "${rawInput}"
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const issueUrl = `https://github.com/${issueInfo.owner}/${issueInfo.repo}/issues/${issueInfo.number}`;
   const result = validateAndSanitizeUrl(issueUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE3}`;
+${USAGE4}`;
   }
   const flags = [];
   if (parsed.plan)
@@ -45741,9 +45885,9 @@ ${USAGE3}`;
   const flagsStr = flags.length > 0 ? ` ${flags.join(" ")}` : "";
   return `[MODE: ISSUE_INGEST issue="${result.sanitized}"${flagsStr}]`;
 }
-var MAX_URL_LEN = 2048, USAGE3;
+var MAX_URL_LEN = 2048, USAGE4;
 var init_issue = __esm(() => {
-  USAGE3 = [
+  USAGE4 = [
     "Usage: /swarm issue <url|owner/repo#N|N> [--plan] [--trace] [--no-repro]",
     "",
     "Ingest a GitHub issue into the swarm workflow.",
@@ -49699,7 +49843,7 @@ function validateAndSanitizeUrl2(rawUrl) {
     return { error: "Invalid URL format" };
   }
 }
-function parseArgs4(args) {
+function parseArgs5(args) {
   const out = { council: false, rest: [] };
   for (const token of args) {
     if (token === "--council") {
@@ -49783,31 +49927,31 @@ function parseGitRemoteUrl2(remoteUrl) {
   return null;
 }
 function handlePrReviewCommand(_directory, args) {
-  const parsed = parseArgs4(args);
+  const parsed = parseArgs5(args);
   const rawInput = parsed.rest.join(" ").trim();
   if (!rawInput) {
-    return USAGE4;
+    return USAGE5;
   }
   const isFullUrl = /^https?:\/\//i.test(rawInput);
   const prInfo = parsePrRef(isFullUrl ? sanitizeUrl2(rawInput) : rawInput);
   if (!prInfo) {
     return `Error: Could not parse PR reference from "${rawInput}"
 
-${USAGE4}`;
+${USAGE5}`;
   }
   const prUrl = `https://github.com/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.number}`;
   const result = validateAndSanitizeUrl2(prUrl);
   if ("error" in result) {
     return `Error: ${result.error}
 
-${USAGE4}`;
+${USAGE5}`;
   }
   const councilFlag = parsed.council ? "council=true" : "council=false";
   return `[MODE: PR_REVIEW pr="${result.sanitized}" ${councilFlag}]`;
 }
-var MAX_URL_LEN2 = 2048, USAGE4;
+var MAX_URL_LEN2 = 2048, USAGE5;
 var init_pr_review = __esm(() => {
-  USAGE4 = [
+  USAGE5 = [
     "Usage: /swarm pr-review <url|owner/repo#N|N> [--council]",
     "",
     "Run a full swarm PR review on a GitHub pull request.",
@@ -58252,6 +58396,7 @@ var init_registry = __esm(() => {
   init_curate();
   init_dark_matter();
   init_deep_dive();
+  init_design_docs();
   init_diagnose();
   init_doctor();
   init_evidence();
@@ -58566,6 +58711,20 @@ Subcommands:
       args: "<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]",
       category: "agent",
       aliasOf: "deep-dive"
+    },
+    "design-docs": {
+      handler: async (ctx) => handleDesignDocsCommand(ctx.directory, ctx.args),
+      description: "Generate or sync language-agnostic design docs (domain, technical-spec, behavior-spec, reference/) for the project under build [description]",
+      args: "<description> [--out <dir>] [--lang <name>] [--update]",
+      details: "Triggers the architect to enter MODE: DESIGN_DOCS \u2014 delegates to the docs_design agent to author/sync docs/domain.md, docs/technical-spec.md, docs/behavior-spec.md, and docs/reference/* (plus reference/traceability.json and design-changelog.md). Normative docs are 100% language-agnostic; all framework-specific material is quarantined under reference/. --update syncs existing docs to current code/spec instead of generating fresh. Requires design_docs.enabled: true.",
+      category: "agent"
+    },
+    "design docs": {
+      handler: async (ctx) => handleDesignDocsCommand(ctx.directory, ctx.args),
+      description: "Alias for /swarm design-docs \u2014 generate or sync design docs",
+      args: "<description> [--out <dir>] [--lang <name>] [--update]",
+      category: "agent",
+      aliasOf: "design-docs"
     },
     issue: {
       handler: async (ctx) => handleIssueCommand(ctx.directory, ctx.args),
