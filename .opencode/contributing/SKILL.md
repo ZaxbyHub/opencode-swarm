@@ -138,7 +138,7 @@ Never replace the release PR body, create tags/releases manually, or edit these 
 
 All `uses:` in `.github/workflows/` must be pinned to full 40-char SHA with version comment:
 ```yaml
-- uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+- uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 ```
 
 Find SHA: `gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'`

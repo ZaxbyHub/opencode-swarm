@@ -291,7 +291,7 @@ If you add or modify a workflow file in `.github/workflows/`, every `uses:` refe
 
 ```yaml
 # Correct
-- uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+- uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
 # Wrong — will fail security tests
 - uses: actions/checkout@v4
