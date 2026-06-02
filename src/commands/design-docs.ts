@@ -149,9 +149,14 @@ export async function handleDesignDocsCommand(
 				USAGE
 			);
 		}
-	} catch {
+	} catch (configErr) {
 		// If config cannot be loaded, fall through — the architect MODE protocol
 		// also checks registration and stops if docs_design is unavailable.
+		// Emit a warning so the UX is not silent (F-15 / PR #1096 follow-up).
+		console.warn(
+			`[design-docs] Could not read opencode-swarm.json (${String(configErr)}). ` +
+				'Falling through — the architect will abort if docs_design is not registered.',
+		);
 	}
 
 	const description = sanitizeDescription(parsed.rest.join(' '));

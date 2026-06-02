@@ -40350,7 +40350,9 @@ ${USAGE3}`;
 
 ` + USAGE3;
     }
-  } catch {}
+  } catch (configErr) {
+    console.warn(`[design-docs] Could not read opencode-swarm.json (${String(configErr)}). ` + "Falling through \u2014 the architect will abort if docs_design is not registered.");
+  }
   const description = sanitizeDescription(parsed.rest.join(" "));
   if (!description && !parsed.update) {
     return USAGE3;

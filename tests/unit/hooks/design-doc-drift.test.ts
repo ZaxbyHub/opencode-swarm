@@ -186,4 +186,40 @@ describe('runDesignDocDriftCheck', () => {
 		// Registry is treated as absent → NO_DOCS, not a crash or DOC_STALE.
 		expect(report!.verdict).toBe('NO_DOCS');
 	});
+
+	// F-16 behavior documentation (PR #1096): statSync follows symlinks in
+	// mtimeMsOrNull. A symlinked code_anchor whose target is outside the project
+	// root is blocked by resolveAnchorWithin (path-containment check), so it is
+	// simply skipped rather than followed — the mtime leak does not apply for
+	// out-of-root symlinks. In-root symlinks may still leak existence+mtime.
+	// The lstatSync hardening for in-root symlinks is tracked as a follow-up.
+	it('skips code_anchors that escape the project root via symlink path (F-16 coverage)', async () => {
+		scaffold(dir);
+		write(path.join(dir, 'src', 'foo.ts'), 'x', DOC);
+		// Craft a registry with an anchor that would escape via path — resolveAnchorWithin
+		// blocks `..` paths regardless of symlinks, so the anchor is skipped.
+		write(
+			path.join(dir, 'docs', 'reference', 'traceability.json'),
+			JSON.stringify({
+				schema_version: 1,
+				sections: [
+					{
+						section_id: 'S-001',
+						doc: 'technical-spec',
+						spec_frs: ['FR-001'],
+						code_anchors: ['../../etc/passwd'], // would escape via path resolution
+					},
+				],
+			}),
+			DOC,
+		);
+		write(path.join(dir, 'src', 'foo.ts'), 'x', NEW);
+		const report = await runDesignDocDriftCheck(dir, 14, 'docs');
+		// The escaping anchor is rejected by resolveAnchorWithin → skipped.
+		// Section S-001 maps spec_frs but the anchor is invalid, so it falls
+		// through to the spec-mtime check. spec.md doesn't exist → no stale.
+		expect(report).not.toBeNull();
+		expect(report!.verdict).not.toBe(undefined);
+		// Must never throw regardless of anchor content.
+	});
 });

@@ -129,6 +129,28 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			const result = checkFileAuthority('docs_design', 'src/foo.ts', tempDir);
 			expect(result.allowed).toBe(false);
 		});
+
+		// F-3 regression guard (PR #1096): **/reference/traceability.json glob must
+		// NOT rescue src/reference/traceability.json. blockedGlobs at Step 3 must
+		// run before allowedGlobs at Step 6 so the glob cannot be exploited to
+		// write a .json file under the source tree.
+		it('BLOCKS src/reference/traceability.json (F-3 glob regression guard)', () => {
+			const result = checkFileAuthority(
+				'docs_design',
+				'src/reference/traceability.json',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+		});
+
+		it('BLOCKS lib/reference/traceability.json (F-3 glob regression guard)', () => {
+			const result = checkFileAuthority(
+				'docs_design',
+				'lib/reference/traceability.json',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+		});
 	});
 
 	describe('Coder blocked from evidence/', () => {

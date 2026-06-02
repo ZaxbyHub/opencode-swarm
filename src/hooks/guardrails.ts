@@ -4726,8 +4726,13 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	// docs_design write its deliverables AND constrains it to doc-like files —
 	// source writes (src/**, etc.) remain denied. Without this entry the
 	// file-authority guard rejects every docs_design write as "Unknown agent".
+	//
+	// blockedGlobs runs at Step 3, BEFORE allowedGlobs at Step 6. This prevents
+	// the broad `**/reference/traceability.json` glob from accidentally rescuing
+	// a write to `src/reference/traceability.json` (F-3 / PR #1096 follow-up).
 	docs_design: {
 		allowedPrefix: ['docs/', '.swarm/outputs/'],
+		blockedGlobs: ['src/**', 'lib/**'],
 		allowedGlobs: [
 			'**/docs/**',
 			'**/*.md',
