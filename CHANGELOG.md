@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.47.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.5...v7.47.0) (2026-06-02)
+
+
+### Features
+
+* **design-docs:** add design-doc generation + per-phase drift sync ([#1096](https://github.com/zaxbysauce/opencode-swarm/issues/1096)) ([4b676d0](https://github.com/zaxbysauce/opencode-swarm/commit/4b676d0374c31fdead816ab2f586846acdfd06ad))
+
 ## [7.46.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.4...v7.46.5) (2026-06-01)
 
 
