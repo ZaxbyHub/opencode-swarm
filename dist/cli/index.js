@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.46.5",
+    version: "7.47.0",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16847,6 +16847,7 @@ var init_constants = __esm(() => {
       "syntax_check",
       "search",
       "summarize_work",
+      "knowledge_recall",
       "swarm_command"
     ],
     sme: [
@@ -57789,17 +57790,13 @@ var init_tool_policy = __esm(() => {
     "agents",
     "config",
     "config doctor",
-    "config-doctor",
-    "doctor",
     "doctor tools",
     "status",
     "show-plan",
-    "plan",
     "help",
     "history",
     "evidence",
     "evidence summary",
-    "evidence-summary",
     "retrieve",
     "diagnose",
     "preflight",
@@ -57816,8 +57813,7 @@ var init_tool_policy = __esm(() => {
     "memory import",
     "memory migrate",
     "sync-plan",
-    "export",
-    "list-agents"
+    "export"
   ];
   SWARM_COMMAND_TOOL_ALLOWLIST = new Set([
     "agents",

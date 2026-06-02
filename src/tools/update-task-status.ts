@@ -893,88 +893,41 @@ export async function executeUpdateTaskStatus(
 	}
 
 	// Step 3: Validate working_directory if provided (must be before reviewer gate check)
-	let normalizedDir: string | undefined;
+	// Uses resolveWorkingDirectory to consolidate: null-byte, device-path, traversal,
+	// existence, and subdirectory checks. (FR-006, DD-012)
 	let directory: string;
 
-	if (args.working_directory != null) {
-		// Check for null-byte injection before any processing
-		if (args.working_directory.includes('\0')) {
-			return {
-				success: false,
-				message: 'Invalid working_directory: null bytes are not allowed',
-			};
-		}
+	// When neither is available, return early with original error message
+	if (!args.working_directory && !fallbackDir) {
+		return {
+			success: false,
+			message: 'No working_directory provided and fallbackDir is undefined',
+			errors: ['Cannot resolve directory for task status update'],
+		};
+	}
 
-		// Check for Windows device paths (e.g., \\.\C:\, \\?\GLOBALROOT\, UNC paths)
-		// Applied on all platforms for defense-in-depth (paths may originate from Windows clients)
-		{
-			const devicePathPattern =
-				/^\\\\|^(NUL|CON|AUX|COM[1-9]|LPT[1-9])(\..*)?$/i;
-			if (devicePathPattern.test(args.working_directory)) {
-				return {
-					success: false,
-					message:
-						'Invalid working_directory: Windows device paths are not allowed',
-				};
-			}
-		}
+	const resolveResult = resolveWorkingDirectory(
+		args.working_directory ?? fallbackDir,
+		fallbackDir!,
+	);
+	if (!resolveResult.success) {
+		return {
+			success: false,
+			message: resolveResult.message,
+			errors: [resolveResult.message],
+		};
+	}
+	directory = resolveResult.directory;
 
-		// Normalize path first
-		normalizedDir = path.normalize(args.working_directory);
-
-		// Check for path traversal sequences
-		const pathParts = normalizedDir.split(path.sep);
-		if (pathParts.includes('..')) {
-			return {
-				success: false,
-				message:
-					'Invalid working_directory: path traversal sequences (..) are not allowed',
-				errors: [
-					'Invalid working_directory: path traversal sequences (..) are not allowed',
-				],
-			};
-		}
-
-		// Check if directory exists on disk and contains a valid .swarm/plan.json
-		// Use path.resolve to properly resolve the path before checking existence
-		// Use a carefully crafted path to avoid Windows path quirks
-		const resolvedDir = path.resolve(normalizedDir);
-
-		// Additional check: verify the resolved path is within the expected workspace
-		// This prevents Windows from interpreting certain paths as valid
-		try {
-			const realPath = fs.realpathSync(resolvedDir);
-			const planPath = path.join(realPath, '.swarm', 'plan.json');
-			if (!fs.existsSync(planPath)) {
-				return {
-					success: false,
-					message: `Invalid working_directory: plan not found in "${realPath}"`,
-					errors: [
-						`Invalid working_directory: plan not found in "${realPath}"`,
-					],
-				};
-			}
-			// Use realPath as the validated directory
-			directory = realPath;
-		} catch {
-			return {
-				success: false,
-				message: `Invalid working_directory: path "${resolvedDir}" does not exist or is inaccessible`,
-				errors: [
-					`Invalid working_directory: path "${resolvedDir}" does not exist or is inaccessible`,
-				],
-			};
-		}
-	} else {
-		// No working_directory provided, use fallbackDir from createSwarmTool
-		if (!fallbackDir) {
-			return {
-				success: false,
-				message: 'No working_directory provided and fallbackDir is undefined',
-				errors: ['Cannot resolve directory for task status update'],
-			};
-		}
-		directory = fallbackDir;
+	// Verify .swarm/plan.json exists (resolveWorkingDirectory checks directory
+	// existence but not plan file presence)
+	const planPath = path.join(directory, '.swarm', 'plan.json');
+	if (!fs.existsSync(planPath)) {
+		return {
+			success: false,
+			message: `Invalid working_directory: plan not found in "${directory}"`,
+			errors: [`Invalid working_directory: plan not found in "${directory}"`],
+		};
 	}
 
 	// Defense-in-depth: reject if resolved directory is a subdirectory of the

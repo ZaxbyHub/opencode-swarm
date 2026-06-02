@@ -8,17 +8,13 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'agents',
 	'config',
 	'config doctor',
-	'config-doctor',
-	'doctor',
 	'doctor tools',
 	'status',
 	'show-plan',
-	'plan',
 	'help',
 	'history',
 	'evidence',
 	'evidence summary',
-	'evidence-summary',
 	'retrieve',
 	'diagnose',
 	'preflight',
@@ -36,7 +32,6 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'memory migrate',
 	'sync-plan',
 	'export',
-	'list-agents',
 ] as const;
 
 export type SwarmCommandToolInputCommand =

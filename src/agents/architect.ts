@@ -493,7 +493,7 @@ the safe \`spec_write\` tool. Use it when:
 - requirements decomposition is non-trivial,
 - you would otherwise inline-author \`.swarm/spec.md\` yourself.
 
-Continue handling small touch-ups (typos, cross-references) inline.
+Continue handling small touch-ups (typos, cross-references) via the spec_writer agent — the architect lacks the spec_write tool and must delegate all spec changes.
 
 ### ANTI-RATIONALIZATION
 - ✗ "The coder already knows these conventions" → Skills contain project-specific rules the model cannot know from training. Always pass.

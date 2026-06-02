@@ -89,20 +89,4 @@ describe('swarm_command tool', () => {
 			expect(String(result)).toContain(expectedText);
 		}
 	});
-
-	test('canonicalizes allowed aliases', async () => {
-		const tool = createSwarmCommandTool(agents());
-
-		const configDoctor = await tool.execute(
-			{ command: 'config-doctor', args: [] },
-			toolContext(),
-		);
-		const listAgents = await tool.execute(
-			{ command: 'list-agents', args: [] },
-			toolContext(),
-		);
-
-		expect(String(configDoctor)).toContain('Config Doctor');
-		expect(String(listAgents)).toContain('## Registered Agents');
-	});
 });

@@ -16,7 +16,6 @@ import {
 	PhaseCompleteConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
-import { getEffectiveGates, getProfile } from '../db/qa-gate-profile.js';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
@@ -59,7 +58,6 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
-import { derivePlanId } from '../plan/utils.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
 	ensureAgentSession,
@@ -67,12 +65,20 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
-import { readSupervisorReportRaw } from '../summaries/store';
 import { telemetry } from '../telemetry';
 import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
 import * as logger from '../utils/logger';
-import { executeCompletionVerify } from './completion-verify';
 import { createSwarmTool } from './create-tool';
+import {
+	type GateContext,
+	runArchitectureSupervisorGate,
+	runCompletionVerifyGate,
+	runDriftGate,
+	runFinalCouncilGate,
+	runHallucinationGate,
+	runMutationGate,
+	runPhaseCouncilGate,
+} from './phase-complete/gates/index.js';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
 /**
@@ -122,6 +128,8 @@ function safeWarn(message: string, error: unknown): void {
 		// Ignore logger failures to keep phase_complete non-blocking
 	}
 }
+
+export const MAX_OUTPUT_BYTES = 512_000; // 512KB max output (FR-007, DD-013)
 
 const TASK_GATE_INFERABLE_AGENTS = new Set([
 	'coder',
@@ -313,6 +321,48 @@ function isValidRetroEntry(
 		(entry as { phase_number?: unknown }).phase_number === phase &&
 		'verdict' in entry &&
 		(entry as { verdict?: unknown }).verdict === 'pass'
+	);
+}
+
+/**
+ * Helper to build a blocked PhaseCompleteResult from a GateResult.
+ * The agentsDispatched and agentsMissing from the gate are preserved.
+ */
+function blockedResult(
+	phase: number,
+	gateResult: {
+		reason?: string;
+		message?: string;
+		agentsDispatched: string[];
+		agentsMissing: string[];
+		warnings: string[];
+		[k: string]: unknown;
+	},
+): string {
+	// Collect extra fields (e.g. phase_council_required, final_council_required)
+	const {
+		reason,
+		message,
+		agentsDispatched,
+		agentsMissing,
+		warnings,
+		blocked: _blocked,
+		...extra
+	} = gateResult;
+	return JSON.stringify(
+		{
+			success: false,
+			phase,
+			status: 'blocked' as const,
+			reason,
+			message,
+			agentsDispatched,
+			agentsMissing,
+			warnings,
+			...extra,
+		},
+		null,
+		2,
 	);
 }
 
@@ -532,1182 +582,96 @@ export async function executePhaseComplete(
 		);
 	}
 
-	// Turbo mode: skip completion-verify, drift-verifier, and hallucination-guard gates
+	// ── Gate orchestration ──────────────────────────────────────────────────────
+
+	// Build the shared gate context used by all gate functions.
+	// Fields that some gates need but not all: safeWarn is always provided.
+	const gateCtx: GateContext = {
+		phase,
+		dir,
+		sessionID,
+		pluginConfig: config,
+		agentsDispatched,
+		safeWarn,
+	};
+
+	// Turbo mode: skip gates 1-5 (but NOT 5b Architecture Supervision).
+	// NOTE: Gate 5b (Architecture Supervision) is intentionally NOT turbo-bypassed —
+	// enabling mode:'gate' is an explicit opt-in to a hard cross-task coherence
+	// check, so it is enforced even under lean turbo.
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
 			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
 		);
 	} else {
-		// Gate 1: Completion Verify (deterministic, in-process)
-		try {
-			const completionResultRaw = await executeCompletionVerify({ phase }, dir);
-			const completionResult = JSON.parse(completionResultRaw);
-			if (completionResult.status === 'blocked') {
-				return JSON.stringify(
-					{
-						success: false,
-						phase,
-						status: 'blocked' as const,
-						reason: 'COMPLETION_INCOMPLETE',
-						message: `Phase ${phase} cannot be completed: ${completionResult.reason}`,
-						agentsDispatched,
-						agentsMissing: [],
-						warnings: completionResult.blockedTasks
-							? [
-									`Blocked tasks: ${completionResult.blockedTasks.map((t: { task_id: string }) => t.task_id).join(', ')}`,
-								]
-							: [],
-					},
-					null,
-					2,
-				);
+		// Gate 1: Completion Verify
+		{
+			const gateResult = await runCompletionVerifyGate(gateCtx);
+			if (gateResult.blocked) {
+				return blockedResult(phase, gateResult);
 			}
-		} catch (completionError) {
-			// Non-blocking — treat as warning and continue
-			safeWarn(
-				`[phase_complete] Completion verify error (non-blocking):`,
-				completionError,
-			);
+			warnings.push(...gateResult.warnings);
 		}
 
-		// Gate 2: Drift Verifier (conditional on drift_check QA gate)
-		// Load QA gate profile to check drift_check flag
-		let driftCheckEnabled = true; // Default: preserve current mandatory behavior
-		let driftHasSpecMd = false;
-		try {
-			const specMdPath = path.join(dir, '.swarm', 'spec.md');
-			driftHasSpecMd = fs.existsSync(specMdPath);
-
-			const gatePlan = await loadPlan(dir);
-			if (gatePlan) {
-				const gatePlanId = derivePlanId(gatePlan);
-				const gateProfile = getProfile(dir, gatePlanId);
-				if (gateProfile) {
-					const gateSession = sessionID
-						? swarmState.agentSessions.get(sessionID)
-						: undefined;
-					const gateOverrides = gateSession?.qaGateSessionOverrides ?? {};
-					const gateEffective = getEffectiveGates(gateProfile, gateOverrides);
-					driftCheckEnabled = gateEffective.drift_check === true;
-				}
-				// No profile → driftCheckEnabled stays true (DEFAULT_QA_GATES fallback)
+		// Gate 2: Drift Verifier
+		{
+			const gateResult = await runDriftGate(gateCtx);
+			if (gateResult.blocked) {
+				return blockedResult(phase, gateResult);
 			}
-		} catch (gateLoadError) {
-			// Profile load failure — preserve current mandatory behavior (safe default)
-			safeWarn(
-				`[phase_complete] QA gate profile load error, drift_check defaults to enabled:`,
-				gateLoadError,
-			);
+			warnings.push(...gateResult.warnings);
 		}
 
-		if (!driftCheckEnabled) {
-			// drift_check gate disabled — skip drift verification entirely
-			warnings.push(
-				`drift_check gate is disabled. Drift verification was skipped for phase ${phase}.`,
-			);
-		} else {
-			// drift_check enabled — run drift verification
-			// First: check phase type annotation — non-code phases skip entirely
-			let phaseType: string | undefined;
-			try {
-				const planPath = path.join(dir, '.swarm', 'plan.json');
-				if (fs.existsSync(planPath)) {
-					const planRaw = fs.readFileSync(planPath, 'utf-8');
-					const plan = JSON.parse(planRaw);
-					const targetPhase = plan.phases?.find(
-						(p: { id: number }) => p.id === phase,
-					);
-					phaseType = targetPhase?.type;
-				}
-			} catch {
-				// plan.json missing or unreadable — phaseType stays undefined
+		// Gate 3: Hallucination Guard
+		{
+			const gateResult = await runHallucinationGate(gateCtx);
+			if (gateResult.blocked) {
+				return blockedResult(phase, gateResult);
 			}
-
-			if (phaseType === 'non-code') {
-				// Phase annotated as non-code — drift check not required, skip entirely
-				warnings.push(
-					`Phase ${phase} is annotated as 'non-code'. Drift verification was skipped per phase type annotation.`,
-				);
-			} else {
-				// Code phase — proceed with drift evidence checking
-				try {
-					// Check for evidence at .swarm/evidence/{phase}/drift-verifier.json
-					const driftEvidencePath = path.join(
-						dir,
-						'.swarm',
-						'evidence',
-						String(phase),
-						'drift-verifier.json',
-					);
-					let driftVerdictFound = false;
-					let driftVerdictApproved = false;
-
-					try {
-						const driftEvidenceContent = fs.readFileSync(
-							driftEvidencePath,
-							'utf-8',
-						);
-						const driftEvidence = JSON.parse(driftEvidenceContent);
-						const entries = driftEvidence.entries ?? [];
-						for (const entry of entries) {
-							if (
-								typeof entry.type === 'string' &&
-								entry.type.includes('drift') &&
-								typeof entry.verdict === 'string'
-							) {
-								driftVerdictFound = true;
-								if (entry.verdict === 'approved') {
-									driftVerdictApproved = true;
-								}
-								// Check if summary indicates needs_revision
-								if (
-									entry.verdict === 'rejected' ||
-									(typeof entry.summary === 'string' &&
-										entry.summary.includes('NEEDS_REVISION'))
-								) {
-									return JSON.stringify(
-										{
-											success: false,
-											phase,
-											status: 'blocked' as const,
-											reason: 'DRIFT_VERIFICATION_REJECTED',
-											message: `Phase ${phase} cannot be completed: drift verifier returned verdict '${entry.verdict}'. Address the drift issues before completing the phase.`,
-											agentsDispatched,
-											agentsMissing: [],
-											warnings: [],
-										},
-										null,
-										2,
-									);
-								}
-							}
-						}
-					} catch (readError) {
-						// File doesn't exist or is invalid JSON
-						if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') {
-							safeWarn(
-								`[phase_complete] Drift verifier evidence unreadable:`,
-								readError,
-							);
-						}
-						// Treat as missing — fall through to blocked check below
-						driftVerdictFound = false;
-					}
-
-					if (!driftVerdictFound) {
-						if (!driftHasSpecMd) {
-							// No spec.md — drift verification is advisory-only
-							// Check task completion status for advisory message quality
-							let incompleteTaskCount = 0;
-							let planParseable = false;
-							try {
-								const planPath = path.join(dir, '.swarm', 'plan.json');
-								if (fs.existsSync(planPath)) {
-									const planRaw = fs.readFileSync(planPath, 'utf-8');
-									const plan = JSON.parse(planRaw);
-									planParseable = true;
-									const planPhase = plan.phases?.find(
-										(p: { id: number }) => p.id === phase,
-									);
-									if (planPhase?.tasks) {
-										incompleteTaskCount = planPhase.tasks.filter(
-											(t: { status?: string }) =>
-												t.status !== 'completed' && t.status !== 'closed',
-										).length;
-									}
-								}
-							} catch {
-								// plan.json unreadable or malformed — planParseable stays false
-							}
-
-							if (!planParseable) {
-								// plan.json missing or malformed — can't determine task status, suggest verifier
-								warnings.push(
-									`No spec.md found and drift verification evidence missing — consider running critic_drift_verifier before phase completion.`,
-								);
-							} else if (incompleteTaskCount > 0) {
-								warnings.push(
-									`No spec.md found and drift verification evidence missing. Phase ${phase} has ${incompleteTaskCount} incomplete task(s) in plan.json — consider running critic_drift_verifier before phase completion.`,
-								);
-							} else {
-								warnings.push(
-									`No spec.md found. Phase ${phase} tasks are all completed in plan.json. Drift verification was skipped.`,
-								);
-							}
-						} else {
-							// spec.md exists AND drift evidence missing — hard block
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'DRIFT_VERIFICATION_MISSING',
-									message: `Phase ${phase} cannot be completed: drift_check is enabled and drift verifier evidence not found at .swarm/evidence/${phase}/drift-verifier.json. Run drift verification before completing the phase.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-					}
-
-					if (!driftVerdictApproved && driftVerdictFound) {
-						// Drift verdict found but not approved — this shouldn't happen if above checks passed,
-						// but treat as rejected for safety
-						return JSON.stringify(
-							{
-								success: false,
-								phase,
-								status: 'blocked' as const,
-								reason: 'DRIFT_VERIFICATION_REJECTED',
-								message: `Phase ${phase} cannot be completed: drift verifier verdict is not approved.`,
-								agentsDispatched,
-								agentsMissing: [],
-								warnings: [],
-							},
-							null,
-							2,
-						);
-					}
-				} catch (driftError) {
-					// Hard block — drift verification errors prevent phase completion
-					return JSON.stringify(
-						{
-							success: false,
-							phase,
-							status: 'blocked' as const,
-							reason: 'DRIFT_VERIFICATION_ERROR',
-							message: `Phase ${phase} cannot be completed: drift verification encountered an error: ${driftError instanceof Error ? driftError.message : String(driftError)}. This is a hard block — resolve the error before completing the phase.`,
-							agentsDispatched,
-							agentsMissing: [],
-							warnings: [],
-						},
-						null,
-						2,
-					);
-				}
-			}
+			warnings.push(...gateResult.warnings);
 		}
 
-		// Gate 3: Hallucination Guard (conditional on QA gate flag)
-		try {
-			const plan = await loadPlan(dir);
-			if (plan) {
-				const planId = derivePlanId(plan);
-				const profile = getProfile(dir, planId);
-				if (profile) {
-					const session = sessionID
-						? swarmState.agentSessions.get(sessionID)
-						: undefined;
-					const overrides = session?.qaGateSessionOverrides ?? {};
-					const effective = getEffectiveGates(profile, overrides);
-
-					if (effective.hallucination_guard === true) {
-						const hgPath = path.join(
-							dir,
-							'.swarm',
-							'evidence',
-							String(phase),
-							'hallucination-guard.json',
-						);
-						let hgVerdictFound = false;
-						let hgVerdictApproved = false;
-
-						try {
-							const hgContent = fs.readFileSync(hgPath, 'utf-8');
-							const hgBundle = JSON.parse(hgContent);
-							for (const entry of hgBundle.entries ?? []) {
-								if (
-									typeof entry.type === 'string' &&
-									entry.type.includes('hallucination') &&
-									typeof entry.verdict === 'string'
-								) {
-									hgVerdictFound = true;
-									if (entry.verdict === 'approved') {
-										hgVerdictApproved = true;
-									}
-									if (
-										entry.verdict === 'rejected' ||
-										(typeof entry.summary === 'string' &&
-											entry.summary.includes('NEEDS_REVISION'))
-									) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'HALLUCINATION_VERIFICATION_REJECTED',
-												message: `Phase ${phase} cannot be completed: hallucination verifier returned verdict '${entry.verdict}'. Remove fabricated APIs/signatures and fix broken citations before completing the phase.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-								}
-							}
-						} catch (readErr) {
-							if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-								safeWarn(
-									`[phase_complete] Hallucination guard evidence unreadable:`,
-									readErr,
-								);
-							}
-							hgVerdictFound = false;
-						}
-
-						if (!hgVerdictFound) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'HALLUCINATION_VERIFICATION_MISSING',
-									message: `Phase ${phase} cannot be completed: hallucination_guard is enabled and evidence not found at .swarm/evidence/${phase}/hallucination-guard.json. Delegate to critic_hallucination_verifier and call write_hallucination_evidence before completing the phase.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-
-						if (!hgVerdictApproved) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'HALLUCINATION_VERIFICATION_REJECTED',
-									message: `Phase ${phase} cannot be completed: hallucination verifier verdict is not approved.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-					}
-				}
+		// Gate 4: Mutation Gate
+		{
+			const gateResult = await runMutationGate(gateCtx);
+			if (gateResult.blocked) {
+				return blockedResult(phase, gateResult);
 			}
-		} catch (hgError) {
-			// Non-blocking — treat as warning and continue
-			safeWarn(
-				`[phase_complete] Hallucination guard error (non-blocking):`,
-				hgError,
-			);
+			warnings.push(...gateResult.warnings);
 		}
 
-		// Gate 4: Mutation Gate (conditional on QA gate flag)
-		try {
-			const plan = await loadPlan(dir);
-			if (plan) {
-				const planId = derivePlanId(plan);
-				const profile = getProfile(dir, planId);
-				if (profile) {
-					const session = sessionID
-						? swarmState.agentSessions.get(sessionID)
-						: undefined;
-					const overrides = session?.qaGateSessionOverrides ?? {};
-					const effective = getEffectiveGates(profile, overrides);
-
-					if (effective.mutation_test === true) {
-						const mgPath = path.join(
-							dir,
-							'.swarm',
-							'evidence',
-							String(phase),
-							'mutation-gate.json',
-						);
-						let mgVerdictFound = false;
-						let mgVerdict: string | undefined;
-
-						try {
-							const mgContent = fs.readFileSync(mgPath, 'utf-8');
-							const mgBundle = JSON.parse(mgContent);
-							for (const entry of mgBundle.entries ?? []) {
-								if (
-									typeof entry.type === 'string' &&
-									entry.type === 'mutation-gate' &&
-									typeof entry.verdict === 'string'
-								) {
-									mgVerdictFound = true;
-									mgVerdict = entry.verdict;
-									if (entry.verdict === 'fail') {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'MUTATION_GATE_FAIL',
-												message: `Phase ${phase} cannot be completed: mutation gate returned verdict 'fail'. Resolve surviving mutants or lower the kill-rate threshold before completing the phase.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									} else if (
-										!['pass', 'warn', 'skip'].includes(entry.verdict)
-									) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'MUTATION_GATE_FAIL',
-												message: `Phase ${phase} cannot be completed: mutation gate evidence contains unrecognized verdict '${entry.verdict}'. Expected one of: pass, warn, fail, skip.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-								}
-							}
-						} catch (readErr) {
-							if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-								safeWarn(
-									`[phase_complete] Mutation gate evidence unreadable:`,
-									readErr,
-								);
-							}
-							mgVerdictFound = false;
-						}
-
-						if (!mgVerdictFound) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'MUTATION_GATE_MISSING',
-									message: `Phase ${phase} cannot be completed: mutation_test is enabled and evidence not found at .swarm/evidence/${phase}/mutation-gate.json. Run mutation_test, then call write_mutation_evidence before completing the phase.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-
-						if (mgVerdict === 'warn') {
-							safeWarn(
-								`[phase_complete] Mutation gate verdict is 'warn' for phase ${phase} — proceeding with warning`,
-								undefined,
-							);
-						}
-					}
-				}
+		// Gate 5: Phase Council
+		{
+			const gateResult = await runPhaseCouncilGate(gateCtx);
+			if (gateResult.blocked) {
+				return blockedResult(phase, gateResult);
 			}
-		} catch (mgError) {
-			// Non-blocking — treat as warning and continue
-			safeWarn(`[phase_complete] Mutation gate error (non-blocking):`, mgError);
-		}
-
-		// Gate 5: Phase Council (conditional on council_mode QA gate flag)
-		let councilModeEnabled = false;
-		try {
-			const plan = await loadPlan(dir);
-			if (plan) {
-				const planId = derivePlanId(plan);
-				const profile = getProfile(dir, planId);
-				if (profile) {
-					const session = sessionID
-						? swarmState.agentSessions.get(sessionID)
-						: undefined;
-					const overrides = session?.qaGateSessionOverrides ?? {};
-					const effective = getEffectiveGates(profile, overrides);
-
-					if (effective.council_mode === true) {
-						councilModeEnabled = true;
-						const pcPath = path.join(
-							dir,
-							'.swarm',
-							'evidence',
-							String(phase),
-							'phase-council.json',
-						);
-						let pcVerdictFound = false;
-						let _pcVerdict: string | undefined;
-						let pcQuorumSize: number | undefined;
-						let pcTimestamp: string | undefined;
-						let pcPhaseNumber: number | undefined;
-
-						try {
-							const pcContent = fs.readFileSync(pcPath, 'utf-8');
-							const pcBundle = JSON.parse(pcContent);
-							for (const entry of pcBundle.entries ?? []) {
-								if (
-									typeof entry.type === 'string' &&
-									entry.type === 'phase-council' &&
-									typeof entry.verdict === 'string'
-								) {
-									pcVerdictFound = true;
-									_pcVerdict = entry.verdict;
-									pcQuorumSize =
-										typeof entry.quorumSize === 'number'
-											? entry.quorumSize
-											: undefined;
-									pcTimestamp =
-										typeof entry.timestamp === 'string'
-											? entry.timestamp
-											: undefined;
-									pcPhaseNumber =
-										typeof entry.phase_number === 'number'
-											? entry.phase_number
-											: typeof entry.phase === 'number'
-												? entry.phase
-												: undefined;
-
-									// Validate timestamp freshness (must be within last 24 hours and not in the future)
-									const now = new Date();
-									const pcTime = pcTimestamp ? new Date(pcTimestamp) : null;
-									if (!pcTime || Number.isNaN(pcTime.getTime())) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'PHASE_COUNCIL_INVALID_TIMESTAMP',
-												message: `Phase ${phase} cannot be completed: phase council evidence has missing or invalid timestamp.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-									const maxAge = 24 * 60 * 60 * 1000; // 24 hours
-									if (pcTime.getTime() > now.getTime()) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'PHASE_COUNCIL_FUTURE_TIMESTAMP',
-												message: `Phase ${phase} cannot be completed: phase council evidence timestamp is in the future.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-									if (now.getTime() - pcTime.getTime() > maxAge) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'PHASE_COUNCIL_STALE_EVIDENCE',
-												message: `Phase ${phase} cannot be completed: phase council evidence is older than 24 hours. Re-convene council for fresh review.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-
-									if (
-										entry.verdict === 'REJECT' ||
-										entry.verdict === 'reject'
-									) {
-										const requiredFixes =
-											entry.requiredFixes ?? entry.required_fixes ?? [];
-										const fixesDetail =
-											Array.isArray(requiredFixes) && requiredFixes.length > 0
-												? `\nRequired fixes: ${requiredFixes.map((f: { detail?: string; location?: string }) => f.detail ?? JSON.stringify(f)).join('; ')}`
-												: '';
-
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'PHASE_COUNCIL_REJECTED',
-												message: `Phase ${phase} cannot be completed: phase council returned verdict 'REJECT'. Address the required fixes before completing the phase.${fixesDetail}`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-
-									if (
-										entry.verdict === 'CONCERNS' ||
-										entry.verdict === 'concerns'
-									) {
-										const phaseConcernsAllow =
-											config.council?.phaseConcernsAllowComplete ?? true;
-
-										if (!phaseConcernsAllow) {
-											const advisoryNotes =
-												entry.advisoryNotes ?? entry.advisory_notes ?? [];
-											const notesDetail =
-												Array.isArray(advisoryNotes) && advisoryNotes.length > 0
-													? `\nAdvisory notes: ${advisoryNotes.join('; ')}`
-													: '';
-
-											return JSON.stringify(
-												{
-													success: false,
-													phase,
-													status: 'blocked' as const,
-													reason: 'PHASE_COUNCIL_CONCERNS',
-													message: `Phase ${phase} cannot be completed: phase council returned verdict 'CONCERNS'.${notesDetail}`,
-													agentsDispatched,
-													agentsMissing: [],
-													warnings: [],
-												},
-												null,
-												2,
-											);
-										}
-										// If concerns-pass is allowed, warn and continue
-										safeWarn(
-											`[phase_complete] Phase council returned CONCERNS for phase ${phase} — proceeding (phaseConcernsAllowComplete is enabled)`,
-											undefined,
-										);
-									}
-
-									if (
-										entry.verdict !== 'APPROVE' &&
-										entry.verdict !== 'approve' &&
-										entry.verdict !== 'CONCERNS' &&
-										entry.verdict !== 'concerns'
-									) {
-										return JSON.stringify(
-											{
-												success: false,
-												phase,
-												status: 'blocked' as const,
-												reason: 'PHASE_COUNCIL_INVALID',
-												message: `Phase ${phase} cannot be completed: phase council evidence contains unrecognized verdict '${entry.verdict}'. Expected one of: APPROVE, CONCERNS, REJECT.`,
-												agentsDispatched,
-												agentsMissing: [],
-												warnings: [],
-											},
-											null,
-											2,
-										);
-									}
-								}
-							}
-						} catch (readErr) {
-							if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-								safeWarn(
-									`[phase_complete] Phase council evidence unreadable:`,
-									readErr,
-								);
-							}
-							pcVerdictFound = false;
-						}
-
-						if (!pcVerdictFound) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'PHASE_COUNCIL_REQUIRED',
-									phase_council_required: true,
-									message: `Phase ${phase} cannot be completed: council_mode is enabled and phase council evidence not found at .swarm/evidence/${phase}/phase-council.json. Convene a phase-level council (dispatch 5 members, collect verdicts, call submit_phase_council_verdicts) before completing the phase.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [
-										`Phase council required — convene 5 council members (critic, reviewer, sme, test_engineer, explorer) for holistic phase review. Call submit_phase_council_verdicts to synthesize verdicts and write phase-council.json evidence.`,
-									],
-								},
-								null,
-								2,
-							);
-						}
-
-						// Validate quorum (minimum 3)
-						if (
-							pcQuorumSize === undefined ||
-							typeof pcQuorumSize !== 'number'
-						) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'PHASE_COUNCIL_MISSING_QUORUM',
-									message: `Phase ${phase} cannot be completed: phase council evidence is missing quorumSize field.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-						if (pcQuorumSize < 3) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'PHASE_COUNCIL_INSUFFICIENT_QUORUM',
-									message: `Phase ${phase} cannot be completed: phase council quorum (${pcQuorumSize}) is below minimum (3). Re-convene council with sufficient members.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-
-						// Validate phase number matches
-						if (
-							pcPhaseNumber === undefined ||
-							typeof pcPhaseNumber !== 'number'
-						) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'PHASE_COUNCIL_MISSING_PHASE',
-									message: `Phase ${phase} cannot be completed: phase council evidence is missing phase_number field.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-						if (pcPhaseNumber !== phase) {
-							return JSON.stringify(
-								{
-									success: false,
-									phase,
-									status: 'blocked' as const,
-									reason: 'PHASE_COUNCIL_PHASE_MISMATCH',
-									message: `Phase ${phase} cannot be completed: phase council evidence is for phase ${pcPhaseNumber}, not phase ${phase}. Run council for the correct phase.`,
-									agentsDispatched,
-									agentsMissing: [],
-									warnings: [],
-								},
-								null,
-								2,
-							);
-						}
-					}
-				}
-			}
-		} catch (pcError) {
-			if (councilModeEnabled) {
-				// Fail-closed: council gate errors block phase completion
-				warnings.push(`PHASE_COUNCIL_ERROR: ${String(pcError)}`);
-				return JSON.stringify(
-					{
-						success: false,
-						phase,
-						status: 'blocked' as const,
-						reason: 'PHASE_COUNCIL_ERROR',
-						message: `Phase ${phase} cannot be completed: phase council gate encountered an error when council_mode was enabled. Error: ${String(pcError)}`,
-						agentsDispatched,
-						agentsMissing: [],
-						warnings: [`PHASE_COUNCIL_ERROR: ${String(pcError)}`],
-					},
-					null,
-					2,
-				);
-			} else {
-				// Non-blocking when council_mode is off
-				safeWarn(
-					`[phase_complete] Phase council gate error (non-blocking):`,
-					pcError,
-				);
-			}
+			warnings.push(...gateResult.warnings);
 		}
 	}
 
-	// Gate 5b: Architecture Supervision (issue #893) — opt-in, gate mode only.
-	// Mirrors the phase-council gate: reads the raw supervisor sidecar and blocks on a
-	// missing/invalid/stale/REJECT verdict. Advisory mode bypasses this entirely.
-	// NOTE: unlike Gates 1–5, this gate is intentionally NOT turbo-bypassed — enabling
-	// mode:'gate' is an explicit opt-in to a hard cross-task coherence check, so it is
-	// enforced even under lean turbo.
+	// Gate 5b: Architecture Supervision — NOT turbo-bypassed (see note above)
 	if (
 		config.architectural_supervision?.enabled &&
 		config.architectural_supervision.mode === 'gate'
 	) {
-		const asConfig = config.architectural_supervision;
-		// Brief summary of supervisor findings to surface in block messages (parity with
-		// the phase-council gate, which echoes requiredFixes).
-		const summarizeFindings = (findings: unknown[] | undefined): string => {
-			if (!Array.isArray(findings) || findings.length === 0) return '';
-			const details = findings
-				.map((f) =>
-					f &&
-					typeof f === 'object' &&
-					typeof (f as { description?: unknown }).description === 'string'
-						? (f as { description: string }).description
-						: undefined,
-				)
-				.filter((d): d is string => Boolean(d));
-			return details.length > 0 ? `\nFindings: ${details.join('; ')}` : '';
-		};
-		const asBlocked = (reason: string, message: string) =>
-			JSON.stringify(
-				{
-					success: false,
-					phase,
-					status: 'blocked' as const,
-					reason,
-					message,
-					agentsDispatched,
-					agentsMissing: [],
-					warnings: [],
-				},
-				null,
-				2,
-			);
-
-		let asEntry: ReturnType<typeof readSupervisorReportRaw> = null;
-		try {
-			asEntry = readSupervisorReportRaw(dir, phase);
-		} catch (asError) {
-			// Fail-closed: gate errors block phase completion.
-			return asBlocked(
-				'ARCH_SUPERVISOR_ERROR',
-				`Phase ${phase} cannot be completed: architecture supervisor gate encountered an error. Error: ${String(asError)}`,
-			);
+		const gateResult = await runArchitectureSupervisorGate(gateCtx);
+		if (gateResult.blocked) {
+			return blockedResult(phase, gateResult);
 		}
-
-		if (!asEntry) {
-			return asBlocked(
-				'ARCH_SUPERVISOR_REQUIRED',
-				`Phase ${phase} cannot be completed: architectural_supervision gate mode is enabled and no architecture supervisor evidence was found at .swarm/evidence/${phase}/architecture-supervisor.json. Dispatch critic_architecture_supervisor with the phase + agent summaries, then call write_architecture_supervisor_evidence.`,
-			);
-		}
-
-		// Timestamp freshness (within last 24h, not in the future).
-		const now = new Date();
-		const asTime = asEntry.timestamp ? new Date(asEntry.timestamp) : null;
-		if (!asTime || Number.isNaN(asTime.getTime())) {
-			return asBlocked(
-				'ARCH_SUPERVISOR_INVALID_TIMESTAMP',
-				`Phase ${phase} cannot be completed: architecture supervisor evidence has a missing or invalid timestamp.`,
-			);
-		}
-		if (asTime.getTime() > now.getTime()) {
-			return asBlocked(
-				'ARCH_SUPERVISOR_FUTURE_TIMESTAMP',
-				`Phase ${phase} cannot be completed: architecture supervisor evidence timestamp is in the future.`,
-			);
-		}
-		if (now.getTime() - asTime.getTime() > 24 * 60 * 60 * 1000) {
-			return asBlocked(
-				'ARCH_SUPERVISOR_STALE_EVIDENCE',
-				`Phase ${phase} cannot be completed: architecture supervisor evidence is older than 24 hours. Re-run the supervisor for fresh review.`,
-			);
-		}
-
-		// Phase number must match.
-		if (
-			typeof asEntry.phase_number !== 'number' ||
-			asEntry.phase_number !== phase
-		) {
-			return asBlocked(
-				'ARCH_SUPERVISOR_PHASE_MISMATCH',
-				`Phase ${phase} cannot be completed: architecture supervisor evidence is for phase ${String(asEntry.phase_number)}, not phase ${phase}.`,
-			);
-		}
-
-		// Verdict.
-		const asVerdict = asEntry.verdict;
-		if (asVerdict === 'REJECT') {
-			return asBlocked(
-				'ARCH_SUPERVISOR_REJECTED',
-				`Phase ${phase} cannot be completed: architecture supervisor returned verdict 'REJECT'. Address the system-level findings before completing the phase.${summarizeFindings(asEntry.findings)}`,
-			);
-		}
-		if (asVerdict === 'CONCERNS') {
-			if (asConfig.allow_concerns_to_complete === false) {
-				return asBlocked(
-					'ARCH_SUPERVISOR_CONCERNS',
-					`Phase ${phase} cannot be completed: architecture supervisor returned verdict 'CONCERNS' and allow_concerns_to_complete is disabled.${summarizeFindings(asEntry.findings)}`,
-				);
-			}
-			safeWarn(
-				`[phase_complete] Architecture supervisor returned CONCERNS for phase ${phase} — proceeding (allow_concerns_to_complete is enabled)`,
-				undefined,
-			);
-		} else if (asVerdict !== 'APPROVE') {
-			return asBlocked(
-				'ARCH_SUPERVISOR_INVALID',
-				`Phase ${phase} cannot be completed: architecture supervisor evidence contains unrecognized verdict '${String(asVerdict)}'. Expected one of: APPROVE, CONCERNS, REJECT.`,
-			);
-		}
+		warnings.push(...gateResult.warnings);
 	}
 
-	// Gate 6: Final Council (conditional on final_council QA gate flag)
-	// Only fires after the LAST phase completes — not after intermediate phases.
+	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
 	if (!hasActiveTurboMode(sessionID)) {
-		let finalCouncilEnabled = false;
-		try {
-			const plan = await loadPlan(dir);
-			if (plan) {
-				const lastPhaseId = plan.phases[plan.phases.length - 1]?.id;
-				if (lastPhaseId !== undefined && phase === lastPhaseId) {
-					const planId = derivePlanId(plan);
-					const profile = getProfile(dir, planId);
-					if (profile) {
-						const session = sessionID
-							? swarmState.agentSessions.get(sessionID)
-							: undefined;
-						const overrides = session?.qaGateSessionOverrides ?? {};
-						const effective = getEffectiveGates(profile, overrides);
-
-						if (effective.final_council === true) {
-							finalCouncilEnabled = true;
-							const fcPath = path.join(
-								dir,
-								'.swarm',
-								'evidence',
-								'final-council.json',
-							);
-							let fcVerdictFound = false;
-							let _fcVerdict: string | undefined;
-
-							try {
-								const fcContent = fs.readFileSync(fcPath, 'utf-8');
-								const fcBundle = JSON.parse(fcContent);
-								for (const entry of fcBundle.entries ?? []) {
-									if (
-										typeof entry.type === 'string' &&
-										entry.type === 'final-council' &&
-										typeof entry.verdict === 'string'
-									) {
-										fcVerdictFound = true;
-										_fcVerdict = entry.verdict;
-
-										// Plan ID binding: prevent stale evidence from prior project
-										if (plan) {
-											const currentPlanId = derivePlanId(plan);
-											if (entry.plan_id && entry.plan_id !== currentPlanId) {
-												return JSON.stringify(
-													{
-														success: false,
-														phase,
-														status: 'blocked' as const,
-														reason: 'final_council_plan_mismatch',
-														message: `Final council evidence belongs to a different plan (evidence: ${entry.plan_id}, current: ${currentPlanId}). Re-run the final council.`,
-														agentsDispatched,
-														agentsMissing: [],
-														warnings: [],
-													},
-													null,
-													2,
-												);
-											}
-											if (!entry.plan_id) {
-												// Fail-closed: evidence without plan_id cannot be trusted
-												return JSON.stringify(
-													{
-														success: false,
-														phase,
-														status: 'blocked' as const,
-														reason: 'FINAL_COUNCIL_PLAN_ID_REQUIRED',
-														message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing plan_id binding. Re-run the final council to generate evidence with plan identity.`,
-														agentsDispatched,
-														agentsMissing: [],
-														warnings: [],
-													},
-													null,
-													2,
-												);
-											}
-										}
-
-										if (
-											typeof entry.quorumSize !== 'number' ||
-											!Number.isFinite(entry.quorumSize) ||
-											entry.quorumSize < 5
-										) {
-											return JSON.stringify(
-												{
-													success: false,
-													phase,
-													status: 'blocked' as const,
-													reason: 'FINAL_COUNCIL_MISSING_QUORUM',
-													message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing valid quorum metadata. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate quorumed evidence.`,
-													agentsDispatched,
-													agentsMissing: [],
-													warnings: [],
-												},
-												null,
-												2,
-											);
-										}
-
-										const requiredFinalCouncilMembers = [
-											'critic',
-											'reviewer',
-											'sme',
-											'test_engineer',
-											'explorer',
-										];
-										const membersVoted = Array.isArray(entry.membersVoted)
-											? entry.membersVoted.filter(
-													(member: unknown): member is string =>
-														typeof member === 'string',
-												)
-											: [];
-										const membersAbsent = Array.isArray(entry.membersAbsent)
-											? entry.membersAbsent.filter(
-													(member: unknown): member is string =>
-														typeof member === 'string',
-												)
-											: [];
-										const distinctMembersVoted = new Set(membersVoted);
-										const hasAllRequiredMembers =
-											requiredFinalCouncilMembers.every((member) =>
-												distinctMembersVoted.has(member),
-											) &&
-											distinctMembersVoted.size ===
-												requiredFinalCouncilMembers.length &&
-											membersAbsent.length === 0;
-										if (!hasAllRequiredMembers) {
-											return JSON.stringify(
-												{
-													success: false,
-													phase,
-													status: 'blocked' as const,
-													reason: 'FINAL_COUNCIL_MISSING_QUORUM',
-													message: `Phase ${phase} (last phase) cannot be completed: final council evidence does not prove all five required members voted. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate complete evidence.`,
-													agentsDispatched,
-													agentsMissing: [],
-													warnings: [],
-												},
-												null,
-												2,
-											);
-										}
-
-										if (
-											entry.verdict === 'rejected' ||
-											entry.verdict === 'REJECTED'
-										) {
-											return JSON.stringify(
-												{
-													success: false,
-													phase,
-													status: 'blocked' as const,
-													reason: 'FINAL_COUNCIL_REJECTED',
-													message: `Phase ${phase} (last phase) cannot be completed: final council returned verdict 'REJECTED'. Address the required fixes before completing the project.`,
-													agentsDispatched,
-													agentsMissing: [],
-													warnings: [],
-												},
-												null,
-												2,
-											);
-										}
-
-										if (
-											entry.verdict !== 'approved' &&
-											entry.verdict !== 'APPROVED'
-										) {
-											return JSON.stringify(
-												{
-													success: false,
-													phase,
-													status: 'blocked' as const,
-													reason: 'FINAL_COUNCIL_INVALID_VERDICT',
-													message: `Phase ${phase} (last phase) cannot be completed: final council evidence contains unrecognized verdict '${entry.verdict}'. Expected 'approved'.`,
-													agentsDispatched,
-													agentsMissing: [],
-													warnings: [],
-												},
-												null,
-												2,
-											);
-										}
-									}
-								}
-							} catch (readErr) {
-								if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-									safeWarn(
-										`[phase_complete] Final council evidence unreadable:`,
-										readErr,
-									);
-								}
-								fcVerdictFound = false;
-							}
-
-							if (!fcVerdictFound) {
-								return JSON.stringify(
-									{
-										success: false,
-										phase,
-										status: 'blocked' as const,
-										reason: 'FINAL_COUNCIL_REQUIRED',
-										final_council_required: true,
-										message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled and final council evidence not found at .swarm/evidence/final-council.json. Dispatch critic, reviewer, sme, test_engineer, and explorer with project-scoped context, collect their CouncilMemberVerdict JSON, and call write_final_council_evidence before completing the project. Do not use convene_general_council for this gate.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [
-											`Final council required - dispatch the five project-scoped council members, then call write_final_council_evidence to persist quorumed evidence.`,
-										],
-									},
-									null,
-									2,
-								);
-							}
-						}
-					}
-				}
-			}
-		} catch (fcError) {
-			if (finalCouncilEnabled) {
-				// Fail-closed: final council gate errors block phase completion
-				warnings.push(`FINAL_COUNCIL_ERROR: ${String(fcError)}`);
-				return JSON.stringify(
-					{
-						success: false,
-						phase,
-						status: 'blocked' as const,
-						reason: 'FINAL_COUNCIL_ERROR',
-						message: `Phase ${phase} (last phase) cannot be completed: final council gate encountered an error. Error: ${String(fcError)}`,
-						agentsDispatched,
-						agentsMissing: [],
-						warnings: [`FINAL_COUNCIL_ERROR: ${String(fcError)}`],
-					},
-					null,
-					2,
-				);
-			} else {
-				safeWarn(
-					`[phase_complete] Final council gate error (non-blocking):`,
-					fcError,
-				);
-			}
+		const gateResult = await runFinalCouncilGate(gateCtx);
+		if (gateResult.blocked) {
+			return blockedResult(phase, gateResult);
 		}
+		warnings.push(...gateResult.warnings);
 	}
+
+	// ── Post-gate logic ────────────────────────────────────────────────────────
 
 	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
 	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
@@ -2461,11 +1425,45 @@ export async function executePhaseComplete(
 	// Write root-level checkpoint artifact (non-blocking)
 	await writeCheckpoint(dir).catch(() => {});
 
-	return JSON.stringify(
-		{ ...result, timestamp: event.timestamp, duration_ms: durationMs },
-		null,
-		2,
-	);
+	const outputData = {
+		...result,
+		timestamp: event.timestamp,
+		duration_ms: durationMs,
+	};
+	return _buildOutputJson(outputData);
+}
+
+/** @internal exported for testing only */
+export function _buildOutputJson(outputData: {
+	phase: number;
+	success: boolean;
+	status: string;
+	message?: string;
+	agentsDispatched?: string[];
+	agentsMissing?: string[];
+	warnings?: string[];
+	timestamp: string;
+	duration_ms: number;
+	[key: string]: unknown;
+}): string {
+	let json = JSON.stringify(outputData, null, 2);
+	if (json.length > MAX_OUTPUT_BYTES) {
+		const truncated = {
+			_truncated: true,
+			_truncation_reason: `Output exceeded MAX_OUTPUT_BYTES (${MAX_OUTPUT_BYTES}) limit`,
+			phase: outputData.phase,
+			success: outputData.success,
+			status: outputData.status,
+			message: outputData.message,
+			agentsDispatched: outputData.agentsDispatched?.slice(0, 10),
+			agentsMissing: outputData.agentsMissing?.slice(0, 10),
+			warnings: ['(output truncated — full output exceeded size limit)'],
+			timestamp: outputData.timestamp,
+			duration_ms: outputData.duration_ms,
+		};
+		json = JSON.stringify(truncated, null, 2);
+	}
+	return json;
 }
 
 /**
