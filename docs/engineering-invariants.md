@@ -22,7 +22,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 ### v6.48.0 — Tool registration gaps + ambiguous test_runner outcomes
 
 - **Symptom:** six tools (`syntax_check`, `placeholder_scan`, `quality_budget`, `sast_scan`, `sbom_generate`, `build_check`) listed in `TOOL_NAMES` and `AGENT_TOOL_MAP` but absent from the plugin `tool: {}` block. Agents calling them got "tool not found." `test_runner` returned ambiguous error signals on zero-files and too-many-files paths, causing the architect to retry-loop.
-- **Invariants established:** Tool addition is incomplete until exported, registered in the plugin block, mapped in `AGENT_TOOL_MAP`, surfaced in help/docs, and covered by parity tests. Conformance test (`verify-six-tools-registration.test.ts`) and `/swarm doctor tools` now enforce coherence. `test_runner` returns explicit `outcome: 'pass' | 'skip' | 'regression' | 'scope_exceeded' | 'error'` with `MAX_SAFE_TEST_FILES = 50`.
+- **Invariants established:** Tool addition is incomplete until exported, registered in the plugin block, mapped in `AGENT_TOOL_MAP`, surfaced in help/docs, and covered by parity tests. `/swarm doctor tools` and registration-smoke/plugin-registration-adversarial tests enforce coherence. `test_runner` returns explicit `outcome: 'pass' | 'skip' | 'regression' | 'scope_exceeded' | 'error'` with `MAX_SAFE_TEST_FILES = 50`.
 - **Maps to AGENTS.md:** invariants 6 (test_runner safety) and 11 (tool registration coherence).
 
 ### v6.80.2 — Cross-session global state, empty checkpoint commits

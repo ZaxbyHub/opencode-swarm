@@ -123,7 +123,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['coder']).toEqual(expected);
 		});
 
-		it('test_engineer should retain expected 15 tools', () => {
+		it('test_engineer should retain expected 16 tools', () => {
 			const expected = [
 				'test_runner',
 				'test_impact',
@@ -139,6 +139,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'syntax_check',
 				'search',
 				'summarize_work',
+				'knowledge_recall',
 				'swarm_command',
 			];
 			expect(AGENT_TOOL_MAP['test_engineer']).toEqual(expected);

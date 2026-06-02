@@ -345,6 +345,7 @@ export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = {
 		'syntax_check',
 		'search',
 		'summarize_work',
+		'knowledge_recall',
 		'swarm_command',
 	],
 	sme: [
