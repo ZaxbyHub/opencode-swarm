@@ -51,7 +51,7 @@ When the user asks for a "council", "independent review", "N-agent review", or u
    - docs and intent-vs-actual
    - tests and falsifiability
    A 6th `performance and architecture` lane may be added when risk justifies it.
-4. Each agent's prompt must include: branch name, commit list (`git log origin/main..HEAD`), scope of files owned by that lane, explicit bug-hunting checklist, and a "return CONFIRMED / SUSPICIOUS / CLEAN with file:line evidence, cap N words" instruction.
+4. Each agent's prompt must include: branch name, commit list (`git log origin/main..HEAD`), scope of files owned by that lane, explicit bug-hunting checklist, and a "return EVIDENCE_FOUND / SUSPICIOUS / CLEAN with file:line evidence, cap N words" instruction. Agents must not return CONFIRMED, DISPROVED, or final severity.
 5. Agents are launched in parallel so the orchestrator must NOT duplicate their work. The main thread only collates, validates, and synthesizes.
 6. When all agents return, the main thread acts as the **independent reviewer**: re-read the flagged file:line evidence directly and classify each candidate CONFIRMED / DISPROVED / UNVERIFIED / PRE_EXISTING before reporting. DISPROVED findings must be called out — agents overclaim regularly.
 > Note: Step 6 (main-thread-as-reviewer) is specific to the council pattern. In the default workflow, reviewer validation MUST be delegated to a reviewer subagent per the anti-self-review rule above.
@@ -174,7 +174,7 @@ Candidates not validated must be listed as UNVERIFIED with reason in the validat
 
 **DISPROVED findings must be called out explicitly** — agents regularly overclaim.
 
-**Base-branch verification (mandatory):** If a finding claims behavior is "new" or "introduced by the PR", the reviewer MUST read the equivalent code on the base branch (`git show <base_ref>:<file>`) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
+**Base-branch verification (mandatory):** If a finding claims behavior is "new" or "introduced by the PR", the reviewer MUST read the equivalent code on the base branch (`git show <base_ref>:<file>`) to verify it was not present before. `<base_ref>` is the merge-base SHA or base branch name — resolve it from the PR context (e.g. `git merge-base HEAD origin/main`) or the reviewer delegation prompt. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
 
 ---
 

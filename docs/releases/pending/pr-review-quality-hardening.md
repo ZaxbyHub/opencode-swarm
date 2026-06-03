@@ -1,4 +1,4 @@
-## First-class PR Review mode with quality hardening
+# First-class PR Review mode with quality hardening
 
 ### What changed
 - Added `MODE: PR_REVIEW` as a first-class mode in the architect prompt (`src/agents/architect.ts`). The mode activates via `[MODE: PR_REVIEW pr="..." council=true/false]` signal from the existing `pr-review` command handler and loads the `swarm-pr-review` skill.
@@ -18,3 +18,4 @@ No migration required. The `MODE: PR_REVIEW` signal is emitted by the existing `
 ### Known caveats
 - The `.opencode` skill references `prm_scorer` in Phase 5 verifier routing — this is aspirational/planned and not yet implemented in the codebase (pre-existing, not introduced by this PR)
 - No feature-flag strip path for `MODE: PR_REVIEW` in architect.ts (unlike `DESIGN_DOCS`); the pr-review command is unconditionally registered so this has no current impact
+- `.claude/skills/swarm-pr-review/SKILL.md` is an intentionally condensed 6-phase variant (~377 lines) for Claude Code sessions. `.opencode/skills/swarm-pr-review/SKILL.md` is the full 12-phase operative protocol (~883 lines) loaded by `architect.ts MODE: PR_REVIEW`. Both receive the same quality hardening additions; the structural difference is pre-existing design. The divergence is explicitly acknowledged in `tests/unit/skills/skill-mirrors.test.ts` under `DIVERGENT_ARCHITECT_MODE_SKILLS`.

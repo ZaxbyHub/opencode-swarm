@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const architectSource = readFileSync(
@@ -11,6 +11,9 @@ const architectSource = readFileSync(
 	'utf-8',
 );
 
+// Skills where .opencode and .claude mirrors must be byte-identical.
+// When adding a new architect mode stub that loads a skill, add it here
+// (or to DIVERGENT_ARCHITECT_MODE_SKILLS if the .claude variant is intentionally condensed).
 const MIRRORED_ARCHITECT_MODE_SKILLS = [
 	[
 		'brainstorm',
@@ -83,7 +86,30 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 		'.opencode/skills/phase-wrap/SKILL.md',
 		'.claude/skills/phase-wrap/SKILL.md',
 	],
+	[
+		'design-docs',
+		'.opencode/skills/design-docs/SKILL.md',
+		'.claude/skills/design-docs/SKILL.md',
+	],
 ] as const;
+
+// Skills where .opencode is the full operative protocol loaded by architect.ts and
+// .claude is an intentionally condensed variant for Claude Code sessions.
+// Both files must exist; byte-identity is not required but divergence is documented here.
+const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	opencodePath: string;
+	claudePath: string;
+	reason: string;
+}> = [
+	{
+		slug: 'swarm-pr-review',
+		opencodePath: '.opencode/skills/swarm-pr-review/SKILL.md',
+		claudePath: '.claude/skills/swarm-pr-review/SKILL.md',
+		reason:
+			'.claude is a 6-phase condensed variant; .opencode is the 12-phase full protocol loaded by architect.ts MODE: PR_REVIEW',
+	},
+];
 
 describe('architect mode skill mirrors - regression: prevent mirror drift (F-001)', () => {
 	for (const [
@@ -107,6 +133,13 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		});
 	}
 
+	for (const { slug, opencodePath, claudePath } of DIVERGENT_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} skill: both .opencode and .claude mirrors exist (acknowledged divergent pair)`, () => {
+			expect(existsSync(join(process.cwd(), opencodePath))).toBe(true);
+			expect(existsSync(join(process.cwd(), claudePath))).toBe(true);
+		});
+	}
+
 	it('keeps mirrored skill list in sync with architect mode stubs', () => {
 		// Previous coverage used only this hardcoded list, so a new architect
 		// stub could reference a skill that was never checked for mirror parity.
@@ -115,9 +148,10 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 				/file:\.opencode\/skills\/([^/\s`]+)\/SKILL\.md/g,
 			),
 		].map((match) => match[1]);
-		const mirroredSlugs = MIRRORED_ARCHITECT_MODE_SKILLS.map(
-			([skillName]) => skillName,
-		);
+		const mirroredSlugs = [
+			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
+			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+		];
 
 		expect([...new Set(stubSlugs)].sort()).toEqual([...mirroredSlugs].sort());
 	});
