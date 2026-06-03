@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.48.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.47.0...v7.48.0) (2026-06-03)
+
+
+### Features
+
+* **pr-review:** add first-class MODE: PR_REVIEW with quality-over-speed hardening ([#1100](https://github.com/zaxbysauce/opencode-swarm/issues/1100)) ([22dd966](https://github.com/zaxbysauce/opencode-swarm/commit/22dd966b81193b9b6af70448d35583508f930646))
+
 ## [7.47.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.46.5...v7.47.0) (2026-06-02)
 
 
