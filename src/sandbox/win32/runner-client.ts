@@ -14,7 +14,13 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { warn } from '../../utils/logger';
+
+// Runtime-portable equivalent of __dirname: works from both the TypeScript source
+// tree and the compiled ESM bundle in dist/, where Bun hardcodes the build-machine
+// __dirname as a string literal (making it wrong on any other machine).
+const _runtimeDir = fileURLToPath(new URL('.', import.meta.url));
 
 /** Result of probing the runner binary for capabilities. */
 export interface RunnerProbeResult {
@@ -123,10 +129,14 @@ function findRunnerBinary(): string | null {
 	const arch = process.arch === 'x64' ? 'x64' : 'arm64';
 	const platform = 'win32';
 
-	// Check package-local binaries
+	// Check package-local binaries.
+	// _runtimeDir is resolved at runtime from import.meta.url so it is correct
+	// whether the code runs from src/ or the compiled dist/ bundle (where Bun
+	// would hardcode __dirname as a build-machine path, which is wrong on any
+	// consumer machine).
 	const packagePaths = [
 		path.resolve(
-			__dirname,
+			_runtimeDir,
 			'..',
 			'..',
 			'..',
@@ -135,7 +145,7 @@ function findRunnerBinary(): string | null {
 			'swarm-sandbox-runner.exe',
 		),
 		path.resolve(
-			__dirname,
+			_runtimeDir,
 			'..',
 			'..',
 			'..',
