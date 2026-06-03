@@ -3,7 +3,7 @@ import type { TestRunRecord } from './history-store.js';
 export interface FlakyTestEntry {
 	testFile: string;
 	testName: string;
-	flakyScore: number; // alternation_count / total_runs, 0-1
+	flakyScore: number; // (alternation_score + pass_rate_variance_score) / 2, 0-1
 	totalRuns: number;
 	alternationCount: number;
 	isQuarantined: boolean; // true if flakyScore > 0.3 AND totalRuns >= 5
@@ -14,6 +14,40 @@ export interface FlakyTestEntry {
 const FLAKY_THRESHOLD = 0.3;
 const MIN_RUNS_FOR_QUARANTINE = 5;
 const MAX_HISTORY_RUNS = 20;
+
+function computeCombinedFlakyScore(recent: TestRunRecord[]): {
+	alternationCount: number;
+	flakyScore: number;
+} {
+	const totalRuns = recent.length;
+
+	if (totalRuns < 2) {
+		return { alternationCount: 0, flakyScore: 0 };
+	}
+
+	let alternationCount = 0;
+	let passCount = 0;
+
+	for (let i = 0; i < recent.length; i++) {
+		if (recent[i].result === 'pass') {
+			passCount++;
+		}
+		if (i > 0 && recent[i].result !== recent[i - 1].result) {
+			alternationCount++;
+		}
+	}
+
+	const alternationScore = alternationCount / totalRuns;
+	const passRate = passCount / totalRuns;
+	const passRateVarianceScore = 4 * passRate * (1 - passRate);
+
+	// Combined flaky score formula:
+	// (alternation_score + pass_rate_variance_score) / 2
+	return {
+		alternationCount,
+		flakyScore: (alternationScore + passRateVarianceScore) / 2,
+	};
+}
 
 export function computeFlakyScore(history: TestRunRecord[]): number {
 	if (history.length === 0) {
@@ -27,14 +61,7 @@ export function computeFlakyScore(history: TestRunRecord[]): number {
 		return 0;
 	}
 
-	let alternationCount = 0;
-	for (let i = 1; i < recent.length; i++) {
-		if (recent[i].result !== recent[i - 1].result) {
-			alternationCount++;
-		}
-	}
-
-	return alternationCount / totalRuns;
+	return computeCombinedFlakyScore(recent).flakyScore;
 }
 
 export function detectFlakyTests(
@@ -81,14 +108,7 @@ export function detectFlakyTests(
 			continue;
 		}
 
-		let alternationCount = 0;
-		for (let i = 1; i < recent.length; i++) {
-			if (recent[i].result !== recent[i - 1].result) {
-				alternationCount++;
-			}
-		}
-
-		const flakyScore = totalRuns >= 2 ? alternationCount / totalRuns : 0;
+		const { alternationCount, flakyScore } = computeCombinedFlakyScore(recent);
 		const isQuarantined =
 			flakyScore > FLAKY_THRESHOLD && totalRuns >= MIN_RUNS_FOR_QUARANTINE;
 

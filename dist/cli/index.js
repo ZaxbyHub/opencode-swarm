@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.48.0",
+    version: "7.48.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -11341,7 +11341,7 @@ function finalize(ctx, schema) {
     result.$schema = "http://json-schema.org/draft-07/schema#";
   } else if (ctx.target === "draft-04") {
     result.$schema = "http://json-schema.org/draft-04/schema#";
-  } else if (ctx.target === "openapi-3.0") {} else {}
+  } else if (ctx.target === "openapi-3.0") {}
   if (ctx.external?.uri) {
     const id = ctx.external.registry.get(schema)?.id;
     if (!id)
@@ -11606,7 +11606,7 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     if (val === undefined) {
       if (ctx.unrepresentable === "throw") {
         throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-      } else {}
+      }
     } else if (typeof val === "bigint") {
       if (ctx.unrepresentable === "throw") {
         throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -32630,7 +32630,7 @@ class JSONSchemaGenerator2 {
               if (val === undefined) {
                 if (this.unrepresentable === "throw") {
                   throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-                } else {}
+                }
               } else if (typeof val === "bigint") {
                 if (this.unrepresentable === "throw") {
                   throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -52396,6 +52396,29 @@ function classifyAndCluster(testResults, history) {
 }
 
 // src/test-impact/flaky-detector.ts
+function computeCombinedFlakyScore(recent) {
+  const totalRuns = recent.length;
+  if (totalRuns < 2) {
+    return { alternationCount: 0, flakyScore: 0 };
+  }
+  let alternationCount = 0;
+  let passCount = 0;
+  for (let i = 0;i < recent.length; i++) {
+    if (recent[i].result === "pass") {
+      passCount++;
+    }
+    if (i > 0 && recent[i].result !== recent[i - 1].result) {
+      alternationCount++;
+    }
+  }
+  const alternationScore = alternationCount / totalRuns;
+  const passRate = passCount / totalRuns;
+  const passRateVarianceScore = 4 * passRate * (1 - passRate);
+  return {
+    alternationCount,
+    flakyScore: (alternationScore + passRateVarianceScore) / 2
+  };
+}
 function detectFlakyTests(allHistory) {
   const grouped = new Map;
   for (const record3 of allHistory) {
@@ -52421,13 +52444,7 @@ function detectFlakyTests(allHistory) {
     if (totalRuns < 2) {
       continue;
     }
-    let alternationCount = 0;
-    for (let i = 1;i < recent.length; i++) {
-      if (recent[i].result !== recent[i - 1].result) {
-        alternationCount++;
-      }
-    }
-    const flakyScore = totalRuns >= 2 ? alternationCount / totalRuns : 0;
+    const { alternationCount, flakyScore } = computeCombinedFlakyScore(recent);
     const isQuarantined = flakyScore > FLAKY_THRESHOLD && totalRuns >= MIN_RUNS_FOR_QUARANTINE;
     const recentResults = recent.map((r) => r.result);
     const testFile = entry.originalFile;

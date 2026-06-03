@@ -52,8 +52,8 @@ describe('ADVERSARIAL: large history performance', () => {
 		const start = Date.now();
 		const score = computeFlakyScore(history);
 		const elapsed = Date.now() - start;
-		// Capped at MAX_HISTORY_RUNS = 20, so last 20 alternating = 19/20 = 0.95
-		expect(score).toBe(0.95);
+		// Capped at MAX_HISTORY_RUNS = 20: alternation=0.95, pass-rate variance=1 => 0.975
+		expect(score).toBe(0.975);
 		expect(elapsed).toBeLessThan(100); // should be fast
 	});
 
@@ -162,7 +162,7 @@ describe('ADVERSARIAL: all same results', () => {
 // --- ATTACK VECTOR 4: Perfectly alternating results ---
 
 describe('ADVERSARIAL: perfectly alternating results', () => {
-	test('alternating P,F,P,F,P,F,P,F (8 runs) → score = 7/8', () => {
+	test('alternating P,F,P,F,P,F,P,F (8 runs) combines both signals', () => {
 		const history: TestRunRecord[] = Array.from({ length: 8 }, (_, i) =>
 			makeRecord({
 				testFile: 'a.test.ts',
@@ -171,10 +171,10 @@ describe('ADVERSARIAL: perfectly alternating results', () => {
 			}),
 		);
 		const score = computeFlakyScore(history);
-		expect(score).toBe(7 / 8);
+		expect(score).toBe(0.9375);
 	});
 
-	test('alternating 20 runs → max score = 19/20 = 0.95 (limited to 20)', () => {
+	test('alternating 20 runs keeps a near-max score (limited to 20)', () => {
 		const history: TestRunRecord[] = Array.from({ length: 20 }, (_, i) =>
 			makeRecord({
 				testFile: 'a.test.ts',
@@ -183,7 +183,7 @@ describe('ADVERSARIAL: perfectly alternating results', () => {
 			}),
 		);
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.95);
+		expect(results[0].flakyScore).toBe(0.975);
 		expect(results[0].alternationCount).toBe(19);
 		expect(results[0].isQuarantined).toBe(true);
 	});
@@ -202,7 +202,7 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'quota1', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.8);
+		expect(results[0].flakyScore).toBe(0.88);
 		expect(results[0].isQuarantined).toBe(true);
 	});
 
@@ -219,7 +219,7 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'quota2', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.4);
+		expect(results[0].flakyScore).toBeCloseTo(0.68, 10);
 		expect(results[0].isQuarantined).toBe(true);
 	});
 
@@ -233,41 +233,28 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'below', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.2);
-		expect(results[0].isQuarantined).toBe(false);
+		expect(results[0].flakyScore).toBeCloseTo(0.42, 10);
+		expect(results[0].isQuarantined).toBe(true);
 	});
 
 	test('score exactly FLAKY_THRESHOLD (0.3) → NOT quarantined (strictly greater required)', () => {
-		// Use 10 runs with 3 alternations: P,P,P,P,F,F,P,P,P,P
-		// Transitions: P→P(no), P→P(no), P→P(no), P→F(alt1), F→F(no), F→P(alt2), P→P(no), P→P(no), P→P(no)
-		// = 2 alternations / 9 potential transitions, but score = alternations / totalRuns = 2/10 = 0.2?
-		// Wait let me recount: the code does alternationCount / totalRuns
-		// With 10 runs and alternationCount = 3: score = 3/10 = 0.3
-		// Let me just verify the actual count by running
+		// Use 10 runs with one fail at the end:
+		// alternation=1/10=0.1, pass-rate variance=4*(9/10)*(1/10)=0.36, combined=0.23
 		const history: TestRunRecord[] = [];
-		// P,P,P,F,F,F,P,P,P,P - transitions at 2→3, 4→5, 7→8
 		for (let i = 0; i < 10; i++) {
 			let result: 'pass' | 'fail' = 'pass';
-			if (i === 3 || i === 4 || i === 5) result = 'fail';
+			if (i === 9) result = 'fail';
 			history.push(
 				makeRecord({ testFile: 'a.test.ts', testName: 'exact30', result }),
 			);
 		}
 		const results = detectFlakyTests(history);
-		// Let's just assert it's close to 0.3 but below 0.3 (not quarantined)
-		// and verify the score is > 0 since it IS flaky
-		expect(results[0].flakyScore).toBeGreaterThan(0);
-		expect(results[0].flakyScore).toBeLessThanOrEqual(0.3);
+		expect(results[0].flakyScore).toBeCloseTo(0.23, 10);
 		expect(results[0].isQuarantined).toBe(false);
 	});
 
 	test('score FLAKY_THRESHOLD - 0.01 with 5 runs → NOT quarantined', () => {
-		// 0.29: impossible with int alternations for small n
-		// 1/4=0.25, 2/7≈0.286, let's try 7 runs with 2 alternations = 2/7≈0.286
-		// But we need exactly 5 runs for MIN_RUNS_FOR_QUARANTINE
-		// 1/5=0.2, 2/5=0.4 — no 0.29 possible. Test the closest boundary: score=0.4 with 5 runs
-		// This is already quarantined. Let's test score=0.2 with 5 runs (already above)
-		// The boundary is strictly > 0.3, so 0.4 is the minimum quarantinable score with 5 runs
+		// With the combined formula this pattern remains above threshold.
 		const history = [
 			makeRecord({
 				testFile: 'a.test.ts',
@@ -296,8 +283,8 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 			}),
 		];
 		const results = detectFlakyTests(history);
-		// P,P,F,P,F → 3 alternations / 5 = 0.6 > 0.3
-		expect(results[0].flakyScore).toBe(0.6);
+		// alternation=0.6, pass-rate variance=0.96 => combined=0.78
+		expect(results[0].flakyScore).toBe(0.78);
 		expect(results[0].isQuarantined).toBe(true);
 	});
 });
@@ -454,7 +441,7 @@ describe('ADVERSARIAL: very long test names', () => {
 // --- ATTACK VECTOR 9: skip results mixed with pass/fail ---
 
 describe('ADVERSARIAL: skip results in history', () => {
-	test('skip alternates with pass: P,S,P,S,P = 4 alternations / 5 = 0.8', () => {
+	test('skip alternates with pass: P,S,P,S,P includes variance signal', () => {
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'skip1', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'skip1', result: 'skip' }),
@@ -463,7 +450,7 @@ describe('ADVERSARIAL: skip results in history', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'skip1', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.8);
+		expect(results[0].flakyScore).toBe(0.88);
 		expect(results[0].recentResults).toEqual([
 			'pass',
 			'skip',
@@ -483,7 +470,7 @@ describe('ADVERSARIAL: skip results in history', () => {
 		];
 		const results = detectFlakyTests(history);
 		// skip→fail (alt), fail→pass (alt), pass→skip (alt), skip→fail (alt) = 4/5
-		expect(results[0].flakyScore).toBe(0.8);
+		expect(results[0].flakyScore).toBeCloseTo(0.72, 10);
 	});
 
 	test('all skips = 0 alternations', () => {
@@ -558,8 +545,8 @@ describe('ADVERSARIAL: unsorted timestamps', () => {
 		];
 		const results = detectFlakyTests(history);
 		// Sorted: Jan1=fail, Jan2=fail, Jan3=pass, Jan4=pass, Jan5=pass
-		// fail→fail (no), fail→pass (alt), pass→pass (no), pass→pass (no) = 1/5 = 0.2
-		expect(results[0].flakyScore).toBe(0.2);
+		// fail→fail (no), fail→pass (alt), pass→pass (no), pass→pass (no); combined score = 0.58
+		expect(results[0].flakyScore).toBe(0.58);
 	});
 
 	test('computeFlakyScore with unsorted array — does NOT sort (external caller must sort)', () => {
@@ -579,9 +566,9 @@ describe('ADVERSARIAL: unsorted timestamps', () => {
 				timestamp: '2024-01-01T00:00:00.000Z',
 			}),
 		];
-		// No sorting — pass then fail → alternation = 1/2 = 0.5
+		// No sorting — pass then fail; combined score = (0.5 + 1) / 2 = 0.75
 		const score = computeFlakyScore(unsorted);
-		expect(score).toBe(0.5);
+		expect(score).toBe(0.75);
 	});
 });
 
@@ -624,8 +611,8 @@ describe('ADVERSARIAL: grouping by (testFile, testName)', () => {
 		];
 		const results = detectFlakyTests(history);
 		expect(results.length).toBe(1);
-		// P,F,P → 2 alternations / 3 = 0.666...
-		expect(results[0].flakyScore).toBe(2 / 3);
+		// P,F,P: alternation=2/3, pass-rate variance=8/9 => combined=7/9
+		expect(results[0].flakyScore).toBe(7 / 9);
 	});
 
 	test('many tests in same file all with different names → all separate', () => {
@@ -670,12 +657,12 @@ describe('ADVERSARIAL: computeFlakyScore unsorted input', () => {
 		expect(computeFlakyScore(history)).toBe(0);
 	});
 
-	test('exactly 2 runs: with alternation → score = 0.5', () => {
+	test('exactly 2 runs: with alternation includes variance', () => {
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'two', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'two', result: 'fail' }),
 		];
-		expect(computeFlakyScore(history)).toBe(0.5);
+		expect(computeFlakyScore(history)).toBe(0.75);
 	});
 
 	test('limits to last 20 regardless of input size', () => {
@@ -700,8 +687,8 @@ describe('ADVERSARIAL: computeFlakyScore unsorted input', () => {
 				}),
 			);
 		}
-		// Score based on last 20 (alternating) = 19/20 = 0.95
-		expect(computeFlakyScore(history)).toBe(0.95);
+		// Score based on last 20 (alternating): (0.95 + 1) / 2 = 0.975
+		expect(computeFlakyScore(history)).toBe(0.975);
 	});
 });
 
@@ -740,8 +727,7 @@ describe('ADVERSARIAL: isTestQuarantined boundary conditions', () => {
 		expect(isTestQuarantined('a.test.ts', 'flaky', history)).toBe(false);
 	});
 
-	test('score below threshold (0.2) with 10 runs → false', () => {
-		// 2/10 = 0.2
+	test('combined score can exceed threshold with low alternation', () => {
 		const history: TestRunRecord[] = [];
 		for (let i = 0; i < 10; i++) {
 			history.push(
@@ -752,7 +738,7 @@ describe('ADVERSARIAL: isTestQuarantined boundary conditions', () => {
 				}),
 			);
 		}
-		expect(isTestQuarantined('a.test.ts', 'below', history)).toBe(false);
+		expect(isTestQuarantined('a.test.ts', 'below', history)).toBe(true);
 	});
 });
 
@@ -869,7 +855,7 @@ describe('ADVERSARIAL: ISO timestamp edge cases', () => {
 		];
 		const results = detectFlakyTests(history);
 		// Oldest first → P then F
-		expect(results[0].flakyScore).toBe(0.5);
+		expect(results[0].flakyScore).toBe(0.75);
 	});
 
 	test('far future ISO timestamp', () => {
@@ -888,7 +874,7 @@ describe('ADVERSARIAL: ISO timestamp edge cases', () => {
 			}),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.5);
+		expect(results[0].flakyScore).toBe(0.75);
 	});
 });
 
@@ -944,7 +930,7 @@ describe('ADVERSARIAL: recommendation tiers', () => {
 		expect(results[0].recommendation).toContain('Severely flaky');
 	});
 
-	test('score > 0.3 but <= 0.5 → Moderately flaky', () => {
+	test('score > 0.5 → Severely flaky', () => {
 		// 10 runs, 4 alternations = 0.4
 		const history: TestRunRecord[] = [];
 		for (let i = 0; i < 10; i++) {
@@ -957,10 +943,10 @@ describe('ADVERSARIAL: recommendation tiers', () => {
 			);
 		}
 		const results = detectFlakyTests(history);
-		expect(results[0].recommendation).toContain('Moderately flaky');
+		expect(results[0].recommendation).toContain('Severely flaky');
 	});
 
-	test('score <= 0.3 → no recommendation even with 5+ runs', () => {
+	test('score > 0.3 can produce a recommendation even with low alternation', () => {
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'low', result: 'fail' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'low', result: 'fail' }),
@@ -969,6 +955,6 @@ describe('ADVERSARIAL: recommendation tiers', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'low', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].recommendation).toBeUndefined();
+		expect(results[0].recommendation).toContain('Moderately flaky');
 	});
 });
