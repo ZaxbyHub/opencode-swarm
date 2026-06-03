@@ -1598,23 +1598,32 @@ export function createArchitectAgent(
 				'\n{{AGENT_PREFIX}}designer - UI/UX design specs (scaffold generation for UI components — runs BEFORE coder on UI tasks)',
 				'',
 			)
-			// Remove designer delegation example in ## DELEGATION FORMAT
+			// Remove designer delegation example in ## DELEGATION FORMAT.
+			// Fixed lookahead: the block ends with "SKILLS: none" before "## WORKFLOW",
+			// so the original `accessibility(?=\n\n## WORKFLOW)` never matched.
 			?.replace(
-				/\n\{\{AGENT_PREFIX\}\}designer\nTASK: Design specification[\s\S]*?accessibility(?=\n\n## WORKFLOW)/,
+				/\n\{\{AGENT_PREFIX\}\}designer\nTASK: Design specification[\s\S]*?(?=\n\n## WORKFLOW)/,
 				'',
 			)
-			// Remove UI design gate step from pipeline (5a)
+			// Remove designer from knowledge-directive delegation list (issue #653 gap 1)
+			?.replace(', or designer', '')
+			// Remove from SKILL AGENT TARGET RENDERING section (issue #653 gap 2)
 			?.replace(
-				'5a. **UI DESIGN GATE** (conditional — Rule 9): If task matches UI trigger → {{AGENT_PREFIX}}designer produces scaffold → pass scaffold to coder as INPUT. If no match → skip.\n\n',
+				"- the active swarm's designer agent = @{{AGENT_PREFIX}}designer\n",
 				'',
-			)
-			// Simplify the step-5a transition instruction
-			?.replace(
-				'→ After step 5a (or immediately if no UI task applies): Call update_task_status',
-				'→ Call update_task_status',
-			)
-			// Remove designer scaffold reference from coder step
-			?.replace(' (if designer scaffold produced, include it as INPUT)', '');
+			);
+
+		// Warn if custom prompt wording prevented stripping (issue #653).
+		// All designer occurrences in the default ARCHITECT_PROMPT are removed by the
+		// replacements above. If `designer` still appears, the caller supplied a custom
+		// prompt whose wording does not match the target strings — likely an unregistered-
+		// agent dispatch waiting to fail at runtime.
+		if (prompt?.includes('designer')) {
+			console.warn(
+				'[swarm] WARNING: Custom architect prompt may still contain designer references after stripping. ' +
+					'Verify your custom prompt does not reference @designer when ui_review is disabled.',
+			);
+		}
 	}
 
 	// Strip docs_design references when design_docs is not enabled (issue #1080).
