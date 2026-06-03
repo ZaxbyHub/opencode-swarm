@@ -104,6 +104,14 @@ Record:
 
 If scope cannot be determined, review the narrowest safe scope available and state the limitation.
 
+### Pre-flight git ref availability
+
+Before launching explorers (Phase 3), confirm the PR branch refs are available:
+- If `head_ref` is a remote branch that is not checked out locally, fetch it via `git fetch origin <head_ref>`
+- Explicitly pass the commit range (`base_ref..head_ref`) in every explorer delegation so explorers read from the correct revision
+
+If refs cannot be fetched, state the limitation in the context pack.
+
 ---
 
 # Default Review Workflow
@@ -269,6 +277,11 @@ Tool candidate rules:
 Launch all base lanes in parallel in a single message with multiple Agent tool calls when the environment supports it (`run_in_background: true`). Use `Explore` subagents for exploration.
 
 If the Agent tool is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane.
+
+**task_id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, apply these rules:
+- For Agent tools that require caller-supplied `task_id` values, every parallel explorer lane invocation and retry MUST use a unique ID across the review session, including lane and attempt suffix (e.g. `pr_review_explore_lane1_attempt2`). Never reuse a prior `task_id` unless intentionally resuming that exact lane.
+- If the runtime auto-generates `task_id` values (resume mode), omit the `task_id` parameter rather than fabricating one.
+- Do not use the same `task_id` across concurrent lane dispatches — schema validation rejects duplicate `task_id` values.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
@@ -797,6 +810,8 @@ Context pack summary:
 - impact cone: ...
 - deterministic signals: ...
 - relevant Swarm artifacts / knowledge: ...
+- base_ref: <commit SHA of base branch>
+- head_ref: <commit SHA of PR head branch>
 
 Candidates:
 - ...
@@ -805,6 +820,8 @@ For each candidate, return:
 [REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
 
 You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
+
+IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you MUST read the equivalent code on the base branch (git show <base_ref>:<file>) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
 ```
 
 ---
