@@ -110,8 +110,16 @@ function getEvidenceDir(directory: string): string {
 	const evidenceDir = path.join(swarmDir, 'evidence');
 	mkdirSync(evidenceDir, { recursive: true });
 
-	const resolvedSwarmDir = path.normalize(realpathSync(swarmDir));
-	const resolvedEvidenceDir = path.normalize(realpathSync(evidenceDir));
+	let resolvedSwarmDir: string;
+	let resolvedEvidenceDir: string;
+	try {
+		resolvedSwarmDir = path.normalize(realpathSync(swarmDir));
+		resolvedEvidenceDir = path.normalize(realpathSync(evidenceDir));
+	} catch (error) {
+		throw new Error(
+			`Unable to resolve evidence directory: ${(error as Error).message}`,
+		);
+	}
 	const swarmPrefix = `${resolvedSwarmDir}${path.sep}`;
 	const withinSwarmBoundary =
 		process.platform === 'win32'

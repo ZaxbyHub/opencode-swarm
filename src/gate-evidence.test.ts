@@ -113,6 +113,7 @@ describe('recordGateEvidence', () => {
 		try {
 			symlinkSync(attackerDir, evidenceDir, 'dir');
 		} catch {
+			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
 			rmSync(attackerDir, { recursive: true, force: true });
 			return;
 		}
@@ -156,6 +157,7 @@ describe('recordAgentDispatch', () => {
 		try {
 			symlinkSync(attackerDir, evidenceDir, 'dir');
 		} catch {
+			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
 			rmSync(attackerDir, { recursive: true, force: true });
 			return;
 		}
