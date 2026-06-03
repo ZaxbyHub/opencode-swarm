@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.48.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.0...v7.48.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* **agents:** fill designer-stripping gaps and warn on unstrippable custom-prompt refs ([#1102](https://github.com/zaxbysauce/opencode-swarm/issues/1102)) ([0e829c7](https://github.com/zaxbysauce/opencode-swarm/commit/0e829c745470148d23839cbe696e1406018441ef))
+
 ## [7.48.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.47.0...v7.48.0) (2026-06-03)
 
 
