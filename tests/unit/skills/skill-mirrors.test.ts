@@ -133,8 +133,8 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		});
 	}
 
-	for (const { slug, opencodePath, claudePath } of DIVERGENT_ARCHITECT_MODE_SKILLS) {
-		it(`${slug} skill: both .opencode and .claude mirrors exist (acknowledged divergent pair)`, () => {
+	for (const { slug, opencodePath, claudePath, reason } of DIVERGENT_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} skill: both .opencode and .claude mirrors exist (${reason})`, () => {
 			expect(existsSync(join(process.cwd(), opencodePath))).toBe(true);
 			expect(existsSync(join(process.cwd(), claudePath))).toBe(true);
 		});
@@ -153,6 +153,11 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 		];
 
-		expect([...new Set(stubSlugs)].sort()).toEqual([...mirroredSlugs].sort());
+		// Deduplicate both sides — architect.ts may reference a slug in multiple
+		// MODE stubs (e.g. when the same skill is loaded by two modes), and a
+		// future editor could mistakenly add a slug to both MIRRORED and DIVERGENT.
+		expect([...new Set(stubSlugs)].sort()).toEqual(
+			[...new Set(mirroredSlugs)].sort(),
+		);
 	});
 });
