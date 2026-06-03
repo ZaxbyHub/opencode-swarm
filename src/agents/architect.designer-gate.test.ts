@@ -37,9 +37,7 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		});
 
 		it('excludes designer from SKILL AGENT TARGET RENDERING section', () => {
-			expect(prompt).not.toContain(
-				"the active swarm's designer agent = @",
-			);
+			expect(prompt).not.toContain("the active swarm's designer agent = @");
 		});
 	});
 
@@ -72,9 +70,7 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		});
 
 		it('excludes designer from SKILL AGENT TARGET RENDERING section', () => {
-			expect(prompt).not.toContain(
-				"the active swarm's designer agent = @",
-			);
+			expect(prompt).not.toContain("the active swarm's designer agent = @");
 		});
 	});
 
@@ -112,9 +108,7 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		});
 
 		it('includes designer in SKILL AGENT TARGET RENDERING section', () => {
-			expect(prompt).toContain(
-				"the active swarm's designer agent = @",
-			);
+			expect(prompt).toContain("the active swarm's designer agent = @");
 		});
 	});
 
@@ -123,11 +117,20 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt =
 				'You are an architect. Delegate UI tasks to @designer for scaffold generation.';
-			createArchitectAgent('test-model', customPrompt, undefined, undefined, undefined, {
-				enabled: false,
-			});
+			createArchitectAgent(
+				'test-model',
+				customPrompt,
+				undefined,
+				undefined,
+				undefined,
+				{
+					enabled: false,
+				},
+			);
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining('Custom architect prompt may still contain designer references'),
+				expect.stringContaining(
+					'Custom architect prompt may still contain designer references',
+				),
 			);
 			warnSpy.mockRestore();
 		});
@@ -145,9 +148,16 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		it('does NOT emit console.warn when ui_review is enabled, even with designer refs in custom prompt', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt = 'Architect prompt that mentions @designer agent.';
-			createArchitectAgent('test-model', customPrompt, undefined, undefined, undefined, {
-				enabled: true,
-			});
+			createArchitectAgent(
+				'test-model',
+				customPrompt,
+				undefined,
+				undefined,
+				undefined,
+				{
+					enabled: true,
+				},
+			);
 			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
@@ -162,9 +172,16 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		it('does NOT emit console.warn for bare "designer" noun (no @ prefix) in custom prompt', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt = 'The human is a UX designer who will review output.';
-			createArchitectAgent('test-model', customPrompt, undefined, undefined, undefined, {
-				enabled: false,
-			});
+			createArchitectAgent(
+				'test-model',
+				customPrompt,
+				undefined,
+				undefined,
+				undefined,
+				{
+					enabled: false,
+				},
+			);
 			expect(warnSpy).not.toHaveBeenCalled();
 			warnSpy.mockRestore();
 		});
@@ -172,23 +189,42 @@ describe('createArchitectAgent — designer gate (ui_review)', () => {
 		it('emits console.warn for @Designer (capital D) in custom prompt when ui_review is disabled', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const customPrompt = 'Delegate UI tasks to @Designer agent.';
-			createArchitectAgent('test-model', customPrompt, undefined, undefined, undefined, {
-				enabled: false,
-			});
+			createArchitectAgent(
+				'test-model',
+				customPrompt,
+				undefined,
+				undefined,
+				undefined,
+				{
+					enabled: false,
+				},
+			);
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining('Custom architect prompt may still contain designer references'),
+				expect.stringContaining(
+					'Custom architect prompt may still contain designer references',
+				),
 			);
 			warnSpy.mockRestore();
 		});
 
 		it('emits console.warn for {{AGENT_PREFIX}}designer (no @ prefix) in custom prompt', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
-			const customPrompt = 'You can delegate UI tasks to {{AGENT_PREFIX}}designer for scaffolding.';
-			createArchitectAgent('test-model', customPrompt, undefined, undefined, undefined, {
-				enabled: false,
-			});
+			const customPrompt =
+				'You can delegate UI tasks to {{AGENT_PREFIX}}designer for scaffolding.';
+			createArchitectAgent(
+				'test-model',
+				customPrompt,
+				undefined,
+				undefined,
+				undefined,
+				{
+					enabled: false,
+				},
+			);
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining('Custom architect prompt may still contain designer references'),
+				expect.stringContaining(
+					'Custom architect prompt may still contain designer references',
+				),
 			);
 			warnSpy.mockRestore();
 		});

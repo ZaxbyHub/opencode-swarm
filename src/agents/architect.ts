@@ -1620,7 +1620,11 @@ export function createArchitectAgent(
 		// prompt that our replacements could not fully sanitize — an unregistered-agent
 		// dispatch waiting to fail at runtime.
 		// Bare "designer" nouns (e.g. "the human is a UX designer") are intentionally excluded.
-		if (/(?:@(?:\{\{AGENT_PREFIX\}\})?designer\b|\{\{AGENT_PREFIX\}\}designer\b)/i.test(prompt ?? '')) {
+		if (
+			/(?:@(?:\{\{AGENT_PREFIX\}\})?designer\b|\{\{AGENT_PREFIX\}\}designer\b)/i.test(
+				prompt ?? '',
+			)
+		) {
 			console.warn(
 				'[swarm] WARNING: Custom architect prompt may still contain designer references after stripping. ' +
 					'Verify your custom prompt does not reference @designer when ui_review is disabled.',
