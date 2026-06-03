@@ -133,7 +133,12 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		});
 	}
 
-	for (const { slug, opencodePath, claudePath, reason } of DIVERGENT_ARCHITECT_MODE_SKILLS) {
+	for (const {
+		slug,
+		opencodePath,
+		claudePath,
+		reason,
+	} of DIVERGENT_ARCHITECT_MODE_SKILLS) {
 		it(`${slug} skill: both .opencode and .claude mirrors exist (${reason})`, () => {
 			expect(existsSync(join(process.cwd(), opencodePath))).toBe(true);
 			expect(existsSync(join(process.cwd(), claudePath))).toBe(true);
