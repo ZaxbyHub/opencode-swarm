@@ -15,6 +15,7 @@ Also load:
 
 Codex-specific execution notes:
 
+- MCP tool names (`mcp__github__*`) are injected by the runtime harness and may differ across environments. Verify availability via `ToolSearch` before first use in a session.
 - No `gh` CLI available. Use `mcp__github__pull_request_read` (method `get_check_runs`) to list check status and `mcp__github__get_job_logs` (with `return_content: true`) to fetch failure logs.
 - For dist-check **source-change**: run `bun run build`, commit `dist/`, then push normally.
 - For dist-check **version-drift** (branch behind main, only diff is a version string): `git fetch origin main && git rebase origin/main` (abort with `git rebase --abort` if conflicts occur and escalate to user), then `bun run build && node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')" && git add dist/ && git commit` then `git push --force-with-lease origin <branch>`. Force-push is required and expected after rebase.
