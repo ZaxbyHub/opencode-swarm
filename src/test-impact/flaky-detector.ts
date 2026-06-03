@@ -39,6 +39,8 @@ function computeCombinedFlakyScore(recent: TestRunRecord[]): {
 
 	const alternationScore = alternationCount / totalRuns;
 	const passRate = passCount / totalRuns;
+	// Bernoulli variance is p(1-p), with a maximum of 0.25 at p=0.5.
+	// Multiply by 4 to normalize variance to a 0..1 score.
 	const passRateVarianceScore = 4 * passRate * (1 - passRate);
 
 	// Combined flaky score formula:

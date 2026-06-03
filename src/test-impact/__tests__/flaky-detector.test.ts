@@ -92,7 +92,8 @@ describe('computeFlakyScore', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
 		];
-		// Alternation-only score would be 2/5 = 0.4.
+		// Alternation=2/5=0.4, pass-rate variance=4*0.8*0.2=0.64,
+		// combined score=(0.4+0.64)/2=0.52.
 		expect(computeFlakyScore(history)).toBe(0.52);
 	});
 });
