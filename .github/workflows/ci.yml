@@ -41,6 +41,8 @@ jobs:
       - name: Engineering invariant checks
         shell: bash
         run: chmod +x scripts/check-invariants.sh && bash scripts/check-invariants.sh
+      - name: Tool registration coherence check
+        run: bun run scripts/check-tool-registration.ts
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         shell: bash
         run: chmod +x scripts/check-cross-contamination.sh && bash scripts/check-cross-contamination.sh
