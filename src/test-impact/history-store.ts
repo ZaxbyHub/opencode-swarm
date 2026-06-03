@@ -20,6 +20,10 @@ const MAX_HISTORY_PER_TEST = 20;
 const MAX_ERROR_LENGTH = 500;
 const MAX_STACK_LENGTH = 200;
 const MAX_CHANGED_FILES = 50;
+const HISTORY_WRITE_LOCK_TIMEOUT_MS = 5_000;
+const HISTORY_WRITE_LOCK_STALE_MS = 60_000;
+const HISTORY_WRITE_LOCK_BACKOFF_MS = 10;
+const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 function getHistoryPath(workingDir?: string): string {
 	if (!workingDir) {
@@ -173,66 +177,69 @@ export function batchAppendTestRuns(
 		fs.mkdirSync(historyDir, { recursive: true });
 	}
 
-	// Read existing records ONCE
-	const existingRecords = readAllRecords(historyPath);
+	withHistoryWriteLock(historyPath, () => {
+		// Read existing records ONCE
+		const existingRecords = readAllRecords(historyPath);
 
-	// Sanitize all new records
-	const sanitizedRecords = records.map((record) => ({
-		...record,
-		timestamp: record.timestamp || new Date().toISOString(),
-		durationMs: Math.max(0, record.durationMs),
-		errorMessage: sanitizeErrorMessage(record.errorMessage),
-		stackPrefix: sanitizeStackPrefix(record.stackPrefix),
-		changedFiles: sanitizeChangedFiles(record.changedFiles || []),
-	}));
+		// Sanitize all new records
+		const sanitizedRecords = records.map((record) => ({
+			...record,
+			timestamp: record.timestamp || new Date().toISOString(),
+			durationMs: Math.max(0, record.durationMs),
+			errorMessage: sanitizeErrorMessage(record.errorMessage),
+			stackPrefix: sanitizeStackPrefix(record.stackPrefix),
+			changedFiles: sanitizeChangedFiles(record.changedFiles || []),
+		}));
 
-	// Append all at once
-	existingRecords.push(...sanitizedRecords);
+		// Append all at once
+		existingRecords.push(...sanitizedRecords);
 
-	// Prune: keep only last MAX_HISTORY_PER_TEST records per (testFile, testName)
-	const recordsByTest = new Map<string, TestRunRecord[]>();
-	for (const rec of existingRecords) {
-		const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
-		if (!recordsByTest.has(normalizedKey)) {
-			recordsByTest.set(normalizedKey, []);
+		// Prune: keep only last MAX_HISTORY_PER_TEST records per (testFile, testName)
+		const recordsByTest = new Map<string, TestRunRecord[]>();
+		for (const rec of existingRecords) {
+			const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
+			if (!recordsByTest.has(normalizedKey)) {
+				recordsByTest.set(normalizedKey, []);
+			}
+			recordsByTest.get(normalizedKey)!.push(rec);
 		}
-		recordsByTest.get(normalizedKey)!.push(rec);
-	}
 
-	const prunedRecords: TestRunRecord[] = [];
-	for (const [, recs] of recordsByTest) {
-		recs.sort(
+		const prunedRecords: TestRunRecord[] = [];
+		for (const [, recs] of recordsByTest) {
+			recs.sort(
+				(a, b) =>
+					new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+			);
+			const toKeep = recs.slice(-MAX_HISTORY_PER_TEST);
+			prunedRecords.push(...toKeep);
+		}
+
+		prunedRecords.sort(
 			(a, b) =>
 				new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 		);
-		const toKeep = recs.slice(-MAX_HISTORY_PER_TEST);
-		prunedRecords.push(...toKeep);
-	}
 
-	prunedRecords.sort(
-		(a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-	);
-
-	// Write atomically ONCE
-	try {
-		const lines = prunedRecords.map((rec) => JSON.stringify(rec));
-		const content = `${lines.join('\n')}\n`;
-		const tempPath = `${historyPath}.tmp`;
-		fs.writeFileSync(tempPath, content, 'utf-8');
-		fs.renameSync(tempPath, historyPath);
-	} catch (err) {
+		// Write atomically ONCE
 		try {
+			const lines = prunedRecords.map((rec) => JSON.stringify(rec));
+			const content = `${lines.join('\n')}\n`;
 			const tempPath = `${historyPath}.tmp`;
-			if (fs.existsSync(tempPath)) {
-				fs.unlinkSync(tempPath);
+			fs.writeFileSync(tempPath, content, 'utf-8');
+			fs.renameSync(tempPath, historyPath);
+		} catch (err) {
+			try {
+				const tempPath = `${historyPath}.tmp`;
+				if (fs.existsSync(tempPath)) {
+					fs.unlinkSync(tempPath);
+				}
+			} catch {
+				// Ignore cleanup failure
 			}
-		} catch {
-			// Ignore cleanup failure
+			throw new Error(
+				`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
-		throw new Error(
-			`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`,
-		);
-	}
+	});
 }
 
 export function appendTestRun(
@@ -304,60 +311,117 @@ export function appendTestRun(
 		fs.mkdirSync(historyDir, { recursive: true });
 	}
 
-	// Read existing records
-	const existingRecords = readAllRecords(historyPath);
+	withHistoryWriteLock(historyPath, () => {
+		// Read existing records
+		const existingRecords = readAllRecords(historyPath);
 
-	// Append new record
-	existingRecords.push(sanitizedRecord);
+		// Append new record
+		existingRecords.push(sanitizedRecord);
 
-	// Prune: keep only last 20 records per (testFile, testName)
-	const recordsByTest = new Map<string, TestRunRecord[]>();
-	for (const rec of existingRecords) {
-		const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
-		if (!recordsByTest.has(normalizedKey)) {
-			recordsByTest.set(normalizedKey, []);
+		// Prune: keep only last 20 records per (testFile, testName)
+		const recordsByTest = new Map<string, TestRunRecord[]>();
+		for (const rec of existingRecords) {
+			const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
+			if (!recordsByTest.has(normalizedKey)) {
+				recordsByTest.set(normalizedKey, []);
+			}
+			recordsByTest.get(normalizedKey)!.push(rec);
 		}
-		recordsByTest.get(normalizedKey)!.push(rec);
-	}
 
-	// Rebuild with pruning
-	const prunedRecords: TestRunRecord[] = [];
-	for (const [, records] of recordsByTest) {
-		// Sort by timestamp ascending within each test key
-		records.sort(
+		// Rebuild with pruning
+		const prunedRecords: TestRunRecord[] = [];
+		for (const [, records] of recordsByTest) {
+			// Sort by timestamp ascending within each test key
+			records.sort(
+				(a, b) =>
+					new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+			);
+			// Keep only last MAX_HISTORY_PER_TEST records
+			const toKeep = records.slice(-MAX_HISTORY_PER_TEST);
+			prunedRecords.push(...toKeep);
+		}
+
+		// Sort final output by timestamp (oldest first)
+		prunedRecords.sort(
 			(a, b) =>
 				new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 		);
-		// Keep only last MAX_HISTORY_PER_TEST records
-		const toKeep = records.slice(-MAX_HISTORY_PER_TEST);
-		prunedRecords.push(...toKeep);
+
+		// Write atomically: temp file + rename to prevent corruption on crash
+		try {
+			const lines = prunedRecords.map((rec) => JSON.stringify(rec));
+			const content = `${lines.join('\n')}\n`;
+			const tempPath = `${historyPath}.tmp`;
+			fs.writeFileSync(tempPath, content, 'utf-8');
+			fs.renameSync(tempPath, historyPath);
+		} catch (err) {
+			// Clean up temp file if rename failed
+			try {
+				const tempPath = `${historyPath}.tmp`;
+				if (fs.existsSync(tempPath)) {
+					fs.unlinkSync(tempPath);
+				}
+			} catch {
+				// Ignore cleanup failure
+			}
+			throw new Error(
+				`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	});
+}
+
+function withHistoryWriteLock<T>(historyPath: string, fn: () => T): T {
+	const lockPath = `${historyPath}.write-lock`;
+	const deadline = Date.now() + HISTORY_WRITE_LOCK_TIMEOUT_MS;
+
+	while (true) {
+		try {
+			fs.mkdirSync(lockPath);
+			break;
+		} catch (error) {
+			const code =
+				error instanceof Error && 'code' in error
+					? (error as NodeJS.ErrnoException).code
+					: undefined;
+			if (code !== 'EEXIST') {
+				throw new Error(
+					`Failed to acquire test history lock: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+
+			if (Date.now() >= deadline) {
+				throw new Error(
+					`Timed out waiting for test history lock: ${historyPath}`,
+				);
+			}
+
+			try {
+				const lockStat = fs.statSync(lockPath);
+				if (Date.now() - lockStat.mtimeMs >= HISTORY_WRITE_LOCK_STALE_MS) {
+					fs.rmSync(lockPath, { recursive: true, force: true });
+					continue;
+				}
+			} catch {
+				// lock disappeared between checks; retry acquisition
+			}
+
+			const remainingMs = Math.max(0, deadline - Date.now());
+			const sleepMs = Math.min(HISTORY_WRITE_LOCK_BACKOFF_MS, remainingMs);
+			if (sleepMs > 0) {
+				Atomics.wait(LOCK_WAIT_BUFFER, 0, 0, sleepMs);
+			}
+		}
 	}
 
-	// Sort final output by timestamp (oldest first)
-	prunedRecords.sort(
-		(a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-	);
-
-	// Write atomically: temp file + rename to prevent corruption on crash
 	try {
-		const lines = prunedRecords.map((rec) => JSON.stringify(rec));
-		const content = `${lines.join('\n')}\n`;
-		const tempPath = `${historyPath}.tmp`;
-		fs.writeFileSync(tempPath, content, 'utf-8');
-		fs.renameSync(tempPath, historyPath);
-	} catch (err) {
-		// Clean up temp file if rename failed
+		return fn();
+	} finally {
 		try {
-			const tempPath = `${historyPath}.tmp`;
-			if (fs.existsSync(tempPath)) {
-				fs.unlinkSync(tempPath);
-			}
+			fs.rmSync(lockPath, { recursive: true, force: true });
 		} catch {
-			// Ignore cleanup failure
+			// Best-effort cleanup. Stale lock handling retries acquisition on next write.
 		}
-		throw new Error(
-			`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`,
-		);
 	}
 }
 
