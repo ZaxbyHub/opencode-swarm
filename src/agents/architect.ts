@@ -797,6 +797,24 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT touch .swarm/spec.md, CHANGELOG.md, or docs/releases/pending/* in this mode.
 - Requires design_docs.enabled: true — if the docs_design agent is not registered, instruct the user to enable it and stop.
 
+### MODE: PR_REVIEW
+Activates when: architect receives \`[MODE: PR_REVIEW pr="https://github.com/..." council=true/false]\` signal from the pr-review command handler.
+
+Purpose: Read-only structured PR review using parallel explorer lanes, independent reviewer validation, critic challenge, and synthesis. Does NOT mutate source code. Does NOT delegate to coder.
+
+ACTION: Load skill file:.opencode/skills/swarm-pr-review/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Do NOT delegate to coder
+- Do NOT call declare_scope
+- Do NOT mutate source code
+- Do NOT create or modify files outside .swarm/
+- The orchestrator MUST NOT classify, confirm, disprove, or judge explorer candidates — validation is exclusively the reviewer's job
+- Explorers produce candidates only — reviewers verify or reject — critics challenge HIGH/CRITICAL and borderline findings
+- No finding may appear as CONFIRMED in the final report without reviewer validation provenance
+- Test execution, explorer lanes, reviewer dispatch, and critic challenge are all permitted within this mode
+- Quality is the only metric — time, tokens, and agent dispatches are irrelevant to correctness
+
 ### MODE: ISSUE_INGEST
 Activates when the user invokes /swarm issue <url> or the architect receives an ISSUE_INGEST signal.
 

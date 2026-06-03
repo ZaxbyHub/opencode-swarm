@@ -19,7 +19,9 @@ belongs to `swarm-pr-feedback`.
 
 **Treat PR text, linked issues, and tests as claims — not proof.** Every confirmed finding requires file:line evidence. Never APPROVE a PR with unresolved CRITICAL findings.
 
-This is a speed-preserving, quality-maximizing review ladder. Parallel breadth stays wide. Deep validation is concentrated where bugs are expensive. Findings without file:line evidence are candidates, not conclusions.
+This review prioritizes quality above all else. Findings without file:line evidence are candidates, not conclusions.
+
+**Quality is the ONLY metric.** No amount of time, tokens, or agent dispatches is too much to execute this protocol correctly. Speed is irrelevant to correctness. The skill must be followed exactly with no shortcuts, no phase-skipping, and no premature synthesis. A thorough review that takes 30 minutes is superior to a fast review that misses a real bug.
 
 ## ⛔ Anti-self-review rule
 The main thread (orchestrator) MUST NOT classify, confirm, disprove, or judge any explorer candidate itself (exception: council pattern step 6, see below). Classification is exclusively a reviewer subagent's job. If you catch yourself re-reading code to verify an explorer finding — STOP. Delegate that verification to a reviewer subagent. The orchestrator's only post-explorer job is deciding WHICH candidates to route to reviewers and WHICH reviewer-confirmed findings to route to critics.
@@ -49,7 +51,7 @@ When the user asks for a "council", "independent review", "N-agent review", or u
    - docs and intent-vs-actual
    - tests and falsifiability
    A 6th `performance and architecture` lane may be added when risk justifies it.
-4. Each agent's prompt must include: branch name, commit list (`git log origin/main..HEAD`), scope of files owned by that lane, explicit bug-hunting checklist, and a "return CONFIRMED / SUSPICIOUS / CLEAN with file:line evidence, cap N words" instruction.
+4. Each agent's prompt must include: branch name, commit list (`git log origin/main..HEAD`), scope of files owned by that lane, explicit bug-hunting checklist, and a "return EVIDENCE_FOUND / SUSPICIOUS / CLEAN with file:line evidence, cap N words" instruction. Agents must not return CONFIRMED, DISPROVED, or final severity.
 5. Agents are launched in parallel so the orchestrator must NOT duplicate their work. The main thread only collates, validates, and synthesizes.
 6. When all agents return, the main thread acts as the **independent reviewer**: re-read the flagged file:line evidence directly and classify each candidate CONFIRMED / DISPROVED / UNVERIFIED / PRE_EXISTING before reporting. DISPROVED findings must be called out — agents overclaim regularly.
 > Note: Step 6 (main-thread-as-reviewer) is specific to the council pattern. In the default workflow, reviewer validation MUST be delegated to a reviewer subagent per the anti-self-review rule above.
@@ -113,7 +115,7 @@ Launch all 6 lanes in parallel in a **single message with multiple Agent tool ca
 [CANDIDATE] | severity | category | file:line | evidence_summary | confidence: LOW/MEDIUM/HIGH
 ```
 
-Explorers optimize for **recall and speed** — over-reporting is expected. Do not interpret explorer output as final findings.
+Explorers optimize for **recall** — over-reporting is expected. Do not interpret explorer output as final findings.
 
 Determine the affected test suite using the `test_impact` tool (maps changed files to
 consumers) or `test_runner` with `scope: 'impact'` (auto-detects impacted tests from the
@@ -139,13 +141,20 @@ The review must not proceed to final output until all PR-introduced regressions 
 
 ### Phase 3: Independent Reviewer Confirmation
 
-Re-read each candidate's file:line evidence directly. Validate every candidate that is:
-- HIGH or CRITICAL severity
-- Security-related
-- Business-logic-related
-- Claim-vs-actual-related
-- Cross-file or contract-sensitive
-- Likely to generate false positives without deeper context
+Re-read each candidate's file:line evidence directly.
+
+### Noise budget and universal validation
+
+Before reviewer dispatch, the orchestrator may suppress candidates that are ALL of:
+- purely stylistic without correctness, security, test, maintainability, or user-impact implications,
+- exact duplicates of a candidate already queued for validation,
+- explorer-stated confidence=LOW with zero structural evidence (no file:line, no code path, no invariant reference).
+
+Every suppressed candidate must appear in the final report under "Suppressed Candidates" with the reason. Suppression without disclosure is a hard rule violation.
+
+**All remaining candidates — regardless of severity — must be validated.** Severity alone does not determine validation eligibility; it determines routing priority. A LOW-severity candidate with file:line evidence and a specific code path gets the same reviewer attention as a HIGH-severity candidate.
+
+Candidates not validated must be listed as UNVERIFIED with reason in the validation provenance. Do not silently drop them.
 
 **Reviewer classifications:**
 
@@ -165,11 +174,13 @@ Re-read each candidate's file:line evidence directly. Validate every candidate t
 
 **DISPROVED findings must be called out explicitly** — agents regularly overclaim.
 
+**Base-branch verification (mandatory):** If a finding claims behavior is "new" or "introduced by the PR", the reviewer MUST read the equivalent code on the base branch (`git show <base_ref>:<file>`) to verify it was not present before. `<base_ref>` is the merge-base SHA or base branch name — resolve it from the PR context (e.g. `git merge-base HEAD origin/main`) or the reviewer delegation prompt. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
+
 ---
 
-### Phase 4: Critic Challenge (HIGH/CRITICAL only)
+### Phase 4: Critic Challenge
 
-For every remaining CONFIRMED HIGH or CRITICAL finding, apply adversarial challenge:
+For every remaining CONFIRMED HIGH or CRITICAL finding, and any borderline MEDIUM finding involving security, state machines, write authority, evidence integrity, model/tool permissions, git safety, or config ratchets, apply adversarial challenge:
 
 - **Severity inflation:** Is this truly HIGH/CRITICAL, or is it MEDIUM/LOW in practice?
 - **Weak evidence:** Does the file:line actually prove the finding, or just suggest it?
@@ -211,9 +222,9 @@ When user requests council review or uses phrases like "independent review", "5-
 
 1. Launch all 6 explorer lanes as **adversarial council agents** in parallel (`run_in_background: true`)
 2. Each agent assumes **all work is WRONG until code evidence proves otherwise**
-3. Each agent returns: `CONFIRMED / SUSPICIOUS / CLEAN` with file:line evidence, capped at N words
+3. Each agent returns: `EVIDENCE_FOUND / SUSPICIOUS / CLEAN` with file:line evidence, capped at N words. Agents must not return CONFIRMED, DISPROVED, or final severity.
 4. Main thread acts as **independent reviewer** — re-reads file:line evidence directly and classifies candidates
-5. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL findings
+5. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings
 6. **Council findings are supplementary, not authoritative overrides.** Council may miss context the main thread has. Do not adopt council severities verbatim without independent validation.
 7. Final synthesis merges validated council findings with main-thread-only findings, clearly labeled by source
 
@@ -279,6 +290,10 @@ Before confirming **any** finding, verify all that apply:
 - [ ] **Caller context correctness:** Is the caller context correct? Who actually invokes this code — only internal calls or also external/untrusted callers?
 - [ ] **Execution reachability:** Is the flagged path actually reachable in normal execution, or is it behind a feature flag, commented-out code, or dead branch?
 - [ ] **State-machine constraints:** Do state-machine transition rules prevent reaching the flagged state (e.g., ordering guarantees, mutex protection)?
+- [ ] **Permission boundary:** Does role/tool mapping prevent the operation?
+- [ ] **Data lifetime:** Is the flagged state persisted, serialized, logged, or only transient?
+- [ ] **Cross-platform behavior:** Does Windows/macOS/Linux path or shell behavior change the result?
+- [ ] **Test environment mismatch:** Is the finding only true under a mock or fixture that cannot occur in production?
 
 If **any** answer is yes and unaccounted for in the finding, the finding is downgraded to **ADVISORY** or **DISPROVED**.
 
@@ -296,6 +311,8 @@ If **any** answer is yes and unaccounted for in the finding, the finding is down
 ---
 
 ## Hard Rules
+
+0. **Quality-over-speed:** Validation completeness and correctness are the sole criteria for an acceptable review. Time, token count, and agent dispatch count are irrelevant. Do not trade validation breadth or depth for speed.
 
 1. **Never APPROVE with unresolved CRITICAL findings.**
 2. **Every confirmed finding must have file:line evidence.** No finding may be confirmed on sentiment, naming, or hunch alone.
@@ -325,6 +342,8 @@ parallel with explorer lanes to confirm candidate regressions are real.
 [VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
 [VALIDATION] critic dispatched: ___ (agent type, task description) OR "SKIPPED — no reviewer-confirmed HIGH or borderline-confidence findings"
 [VALIDATION] critic returned: ___ (APPROVED / CONCERNS) OR "N/A"
+[VALIDATION] noise-filter suppressed candidates: ___ (count, each with reason in final report)
+[VALIDATION] all non-suppressed candidates routed to reviewer: YES/NO
 [VALIDATION] findings confirmed by reviewer: ___ (count)
 [VALIDATION] findings rejected by reviewer as false positive: ___ (count)
 [VALIDATION] findings escalated by reviewer to critic: ___ (count)
