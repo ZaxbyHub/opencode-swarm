@@ -2,11 +2,13 @@
  * Tool manifest - HANDLER wiring for every tool. The registration METADATA
  * (names, descriptions, agents) lives in ./tool-metadata.ts.
  *
- * `TOOL_MANIFEST satisfies Record<ToolName, () => ToolDefinition>` (ToolName =
- * keyof typeof TOOL_METADATA) makes this exhaustive: every metadata entry MUST
- * have a handler here and vice versa, or it is a COMPILE error. That, plus the
- * required fields in ToolMeta, keeps the dead-tools bug class impossible while the
- * two files stay decoupled (this one imports handlers; metadata imports none).
+ * The `defineHandlers` helper below constrains its argument to
+ * `Record<ToolName, () => ToolDefinition>` (ToolName = keyof typeof TOOL_METADATA),
+ * which makes this map exhaustive: every metadata entry MUST have a handler here,
+ * or it is a COMPILE error. That, plus the required fields in ToolMeta, keeps the
+ * dead-tools bug class impossible while the two files stay decoupled (this one
+ * imports handlers; metadata imports none). A stray handler key (no metadata) is
+ * caught at runtime by scripts/check-tool-registration.ts.
  *
  * Handlers are stored as lazy thunks (`() => tool`) so this object never reads a
  * handler binding during module evaluation - safe inside import cycles. Resolve

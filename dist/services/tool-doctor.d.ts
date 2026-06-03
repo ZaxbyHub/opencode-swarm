@@ -23,15 +23,15 @@ export type ToolDoctorResult = ConfigDoctorResult;
 /**
  * Check AGENT_TOOL_MAP alignment with registered tools
  *
- * Verifies that every tool listed in AGENT_TOOL_MAP is actually
- * registered in the plugin's tool: {} block. A missing registration
- * means the agent's system prompt will instruct the model to call a
- * tool that opencode never exposes to the runtime, which silently
- * breaks the agent's workflow (this is how the council feature shipped
- * broken in 6.66.0 — submit_council_verdicts and declare_council_criteria were
- * in AGENT_TOOL_MAP.architect but never registered). Findings are
- * emitted at severity 'error' so `config doctor` / `/swarm preflight`
- * treats this class of drift as fatal rather than advisory.
+ * Verifies that every tool listed in AGENT_TOOL_MAP is a registered tool name
+ * (a member of the manifest-derived registered set passed in). A missing
+ * registration means the agent's system prompt would instruct the model to call
+ * a tool that opencode never exposes to the runtime, which silently breaks the
+ * agent's workflow (this is how the council feature shipped broken in 6.66.0 —
+ * submit_council_verdicts and declare_council_criteria were in
+ * AGENT_TOOL_MAP.architect but never registered). Findings are emitted at
+ * severity 'error' so `config doctor` / `/swarm preflight` treats this class of
+ * drift as fatal rather than advisory.
  */
 export declare function checkAgentToolMapAlignment(registeredKeys: Set<string>): ConfigFinding[];
 /**

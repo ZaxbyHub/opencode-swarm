@@ -43893,7 +43893,7 @@ function checkAgentToolMapAlignment(registeredKeys) {
         findings.push({
           id: `agent-tool-map-mismatch-${agentName}-${toolName}`,
           title: "AGENT_TOOL_MAP alignment gap",
-          description: `Tool "${toolName}" is assigned to agent "${agentName}" in AGENT_TOOL_MAP but is not registered in the plugin's tool: {} block. The agent will not be able to use this tool.`,
+          description: `Tool "${toolName}" is assigned to agent "${agentName}" in AGENT_TOOL_MAP but is not a registered tool name. The agent will not be able to use this tool.`,
           severity: "error",
           path: `AGENT_TOOL_MAP.${agentName}`,
           currentValue: toolName,

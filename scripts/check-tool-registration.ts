@@ -20,6 +20,7 @@ import {
 	TOOL_METADATA,
 	TOOL_NAME_SET,
 	TOOL_NAMES,
+	type ToolName,
 } from '../src/tools/tool-metadata';
 
 const errors: string[] = [];
@@ -62,7 +63,7 @@ if (TOOL_NAMES.length !== metaKeys.length) {
 	);
 }
 for (const name of metaKeys) {
-	if (!TOOL_NAME_SET.has(name as never)) {
+	if (!TOOL_NAME_SET.has(name as ToolName)) {
 		errors.push(`Tool "${name}" is missing from TOOL_NAME_SET.`);
 	}
 }
@@ -81,11 +82,38 @@ for (const [name, thunk] of Object.entries(TOOL_MANIFEST)) {
 	}
 }
 
-// 5) Every tool assigned to an agent must exist in the metadata.
+// 5) AGENT_TOOL_MAP must be the EXACT inversion of TOOL_METADATA.agents — every
+//    assignment present, none stray, none dropped (catches a derivation
+//    regression in either direction, not just "assigned tool exists").
+const expectedAgentTools = new Map<string, Set<string>>();
+for (const [name, meta] of Object.entries(TOOL_METADATA)) {
+	for (const agent of meta.agents) {
+		let set = expectedAgentTools.get(agent);
+		if (!set) {
+			set = new Set();
+			expectedAgentTools.set(agent, set);
+		}
+		set.add(name);
+	}
+}
 for (const [agent, tools] of Object.entries(AGENT_TOOL_MAP)) {
-	for (const tool of tools) {
+	const expected = expectedAgentTools.get(agent) ?? new Set<string>();
+	const actual = new Set(tools);
+	for (const tool of actual) {
 		if (!metaKeySet.has(tool)) {
 			errors.push(`Agent "${agent}" references tool "${tool}" which has no metadata.`);
+		}
+		if (!expected.has(tool)) {
+			errors.push(
+				`Agent "${agent}" lists tool "${tool}" not assigned to it in TOOL_METADATA.agents (stray assignment).`,
+			);
+		}
+	}
+	for (const tool of expected) {
+		if (!actual.has(tool)) {
+			errors.push(
+				`Tool "${tool}" declares agent "${agent}" in TOOL_METADATA but is missing from AGENT_TOOL_MAP["${agent}"] (dropped assignment).`,
+			);
 		}
 	}
 }
