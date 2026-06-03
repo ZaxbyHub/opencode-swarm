@@ -27,6 +27,8 @@ This workflow is designed for the Swarm plugin itself and any repo that benefits
 
 Never APPROVE a PR with unresolved CRITICAL findings. Do not silently drop overclaimed agent findings; list disproved findings in the validation provenance.
 
+**Quality is the ONLY metric.** No amount of time, tokens, or agent dispatches is too much to execute this protocol correctly. Speed is irrelevant to correctness. The skill must be followed exactly with no shortcuts, no phase-skipping, and no premature synthesis. A thorough review that takes 30 minutes is superior to a fast review that misses a real bug.
+
 ---
 
 ## Review Modes
@@ -365,22 +367,18 @@ Verifier output is advisory until incorporated by the independent reviewer or cr
 
 Route candidates to reviewer subagents. The reviewer must re-read the candidate's file:line evidence and relevant context pack entries directly.
 
-### Mandatory validation coverage
+### Noise budget and universal validation
 
-Validate every candidate that is:
+Before reviewer dispatch, the orchestrator may suppress candidates that are ALL of:
+- purely stylistic without correctness, security, test, maintainability, or user-impact implications,
+- exact duplicates of a candidate already queued for validation,
+- explorer-stated confidence=LOW with zero structural evidence (no file:line, no code path, no invariant reference).
 
-- CRITICAL or HIGH severity,
-- security-related,
-- business-logic-related,
-- claim-vs-actual-related,
-- cross-file or contract-sensitive,
-- in a triggered Swarm plugin micro-lane,
-- MEDIUM severity touching changed production code,
-- a repeated LOW cluster with the same root cause,
-- related to persistence, write authority, git state, model permissions, tool permissions, phase gates, evidence integrity, config ratchets, or knowledge tiers,
-- likely to generate false positives without deeper context.
+Every suppressed candidate must appear in the final report under "Suppressed Candidates" with the reason. Suppression without disclosure is a hard rule violation.
 
-Candidates not validated must be listed as unverified or suppressed as non-actionable noise, with a reason. Do not silently drop them.
+**All remaining candidates — regardless of severity — must be routed to independent reviewer validation.** Severity alone does not determine validation eligibility; it determines routing priority. A LOW-severity candidate with file:line evidence and a specific code path gets the same reviewer attention as a HIGH-severity candidate.
+
+Candidates not routed to reviewers must be listed as UNVERIFIED with reason in the validation provenance. Do not silently drop them.
 
 ### Reviewer required checks
 
@@ -637,6 +635,8 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 
 # Hard Rules
 
+0. Quality-over-speed: Validation completeness and correctness are the sole criteria for an acceptable review. Time, token count, and agent dispatch count are irrelevant. Do not trade validation breadth or depth for speed.
+
 1. Never APPROVE with unresolved CRITICAL findings.
 2. Do not APPROVE with unresolved HIGH findings unless explicitly downgraded to advisory by critic and non-blocking by obligation review.
 3. Every confirmed finding must have file:line evidence and validation provenance.
@@ -686,6 +686,9 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] falsification probes included: ___
 [VALIDATION] grouped root-cause findings: ___
 [VALIDATION] metrics / knowledge writeback: ___
+[VALIDATION] all explorers verified to diff against PR branch, not HEAD: YES/NO
+[VALIDATION] noise-filter suppressed candidates: ___ (count, each with reason in final report)
+[VALIDATION] all non-suppressed candidates routed to reviewer: YES/NO
 ```
 
 If the reviewer returned `REJECTED` or `CONCERNS`, route the issue back to implementation context or mark the candidate invalid with reason. Do not silently downgrade a rejection.
