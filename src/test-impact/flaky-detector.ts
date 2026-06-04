@@ -76,7 +76,7 @@ export function detectFlakyTests(
 	>();
 
 	for (const record of allHistory) {
-		const key = `${record.testFile.toLowerCase()}|${record.testName.toLowerCase()}`;
+		const key = `${record.testFile.toLowerCase()}\0${record.testName.toLowerCase()}`;
 		if (!grouped.has(key)) {
 			grouped.set(key, {
 				records: [],
@@ -162,6 +162,11 @@ export function isTestQuarantined(
 		(r) =>
 			r.testFile.toLowerCase() === normalizedFile &&
 			r.testName.toLowerCase() === normalizedName,
+	);
+
+	filtered.sort(
+		(a: TestRunRecord, b: TestRunRecord) =>
+			new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 	);
 
 	if (filtered.length === 0) {

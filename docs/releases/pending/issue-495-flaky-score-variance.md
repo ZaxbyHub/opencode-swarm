@@ -29,4 +29,5 @@ change quarantine outcomes for some historical test-result patterns.
 
 ## Known caveats
 
-None.
+- **Skip results treated as non-pass**: Intermittent `skip` results are treated as non-pass for variance calculation and count as state transitions for alternation. A test with pattern P,S,P,S,P scores 0.88 even though no actual failures occurred. This is an intentional design tradeoff — all-skips correctly scores 0.
+- **Recommendation tier threshold shift**: The combined formula produces higher scores than alternation-only, especially for non-alternating patterns. Tests that previously scored below 0.5 may now cross the "severely flaky" threshold via variance contribution alone (e.g., F,F,F,F,P went from 0.2 to 0.42). Recommendation thresholds remain at 0.3 / 0.5.

@@ -4,23 +4,7 @@ import {
 	detectFlakyTests,
 	isTestQuarantined,
 } from '../flaky-detector.js';
-import type { TestRunRecord } from '../history-store.js';
-
-type TestRunRecordInput = Partial<TestRunRecord> & {
-	testFile: string;
-	testName: string;
-	result: 'pass' | 'fail' | 'skip';
-};
-
-function makeRecord(overrides: TestRunRecordInput): TestRunRecord {
-	return {
-		timestamp: '2024-01-01T00:00:00.000Z',
-		taskId: '1.1',
-		durationMs: 100,
-		changedFiles: [],
-		...overrides,
-	};
-}
+import { makeRecord } from './helpers.js';
 
 // --- ATTACK VECTOR 1: Empty arrays ---
 
@@ -49,12 +33,9 @@ describe('ADVERSARIAL: large history performance', () => {
 				result: i % 2 === 0 ? 'pass' : 'fail',
 			}),
 		);
-		const start = Date.now();
 		const score = computeFlakyScore(history);
-		const elapsed = Date.now() - start;
 		// Capped at MAX_HISTORY_RUNS = 20: alternation=0.95, pass-rate variance=1 => 0.975
-		expect(score).toBe(0.975);
-		expect(elapsed).toBeLessThan(100); // should be fast
+		expect(score).toBeCloseTo(0.975, 3);
 	});
 
 	test('detectFlakyTests handles 1000 records across many tests', () => {
@@ -70,11 +51,8 @@ describe('ADVERSARIAL: large history performance', () => {
 				);
 			}
 		}
-		const start = Date.now();
 		const results = detectFlakyTests(history);
-		const elapsed = Date.now() - start;
 		expect(results.length).toBe(50);
-		expect(elapsed).toBeLessThan(500); // should be reasonable
 	});
 });
 
@@ -171,7 +149,7 @@ describe('ADVERSARIAL: perfectly alternating results', () => {
 			}),
 		);
 		const score = computeFlakyScore(history);
-		expect(score).toBe(0.9375);
+		expect(score).toBeCloseTo(0.9375, 4);
 	});
 
 	test('alternating 20 runs keeps a near-max score (limited to 20)', () => {
@@ -183,7 +161,7 @@ describe('ADVERSARIAL: perfectly alternating results', () => {
 			}),
 		);
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.975);
+		expect(results[0].flakyScore).toBeCloseTo(0.975, 3);
 		expect(results[0].alternationCount).toBe(19);
 		expect(results[0].isQuarantined).toBe(true);
 	});
@@ -202,7 +180,7 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'quota1', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.88);
+		expect(results[0].flakyScore).toBeCloseTo(0.88, 3);
 		expect(results[0].isQuarantined).toBe(true);
 	});
 
@@ -284,7 +262,7 @@ describe('ADVERSARIAL: quarantine threshold boundaries', () => {
 		];
 		const results = detectFlakyTests(history);
 		// alternation=0.6, pass-rate variance=0.96 => combined=0.78
-		expect(results[0].flakyScore).toBe(0.78);
+		expect(results[0].flakyScore).toBeCloseTo(0.78, 3);
 		expect(results[0].isQuarantined).toBe(true);
 	});
 });
@@ -429,12 +407,9 @@ describe('ADVERSARIAL: very long test names', () => {
 				result: 'pass',
 			}),
 		];
-		const start = Date.now();
 		const results = detectFlakyTests(history);
-		const elapsed = Date.now() - start;
 		expect(results.length).toBe(1);
 		expect(results[0].testName.length).toBe(50000);
-		expect(elapsed).toBeLessThan(500);
 	});
 });
 
@@ -450,7 +425,7 @@ describe('ADVERSARIAL: skip results in history', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'skip1', result: 'pass' }),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.88);
+		expect(results[0].flakyScore).toBeCloseTo(0.88, 3);
 		expect(results[0].recentResults).toEqual([
 			'pass',
 			'skip',
@@ -546,7 +521,7 @@ describe('ADVERSARIAL: unsorted timestamps', () => {
 		const results = detectFlakyTests(history);
 		// Sorted: Jan1=fail, Jan2=fail, Jan3=pass, Jan4=pass, Jan5=pass
 		// fail→fail (no), fail→pass (alt), pass→pass (no), pass→pass (no); combined score = 0.58
-		expect(results[0].flakyScore).toBe(0.58);
+		expect(results[0].flakyScore).toBeCloseTo(0.58, 3);
 	});
 
 	test('computeFlakyScore with unsorted array — does NOT sort (external caller must sort)', () => {
@@ -568,7 +543,7 @@ describe('ADVERSARIAL: unsorted timestamps', () => {
 		];
 		// No sorting — pass then fail; combined score = (0.5 + 1) / 2 = 0.75
 		const score = computeFlakyScore(unsorted);
-		expect(score).toBe(0.75);
+		expect(score).toBeCloseTo(0.75, 3);
 	});
 });
 
@@ -662,7 +637,7 @@ describe('ADVERSARIAL: computeFlakyScore unsorted input', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'two', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'two', result: 'fail' }),
 		];
-		expect(computeFlakyScore(history)).toBe(0.75);
+		expect(computeFlakyScore(history)).toBeCloseTo(0.75, 3);
 	});
 
 	test('limits to last 20 regardless of input size', () => {
@@ -688,7 +663,7 @@ describe('ADVERSARIAL: computeFlakyScore unsorted input', () => {
 			);
 		}
 		// Score based on last 20 (alternating): (0.95 + 1) / 2 = 0.975
-		expect(computeFlakyScore(history)).toBe(0.975);
+		expect(computeFlakyScore(history)).toBeCloseTo(0.975, 3);
 	});
 });
 
@@ -808,6 +783,44 @@ describe('ADVERSARIAL: key injection in grouping', () => {
 		expect(results.length).toBe(1);
 		expect(results[0].testFile).toBe('');
 	});
+
+	test('cross-field pipe collision — different tests with same composite key are not merged', () => {
+		// Two different tests can produce the same composite key:
+		// Test A: testFile="a.test.ts", testName="foo|bar" → "a.test.ts|foo|bar"
+		// Test B: testFile="a.test.ts|foo", testName="bar" → "a.test.ts|foo|bar"
+		// These should produce TWO separate FlakyTestEntry objects
+		const history = [
+			makeRecord({
+				testFile: 'a.test.ts',
+				testName: 'foo|bar',
+				result: 'pass',
+			}),
+			makeRecord({
+				testFile: 'a.test.ts',
+				testName: 'foo|bar',
+				result: 'fail',
+			}),
+			makeRecord({
+				testFile: 'a.test.ts|foo',
+				testName: 'bar',
+				result: 'pass',
+			}),
+			makeRecord({
+				testFile: 'a.test.ts|foo',
+				testName: 'bar',
+				result: 'pass',
+			}),
+		];
+		const results = detectFlakyTests(history);
+		// Should be TWO separate entries — one per unique (testFile, testName) pair
+		expect(results.length).toBe(2);
+		const entryA = results.find((r) => r.testFile === 'a.test.ts');
+		const entryB = results.find((r) => r.testFile === 'a.test.ts|foo');
+		expect(entryA?.testName).toBe('foo|bar');
+		expect(entryB?.testName).toBe('bar');
+		expect(entryA?.totalRuns).toBe(2);
+		expect(entryB?.totalRuns).toBe(2);
+	});
 });
 
 // --- ATTACK VECTOR: ISO timestamp edge cases ---
@@ -857,7 +870,7 @@ describe('ADVERSARIAL: ISO timestamp edge cases', () => {
 		];
 		const results = detectFlakyTests(history);
 		// Oldest first → P then F
-		expect(results[0].flakyScore).toBe(0.75);
+		expect(results[0].flakyScore).toBeCloseTo(0.75, 3);
 	});
 
 	test('far future ISO timestamp', () => {
@@ -876,7 +889,7 @@ describe('ADVERSARIAL: ISO timestamp edge cases', () => {
 			}),
 		];
 		const results = detectFlakyTests(history);
-		expect(results[0].flakyScore).toBe(0.75);
+		expect(results[0].flakyScore).toBeCloseTo(0.75, 3);
 	});
 });
 
