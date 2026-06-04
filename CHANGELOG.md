@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.50.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.1...v7.50.0) (2026-06-04)
+
+
+### Features
+
+* **tools:** add native apply_patch tool with scope-guard array-aware path extraction ([#1116](https://github.com/zaxbysauce/opencode-swarm/issues/1116)) ([09a3a3f](https://github.com/zaxbysauce/opencode-swarm/commit/09a3a3f179581447944666dbd457c7ff76cbb05e))
+
 ## [7.49.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.0...v7.49.1) (2026-06-04)
 
 
