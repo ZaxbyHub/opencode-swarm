@@ -576,10 +576,7 @@ describe('apply-patch tool', () => {
 	});
 
 	// ===== Test 19: Handles \\r\\n line endings =====
-	// SKIPPED: Implementation bug - apply-patch.ts normalizes patch to LF but reads
-	// file content as-is with CRLF. The comparison fails because '\r' is in the file
-	// but not in the normalized patch. To fix: normalize file content in applyHunks.
-	test.skip('handles \\r\\n line endings correctly', async () => {
+	test('handles \\r\\n line endings correctly', async () => {
 		const targetFile = 'crlf.txt';
 		// File with CRLF line endings
 		createFile(workspace, targetFile, 'line1\r\nline2\r\nline3\r\n');
@@ -606,10 +603,7 @@ describe('apply-patch tool', () => {
 		expect(content).toContain('line2-modified');
 	});
 
-	// SKIPPED: Implementation bug - applyHunks uses expectedOldLines.join('\\n') which
-	// always produces a trailing \\n, but file content without trailing newline doesn't have one.
-	// The comparison fails. To fix: handle trailing newline difference in applyHunks.
-	test.skip('handles file with no trailing newline', async () => {
+	test('handles file with no trailing newline', async () => {
 		const targetFile = 'nonl.txt';
 		// File WITHOUT trailing newline
 		writeFileSync(
@@ -638,9 +632,7 @@ describe('apply-patch tool', () => {
 		expect(content).toContain('line2-modified');
 	});
 
-	// SKIPPED: Implementation bug - empty patch format (no hunk) is not recognized as "no-changes".
-	// The parser returns no files rather than a file with no-changes status.
-	test.skip('empty patch returns success with no-changes status', async () => {
+	test('empty patch returns success with no-changes status', async () => {
 		const targetFile = 'empty-patch.txt';
 		createFile(workspace, targetFile, 'content\n');
 

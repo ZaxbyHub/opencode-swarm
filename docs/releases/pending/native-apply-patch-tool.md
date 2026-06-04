@@ -28,5 +28,4 @@ No migration required. The tool is automatically available to `coder` agents via
 
 ## Known caveats
 
-- 3 edge-case tests are skipped: CRLF line ending handling, files without trailing newlines, and empty patch format. These represent minor implementation gaps that do not affect core functionality.
 - Line coverage is 69.87% — error recovery paths and some edge cases are untested.
