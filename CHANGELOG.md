@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.49.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.1...v7.49.0) (2026-06-04)
+
+
+### Features
+
+* **tools:** tool auto-registration via single manifest ([#1107](https://github.com/zaxbysauce/opencode-swarm/issues/1107)) ([79c7a80](https://github.com/zaxbysauce/opencode-swarm/commit/79c7a80383eb86c5f5c3c98dc836b2640a963811))
+
 ## [7.48.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.0...v7.48.1) (2026-06-03)
 
 

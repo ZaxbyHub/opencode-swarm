@@ -255,6 +255,7 @@ describe('get_approved_plan tool', () => {
 
 		expect(result.success).toBe(true);
 		expect(result.drift_detected).toBe(true);
+		expect(result.approved_plan).toBeUndefined();
 		expect(result.current_plan_error).toContain('mutated after approval');
 	});
 
