@@ -835,7 +835,8 @@ describe('history-store', () => {
 			);
 			const childScriptPath = path.join(tempDir, 'history-writer.mjs');
 			const childCode = `
-import { appendTestRun } from ${JSON.stringify(modulePath)};
+import { appendTestRun, _internals } from ${JSON.stringify(modulePath)};
+_internals.validateProjectRoot = () => {};
 const [workingDir, writerId, writesPerWriterArg] = process.argv.slice(-3);
 const writes = Number(writesPerWriterArg);
 for (let i = 0; i < writes; i++) {
@@ -904,7 +905,9 @@ for (let i = 0; i < writes; i++) {
 				});
 
 			await Promise.all(
-				Array.from({ length: writerCount }, (_, writerId) => runWriter(writerId)),
+				Array.from({ length: writerCount }, (_, writerId) =>
+					runWriter(writerId),
+				),
 			);
 
 			const records = getAllHistory(tempDir);
