@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -823,6 +824,96 @@ describe('history-store', () => {
 			expect(records[0].testName).toBe('first');
 			expect(records[1].testName).toBe('second');
 			expect(records[1].result).toBe('fail');
+		});
+
+		test('preserves all records under parallel appendTestRun callers', async () => {
+			const writerCount = 10;
+			const writesPerWriter = 4;
+			const modulePath = path.resolve(
+				import.meta.dir,
+				'../../test-impact/history-store.ts',
+			);
+			const childScriptPath = path.join(tempDir, 'history-writer.mjs');
+			const childCode = `
+import { appendTestRun, _internals } from ${JSON.stringify(modulePath)};
+_internals.validateProjectRoot = () => {};
+const [workingDir, writerId, writesPerWriterArg] = process.argv.slice(-3);
+const writes = Number(writesPerWriterArg);
+for (let i = 0; i < writes; i++) {
+  appendTestRun({
+    timestamp: new Date().toISOString(),
+    taskId: \`parallel-\${writerId}\`,
+    testFile: 'src/parallel.test.ts',
+    testName: \`writer-\${writerId}-run-\${i}\`,
+    result: 'pass',
+    durationMs: 1,
+    changedFiles: [],
+  }, workingDir);
+}
+`;
+			fs.writeFileSync(childScriptPath, childCode, 'utf-8');
+
+			const runWriter = (writerId: number): Promise<void> =>
+				new Promise((resolve, reject) => {
+					let settled = false;
+					const child = spawn(
+						process.execPath,
+						[
+							childScriptPath,
+							tempDir,
+							String(writerId),
+							String(writesPerWriter),
+						],
+						{
+							cwd: tempDir,
+							timeout: 10_000,
+							stdio: ['ignore', 'pipe', 'pipe'],
+						},
+					);
+					let stderr = '';
+					child.stderr.on('data', (chunk) => {
+						stderr += String(chunk);
+					});
+					child.on('error', (error) => {
+						if (settled) return;
+						settled = true;
+						try {
+							child.kill();
+						} catch {
+							// ignore
+						}
+						reject(error);
+					});
+					child.on('exit', (code) => {
+						if (settled) return;
+						settled = true;
+						if (code === 0) {
+							resolve();
+							return;
+						}
+						try {
+							child.kill();
+						} catch {
+							// ignore
+						}
+						reject(
+							new Error(
+								`writer ${writerId} failed with code ${code}: ${stderr.trim()}`,
+							),
+						);
+					});
+				});
+
+			await Promise.all(
+				Array.from({ length: writerCount }, (_, writerId) =>
+					runWriter(writerId),
+				),
+			);
+
+			const records = getAllHistory(tempDir);
+			expect(records.length).toBe(writerCount * writesPerWriter);
+			const uniqueNames = new Set(records.map((record) => record.testName));
+			expect(uniqueNames.size).toBe(writerCount * writesPerWriter);
 		});
 	});
 

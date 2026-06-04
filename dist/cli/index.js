@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.50.0",
+    version: "7.50.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -52594,47 +52594,90 @@ function batchAppendTestRuns(records, workingDir) {
   if (!fs19.existsSync(historyDir)) {
     fs19.mkdirSync(historyDir, { recursive: true });
   }
-  const existingRecords = readAllRecords(historyPath);
-  const sanitizedRecords = records.map((record3) => ({
-    ...record3,
-    timestamp: record3.timestamp || new Date().toISOString(),
-    durationMs: Math.max(0, record3.durationMs),
-    errorMessage: sanitizeErrorMessage(record3.errorMessage),
-    stackPrefix: sanitizeStackPrefix(record3.stackPrefix),
-    changedFiles: sanitizeChangedFiles(record3.changedFiles || [])
-  }));
-  existingRecords.push(...sanitizedRecords);
-  const recordsByTest = new Map;
-  for (const rec of existingRecords) {
-    const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
-    if (!recordsByTest.has(normalizedKey)) {
-      recordsByTest.set(normalizedKey, []);
+  withHistoryWriteLock(historyPath, () => {
+    const existingRecords = readAllRecords(historyPath);
+    const sanitizedRecords = records.map((record3) => ({
+      ...record3,
+      timestamp: record3.timestamp || new Date().toISOString(),
+      durationMs: Math.max(0, record3.durationMs),
+      errorMessage: sanitizeErrorMessage(record3.errorMessage),
+      stackPrefix: sanitizeStackPrefix(record3.stackPrefix),
+      changedFiles: sanitizeChangedFiles(record3.changedFiles || [])
+    }));
+    existingRecords.push(...sanitizedRecords);
+    const recordsByTest = new Map;
+    for (const rec of existingRecords) {
+      const normalizedKey = `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
+      if (!recordsByTest.has(normalizedKey)) {
+        recordsByTest.set(normalizedKey, []);
+      }
+      recordsByTest.get(normalizedKey).push(rec);
     }
-    recordsByTest.get(normalizedKey).push(rec);
-  }
-  const prunedRecords = [];
-  for (const [, recs] of recordsByTest) {
-    recs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    const toKeep = recs.slice(-MAX_HISTORY_PER_TEST);
-    prunedRecords.push(...toKeep);
-  }
-  prunedRecords.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  try {
-    const lines = prunedRecords.map((rec) => JSON.stringify(rec));
-    const content = `${lines.join(`
+    const prunedRecords = [];
+    for (const [, recs] of recordsByTest) {
+      recs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      const toKeep = recs.slice(-MAX_HISTORY_PER_TEST);
+      prunedRecords.push(...toKeep);
+    }
+    prunedRecords.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    try {
+      const lines = prunedRecords.map((rec) => JSON.stringify(rec));
+      const content = `${lines.join(`
 `)}
 `;
-    const tempPath = `${historyPath}.tmp`;
-    fs19.writeFileSync(tempPath, content, "utf-8");
-    fs19.renameSync(tempPath, historyPath);
-  } catch (err) {
-    try {
       const tempPath = `${historyPath}.tmp`;
-      if (fs19.existsSync(tempPath)) {
-        fs19.unlinkSync(tempPath);
+      fs19.writeFileSync(tempPath, content, "utf-8");
+      fs19.renameSync(tempPath, historyPath);
+    } catch (err) {
+      try {
+        const tempPath = `${historyPath}.tmp`;
+        if (fs19.existsSync(tempPath)) {
+          fs19.unlinkSync(tempPath);
+        }
+      } catch {}
+      throw new Error(`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+}
+function withHistoryWriteLock(historyPath, fn) {
+  const lockPath = `${historyPath}.write-lock`;
+  const deadline = Date.now() + HISTORY_WRITE_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      fs19.mkdirSync(lockPath);
+      break;
+    } catch (error93) {
+      const code = error93 instanceof Error && "code" in error93 ? error93.code : undefined;
+      if (code !== "EEXIST") {
+        throw new Error(`Failed to acquire test history lock: ${error93 instanceof Error ? error93.message : String(error93)}`);
       }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for test history lock: ${historyPath}`);
+      }
+      try {
+        const lockStat = fs19.statSync(lockPath);
+        if (Date.now() - lockStat.mtimeMs >= HISTORY_WRITE_LOCK_STALE_MS) {
+          fs19.rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {}
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const sleepMs = Math.min(HISTORY_WRITE_LOCK_BACKOFF_MS, remainingMs);
+      if (sleepMs > 0) {
+        sleepSync(sleepMs);
+      }
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      fs19.rmSync(lockPath, { recursive: true, force: true });
     } catch {}
-    throw new Error(`Failed to write test history: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  function sleepSync(ms) {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {}
   }
 }
 function readAllRecords(historyPath) {
@@ -52670,7 +52713,7 @@ function getAllHistory(workingDir) {
   records.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return records;
 }
-var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, DANGEROUS_PROPERTY_NAMES, _internals26;
+var MAX_HISTORY_PER_TEST = 20, MAX_ERROR_LENGTH = 500, MAX_STACK_LENGTH = 200, MAX_CHANGED_FILES = 50, HISTORY_WRITE_LOCK_TIMEOUT_MS = 5000, HISTORY_WRITE_LOCK_STALE_MS = 60000, HISTORY_WRITE_LOCK_BACKOFF_MS = 10, DANGEROUS_PROPERTY_NAMES, _internals26;
 var init_history_store = __esm(() => {
   init_manager2();
   DANGEROUS_PROPERTY_NAMES = new Set([
