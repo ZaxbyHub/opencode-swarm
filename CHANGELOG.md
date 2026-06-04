@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.49.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.0...v7.49.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **critic:** add tampering sub-branch to critic prompts with review fixes ([#1112](https://github.com/zaxbysauce/opencode-swarm/issues/1112)) ([317a636](https://github.com/zaxbysauce/opencode-swarm/commit/317a6362ef349fe20d2e78e9248c79503eaa5de6))
+
 ## [7.49.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.1...v7.49.0) (2026-06-04)
 
 
