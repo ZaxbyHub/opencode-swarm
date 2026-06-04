@@ -1,5 +1,26 @@
 # Changelog
 
+## [7.50.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.1...v7.50.0) (2026-06-04)
+
+
+### Features
+
+* **tools:** add native apply_patch tool with scope-guard array-aware path extraction ([#1116](https://github.com/zaxbysauce/opencode-swarm/issues/1116)) ([09a3a3f](https://github.com/zaxbysauce/opencode-swarm/commit/09a3a3f179581447944666dbd457c7ff76cbb05e))
+
+## [7.49.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.0...v7.49.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **critic:** add tampering sub-branch to critic prompts with review fixes ([#1112](https://github.com/zaxbysauce/opencode-swarm/issues/1112)) ([317a636](https://github.com/zaxbysauce/opencode-swarm/commit/317a6362ef349fe20d2e78e9248c79503eaa5de6))
+
+## [7.49.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.1...v7.49.0) (2026-06-04)
+
+
+### Features
+
+* **tools:** tool auto-registration via single manifest ([#1107](https://github.com/zaxbysauce/opencode-swarm/issues/1107)) ([79c7a80](https://github.com/zaxbysauce/opencode-swarm/commit/79c7a80383eb86c5f5c3c98dc836b2640a963811))
+
 ## [7.48.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.48.0...v7.48.1) (2026-06-03)
 
 

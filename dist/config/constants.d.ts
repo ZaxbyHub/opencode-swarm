@@ -1,15 +1,10 @@
 import type { ToolName } from '../tools/tool-names';
-export declare const QA_AGENTS: readonly ["reviewer", "critic", "critic_oversight"];
-export declare const PIPELINE_AGENTS: readonly ["explorer", "coder", "test_engineer"];
-export declare const ORCHESTRATOR_NAME: "architect";
-export declare const ALL_SUBAGENT_NAMES: readonly ["sme", "docs", "docs_design", "designer", "critic_sounding_board", "critic_drift_verifier", "critic_hallucination_verifier", "critic_architecture_supervisor", "curator_init", "curator_phase", "council_generalist", "council_skeptic", "council_domain_expert", "skill_improver", "spec_writer", "reviewer", "critic", "critic_oversight", "explorer", "coder", "test_engineer"];
-export declare const ALL_AGENT_NAMES: readonly ["architect", "sme", "docs", "docs_design", "designer", "critic_sounding_board", "critic_drift_verifier", "critic_hallucination_verifier", "critic_architecture_supervisor", "curator_init", "curator_phase", "council_generalist", "council_skeptic", "council_domain_expert", "skill_improver", "spec_writer", "reviewer", "critic", "critic_oversight", "explorer", "coder", "test_engineer"];
+import type { AgentName, QAAgentName } from './agent-names';
+export { AGENT_TOOL_MAP, TOOL_DESCRIPTIONS } from '../tools/tool-metadata';
+export type { AgentName, PipelineAgentName, QAAgentName } from './agent-names';
+export { ALL_AGENT_NAMES, ALL_SUBAGENT_NAMES, ORCHESTRATOR_NAME, PIPELINE_AGENTS, QA_AGENTS, } from './agent-names';
 export declare const OPENCODE_NATIVE_AGENTS: Set<"compaction" | "title" | "build" | "general" | "plan" | "explore" | "summary">;
 export declare const CLAUDE_CODE_NATIVE_COMMANDS: ReadonlySet<string>;
-export type QAAgentName = (typeof QA_AGENTS)[number];
-export type PipelineAgentName = (typeof PIPELINE_AGENTS)[number];
-export type AgentName = (typeof ALL_AGENT_NAMES)[number];
-export declare const AGENT_TOOL_MAP: Record<AgentName, ToolName[]>;
 export declare const MEMORY_TOOL_NAMES: readonly ["swarm_memory_recall", "swarm_memory_propose"];
 export declare const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>>;
 /**
@@ -24,7 +19,6 @@ export declare const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]
  */
 export declare const WRITE_TOOL_NAMES: readonly ["write", "edit", "patch", "apply_patch", "create_file", "insert", "replace", "append", "prepend"];
 export type WriteToolName = (typeof WRITE_TOOL_NAMES)[number];
-export declare const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>>;
 export declare const DEFAULT_MODELS: Record<string, string>;
 export declare const DEFAULT_AGENT_CONFIGS: Record<string, {
     model: string;

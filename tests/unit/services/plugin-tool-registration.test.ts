@@ -1,71 +1,24 @@
 import { describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { AGENT_TOOL_MAP } from '../../../src/config/constants';
+import { buildPluginToolObject } from '../../../src/tools/plugin-registration';
 
 /**
  * Regression guard for the council-tools-missing-from-plugin bug.
  *
  * Commit 62faff3 ("feat(council): add Work Complete Council verification gate")
  * added submit_council_verdicts and declare_council_criteria to AGENT_TOOL_MAP.architect,
- * implemented the tool modules, and exported them from src/tools/index.ts — but
- * forgot to import them in src/index.ts and register them in the plugin's
- * `tool: { … }` block. Result: the architect system prompt told the model to
+ * implemented the tool modules, and exported them — but forgot to wire them into
+ * the plugin's tool object. Result: the architect system prompt told the model to
  * call tools that opencode had never registered, so no model could invoke them.
  *
- * This test parses src/index.ts and asserts that every tool referenced by any
- * agent in AGENT_TOOL_MAP is actually registered in the plugin's exported
- * `tool: {}` block. That makes the regression a failing test at build time,
- * not a silent warning from tool-doctor that only runs on user-invoked
- * diagnostics.
+ * As of #507 both AGENT_TOOL_MAP and the plugin tool object derive from the single
+ * TOOL_MANIFEST, so this class of drift is structurally impossible. This test now
+ * asserts that every tool referenced by any agent in AGENT_TOOL_MAP is present in
+ * the REAL derived plugin tool object (buildPluginToolObject) — guarding the
+ * derivation rather than parsing source text.
  */
 describe('plugin tool registration alignment', () => {
-	const indexPath = path.join(process.cwd(), 'src', 'index.ts');
-	const source = fs.readFileSync(indexPath, 'utf-8');
-
-	// Extract the plugin's `tool: { … }` block. Find the `return {` containing
-	// `name: 'opencode-swarm'` and then the first `tool: {` nested inside.
-	function extractRegisteredToolKeys(src: string): Set<string> {
-		const startMarker = src.indexOf("name: 'opencode-swarm'");
-		if (startMarker === -1) {
-			throw new Error('Could not locate opencode-swarm plugin return object');
-		}
-		const toolStart = src.indexOf('tool: {', startMarker);
-		if (toolStart === -1) {
-			throw new Error('Could not locate tool: { block in plugin return');
-		}
-		// Walk brace depth from the opening { of tool: {
-		const openBrace = src.indexOf('{', toolStart);
-		let depth = 0;
-		let endIdx = -1;
-		for (let i = openBrace; i < src.length; i++) {
-			const ch = src[i];
-			if (ch === '{') depth++;
-			else if (ch === '}') {
-				depth--;
-				if (depth === 0) {
-					endIdx = i;
-					break;
-				}
-			}
-		}
-		if (endIdx === -1) {
-			throw new Error('Unterminated tool: { block');
-		}
-		const block = src.slice(openBrace + 1, endIdx);
-		const keys = new Set<string>();
-		// Match shorthand keys (`foo,` or `foo\n`) and renamed keys (`foo: bar,`).
-		// Lookahead on the trailing delimiter so consecutive keys on the same line
-		// (`foo, bar,`) are all captured — a plain `[:,}\n]` consumes the comma
-		// and leaves the next key without a valid leading delimiter.
-		const keyRe = /(?:^|[,{\n])\s*([a-zA-Z_][a-zA-Z0-9_]*)(?=\s*[:,}\n])/g;
-		for (const m of block.matchAll(keyRe)) {
-			keys.add(m[1]);
-		}
-		return keys;
-	}
-
-	const registered = extractRegisteredToolKeys(source);
+	const registered = new Set(Object.keys(buildPluginToolObject({})));
 
 	test('council tools are registered in plugin tool block', () => {
 		expect(registered.has('submit_council_verdicts')).toBe(true);

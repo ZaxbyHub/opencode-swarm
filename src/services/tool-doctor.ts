@@ -1,19 +1,26 @@
 /**
  * Tool Doctor Service
  *
- * Validates that every tool name in TOOL_NAMES has a corresponding
- * registration in the plugin's tool: {} block in src/index.ts.
+ * Validates that every tool assigned in AGENT_TOOL_MAP is a registered tool name.
+ *
+ * As of #507, registration is DERIVED from the single registration-data source
+ * (tool-metadata) and the handler set is compile-time-guaranteed to match it
+ * (`manifest.ts satisfies Record<ToolName, () => ToolDefinition>`), so the set of
+ * registered tools is exactly TOOL_NAME_SET. This service therefore validates
+ * against TOOL_NAME_SET (handler-free) rather than importing the handler-bearing
+ * manifest — that keeps tool-doctor (and the `../services` barrel that re-exports
+ * it) out of the tool-module import graph, avoiding init cycles (#507 CI finding).
+ * The handler-level coherence is enforced by the compile-time `satisfies` plus the
+ * standalone CI script `scripts/check-tool-registration.ts`.
  *
  * Also validates:
- * - AGENT_TOOL_MAP alignment: tools assigned to agents are registered in the plugin
+ * - AGENT_TOOL_MAP alignment: tools assigned to agents are registered tool names
  * - Class 3 tool binary readiness: external binaries needed by lint tools are available
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { isCommandAvailable } from '../build/discovery';
 import { AGENT_TOOL_MAP } from '../config/constants';
-import { TOOL_NAMES } from '../tools/tool-names';
+import { TOOL_NAME_SET, TOOL_NAMES } from '../tools/tool-names';
 import type { ConfigDoctorResult, ConfigFinding } from './config-doctor';
 
 /** Binaries checked for Class 3 tool readiness */
@@ -36,54 +43,28 @@ const BINARY_CHECKLIST = [
 export type ToolDoctorResult = ConfigDoctorResult;
 
 /**
- * Extract tool keys from the plugin's tool: {} block in src/index.ts
- * Parses the file to find the tool block and returns its registered keys.
+ * The set of registered tool names. Equals the plugin tool object's keys by
+ * construction (the manifest's handler set is compile-time-equal to the metadata
+ * keys, and TOOL_NAME_SET derives from those keys). Handler-free on purpose.
  */
-function extractRegisteredToolKeys(indexPath: string): Set<string> {
-	const registeredKeys = new Set<string>();
-
-	try {
-		const content = fs.readFileSync(indexPath, 'utf-8');
-
-		// Find the tool: { ... } block
-		// We need to parse the object literal to extract all keys
-		const toolBlockMatch = content.match(
-			/tool:\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}/s,
-		);
-		if (!toolBlockMatch) {
-			return registeredKeys;
-		}
-
-		const toolBlock = toolBlockMatch[1];
-
-		// Parse keys from the tool block
-		// Match patterns like: keyName, or keyName:, with optional value
-		// Handles both: key, and key: value patterns
-		const keyPattern = /^\s*(\w+)(?:\s*:|,)/gm;
-		for (const match of toolBlock.matchAll(keyPattern)) {
-			registeredKeys.add(match[1]);
-		}
-	} catch (_error) {
-		// If we can't read/parse the file, return empty set
-	}
-
-	return registeredKeys;
+function getRegisteredToolKeys(): Set<string> {
+	return new Set<string>(TOOL_NAME_SET);
 }
 
 /**
  * Check AGENT_TOOL_MAP alignment with registered tools
  *
- * Verifies that every tool listed in AGENT_TOOL_MAP is actually
- * registered in the plugin's tool: {} block. A missing registration
- * means the agent's system prompt will instruct the model to call a
- * tool that opencode never exposes to the runtime, which silently
- * breaks the agent's workflow (this is how the council feature shipped
- * broken in 6.66.0 — submit_council_verdicts and declare_council_criteria were
- * in AGENT_TOOL_MAP.architect but never registered). Findings are
- * emitted at severity 'error' so `config doctor` / `/swarm preflight`
- * treats this class of drift as fatal rather than advisory.
+ * Verifies that every tool listed in AGENT_TOOL_MAP is a registered tool name
+ * (a member of the manifest-derived registered set passed in). A missing
+ * registration means the agent's system prompt would instruct the model to call
+ * a tool that opencode never exposes to the runtime, which silently breaks the
+ * agent's workflow (this is how the council feature shipped broken in 6.66.0 —
+ * submit_council_verdicts and declare_council_criteria were in
+ * AGENT_TOOL_MAP.architect but never registered). Findings are emitted at
+ * severity 'error' so `config doctor` / `/swarm preflight` treats this class of
+ * drift as fatal rather than advisory.
  */
-function checkAgentToolMapAlignment(
+export function checkAgentToolMapAlignment(
 	registeredKeys: Set<string>,
 ): ConfigFinding[] {
 	const findings: ConfigFinding[] = [];
@@ -94,7 +75,7 @@ function checkAgentToolMapAlignment(
 				findings.push({
 					id: `agent-tool-map-mismatch-${agentName}-${toolName}`,
 					title: 'AGENT_TOOL_MAP alignment gap',
-					description: `Tool "${toolName}" is assigned to agent "${agentName}" in AGENT_TOOL_MAP but is not registered in the plugin's tool: {} block. The agent will not be able to use this tool.`,
+					description: `Tool "${toolName}" is assigned to agent "${agentName}" in AGENT_TOOL_MAP but is not a registered tool name. The agent will not be able to use this tool.`,
 					severity: 'error',
 					path: `AGENT_TOOL_MAP.${agentName}`,
 					currentValue: toolName,
@@ -162,41 +143,13 @@ export function getBinaryReadinessAdvisory(): string | null {
 
 export function runToolDoctor(
 	_directory: string,
-	pluginRoot?: string,
+	_pluginRoot?: string,
 ): ToolDoctorResult {
 	const findings: ConfigFinding[] = [];
 
-	// Resolve the plugin's own src/index.ts.
-	// import.meta.dir is the plugin's services/ directory at runtime (src/services/ in dev,
-	// dist/services/ in prod). Two levels up reaches the plugin root.
-	const resolvedPluginRoot =
-		pluginRoot ?? path.resolve(import.meta.dir, '..', '..');
-	const indexPath = path.join(resolvedPluginRoot, 'src', 'index.ts');
-
-	// If plugin source is not available (production npm install), return a single
-	// informational finding rather than falsely reporting every tool as missing.
-	if (!fs.existsSync(indexPath)) {
-		return {
-			findings: [
-				{
-					id: 'plugin-src-unavailable',
-					title: 'Plugin source not available',
-					description: `Tool registration check requires plugin source files. Expected: ${indexPath}. This check is available in development environments; in production npm installs, only compiled dist/ is present.`,
-					severity: 'warn',
-					path: indexPath,
-					currentValue: undefined,
-					autoFixable: false,
-				},
-			],
-			summary: { info: 0, warn: 1, error: 0 },
-			hasAutoFixableIssues: false,
-			timestamp: Date.now(),
-			configSource: indexPath,
-		};
-	}
-
-	// Get registered tool keys from the plugin
-	const registeredKeys = extractRegisteredToolKeys(indexPath);
+	// Registered keys are derived from the single-source manifest (works in dev
+	// AND production dist — it is a module import, not a source-file parse).
+	const registeredKeys = getRegisteredToolKeys();
 
 	// Check each tool name for registration
 	for (const toolName of TOOL_NAMES) {
@@ -204,7 +157,7 @@ export function runToolDoctor(
 			findings.push({
 				id: `missing-tool-registration-${toolName}`,
 				title: 'Missing tool registration',
-				description: `Tool "${toolName}" is defined in TOOL_NAMES but is not registered in the plugin's tool: {} block. This means the tool will not be available at runtime.`,
+				description: `Tool "${toolName}" is defined in TOOL_NAMES but is not present in the plugin tool object derived from TOOL_MANIFEST. This means the tool will not be available at runtime.`,
 				severity: 'error',
 				path: `tool.${toolName}`,
 				currentValue: undefined,
@@ -234,6 +187,6 @@ export function runToolDoctor(
 		summary,
 		hasAutoFixableIssues,
 		timestamp: Date.now(),
-		configSource: indexPath,
+		configSource: 'src/tools/manifest.ts',
 	};
 }

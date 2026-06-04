@@ -12,11 +12,13 @@ import {
 	upsertNode,
 	validateWorkspace,
 } from '../../../src/tools/repo-graph';
+import { _internals as builderInternals } from '../../../src/tools/repo-graph/builder';
 import * as logger from '../../../src/utils/logger';
 
 describe('buildWorkspaceGraph', () => {
 	let tempDir: string;
 	let workspacePath: string;
+	const realParseFileImports = builderInternals.parseFileImports;
 
 	beforeEach(async () => {
 		// Create temp directory INSIDE the current working directory to avoid
@@ -31,6 +33,7 @@ describe('buildWorkspaceGraph', () => {
 	});
 
 	afterEach(async () => {
+		builderInternals.parseFileImports = realParseFileImports;
 		// Clear graph cache to prevent pollution between tests
 		clearCache(workspacePath);
 		// Clean up temp directory
@@ -181,6 +184,30 @@ import { m } from './m-file';`,
 		expect(() => buildWorkspaceGraph('nonexistent-directory-12345')).toThrow(
 			'Workspace directory does not exist',
 		);
+	});
+
+	test('malformed file parse failure does not abort full rebuild', async () => {
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'broken.ts'),
+			`export const broken = true;`,
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'valid.ts'),
+			`export const valid = true;`,
+		);
+
+		builderInternals.parseFileImports = (content: string) => {
+			if (content.includes('broken')) {
+				throw new Error('synthetic parse failure');
+			}
+			return realParseFileImports(content);
+		};
+
+		const graph = buildWorkspaceGraph(workspacePath);
+		const modules = Object.values(graph.nodes).map((n) => n.moduleName);
+
+		expect(modules).toContain('valid.ts');
+		expect(modules).not.toContain('broken.ts');
 	});
 
 	test('bare specifiers produce no edges', async () => {

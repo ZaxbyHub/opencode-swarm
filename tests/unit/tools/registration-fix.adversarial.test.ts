@@ -1,12 +1,19 @@
 /**
- * Adversarial security tests for tool registration in src/index.ts
+ * Adversarial security tests for tool registration.
+ *
+ * As of #507 registration is DERIVED from the single-source TOOL_MANIFEST, so
+ * the old attack vectors that targeted the hand-maintained `import { … } from
+ * './tools'` block and literal `tool: {}` object in src/index.ts are now
+ * structurally impossible (TypeScript rejects duplicate manifest keys; there is
+ * no import block to shadow). These tests assert the equivalent invariants
+ * against the manifest and the real derived plugin tool object.
  *
  * Attack vectors tested:
- * 1. Name collisions - tools with same name as existing imports
- * 2. Import shadowing - tools shadowing other imports in same file
+ * 1. Name collisions - tools with same name as existing tool names
+ * 2. Manifest integrity - distinct, single-binding registrations
  * 3. createSwarmTool structure verification for diff_summary, test_impact, mutation_test
- * 4. Duplicate imports in the import block
- * 5. Phantom imports - imports that don't exist in barrel exports
+ * 4. Duplicate registration detection
+ * 5. Phantom imports - tools missing from the derived plugin object
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -15,7 +22,13 @@ import * as path from 'node:path';
 
 // Import tools to verify their structure
 import { diff_summary, mutation_test, test_impact } from '../../../src/tools';
+import { TOOL_MANIFEST } from '../../../src/tools/manifest';
+import { buildPluginToolObject } from '../../../src/tools/plugin-registration';
 import { TOOL_NAMES, type ToolName } from '../../../src/tools/tool-names';
+
+// The real plugin tool object derived from the manifest (swarm_command's DI
+// instance is not needed to enumerate keys).
+const PLUGIN_TOOLS = buildPluginToolObject({});
 
 describe('Adversarial: Tool Registration Security', () => {
 	// ========================================================================
@@ -68,29 +81,17 @@ describe('Adversarial: Tool Registration Security', () => {
 	// ========================================================================
 	// 2. IMPORT SHADOWING VERIFICATION
 	// ========================================================================
-	describe('2. Import Shadowing Verification', () => {
-		test('src/index.ts imports should not shadow each other', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			const toolsImportMatch = indexContent.match(
-				/import\s*\{([^}]+)\}\s*from\s*['"]\.\/tools['"]/,
-			);
-			expect(toolsImportMatch).toBeTruthy();
-
-			const importedTools = toolsImportMatch![1]
-				.split(',')
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
-
-			const duplicates = importedTools.filter(
-				(tool, idx) => importedTools.indexOf(tool) !== idx,
-			);
-			expect(duplicates).toEqual([]);
-
-			expect(importedTools).toContain('diff_summary');
-			expect(importedTools).toContain('test_impact');
-			expect(importedTools).toContain('mutation_test');
+	describe('2. Manifest Integrity Verification', () => {
+		test('the manifest registers the 3 historically-dead tools', () => {
+			// diff_summary/test_impact/mutation_test were the "registered in 3 of 4
+			// locations" bug. With a single manifest they cannot drift.
+			expect(TOOL_MANIFEST).toHaveProperty('diff_summary');
+			expect(TOOL_MANIFEST).toHaveProperty('test_impact');
+			expect(TOOL_MANIFEST).toHaveProperty('mutation_test');
+			// And they surface in the real derived plugin tool object.
+			expect(PLUGIN_TOOLS).toHaveProperty('diff_summary');
+			expect(PLUGIN_TOOLS).toHaveProperty('test_impact');
+			expect(PLUGIN_TOOLS).toHaveProperty('mutation_test');
 		});
 
 		test('no import should shadow built-in or external modules', () => {
@@ -127,29 +128,11 @@ describe('Adversarial: Tool Registration Security', () => {
 			}
 		});
 
-		test('each imported tool should have exactly one binding', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			const toolsImportMatch = indexContent.match(
-				/import\s*\{([^}]+)\}\s*from\s*['"]\.\/tools['"]/,
-			);
-			expect(toolsImportMatch).toBeTruthy();
-
-			const importedTools = toolsImportMatch![1]
-				.split(',')
-				.map((s) => s.trim().split(' as ')[0].trim())
-				.filter((s) => s.length > 0);
-
-			const seen = new Set<string>();
-			const duplicates: string[] = [];
-			for (const tool of importedTools) {
-				if (seen.has(tool)) {
-					duplicates.push(tool);
-				}
-				seen.add(tool);
-			}
-			expect(duplicates).toEqual([]);
+		test('each registered tool has exactly one binding in the plugin object', () => {
+			// Object keys are inherently unique; this guards against a derivation
+			// regression that could double-register a tool.
+			const keys = Object.keys(PLUGIN_TOOLS);
+			expect(keys.length).toBe(new Set(keys).size);
 		});
 	});
 
@@ -251,52 +234,16 @@ describe('Adversarial: Tool Registration Security', () => {
 	// ========================================================================
 	// 4. DUPLICATE IMPORT DETECTION
 	// ========================================================================
-	describe('4. Duplicate Import Detection', () => {
-		test('import block should have no duplicate imports', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			const toolsImportMatch = indexContent.match(
-				/import\s*\{([^}]+)\}\s*from\s*['"]\.\/tools['"]/,
-			);
-			expect(toolsImportMatch).toBeTruthy();
-
-			const importLine = toolsImportMatch![1];
-			const imports = importLine
-				.split(',')
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
-
-			const seen = new Set<string>();
-			const duplicates: string[] = [];
-			for (const imp of imports) {
-				const baseName = imp.split(' as ')[0].trim();
-				if (seen.has(baseName)) {
-					duplicates.push(baseName);
-				}
-				seen.add(baseName);
-			}
-			expect(duplicates).toEqual([]);
+	describe('4. Duplicate Registration Detection', () => {
+		test('manifest keys have no duplicates', () => {
+			const keys = Object.keys(TOOL_MANIFEST);
+			expect(keys.length).toBe(new Set(keys).size);
 		});
 
-		test('no tool should be imported twice with different aliases', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			const toolsImportMatch = indexContent.match(
-				/import\s*\{([^}]+)\}\s*from\s*['"]\.\/tools['"]/,
-			);
-			expect(toolsImportMatch).toBeTruthy();
-
-			const imports = toolsImportMatch![1]
-				.split(',')
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
-
-			const bases = imports.map((s) => s.split(' as ')[0].trim());
-			const uniqueBases = new Set(bases);
-
-			expect(bases.length).toBe(uniqueBases.size);
+		test('plugin tool object and TOOL_NAMES agree exactly (no stray/missing)', () => {
+			const pluginKeys = new Set(Object.keys(PLUGIN_TOOLS));
+			const names = new Set(TOOL_NAMES);
+			expect(pluginKeys).toEqual(names);
 		});
 	});
 
@@ -318,18 +265,13 @@ describe('Adversarial: Tool Registration Security', () => {
 			expect(barrelContent).toContain('mutation_test');
 		});
 
-		test('all 3 new tools should be registered in the tool object', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			// The tools are registered via shorthand property syntax
-			const toolBlockMatch = indexContent.match(/tool:\s*\{([^}]+)\}/s);
-			expect(toolBlockMatch).toBeTruthy();
-
-			const toolBlock = toolBlockMatch![1];
-			expect(toolBlock).toContain('diff_summary');
-			expect(toolBlock).toContain('test_impact');
-			expect(toolBlock).toContain('mutation_test');
+		test('all 3 new tools should be registered in the derived tool object', () => {
+			expect(PLUGIN_TOOLS).toHaveProperty('diff_summary');
+			expect(PLUGIN_TOOLS).toHaveProperty('test_impact');
+			expect(PLUGIN_TOOLS).toHaveProperty('mutation_test');
+			expect(typeof PLUGIN_TOOLS.diff_summary?.execute).toBe('function');
+			expect(typeof PLUGIN_TOOLS.test_impact?.execute).toBe('function');
+			expect(typeof PLUGIN_TOOLS.mutation_test?.execute).toBe('function');
 		});
 
 		test('barrel re-exports should not have syntax errors', () => {
@@ -418,19 +360,13 @@ describe('Adversarial: Tool Registration Security', () => {
 		});
 
 		test('new tools should not accidentally be aliases for each other', () => {
-			const indexPath = path.resolve(process.cwd(), 'src', 'index.ts');
-			const indexContent = fs.readFileSync(indexPath, 'utf-8');
-
-			const toolsImportMatch = indexContent.match(
-				/import\s*\{([^}]+)\}\s*from\s*['"]\.\/tools['"]/,
-			);
-			expect(toolsImportMatch).toBeTruthy();
-
-			const imports = toolsImportMatch![1];
-
-			expect(imports).not.toContain('diff_summary as');
-			expect(imports).not.toContain('test_impact as');
-			expect(imports).not.toContain('mutation_test as');
+			// Each resolves to a distinct handler instance in the plugin object.
+			const a = PLUGIN_TOOLS.diff_summary;
+			const b = PLUGIN_TOOLS.test_impact;
+			const c = PLUGIN_TOOLS.mutation_test;
+			expect(a).not.toBe(b);
+			expect(b).not.toBe(c);
+			expect(a).not.toBe(c);
 		});
 	});
 });

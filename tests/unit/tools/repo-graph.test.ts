@@ -583,6 +583,32 @@ describe('workspaceRoot matching on save', () => {
 			.catch(() => false);
 		expect(exists).toBe(true);
 	});
+
+	test('saveGraph creates .swarm directory when missing', async () => {
+		const resolvedWorkspace = path.resolve(workspaceName);
+		const graph: RepoGraph = {
+			schema_version: '1.0.0',
+			workspaceRoot: resolvedWorkspace,
+			nodes: {},
+			edges: [],
+			metadata: {
+				generatedAt: new Date().toISOString(),
+				generator: 'test',
+				nodeCount: 0,
+				edgeCount: 0,
+			},
+		};
+
+		await fs.promises.mkdir(path.join(workspaceName), { recursive: true });
+		await expect(saveGraph(workspaceName, graph)).resolves.toBeUndefined();
+
+		const graphPath = path.join(workspaceName, '.swarm', 'repo-graph.json');
+		const exists = await fs.promises
+			.access(graphPath)
+			.then(() => true)
+			.catch(() => false);
+		expect(exists).toBe(true);
+	});
 });
 
 describe('atomic create fallback', () => {

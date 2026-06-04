@@ -46,8 +46,14 @@ import {
  */
 export const _internals: {
 	safeRealpathSync: typeof safeRealpathSync;
+	extractTSSymbols: typeof extractTSSymbols;
+	extractPythonSymbols: typeof extractPythonSymbols;
+	parseFileImports: typeof parseFileImports;
 } = {
 	safeRealpathSync,
+	extractTSSymbols,
+	extractPythonSymbols,
+	parseFileImports,
 } as const;
 
 // ============ Constants ============
@@ -712,16 +718,19 @@ export function scanFile(
 	try {
 		if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
 			const relativePath = path.relative(absoluteRoot, filePath);
-			const symbols = extractTSSymbols(relativePath, absoluteRoot);
+			const symbols = _internals.extractTSSymbols(relativePath, absoluteRoot);
 			exports = symbols.filter((s) => s.exported).map((s) => s.name);
 		} else if (ext === '.py') {
 			const relativePath = path.relative(absoluteRoot, filePath);
-			const symbols = extractPythonSymbols(relativePath, absoluteRoot);
+			const symbols = _internals.extractPythonSymbols(
+				relativePath,
+				absoluteRoot,
+			);
 			exports = symbols.filter((s) => s.exported).map((s) => s.name);
 		}
 
 		// Parse imports to get specifiers with types
-		const parsedImports = parseFileImports(content);
+		const parsedImports = _internals.parseFileImports(content);
 
 		// Create the graph node
 		const node: GraphNode = {
@@ -865,15 +874,18 @@ export function buildWorkspaceGraph(
 		try {
 			if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
 				const relativePath = path.relative(absoluteRoot, filePath);
-				const symbols = extractTSSymbols(relativePath, absoluteRoot);
+				const symbols = _internals.extractTSSymbols(relativePath, absoluteRoot);
 				exports = symbols.filter((s) => s.exported).map((s) => s.name);
 			} else if (ext === '.py') {
 				const relativePath = path.relative(absoluteRoot, filePath);
-				const symbols = extractPythonSymbols(relativePath, absoluteRoot);
+				const symbols = _internals.extractPythonSymbols(
+					relativePath,
+					absoluteRoot,
+				);
 				exports = symbols.filter((s) => s.exported).map((s) => s.name);
 			}
 
-			parsedImports = parseFileImports(content);
+			parsedImports = _internals.parseFileImports(content);
 		} catch {
 			// Skip malformed file without aborting entire graph build
 			continue;

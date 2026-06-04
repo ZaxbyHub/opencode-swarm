@@ -1,3 +1,4 @@
+export { applyPatch } from './apply-patch';
 export { batch_symbols } from './batch-symbols';
 export { build_check } from './build-check';
 export { check_gate_status } from './check-gate-status';

@@ -10,6 +10,7 @@
  * Also exports upsertNode, addEdge, and resolveModuleSpecifier which are
  * used by both the builder and the incremental updater.
  */
+import { extractPythonSymbols, extractTSSymbols } from '../symbols';
 import { safeRealpathSync } from './safe-realpath';
 import type { BuildWorkspaceGraphOptions, GraphEdge, GraphNode, RepoGraph } from './types';
 /**
@@ -20,6 +21,9 @@ import type { BuildWorkspaceGraphOptions, GraphEdge, GraphNode, RepoGraph } from
  */
 export declare const _internals: {
     safeRealpathSync: typeof safeRealpathSync;
+    extractTSSymbols: typeof extractTSSymbols;
+    extractPythonSymbols: typeof extractPythonSymbols;
+    parseFileImports: typeof parseFileImports;
 };
 /**
  * Add or update a node in the graph.
@@ -57,6 +61,23 @@ export declare function addEdge(graph: RepoGraph, edge: GraphEdge): void;
  * @returns Resolved absolute path or null if unresolvable
  */
 export declare function resolveModuleSpecifier(workspaceRoot: string, sourceFile: string, specifier: string): string | null;
+/**
+ * A parsed import with its specifier and type.
+ */
+interface ParsedImport {
+    /** The module specifier (e.g., './foo', 'lodash') */
+    specifier: string;
+    /** The type of import */
+    importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+}
+/**
+ * Parse imports from file content using the same rules as imports.ts.
+ * Handles ES module imports and CommonJS require() statements.
+ *
+ * @param content - File content to parse
+ * @returns Array of parsed imports with specifier and type
+ */
+declare function parseFileImports(content: string): ParsedImport[];
 /**
  * Result of scanning a single file for graph updates.
  */
@@ -100,3 +121,4 @@ export declare function buildWorkspaceGraph(workspaceRoot: string, options?: Bui
  * bounded walk behavior, same deterministic file order.
  */
 export declare function buildWorkspaceGraphAsync(workspaceRoot: string, options?: BuildWorkspaceGraphOptions): Promise<RepoGraph>;
+export {};

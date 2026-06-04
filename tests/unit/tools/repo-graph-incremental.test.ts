@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { clearCache } from '../../../src/tools/repo-graph';
+import { _internals as builderInternals } from '../../../src/tools/repo-graph/builder';
 
 // Use dynamic import to get the real module (bypasses any mock.module from other test files)
 // This is necessary because bun:test's mock.module persists globally across tests
@@ -23,6 +24,7 @@ const getRealRepoGraph = async () => {
 describe('updateGraphForFiles', () => {
 	let tempDir: string;
 	let workspacePath: string;
+	const realParseFileImports = builderInternals.parseFileImports;
 	// Store real functions after getting them
 
 	/** Normalize a path for use as a graph key (forward slashes, matching normalizeGraphPath) */
@@ -62,6 +64,7 @@ describe('updateGraphForFiles', () => {
 	});
 
 	afterEach(async () => {
+		builderInternals.parseFileImports = realParseFileImports;
 		clearCache(workspacePath);
 		try {
 			await fsSync.promises.rm(tempDir, { recursive: true, force: true });
@@ -372,6 +375,39 @@ export const indexExport = 'hello';`,
 			if (edge.source === dirtyAbsPath) {
 				expect(/[\0\t\r\n]/.test(edge.importSpecifier)).toBe(false);
 			}
+		}
+	});
+
+	test('malformed file scan failure is handled without throwing', async () => {
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'good.ts'),
+			`export const good = true;`,
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'bad.ts'),
+			`export const bad = true;`,
+		);
+
+		const initialGraph = buildWorkspaceGraph(workspacePath);
+		await saveGraph(workspacePath, initialGraph);
+
+		builderInternals.parseFileImports = (content: string) => {
+			if (content.includes('bad')) {
+				throw new Error('synthetic parse failure');
+			}
+			return realParseFileImports(content);
+		};
+
+		const updatedGraph = await updateGraphForFiles(workspacePath, [
+			path.join(tempDir, 'bad.ts'),
+		]);
+
+		const modules = Object.values(updatedGraph.nodes).map((n) => n.moduleName);
+		expect(modules).toContain('good.ts');
+		expect(modules).toContain('bad.ts');
+		for (const edge of updatedGraph.edges) {
+			expect(updatedGraph.nodes[normalizeKey(edge.source)]).toBeDefined();
+			expect(updatedGraph.nodes[normalizeKey(edge.target)]).toBeDefined();
 		}
 	});
 });

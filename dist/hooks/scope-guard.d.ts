@@ -41,3 +41,27 @@ export declare function createScopeGuardHook(config: Partial<ScopeGuardConfig>, 
  * @returns true if the file is within scope, false otherwise
  */
 export declare function isFileInScope(filePath: string, scopeEntries: string[], directory?: string): boolean;
+/**
+ * Sanitize a raw file path string to prevent log injection and null-byte attacks.
+ * Replaces C0 control characters (0x00-0x1F), DEL (0x7F), C1 control characters
+ * (0x80-0x9F), and strips remaining ANSI CSI sequences.
+ *
+ * All matched control characters are replaced with underscores rather than removed,
+ * so that the resulting string can still be passed to `path.resolve()` without
+ * triggering `ERR_INVALID_ARG_VALUE` on embedded null bytes.
+ *
+ * Extracted from the original inline sanitization in the scope guard
+ * to support reuse across single-path and multi-path code paths.
+ *
+ * @param raw - The unsanitized file path string
+ * @returns The sanitized file path string safe for logging and scope matching
+ */
+declare function sanitizePath(raw: string): string;
+/**
+ * Internal implementation details exposed for unit testing.
+ * DO NOT use these in production code.
+ */
+export declare const _internals: {
+    sanitizePath: typeof sanitizePath;
+};
+export {};
