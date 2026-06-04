@@ -106,4 +106,5 @@ export declare const TOOL_MANIFEST: {
     lean_turbo_review: () => ToolDefinition;
     lean_turbo_run_phase: () => ToolDefinition;
     lean_turbo_status: () => ToolDefinition;
+    apply_patch: () => ToolDefinition;
 };

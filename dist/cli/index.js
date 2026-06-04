@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.49.0",
+    version: "7.49.1",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -16987,6 +16987,10 @@ var init_tool_metadata = __esm(() => {
     lean_turbo_status: {
       description: "returns Lean Turbo configuration and active status for the current session",
       agents: ["architect"]
+    },
+    apply_patch: {
+      description: "Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation",
+      agents: ["coder"]
     }
   };
   TOOL_NAMES = Object.keys(TOOL_METADATA);

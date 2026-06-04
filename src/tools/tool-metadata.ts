@@ -571,6 +571,11 @@ export const TOOL_METADATA = {
 			'returns Lean Turbo configuration and active status for the current session',
 		agents: ['architect'],
 	},
+	apply_patch: {
+		description:
+			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation',
+		agents: ['coder'],
+	},
 } satisfies Record<string, ToolMeta>;
 
 /** Union type of all valid tool names (the metadata keys). */

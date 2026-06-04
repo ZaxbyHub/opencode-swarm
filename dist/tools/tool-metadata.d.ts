@@ -355,6 +355,10 @@ export declare const TOOL_METADATA: {
         description: string;
         agents: "architect"[];
     };
+    apply_patch: {
+        description: string;
+        agents: "coder"[];
+    };
 };
 /** Union type of all valid tool names (the metadata keys). */
 export type ToolName = keyof typeof TOOL_METADATA;

@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { resolveScopeWithFallbacks } from '../scope/scope-persistence';
-import { swarmState } from '../state';
+import { type AgentSessionState, swarmState } from '../state';
 import { pendingCoderScopeByTaskId } from './delegation-gate.js';
 import { normalizeToolName } from './normalize-tool-name';
 
@@ -89,52 +89,48 @@ export function createScopeGuardHook(
 			});
 			if (!declaredScope || declaredScope.length === 0) return; // No scope declared — allow
 
-			// Get the file path from args
+			// Get the file path(s) from args — collect ALL candidate paths from ALL supported keys
 			const argsObj = output.args as Record<string, unknown> | undefined;
-			const rawFilePath = argsObj?.path ?? argsObj?.filePath ?? argsObj?.file;
-			if (typeof rawFilePath !== 'string' || !rawFilePath) return; // Can't determine path — allow
-			// Sanitize path to prevent log injection — strip control chars + ANSI escape sequences.
-			// ESC (0x1B) is handled via split/join to avoid biome noControlCharactersInRegex rule.
-			const filePath = rawFilePath
-				.replace(/[\r\n\t]/g, '_')
-				.split(String.fromCharCode(27))
-				.join('_') // strip ESC (ANSI escape prefix)
-				.replace(/\[[\d;]*m/g, ''); // strip remaining ANSI CSI sequences
+			const candidatePaths: string[] = [];
 
-			// Check if file is in scope
-			if (!isFileInScope(filePath, declaredScope, directory)) {
-				const taskId = session?.currentTaskId ?? 'unknown';
-				const violationMessage = `SCOPE VIOLATION: ${agentName} attempted to modify '${filePath}' which is not in declared scope for task ${taskId}. Declared scope: [${declaredScope.slice(0, 3).join(', ')}${declaredScope.length > 3 ? '...' : ''}]`;
-
-				// Log violation to session
-				if (session) {
-					session.lastScopeViolation = violationMessage;
-					session.scopeViolationDetected = true;
+			// Collect single-string paths from ALL supported keys
+			const singlePathKeys = ['path', 'filePath', 'file'];
+			for (const key of singlePathKeys) {
+				const val = argsObj?.[key];
+				if (typeof val === 'string' && val) {
+					candidatePaths.push(val);
 				}
+			}
 
-				// Inject advisory to architect session (if callback provided)
-				if (injectAdvisory) {
-					// Find the architect session to notify
-					for (const [archSessionId, archSession] of swarmState.agentSessions) {
-						const archAgent =
-							swarmState.activeAgent.get(archSessionId) ??
-							archSession.agentName;
-						if (stripKnownSwarmPrefix(archAgent) === ORCHESTRATOR_NAME) {
-							try {
-								injectAdvisory(
-									archSessionId,
-									`[SCOPE GUARD] ${violationMessage}`,
-								);
-							} catch {
-								/* non-blocking */
-							}
-							break;
+			// Collect array paths from all supported array keys
+			const arrayPathKeys = ['files', 'paths', 'targetFiles'];
+			for (const key of arrayPathKeys) {
+				const val = argsObj?.[key];
+				if (Array.isArray(val)) {
+					for (const item of val) {
+						if (typeof item === 'string' && item) {
+							candidatePaths.push(item);
 						}
 					}
 				}
+			}
 
-				// BLOCK the tool call by throwing
-				throw new Error(violationMessage);
+			if (candidatePaths.length === 0) return; // Can't determine path — allow
+
+			// Validate every collected path
+			for (const rawPath of candidatePaths) {
+				const filePath = sanitizePath(rawPath);
+				if (!isFileInScope(filePath, declaredScope, directory)) {
+					reportScopeViolation(
+						agentName,
+						filePath,
+						taskId,
+						session,
+						injectAdvisory,
+						swarmState,
+						declaredScope,
+					);
+				}
 			}
 		},
 	};
@@ -155,10 +151,109 @@ export function isFileInScope(
 ): boolean {
 	const dir = directory ?? process.cwd();
 	const resolvedFile = path.resolve(dir, filePath);
-	return scopeEntries.some((scope) => {
-		const resolvedScope = path.resolve(dir, scope);
-		if (resolvedFile === resolvedScope) return true;
-		const rel = path.relative(resolvedScope, resolvedFile);
-		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-	});
+	// Filter empty strings: path.resolve(dir, '') resolves to dir itself,
+	// making path.relative return non-dotdot for ANY file — silently neutering scope.
+	return scopeEntries
+		.filter((scope) => scope.length > 0)
+		.some((scope) => {
+			const resolvedScope = path.resolve(dir, scope);
+			if (resolvedFile === resolvedScope) return true;
+			const rel = path.relative(resolvedScope, resolvedFile);
+			return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+		});
+}
+
+// --- Helpers for array-path scope checking ---
+
+/**
+ * Sanitize a raw file path string to prevent log injection and null-byte attacks.
+ * Strips control characters (NUL, CR, LF, TAB, BS, FF, VT), ESC (ANSI escape prefix),
+ * and remaining ANSI CSI sequences.
+ *
+ * Null bytes are removed rather than replaced because Node.js `path.resolve()`
+ * throws `ERR_INVALID_ARG_VALUE` on `\0`, which would bypass the intended
+ * SCOPE VIOLATION error path with a raw TypeError.
+ *
+ * Extracted from the original inline sanitization in the scope guard
+ * to support reuse across single-path and multi-path code paths.
+ *
+ * @param raw - The unsanitized file path string
+ * @returns The sanitized file path string safe for logging and scope matching
+ */
+function sanitizePath(raw: string): string {
+	let result = '';
+	for (let i = 0; i < raw.length; i++) {
+		const c = raw.charCodeAt(i);
+		// Replace C0 controls (0x00-0x1F) and DEL (0x7F) with underscore
+		if (c <= 0x1f || c === 0x7f) {
+			result += '_';
+			continue;
+		}
+		// ESC (0x1B) requires split/join to avoid regex control-char rule
+		if (c === 0x1b) {
+			result += '_';
+			continue;
+		}
+		result += raw[i];
+	}
+	// Strip remaining ANSI CSI sequences
+	return result.replace(/\[[\d;]*m/g, '');
+}
+
+/**
+ * Internal implementation details exposed for unit testing.
+ * DO NOT use these in production code.
+ */
+export const _internals = { sanitizePath };
+
+/**
+ * Report a scope violation for an out-of-scope file path.
+ * Logs the violation to the session state, injects an advisory to the
+ * architect session, and throws an Error to block the tool call.
+ *
+ * @param agentName - Name of the agent that caused the violation
+ * @param filePath - The sanitized file path that is out of scope
+ * @param taskId - The current task ID (or null if unknown)
+ * @param session - The agent session state (or undefined)
+ * @param injectAdvisory - Optional callback to push advisory to architect session
+ * @param state - The swarm state singleton for finding architect sessions
+ * @param scopeEntries - The declared scope entries for scope mismatch display
+ * @throws Error - Always throws to block the violating tool call
+ */
+function reportScopeViolation(
+	agentName: string,
+	filePath: string,
+	taskId: string | null,
+	session: AgentSessionState | undefined,
+	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
+	state: typeof swarmState,
+	scopeEntries: string[],
+): void {
+	const taskLabel = taskId ?? 'unknown';
+	const violationMessage = `SCOPE VIOLATION: ${agentName} attempted to modify '${filePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${scopeEntries.slice(0, 3).join(', ')}${scopeEntries.length > 3 ? '...' : ''}]`;
+
+	// Log violation to session
+	if (session) {
+		session.lastScopeViolation = violationMessage;
+		session.scopeViolationDetected = true;
+	}
+
+	// Inject advisory to architect session (if callback provided)
+	if (injectAdvisory) {
+		for (const [archSessionId, archSession] of state.agentSessions) {
+			const archAgent =
+				state.activeAgent.get(archSessionId) ?? archSession.agentName;
+			if (stripKnownSwarmPrefix(archAgent) === ORCHESTRATOR_NAME) {
+				try {
+					injectAdvisory(archSessionId, `[SCOPE GUARD] ${violationMessage}`);
+				} catch {
+					/* non-blocking */
+				}
+				break;
+			}
+		}
+	}
+
+	// BLOCK the tool call by throwing
+	throw new Error(violationMessage);
 }

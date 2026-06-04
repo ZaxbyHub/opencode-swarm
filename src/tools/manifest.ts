@@ -23,6 +23,7 @@
  * Neither is implemented (no current tool needs them). Not tree-shakeable.
  */
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { applyPatch } from './apply-patch';
 import { batch_symbols } from './batch-symbols';
 import { build_check } from './build-check';
 import { check_gate_status } from './check-gate-status';
@@ -204,4 +205,5 @@ export const TOOL_MANIFEST = defineHandlers({
 	lean_turbo_review: () => lean_turbo_review,
 	lean_turbo_run_phase: () => lean_turbo_run_phase,
 	lean_turbo_status: () => lean_turbo_status,
+	apply_patch: () => applyPatch,
 });
