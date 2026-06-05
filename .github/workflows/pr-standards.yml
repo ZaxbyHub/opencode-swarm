@@ -54,7 +54,7 @@ jobs:
 
           # Release-please and other bots do not follow the human PR body contract.
           case "$PR_AUTHOR" in
-            *"[bot]")
+            *"[bot]"|"Copilot")
               echo "Bot author ($PR_AUTHOR) — skipping PR body contract."
               exit 0
               ;;
@@ -116,7 +116,7 @@ jobs:
           set -euo pipefail
 
           case "$PR_AUTHOR" in
-            *"[bot]")
+            *"[bot]"|"Copilot")
               echo "Bot author ($PR_AUTHOR) — skipping release fragment requirement."
               exit 0
               ;;
