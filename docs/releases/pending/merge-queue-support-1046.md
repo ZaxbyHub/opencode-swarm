@@ -36,9 +36,14 @@ enables the merge queue. To finish enabling it, an admin must update the `main`
 branch protection / ruleset:
 
 - Require a pull request before merging.
-- Require status checks: `quality`, `unit`, `integration`, `dist-check`,
-  `package-check`, `security`, `php-validation`, `rust-sandbox-runner`, `smoke`,
-  `check-title`, `pr-standards` (prefer GitHub Actions as the check source).
+- Require status checks (prefer GitHub Actions as the check source). Use the **exact
+  check names GitHub emits** — matrix jobs report one check per matrix leg, not an
+  aggregate, so require each leg by name or the queue will wait forever for a check
+  that never reports:
+  - `quality`, `integration`, `dist-check`, `package-check`, `security`,
+    `php-validation`, `rust-sandbox-runner`, `check-title`, `pr-standards`
+  - `unit (ubuntu-latest)`, `unit (macos-latest)`, `unit (windows-latest)`
+  - `smoke (ubuntu-latest)`, `smoke (macos-latest)`, `smoke (windows-latest)`
 - **Require merge queue.**
 - Keep linear history / conversation resolution if desired.
 - Do not require manual branch freshness — let the merge queue do final current-base
