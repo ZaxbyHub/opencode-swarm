@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.51.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.4...v7.51.0) (2026-06-05)
+
+
+### Features
+
+* add git_blame tool, improve suggest_patch/test_runner/symbols/diff, expand descriptions, add skills ([#1123](https://github.com/zaxbysauce/opencode-swarm/issues/1123)) ([8079900](https://github.com/zaxbysauce/opencode-swarm/commit/807990044febe90d514198c104d579928091e49c))
+
 ## [7.50.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.3...v7.50.4) (2026-06-05)
 
 
