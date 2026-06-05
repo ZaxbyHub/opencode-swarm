@@ -291,8 +291,10 @@ Closes #<issue-number>
 ## Test plan
 - [ ] <validation item>
 "@
-$body | Out-File "$env:TEMP\pr_body.txt" -Encoding UTF8
-gh pr create --title "<type>(<scope>): <description>" --body-file "$env:TEMP\pr_body.txt" --base main
+$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+$prBodyPath = Join-Path ([System.IO.Path]::GetTempPath()) "pr_body.txt"
+[System.IO.File]::WriteAllText($prBodyPath, $body, $utf8NoBom)
+gh pr create --title "<type>(<scope>): <description>" --body-file $prBodyPath --base main
 ```
 
 ## Step 6.5 - Issue comment
@@ -324,8 +326,10 @@ Fixed in PR #<pr-number>.
 ## Migration
 No migration required.
 "@
-$comment | Out-File "$env:TEMP\issue-comment.txt" -Encoding UTF8
-gh issue comment <issue-number> --body-file "$env:TEMP\issue-comment.txt"
+$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+$issueCommentPath = Join-Path ([System.IO.Path]::GetTempPath()) "issue-comment.txt"
+[System.IO.File]::WriteAllText($issueCommentPath, $comment, $utf8NoBom)
+gh issue comment <issue-number> --body-file $issueCommentPath
 ````
 
 If the PR merged before this was done, post the missing issue comment immediately.
