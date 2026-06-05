@@ -7,6 +7,15 @@
  * - updateRetrievalOutcome (outcome tracking)
  */
 
+/**
+ * MOCK ISOLATION NOTE: This file uses `vi.mock('../../../src/hooks/knowledge-store.js')`
+ * which affects the module cache for the entire test process. When running this file
+ * together with other knowledge test files (e.g., knowledge-store-transactions.test.ts),
+ * use the `--isolate` flag to prevent mock leakage:
+ *
+ *   bun test --isolate tests/unit/hooks/knowledge-reader.test.ts tests/unit/hooks/knowledge-store-transactions.test.ts
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	type ProjectContext,

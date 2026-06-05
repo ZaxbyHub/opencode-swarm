@@ -1418,7 +1418,8 @@ export async function applyCuratorKnowledgeUpdates(
 	// These are appended after the transaction to avoid nested locking.
 	// Re-read lessons from the file for dedup purposes.
 	// This is a separate unlocked read; the append below is independently locked.
-	const currentEntries = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
+	const currentEntries =
+		await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
 	const currentLessons: string[] = currentEntries.map((e) => e.lesson);
 
 	for (const rec of validRecommendations) {

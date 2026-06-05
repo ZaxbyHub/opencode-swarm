@@ -4,9 +4,8 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import {
@@ -16,6 +15,7 @@ import {
 	readRetractionRecords,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
+	transactFile,
 	transactKnowledge,
 	wordBigrams,
 } from './knowledge-store.js';
@@ -268,43 +268,25 @@ async function _detectTechStack(directory: string): Promise<string[]> {
 // function to prevent lost-update races (LF-1 fix).
 async function transactShownFile(
 	shownFile: string,
-	mutate: (
-		data: Record<string, string[]>,
-	) => Record<string, string[]> | null,
+	mutate: (data: Record<string, string[]>) => Record<string, string[]> | null,
 ): Promise<void> {
-	const dir = path.dirname(shownFile);
-	await mkdir(dir, { recursive: true });
-
-	let release: (() => Promise<void>) | null = null;
-	try {
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
-
-		let shownData: Record<string, string[]> = {};
-		if (existsSync(shownFile)) {
+	await transactFile<Record<string, string[]>>(
+		shownFile,
+		async (filePath) => {
+			if (!existsSync(filePath)) return {};
 			try {
-				const content = await readFile(shownFile, 'utf-8');
-				shownData = JSON.parse(content);
+				const content = await readFile(filePath, 'utf-8');
+				return JSON.parse(content);
 			} catch {
 				// Malformed JSON — start fresh (safe fallback)
+				return {};
 			}
-		}
-
-		const result = mutate(shownData);
-		if (result === null) return;
-
-		await atomicWriteFile(shownFile, JSON.stringify(result, null, 2));
-	} finally {
-		if (release) {
-			try {
-				await release();
-			} catch {
-				/* lock release failed — non-blocking */
-			}
-		}
-	}
+		},
+		async (filePath, data) => {
+			await atomicWriteFile(filePath, JSON.stringify(data, null, 2));
+		},
+		mutate,
+	);
 }
 
 // ============================================================================
@@ -708,8 +690,10 @@ export const _internals: {
 	readMergedKnowledge: typeof readMergedKnowledge;
 	updateRetrievalOutcome: typeof updateRetrievalOutcome;
 	scoreDirectiveAgainstContext: typeof scoreDirectiveAgainstContext;
+	transactShownFile: typeof transactShownFile;
 } = {
 	readMergedKnowledge,
 	updateRetrievalOutcome,
 	scoreDirectiveAgainstContext,
+	transactShownFile,
 };

@@ -616,7 +616,8 @@ export async function quarantineEntry(
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(swarmDir, {
-			retries: { retries: 3, minTimeout: 100 },
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
 		});
 
 		// Read INSIDE lock
@@ -731,7 +732,8 @@ export async function restoreEntry(
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(swarmDir, {
-			retries: { retries: 3, minTimeout: 100 },
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
 		});
 
 		// Read quarantined entries INSIDE lock

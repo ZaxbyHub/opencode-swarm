@@ -309,17 +309,14 @@ export async function rewriteKnowledge<T>(
 	}
 }
 
-// Perform an atomic locked read-modify-write on a JSONL file.
-// Acquires a directory lock, reads all entries, calls mutate() with them,
-// and if mutate returns a non-null array, writes the result crash-atomically
-// via temp-file + rename (atomicWriteFile). Returns true if the file was
-// rewritten, false if mutate returned null (no-op).
-//
-// All callers that need a lock-before-read pattern (TOCTOU prevention) or
-// crash-atomic writes (MF-5 prevention) MUST use this function.
-export async function transactKnowledge<T>(
+// Generic atomic locked read-modify-write for any file type.
+// Acquires a directory lock, reads data via `read`, calls `mutate()`, and if
+// mutate returns non-null, writes via `write`. Returns true if a write occurred.
+export async function transactFile<T>(
 	filePath: string,
-	mutate: (entries: T[]) => T[] | null,
+	read: (filePath: string) => Promise<T>,
+	write: (filePath: string, data: T) => Promise<void>,
+	mutate: (data: T) => T | null,
 ): Promise<boolean> {
 	const dir = path.dirname(filePath);
 	await mkdir(dir, { recursive: true });
@@ -330,13 +327,10 @@ export async function transactKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		const entries = await readKnowledge<T>(filePath);
-		const result = mutate(entries);
+		const data = await read(filePath);
+		const result = mutate(data);
 		if (result === null) return false;
-		const content =
-			result.map((e) => JSON.stringify(e)).join('\n') +
-			(result.length > 0 ? '\n' : '');
-		await atomicWriteFile(filePath, content);
+		await write(filePath, result);
 		return true;
 	} finally {
 		if (release) {
@@ -347,6 +341,37 @@ export async function transactKnowledge<T>(
 			}
 		}
 	}
+}
+
+// Perform an atomic locked read-modify-write on a JSONL file.
+// Acquires a directory lock, reads all entries, calls mutate() with them,
+// and if mutate returns a non-null array, writes the result crash-atomically
+// via temp-file + rename (atomicWriteFile). Returns true if the file was
+// rewritten, false if mutate returned null (no-op).
+//
+// All callers that need a lock-before-read pattern (TOCTOU prevention) or
+// crash-atomic writes (MF-5 prevention) MUST use this function.
+// NOTE: Directory-level locking means all JSONL files in .swarm/ (knowledge.jsonl,
+// knowledge-rejected.jsonl, knowledge-retractions.jsonl, etc.) share the same lock.
+// This is an intentional correctness trade-off: it prevents TOCTOU races between
+// concurrent operations on different files in the same directory, at the cost of
+// serializing operations that could theoretically run in parallel. In practice,
+// knowledge operations are infrequent enough that contention is not a concern.
+export async function transactKnowledge<T>(
+	filePath: string,
+	mutate: (entries: T[]) => T[] | null,
+): Promise<boolean> {
+	return transactFile<T[]>(
+		filePath,
+		readKnowledge,
+		async (fp, entries) => {
+			const content =
+				entries.map((e) => JSON.stringify(e)).join('\n') +
+				(entries.length > 0 ? '\n' : '');
+			await atomicWriteFile(fp, content);
+		},
+		mutate,
+	);
 }
 
 // Enforce a FIFO max-entries cap on a JSONL file.

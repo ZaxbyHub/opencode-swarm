@@ -17,8 +17,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	_internals as taskFileInternals,
 	atomicWriteFile,
+	_internals as taskFileInternals,
 } from '../../../src/evidence/task-file.js';
 import {
 	appendKnowledge,
@@ -307,6 +307,38 @@ describe('rewriteKnowledge crash-atomic temp-file + rename (requirement 5)', () 
 		const tmpFiles = fs.readdirSync(tmpDir).filter((f) => f.includes('.tmp.'));
 		expect(tmpFiles).toHaveLength(0);
 	});
+
+	it('transactKnowledge preserves original file when atomicWriteFile fails', async () => {
+		// Pre-populate file
+		await appendKnowledge(testFile, { id: 'stable', lesson: 'stable entry' });
+		const originalContent = fs.readFileSync(testFile, 'utf-8');
+
+		// Inject rename failure to simulate atomicWriteFile crash
+		const originalRename = taskFileInternals.renameSync;
+		taskFileInternals.renameSync = () => {
+			throw new Error('Simulated rename failure');
+		};
+
+		// Attempt transaction that would normally succeed
+		await expect(
+			transactKnowledge<TestEntry>(testFile, (entries) => [
+				...entries,
+				{ id: 'new', lesson: 'new entry' },
+			]),
+		).rejects.toThrow('Simulated rename failure');
+
+		// Restore original renameSync
+		taskFileInternals.renameSync = originalRename;
+
+		// Original file must be unchanged
+		const afterContent = fs.readFileSync(testFile, 'utf-8');
+		expect(afterContent).toBe(originalContent);
+
+		// No temp files should be left behind
+		const dirFiles = fs.readdirSync(tmpDir);
+		const tmpFiles = dirFiles.filter((f) => f.includes('.tmp.'));
+		expect(tmpFiles).toHaveLength(0);
+	});
 });
 
 // ============================================================================
@@ -374,7 +406,10 @@ describe('transactKnowledge no-op when mutate returns null', () => {
 		// Allow a little time so mtime would differ if a write happened
 		await Bun.sleep(10);
 
-		const wrote = await transactKnowledge<TestEntry>(testFile, (_entries) => null);
+		const wrote = await transactKnowledge<TestEntry>(
+			testFile,
+			(_entries) => null,
+		);
 
 		expect(wrote).toBe(false);
 		// File should be unchanged (same mtime)
@@ -418,7 +453,10 @@ describe('transactKnowledge with non-existent file', () => {
 	it('is a no-op when file does not exist and mutate returns null', async () => {
 		const newFile = path.join(tmpDir, 'ghost.jsonl');
 
-		const wrote = await transactKnowledge<TestEntry>(newFile, (_entries) => null);
+		const wrote = await transactKnowledge<TestEntry>(
+			newFile,
+			(_entries) => null,
+		);
 
 		expect(wrote).toBe(false);
 		expect(fs.existsSync(newFile)).toBe(false);
@@ -470,7 +508,10 @@ describe('Concurrent transactKnowledge calls serialize correctly', () => {
 			),
 			transactKnowledge<TestEntry>(testFile, (entries) => {
 				if (entries.some((e) => e.id === 'new-entry')) return null;
-				return [...entries, { id: 'new-entry', lesson: 'new', status: 'active' }];
+				return [
+					...entries,
+					{ id: 'new-entry', lesson: 'new', status: 'active' },
+				];
 			}),
 		]);
 
@@ -490,5 +531,51 @@ describe('Concurrent transactKnowledge calls serialize correctly', () => {
 
 		// Total entries: 5 seeds + 1 new = 6
 		expect(entries).toHaveLength(6);
+	});
+});
+
+// ============================================================================
+// 4. Concurrent .knowledge-shown.json updates preserve all shown IDs/outcomes.
+// ============================================================================
+
+describe('Concurrent .knowledge-shown.json updates (requirement 4)', () => {
+	let shownDir: string;
+	let shownFile: string;
+
+	beforeEach(() => {
+		shownDir = path.join(
+			os.tmpdir(),
+			`shown-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		fs.mkdirSync(shownDir, { recursive: true });
+		shownFile = path.join(shownDir, '.knowledge-shown.json');
+	});
+
+	afterEach(() => {
+		fs.rmSync(shownDir, { recursive: true, force: true });
+	});
+
+	it('concurrent transactShownFile calls for different phases preserve both phases', async () => {
+		const { _internals } = await import(
+			'../../../src/hooks/knowledge-reader.js'
+		);
+		const { transactShownFile } = _internals;
+
+		await Promise.all([
+			transactShownFile(shownFile, (data) => {
+				data['Phase 1'] = ['lesson-a', 'lesson-b'];
+				return data;
+			}),
+			transactShownFile(shownFile, (data) => {
+				data['Phase 2'] = ['lesson-c', 'lesson-d'];
+				return data;
+			}),
+		]);
+
+		const content = fs.readFileSync(shownFile, 'utf-8');
+		const data = JSON.parse(content);
+
+		expect(data['Phase 1']).toEqual(['lesson-a', 'lesson-b']);
+		expect(data['Phase 2']).toEqual(['lesson-c', 'lesson-d']);
 	});
 });
