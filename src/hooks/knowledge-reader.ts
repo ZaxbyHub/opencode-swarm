@@ -4,8 +4,10 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import {
 	jaccardBigram,
@@ -14,7 +16,7 @@ import {
 	readRetractionRecords,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	transactKnowledge,
 	wordBigrams,
 } from './knowledge-store.js';
 import type {
@@ -256,6 +258,56 @@ async function _detectTechStack(directory: string): Promise<string[]> {
 }
 
 // ============================================================================
+// Internal Helper: transactShownFile
+// ============================================================================
+
+// Perform an atomic locked read-modify-write on .knowledge-shown.json.
+// Acquires a directory lock, reads (or initialises) the JSON object, calls
+// mutate(), and if the result is non-null writes it crash-atomically via
+// atomicWriteFile. All writes to .knowledge-shown.json MUST go through this
+// function to prevent lost-update races (LF-1 fix).
+async function transactShownFile(
+	shownFile: string,
+	mutate: (
+		data: Record<string, string[]>,
+	) => Record<string, string[]> | null,
+): Promise<void> {
+	const dir = path.dirname(shownFile);
+	await mkdir(dir, { recursive: true });
+
+	let release: (() => Promise<void>) | null = null;
+	try {
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+
+		let shownData: Record<string, string[]> = {};
+		if (existsSync(shownFile)) {
+			try {
+				const content = await readFile(shownFile, 'utf-8');
+				shownData = JSON.parse(content);
+			} catch {
+				// Malformed JSON — start fresh (safe fallback)
+			}
+		}
+
+		const result = mutate(shownData);
+		if (result === null) return;
+
+		await atomicWriteFile(shownFile, JSON.stringify(result, null, 2));
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock release failed — non-blocking */
+			}
+		}
+	}
+}
+
+// ============================================================================
 // Internal Helper: recordLessonsShown
 // ============================================================================
 
@@ -267,23 +319,16 @@ async function recordLessonsShown(
 	const shownFile = path.join(directory, '.swarm', '.knowledge-shown.json');
 
 	try {
-		let shownData: Record<string, string[]> = {};
-
-		if (existsSync(shownFile)) {
-			const content = await readFile(shownFile, 'utf-8');
-			shownData = JSON.parse(content);
-		}
-
 		// Normalize to canonical 'Phase N' key so updateRetrievalOutcome can
 		// always find the record regardless of verbose phase description format.
 		// e.g. 'Phase 1: Setup [IN PROGRESS]' → 'Phase 1'
 		const phaseMatch = /^Phase\s+(\d+)/i.exec(currentPhase);
 		const canonicalKey = phaseMatch ? `Phase ${phaseMatch[1]}` : currentPhase;
 
-		shownData[canonicalKey] = lessonIds;
-
-		await mkdir(path.dirname(shownFile), { recursive: true });
-		await writeFile(shownFile, JSON.stringify(shownData, null, 2), 'utf-8');
+		await transactShownFile(shownFile, (shownData) => {
+			shownData[canonicalKey] = lessonIds;
+			return shownData;
+		});
 	} catch {
 		warn('[swarm] Knowledge: failed to record shown lessons');
 	}
@@ -504,85 +549,86 @@ export async function updateRetrievalOutcome(
 			return;
 		}
 
-		const content = await readFile(shownFile, 'utf-8');
-		const shownData: Record<string, string[]> = JSON.parse(content);
-		const shownIds = shownData[phaseInfo];
+		// Read shownIds with a regular (unlocked) read — we only need the initial
+		// value for dispatch; the final delete of this phase key is done atomically
+		// via transactShownFile below (LF-1 fix).
+		let shownIds: string[] | undefined;
+		try {
+			const content = await readFile(shownFile, 'utf-8');
+			const shownData: Record<string, string[]> = JSON.parse(content);
+			shownIds = shownData[phaseInfo];
+		} catch {
+			return;
+		}
 
 		// Exit if no shown IDs for this phase
 		if (!shownIds || shownIds.length === 0) {
 			return;
 		}
 
-		// Update swarm entries
+		// Update swarm entries atomically (CF-2 fix: transactKnowledge acquires the
+		// lock before reading so concurrent appends are not lost by the rewrite).
 		const swarmPath = resolveSwarmKnowledgePath(directory);
-		const entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
-		let updated = false;
 		const foundInSwarm = new Set<string>();
 
-		for (const entry of entries) {
-			if (shownIds.includes(entry.id)) {
-				// v2: applied_count is FROZEN — do NOT auto-increment from "shown".
-				// Use shown_count (already bumped by recordKnowledgeShown) and the
-				// new succeeded_after_shown_count / failed_after_shown_count for
-				// post-phase outcome attribution.
-				const ro = entry.retrieval_outcomes as unknown as Record<
-					string,
-					unknown
-				>;
-				if (phaseSucceeded) {
-					ro.succeeded_after_shown_count =
-						((ro.succeeded_after_shown_count as number) ?? 0) + 1;
-				} else {
-					ro.failed_after_shown_count =
-						((ro.failed_after_shown_count as number) ?? 0) + 1;
+		await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+			let mutated = false;
+			for (const entry of entries) {
+				if (shownIds!.includes(entry.id)) {
+					// v2: applied_count is FROZEN — do NOT auto-increment from "shown".
+					// Use shown_count (already bumped by recordKnowledgeShown) and the
+					// new succeeded_after_shown_count / failed_after_shown_count for
+					// post-phase outcome attribution.
+					const ro = entry.retrieval_outcomes as unknown as Record<
+						string,
+						unknown
+					>;
+					if (phaseSucceeded) {
+						ro.succeeded_after_shown_count =
+							((ro.succeeded_after_shown_count as number) ?? 0) + 1;
+					} else {
+						ro.failed_after_shown_count =
+							((ro.failed_after_shown_count as number) ?? 0) + 1;
+					}
+					mutated = true;
+					foundInSwarm.add(entry.id);
 				}
-				updated = true;
-				foundInSwarm.add(entry.id);
 			}
-		}
+			return mutated ? entries : null;
+		});
 
-		if (updated) {
-			await rewriteKnowledge(swarmPath, entries);
-		}
-
-		// Only update hive if there are IDs that weren't found in swarm
+		// Update hive entries for IDs not found in swarm, atomically (CF-2 fix).
 		const remainingIds = shownIds.filter((id) => !foundInSwarm.has(id));
-		if (remainingIds.length === 0) {
-			// All shown lessons were swarm-tier; skip hive read
-			delete shownData[phaseInfo];
-			await writeFile(shownFile, JSON.stringify(shownData, null, 2), 'utf-8');
-			return;
-		}
-
-		// Update hive entries
-		const hivePath = resolveHiveKnowledgePath();
-		const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-		let hiveUpdated = false;
-
-		for (const entry of hiveEntries) {
-			if (remainingIds.includes(entry.id)) {
-				const ro = entry.retrieval_outcomes as unknown as Record<
-					string,
-					unknown
-				>;
-				if (phaseSucceeded) {
-					ro.succeeded_after_shown_count =
-						((ro.succeeded_after_shown_count as number) ?? 0) + 1;
-				} else {
-					ro.failed_after_shown_count =
-						((ro.failed_after_shown_count as number) ?? 0) + 1;
+		if (remainingIds.length > 0) {
+			const hivePath = resolveHiveKnowledgePath();
+			await transactKnowledge<HiveKnowledgeEntry>(hivePath, (hiveEntries) => {
+				let mutated = false;
+				for (const entry of hiveEntries) {
+					if (remainingIds.includes(entry.id)) {
+						const ro = entry.retrieval_outcomes as unknown as Record<
+							string,
+							unknown
+						>;
+						if (phaseSucceeded) {
+							ro.succeeded_after_shown_count =
+								((ro.succeeded_after_shown_count as number) ?? 0) + 1;
+						} else {
+							ro.failed_after_shown_count =
+								((ro.failed_after_shown_count as number) ?? 0) + 1;
+						}
+						mutated = true;
+					}
 				}
-				hiveUpdated = true;
-			}
+				return mutated ? hiveEntries : null;
+			});
 		}
 
-		if (hiveUpdated) {
-			await rewriteKnowledge(hivePath, hiveEntries);
-		}
-
-		// Clean up shown record
-		delete shownData[phaseInfo];
-		await writeFile(shownFile, JSON.stringify(shownData, null, 2), 'utf-8');
+		// Clean up shown record atomically (LF-1 fix: transactShownFile prevents
+		// concurrent recordLessonsShown from clobbering an in-progress delete).
+		await transactShownFile(shownFile, (data) => {
+			delete data[phaseInfo];
+			return data;
+		});
 	} catch {
 		warn('[swarm] Knowledge: failed to update retrieval outcomes');
 	}

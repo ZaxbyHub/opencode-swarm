@@ -1,7 +1,7 @@
 /** Core storage layer for the opencode-swarm v6.17 two-tier knowledge system. */
 
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
@@ -309,6 +309,46 @@ export async function rewriteKnowledge<T>(
 	}
 }
 
+// Perform an atomic locked read-modify-write on a JSONL file.
+// Acquires a directory lock, reads all entries, calls mutate() with them,
+// and if mutate returns a non-null array, writes the result crash-atomically
+// via temp-file + rename (atomicWriteFile). Returns true if the file was
+// rewritten, false if mutate returned null (no-op).
+//
+// All callers that need a lock-before-read pattern (TOCTOU prevention) or
+// crash-atomic writes (MF-5 prevention) MUST use this function.
+export async function transactKnowledge<T>(
+	filePath: string,
+	mutate: (entries: T[]) => T[] | null,
+): Promise<boolean> {
+	const dir = path.dirname(filePath);
+	await mkdir(dir, { recursive: true });
+
+	let release: (() => Promise<void>) | null = null;
+	try {
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+		const entries = await readKnowledge<T>(filePath);
+		const result = mutate(entries);
+		if (result === null) return false;
+		const content =
+			result.map((e) => JSON.stringify(e)).join('\n') +
+			(result.length > 0 ? '\n' : '');
+		await atomicWriteFile(filePath, content);
+		return true;
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock release failed — non-blocking */
+			}
+		}
+	}
+}
+
 // Enforce a FIFO max-entries cap on a JSONL file.
 // If the file exceeds `maxEntries`, the oldest entries are dropped.
 // No-op when the file has fewer entries than the cap.
@@ -319,36 +359,10 @@ export async function enforceKnowledgeCap<T>(
 	filePath: string,
 	maxEntries: number,
 ): Promise<void> {
-	let release: (() => Promise<void>) | null = null;
-	try {
-		const dir = path.dirname(filePath);
-		// Ensure directory exists before acquiring lock (required by proper-lockfile).
-		await mkdir(dir, { recursive: true });
-		// Acquire directory lock for entire read-modify-write to prevent
-		// concurrent appendKnowledge from racing (TOCTOU race prevention)
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
-
-		const entries = await readKnowledge<T>(filePath);
-		if (entries.length > maxEntries) {
-			const trimmed = entries.slice(entries.length - maxEntries);
-			// Write directly with the held lock (avoid nested lock via rewriteKnowledge).
-			const content =
-				trimmed.map((e) => JSON.stringify(e)).join('\n') +
-				(trimmed.length > 0 ? '\n' : '');
-			await writeFile(filePath, content, 'utf-8');
-		}
-	} finally {
-		if (release) {
-			try {
-				await release();
-			} catch {
-				// Lock release failed — non-blocking
-			}
-		}
-	}
+	await transactKnowledge<T>(filePath, (entries) => {
+		if (entries.length <= maxEntries) return null;
+		return entries.slice(entries.length - maxEntries);
+	});
 }
 
 // Results from a sweep operation (aging or TODO removal)
@@ -368,27 +382,17 @@ export async function sweepAgedEntries<T extends KnowledgeEntryBase>(
 	filePath: string,
 	defaultMaxPhases: number,
 ): Promise<SweepResult> {
-	let release: (() => Promise<void>) | null = null;
-	try {
-		const dir = path.dirname(filePath);
-		// Ensure directory exists before acquiring lock (required by proper-lockfile).
-		await mkdir(dir, { recursive: true });
-		// Acquire directory lock for entire read-modify-write to prevent
-		// concurrent appendKnowledge from racing (H2 race condition prevention)
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+	const result: SweepResult = {
+		scanned: 0,
+		aged: 0,
+		archived: 0,
+		removed: 0,
+		skipped_promoted: 0,
+	};
 
-		const entries = await readKnowledge<T>(filePath);
-		const result: SweepResult = {
-			scanned: entries.length,
-			aged: 0,
-			archived: 0,
-			removed: 0,
-			skipped_promoted: 0,
-		};
-		if (entries.length === 0) return result;
+	await transactKnowledge<T>(filePath, (entries) => {
+		result.scanned = entries.length;
+		if (entries.length === 0) return null;
 
 		const now = new Date().toISOString();
 		let mutated = false;
@@ -417,23 +421,10 @@ export async function sweepAgedEntries<T extends KnowledgeEntryBase>(
 			}
 		}
 
-		// Write directly with the held lock (avoid nested lock via rewriteKnowledge).
-		if (mutated) {
-			const content =
-				entries.map((e) => JSON.stringify(e)).join('\n') +
-				(entries.length > 0 ? '\n' : '');
-			await writeFile(filePath, content, 'utf-8');
-		}
-		return result;
-	} finally {
-		if (release) {
-			try {
-				await release();
-			} catch {
-				// Lock release failed — non-blocking
-			}
-		}
-	}
+		return mutated ? entries : null;
+	});
+
+	return result;
 }
 
 // Hard-remove todo-category entries that have aged past todoMaxPhases.
@@ -442,25 +433,17 @@ export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 	filePath: string,
 	todoMaxPhases: number,
 ): Promise<SweepResult> {
-	let release: (() => Promise<void>) | null = null;
-	try {
-		const dir = path.dirname(filePath);
-		// Ensure directory exists before acquiring lock (required by proper-lockfile).
-		await mkdir(dir, { recursive: true });
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+	const result: SweepResult = {
+		scanned: 0,
+		aged: 0,
+		archived: 0,
+		removed: 0,
+		skipped_promoted: 0,
+	};
 
-		const entries = await readKnowledge<T>(filePath);
-		const result: SweepResult = {
-			scanned: entries.length,
-			aged: 0,
-			archived: 0,
-			removed: 0,
-			skipped_promoted: 0,
-		};
-		if (entries.length === 0) return result;
+	await transactKnowledge<T>(filePath, (entries) => {
+		result.scanned = entries.length;
+		if (entries.length === 0) return null;
 
 		const kept = entries.filter((e) => {
 			// Promoted entries are TTL-exempt per design, even for TODO category.
@@ -473,42 +456,29 @@ export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 			return true;
 		});
 
-		// Write directly with the held lock (avoid nested lock via rewriteKnowledge).
-		if (result.removed > 0) {
-			const content =
-				kept.map((e) => JSON.stringify(e)).join('\n') +
-				(kept.length > 0 ? '\n' : '');
-			await writeFile(filePath, content, 'utf-8');
-		}
-		return result;
-	} finally {
-		if (release) {
-			try {
-				await release();
-			} catch {
-				// Lock release failed — non-blocking
-			}
-		}
-	}
+		return result.removed > 0 ? kept : null;
+	});
+
+	return result;
 }
 
 // Append a RejectedLesson, enforcing a FIFO max-20 cap.
-// If the file already has >= 20 entries, drop the oldest before appending.
+// The full read-check-write is atomic under a directory lock (transactKnowledge)
+// to prevent concurrent callers from both reading below the cap and both appending,
+// ending up with more than MAX entries or silently losing a lesson (CF-2 TOCTOU fix).
 export async function appendRejectedLesson(
 	directory: string,
 	lesson: RejectedLesson,
 ): Promise<void> {
 	const filePath = resolveSwarmRejectedPath(directory);
-	const existing = await readRejectedLessons(directory);
 	const MAX = 20;
-	const updated = [...existing, lesson];
-	if (updated.length > MAX) {
-		// FIFO: drop oldest entries
-		const trimmed = updated.slice(updated.length - MAX);
-		await rewriteKnowledge(filePath, trimmed);
-	} else {
-		await appendKnowledge(filePath, lesson);
-	}
+	await transactKnowledge<RejectedLesson>(filePath, (existing) => {
+		const updated = [...existing, lesson];
+		if (updated.length > MAX) {
+			return updated.slice(updated.length - MAX);
+		}
+		return updated;
+	});
 }
 
 // ============================================================================
@@ -733,7 +703,7 @@ async function applyConfidenceDeltas(
 			const content =
 				entries.map((e) => JSON.stringify(e)).join('\n') +
 				(entries.length > 0 ? '\n' : '');
-			await writeFile(filePath, content, 'utf-8');
+			await atomicWriteFile(filePath, content);
 		}
 	} catch (err) {
 		console.warn(
@@ -765,6 +735,7 @@ export const _internals: {
 	readRejectedLessons: typeof readRejectedLessons;
 	appendKnowledge: typeof appendKnowledge;
 	rewriteKnowledge: typeof rewriteKnowledge;
+	transactKnowledge: typeof transactKnowledge;
 	enforceKnowledgeCap: typeof enforceKnowledgeCap;
 	sweepAgedEntries: typeof sweepAgedEntries;
 	sweepStaleTodos: typeof sweepStaleTodos;
@@ -787,6 +758,7 @@ export const _internals: {
 	readRejectedLessons,
 	appendKnowledge,
 	rewriteKnowledge,
+	transactKnowledge,
 	enforceKnowledgeCap,
 	sweepAgedEntries,
 	sweepStaleTodos,

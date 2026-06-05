@@ -58,6 +58,7 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
+	transactKnowledge,
 } from './knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -1321,77 +1322,88 @@ export async function applyCuratorKnowledgeUpdates(
 	);
 
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
-	const entries = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
 
-	let modified = false;
+	// Closure variables written by the transactKnowledge callback so the
+	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
-	const updatedEntries = entries.map((entry) => {
-		// Find matching recommendation by entry_id
-		const rec = validRecommendations.find((r) => r.entry_id === entry.id);
-		if (!rec) return entry;
+	const foundIds = new Set<string>();
 
-		// Apply mutation
-		switch (rec.action) {
-			case 'promote':
-				appliedIds.add(entry.id);
-				applied++;
-				modified = true;
-				return {
-					...entry,
-					hive_eligible: true,
-					confidence: Math.min(1.0, (entry.confidence ?? 0) + 0.1),
-					updated_at: new Date().toISOString(),
-				};
-			case 'archive':
-				appliedIds.add(entry.id);
-				applied++;
-				modified = true;
-				return {
-					...entry,
-					status: 'archived',
-					updated_at: new Date().toISOString(),
-				};
-			case 'flag_contradiction':
-				appliedIds.add(entry.id);
-				applied++;
-				modified = true;
-				return {
-					...entry,
-					tags: [
-						...(entry.tags ?? []),
-						`contradiction:${(rec.reason ?? '').slice(0, 50)}`,
-					],
-					updated_at: new Date().toISOString(),
-				};
-			case 'rewrite': {
-				// Replace lesson text in-place. Preserve all metadata.
-				// Enforce the 15–280 char bounds before applying.
-				const newLesson = (rec.lesson ?? '').trim();
-				if (newLesson.length < 15 || newLesson.length > 280) {
-					// Malformed rewrite — treat as skipped, return unmodified entry
-					return entry;
+	// Atomically read, mutate, and rewrite existing entries under a directory lock
+	// (CF-2 TOCTOU fix: concurrent appendKnowledge calls between an unlocked read
+	// and a locked rewrite can no longer silently drop entries).
+	await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (entries) => {
+		// Reset closure state on each call (in case of future retry semantics).
+		appliedIds.clear();
+		foundIds.clear();
+		let txApplied = 0;
+		let modified = false;
+
+		for (const e of entries) foundIds.add(e.id);
+
+		const updatedEntries = entries.map((entry) => {
+			const rec = validRecommendations.find((r) => r.entry_id === entry.id);
+			if (!rec) return entry;
+
+			switch (rec.action) {
+				case 'promote':
+					appliedIds.add(entry.id);
+					txApplied++;
+					modified = true;
+					return {
+						...entry,
+						hive_eligible: true,
+						confidence: Math.min(1.0, (entry.confidence ?? 0) + 0.1),
+						updated_at: new Date().toISOString(),
+					};
+				case 'archive':
+					appliedIds.add(entry.id);
+					txApplied++;
+					modified = true;
+					return {
+						...entry,
+						status: 'archived' as const,
+						updated_at: new Date().toISOString(),
+					};
+				case 'flag_contradiction':
+					appliedIds.add(entry.id);
+					txApplied++;
+					modified = true;
+					return {
+						...entry,
+						tags: [
+							...(entry.tags ?? []),
+							`contradiction:${(rec.reason ?? '').slice(0, 50)}`,
+						],
+						updated_at: new Date().toISOString(),
+					};
+				case 'rewrite': {
+					const newLesson = (rec.lesson ?? '').trim();
+					if (newLesson.length < 15 || newLesson.length > 280) {
+						return entry;
+					}
+					appliedIds.add(entry.id);
+					txApplied++;
+					modified = true;
+					return {
+						...entry,
+						lesson: newLesson,
+						updated_at: new Date().toISOString(),
+						confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05),
+					};
 				}
-				appliedIds.add(entry.id);
-				applied++;
-				modified = true;
-				return {
-					...entry,
-					lesson: newLesson,
-					updated_at: new Date().toISOString(),
-					// Slightly reduce confidence on rewrite (lesson changed — needs re-validation)
-					confidence: Math.max(0.1, (entry.confidence ?? 0.5) - 0.05),
-				};
+				default:
+					return entry;
 			}
-			default:
-				return entry;
-		}
+		});
+
+		applied += txApplied;
+		return modified ? updatedEntries : null;
 	});
 
-	// Count skipped: recommendations that were not applied
+	// Count skipped: recommendations that were not applied to existing entries
 	for (const rec of validRecommendations) {
 		if (rec.entry_id !== undefined && !appliedIds.has(rec.entry_id)) {
-			const found = entries.some((e) => e.id === rec.entry_id);
-			if (!found) {
+			if (!foundIds.has(rec.entry_id)) {
 				logger.warn(
 					`[curator] applyCuratorKnowledgeUpdates: entry_id '${rec.entry_id}' not found — skipping`,
 				);
@@ -1400,17 +1412,16 @@ export async function applyCuratorKnowledgeUpdates(
 		}
 	}
 
-	// Only rewrite if at least one entry was mutated
-	if (modified) {
-		await rewriteKnowledge(knowledgePath, updatedEntries);
-	}
-
 	// Create new entries for recommendations that used the "new" token.
 	// entry_id === undefined means the LLM requested a new knowledge entry.
 	// Only 'promote' actions are meaningful without an existing entry_id —
 	// 'archive' and 'flag_contradiction' require a real entry to operate on.
-	// These are appended after the rewrite to avoid lock contention.
-	const existingLessons: string[] = entries.map((e) => e.lesson);
+	// These are appended after the transaction to avoid nested locking.
+	// Re-read lessons from the file for dedup purposes.
+	// This is a separate unlocked read; the append below is independently locked.
+	const currentEntries = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
+	const currentLessons: string[] = currentEntries.map((e) => e.lesson);
+
 	for (const rec of validRecommendations) {
 		if (rec.entry_id !== undefined) continue;
 		if (rec.action !== 'promote') {
@@ -1418,21 +1429,18 @@ export async function applyCuratorKnowledgeUpdates(
 			continue;
 		}
 		const lesson = (rec.lesson?.trim() ?? '').slice(0, 280);
-		// Enforce minimum length per KnowledgeEntryBase spec (15–280 chars)
 		if (lesson.length < 15) {
 			skipped++;
 			continue;
 		}
-		// Exact-match dedup within this batch — separate from validateLesson (contradiction detection only)
 		if (
-			existingLessons.some((el) => el.toLowerCase() === lesson.toLowerCase())
+			currentLessons.some((el) => el.toLowerCase() === lesson.toLowerCase())
 		) {
 			skipped++;
 			continue;
 		}
-		// Validation gate: contradiction detection
 		if (knowledgeConfig.validation_enabled !== false) {
-			const validation = validateLesson(lesson, existingLessons, {
+			const validation = validateLesson(lesson, currentLessons, {
 				category: rec.category ?? 'other',
 				scope: 'global',
 				confidence: rec.confidence ?? 0.5,
@@ -1466,7 +1474,7 @@ export async function applyCuratorKnowledgeUpdates(
 		};
 		await appendKnowledge(knowledgePath, newEntry);
 		applied++;
-		existingLessons.push(lesson);
+		currentLessons.push(lesson);
 	}
 
 	return { applied, skipped };
