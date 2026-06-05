@@ -127,6 +127,16 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).toContain('ROUND 2 DELIBERATION');
 		});
 
+		it('requires re-dispatch of all absent members after insufficient_quorum', () => {
+			expect(prompt).toMatch(/dispatch ALL absent members.*single parallel batch/i);
+		});
+
+		it('requires prior-round dissenters to be re-dispatched', () => {
+			expect(prompt).toMatch(
+				/every prior-round\s+dissenter[\s\S]*re-dispatched/i,
+			);
+		});
+
 		describe('critic dispatch includes approved-plan baseline and drift analysis', () => {
 			it('contains get_approved_plan in the critic dispatch text', () => {
 				expect(prompt).toContain('get_approved_plan');

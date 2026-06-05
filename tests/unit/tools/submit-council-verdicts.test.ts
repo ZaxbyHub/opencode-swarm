@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startAgentSession } from '../../../src/state';
 
 const writeConfig = (dir: string, council: Record<string, unknown>): void => {
 	mkdirSync(join(dir, '.opencode'), { recursive: true });
@@ -22,9 +23,11 @@ const writeConfig = (dir: string, council: Record<string, unknown>): void => {
 const makeVerdict = (
 	agent: string,
 	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT' = 'APPROVE',
+	verdictRound?: number,
 ): Record<string, unknown> => ({
 	agent,
 	verdict,
+	...(verdictRound !== undefined ? { verdictRound } : {}),
 	confidence: 1,
 	findings: [],
 	criteriaAssessed: [],
@@ -305,6 +308,133 @@ describe('submit_council_verdicts — quorum guard', () => {
 			expect(parsed).toHaveProperty('membersAbsent');
 			expect(parsed).toHaveProperty('quorumSize');
 			expect(parsed.quorumMet).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('rejects cherry-picked re-dispatch after insufficient_quorum in same round', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'submit-quorum-cherry-pick-'));
+		const sessionID = `submit-council-${Date.now()}-a`;
+		try {
+			writeConfig(tempDir, { enabled: true });
+			startAgentSession(sessionID, 'architect', undefined, tempDir);
+			const { submit_council_verdicts } = await import(
+				'../../../src/tools/convene-council'
+			);
+			const first = await submit_council_verdicts.execute(
+				{
+					taskId: '1.1',
+					swarmId: 'swarm-1',
+					roundNumber: 1,
+					verdicts: [makeVerdict('critic'), makeVerdict('test_engineer')],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir, sessionID },
+			);
+			const firstParsed = JSON.parse(first);
+			expect(firstParsed.reason).toBe('insufficient_quorum');
+			expect(firstParsed.membersAbsent).toEqual(['reviewer', 'sme', 'explorer']);
+
+			const retry = await submit_council_verdicts.execute(
+				{
+					taskId: '1.1',
+					swarmId: 'swarm-1',
+					roundNumber: 1,
+					verdicts: [
+						makeVerdict('critic'),
+						makeVerdict('test_engineer'),
+						makeVerdict('reviewer'),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir, sessionID },
+			);
+			const retryParsed = JSON.parse(retry);
+			expect(retryParsed.success).toBe(false);
+			expect(retryParsed.reason).toBe('cherry_pick_detected');
+			expect(retryParsed.stillMissingMembers).toEqual(['sme', 'explorer']);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('round 2 requires prior-round dissenter to re-review', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'submit-dissenter-round2-'));
+		const sessionID = `submit-council-${Date.now()}-b`;
+		try {
+			writeConfig(tempDir, { enabled: true });
+			startAgentSession(sessionID, 'architect', undefined, tempDir);
+			const { submit_council_verdicts } = await import(
+				'../../../src/tools/convene-council'
+			);
+			const round1 = await submit_council_verdicts.execute(
+				{
+					taskId: '2.2',
+					swarmId: 'swarm-1',
+					roundNumber: 1,
+					verdicts: [
+						makeVerdict('critic', 'APPROVE', 1),
+						makeVerdict('reviewer', 'APPROVE', 1),
+						makeVerdict('sme', 'CONCERNS', 1),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir, sessionID },
+			);
+			const round1Parsed = JSON.parse(round1);
+			expect(round1Parsed.success).toBe(true);
+
+			const round2 = await submit_council_verdicts.execute(
+				{
+					taskId: '2.2',
+					swarmId: 'swarm-1',
+					roundNumber: 2,
+					verdicts: [
+						makeVerdict('critic', 'APPROVE', 2),
+						makeVerdict('reviewer', 'APPROVE', 2),
+						makeVerdict('test_engineer', 'APPROVE', 2),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir, sessionID },
+			);
+			const round2Parsed = JSON.parse(round2);
+			expect(round2Parsed.success).toBe(false);
+			expect(round2Parsed.reason).toBe('cherry_pick_detected');
+			expect(round2Parsed.stillMissingMembers).toEqual(['sme']);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('rejects stale verdictRound values from prior rounds', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'submit-stale-verdict-round-'));
+		try {
+			writeConfig(tempDir, { enabled: true });
+			const { submit_council_verdicts } = await import(
+				'../../../src/tools/convene-council'
+			);
+			const result = await submit_council_verdicts.execute(
+				{
+					taskId: '3.1',
+					swarmId: 'swarm-1',
+					roundNumber: 2,
+					verdicts: [
+						makeVerdict('critic', 'APPROVE', 2),
+						makeVerdict('reviewer', 'APPROVE', 2),
+						makeVerdict('sme', 'CONCERNS', 1),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('stale_verdict_detected');
+			expect(parsed.staleVerdicts).toEqual([
+				{ agent: 'sme', verdictRound: 1 },
+			]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

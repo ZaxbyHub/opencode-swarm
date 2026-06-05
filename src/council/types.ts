@@ -50,6 +50,8 @@ export interface CouncilFinding {
 export interface CouncilMemberVerdict {
 	agent: CouncilAgent;
 	verdict: CouncilVerdict;
+	/** Optional source round for freshness checks on resubmission. */
+	verdictRound?: number;
 	/** Confidence 0.0–1.0 */
 	confidence: number;
 	findings: CouncilFinding[];

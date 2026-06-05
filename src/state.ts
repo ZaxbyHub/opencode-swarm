@@ -13,6 +13,7 @@ import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
+import type { CouncilAgent } from './council/types';
 import { getProfile, type QaGates } from './db/qa-gate-profile.js';
 import {
 	detectEnvironmentProfile,
@@ -183,6 +184,11 @@ export interface AgentSessionState {
 			quorumSize: number;
 		}
 	>;
+	/**
+	 * Per-(task,round) required council members for the next submission attempt.
+	 * Key format: `${taskId}:${roundNumber}`.
+	 */
+	pendingCouncilRequirements?: Map<string, Set<CouncilAgent>>;
 	/** Last gate outcome for deliberation preamble injection */
 	lastGateOutcome: {
 		gate: string;
@@ -523,6 +529,7 @@ export function startAgentSession(
 		taskWorkflowStates: new Map(),
 		stageBCompletion: new Map(),
 		taskCouncilApproved: new Map(),
+		pendingCouncilRequirements: new Map(),
 		lastGateOutcome: null,
 		declaredCoderScope: null,
 		lastScopeViolation: null,
@@ -720,6 +727,9 @@ export function ensureAgentSession(
 		// v6.71+ Council mode migration safety
 		if (!session.taskCouncilApproved) {
 			session.taskCouncilApproved = new Map();
+		}
+		if (!session.pendingCouncilRequirements) {
+			session.pendingCouncilRequirements = new Map();
 		}
 		if (session.lastGateOutcome === undefined) {
 			session.lastGateOutcome = null;

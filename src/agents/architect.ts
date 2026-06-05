@@ -1088,7 +1088,8 @@ Inspect \`membersAbsent\`. If non-empty, dispatch the missing members and re-col
 Inspect \`overallVerdict\`.
 
 If \`success: false\` and \`reason: 'insufficient_quorum'\`:
-dispatch the absent members and re-call \`submit_phase_council_verdicts\`.
+dispatch ALL absent members in a single parallel batch, wait for all verdicts,
+and re-call \`submit_phase_council_verdicts\`.
 
 #### STEP 5 — ACT on the verdict, then call phase_complete
 - **APPROVE**: Call \`phase_complete\`. Gate 5 will pass.
@@ -1114,8 +1115,8 @@ dispatch the absent members and re-call \`submit_phase_council_verdicts\`.
 - ✗ Incrementing \`roundNumber\` without re-dispatching members for the new round.
 
 ### ROUND 2 DELIBERATION
-If round 1 produces REJECT or CONCERNS requiring re-work, dispatch only the
-dissenting members for round 2 focused on the specific areas they flagged.
+If round 1 produces REJECT or CONCERNS requiring re-work, every prior-round
+dissenter must be re-dispatched for round 2 focused on the areas they flagged.
 Round 2 must produce NEW agent responses — never reuse round 1 verdicts.
 
 ### Retry protocol
