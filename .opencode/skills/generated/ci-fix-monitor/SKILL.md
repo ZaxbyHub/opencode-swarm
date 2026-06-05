@@ -2,7 +2,7 @@
 name: ci-fix-monitor
 description: >
   Monitor CI on a PR, diagnose failures, fix them, and re-push until green.
-  Covers reading CI logs, classifying failure types (check-title, dist-check,
+  Covers reading CI logs, classifying failure types (check-title, package-check,
   test failures, lint), determining the correct fix, and re-pushing.
 ---
 
@@ -38,8 +38,8 @@ and stop.
 | Failure type | Root cause pattern | Fix action |
 |---|---|---|
 | **check-title** | PR title lacks `<type>(<scope>):` prefix | Update title via PR edit |
-| **dist-check: source changed** | Source was changed but dist/ not rebuilt | Rebuild: `bun run build` then commit dist/ |
-| **dist-check: version drift only** | Branch is behind main; main had a release commit; CI uses merge-commit checkout | Rebase onto main, rebuild, force-push — see section below |
+| **package-check** | npm tarball validation failed (source/build/package-manifest problem) | Fix source/build/manifest — see section below. Not generated-file drift. |
+| **branch behind main** | Branch is behind main; main had a release commit; CI uses merge-commit checkout | Rebase onto main, force-push — see section below |
 | **lint/quality: format** | Code style violations (long lines, spacing) | `bunx biome format --write <files>` then commit |
 | **lint/quality: lint** | Lint rule violations (noExplicitAny, etc.) | `bunx biome check --write <files>` or fix manually |
 | **unit test** | Test failures | Read log, fix code, commit |
@@ -63,25 +63,27 @@ Read the log carefully before concluding root cause. Distinguish between:
 ### check-title
 No commit needed. Update the PR title.
 
-### dist-check: source-change rebuild
+### package-check failure
 
-The dist/ was not rebuilt after source changes:
+`package-check` validates the npm tarball (`npm pack` + tarball contents). A
+failure is a source/build/package-manifest problem, **not** generated-file
+drift. `dist/` is generated and NOT committed — do not stage it. Run
+`bun run build` locally only when you need the bundle to verify the failure:
 
 ```bash
 bun run build
 node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"
-git add dist/
-git commit -m "chore: rebuild dist after source changes"
-git push origin <branch>
 ```
 
-### dist-check: version-drift only (branch behind main)
+Fix the underlying source/build/`package.json` `files` manifest issue, then
+commit the source fix (not `dist/`) and push.
 
-**Identifying this case:** The only diff in the CI log is a version string
-(`version: "X.Y.Z"` changed to a higher version). No source file change is
-needed — main had a release commit after the branch was cut, and GitHub Actions
-checks out the merge-commit for CI, so the fresh build embeds main's version
-while the committed dist has the old version.
+### branch behind main (version drift)
+
+**Identifying this case:** A version string differs (`version: "X.Y.Z"` changed
+to a higher version) because main had a release commit after the branch was cut,
+and GitHub Actions checks out the merge-commit for CI. Rebase onto main to pick
+up the release commit.
 
 **Fix:**
 
@@ -90,10 +92,6 @@ git fetch origin main
 git rebase origin/main       # fast-forward the branch onto the release commit
 # If the rebase halts with conflicts, run `git rebase --abort` and escalate
 # to the user — do not attempt to resolve a conflicted rebase automatically.
-bun run build                # rebuilds with the updated package.json version
-node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"
-git add dist/
-git commit -m "chore(dist): rebuild after rebase onto vX.Y.Z main"
 git push --force-with-lease origin <branch>   # force-push is required after rebase
 ```
 
@@ -110,7 +108,6 @@ Auto-fix only the changed files to minimize noise:
 ```bash
 bunx biome format --write src/path/to/changed-file.ts
 bun test src/path/to/changed-file.test.ts   # verify tests still pass after format
-bun run build                                # if dist/ is committed, rebuild it
 git add <files>
 git commit -m "style: apply Biome formatting"
 git push origin <branch>
@@ -165,14 +162,14 @@ state is acceptable only if the same check was skipped on the base branch
 
 - Do NOT watch CI passively without diagnosing failures first
 - Do NOT assume a failure is pre-existing without checking main
-- Do NOT skip the reviewer when the fix involves code changes (not just dist/title)
+- Do NOT skip the reviewer when the fix involves code changes (not just title)
 - Do NOT run `biome format --write .` on the whole repo for a single-file format fix
-- dist-check failures are NEVER pre-existing — they are always a hard gate
+- Do NOT stage or commit `dist/` — it is generated and NOT committed; there is no committed-dist drift check
 - After a rebase, a force-push is required and expected — do not try a regular push
 
 ## Source knowledge entries
 - 3736ded4: Evidence summary must not contain verdict words
-- b3553e79: Rebuild dist after merge bumps version
+- b3553e79: dist/ is generated and not committed — branch-behind-main fixes are rebase-only (no dist rebuild/commit)
 - b701eb40: Bash glob quoting bug pattern
 - 2a1b020a: High-volume CI notices create noise
-- ff557dc: dist-check version-drift fix: rebase onto main + rebuild + force-push
+- ff557dc: Branch-behind-main (version drift) fix: rebase onto main + force-push (no dist rebuild/commit)

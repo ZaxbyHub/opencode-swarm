@@ -55,8 +55,10 @@ Identify which files in the diff are NOT part of the feature being reverted:
 - `package.json` — version field + dependency additions/removals
 - `CHANGELOG.md` — release history
 - Lockfiles (`bun.lock`, `package-lock.json`) — dependency graph
-- `dist/` — build artifacts (will need rebuild)
 - Any config files modified by release PRs between the feature and now
+
+`dist/` is generated and NOT committed, so it never appears in a revert diff and
+needs no rebuild+commit as part of a revert — reverting the source is enough.
 
 **Gate:** If ANY version metadata or dependency file appears in the diff, you MUST verify post-revert state (Step 3).
 
@@ -105,13 +107,9 @@ After reverting, verify these files match expected state:
    bun install --frozen-lockfile   # Must succeed
    ```
 
-5. **`dist/`** — rebuild required after any source or dependency change
+5. **Bundle size** — if dependencies were added/removed, verify smoke test thresholds still pass. `dist/` is generated and NOT committed; run `bun run build` locally only when you need the bundle to verify.
    ```bash
    bun run build
-   ```
-
-6. **Bundle size** — if dependencies were added/removed, verify smoke test thresholds still pass
-   ```bash
    bun test tests/smoke --timeout 120000
    ```
 
@@ -158,12 +156,7 @@ Use when the wrong code was merged to main and you need a clean recovery.
    git diff --name-only origin/main..HEAD
    ```
 
-4. **Rebuild dist/** if any source files changed:
-   ```bash
-   bun run build
-   ```
-
-5. **Run full QA gates** before pushing (lint, build, tests, smoke tests)
+4. **Run full QA gates** before pushing (lint, build, tests, smoke tests). `dist/` is generated and NOT committed — do not stage it; run `bun run build` locally only when you need the bundle to verify.
 
 **Do NOT attempt incremental cleanup** (removing bad files one by one from a contaminated branch) when release metadata, generated bundles, or dependency graphs are involved. Clean-slate cherry-pick guarantees no contamination leaks.
 
@@ -173,9 +166,8 @@ Use when the wrong code was merged to main and you need a clean recovery.
 
 After resolving any revert or cherry-pick conflicts:
 1. Run `git diff` to review ALL resolved files — not just the conflicted ones
-2. Pay special attention to dist/ and generated files — prefer accepting theirs and rebuilding
-3. For CHANGELOG/manifest conflicts — restore from known-good state, do NOT merge both versions
-4. Verify build succeeds before committing: `bun run build`
+2. For CHANGELOG/manifest conflicts — restore from known-good state, do NOT merge both versions
+3. Verify build succeeds before committing: `bun run build` (`dist/` is generated and NOT committed — do not stage it)
 
 ---
 
@@ -183,8 +175,7 @@ After resolving any revert or cherry-pick conflicts:
 
 - NEVER assume version metadata survived a multi-commit revert unchanged — always verify
 - NEVER dismiss CI failures as pre-existing without comparing timestamps against last-green-CI
-- NEVER attempt incremental cleanup of contaminated branches when release metadata, generated bundles, or dependency graphs are involved
-- NEVER push a revert without rebuilding dist/ if source files changed
+- NEVER attempt incremental cleanup of contaminated branches when release metadata or dependency graphs are involved
 - NEVER hand-invent release-please version numbers — restore from known-good state or re-run release-please
 - NEVER trust stale local SHAs after force-pushes — refetch and compare against remote before recovery
 

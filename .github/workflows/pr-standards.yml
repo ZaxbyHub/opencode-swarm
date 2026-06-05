@@ -144,7 +144,7 @@ jobs:
           # Docs/workflow/meta-only changes (no source, generated output, scripts,
           # tests, runners, examples, or dependency manifests touched) do not
           # require a release fragment.
-          if ! grep -Eq '^(src/|bin/|dist/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed"; then
+          if ! grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed"; then
             echo "Docs/workflow/meta-only change without release fragment accepted."
             exit 0
           fi

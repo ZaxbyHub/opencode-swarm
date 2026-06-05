@@ -171,7 +171,7 @@ The context pack must include, when available:
 - Pull in relevant `.swarm/evidence/`, `.swarm/state`, `.swarm/knowledge`, or hive/project knowledge entries when present.
 - Historical knowledge may guide candidate generation but cannot confirm a finding by itself.
 - Mark stale, quarantined, or cross-project knowledge as advisory until independently verified in this repo.
-- **CI built-artifact checks (dist-check, lockfile diff, bundle-size, etc.) compare against the merge commit, not the PR branch head. The merge commit includes base-branch changes (version bumps, lockfile updates) that may not be in the PR branch, causing false-positive drift signals. When investigating a CI failure on a built artifact, verify the finding against the actual PR branch head artifacts before reporting as PR-introduced. If the drift is only a version mismatch or a lockfile staleness that rebuilding resolves, note in the deterministics signal log that it is a branch-hygiene artifact, not a PR-introduced issue.**
+- **CI built-artifact checks (package-check, lockfile diff, bundle-size, etc.) compare against the merge commit, not the PR branch head. The merge commit includes base-branch changes (version bumps, lockfile updates) that may not be in the PR branch, causing false-positive drift signals. When investigating a CI failure on a built artifact, verify the finding against the actual PR branch head artifacts before reporting as PR-introduced. If the drift is only a version mismatch or a lockfile staleness that rebuilding resolves, note in the deterministics signal log that it is a branch-hygiene artifact, not a PR-introduced issue.**
 
 ---
 
