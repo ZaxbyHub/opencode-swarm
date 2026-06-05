@@ -66,10 +66,7 @@ export function parseDependencyGraph(planPath: string): DependencyGraph {
 				: error instanceof Error
 					? error.message
 					: String(error);
-		console.error(
-			`[dependency-graph] Failed to parse ${planPath}:`,
-			detail,
-		);
+		console.error(`[dependency-graph] Failed to parse ${planPath}:`, detail);
 		return { tasks, phases, roots: [], leaves: [] };
 	}
 
