@@ -42,7 +42,7 @@ branch protection / ruleset:
   check names GitHub emits** — matrix jobs report one check per matrix leg, not an
   aggregate, so require each leg by name or the queue will wait forever for a check
   that never reports:
-  - `quality`, `integration`, `dist-check`, `package-check`, `security`,
+  - `quality`, `integration`, `package-check`, `security`,
     `php-validation`, `rust-sandbox-runner`, `check-title`, `pr-standards`
   - `unit (ubuntu-latest)`, `unit (macos-latest)`, `unit (windows-latest)`
   - `smoke (ubuntu-latest)`, `smoke (macos-latest)`, `smoke (windows-latest)`
@@ -55,4 +55,5 @@ branch protection / ruleset:
 
 - Until the queue is enabled, these `merge_group` triggers never fire, so PR behavior
   is unchanged.
-- `dist-check` still runs in the queue for now; it is removed by #1047 (PR 3).
+- `dist-check` is removed in this same release by #1047 (PR 3); do not configure it as
+  a required check.

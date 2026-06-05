@@ -285,7 +285,7 @@ When CI reports a `unit (ubuntu-latest|macos-latest|windows-latest)` failure:
    bun --smol test tests/unit/<dir>/<file>.test.ts --timeout 30000
    ```
 3. **Then check if the same failure reproduces on `main`.** If yes, document as pre-existing in the PR description and continue with your branch's work; do not silently inherit the failure.
-4. **For dist-check failures:** any change under `src/` that the bundler picks up requires `bun run build` + commit of `dist/` in the same PR. The job compares committed `dist/` against a fresh build.
+4. **For `package-check` failures:** `package-check` validates the npm tarball (`npm pack` + tarball contents). A failure here is a source/build/package-manifest problem, not generated-file drift. `dist/` is generated and NOT committed — do not stage it; run `bun run build` locally only when you need the bundle. There is no longer a committed-dist drift check.
 5. **For matrix-OS-only failures:** check `process.platform` guards, `mkdtempSync` realpath wrapping, chmod guards, symlink capability checks, and `npx`-spawn skips (sections above).
 
 ## Before Submitting

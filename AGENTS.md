@@ -38,7 +38,8 @@ Every PR that touches a relevant area must list which of these invariants it tou
 - The main plugin bundle (`dist/index.js`) must remain Node-ESM-loadable. **No top-level `bun:` imports** (see v6.86.8 / `bundle-portability.test.ts`).
 - **No direct `Bun.*` calls** outside `src/utils/bun-compat.ts`. CLI-only modules that intentionally `--target bun` are the only exception.
 - The default export must remain the v1 plugin object shape `{ id, server }` (see v6.86.9 / `bundle-plugin-shape.test.ts`).
-- Any change touching `src/index.ts`, package exports, `package.json#main`, `bun build` config, `dist/`, or plugin entry shape must run the bundle-portability and plugin-shape tests AND `node --input-type=module -e "await import('./dist/index.js')"`.
+- Any change touching `src/index.ts`, package exports, `package.json#main`, `bun build` config, or plugin entry shape must run the bundle-portability and plugin-shape tests AND `node --input-type=module -e "await import('./dist/index.js')"`.
+- `dist/` is **generated build output and is not committed** (#1047). Do not stage it. CI builds it (`unit`, `package-check`, `smoke` run `bun run build`) and `package-check` validates the packed npm tarball; release/publish builds from source.
 
 ### 3. Subprocesses — bounded, non-interactive, killable, portable
 
