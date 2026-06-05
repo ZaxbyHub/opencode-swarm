@@ -421,6 +421,26 @@ function resolveDelegatedPlanTaskId(
 		args.task,
 		args.input,
 	];
+
+	// Strong signal: when delegation text includes a TASK: line, prefer IDs from
+	// that line even if other task IDs appear elsewhere in the same prompt.
+	const taskLineMatches = new Set<string>();
+	for (const field of candidateTextFields) {
+		if (typeof field !== 'string') continue;
+		const taskLine = extractTaskLine(field);
+		if (!taskLine) continue;
+		for (const m of taskLine.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
+			const candidate = m[1];
+			if (!isStrictTaskId(candidate)) continue;
+			if (knownPlanTaskIds && !knownPlanTaskIds.has(candidate)) continue;
+			taskLineMatches.add(candidate);
+		}
+	}
+	if (taskLineMatches.size === 1) {
+		return taskLineMatches.values().next().value as string;
+	}
+	if (taskLineMatches.size > 1) return null;
+
 	const seen = new Set<string>();
 	for (const field of candidateTextFields) {
 		if (typeof field !== 'string') continue;
