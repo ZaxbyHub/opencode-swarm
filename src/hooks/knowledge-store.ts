@@ -319,7 +319,13 @@ export async function transactFile<T>(
 	mutate: (data: T) => T | null,
 ): Promise<boolean> {
 	const dir = path.dirname(filePath);
-	await mkdir(dir, { recursive: true });
+	try {
+		await mkdir(dir, { recursive: true });
+	} catch {
+		// Directory creation failed (path traversal, null byte, permissions, etc.)
+		// Safe fallback: treat as no-op.
+		return false;
+	}
 
 	let release: (() => Promise<void>) | null = null;
 	try {
