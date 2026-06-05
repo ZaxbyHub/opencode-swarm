@@ -57,7 +57,6 @@ import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
 	transactKnowledge,
 } from './knowledge-store.js';
 import type {
@@ -1292,7 +1291,7 @@ export async function runCuratorPhase(
 
 /**
  * Apply curator knowledge recommendations: promote, archive, or flag contradictions.
- * Uses readKnowledge + rewriteKnowledge pattern for atomic updates.
+ * Uses transactKnowledge for atomic locked read-modify-write updates.
  * @param directory - The workspace directory
  * @param recommendations - Array of knowledge recommendations to apply
  * @param knowledgeConfig - Knowledge configuration (for path resolution)

@@ -5,7 +5,6 @@ import {
 	readKnowledgeCounterRollups,
 } from './knowledge-events.js';
 import {
-	appendKnowledge,
 	appendRejectedLesson,
 	appendRetractionRecord,
 	computeConfidence,
