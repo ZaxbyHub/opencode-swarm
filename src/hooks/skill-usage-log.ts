@@ -89,6 +89,7 @@ export const _internals = {
 	openSync: fs.openSync.bind(fs),
 	readSync: fs.readSync.bind(fs),
 	closeSync: fs.closeSync.bind(fs),
+	pruneSkillUsageLog,
 	resolveSourceKnowledgeIds,
 	applySkillUsageFeedback,
 	parseGeneratedFromKnowledge,
@@ -166,6 +167,18 @@ export function appendSkillUsageEntry(
 		`${JSON.stringify(fullEntry)}\n`,
 		'utf-8',
 	);
+
+	try {
+		const stat = _internals.statSync(resolved);
+		if (stat.size > SKILL_USAGE_LOG_ROTATE_BYTES) {
+			_internals.pruneSkillUsageLog(
+				directory,
+				SKILL_USAGE_LOG_MAX_ENTRIES_PER_SKILL,
+			);
+		}
+	} catch {
+		// best-effort compaction check — fail-open
+	}
 }
 
 // ============================================================================
@@ -230,6 +243,9 @@ export function readSkillUsageEntries(
 
 /** Default maximum bytes to read from the end of the log file. */
 export const TAIL_BYTES_DEFAULT = 64 * 1024; // 64 KB — covers ~500 entries
+export const MAX_TAIL_BYTES = TAIL_BYTES_DEFAULT;
+const SKILL_USAGE_LOG_ROTATE_BYTES = 1024 * 1024; // 1 MB
+const SKILL_USAGE_LOG_MAX_ENTRIES_PER_SKILL = 500;
 
 /**
  * Read the last `maxBytes` of the skill-usage JSONL log and parse matching
@@ -250,8 +266,15 @@ export function readSkillUsageEntriesTail(
 	const logPath = resolveLogPath(directory);
 	if (!_internals.existsSync(logPath)) return [];
 	try {
+		const normalizedMaxBytes = Number.isFinite(maxBytes)
+			? maxBytes
+			: TAIL_BYTES_DEFAULT;
+		const boundedMaxBytes = Math.min(
+			Math.max(1, normalizedMaxBytes),
+			MAX_TAIL_BYTES,
+		);
 		const stat = _internals.statSync(logPath);
-		const start = Math.max(0, stat.size - maxBytes);
+		const start = Math.max(0, stat.size - boundedMaxBytes);
 		const fd = _internals.openSync(logPath, 'r');
 		try {
 			const readLen = stat.size - start;

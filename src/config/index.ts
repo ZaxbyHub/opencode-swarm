@@ -92,6 +92,7 @@ export type {
 	PhaseCompleteConfig,
 	PipelineConfig,
 	PluginConfig,
+	SkillPropagationConfig,
 	SwarmConfig,
 	TurboConfig,
 } from './schema';
@@ -105,6 +106,7 @@ export {
 	PhaseCompleteConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
+	SkillPropagationConfigSchema,
 	SwarmConfigSchema,
 	TurboConfigSchema,
 } from './schema';

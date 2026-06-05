@@ -28,6 +28,7 @@ import {
 	KnowledgeConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
+	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
@@ -594,6 +595,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// v6.17 Knowledge system hooks — fire-and-forget, wrapped in safeHook
 	const knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+	const skillPropagationConfig = SkillPropagationConfigSchema.parse(
+		config.skillPropagation ?? {},
+	);
 	const knowledgeCuratorHook = knowledgeConfig.enabled
 		? createKnowledgeCuratorHook(ctx.directory, knowledgeConfig)
 		: undefined;
@@ -1244,6 +1248,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// v2: scan for skill propagation warnings and compliance tracking
 				(input: unknown, output: unknown): Promise<void> => {
 					try {
+						if (!skillPropagationConfig.enabled) {
+							return Promise.resolve();
+						}
 						const p = input as { sessionID?: string };
 						return skillPropagationTransformScan(
 							ctx.directory,
@@ -1441,16 +1448,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    agents without a SKILLS field. Also pushes a visible warning
 			//    to pendingAdvisoryMessages for injection into the architect's
 			//    next prompt. When enforce=true, blocks the delegation entirely.
-			const skillResult = await skillPropagationGateBefore(
-				ctx.directory,
-				{
-					tool: input.tool,
-					agent: input.agent,
-					sessionID: input.sessionID,
-					args: input.args,
-				},
-				{ enabled: true },
-			);
+			const skillResult = skillPropagationConfig.enabled
+				? await skillPropagationGateBefore(
+						ctx.directory,
+						{
+							tool: input.tool,
+							agent: input.agent,
+							sessionID: input.sessionID,
+							args: input.args,
+						},
+						skillPropagationConfig,
+					)
+				: { blocked: false, reason: null, recommendedSkills: undefined };
 			if (skillResult.blocked) {
 				throw new Error(
 					skillResult.reason ?? 'Blocked by skill propagation gate',

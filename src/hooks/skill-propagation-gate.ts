@@ -228,10 +228,8 @@ const SKILL_SEARCH_ROOTS = [
 ];
 
 /**
- * Maximum number of session-scoped skill-usage entries to process for
- * skill scoring. When a session accumulates more entries than this
- * limit, scoring is skipped to prevent unbounded file reads from
- * stalling every delegated Task call.
+ * Maximum number of session-scoped skill-usage tail entries to process for
+ * skill scoring. This applies to the bounded tail-read window only.
  */
 export const MAX_SCORING_SESSION_ENTRIES = 500;
 
@@ -670,7 +668,7 @@ export async function skillPropagationGateBefore(
 			if (sessionEntries.length > _internals.MAX_SCORING_SESSION_ENTRIES) {
 				scoringSkipped = true;
 				warn(
-					`[skill-propagation-gate] skipping scoring — session has ${sessionEntries.length} entries (limit: ${_internals.MAX_SCORING_SESSION_ENTRIES})`,
+					`[skill-propagation-gate] skipping scoring — tail window has ${sessionEntries.length} session entries (limit: ${_internals.MAX_SCORING_SESSION_ENTRIES})`,
 				);
 			} else {
 				const prompt =

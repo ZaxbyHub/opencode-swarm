@@ -1162,6 +1162,15 @@ export type KnowledgeApplicationConfig = z.infer<
 	typeof KnowledgeApplicationConfigSchema
 >;
 
+// Skill propagation gate configuration
+export const SkillPropagationConfigSchema = z.object({
+	enabled: z.boolean().default(true),
+});
+
+export type SkillPropagationConfig = z.infer<
+	typeof SkillPropagationConfigSchema
+>;
+
 // Skill-improver agent configuration (issue #629)
 export const SkillImproverConfigSchema = z.object({
 	/** Default: false. Must be explicitly enabled. */
@@ -1652,6 +1661,9 @@ export const PluginConfigSchema = z.object({
 
 	// v2: Knowledge-application contract (warn|enforce, ack tracking)
 	knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+
+	// Skill propagation gate/injection configuration
+	skillPropagation: SkillPropagationConfigSchema.optional(),
 
 	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
 	skill_improver: SkillImproverConfigSchema.optional(),

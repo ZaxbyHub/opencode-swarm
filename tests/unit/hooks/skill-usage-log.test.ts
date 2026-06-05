@@ -12,6 +12,7 @@ import * as path from 'node:path';
 
 import {
 	_internals,
+	MAX_TAIL_BYTES,
 	appendSkillUsageEntry,
 	pruneSkillUsageLog,
 	readSkillUsageEntries,
@@ -74,6 +75,8 @@ describe('appendSkillUsageEntry', () => {
 		_internals.appendFileSync = fs.appendFileSync.bind(fs);
 		_internals.existsSync = fs.existsSync.bind(fs);
 		_internals.mkdirSync = fs.mkdirSync.bind(fs);
+		_internals.statSync = fs.statSync.bind(fs);
+		_internals.pruneSkillUsageLog = pruneSkillUsageLog;
 	});
 
 	test('appends a valid entry to skill-usage.jsonl', () => {
@@ -712,6 +715,22 @@ describe('_internals DI seam', () => {
 			'mkdir blocked',
 		);
 	});
+
+	test('triggers best-effort compaction when log exceeds 1 MB', () => {
+		let pruneCalled = false;
+		_internals.pruneSkillUsageLog = (dir: string, maxEntriesPerSkill: number) => {
+			pruneCalled = true;
+			expect(dir).toBe(tempDir);
+			expect(maxEntriesPerSkill).toBe(500);
+			return { pruned: 0, remaining: 0 };
+		};
+		_internals.statSync = ((_path: fs.PathLike) => ({
+			size: 1024 * 1024 + 1,
+		})) as typeof fs.statSync;
+
+		appendSkillUsageEntry(tempDir, makeEntry());
+		expect(pruneCalled).toBe(true);
+	});
 });
 
 // Import crypto for restore
@@ -801,6 +820,34 @@ describe('readSkillUsageEntriesTail', () => {
 		// Should return fewer entries than total (bounded by tail read)
 		expect(result.length).toBeLessThan(100);
 		expect(result.length).toBeGreaterThan(0);
+	});
+
+	test('clamps oversized maxBytes to MAX_TAIL_BYTES', () => {
+		const jsonLine = `${JSON.stringify(makeEntry({ sessionID: 'clamp-session' }))}\n`;
+		let readLength = 0;
+		_internals.existsSync = () => true;
+		_internals.statSync = ((_path: fs.PathLike) => ({
+			size: MAX_TAIL_BYTES * 4,
+		})) as typeof fs.statSync;
+		_internals.openSync = () => 123 as unknown as number;
+		_internals.readSync = (
+			_fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+		) => {
+			readLength = length;
+			buffer.write(jsonLine, offset, 'utf-8');
+			return jsonLine.length;
+		};
+		_internals.closeSync = () => {};
+
+		readSkillUsageEntriesTail(
+			tempDir,
+			{ sessionID: 'clamp-session' },
+			Number.POSITIVE_INFINITY,
+		);
+		expect(readLength).toBe(MAX_TAIL_BYTES);
 	});
 
 	test('returns empty array on I/O error via _internals override', () => {
