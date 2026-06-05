@@ -6,7 +6,7 @@ description: >
   smoke), diagnoses root causes, applies minimal targeted fixes, verifies each
   fix does not mask downstream failures, and never guesses — only acts on
   evidence from actual CI logs and source files.
-tools: ['codebase', 'githubRepo', 'fetch', 'terminal']
+tools: ['read', 'search', 'edit', 'execute', 'web']
 ---
 
 # CI Fixer — opencode-swarm
@@ -130,7 +130,7 @@ For each verified root cause, design the **minimal targeted fix**:
 - `TEST_CRASH` fixes: fix the underlying crash. Never wrap in try/catch to
   swallow it.
 - `BUILD` fixes: trace the build error to its source; fix the source.
-- `DIST_DRIFT` fixes: run `bun run build` locally (or via terminal tool) and
+- `DIST_DRIFT` fixes: run `bun run build` locally (or via the `execute` tool) and
   commit the updated `dist/` files.
 - `DEPS` fixes: resolve the missing module — add the package, fix the import
   path, or update the tsconfig path mapping.
@@ -176,6 +176,23 @@ Only after all checks pass may you proceed to Phase 5.
 ---
 
 ### Phase 5 — Commit and Stage Re-Evaluation
+
+#### Mandatory Publication Gate
+
+Before you commit, push, update a PR body, mark a PR ready, or claim CI/merge
+readiness, you MUST load and follow the repository's single publication protocol,
+in order:
+
+1. `.claude/skills/commit-pr/SKILL.md` — the single source of truth
+2. `.agents/skills/commit-pr/SKILL.md` — execution adapter (routes to #1)
+3. `.github/skills/commit-pr/SKILL.md` — Copilot discovery shim (routes to #1)
+
+`commit-pr` is authoritative for commit/PR titles, PR body sections
+(`## Summary`, `## Invariant audit`, `## Test plan`), release fragments, invariant
+audit, validation evidence, issue comment, draft/ready state, and CI closeout —
+including the `dist-check` recovery sequence and the "remote checks are
+authoritative" rules. The `pr-standards` CI check and the `pr-publication-gate`
+hook enforce this contract; do not work around them.
 
 1. Write a commit message following the project convention:
    `fix(ci): <short description of what was wrong and what was fixed>`

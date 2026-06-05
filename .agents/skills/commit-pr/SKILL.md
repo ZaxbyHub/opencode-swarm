@@ -1,9 +1,11 @@
 ---
 name: commit-pr
 description: >
-  Codex-native adapter for the opencode-swarm publish workflow. Use when asked to
-  commit, push, open or update a PR, refresh PR body text, mark a PR ready, or
-  close out remote CI before merge.
+  Mandatory Codex/Copilot publication adapter for opencode-swarm. Use for every
+  GitHub issue assignment that results in code changes, commits, pushes, draft PRs,
+  PR body edits, PR readying, release notes, or CI closeout. Must be loaded before
+  `git push`, `gh pr create`, `gh pr edit`, or `gh pr ready`. Routes to the single
+  canonical source of truth at `.claude/skills/commit-pr/SKILL.md`.
 ---
 
 # Commit & PR

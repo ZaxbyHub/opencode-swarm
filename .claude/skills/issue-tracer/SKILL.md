@@ -38,6 +38,8 @@ Use these sources in this order.
 8. If confidence drops below 90%, stop and surface the uncertainty instead of guessing.
 9. Do not disable, delete, weaken, or skip tests to make the run green.
 10. Do not push, merge, publish, delete data, drop databases, rewrite history, or perform destructive operations without explicit user approval.
+11. Evidence-grounded reporting: every claim that a command, build, test, lint, or check "passed" or "was validated" MUST include the exact command and its captured output or exit status. Never assert success you did not observe — show the evidence instead of describing it.
+12. Tests passing is "plausible," not "correct." A patch that turns the suite green can still overfit the test and miss the real defect. Before declaring closure you MUST justify, in writing, why the fix is correct against the issue's intended behavior — not merely that tests are green.
 
 ## Required Artifacts
 
@@ -53,6 +55,7 @@ Create a trace directory before meaningful investigation:
 ├── 06-critic-review.md
 ├── 07-approved-plan.md
 ├── 08-test-results.md
+├── 08b-implementation-review.md
 ├── 09-pr-body.md
 └── state.md
 ```
@@ -188,6 +191,15 @@ Use `references/localization-playbook.md`.
 4. [Why alternatives were ruled out]
 ```
 
+### Reasoning-guided ranking and confirmation
+
+State-of-the-art agentic fault localization ranks candidates by explicit reasoning, not surface similarity, and confirms high-risk faults with an independent pass:
+
+1. For each surviving candidate location, write a one-paragraph **bug-specific explanation**: precisely why this exact symbol/line could produce the observed symptom under the triggering conditions. "This file looks related" is not a ranking — a candidate with no causal explanation is ranked last or dropped.
+2. Rank candidates by causal explanation strength plus direct code evidence (stack-trace/test-spectrum agreement, data-flow reachability, recent diffs), localizing hierarchically: file -> element (function/class/handler/config) -> exact line/condition.
+3. Do not propose any patch until the fault is justified at the **line/condition** level, not merely the file level.
+4. When the fault is high-risk (security, isolation, IPC, auth, data integrity, concurrency) or the top two candidates are close, run a **second, independent localization pass** that does not read the first pass's conclusion, then reconcile. Agreement across independent passes raises confidence; disagreement means keep localizing rather than guessing.
+
 ### Phase 2 Gate
 
 Proceed only when:
@@ -196,6 +208,7 @@ Proceed only when:
 - the selected root cause has direct code evidence
 - every referenced symbol/path was opened and verified
 - the triggering condition is known
+- each retained candidate has a written bug-specific explanation, and the chosen root cause is localized to the line/condition level
 - alternative explanations are ruled out or explicitly documented as residual risk
 
 If two or more hypotheses remain equally plausible, stop and ask for the smallest additional evidence needed.
@@ -246,6 +259,10 @@ Use `references/critic-gate.md`.
 8. Copy the final reviewed plan to `07-approved-plan.md` with an unchecked approval line.
 9. Present the final reviewed plan to the user and stop. Ask for explicit approval to implement.
 
+#### High-risk: candidate-patch sampling
+
+For high-risk or close-call fixes, do not commit to a single patch shape prematurely. Draft 2-3 concrete candidate patches for the selected root cause, and choose between them by which one makes the reproduction test pass while keeping the regression suite green and the diff minimal. On a genuine tie, prefer the smallest, most contract-preserving patch and record why the alternatives were rejected. This mirrors validate-then-select repair: a patch is chosen on evidence (tests + minimality), not on first-draft intuition.
+
 ### Phase 3 Gate
 
 Do not write production code until:
@@ -287,9 +304,33 @@ Proceed only when:
 
 - implementation matches the approved plan or deviations are documented and approved
 - regression protection exists
-- impacted tests pass
-- required quality checks pass or failures are documented as unrelated with evidence
+- impacted tests pass, with the exact commands and captured output recorded in `08-test-results.md` (no asserted-but-unshown results)
+- required quality checks pass or failures are documented as unrelated with clean-`origin/main` evidence
+- a written correctness justification explains why the patch fixes the root cause and does not merely satisfy the test (plausible != correct)
 - no TODO, stub, placeholder, dead branch, or unwired path was introduced
+
+## Phase 4.5: Independent Implementation Review
+
+Goal: have a fresh, independent context try to **refute** the implemented patch before it is presented as done. The context that wrote the patch must not be the only context that approves it.
+
+This is distinct from the Phase 3 plan critic: Phase 3 challenges the *plan*; Phase 4.5 challenges the *actual diff and its validation evidence*.
+
+1. Run the review in an independent context:
+   - If subagent delegation is available, launch a separate reviewer subagent with `references/critic-gate.md` (Implementation Review section), given only the diff, `08-test-results.md`, and the trace artifacts — not your own reasoning narrative.
+   - If running as a subagent that cannot spawn subagents, or no independent context is available, run the fallback adversarial self-review in a clean pass and label it "Fallback self-review: independent reviewer unavailable."
+2. The reviewer's mandate is adversarial: find a concrete input, environment, caller, or sequence for which the patch is wrong, incomplete, overfits the regression test, leaves a runtime path unwired, or regresses a contract. It must verify claims against the actual code and command output, not trust the summary.
+3. The reviewer returns `APPROVE`, `NEEDS_REVISION`, or `BLOCKED` and writes `08b-implementation-review.md`.
+4. Resolve every `NEEDS_REVISION`/`BLOCKED` item by changing code or evidence, then re-review. Do not downgrade a blocker by rewording it.
+5. For high-risk work (security, isolation, IPC, auth, payments, migrations, data integrity), an independent implementation review is mandatory before closure, consistent with `../commit-pr/SKILL.md` Step 9.
+
+### Phase 4.5 Gate
+
+Proceed only when:
+
+- `08b-implementation-review.md` exists with a verdict
+- the review ran on the real diff and the captured validation evidence
+- every blocker is resolved with a code or evidence change, or explicitly escalated to the user
+- if the independent reviewer was unavailable, that limitation is disclosed in the artifact and to the user
 
 ## Phase 5: Closure and PR-Ready Output
 
@@ -300,10 +341,10 @@ Goal: leave the issue ready for human review or PR creation.
    - `git diff`
    - `git diff --check`
 2. Verify no unrelated files changed.
-3. Write `09-pr-body.md` using `assets/pr-template.md`.
+3. Write `09-pr-body.md` as a draft using `assets/pr-template.md`.
 4. Prepare a conventional commit message:
    - `fix(<scope>): <short issue-specific description>`
-5. If the user explicitly asked you to commit or open a PR, do so only after confirming there are no unrelated changes.
+5. Publication is governed by the single source of truth, `../commit-pr/SKILL.md`. When the user asks you to commit, push, or open/update a PR — and only after confirming there are no unrelated changes — switch to that skill and follow it for the PR title, the PR body contract (`Closes #<issue>`, `## Summary`, `## Invariant audit`, `## Test plan`), the release fragment, the invariant audit, the issue comment, and CI closeout. `assets/pr-template.md` is a drafting aid; the published PR body must satisfy the `commit-pr` contract (the `pr-standards` check enforces it). Do not invent a parallel PR format.
 6. Final response must include:
    - root cause with file/line references
    - exact change summary
@@ -346,9 +387,13 @@ Before declaring the issue ready:
 - [ ] Public API, CLI, UI, persistence, config, and docs surfaces are checked where relevant.
 - [ ] Edge cases are tested or explicitly ruled out.
 - [ ] Regression test fails before the fix and passes after the fix when feasible.
-- [ ] Impacted tests, lint/type/build checks are run.
-- [ ] Independent critic review completed before user approval.
+- [ ] Impacted tests, lint/type/build checks are run, with commands and captured output recorded.
+- [ ] Independent critic review of the plan completed before user approval.
 - [ ] User approval obtained before implementation.
+- [ ] Independent implementation review (Phase 4.5) completed on the real diff and evidence; blockers resolved.
+- [ ] A written correctness justification distinguishes "tests green" from "root cause fixed."
+- [ ] Every "passed"/"validated" claim cites the exact command and its captured output.
+- [ ] Publication (commit/push/PR) followed `../commit-pr/SKILL.md` (the single source of truth).
 - [ ] PR-ready summary is complete.
 
 ## Escalation Triggers
@@ -362,3 +407,15 @@ Stop and ask the user or present options when:
 - root cause spans multiple subsystems and the approved scope is too narrow
 - the critic returns `BLOCKED`
 - confidence remains below 90% after reasonable investigation
+
+## Method Provenance (state of the art)
+
+The quality methods in this skill are grounded in current agentic-repair and agent-reliability research, adapted to a plan-first, evidence-first workflow:
+
+- Hierarchical file -> function -> line localization, multi-sample candidate patches, and validate-then-select repair: Agentless (Xia et al. 2024, https://arxiv.org/abs/2407.01489).
+- Reasoning-guided, explanation-ranked fault localization (causal explanation per candidate, not surface similarity): RGFL (https://arxiv.org/pdf/2601.18044); structure/spectrum-aware search: AutoCodeRover (https://arxiv.org/abs/2404.05427).
+- "Tests passing is plausible, not correct" / patch overfitting: patch-correctness survey (https://dl.acm.org/doi/10.1145/3702972).
+- Self-consistency across independent passes: Wang et al. 2022 (https://arxiv.org/abs/2203.11171).
+- Fresh independent context refutes the result (the doer is not the grader) and evidence-grounded reporting (show the command and its output, do not assert success): Anthropic, "Effective harnesses for long-running agents" (https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents).
+- Plan -> implement -> review separation as explicit quality gates: Anthropic, "Building Effective Agents" (https://www.anthropic.com/research/building-effective-agents).
+- Escalate when the issue lacks reproducible steps or acceptance criteria (issue clarity predicts resolution success): GitHub coding-agent best practices (https://docs.github.com/copilot/how-tos/agents/copilot-coding-agent/best-practices-for-using-copilot-to-work-on-tasks).

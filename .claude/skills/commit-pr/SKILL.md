@@ -260,6 +260,21 @@ PR body requirements:
 - `## Invariant audit`
 - `## Test plan`
 
+### Publication-gate evidence
+
+A repository publication gate (`.github/hooks/pr-publication-gate.json` ->
+`scripts/copilot-pr-publication-gate.sh`) may block `gh pr create`, `gh pr edit`,
+and `gh pr ready` until publication evidence exists. Before publishing, write:
+
+- `.swarm/evidence/pr_body.md` — the exact PR body you will publish (must contain
+  `## Summary`, `## Invariant audit`, and `## Test plan`).
+- `.swarm/evidence/commit-pr-validation.md` — the validation commands you ran and
+  their results.
+
+These files live under `.swarm/` (runtime state, never committed) and double as the
+evidence the gate checks. Keep them current if you edit the PR body or rerun
+validation. The CI `pr-standards` check enforces the same body contract server-side.
+
 PowerShell-safe pattern:
 
 ```powershell
