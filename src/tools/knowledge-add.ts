@@ -13,7 +13,7 @@ import type {
 } from '../hooks/knowledge-types.js';
 import { validateLesson } from '../hooks/knowledge-validator.js';
 import { loadPlan } from '../plan/manager.js';
-import { warn } from '../utils/index.js';
+import { warn } from '../utils';
 import { createSwarmTool } from './create-tool.js';
 
 const VALID_CATEGORIES: KnowledgeCategory[] = [
