@@ -269,8 +269,8 @@ async function _detectTechStack(directory: string): Promise<string[]> {
 async function transactShownFile(
 	shownFile: string,
 	mutate: (data: Record<string, string[]>) => Record<string, string[]> | null,
-): Promise<void> {
-	await transactFile<Record<string, string[]>>(
+): Promise<boolean> {
+	return transactFile<Record<string, string[]>>(
 		shownFile,
 		async (filePath) => {
 			if (!existsSync(filePath)) return {};
@@ -307,10 +307,13 @@ async function recordLessonsShown(
 		const phaseMatch = /^Phase\s+(\d+)/i.exec(currentPhase);
 		const canonicalKey = phaseMatch ? `Phase ${phaseMatch[1]}` : currentPhase;
 
-		await transactShownFile(shownFile, (shownData) => {
+		const ok = await transactShownFile(shownFile, (shownData) => {
 			shownData[canonicalKey] = lessonIds;
 			return shownData;
 		});
+		if (!ok) {
+			warn('[swarm] Knowledge: failed to record shown lessons');
+		}
 	} catch {
 		warn('[swarm] Knowledge: failed to record shown lessons');
 	}
