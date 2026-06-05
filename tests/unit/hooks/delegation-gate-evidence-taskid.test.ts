@@ -128,6 +128,16 @@ describe('resolveDelegatedPlanTaskId — FR-001: derives task ID from delegation
 			expect(result).toBe('1.2.3');
 		});
 
+		it('uses TASK line ID when prompt also mentions other plan tasks', () => {
+			const args = {
+				prompt:
+					'TASK: 21.1 Finish config split\nContext: depends on 21.2 and validated near 21.4',
+			};
+			const knownPlanTaskIds = new Set(['21.1', '21.2', '21.4']);
+			const result = resolveDelegatedPlanTaskId(args, knownPlanTaskIds);
+			expect(result).toBe('21.1');
+		});
+
 		it('prefers explicit task_id over text extraction', () => {
 			const args = {
 				task_id: '1.1',
@@ -474,6 +484,28 @@ describe('resolveEvidenceTaskId — FR-004: ambiguity handled correctly', () => 
 		// Step 3 fallback → '1.1'
 		const result = await resolveEvidenceTaskId(args, session, tempDir);
 		expect(result).toBe('1.1');
+	});
+
+	it('TASK line with extra task mentions resolves to TASK line instead of fallback', async () => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+		tempDir = makeTempProject('evidence-taskid-fr004c-');
+		writePlanJson(tempDir, {
+			tasks: [
+				{ id: '21.1', status: 'pending' },
+				{ id: '21.2', status: 'pending' },
+				{ id: '21.4', status: 'in_progress' },
+			],
+		});
+
+		const session = ensureAgentSession('test-session-fr004c');
+		session.currentTaskId = '21.4';
+		const args = {
+			prompt:
+				'TASK: 21.1 complete reviewer gate\nRelated: 21.2 and 21.4 appear in context',
+		};
+
+		const result = await resolveEvidenceTaskId(args, session, tempDir);
+		expect(result).toBe('21.1');
 	});
 });
 
