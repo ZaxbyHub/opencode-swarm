@@ -570,6 +570,9 @@ export function createSystemEnhancerHook(
 					function tryInject(text: string): void {
 						const tokens = estimateTokens(text);
 						if (injectedTokens + tokens > maxInjectionTokens) {
+							warn(
+								`system-enhancer: injection budget exceeded (${injectedTokens + tokens} > ${maxInjectionTokens} tokens) — truncating system prompt content`,
+							);
 							return;
 						}
 						output.system.push(text);
