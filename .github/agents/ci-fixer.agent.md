@@ -35,7 +35,7 @@ Stage 2  ├─ unit          (bun run build + bun test, all platforms, needs: q
             │
 Stage 3  integration      (needs: unit)
             │
-Stage 4  smoke            (needs: unit + integration + package-check + php-validation)
+Stage 4  smoke            (needs: unit + integration + package-check + php-validation + rust-sandbox-runner)
 ```
 
 **Fix stage N completely before inspecting stage N+1.** Fixing a Stage 1
