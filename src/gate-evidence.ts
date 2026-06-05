@@ -11,7 +11,7 @@
  * Gates are append-only: required_gates can only grow, never shrink.
  */
 
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
@@ -106,7 +106,33 @@ export function expandRequiredGates(
 }
 
 function getEvidenceDir(directory: string): string {
-	return path.join(directory, '.swarm', 'evidence');
+	const swarmDir = path.resolve(directory, '.swarm');
+	const evidenceDir = path.join(swarmDir, 'evidence');
+	mkdirSync(evidenceDir, { recursive: true });
+
+	let resolvedSwarmDir: string;
+	let resolvedEvidenceDir: string;
+	try {
+		resolvedSwarmDir = path.normalize(realpathSync(swarmDir));
+		resolvedEvidenceDir = path.normalize(realpathSync(evidenceDir));
+	} catch (error) {
+		throw new Error(
+			`Unable to resolve evidence directory: ${(error as Error).message}`,
+		);
+	}
+	const swarmPrefix = `${resolvedSwarmDir}${path.sep}`;
+	const withinSwarmBoundary =
+		process.platform === 'win32'
+			? resolvedEvidenceDir.toLowerCase().startsWith(swarmPrefix.toLowerCase())
+			: resolvedEvidenceDir.startsWith(swarmPrefix);
+
+	if (!withinSwarmBoundary) {
+		throw new Error(
+			`Evidence path escapes .swarm boundary: ${resolvedEvidenceDir}`,
+		);
+	}
+
+	return resolvedEvidenceDir;
 }
 
 function getEvidencePath(directory: string, taskId: string): string {
@@ -142,11 +168,10 @@ export async function recordGateEvidence(
 	turbo?: boolean,
 ): Promise<void> {
 	assertValidTaskId(taskId);
-	const evidenceDir = getEvidenceDir(directory);
-	mkdirSync(evidenceDir, { recursive: true });
 
 	await withTaskEvidenceLock(directory, taskId, gate, async () => {
-		const evidencePath = getEvidencePath(directory, taskId);
+		const resolvedEvidenceDir = getEvidenceDir(directory);
+		const evidencePath = path.join(resolvedEvidenceDir, `${taskId}.json`);
 		let existing: TaskEvidence | null = null;
 		try {
 			existing = readExisting(evidencePath, taskId);
@@ -189,11 +214,10 @@ export async function recordAgentDispatch(
 	turbo?: boolean,
 ): Promise<void> {
 	assertValidTaskId(taskId);
-	const evidenceDir = getEvidenceDir(directory);
-	mkdirSync(evidenceDir, { recursive: true });
 
 	await withTaskEvidenceLock(directory, taskId, agentType, async () => {
-		const evidencePath = getEvidencePath(directory, taskId);
+		const resolvedEvidenceDir = getEvidenceDir(directory);
+		const evidencePath = path.join(resolvedEvidenceDir, `${taskId}.json`);
 		let existing: TaskEvidence | null = null;
 		try {
 			existing = readExisting(evidencePath, taskId);

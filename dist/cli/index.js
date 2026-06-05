@@ -52,7 +52,7 @@ var package_default;
 var init_package = __esm(() => {
   package_default = {
     name: "opencode-swarm",
-    version: "7.50.1",
+    version: "7.50.2",
     description: "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
     main: "dist/index.js",
     types: "dist/index.d.ts",
@@ -40477,7 +40477,7 @@ function getPluginLockFilePaths() {
 var init_cache_paths = () => {};
 
 // src/gate-evidence.ts
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync7 } from "fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync7, realpathSync as realpathSync3 } from "fs";
 function isValidTaskId(taskId) {
   return isStrictTaskId(taskId);
 }
