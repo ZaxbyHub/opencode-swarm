@@ -12,6 +12,7 @@ import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
 import { clearCriticalShownIds, setCriticalShownIds } from '../state.js';
 import { warn } from '../utils/logger.js';
+import { sanitizeContextText } from './context-sanitizer.js';
 import {
 	buildDriftInjectionText,
 	readPriorDriftReports,
@@ -173,21 +174,7 @@ function buildDirectiveBlock(
 }
 
 /** Sanitizes lesson text to prevent prompt injection into LLM context. */
-function sanitizeLessonForContext(text: string): string {
-	return text
-		.split('')
-		.filter((char) => {
-			const code = char.charCodeAt(0);
-			return (
-				code === 9 || code === 10 || code === 13 || (code > 31 && code !== 127)
-			);
-		})
-		.join('')
-		.replace(/[\u200B-\u200D\uFEFF]/g, '') // Zero-width chars
-		.replace(/[\u202A-\u202E\u2066-\u2069]/g, '') // BiDi override chars
-		.replace(/```/g, '` ` `') // Break code block escapes
-		.replace(/^system\s*:/gim, '[BLOCKED]:'); // Block system: prefix
-}
+const sanitizeLessonForContext = sanitizeContextText;
 
 /** Returns true if this agent is the architect (the sole intended recipient of knowledge injection). */
 function isOrchestratorAgent(agentName: string): boolean {
@@ -390,7 +377,7 @@ export function createKnowledgeInjectorHook(
 					const latestReport = driftReports[driftReports.length - 1];
 					const driftText = buildDriftInjectionText(latestReport, 500);
 					if (driftText) {
-						freshPreamble = driftText;
+						freshPreamble = sanitizeContextText(driftText);
 					}
 				}
 			} catch {
@@ -404,8 +391,8 @@ export function createKnowledgeInjectorHook(
 					'curator-briefing.md',
 				);
 				if (briefingContent) {
-					// Truncate to stay within token budget (same 500 char limit as drift)
-					const truncatedBriefing = briefingContent.slice(0, 500);
+					// Sanitize and truncate to stay within token budget (same 500 char limit as drift)
+					const truncatedBriefing = sanitizeContextText(briefingContent).slice(0, 500);
 					freshPreamble = freshPreamble
 						? `<curator_briefing>${truncatedBriefing}</curator_briefing>\n\n${freshPreamble}`
 						: `<curator_briefing>${truncatedBriefing}</curator_briefing>`;
@@ -475,8 +462,9 @@ export function createKnowledgeInjectorHook(
 
 			// 2. Run memory
 			if (runMemory && remaining > 300) {
-				parts.push(runMemory);
-				remaining -= runMemory.length;
+				const sanitizedRunMemory = sanitizeContextText(runMemory);
+				parts.push(sanitizedRunMemory);
+				remaining -= sanitizedRunMemory.length;
 			}
 
 			// 3. Drift preamble (freshPreamble without curator briefing at reduced budgets)
