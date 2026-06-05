@@ -108,22 +108,28 @@ describe('recordGateEvidence', () => {
 	});
 
 	it('9b. blocks writes when .swarm/evidence is a symlink escape', async () => {
-		const attackerDir = mkdtempSync(path.join(os.tmpdir(), 'gate-escape-'));
+		const attackerDir = path.join(tmpDir, 'attacker-escape-dir');
+		mkdirSync(attackerDir, { recursive: true });
 		const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
 		try {
 			symlinkSync(attackerDir, evidenceDir, 'dir');
 		} catch {
 			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
-			rmSync(attackerDir, { recursive: true, force: true });
 			return;
 		}
 
-		await expect(
-			recordGateEvidence(tmpDir, '1.9', 'reviewer', 'session-1'),
-		).rejects.toThrow(/escapes \.swarm boundary/);
-		expect(existsSync(path.join(attackerDir, '1.9.json'))).toBe(false);
-
-		rmSync(attackerDir, { recursive: true, force: true });
+		try {
+			await expect(
+				recordGateEvidence(tmpDir, '1.9', 'reviewer', 'session-1'),
+			).rejects.toThrow(/escapes \.swarm boundary/);
+			expect(existsSync(path.join(attackerDir, '1.9.json'))).toBe(false);
+		} finally {
+			try {
+				rmSync(attackerDir, { recursive: true, force: true });
+			} catch {
+				// Best-effort cleanup
+			}
+		}
 	});
 });
 
@@ -152,22 +158,28 @@ describe('recordAgentDispatch', () => {
 	});
 
 	it('11b. blocks dispatch writes when .swarm/evidence is a symlink escape', async () => {
-		const attackerDir = mkdtempSync(path.join(os.tmpdir(), 'dispatch-escape-'));
+		const attackerDir = path.join(tmpDir, 'attacker-escape-dir');
+		mkdirSync(attackerDir, { recursive: true });
 		const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
 		try {
 			symlinkSync(attackerDir, evidenceDir, 'dir');
 		} catch {
 			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
-			rmSync(attackerDir, { recursive: true, force: true });
 			return;
 		}
 
-		await expect(recordAgentDispatch(tmpDir, '1.10', 'coder')).rejects.toThrow(
-			/escapes \.swarm boundary/,
-		);
-		expect(existsSync(path.join(attackerDir, '1.10.json'))).toBe(false);
-
-		rmSync(attackerDir, { recursive: true, force: true });
+		try {
+			await expect(
+				recordAgentDispatch(tmpDir, '1.10', 'coder'),
+			).rejects.toThrow(/escapes \.swarm boundary/);
+			expect(existsSync(path.join(attackerDir, '1.10.json'))).toBe(false);
+		} finally {
+			try {
+				rmSync(attackerDir, { recursive: true, force: true });
+			} catch {
+				// Best-effort cleanup
+			}
+		}
 	});
 });
 

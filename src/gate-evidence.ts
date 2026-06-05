@@ -132,7 +132,7 @@ function getEvidenceDir(directory: string): string {
 		);
 	}
 
-	return evidenceDir;
+	return resolvedEvidenceDir;
 }
 
 function getEvidencePath(directory: string, taskId: string): string {
@@ -168,10 +168,10 @@ export async function recordGateEvidence(
 	turbo?: boolean,
 ): Promise<void> {
 	assertValidTaskId(taskId);
-	getEvidenceDir(directory);
 
 	await withTaskEvidenceLock(directory, taskId, gate, async () => {
-		const evidencePath = getEvidencePath(directory, taskId);
+		const resolvedEvidenceDir = getEvidenceDir(directory);
+		const evidencePath = path.join(resolvedEvidenceDir, `${taskId}.json`);
 		let existing: TaskEvidence | null = null;
 		try {
 			existing = readExisting(evidencePath, taskId);
@@ -214,10 +214,10 @@ export async function recordAgentDispatch(
 	turbo?: boolean,
 ): Promise<void> {
 	assertValidTaskId(taskId);
-	getEvidenceDir(directory);
 
 	await withTaskEvidenceLock(directory, taskId, agentType, async () => {
-		const evidencePath = getEvidencePath(directory, taskId);
+		const resolvedEvidenceDir = getEvidenceDir(directory);
+		const evidencePath = path.join(resolvedEvidenceDir, `${taskId}.json`);
 		let existing: TaskEvidence | null = null;
 		try {
 			existing = readExisting(evidencePath, taskId);
