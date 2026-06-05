@@ -103,7 +103,7 @@ Enter architect MODE: COUNCIL — convene a fixed three-agent General Council (`
 
 **Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
 
-**No-args behavior:** prints a usage string. The command never throws on bad input — invalid preset names and injected `[MODE: ...]` headers are silently dropped.
+**No-args behavior:** prints a usage string. The command never throws on bad input — injected `[MODE: ...]` headers are silently dropped.
 
 ### `/swarm pr-review <pr-url|owner/repo#N|N> [--council]`
 
