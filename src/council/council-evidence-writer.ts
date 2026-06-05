@@ -33,6 +33,13 @@ const EVIDENCE_DIR = '.swarm/evidence';
 const VALID_TASK_ID = /^\d+\.\d+(\.\d+)*$/;
 const COUNCIL_GATE_NAME = 'council';
 const COUNCIL_AGENT_ID = 'architect';
+// Lenient read-before-merge schema: accepts any non-null object to validate
+// that the evidence file contains a valid JSON object before merging.
+// Rejects primitive root values (null, arrays, strings, numbers) that would
+// indicate file corruption. Field-level validation is NOT performed here — the
+// read-before-merge pattern must accept output from any gate writer.
+// The real defense-in-depth against prototype pollution is the
+// safeAssignOwnProps/FORBIDDEN_KEYS filtering applied after parsing (below).
 const EvidenceFileSchema = z.record(z.string(), z.unknown());
 
 /**
