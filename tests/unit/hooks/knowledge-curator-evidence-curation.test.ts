@@ -4,11 +4,9 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import { createKnowledgeCuratorHook } from '../../../src/hooks/knowledge-curator.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 // Create local mock variables for knowledge-store
-const mockAppendKnowledge = mock(async () => {});
 const mockAppendRejectedLesson = mock(async () => {});
 const mockFindNearDuplicate = mock(
 	(_s: string, _a: unknown[], _n: number) => undefined,
@@ -88,7 +86,6 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 		mockReadKnowledge(...(args as [string])),
 	readRetractionRecords: (...args: unknown[]) =>
 		mockReadRetractionRecords(...(args as [string])),
-	appendKnowledge: (...args: unknown[]) => mockAppendKnowledge(...(args as [])),
 	appendRetractionRecord: (...args: unknown[]) =>
 		mockAppendRetractionRecord(...(args as [string, unknown])),
 	appendRejectedLesson: (...args: unknown[]) =>
@@ -99,8 +96,19 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 		mockRewriteKnowledge(...(args as [string, unknown[]])),
 	computeConfidence: (...args: unknown[]) =>
 		mockComputeConfidence(...(args as [number, boolean])),
+	computeOutcomeSignal: () => 0,
 	inferTags: (...args: unknown[]) => mockInferTags(...(args as [string])),
 	normalize: (...args: unknown[]) => mockNormalize(...(args as [string])),
+	transactKnowledge: mock(
+		async <T>(
+			_filePath: string,
+			mutate: (entries: T[]) => T[] | null,
+		): Promise<boolean> => {
+			const entries = (await mockReadKnowledge(_filePath)) as T[];
+			const result = mutate(entries);
+			return result !== null;
+		},
+	),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -132,7 +140,21 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 				{ category: string; scope: string; confidence: number },
 			]),
 		),
+	quarantineEntry: (...args: unknown[]) =>
+		mockQuarantineEntry(
+			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
+		),
 }));
+
+// Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)
+// using dynamic import so that the mocks are active before the modules under test are loaded.
+const { createKnowledgeCuratorHook } = await import(
+	'../../../src/hooks/knowledge-curator.js'
+);
+
+const { transactKnowledge: mockTransactKnowledge } = await import(
+	'../../../src/hooks/knowledge-store.js'
+);
 
 // ============================================================================
 // Test data
@@ -162,7 +184,7 @@ const defaultConfig: KnowledgeConfig = {
 
 describe('knowledge-curator - evidence file curation', () => {
 	beforeEach(() => {
-		mockAppendKnowledge.mockClear();
+		mockTransactKnowledge.mockClear();
 		mockAppendRejectedLesson.mockClear();
 		mockFindNearDuplicate.mockClear();
 		mockReadKnowledge.mockClear();
@@ -193,7 +215,6 @@ describe('knowledge-curator - evidence file curation', () => {
 		);
 		mockReadKnowledge.mockResolvedValue([]);
 		mockReadRetractionRecords.mockResolvedValue([]);
-		mockAppendKnowledge.mockResolvedValue(undefined);
 		mockAppendRetractionRecord.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
@@ -241,10 +262,15 @@ describe('knowledge-curator - evidence file curation', () => {
 			};
 			await hook(input, {});
 
-			// Expected: curateAndStoreSwarm called (via appendKnowledge)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
-			const lessonsStored = mockAppendKnowledge.mock.calls.map(
-				([, entry]) => entry.lesson,
+			// Expected: curateAndStoreSwarm called (via transactKnowledge, batched)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			const lessonsStored = (result ?? []).map(
+				(entry: unknown) => (entry as { lesson?: string }).lesson,
 			);
 			expect(lessonsStored).toContain('Always write tests before code');
 			expect(lessonsStored).toContain('Use type safety everywhere');
@@ -271,13 +297,19 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: curateAndStoreSwarm still called (plan.md trigger)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledWith(
-				'/project/.swarm/knowledge.jsonl',
-				expect.objectContaining({
-					lesson: 'Normal lesson from plan',
-				}),
+			// Expected: curateAndStoreSwarm still called (plan.md trigger) — transact once
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			expect(result).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lesson: 'Normal lesson from plan',
+					}),
+				]),
 			);
 
 			// Verify it was plan.md path, not evidence path handling
@@ -311,10 +343,15 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: both lessons stored
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
-			const lessonsStored = mockAppendKnowledge.mock.calls.map(
-				([, entry]) => entry.lesson,
+			// Expected: both lessons stored (transact once for the batch)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			const lessonsStored = (result ?? []).map(
+				(entry: unknown) => (entry as { lesson?: string }).lesson,
 			);
 			expect(lessonsStored).toContain('Lesson 1 from flat');
 			expect(lessonsStored).toContain('Lesson 2 from flat');
@@ -343,13 +380,19 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: lesson from entries[0].lessons_learned stored
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledWith(
-				'/project/.swarm/knowledge.jsonl',
-				expect.objectContaining({
-					lesson: 'Lesson from entries',
-				}),
+			// Expected: lesson from entries[0].lessons_learned stored (transact once)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			expect(result).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lesson: 'Lesson from entries',
+					}),
+				]),
 			);
 		});
 
@@ -372,7 +415,7 @@ Phase: 1
 			await hook(input, {});
 
 			// Expected: curateAndStoreSwarm NOT called (early return on empty lessons)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
 		});
 	});
@@ -399,7 +442,7 @@ Phase: 1
 			await hook(input, {});
 
 			// Expected: curateAndStoreSwarm called only once (idempotency check passed)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('idempotency: same evidence file written with different content (more lessons) → curateAndStoreSwarm called again', async () => {
@@ -434,8 +477,8 @@ Phase: 1
 			// Second call (content changed)
 			await hook(input, {});
 
-			// Expected: curateAndStoreSwarm called twice (different content)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(3); // 1 from first call, 2 from second call
+			// Expected: curateAndStoreSwarm called twice (different content) — 1 transact per batch
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2); // 1 from first call, 1 from second call
 		});
 	});
 
@@ -456,7 +499,7 @@ Phase: 1
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
 			// Expected: curateAndStoreSwarm NOT called (early return on missing file)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('invalid JSON in evidence file → curator NOT called, no error thrown', async () => {
@@ -475,7 +518,7 @@ Phase: 1
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
 			// Expected: curateAndStoreSwarm NOT called (JSON parse error causes early return)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('no lessons_learned field → curator NOT called, no error thrown', async () => {
@@ -499,7 +542,7 @@ Phase: 1
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
 			// Expected: curateAndStoreSwarm NOT called (no lessons_learned field)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('entries array is empty → curator NOT called, no error thrown', async () => {
@@ -523,7 +566,7 @@ Phase: 1
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
 			// Expected: curateAndStoreSwarm NOT called (empty entries)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -546,20 +589,26 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: lesson stored with correct metadata
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledWith(
-				'/project/.swarm/knowledge.jsonl',
-				expect.objectContaining({
-					lesson: 'Lesson with metadata',
-					project_name: 'my-awesome-project',
-					confirmed_by: expect.arrayContaining([
-						expect.objectContaining({
-							phase_number: 5,
-							project_name: 'my-awesome-project',
-						}),
-					]),
-				}),
+			// Expected: lesson stored with correct metadata (transact once)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			expect(result).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lesson: 'Lesson with metadata',
+						project_name: 'my-awesome-project',
+						confirmed_by: expect.arrayContaining([
+							expect.objectContaining({
+								phase_number: 5,
+								project_name: 'my-awesome-project',
+							}),
+						]),
+					}),
+				]),
 			);
 
 			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
@@ -582,14 +631,20 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: lesson stored with default project_name
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledWith(
-				'/project/.swarm/knowledge.jsonl',
-				expect.objectContaining({
-					lesson: 'Lesson without project name',
-					project_name: 'unknown',
-				}),
+			// Expected: lesson stored with default project_name (transact once)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			expect(result).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lesson: 'Lesson without project name',
+						project_name: 'unknown',
+					}),
+				]),
 			);
 		});
 
@@ -610,18 +665,24 @@ Phase: 1
 			};
 			await hook(input, {});
 
-			// Expected: lesson stored with default phase_number
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledWith(
-				'/project/.swarm/knowledge.jsonl',
-				expect.objectContaining({
-					lesson: 'Lesson without phase number',
-					confirmed_by: expect.arrayContaining([
-						expect.objectContaining({
-							phase_number: 1,
-						}),
-					]),
-				}),
+			// Expected: lesson stored with default phase_number (transact once)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+			const [, mutate] = mockTransactKnowledge.mock.calls[0] as [
+				string,
+				(entries: unknown[]) => unknown[] | null,
+			];
+			const result = mutate([]);
+			expect(result).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lesson: 'Lesson without phase number',
+						confirmed_by: expect.arrayContaining([
+							expect.objectContaining({
+								phase_number: 1,
+							}),
+						]),
+					}),
+				]),
 			);
 
 			expect(mockUpdateRetrievalOutcome).not.toHaveBeenCalled();
@@ -648,7 +709,7 @@ Phase: 1
 			await hook(input, {});
 
 			// Expected: curateAndStoreSwarm still called (uses 'default' sessionID)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('idempotency key uses sessionID + filePath', async () => {
@@ -679,7 +740,7 @@ Phase: 1
 			await hook(input2, {});
 
 			// Expected: curateAndStoreSwarm called twice (different sessionIDs)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2);
 		});
 	});
 
@@ -708,7 +769,7 @@ Phase: 1
 				'/project',
 				'evidence/retro-1/evidence.json',
 			);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('edit and apply_patch operations also trigger evidence curation', async () => {
@@ -739,7 +800,7 @@ Phase: 1
 			await hook(patchInput, {});
 
 			// Expected: both operations trigger curation
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2);
 		});
 	});
 });
