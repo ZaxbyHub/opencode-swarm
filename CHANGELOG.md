@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.51.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.0...v7.51.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **commit-pr:** replace BOM-generating Out-File with BOM-free WriteAllText ([3b90716](https://github.com/zaxbysauce/opencode-swarm/commit/3b9071601bf908b29fc09cf3a858d17be270030d))
+
 ## [7.51.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.4...v7.51.0) (2026-06-05)
 
 
