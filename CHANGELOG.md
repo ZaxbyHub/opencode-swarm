@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.51.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.5...v7.51.6) (2026-06-06)
+
+
+### Performance Improvements
+
+* **repo-graph:** build workspace graph in O(n) to fix slow plugin startup ([99aa75f](https://github.com/zaxbysauce/opencode-swarm/commit/99aa75f506d63b35c6b3e8b387b0d82b558c95d1)), closes [#1144](https://github.com/zaxbysauce/opencode-swarm/issues/1144)
+
 ## [7.51.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.4...v7.51.5) (2026-06-06)
 
 
