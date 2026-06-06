@@ -163,11 +163,12 @@ export function addEdge(graph: RepoGraph, edge: GraphEdge): void {
 
 /**
  * Build a collision-proof dedup key for an edge. Uses a NUL (U+0000) separator:
- * file paths and import specifiers can never contain NUL (parseFileImports
- * strips it and path-security rejects control chars), so distinct edges can
- * never alias even when paths/specifiers contain spaces. `importType` is
- * intentionally excluded, matching addEdge's `(source, target, importSpecifier)`
- * dedup predicate.
+ * file paths and import specifiers can never contain NUL — parseFileImports
+ * skips any import whose specifier contains a control character (and
+ * path-security rejects control chars in resolved source/target paths), so
+ * distinct edges can never alias even when paths/specifiers contain spaces.
+ * `importType` is intentionally excluded, matching addEdge's
+ * `(source, target, importSpecifier)` dedup predicate.
  */
 function buildLoopEdgeKey(edge: GraphEdge): string {
 	return `${edge.source}\u0000${edge.target}\u0000${edge.importSpecifier}`;
