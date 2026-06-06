@@ -99,13 +99,24 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.array(z.string())
 			.optional()
 			.describe('Optional file paths to restrict diff scope.'),
+		summaryOnly: z
+			.boolean()
+			.optional()
+			.describe(
+				'When true, return only file list with additions/deletions counts and hasContractChanges. No hunk content or AST diff. Default false.',
+			),
 	},
 	async execute(
 		args: unknown,
 		directory: string,
 		_ctx?: ToolContext,
 	): Promise<string> {
-		const typedArgs = args as { base?: string; paths?: string[] };
+		const typedArgs = args as {
+			base?: string;
+			paths?: string[];
+			summaryOnly?: boolean;
+		};
+		const summaryOnly = typedArgs.summaryOnly === true;
 		try {
 			if (
 				!directory ||
@@ -169,14 +180,6 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				stdio: ['ignore', 'pipe', 'pipe'],
 			});
 
-			const fullDiffOutput = child_process.execFileSync('git', fullDiffArgs, {
-				encoding: 'utf-8',
-				timeout: DIFF_TIMEOUT_MS,
-				maxBuffer: MAX_BUFFER_BYTES,
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
-
 			const files: Array<{
 				path: string;
 				additions: number;
@@ -193,6 +196,57 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					files.push({ path, additions, deletions });
 				}
 			}
+
+			// Summary-only mode: return file list without full diff or AST analysis.
+			// Lightweight contract change detection via regex on diff output (no AST/tree-sitter).
+			if (summaryOnly) {
+				let hasContractChanges = false;
+				try {
+					const contractDiffArgs = [...gitArgs, '-U0'];
+					if (typedArgs.paths?.length) {
+						contractDiffArgs.push('--', ...typedArgs.paths);
+					}
+					const contractDiffOutput = child_process.execFileSync(
+						'git',
+						contractDiffArgs,
+						{
+							encoding: 'utf-8',
+							timeout: DIFF_TIMEOUT_MS,
+							maxBuffer: MAX_BUFFER_BYTES,
+							cwd: directory,
+							stdio: ['ignore', 'pipe', 'pipe'],
+						},
+					);
+					const contractDiffLines = contractDiffOutput.split('\n');
+					for (const line of contractDiffLines) {
+						for (const pattern of CONTRACT_PATTERNS) {
+							if (pattern.test(line)) {
+								hasContractChanges = true;
+								break;
+							}
+						}
+						if (hasContractChanges) break;
+					}
+				} catch {
+					// Contract detection failed — fail closed to avoid hiding real contract changes.
+					hasContractChanges = true;
+				}
+				const result: DiffResult = {
+					files,
+					contractChanges: [],
+					hasContractChanges,
+					summary: `${files.length} files changed (summary only)`,
+				};
+				return JSON.stringify(result, null, 2);
+			}
+
+			const fullDiffOutput = child_process.execFileSync('git', fullDiffArgs, {
+				encoding: 'utf-8',
+				timeout: DIFF_TIMEOUT_MS,
+				maxBuffer: MAX_BUFFER_BYTES,
+				cwd: directory,
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
 
 			const contractChanges: string[] = [];
 			const diffLines = fullDiffOutput.split('\n');

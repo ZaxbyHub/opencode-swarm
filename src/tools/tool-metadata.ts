@@ -45,7 +45,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	syntax_check: {
-		description: 'syntax validation',
+		description:
+			'check syntax of source files using tree-sitter parsers across multiple languages, returning per-file errors',
 		agents: ['architect', 'coder', 'test_engineer'],
 	},
 	placeholder_scan: {
@@ -53,7 +54,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer'],
 	},
 	imports: {
-		description: 'dependency audit',
+		description:
+			'find all consumers that import from a given file — use before refactoring shared modules to avoid breaking unseen dependents',
 		agents: [
 			'architect',
 			'sme',
@@ -71,11 +73,13 @@ export const TOOL_METADATA = {
 		],
 	},
 	lint: {
-		description: 'code quality',
+		description:
+			'run project linter in check or fix mode; supports biome, eslint, ruff, clippy, and more, returns structured results',
 		agents: ['architect', 'reviewer', 'coder'],
 	},
 	secretscan: {
-		description: 'secret detection',
+		description:
+			'scan for secrets (API keys, tokens, passwords) via regex and entropy; returns redacted previews, excludes common dirs',
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	sast_scan: {
@@ -83,7 +87,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	build_check: {
-		description: 'build verification',
+		description:
+			'discover and run build, typecheck, and test commands for various project ecosystems in the working directory',
 		agents: ['architect', 'coder', 'test_engineer'],
 	},
 	pre_check_batch: {
@@ -96,7 +101,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	symbols: {
-		description: 'code symbol search',
+		description:
+			'extract exported symbols (functions, classes, interfaces, types) from source files; supports TypeScript, JavaScript, and Python',
 		agents: [
 			'architect',
 			'sme',
@@ -170,7 +176,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	checkpoint: {
-		description: 'state snapshots',
+		description:
+			'create named git checkpoints for save, restore, and delete — use before risky operations to enable rollback',
 		agents: ['architect'],
 	},
 	pkg_audit: {
@@ -216,6 +223,11 @@ export const TOOL_METADATA = {
 			'critic_oversight',
 			'explorer',
 		],
+	},
+	git_blame: {
+		description:
+			'per-line git blame metadata: sha, author, date, summary for each line in a file',
+		agents: ['reviewer', 'explorer', 'architect'],
 	},
 	gitingest: {
 		description: 'fetch a GitHub repository full content via gitingest.com',

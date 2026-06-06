@@ -1,8 +1,9 @@
 /** Three-layer validation gate for the opencode-swarm v6.17 knowledge system. */
 
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import { inferTags, readKnowledge } from './knowledge-store.js';
 import type {
@@ -615,7 +616,8 @@ export async function quarantineEntry(
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(swarmDir, {
-			retries: { retries: 3, minTimeout: 100 },
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
 		});
 
 		// Read INSIDE lock
@@ -638,13 +640,13 @@ export async function quarantineEntry(
 			reported_by: reportedBy,
 		};
 
-		// Write remaining entries back to knowledge.jsonl INSIDE lock
+		// Write remaining entries back to knowledge.jsonl INSIDE lock (crash-atomic)
 		// Fix empty file case: write '' not '\n'
 		const jsonlContent =
 			remaining.length > 0
 				? `${remaining.map((e) => JSON.stringify(e)).join('\n')}\n`
 				: '';
-		await writeFile(knowledgePath, jsonlContent, 'utf-8');
+		await atomicWriteFile(knowledgePath, jsonlContent);
 
 		// Append to quarantine file INSIDE lock
 		await appendFile(
@@ -659,12 +661,12 @@ export async function quarantineEntry(
 		if (quarantinedEntries.length > 100) {
 			// Keep last 100 (FIFO - drop oldest)
 			const trimmed = quarantinedEntries.slice(-100);
-			// Fix empty file case: write '' not '\n'
+			// Fix empty file case: write '' not '\n' (crash-atomic)
 			const capContent =
 				trimmed.length > 0
 					? `${trimmed.map((e) => JSON.stringify(e)).join('\n')}\n`
 					: '';
-			await writeFile(quarantinePath, capContent, 'utf-8');
+			await atomicWriteFile(quarantinePath, capContent);
 		}
 
 		// 6. Append fingerprint to rejected file INSIDE lock
@@ -730,7 +732,8 @@ export async function restoreEntry(
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(swarmDir, {
-			retries: { retries: 3, minTimeout: 100 },
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
 		});
 
 		// Read quarantined entries INSIDE lock
@@ -774,18 +777,18 @@ export async function restoreEntry(
 			return; // Skip restore — entry remains in quarantine
 		}
 
-		// Write remaining quarantined entries back INSIDE lock
+		// Write remaining quarantined entries back INSIDE lock (crash-atomic)
 		// Fix empty file case: write '' not '\n'
 		const jsonlContent =
 			remaining.length > 0
 				? `${remaining.map((e) => JSON.stringify(e)).join('\n')}\n`
 				: '';
-		await writeFile(quarantinePath, jsonlContent, 'utf-8');
+		await atomicWriteFile(quarantinePath, jsonlContent);
 
 		// Append original entry back to knowledge.jsonl INSIDE lock
 		await appendFile(knowledgePath, `${JSON.stringify(original)}\n`, 'utf-8');
 
-		// Remove from rejected file INSIDE lock
+		// Remove from rejected file INSIDE lock (crash-atomic)
 		const rejectedEntries = await readKnowledge<RejectedLesson>(rejectedPath);
 		const filtered = rejectedEntries.filter((e) => e.id !== entryId);
 		// Fix empty file case: write '' not '\n'
@@ -793,7 +796,7 @@ export async function restoreEntry(
 			filtered.length > 0
 				? `${filtered.map((e) => JSON.stringify(e)).join('\n')}\n`
 				: '';
-		await writeFile(rejectedPath, rejectedContent, 'utf-8');
+		await atomicWriteFile(rejectedPath, rejectedContent);
 	} finally {
 		if (release) {
 			await release();

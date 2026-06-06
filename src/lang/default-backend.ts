@@ -147,11 +147,13 @@ export function defaultBuildTestCommand(
 ): string[] | null {
 	const scope = opts.scope ?? 'all';
 	const coverage = opts.coverage ?? false;
+	const bail = opts.bail ?? false;
 
 	switch (framework) {
 		case 'bun': {
 			const args: string[] = ['bun', 'test'];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
@@ -165,17 +167,20 @@ export function defaultBuildTestCommand(
 				'.swarm/cache/test-runner-vitest.json',
 			];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
 		case 'jest': {
 			const args: string[] = ['npx', 'jest', '--json'];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
 		case 'mocha': {
 			const args: string[] = ['npx', 'mocha'];
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
@@ -185,6 +190,7 @@ export function defaultBuildTestCommand(
 				? ['python', '-m', 'pytest']
 				: ['python3', '-m', 'pytest'];
 			if (coverage) args.push('--cov=.', '--cov-report=term-missing');
+			if (bail) args.push('-x');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
@@ -245,6 +251,7 @@ export function defaultBuildTestCommand(
 			const args = isCommandAvailable('bundle')
 				? ['bundle', 'exec', 'rspec']
 				: ['rspec'];
+			if (bail) args.push('--fail-fast');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}

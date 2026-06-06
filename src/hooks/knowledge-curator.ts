@@ -5,7 +5,6 @@ import {
 	readKnowledgeCounterRollups,
 } from './knowledge-events.js';
 import {
-	appendKnowledge,
 	appendRejectedLesson,
 	appendRetractionRecord,
 	computeConfidence,
@@ -19,6 +18,7 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
+	transactKnowledge,
 } from './knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -302,10 +302,13 @@ export async function curateAndStoreSwarm(
 	options?: { skipAutoPromotion?: boolean },
 ): Promise<{ stored: number; skipped: number; rejected: number }> {
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
-	const existingEntries =
+
+	// Unlocked snapshot read for validation purposes only.
+	// Dedup against the final on-disk state happens atomically inside
+	// transactKnowledge below (CF-2 prevention).
+	const snapshot =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
 
-	let stored = 0;
 	let skipped = 0;
 	let rejected = 0;
 
@@ -322,6 +325,11 @@ export async function curateAndStoreSwarm(
 		['other', 'other'],
 		['todo', 'todo'],
 	]);
+
+	// Pre-compute new entries using the snapshot for validation and initial dedup.
+	// The in-progress accumulator (snapshotPlusNew) prevents intra-batch duplicates.
+	const snapshotPlusNew: SwarmKnowledgeEntry[] = [...snapshot];
+	const toAdd: SwarmKnowledgeEntry[] = [];
 
 	for (const lesson of lessons) {
 		// Determine category from tags
@@ -344,7 +352,7 @@ export async function curateAndStoreSwarm(
 		// Validate the lesson
 		const result = validateLesson(
 			lesson,
-			existingEntries.map((e) => e.lesson),
+			snapshotPlusNew.map((e) => e.lesson),
 			meta,
 		);
 
@@ -362,10 +370,10 @@ export async function curateAndStoreSwarm(
 			continue;
 		}
 
-		// Check for near-duplicates
+		// Check for near-duplicates against snapshot + already-planned new entries
 		const duplicate = findNearDuplicate(
 			lesson,
-			existingEntries,
+			snapshotPlusNew,
 			config.dedup_threshold,
 		);
 		if (duplicate) {
@@ -402,12 +410,26 @@ export async function curateAndStoreSwarm(
 			auto_generated: true,
 		};
 
-		// Append to knowledge store
-		await appendKnowledge(knowledgePath, entry);
-		stored++;
+		toAdd.push(entry);
+		// Track in accumulator so subsequent lessons in this batch see it for dedup.
+		snapshotPlusNew.push(entry);
+	}
 
-		// Add to existing entries for subsequent deduplication checks
-		existingEntries.push(entry);
+	// Atomically append new entries under lock (CF-2: dedup at commit time against
+	// fresh disk state prevents two concurrent curator calls from both appending the
+	// same lesson).
+	let stored = 0;
+	if (toAdd.length > 0) {
+		await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (current) => {
+			const trulyNew = toAdd.filter(
+				(e) => !findNearDuplicate(e.lesson, current, config.dedup_threshold),
+			);
+			const extraDups = toAdd.length - trulyNew.length;
+			skipped += extraDups;
+			if (trulyNew.length === 0) return null;
+			stored = trulyNew.length;
+			return [...current, ...trulyNew];
+		});
 	}
 
 	// Enforce swarm_max_entries cap (FIFO: drop oldest when exceeded)

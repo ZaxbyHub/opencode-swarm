@@ -120,6 +120,10 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
   treating it as current evidence.
 - For generated output or dist failures, inspect the failing log before rebuilding
   and commit regenerated files only when the PR touches the source surface.
+- When `main` has a merge queue enabled, do not rebase or force-push a PR only
+  because `main` advanced. Once required checks and review are green, queue the PR
+  and let the merge queue perform final current-base validation. Still resolve real
+  merge conflicts and SHA-dependent review threads before queuing.
 
 ## Validation
 

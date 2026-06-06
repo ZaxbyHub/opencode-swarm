@@ -735,6 +735,11 @@ Swarm provides tools for managing generated skill lifecycles:
 | mutation_test | Applies LLM-generated mutation patches to source files and runs tests to measure kill rate; verdict is pass/warn/fail based on configurable thresholds; used by the mutation_test gate (opt-in, off by default) |
 | generate_mutants | Architect-only: generates LLM-based mutation patches (5–10 per function across 6 types: off-by-one, null substitution, operator swap, guard removal, branch swap, side-effect deletion) for direct consumption by the mutation_test tool; returns SKIP verdict on LLM failure rather than throwing |
 | write_mutation_evidence | Architect-only: writes mutation gate results atomically to `.swarm/evidence/{phase}/mutation-gate.json`; accepts verdict (PASS/WARN/FAIL/SKIP), kill rate metrics, and optional survived mutant details; normalizes uppercase-to-lowercase before persisting |
+| git_blame | Per-line git blame metadata (sha, author, date, summary) via `git blame --porcelain`; supports optional line range filtering |
+| diff | Structured git diff with contract change detection; supports `summaryOnly` mode returning file list with additions/deletions counts |
+| suggest_patch | Reviewer-safe structured patch suggestion; supports `format` parameter ('json' or 'unified') where unified outputs valid unified diff with `diff --git` headers, hunks, and context |
+| test_runner | Auto-detect and run tests; supports `bail` parameter to inject framework-specific bail flags for early exit on first failure |
+| symbols | Extract exported symbols from source files; supports `workspace` (boolean) and `name` (string) parameters for multi-file symbol search |
 
 
 All tools run locally. No Docker, no network calls, no external APIs.

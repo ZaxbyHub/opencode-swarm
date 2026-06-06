@@ -25,6 +25,10 @@ canonical workflow.
 - Do not run a fresh broad PR review while closing known feedback. Inspect nearby
   code only to verify reachability, dependency, root cause, or regression risk.
 - Use the repository commit/PR workflow before pushing or updating the PR.
+- When `main` has a merge queue enabled, do not rebase or force-push only because
+  `main` advanced — once checks/review are green, queue the PR and let the queue do
+  final current-base validation. Still fix real merge conflicts and SHA-dependent
+  review threads.
 
 Final output must include a closure ledger for every original feedback item.
 Include operational blockers such as merge conflicts, stale branch state,

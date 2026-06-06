@@ -13,6 +13,7 @@ import type {
 } from '../hooks/knowledge-types.js';
 import { validateLesson } from '../hooks/knowledge-validator.js';
 import { loadPlan } from '../plan/manager.js';
+import { warn } from '../utils';
 import { createSwarmTool } from './create-tool.js';
 
 const VALID_CATEGORIES: KnowledgeCategory[] = [
@@ -181,8 +182,13 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 						message: 'near-duplicate of existing entry',
 					});
 				}
-			} catch {
-				// Read failure should not block knowledge storage
+			} catch (err) {
+				// Read failure should not block knowledge storage, but log a warning
+				// so silent dedup bypass doesn't accumulate near-duplicates unnoticed.
+				warn(
+					'knowledge_add: dedup check failed — skipping near-duplicate detection',
+					err,
+				);
 			}
 
 			// Append to knowledge store

@@ -7,6 +7,12 @@ name: PR Standards
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  # Emit these required checks for merge-queue groups too, so the queue can merge
+  # (see issue #1046). These jobs validate PR title/body, which do not exist for a
+  # merge group, so on `merge_group` every step is skipped and the job reports
+  # success — the PR already satisfied them before being queued.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -17,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -38,6 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR body contract
+        if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -46,7 +54,7 @@ jobs:
 
           # Release-please and other bots do not follow the human PR body contract.
           case "$PR_AUTHOR" in
-            *"[bot]")
+            *"[bot]"|"Copilot")
               echo "Bot author ($PR_AUTHOR) — skipping PR body contract."
               exit 0
               ;;
@@ -95,10 +103,12 @@ jobs:
           echo "PR body contract satisfied."
 
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: github.event_name == 'pull_request'
         with:
           fetch-depth: 0
 
       - name: Require pending release fragment
+        if: github.event_name == 'pull_request'
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -106,7 +116,7 @@ jobs:
           set -euo pipefail
 
           case "$PR_AUTHOR" in
-            *"[bot]")
+            *"[bot]"|"Copilot")
               echo "Bot author ($PR_AUTHOR) — skipping release fragment requirement."
               exit 0
               ;;
@@ -134,7 +144,7 @@ jobs:
           # Docs/workflow/meta-only changes (no source, generated output, scripts,
           # tests, runners, examples, or dependency manifests touched) do not
           # require a release fragment.
-          if ! grep -Eq '^(src/|bin/|dist/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed"; then
+          if ! grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed"; then
             echo "Docs/workflow/meta-only change without release fragment accepted."
             exit 0
           fi

@@ -119,12 +119,13 @@ function getWasmFileName(languageId: string): string {
 }
 
 /**
- * Get the absolute path to the grammars directory.
- * Works in dev (src/lang/runtime.ts) and bundled (dist/index.js) environments,
- * across Windows, macOS, and Linux.
+ * Pure path resolver for the grammars directory given a base directory.
+ * Exported for unit testing; production code uses getGrammarsDirAbsolute().
+ *
+ * @param thisDir - The directory to resolve from (typically dirname of the module file)
+ * @returns Absolute path to the grammars directory
  */
-function getGrammarsDirAbsolute(): string {
-	const thisDir = path.dirname(fileURLToPath(import.meta.url));
+export function resolveGrammarsDir(thisDir: string): string {
 	// In dev: thisDir = .../src/lang/ → grammars at src/lang/grammars/
 	// In main bundle: thisDir = .../dist/ → grammars at dist/lang/grammars/
 	// In CLI bundle: thisDir = .../dist/cli/ → grammars at dist/lang/grammars/
@@ -136,6 +137,16 @@ function getGrammarsDirAbsolute(): string {
 		: isCliBundle
 			? path.join(thisDir, '..', 'lang', 'grammars')
 			: path.join(thisDir, 'lang', 'grammars');
+}
+
+/**
+ * Get the absolute path to the grammars directory.
+ * Works in dev (src/lang/runtime.ts) and bundled (dist/index.js) environments,
+ * across Windows, macOS, and Linux.
+ */
+function getGrammarsDirAbsolute(): string {
+	const thisDir = path.dirname(fileURLToPath(import.meta.url));
+	return resolveGrammarsDir(thisDir);
 }
 
 /**

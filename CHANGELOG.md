@@ -1,5 +1,49 @@
 # Changelog
 
+## [7.51.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.3...v7.51.4) (2026-06-06)
+
+
+### Bug Fixes
+
+* follow-up items from PR [#640](https://github.com/zaxbysauce/opencode-swarm/issues/640) and [#641](https://github.com/zaxbysauce/opencode-swarm/issues/641) reviews ([427cc00](https://github.com/zaxbysauce/opencode-swarm/commit/427cc0011470be531398e673dddc16cdbd545e3d))
+* use consistent import path for utils warn in knowledge-add.ts ([797aeb5](https://github.com/zaxbysauce/opencode-swarm/commit/797aeb5e191eee52860f4e40abac839dcb6ce4f9))
+
+## [7.51.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.2...v7.51.3) (2026-06-06)
+
+
+### Bug Fixes
+
+* **knowledge:** make JSONL persistence transactional, race-safe, and crash-atomic ([24f03e5](https://github.com/zaxbysauce/opencode-swarm/commit/24f03e50ec1e0b9d225a5ea708f1d8b8ca7a0902))
+* **knowledge:** resolve PR review findings - lock params, tests, DRY refactor ([724accf](https://github.com/zaxbysauce/opencode-swarm/commit/724accfbedd13076e109d6498b7abee7a815bbe5))
+* **knowledge:** sanitize all architect-context injection blocks to prevent prompt injection ([175b0df](https://github.com/zaxbysauce/opencode-swarm/commit/175b0df7f2848b9fb82b8e54f1e1164dfffc9638))
+* **lint:** remove unused imports in curator.ts and knowledge-curator.ts ([3ce8408](https://github.com/zaxbysauce/opencode-swarm/commit/3ce84088785b76f55df34fef1e216d4f3b070f94))
+* **prompt-injection:** block closing XML tags and add adversarial tests for drift/briefing paths ([4089584](https://github.com/zaxbysauce/opencode-swarm/commit/40895843cde77431c0f47789d621245f4dec7ed9))
+* **tests:** add transactKnowledge mock to knowledge-injector adversarial tests ([c02430e](https://github.com/zaxbysauce/opencode-swarm/commit/c02430e4f948a252c4f9a4f4975eeb527e309f7a))
+* **transactFile:** add error handling for mkdir on adversarial paths (path traversal, null bytes) — return false instead of crashing ([0852581](https://github.com/zaxbysauce/opencode-swarm/commit/0852581fa47a88491d5c0e226f1d9a1f2b4402fc))
+* **transactShownFile:** return boolean result so callers can detect mkdir failures and log warnings ([7ce393b](https://github.com/zaxbysauce/opencode-swarm/commit/7ce393bf7e86ddbc69437c704a65810c833e722f))
+
+## [7.51.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.1...v7.51.2) (2026-06-05)
+
+
+### Bug Fixes
+
+* **build:** build dist on source installs via prepare script ([9133fe6](https://github.com/zaxbysauce/opencode-swarm/commit/9133fe6a25918b9dbcd2cd06676b78a253b4b9d5))
+* **package-smoke:** tolerate prepare build output in npm pack --json ([d878f3f](https://github.com/zaxbysauce/opencode-swarm/commit/d878f3ff083e9e68f0e1111af988e8063d6fb05a))
+
+## [7.51.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.0...v7.51.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **commit-pr:** replace BOM-generating Out-File with BOM-free WriteAllText ([3b90716](https://github.com/zaxbysauce/opencode-swarm/commit/3b9071601bf908b29fc09cf3a858d17be270030d))
+
+## [7.51.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.4...v7.51.0) (2026-06-05)
+
+
+### Features
+
+* add git_blame tool, improve suggest_patch/test_runner/symbols/diff, expand descriptions, add skills ([#1123](https://github.com/zaxbysauce/opencode-swarm/issues/1123)) ([8079900](https://github.com/zaxbysauce/opencode-swarm/commit/807990044febe90d514198c104d579928091e49c))
+
 ## [7.50.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.3...v7.50.4) (2026-06-05)
 
 

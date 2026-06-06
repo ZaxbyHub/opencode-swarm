@@ -7,6 +7,15 @@
  * - updateRetrievalOutcome (outcome tracking)
  */
 
+/**
+ * MOCK ISOLATION NOTE: This file uses `vi.mock('../../../src/hooks/knowledge-store.js')`
+ * which affects the module cache for the entire test process. When running this file
+ * together with other knowledge test files (e.g., knowledge-store-transactions.test.ts),
+ * use the `--isolate` flag to prevent mock leakage:
+ *
+ *   bun test --isolate tests/unit/hooks/knowledge-reader.test.ts tests/unit/hooks/knowledge-store-transactions.test.ts
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	type ProjectContext,
@@ -26,44 +35,69 @@ import type {
 // ============================================================================
 
 // Mock knowledge-store.ts
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	jaccardBigram: vi.fn((a: Set<string>, b: Set<string>) => {
-		if (a.size === 0 && b.size === 0) return 1.0;
-		const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
-		const union = new Set([...Array.from(a), ...Array.from(b)]);
-		return intersection.size / union.size;
-	}),
-	normalize: vi.fn((text: string) =>
-		text
-			.toLowerCase()
-			.replace(/[^\w\s]/g, ' ')
-			.replace(/\s+/g, ' ')
-			.trim(),
-	),
-	readKnowledge: vi.fn(async () => []),
-	readRetractionRecords: vi.fn(async () => []),
-	rewriteKnowledge: vi.fn(async () => {}),
-	resolveSwarmKnowledgePath: vi.fn(() => '/mock/.swarm/knowledge.jsonl'),
-	resolveHiveKnowledgePath: vi.fn(() => '/mock/hive/shared-learnings.jsonl'),
-	wordBigrams: vi.fn((text: string) => {
-		const words = text
-			.toLowerCase()
-			.replace(/[^\w\s]/g, ' ')
-			.replace(/\s+/g, ' ')
-			.trim()
-			.split(' ')
-			.filter(Boolean);
-		const bigrams = new Set<string>();
-		for (let i = 0; i < words.length - 1; i++) {
-			bigrams.add(`${words[i]} ${words[i + 1]}`);
-		}
-		return bigrams;
-	}),
-	enforceKnowledgeCap: async () => {},
-	sweepAgedEntries: async () => {},
-	sweepStaleTodos: async () => {},
-	bumpKnowledgeConfidenceBatch: async () => {},
-}));
+// transactKnowledge is a passthrough: calls readKnowledge + mutate so tests can
+// inspect which entries were written via the captured call list.
+const transactKnowledgeResults: Array<{ path: string; entries: unknown[] }> =
+	[];
+vi.mock('../../../src/hooks/knowledge-store.js', async () => {
+	const _readKnowledge = vi.fn(async () => []);
+	const _transactKnowledge = vi.fn(
+		async <T>(
+			filePath: string,
+			mutate: (entries: T[]) => T[] | null,
+		): Promise<boolean> => {
+			const entries = (await _readKnowledge(filePath)) as T[];
+			const result = mutate(entries);
+			if (result !== null) {
+				transactKnowledgeResults.push({
+					path: filePath,
+					entries: result as unknown[],
+				});
+				return true;
+			}
+			return false;
+		},
+	);
+	return {
+		jaccardBigram: vi.fn((a: Set<string>, b: Set<string>) => {
+			if (a.size === 0 && b.size === 0) return 1.0;
+			const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
+			const union = new Set([...Array.from(a), ...Array.from(b)]);
+			return intersection.size / union.size;
+		}),
+		normalize: vi.fn((text: string) =>
+			text
+				.toLowerCase()
+				.replace(/[^\w\s]/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim(),
+		),
+		readKnowledge: _readKnowledge,
+		readRetractionRecords: vi.fn(async () => []),
+		rewriteKnowledge: vi.fn(async () => {}),
+		transactKnowledge: _transactKnowledge,
+		resolveSwarmKnowledgePath: vi.fn(() => '/mock/.swarm/knowledge.jsonl'),
+		resolveHiveKnowledgePath: vi.fn(() => '/mock/hive/shared-learnings.jsonl'),
+		wordBigrams: vi.fn((text: string) => {
+			const words = text
+				.toLowerCase()
+				.replace(/[^\w\s]/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim()
+				.split(' ')
+				.filter(Boolean);
+			const bigrams = new Set<string>();
+			for (let i = 0; i < words.length - 1; i++) {
+				bigrams.add(`${words[i]} ${words[i + 1]}`);
+			}
+			return bigrams;
+		}),
+		enforceKnowledgeCap: async () => {},
+		sweepAgedEntries: async () => {},
+		sweepStaleTodos: async () => {},
+		bumpKnowledgeConfidenceBatch: async () => {},
+	};
+});
 
 // Mock node:fs
 vi.mock('node:fs', () => ({
@@ -77,6 +111,19 @@ vi.mock('node:fs/promises', () => ({
 	writeFile: vi.fn(async () => {}),
 }));
 
+// Mock proper-lockfile so transactShownFile doesn't need a real filesystem
+vi.mock('proper-lockfile', () => ({
+	default: {
+		lock: vi.fn(async () => vi.fn(async () => {})),
+	},
+}));
+
+// Mock evidence/task-file.js so atomicWriteFile (used in transactShownFile) is captured
+const mockAtomicWriteFile = vi.fn(async () => {});
+vi.mock('../../../src/evidence/task-file.js', () => ({
+	atomicWriteFile: mockAtomicWriteFile,
+}));
+
 // Mock logger
 const mockWarn = vi.fn();
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -85,12 +132,14 @@ vi.mock('../../../src/utils/logger.js', () => ({
 
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { atomicWriteFile } from '../../../src/evidence/task-file.js';
 // Import mocked modules
 import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
+	transactKnowledge,
 } from '../../../src/hooks/knowledge-store.js';
 
 // ============================================================================
@@ -456,7 +505,7 @@ describe('readMergedKnowledge — ranking', () => {
 			},
 		);
 
-		// Make mkdir reject so recordLessonsShown fails
+		// Make mkdir reject so recordLessonsShown (via transactShownFile) fails
 		(mkdir as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
 			new Error('mkdir failed'),
 		);
@@ -472,7 +521,13 @@ describe('readMergedKnowledge — ranking', () => {
 
 		// Should still return results despite recordLessonsShown failing
 		expect(result.length).toBe(1);
-		// warn IS called when recordLessonsShown' mkdir fails - via internal catch
+
+		// recordLessonsShown is fire-and-forget — the async chain now goes through
+		// transactShownFile → mkdir → error → warn. Give the microtask queue an
+		// extra tick to allow the error propagation and the warn call to settle.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// warn IS called when recordLessonsShown's mkdir fails - via internal catch
 		expect(mockWarn).toHaveBeenCalledWith(
 			'[swarm] Knowledge: failed to record shown lessons',
 		);
@@ -489,6 +544,7 @@ describe('readMergedKnowledge — ranking', () => {
 describe('updateRetrievalOutcome', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		transactKnowledgeResults.length = 0;
 		(readKnowledge as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
 			[],
 		);
@@ -504,7 +560,7 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', 'phase-5', true);
 
-		expect(rewriteKnowledge).not.toHaveBeenCalled();
+		expect(transactKnowledge).not.toHaveBeenCalled();
 	});
 
 	it('Test 11: increments succeeded_after_shown_count on success', async () => {
@@ -537,12 +593,14 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true); // phaseSucceeded
 
-		expect(rewriteKnowledge).toHaveBeenCalledTimes(1);
+		// transactKnowledge should be called for the swarm file (LF-1 fix: replaces rewriteKnowledge)
+		expect(transactKnowledge).toHaveBeenCalledTimes(1);
 
-		const rewriteCall = (
-			rewriteKnowledge as unknown as ReturnType<typeof vi.fn>
-		).mock.calls[0];
-		const updatedEntries = rewriteCall[1] as SwarmKnowledgeEntry[];
+		const swarmResult = transactKnowledgeResults.find((r) =>
+			r.path.includes('swarm'),
+		);
+		expect(swarmResult).toBeDefined();
+		const updatedEntries = swarmResult!.entries as SwarmKnowledgeEntry[];
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
@@ -588,12 +646,14 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', phaseInfo, false); // phaseSucceeded = false
 
-		expect(rewriteKnowledge).toHaveBeenCalledTimes(1);
+		// transactKnowledge should be called for the swarm file (LF-1 fix: replaces rewriteKnowledge)
+		expect(transactKnowledge).toHaveBeenCalledTimes(1);
 
-		const rewriteCall = (
-			rewriteKnowledge as unknown as ReturnType<typeof vi.fn>
-		).mock.calls[0];
-		const updatedEntries = rewriteCall[1] as SwarmKnowledgeEntry[];
+		const swarmResult = transactKnowledgeResults.find((r) =>
+			r.path.includes('swarm'),
+		);
+		expect(swarmResult).toBeDefined();
+		const updatedEntries = swarmResult!.entries as SwarmKnowledgeEntry[];
 		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
 
 		expect(updatedEntry).toBeDefined();
@@ -639,11 +699,13 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
 
-		expect(writeFile).toHaveBeenCalled();
+		// LF-1 fix: the shownFile cleanup now uses atomicWriteFile via transactShownFile
+		// instead of bare writeFile.
+		expect(atomicWriteFile).toHaveBeenCalled();
 
-		const writeFileCall = (writeFile as unknown as ReturnType<typeof vi.fn>)
+		const atomicCall = (atomicWriteFile as unknown as ReturnType<typeof vi.fn>)
 			.mock.calls[0];
-		const writtenData = JSON.parse(writeFileCall[1] as string);
+		const writtenData = JSON.parse(atomicCall[1] as string);
 
 		expect(writtenData[phaseInfo]).toBeUndefined();
 	});
@@ -678,15 +740,13 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
 
-		// rewriteKnowledge should only be called once (for swarm)
-		expect(rewriteKnowledge).toHaveBeenCalledTimes(1);
+		// transactKnowledge should only be called once (for swarm, not hive) since
+		// all shown IDs were found in swarm (LF-1 fix: replaces rewriteKnowledge)
+		expect(transactKnowledge).toHaveBeenCalledTimes(1);
 
 		// Verify it was called for swarm path
-		const rewriteCall = (
-			rewriteKnowledge as unknown as ReturnType<typeof vi.fn>
-		).mock.calls[0];
-		const rewritePath = rewriteCall[0] as string;
-		expect(rewritePath).toContain('swarm');
-		expect(rewritePath).not.toContain('hive');
+		const swarmResult = transactKnowledgeResults[0];
+		expect(swarmResult?.path).toContain('swarm');
+		expect(swarmResult?.path).not.toContain('hive');
 	});
 });

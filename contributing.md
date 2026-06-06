@@ -25,6 +25,13 @@ git checkout -b <type>/<short-description>   # e.g. feat/add-retry-backoff
 bun install --frozen-lockfile
 ```
 
+> **`dist/` is generated, not committed** (#1047). The plugin entry (`package.json#main`
+> → `dist/index.js`) only exists after a build. `bun install` builds it automatically via
+> the `prepare` script, so a fresh clone is runnable. If you load the plugin from this
+> checkout and pull source changes **without** re-running `bun install`, refresh the bundle
+> with `bun run build` (or `bun run dev`, which builds then launches OpenCode) before the
+> plugin will load. The build is cross-platform (bun + tsc, no OS-specific steps).
+
 ### 2. Make your changes
 
 - Write code, tests, and docs

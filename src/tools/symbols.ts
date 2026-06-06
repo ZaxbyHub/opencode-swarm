@@ -24,7 +24,50 @@ interface SymbolInfo {
 
 // ============ Constants ============
 const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1MB per file
+const MAX_WORKSPACE_RESULTS = 50;
+const MAX_WORKSPACE_SCANNED_FILES = 200;
+const WORKSPACE_TIMEOUT_MS = 10_000;
 const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|:|$)/i;
+
+// Extensions supported for symbol extraction
+const SYMBOL_EXTENSIONS = new Set([
+	'.ts',
+	'.tsx',
+	'.js',
+	'.jsx',
+	'.mjs',
+	'.cjs',
+	'.py',
+]);
+
+// Directories to skip during workspace scanning
+const SKIP_DIRECTORIES = new Set([
+	'node_modules',
+	'.git',
+	'dist',
+	'build',
+	'out',
+	'.next',
+	'coverage',
+	'__pycache__',
+]);
+
+// ============ Workspace Types ============
+
+interface WorkspaceFileSummary {
+	file: string;
+	symbolCount: number;
+	symbols: SymbolInfo[];
+}
+
+interface WorkspaceResult {
+	query: { workspace: boolean; name?: string };
+	fileCount: number;
+	scannedFileCount: number;
+	totalSymbols: number;
+	files: WorkspaceFileSummary[];
+	truncated: boolean;
+}
 
 // ============ Validation ============
 
@@ -402,6 +445,137 @@ export function extractPythonSymbols(
 	});
 }
 
+// ============ Workspace File Discovery ============
+
+/**
+ * Recursively find source files with supported symbol extensions.
+ * Skips well-known non-source directories. Caps at maxFiles.
+ * All returned paths are relative to the workspace root.
+ */
+function findSourceFiles(cwd: string, maxFiles: number): string[] {
+	const files: string[] = [];
+	walkDir(cwd, cwd, files, maxFiles);
+	return files;
+}
+
+function walkDir(
+	currentDir: string,
+	rootDir: string,
+	files: string[],
+	maxFiles: number,
+): void {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(currentDir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	entries.sort((a, b) =>
+		a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+	);
+	for (const entry of entries) {
+		if (files.length >= maxFiles) return;
+		if (SKIP_DIRECTORIES.has(entry.name)) continue;
+		const fullPath = path.join(currentDir, entry.name);
+		if (entry.isDirectory()) {
+			walkDir(fullPath, rootDir, files, maxFiles);
+		} else if (
+			entry.isFile() &&
+			SYMBOL_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+		) {
+			files.push(path.relative(rootDir, fullPath));
+		}
+	}
+}
+
+/**
+ * Search workspace for symbols across multiple files.
+ * Uses a time budget and caps results for safety.
+ */
+function searchWorkspaceSymbols(
+	cwd: string,
+	name?: string,
+	exportedOnly: boolean = true,
+): WorkspaceResult {
+	const startTime = Date.now();
+	const sourceFiles = findSourceFiles(cwd, MAX_WORKSPACE_SCANNED_FILES);
+	const files: WorkspaceFileSummary[] = [];
+	let scannedCount = 0;
+	let truncated = false;
+	if (sourceFiles.length >= MAX_WORKSPACE_SCANNED_FILES) {
+		truncated = true;
+	}
+	let totalSymbols = 0;
+
+	for (const relFile of sourceFiles) {
+		// Check timeout
+		if (Date.now() - startTime > WORKSPACE_TIMEOUT_MS) {
+			truncated = true;
+			break;
+		}
+
+		scannedCount++;
+		let syms: SymbolInfo[];
+
+		const ext = path.extname(relFile).toLowerCase();
+		switch (ext) {
+			case '.ts':
+			case '.tsx':
+			case '.js':
+			case '.jsx':
+			case '.mjs':
+			case '.cjs':
+				syms = extractTSSymbols(relFile, cwd);
+				break;
+			case '.py':
+				syms = extractPythonSymbols(relFile, cwd);
+				break;
+			default:
+				continue;
+		}
+
+		// Filter by exported-only
+		if (exportedOnly) {
+			syms = syms.filter((s) => s.exported);
+		}
+
+		// Filter by name substring
+		if (name) {
+			syms = syms.filter((s) => s.name.includes(name));
+		}
+
+		if (syms.length > 0) {
+			const remaining = MAX_WORKSPACE_RESULTS - totalSymbols;
+			if (remaining <= 0) {
+				truncated = true;
+				break;
+			}
+			const cappedSyms = syms.slice(0, remaining);
+			files.push({
+				file: relFile,
+				symbolCount: cappedSyms.length,
+				symbols: cappedSyms,
+			});
+			totalSymbols += cappedSyms.length;
+
+			if (totalSymbols >= MAX_WORKSPACE_RESULTS) {
+				truncated =
+					syms.length > remaining || scannedCount < sourceFiles.length;
+				break;
+			}
+		}
+	}
+
+	return {
+		query: { workspace: true, name },
+		fileCount: files.length,
+		scannedFileCount: scannedCount,
+		totalSymbols,
+		files,
+		truncated,
+	};
+}
+
 // ============ Tool Definition ============
 
 export const symbols: ToolDefinition = createSwarmTool({
@@ -413,8 +587,9 @@ export const symbols: ToolDefinition = createSwarmTool({
 	args: {
 		file: z
 			.string()
+			.optional()
 			.describe(
-				'File path to extract symbols from (e.g., "src/auth/login.ts")',
+				'File path to extract symbols from (e.g., "src/auth/login.ts"). Required when not using workspace mode.',
 			),
 		exported_only: z
 			.boolean()
@@ -422,20 +597,38 @@ export const symbols: ToolDefinition = createSwarmTool({
 			.describe(
 				'If true, only return exported/public symbols. If false, include all top-level symbols.',
 			),
+		workspace: z
+			.boolean()
+			.optional()
+			.describe(
+				'When true, search across the workspace instead of a single file. Returns per-file symbol summaries.',
+			),
+		name: z
+			.string()
+			.optional()
+			.describe(
+				'Search for symbols by name (case-sensitive substring match). When provided without workspace, only searches the specified file.',
+			),
 	},
 	execute: async (args: unknown, directory: string) => {
 		// Safe args extraction - prevent crashes from malicious getters
-		let file: string;
+		let file: string | undefined;
 		let exportedOnly = true;
+		let workspace = false;
+		let name: string | undefined;
 		try {
 			const obj = args as Record<string, unknown>;
-			file = String(obj.file);
+			file =
+				obj.file != null && typeof obj.file === 'string' ? obj.file : undefined;
 			exportedOnly = obj.exported_only === true;
+			workspace = obj.workspace === true;
+			name =
+				obj.name != null && typeof obj.name === 'string' ? obj.name : undefined;
 		} catch {
 			return JSON.stringify(
 				{
 					file: '<unknown>',
-					error: 'Invalid arguments: could not extract file path',
+					error: 'Invalid arguments: could not extract parameters',
 					symbols: [],
 				},
 				null,
@@ -444,7 +637,27 @@ export const symbols: ToolDefinition = createSwarmTool({
 		}
 
 		const cwd = directory;
-		const ext = path.extname(file);
+
+		// --- Workspace mode ---
+		if (workspace) {
+			return JSON.stringify(
+				searchWorkspaceSymbols(cwd, name, exportedOnly),
+				null,
+				2,
+			);
+		}
+
+		// --- Single-file mode requires file ---
+		if (!file) {
+			return JSON.stringify(
+				{
+					error: 'file parameter is required when not using workspace mode',
+					symbols: [],
+				},
+				null,
+				2,
+			);
+		}
 
 		// Validate path contains no control characters
 		if (containsControlChars(file)) {
@@ -497,6 +710,8 @@ export const symbols: ToolDefinition = createSwarmTool({
 			);
 		}
 
+		const ext = path.extname(file);
+
 		let syms: SymbolInfo[];
 
 		switch (ext) {
@@ -525,6 +740,11 @@ export const symbols: ToolDefinition = createSwarmTool({
 
 		if (exportedOnly) {
 			syms = syms.filter((s) => s.exported);
+		}
+
+		// Filter by name substring when name is provided for a single file
+		if (name) {
+			syms = syms.filter((s) => s.name.includes(name));
 		}
 
 		return JSON.stringify(
