@@ -428,6 +428,13 @@ describe('isSafeLockFilePath', () => {
 			await rm(tmp, { recursive: true, force: true });
 		}
 	});
+
+	test('rejects nested opencode path like opencode/opencode/bun.lock (grandparent check)', () => {
+		// Defense-in-depth: reject paths where grandparent is also 'opencode'.
+		// This prevents misconfigured nested paths like /tmp/opencode/opencode/bun.lock.
+		expect(isSafeLockFilePath('/tmp/opencode/opencode/bun.lock')).toBe(false);
+		expect(isSafeLockFilePath('/var/opencode/opencode/bun.lockb')).toBe(false);
+	});
 });
 
 describe('isSafeCachePath cross-platform path acceptance', () => {
