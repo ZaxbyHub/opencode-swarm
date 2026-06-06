@@ -45,3 +45,6 @@ Do NOT stop until ≥95% confident that:
 - Delivered work matches the original plan completely
 
 If below 95%, state what remains and continue working.
+
+#### User-controlled gates
+When the user has explicitly declined or deferred an action that is theirs to take — such as choosing "Leave it for you" on a merge offer, or explicitly saying they will merge manually — that action is outside the agent's scope. The 95% confidence gate applies to technical work the agent controls. Publication by merge is a user-controlled gate: once the user has deliberately declined it, the agent's work is complete and the stop condition is satisfied. Do not loop on pending user-controlled actions.

@@ -398,6 +398,12 @@ gh run cancel <stale-run-id>
 downstream jobs. When the PR checks view looks stale, missing, or inconsistent,
 use the workflow run as the authoritative detail:
 
+> **MCP environments:** When using GitHub MCP tools instead of `gh`, prefer
+> `get_check_runs` over `get_status`. The `get_status` method uses GitHub's
+> legacy commit status API: it returns `state: "pending"` even when all GitHub
+> Actions jobs are green, because Actions creates check-runs (not legacy
+> statuses). `get_check_runs` returns the actual job results.
+
 ```powershell
 gh run view <run-id> --json headSha,status,conclusion,jobs,url
 ```
