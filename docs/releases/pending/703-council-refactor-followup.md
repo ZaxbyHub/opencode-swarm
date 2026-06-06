@@ -36,6 +36,26 @@ which council roles are missing and which base agents need to be re-enabled.
 
 No configuration changes required. Existing configs continue to work unchanged.
 
+### 4. `dist/` build artifacts removed from PR branch
+
+Committed `dist/` artifacts (`dist/cli/index.js`, `dist/index.js`, and 473 `.d.ts` type-declaration
+files) have been removed from tracking in this PR. The `.gitignore` has been updated to use a
+root-anchored `/dist/` rule (aligning with the enforcement introduced in PR #1132) so they cannot
+be re-staged accidentally. CI builds and validates the dist from source; no manual rebuild step is
+required.
+
+### 5. Test coverage for reduced-council warning
+
+A new describe block in `src/agents/council-registration.test.ts` covers the `councilAgentsCreated < 3`
+warning path:
+
+- Reviewer disabled → warning lists `council_generalist (requires reviewer)` with `2/3` count
+- Critic disabled → warning lists `council_skeptic (requires critic)` with `2/3` count
+- SME disabled → warning lists `council_domain_expert (requires sme)` with `2/3` count
+- All three disabled → zero council agents registered; warning lists all three roles with `0/3` count
+- Full council enabled → no council-reduction warning in `deferredWarnings`
+- Named swarm with `reviewer` disabled → warning fires with correct prefix-aware detection (`isAgentDisabled` swarmPrefix path)
+
 ## Known caveats
 
 None.
