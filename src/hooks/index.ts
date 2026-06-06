@@ -2,6 +2,7 @@ export { createAgentActivityHooks } from './agent-activity';
 export { createCcCommandInterceptHook } from './cc-command-intercept';
 export { createCompactionCustomizerHook } from './compaction-customizer';
 export { createContextBudgetHandler } from './context-budget';
+export { createContextCapsuleInjectHook } from './context-capsule-inject';
 export { createCuratorLLMDelegate } from './curator-llm-factory';
 export { createDelegationGateHook } from './delegation-gate';
 export { createDelegationSanitizerHook } from './delegation-sanitizer';

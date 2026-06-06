@@ -854,6 +854,24 @@ export const PlanCursorConfigSchema = z.object({
 // Type alias for downstream usage
 export type PlanCursorConfig = z.infer<typeof PlanCursorConfigSchema>;
 
+// Context Map configuration (issue #1104, FR-006 — opt-in)
+// Controls the Context Map / Context Capsules feature: file-level summaries
+// (capsules) that replace full file reads when context budgets are tight.
+export const ContextMapConfigSchema = z.object({
+	/** Enable the context map feature. Default: false (opt-in). */
+	enabled: z.boolean().default(false),
+	/** Controls how aggressively capsules replace file reads. Default: balanced. */
+	mode: z.enum(['conservative', 'balanced', 'aggressive']).default('balanced'),
+	/** Token budget per capsule summary. Default: 2000. */
+	max_capsule_tokens: z.number().int().positive().default(2000),
+	/** Whether content hash changes invalidate cached file summaries. Default: true. */
+	invalidate_on_hash_change: z.boolean().default(true),
+	/** Maps agent role names to capsule strategy names. Default: {}. */
+	agent_profiles: z.record(z.string(), z.string()).default({}),
+});
+
+export type ContextMapConfig = z.infer<typeof ContextMapConfigSchema>;
+
 // Checkpoint configuration
 export const CheckpointConfigSchema = z
 	.object({
@@ -1573,6 +1591,9 @@ export const PluginConfigSchema = z.object({
 
 	// Plan cursor configuration - controls compressed plan summary injection
 	plan_cursor: PlanCursorConfigSchema.optional(),
+
+	// Context Map configuration (issue #1104, FR-006 — opt-in)
+	context_map: ContextMapConfigSchema.optional(),
 
 	// Evidence configuration
 	evidence: EvidenceConfigSchema.optional(),

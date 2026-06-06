@@ -32,6 +32,7 @@ import {
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
 } from './config/schema';
+import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
@@ -60,6 +61,7 @@ import {
 } from './hooks/adversarial-detector.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
+import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
@@ -420,6 +422,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
+	const contextCapsuleInjectHook = createContextCapsuleInjectHook(
+		config,
+		ctx.directory,
+	);
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const commandHandler = createSwarmCommandHandler(
@@ -1277,6 +1283,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					if (process.env.DEBUG_SWARM)
 						console.error(`[DIAG] systemTransform enhancer DONE`);
 				},
+				contextCapsuleInjectHook['experimental.chat.system.transform'],
 				// Heartbeat: throttled to 30s per session
 				(input: unknown, _output: unknown): Promise<void> => {
 					try {
@@ -1711,6 +1718,36 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 				// Repo graph incremental update on write tools
 				await safeHook(repoGraphHook.toolAfter)(input, output);
+
+				// Context Map: post-agent update after Task tool completes
+				if (
+					isTaskTool &&
+					config.context_map?.enabled === true &&
+					input.sessionID
+				) {
+					try {
+						const contextMapSession = swarmState.agentSessions.get(
+							input.sessionID,
+						);
+						const contextMapTaskId = contextMapSession?.currentTaskId ?? null;
+						if (contextMapTaskId) {
+							const agentOutput =
+								typeof output.output === 'string' ? output.output : '';
+							updateContextMapAfterAgent({
+								task_id: contextMapTaskId,
+								agent_role:
+									swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
+								files_touched: [],
+								implementation_summary: agentOutput.slice(0, 500),
+								task_goal: '',
+								final_status: 'completed',
+								directory: ctx.directory,
+							});
+						}
+					} catch {
+						// Post-agent update must never block the hook chain
+					}
+				}
 
 				// Tool output truncation (after summarizer to avoid double-processing)
 				const toolOutputConfig = config.tool_output;
