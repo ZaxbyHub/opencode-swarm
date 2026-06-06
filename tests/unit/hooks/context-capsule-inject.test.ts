@@ -6,14 +6,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import * as fs from 'node:fs';
+import os from 'node:os';
+import * as path from 'node:path';
 import {
 	_internals,
 	createContextCapsuleInjectHook,
 } from '../../../src/hooks/context-capsule-inject.js';
-import type { AgentRole, CapsuleDelegationReason } from '../../../src/types/context-capsule.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import os from 'node:os';
+import type {
+	AgentRole,
+	CapsuleDelegationReason,
+} from '../../../src/types/context-capsule.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,7 +53,10 @@ const SESSION_ID = 'test-session-1';
 const CAPSULE_CONTENT = '[Context Capsule] File summaries and read policies.';
 
 const mockCapsuleResult = {
-	capsule: { content: CAPSULE_CONTENT, delegation_reason: 'new_task' as CapsuleDelegationReason },
+	capsule: {
+		content: CAPSULE_CONTENT,
+		delegation_reason: 'new_task' as CapsuleDelegationReason,
+	},
 	metadata: {
 		token_estimate: 42,
 		cache_hits: 0,
@@ -351,7 +357,10 @@ describe('_internals DI seam', () => {
 	test('override works for all _internals functions', async () => {
 		// Override all internals with mocks
 		const mockBuildCapsule = mock(() => ({
-			capsule: { content: 'custom capsule', delegation_reason: 'new_task' as CapsuleDelegationReason },
+			capsule: {
+				content: 'custom capsule',
+				delegation_reason: 'new_task' as CapsuleDelegationReason,
+			},
 			metadata: {
 				token_estimate: 1,
 				cache_hits: 0,
@@ -368,7 +377,9 @@ describe('_internals DI seam', () => {
 		const mockReadScopeFile = mock(() => ['overridden.ts']);
 		const mockSaveCapsule = mock(() => {});
 		const mockGetSession = mock(() => undefined);
-		const mockResolveDelegationReason = mock(() => 'new_task' as CapsuleDelegationReason);
+		const mockResolveDelegationReason = mock(
+			() => 'new_task' as CapsuleDelegationReason,
+		);
 		const mockExtractTaskGoal = mock(() => 'Test task goal');
 
 		_internals.buildCapsule = mockBuildCapsule;
@@ -502,7 +513,10 @@ describe('Edge cases — hook never throws', () => {
 
 	test('empty capsule content → no injection', async () => {
 		_internals.buildCapsule = mock(() => ({
-			capsule: { content: '   \n\t  ', delegation_reason: 'new_task' as CapsuleDelegationReason },
+			capsule: {
+				content: '   \n\t  ',
+				delegation_reason: 'new_task' as CapsuleDelegationReason,
+			},
 			metadata: {
 				token_estimate: 0,
 				cache_hits: 0,
@@ -638,12 +652,16 @@ describe('extractTaskGoal', () => {
 			fs.mkdirSync(swarmDir, { recursive: true });
 
 			const plan = {
-				phases: [{
-					tasks: [{
-						id: '1.2',
-						description: 'Build the context map service layer',
-					}],
-				}],
+				phases: [
+					{
+						tasks: [
+							{
+								id: '1.2',
+								description: 'Build the context map service layer',
+							},
+						],
+					},
+				],
 			};
 			fs.writeFileSync(
 				path.join(swarmDir, 'plan.json'),
@@ -661,7 +679,10 @@ describe('extractTaskGoal', () => {
 	test('extractTaskGoal returns empty string for unknown task ID — via hook integration', async () => {
 		// When task ID doesn't match any task in plan.json, task_goal should be ''
 		_internals.buildCapsule = mock(() => ({
-			capsule: { content: CAPSULE_CONTENT, delegation_reason: 'new_task' as CapsuleDelegationReason },
+			capsule: {
+				content: CAPSULE_CONTENT,
+				delegation_reason: 'new_task' as CapsuleDelegationReason,
+			},
 			metadata: {
 				token_estimate: 42,
 				cache_hits: 0,
@@ -695,8 +716,8 @@ describe('extractTaskGoal', () => {
 			'/fake/dir',
 		);
 		// buildCapsule was called with task_goal = ''
-		const [capsuleInput] = (_internals.buildCapsule as ReturnType<typeof mock>).mock
-			.calls[0] as Parameters<typeof _internals.buildCapsule>;
+		const [capsuleInput] = (_internals.buildCapsule as ReturnType<typeof mock>)
+			.mock.calls[0] as Parameters<typeof _internals.buildCapsule>;
 		expect(capsuleInput.task_goal).toBe('');
 	});
 
@@ -720,9 +741,12 @@ describe('extractTaskGoal', () => {
 		const output = { system: ['msg'] };
 		await transform({ sessionID: SESSION_ID }, output);
 
-		expect(_internals.extractTaskGoal).toHaveBeenCalledWith('task-1', '/fake/dir');
-		const [capsuleInput] = (_internals.buildCapsule as ReturnType<typeof mock>).mock
-			.calls[0] as Parameters<typeof _internals.buildCapsule>;
+		expect(_internals.extractTaskGoal).toHaveBeenCalledWith(
+			'task-1',
+			'/fake/dir',
+		);
+		const [capsuleInput] = (_internals.buildCapsule as ReturnType<typeof mock>)
+			.mock.calls[0] as Parameters<typeof _internals.buildCapsule>;
 		expect(capsuleInput.task_goal).toBe('Implement the foo feature');
 	});
 
@@ -743,9 +767,11 @@ describe('extractTaskGoal', () => {
 			fs.mkdirSync(swarmDir, { recursive: true });
 
 			const plan = {
-				phases: [{
-					tasks: [{ id: '3.1', description: 'Refactor the capsule builder' }],
-				}],
+				phases: [
+					{
+						tasks: [{ id: '3.1', description: 'Refactor the capsule builder' }],
+					},
+				],
 			};
 			fs.writeFileSync(
 				path.join(swarmDir, 'plan.json'),
@@ -753,7 +779,9 @@ describe('extractTaskGoal', () => {
 				'utf-8',
 			);
 
-			expect(_internals.extractTaskGoal('3.1', tempDir)).toBe('Refactor the capsule builder');
+			expect(_internals.extractTaskGoal('3.1', tempDir)).toBe(
+				'Refactor the capsule builder',
+			);
 		});
 
 		test('returns empty string when task ID does not match any plan task', () => {
@@ -761,9 +789,11 @@ describe('extractTaskGoal', () => {
 			fs.mkdirSync(swarmDir, { recursive: true });
 
 			const plan = {
-				phases: [{
-					tasks: [{ id: '1.1', description: 'Create the data model' }],
-				}],
+				phases: [
+					{
+						tasks: [{ id: '1.1', description: 'Create the data model' }],
+					},
+				],
 			};
 			fs.writeFileSync(
 				path.join(swarmDir, 'plan.json'),
@@ -809,7 +839,9 @@ describe('extractTaskGoal', () => {
 
 			expect(_internals.extractTaskGoal('1.1', tempDir)).toBe('Phase one task');
 			expect(_internals.extractTaskGoal('2.1', tempDir)).toBe('Phase two task');
-			expect(_internals.extractTaskGoal('3.1', tempDir)).toBe('Phase three task');
+			expect(_internals.extractTaskGoal('3.1', tempDir)).toBe(
+				'Phase three task',
+			);
 			expect(_internals.extractTaskGoal('4.1', tempDir)).toBe('');
 		});
 	});

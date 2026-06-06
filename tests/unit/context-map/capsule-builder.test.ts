@@ -983,7 +983,8 @@ describe('Config wiring (mode, invalidate_on_hash_change, agent_profiles)', () =
 		_internals.loadContextMap = () => map;
 		_internals.existsSync = () => true;
 		// Return different content so hash would fail if checked
-		_internals.readFileSync = () => 'different content' as unknown as Buffer & string;
+		_internals.readFileSync = () =>
+			'different content' as unknown as Buffer & string;
 		_internals.isFileStale = () => true;
 
 		const { capsule, metadata } = buildCapsule({
@@ -1024,7 +1025,8 @@ describe('Config wiring (mode, invalidate_on_hash_change, agent_profiles)', () =
 		_internals.loadContextMap = () => map;
 		_internals.existsSync = () => true;
 		// Return different content so hash fails
-		_internals.readFileSync = () => 'different content' as unknown as Buffer & string;
+		_internals.readFileSync = () =>
+			'different content' as unknown as Buffer & string;
 		_internals.isFileStale = () => true;
 
 		const { capsule, metadata } = buildCapsule({
@@ -1061,7 +1063,8 @@ describe('Config wiring (mode, invalidate_on_hash_change, agent_profiles)', () =
 		const origStale = _internals.isFileStale;
 
 		_internals.existsSync = () => true;
-		_internals.readFileSync = () => 'different content' as unknown as Buffer & string;
+		_internals.readFileSync = () =>
+			'different content' as unknown as Buffer & string;
 		_internals.isFileStale = () => true;
 
 		// invalidateOnHashChange = false → should trust summary regardless of hash
@@ -1089,7 +1092,8 @@ describe('Config wiring (mode, invalidate_on_hash_change, agent_profiles)', () =
 		const origStale = _internals.isFileStale;
 
 		_internals.existsSync = () => true;
-		_internals.readFileSync = () => 'different content' as unknown as Buffer & string;
+		_internals.readFileSync = () =>
+			'different content' as unknown as Buffer & string;
 		_internals.isFileStale = () => true;
 
 		// invalidateOnHashChange = true (default) → should check hash and distrust

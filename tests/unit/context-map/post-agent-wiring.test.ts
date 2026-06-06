@@ -21,8 +21,8 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 
 import {
 	_internals,
-	updateContextMapAfterAgent,
 	type PostAgentUpdateParams,
+	updateContextMapAfterAgent,
 } from '../../../src/context-map/post-agent-update';
 import type { ContextMap } from '../../../src/types/context-map';
 
@@ -64,9 +64,7 @@ function setRealpathSync(predicate: (p: string) => string): void {
 	_internals.realpathSync = mock(predicate) as typeof _internals.realpathSync;
 }
 
-function setExtractFileSummary(
-	fn: typeof _internals.extractFileSummary,
-): void {
+function setExtractFileSummary(fn: typeof _internals.extractFileSummary): void {
 	_internals.extractFileSummary = fn;
 }
 
