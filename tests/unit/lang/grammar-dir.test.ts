@@ -61,9 +61,7 @@ describe('resolveGrammarsDir — getGrammarsDirAbsolute path logic (#642)', () =
 		test('Windows-style path: main bundle context', () => {
 			const thisDir = 'C:\\project\\dist';
 			const result = resolveGrammarsDir(thisDir);
-			expect(result).toBe(
-				path.join('C:\\project\\dist', 'lang', 'grammars'),
-			);
+			expect(result).toBe(path.join('C:\\project\\dist', 'lang', 'grammars'));
 		});
 	});
 
@@ -81,9 +79,7 @@ describe('resolveGrammarsDir — getGrammarsDirAbsolute path logic (#642)', () =
 			expect(cliResult).toBe(
 				path.join('/some/path/cli', '..', 'lang', 'grammars'),
 			);
-			expect(srcResult).toBe(
-				path.join('/some/path/src/lang', 'grammars'),
-			);
+			expect(srcResult).toBe(path.join('/some/path/src/lang', 'grammars'));
 		});
 	});
 });
