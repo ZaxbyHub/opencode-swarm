@@ -103,6 +103,21 @@ export type TaskWorkflowState =
 	| 'complete';
 
 /**
+ * Canonical ordering of TaskWorkflowState values for forward-only transition checks.
+ * Used by advanceTaskState, canAdvanceTaskState, and applyRehydrationCache.
+ * Extracted from three duplicate local literals to a single module-level constant
+ * to eliminate duplication and prevent future drift.
+ */
+const STATE_ORDER: TaskWorkflowState[] = [
+	'idle',
+	'coder_delegated',
+	'pre_check_passed',
+	'reviewer_run',
+	'tests_run',
+	'complete',
+];
+
+/**
  * Represents per-session state for guardrail tracking.
  * Budget fields (toolCallCount, consecutiveErrors, etc.) have moved to InvocationWindow.
  * This interface now tracks session-level metadata and window management.
@@ -1024,15 +1039,6 @@ export function advanceTaskState(
 		);
 	}
 
-	const STATE_ORDER: TaskWorkflowState[] = [
-		'idle',
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-		'complete',
-	];
-
 	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
 	const currentIndex = STATE_ORDER.indexOf(current);
 	const newIndex = STATE_ORDER.indexOf(newState);
@@ -1109,15 +1115,6 @@ export function canAdvanceTaskState(
 ): boolean {
 	if (!isValidTaskId(taskId)) return false;
 	if (!session || !(session.taskWorkflowStates instanceof Map)) return false;
-
-	const STATE_ORDER: TaskWorkflowState[] = [
-		'idle',
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-		'complete',
-	];
 
 	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
 	const currentIndex = STATE_ORDER.indexOf(current);
@@ -1512,15 +1509,6 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 	}
 
 	const { planTaskStates, evidenceMap } = _rehydrationCache;
-
-	const STATE_ORDER: TaskWorkflowState[] = [
-		'idle',
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-		'complete',
-	];
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);
