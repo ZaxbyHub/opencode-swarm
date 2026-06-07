@@ -130,6 +130,8 @@ describe('renderSkillMarkdown', () => {
 		expect(md).toContain('---');
 		expect(md).toMatch(/^name:\s+/m);
 		expect(md).toContain('generated_from_knowledge:');
+		expect(md).toContain('source_knowledge_ids:');
+		expect(md).toMatch(/^generated_at:\s+\S+/m);
 		expect(md).toContain('## Trigger');
 		expect(md).toContain('## Required Procedure');
 		expect(md).toContain('## Forbidden Shortcuts');

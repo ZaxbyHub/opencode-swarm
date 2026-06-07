@@ -238,6 +238,7 @@ function uniqueStrings(arr: string[]): string[] {
 export function renderSkillMarkdown(
 	cluster: KnowledgeCluster,
 	mode: GenerateMode = 'active',
+	generatedAt = new Date().toISOString(),
 ): string {
 	const description =
 		cluster.title.length > 200
@@ -250,6 +251,9 @@ export function renderSkillMarkdown(
 	lines.push(`description: ${escapeYaml(description)}`);
 	lines.push('generated_from_knowledge:');
 	lines.push(ids);
+	lines.push('source_knowledge_ids:');
+	lines.push(ids);
+	lines.push(`generated_at: ${generatedAt}`);
 	lines.push(`confidence: ${cluster.avgConfidence.toFixed(2)}`);
 	lines.push(`status: ${mode === 'active' ? 'active' : 'draft'}`);
 	lines.push('---');
@@ -531,7 +535,12 @@ async function stampSourceEntries(
  */
 export function parseDraftFrontmatter(
 	content: string,
-): { name?: string; status?: string; sourceKnowledgeIds: string[] } | null {
+): {
+	name?: string;
+	status?: string;
+	generatedAt?: string;
+	sourceKnowledgeIds: string[];
+} | null {
 	// Strip optional UTF-8 BOM that some editors prepend on Windows.
 	const stripped =
 		content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
@@ -549,14 +558,19 @@ export function parseDraftFrontmatter(
 	const closeStart = fenceLen + (closeFence.index ?? 0);
 	const body = stripped.slice(fenceLen, closeStart).replace(/\r\n/g, '\n');
 	const lines = body.split('\n');
-	const out: { name?: string; status?: string; sourceKnowledgeIds: string[] } =
-		{
-			sourceKnowledgeIds: [],
-		};
-	let inIdsList = false;
+	const out: {
+		name?: string;
+		status?: string;
+		generatedAt?: string;
+		sourceKnowledgeIds: string[];
+	} = {
+		sourceKnowledgeIds: [],
+	};
+	let inLegacyIdsList = false;
+	let inSourceIdsList = false;
 	for (const raw of lines) {
 		const line = raw;
-		if (inIdsList) {
+		if (inLegacyIdsList || inSourceIdsList) {
 			// Accept any non-empty, non-whitespace token bounded to 64 chars.
 			// Generator emits UUID v4 ids; tests may use short synthetic ids.
 			const m = line.match(/^\s+-\s+(\S{1,64})\s*$/);
@@ -565,7 +579,8 @@ export function parseDraftFrontmatter(
 				continue;
 			}
 			// any non-list line ends the list
-			inIdsList = false;
+			inLegacyIdsList = false;
+			inSourceIdsList = false;
 		}
 		const nm = line.match(/^name:\s*(\S+)\s*$/);
 		if (nm) {
@@ -577,8 +592,18 @@ export function parseDraftFrontmatter(
 			out.status = st[1];
 			continue;
 		}
+		const ga = line.match(/^generated_at:\s*(\S+)\s*$/);
+		if (ga) {
+			out.generatedAt = ga[1];
+			continue;
+		}
 		if (/^generated_from_knowledge:\s*$/.test(line)) {
-			inIdsList = true;
+			inLegacyIdsList = true;
+			continue;
+		}
+		if (/^source_knowledge_ids:\s*$/.test(line)) {
+			out.sourceKnowledgeIds = [];
+			inSourceIdsList = true;
 		}
 	}
 	return out;

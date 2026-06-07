@@ -83,6 +83,26 @@ async function seedKnowledge(): Promise<void> {
 	);
 }
 
+async function seedGeneratedSkill(slug: string, sourceId: string): Promise<void> {
+	const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
+	await mkdir(skillDir, { recursive: true });
+	const skillMd = `---
+name: ${slug}
+description: "seeded skill"
+generated_from_knowledge:
+  - ${sourceId}
+source_knowledge_ids:
+  - ${sourceId}
+generated_at: 2000-01-01T00:00:00.000Z
+confidence: 0.90
+status: active
+---
+
+# Seeded Skill
+`;
+	await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf-8');
+}
+
 describe('skill_improver LLM dispatch', () => {
 	it('invokes the injected delegate and tags proposal source: llm', async () => {
 		await seedKnowledge();
@@ -128,6 +148,30 @@ describe('skill_improver LLM dispatch', () => {
 		expect(body).toContain('source: llm');
 		expect(body).toContain('LLM-derived inventory');
 		expect(body).not.toContain('deterministic_fallback');
+	});
+
+	it('includes stale active skill signals derived from frontmatter metadata', async () => {
+		await seedKnowledge();
+		await seedGeneratedSkill(
+			'scope-skill',
+			'11111111-1111-4111-9111-111111111111',
+		);
+		let lastUserPrompt = '';
+		const delegate = async (_sys: string, user: string): Promise<string> => {
+			lastUserPrompt = user;
+			return '## Inventory snapshot\nok';
+		};
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: cfg,
+			delegate,
+		});
+
+		expect(r.ran).toBe(true);
+		expect(lastUserPrompt).toContain('stale_active_skills: 1');
+		expect(lastUserPrompt).toContain('scope-skill');
+		expect(lastUserPrompt).toContain('updated_after_generation');
 	});
 
 	it('uses request mode in the LLM prompt instead of raw config write_mode', async () => {

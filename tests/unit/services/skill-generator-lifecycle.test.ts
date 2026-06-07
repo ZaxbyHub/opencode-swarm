@@ -90,10 +90,11 @@ describe('renderSkillMarkdown mode', () => {
 		expect(md).toMatch(/^status:\s*active\s*$/m);
 	});
 
-	it('always includes generated_from_knowledge as YAML list (no duplicate source_knowledge_ids field)', () => {
+	it('includes both generated_from_knowledge and source_knowledge_ids YAML lists', () => {
 		const md = renderSkillMarkdown(cluster, 'draft');
 		expect(md).toContain('generated_from_knowledge:');
-		expect(md).not.toContain('source_knowledge_ids:');
+		expect(md).toContain('source_knowledge_ids:');
+		expect(md).toMatch(/^generated_at:\s+\S+/m);
 	});
 });
 
@@ -106,6 +107,7 @@ describe('parseDraftFrontmatter', () => {
 		expect(fm!.name).toBe(cluster.slug);
 		expect(fm!.status).toBe('draft');
 		expect(fm!.sourceKnowledgeIds.sort()).toEqual(['a1', 'a2']);
+		expect(fm!.generatedAt).toBeString();
 	});
 
 	it('returns null for content without leading frontmatter fence', () => {
