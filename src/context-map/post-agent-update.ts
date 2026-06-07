@@ -433,15 +433,16 @@ export function updateContextMapAfterAgent(
 		};
 		const validFiles: string[] = [];
 
+		// Resolve root once outside the loop — root is constant for all iterations.
+		const realRoot = _internals.realpathSync(root);
+
 		for (const filePath of params.files_touched) {
 			try {
 				const resolved = path.resolve(root, filePath);
 
 				// Realpath containment — prevents symlink escape.
-				// Resolve both root and target through realpath so that
-				// symlinks pointing outside the project root are detected
-				// and skipped.
-				const realRoot = _internals.realpathSync(root);
+				// Resolve the target through realpath so that symlinks
+				// pointing outside the project root are detected and skipped.
 				const realResolved = _internals.realpathSync(resolved);
 				const relative = path.relative(realRoot, realResolved);
 				if (relative.startsWith('..') || path.isAbsolute(relative)) {

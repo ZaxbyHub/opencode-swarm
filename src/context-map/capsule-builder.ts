@@ -178,9 +178,15 @@ export const DEFAULT_ROLE_PROFILES: Record<AgentRole, RoleProfile> = {
  * - In map but stale (content hash changed) → read original
  * - In map and fresh → trust summary
  *
+ * When `contentCache` is provided, the file contents read during staleness
+ * checking are stored in the map so callers can reuse them without re-reading
+ * the filesystem (avoids the redundant double-read in buildCapsule).
+ *
  * @param files - Relative file paths to build policy for
  * @param map - The loaded Context Map
  * @param directory - Project root directory for file resolution
+ * @param invalidateOnHashChange - Whether content hash changes invalidate entries
+ * @param contentCache - Optional output map populated with `filePath → content`
  * @returns Array of read policy entries, one per file
  */
 export function buildReadPolicy(
@@ -188,6 +194,7 @@ export function buildReadPolicy(
 	map: ContextMap,
 	directory: string,
 	invalidateOnHashChange = true,
+	contentCache?: Map<string, string | undefined>,
 ): ReadPolicyEntry[] {
 	const policy: ReadPolicyEntry[] = [];
 
@@ -214,6 +221,11 @@ export function buildReadPolicy(
 			}
 		} catch {
 			// File unreadable — treat as stale
+		}
+
+		// Store in the caller's content cache for reuse (single-pass reads)
+		if (contentCache !== undefined) {
+			contentCache.set(filePath, currentContent);
 		}
 
 		if (
@@ -391,12 +403,15 @@ export function buildCapsule(params: BuildCapsuleParams): {
 	// (c) Truncate files to max_files from profile
 	const filesInScope = params.files_in_scope.slice(0, profile.max_files);
 
-	// (d) Build read policy
+	// (d) Build read policy — contentCache avoids redundant file reads in the
+	//     summary loop below (each file is read once, not twice)
+	const contentCache = new Map<string, string | undefined>();
 	const readPolicy = buildReadPolicy(
 		filesInScope,
 		map,
 		directory,
 		params.invalidate_on_hash_change ?? true,
+		contentCache,
 	);
 
 	// (e) Populate file summaries and track cache diagnostics
@@ -416,15 +431,7 @@ export function buildCapsule(params: BuildCapsuleParams): {
 			// Check staleness for tracking purposes (only when hash invalidation is enabled)
 			const shouldCheckStaleness = params.invalidate_on_hash_change !== false;
 			if (shouldCheckStaleness) {
-				const absolutePath = path.join(directory, filePath);
-				let currentContent: string | undefined;
-				try {
-					if (_internals.existsSync(absolutePath)) {
-						currentContent = _internals.readFileSync(absolutePath, 'utf-8');
-					}
-				} catch {
-					// File unreadable
-				}
+				const currentContent = contentCache.get(filePath);
 
 				if (
 					currentContent === undefined ||

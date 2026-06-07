@@ -1162,6 +1162,68 @@ describe('extractEvidenceFindings — real filesystem', () => {
 });
 
 // ---------------------------------------------------------------------------
+// F-002 verification: realpathSync(root) is called once, not N times
+// ---------------------------------------------------------------------------
+
+describe('realpathSync root call count — F-002 regression', () => {
+	test('realpathSync(root) is called exactly once (hoisted from loop)', () => {
+		setLoadContextMap(() => makeContextMap());
+		setSaveContextMap();
+		setExistsSync(() => true);
+		setExtractFileSummary((rel) => ({
+			path: rel,
+			content_hash: 'x',
+			mtime_ms: 0,
+			purpose: '',
+			summary: '',
+		}));
+		setReadFileSync(() => 'content');
+		setAppendTaskHistory((map, summary) => ({
+			...map,
+			task_history: { ...map.task_history, [summary.task_id]: summary },
+		}));
+		setAppendDecision((map, d) => ({
+			...map,
+			decisions: [...map.decisions, d],
+		}));
+
+		// Track realpathSync calls
+		const realpathCalls: string[] = [];
+		const origRealpath = _internals.realpathSync;
+		_internals.realpathSync = ((p: string): string => {
+			realpathCalls.push(p);
+			return p;
+		}) as typeof _internals.realpathSync;
+
+		// Use an absolute path that works on both Unix and Windows
+		// On Unix: /tmp/post-agent-update-test-F002
+		// On Windows: E:\tmp\post-agent-update-test-F002 (or whatever drive letter)
+		const testRoot = path.resolve(os.tmpdir(), 'post-agent-update-test-F002');
+
+		updateContextMapAfterAgent({
+			task_id: 'F-002',
+			agent_role: 'coder',
+			files_touched: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+			implementation_summary: 'Test realpathSync call count',
+			task_goal: 'Goal',
+			final_status: 'completed',
+			directory: testRoot,
+		});
+
+		// realpathSync(root) is called once before the loop (not once per file).
+		// Then realpathSync(resolved) is called for each file inside the loop.
+		// So with 3 files: 1 (root) + 3 (per-file) = 4 total calls.
+		// The fix is that the root call happens once at the top, not per iteration.
+		// We verify: total calls = 4 (1 root + 3 per-file), proving hoist.
+		expect(realpathCalls.length).toBe(4);
+		// The first call must be for the resolved root (proving it was hoisted)
+		expect(realpathCalls[0]).toBe(testRoot);
+
+		_internals.realpathSync = origRealpath;
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Path security
 // ---------------------------------------------------------------------------
 

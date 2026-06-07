@@ -1277,3 +1277,166 @@ describe('edge cases', () => {
 		_internals.loadContextMap = origLoad;
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Tests: contentCache optimization (F-001)
+// ---------------------------------------------------------------------------
+
+describe('buildReadPolicy — contentCache parameter (F-001)', () => {
+	afterEach(() => {
+		mock.restore();
+	});
+
+	test('contentCache is populated with file contents for files that exist', () => {
+		const entry = makeFileEntry({
+			path: 'src/Exists.ts',
+			content_hash: 'abc123',
+		});
+		const map = makeContextMap({ 'src/Exists.ts': entry });
+		const files = ['src/Exists.ts'];
+
+		// Store originals
+		const origExists = _internals.existsSync;
+		const origRead = _internals.readFileSync;
+
+		_internals.existsSync = () => true;
+		_internals.readFileSync = () =>
+			'file content here' as unknown as Buffer & string;
+
+		const contentCache = new Map<string, string | undefined>();
+		buildReadPolicy(files, map, os.tmpdir(), true, contentCache);
+
+		// contentCache should be populated with the file's content
+		expect(contentCache.has('src/Exists.ts')).toBe(true);
+		expect(contentCache.get('src/Exists.ts')).toBe('file content here');
+
+		_internals.existsSync = origExists;
+		_internals.readFileSync = origRead;
+	});
+
+	test('contentCache is populated with undefined for files that do not exist on disk', () => {
+		const entry = makeFileEntry({ path: 'src/Missing.ts' });
+		const map = makeContextMap({ 'src/Missing.ts': entry });
+		const files = ['src/Missing.ts'];
+
+		const origExists = _internals.existsSync;
+		_internals.existsSync = () => false; // file doesn't exist
+
+		const contentCache = new Map<string, string | undefined>();
+		buildReadPolicy(files, map, os.tmpdir(), true, contentCache);
+
+		expect(contentCache.has('src/Missing.ts')).toBe(true);
+		expect(contentCache.get('src/Missing.ts')).toBe(undefined);
+
+		_internals.existsSync = origExists;
+	});
+
+	test('contentCache is NOT populated when the parameter is omitted (backward compatible)', () => {
+		const entry = makeFileEntry({ path: 'src/Exists.ts' });
+		const map = makeContextMap({ 'src/Exists.ts': entry });
+		const files = ['src/Exists.ts'];
+
+		const origExists = _internals.existsSync;
+		const origRead = _internals.readFileSync;
+
+		_internals.existsSync = () => true;
+		_internals.readFileSync = () => 'content' as unknown as Buffer & string;
+
+		// No contentCache passed — function must still work
+		const policy = buildReadPolicy(files, map, os.tmpdir(), true);
+
+		expect(policy).toHaveLength(1);
+		// The function succeeds without the cache
+		expect(policy[0].file_path).toBe('src/Exists.ts');
+
+		_internals.existsSync = origExists;
+		_internals.readFileSync = origRead;
+	});
+
+	test('contentCache is empty when no files_in_scope', () => {
+		const map = makeContextMap({});
+		const contentCache = new Map<string, string | undefined>();
+		buildReadPolicy([], map, os.tmpdir(), true, contentCache);
+		expect(contentCache.size).toBe(0);
+	});
+});
+
+describe('buildCapsule — contentCache optimization via readFileSync call count (F-001)', () => {
+	const tempDir = os.tmpdir();
+
+	afterEach(() => {
+		mock.restore();
+	});
+
+	test('readFileSync is called once per file, not twice (contentCache prevents redundant read)', () => {
+		const entry1 = makeFileEntry({ path: 'src/a.ts' });
+		const entry2 = makeFileEntry({ path: 'src/b.ts' });
+		const map = makeContextMap({ 'src/a.ts': entry1, 'src/b.ts': entry2 });
+
+		const origLoad = _internals.loadContextMap;
+		const origExists = _internals.existsSync;
+		const origRead = _internals.readFileSync;
+		const origStale = _internals.isFileStale;
+
+		_internals.loadContextMap = () => map;
+		_internals.existsSync = () => true;
+		_internals.isFileStale = () => false; // files are fresh
+
+		// Track readFileSync calls with a mock
+		const readCalls: string[] = [];
+		_internals.readFileSync = ((
+			p: string,
+			...args: unknown[]
+		): Buffer | string => {
+			readCalls.push(p);
+			return 'file content' as unknown as Buffer & string;
+		}) as typeof _internals.readFileSync;
+
+		buildCapsule({
+			task_id: '1.1',
+			agent_role: 'coder',
+			delegation_reason: 'new_task',
+			files_in_scope: ['src/a.ts', 'src/b.ts'],
+			task_goal: 'Test contentCache optimization',
+			directory: tempDir,
+		});
+
+		// Without the optimization, each file would be read twice:
+		//   1. once in buildReadPolicy (staleness check)
+		//   2. once in buildCapsule's summary loop (for extractFileSummary)
+		// With the contentCache, buildReadPolicy populates the cache,
+		// and buildCapsule's loop uses contentCache.get() instead of re-reading.
+		// So we expect exactly 2 calls (one per file in buildReadPolicy),
+		// NOT 4 (which would be 2 reads per file).
+		expect(readCalls.length).toBe(2);
+
+		_internals.loadContextMap = origLoad;
+		_internals.existsSync = origExists;
+		_internals.readFileSync = origRead;
+		_internals.isFileStale = origStale;
+	});
+
+	test('contentCache is created internally by buildCapsule and not exposed in public API', () => {
+		const entry = makeFileEntry({ path: 'src/a.ts' });
+		const map = makeContextMap({ 'src/a.ts': entry });
+
+		const origLoad = _internals.loadContextMap;
+		_internals.loadContextMap = () => map;
+
+		// The contentCache is an internal optimization detail.
+		// buildCapsule should still produce a valid capsule.
+		const { capsule, metadata } = buildCapsule({
+			task_id: '1.1',
+			agent_role: 'coder',
+			delegation_reason: 'new_task',
+			files_in_scope: ['src/a.ts'],
+			task_goal: 'Internal cache test',
+			directory: tempDir,
+		});
+
+		expect(metadata.success).toBe(true);
+		expect(capsule.task_id).toBe('1.1');
+
+		_internals.loadContextMap = origLoad;
+	});
+});

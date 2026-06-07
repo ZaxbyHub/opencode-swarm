@@ -8,7 +8,7 @@ Context Map and Context Capsules reduce repeated agent context rediscovery acros
 
 Without this feature, each delegated agent must re-read source files to understand the codebase. Context Capsules reduce this rediscovery when the project's Context Map has already been populated with current file summaries, providing agents with cached summaries derived from the Context Map.
 
-The Context Map is a durable snapshot of file-level summaries, task history, and architectural decisions. It lives at `.swarm/context-map.json` and is read during capsule building (falling back to an empty map when the file is absent). A post-agent write-back module exists for updating the map but is not yet wired into automatic lifecycle hooks.
+The Context Map is a durable snapshot of file-level summaries, task history, and architectural decisions. It lives at `.swarm/context-map.json` and is read during capsule building (falling back to an empty map when the file is absent). A post-agent write-back module automatically updates the map via the `tool.execute.after` lifecycle hook after agent task completion when `context_map.enabled === true`.
 
 ## Configuration
 
@@ -29,12 +29,12 @@ The feature is **opt-in** — it must be explicitly enabled in your opencode con
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `enabled` | `boolean` | `false` | Enable the feature. **Must be `true`** for any capsule injection to occur. |
-| `mode` | `"conservative"` \| `"balanced"` \| `"aggressive"` | `"balanced"` | _Schema-only — reserved for future use._ Currently all modes produce identical capsule behavior. |
+| `mode` | `"conservative"` \| `"balanced"` \| `"aggressive"` | `"balanced"` | Controls capsule detail density: `conservative` includes more files (1.5× max_files), `balanced` uses defaults, `aggressive` includes fewer files (0.6× max_files). |
 | `max_capsule_tokens` | `number` (positive integer) | `2000` | Token budget per capsule. Capsules exceeding this are pruned. |
-| `invalidate_on_hash_change` | `boolean` | `true` | _Schema-only — reserved for future use._ Hash-based staleness detection is currently always enabled. |
-| `agent_profiles` | `Record<string, string>` | `{}` | _Schema-only — reserved for future use._ Currently uses built-in default profiles per role. |
+| `invalidate_on_hash_change` | `boolean` | `true` | Controls whether SHA-256 hash comparison is used to detect stale file summaries. When `false`, cached summaries are always trusted without re-hashing. |
+| `agent_profiles` | `Record<string, string>` | `{}` | Allows overriding the built-in read strategy for specific agent roles (e.g., `{ "reviewer": "thorough" }`). |
 
-> **Note:** The `mode`, `invalidate_on_hash_change`, and `agent_profiles` fields are accepted by the config schema but not yet consumed at runtime. They are included for forward-compatibility.
+> **Note:** The `mode`, `invalidate_on_hash_change`, and `agent_profiles` fields are consumed at runtime by the capsule builder (`capsule-builder.ts`) and the capsule injection hook (`context-capsule-inject.ts`). They affect capsule construction and read policy behavior.
 
 ## Architecture Overview
 
@@ -47,7 +47,7 @@ The feature is implemented across several modules:
 | **File Summary** (`src/context-map/file-summary.ts`) | Language detection, export/import extraction, purpose summarization from JSDoc comments |
 | **Capsule Builder** (`src/context-map/capsule-builder.ts`) | Role-specific capsule construction with per-file read policies |
 | **Capsule Persistence** (`src/context-map/capsule-persistence.ts`) | Capsule CRUD at `.swarm/capsules/{task_id}.json` |
-| **Post-Agent Update** (`src/context-map/post-agent-update.ts`) | Write-back helper for updating the Context Map after agent completion (module exists but is not yet wired into automatic lifecycle hooks) |
+| **Post-Agent Update** (`src/context-map/post-agent-update.ts`) | Write-back helper for updating the Context Map after agent completion; wired into the `tool.execute.after` lifecycle hook when `context_map.enabled === true` |
 | **Telemetry** (`src/context-map/telemetry.ts`) | JSONL telemetry recording at `.swarm/context-telemetry.jsonl` |
 | **Hook** (`src/hooks/context-capsule-inject.ts`) | System message injection via the `experimental.chat.system.transform` hook |
 
@@ -107,7 +107,7 @@ The read policy tells each agent whether to trust a cached file summary or read 
 | `trust_summary: true, read_original: false` | The cached summary is current and sufficient |
 | `trust_summary: false, read_original: true` | File not in map, or summary is stale — read the original |
 
-Staleness is detected by comparing the stored SHA-256 content hash against a fresh hash of the current file content. Hash-based staleness detection is always enabled.
+Staleness is detected by comparing the stored SHA-256 content hash against a fresh hash of the current file content. This behavior is controlled by the `invalidate_on_hash_change` config option (default: `true`).
 
 Files that are not yet in the context map always receive `read_original: true` — there is no cached summary to trust.
 
@@ -172,8 +172,7 @@ After all hooks run, `consolidateSystemMessages` collapses multiple `output.syst
 ## Known Limitations
 
 - **Opt-in only**: The feature is disabled by default. Set `context_map.enabled: true` to activate it.
-- **No automatic post-agent updates**: The `post-agent-update` module exists but is not yet wired into the tool-after or session lifecycle hooks. Context maps are read (not written) during capsule building; they fall back to empty when `.swarm/context-map.json` is absent or corrupt. Future releases will integrate automatic write-back.
-- **Capsule quality depends on map population**: If the context map is empty (when `.swarm/context-map.json` has not been created/populated yet), capsules contain minimal content. The map must be populated via direct persistence API calls before capsules include file summaries.
+- **Capsule quality depends on map population**: If the context map is empty (when `.swarm/context-map.json` has not been created/populated yet), capsules contain minimal content. The map is populated automatically by the post-agent write-back module when `context_map.enabled === true`, or can be populated via direct persistence API calls. Capsules include richer file summaries after the map has been populated with relevant files.
 - **Telemetry is append-only**: The JSONL telemetry file grows indefinitely. There is no automatic rotation or size cap. For long-running sessions, periodically delete `.swarm/context-telemetry.jsonl` to reset.
 
 ## Non-Goals
