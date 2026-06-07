@@ -424,6 +424,9 @@ function resolveDelegatedPlanTaskId(
 
 	// Strong signal: when delegation text includes a TASK: line, prefer IDs from
 	// that line even if other task IDs appear elsewhere in the same prompt.
+	// Fail-closed on ambiguity: multiple distinct IDs on the TASK: line → null
+	// (does NOT fall through to the seen scan; ambiguous TASK: line is treated as
+	// unresolvable rather than silently selecting the wrong task).
 	const taskLineMatches = new Set<string>();
 	for (const field of candidateTextFields) {
 		if (typeof field !== 'string') continue;
