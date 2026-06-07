@@ -59,7 +59,7 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 export function handlePrReviewCommand(
-	_directory: string,
+	directory: string,
 	args: string[],
 ): string {
 	const parsed = parseArgs(args);
@@ -68,7 +68,7 @@ export function handlePrReviewCommand(
 		return `Error: Unknown flag "${parsed.unknownFlag}"\n\n${USAGE}`;
 	}
 
-	const resolved = resolvePrCommandInput(parsed.rest);
+	const resolved = resolvePrCommandInput(parsed.rest, directory);
 
 	// No positional args → usage.
 	if (resolved === null) {

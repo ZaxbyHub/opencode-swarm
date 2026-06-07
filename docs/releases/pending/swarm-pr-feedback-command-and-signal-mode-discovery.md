@@ -17,9 +17,14 @@
   failures, merge conflicts, pasted notes) without running a fresh broad review.
 - **PR references are more ergonomic.** Both `/swarm pr-review` and
   `/swarm pr-feedback` accept a full URL, `owner/repo#N`, or a bare PR number
-  (resolved against the `origin` remote), and you can append free-text
-  instructions after the reference (e.g. `/swarm pr-review 155 focus on the auth
-  refactor`). `pr-feedback` also accepts no PR reference (pasted-feedback session).
+  (resolved against the `origin` remote of the command's project directory), and
+  you can append free-text instructions after the reference (e.g.
+  `/swarm pr-review 155 focus on the auth refactor`). `pr-feedback` also accepts
+  no PR reference (pasted-feedback session). The bare-number git remote lookup
+  runs in the invoked project directory rather than `process.cwd()`, so it
+  resolves correctly in plugin-host contexts; a PR-ref-shaped token that cannot
+  be resolved returns an explicit error instead of being silently demoted to
+  free-text feedback.
 - **PR review/feedback are more autonomous.** The architect now has hard
   constraints to follow the skill exactly, check out the PR branch locally before
   exploring/fixing, run the triggered micro-lanes, and honor appended

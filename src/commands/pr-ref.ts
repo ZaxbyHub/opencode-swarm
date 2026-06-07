@@ -13,6 +13,13 @@
 
 import { execSync } from 'node:child_process';
 
+/**
+ * File-scoped indirection seam for the subprocess call. Tests override
+ * `_internals.execSync` (no `mock.module`) to assert the working directory is
+ * threaded through and to simulate a missing `origin` remote.
+ */
+export const _internals = { execSync };
+
 const MAX_URL_LEN = 2048;
 /** Upper bound on forwarded free-text instructions (post-sanitization). */
 const MAX_INSTRUCTIONS_LEN = 1000;
@@ -184,9 +191,9 @@ export interface ParsedPr {
  * Parse a PR reference from three formats:
  * 1. Full URL: https://github.com/owner/repo/pull/N
  * 2. Shorthand: owner/repo#N
- * 3. Bare number: N (resolved against the `origin` git remote)
+ * 3. Bare number: N (resolved against the `origin` git remote in `cwd`)
  */
-export function parsePrRef(input: string): ParsedPr | null {
+export function parsePrRef(input: string, cwd?: string): ParsedPr | null {
 	// Format 1: Full URL
 	const urlMatch = input.match(
 		/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i,
@@ -213,7 +220,7 @@ export function parsePrRef(input: string): ParsedPr | null {
 	const bareMatch = input.match(/^(\d+)$/);
 	if (bareMatch) {
 		const prNumber = parseInt(bareMatch[1], 10);
-		const remoteUrl = detectGitRemote();
+		const remoteUrl = detectGitRemote(cwd);
 		if (!remoteUrl) {
 			return null;
 		}
@@ -234,15 +241,24 @@ export function parsePrRef(input: string): ParsedPr | null {
 }
 
 /**
- * Detect the remote URL from git config.
+ * Detect the `origin` remote URL from git config.
+ *
+ * `cwd` should be the project directory the command was invoked for. Without it
+ * the lookup runs in `process.cwd()`, which in a plugin host is frequently not
+ * the repository root — so bare-number PR resolution would silently fail or
+ * resolve against the wrong repo (invariant #3: subprocesses run in an explicit
+ * working directory).
  */
-export function detectGitRemote(): string | null {
+export function detectGitRemote(cwd?: string): string | null {
 	try {
-		const remoteUrl = execSync('git remote get-url origin', {
-			encoding: 'utf-8',
-			stdio: ['pipe', 'pipe', 'pipe'],
-			timeout: 5000,
-		}).trim();
+		const remoteUrl = _internals
+			.execSync('git remote get-url origin', {
+				encoding: 'utf-8',
+				stdio: ['pipe', 'pipe', 'pipe'],
+				timeout: 5000,
+				...(cwd ? { cwd } : {}),
+			})
+			.trim();
 
 		return remoteUrl || null;
 	} catch {
@@ -294,13 +310,31 @@ export function parseGitRemoteUrl(
 }
 
 /**
+ * Whether a token is *shaped* like a PR reference — a full `http(s)` URL, an
+ * `owner/repo#N` shorthand, or a bare number. This is intent detection, not
+ * validation: a token can look like a PR ref yet still fail to resolve (e.g. a
+ * bare number when no `origin` remote exists, or a non-GitHub URL). Callers that
+ * accept free-text fallbacks (pr-feedback) use this to tell "the user meant a PR
+ * reference but it didn't resolve" (surface an error) from "the user typed
+ * instructions" (forward them).
+ */
+export function looksLikePrRef(token: string): boolean {
+	return (
+		/^https?:\/\//i.test(token) ||
+		/^[^/]+\/[^#]+#\d+$/.test(token) ||
+		/^\d+$/.test(token)
+	);
+}
+
+/**
  * Resolve the leading token of a PR command's positional args into a validated
  * GitHub PR URL, and collect any trailing tokens as free-text instructions.
  *
  * `rest` is the positional token list AFTER flag parsing (e.g. `--council`
  * already removed). The first token is the PR reference; everything after it
  * is sanitized and returned as `instructions` for forwarding in the MODE
- * signal.
+ * signal. `cwd` is the project directory used to resolve a bare PR number
+ * against the `origin` remote.
  *
  * Returns `null` when there are no positional tokens (caller shows usage).
  */
@@ -308,7 +342,10 @@ export type PrCommandInput =
 	| { prUrl: string; instructions: string }
 	| { error: string };
 
-export function resolvePrCommandInput(rest: string[]): PrCommandInput | null {
+export function resolvePrCommandInput(
+	rest: string[],
+	cwd?: string,
+): PrCommandInput | null {
 	if (rest.length === 0) {
 		// No args at all — caller should show usage.
 		return null;
@@ -319,7 +356,7 @@ export function resolvePrCommandInput(rest: string[]): PrCommandInput | null {
 
 	// Parse PR reference (sanitize full URLs first to strip query/fragment).
 	const isFullUrl = /^https?:\/\//i.test(refToken);
-	const prInfo = parsePrRef(isFullUrl ? sanitizeUrl(refToken) : refToken);
+	const prInfo = parsePrRef(isFullUrl ? sanitizeUrl(refToken) : refToken, cwd);
 	if (!prInfo) {
 		return { error: `Could not parse PR reference from "${refToken}"` };
 	}

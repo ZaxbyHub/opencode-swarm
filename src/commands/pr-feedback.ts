@@ -21,10 +21,14 @@
  * via ./pr-ref.ts.
  */
 
-import { resolvePrCommandInput, sanitizeInstructions } from './pr-ref.js';
+import {
+	looksLikePrRef,
+	resolvePrCommandInput,
+	sanitizeInstructions,
+} from './pr-ref.js';
 
 export function handlePrFeedbackCommand(
-	_directory: string,
+	directory: string,
 	args: string[],
 ): string {
 	const rest = args.filter((t) => t.trim().length > 0);
@@ -35,11 +39,10 @@ export function handlePrFeedbackCommand(
 		return '[MODE: PR_FEEDBACK]';
 	}
 
-	const resolved = resolvePrCommandInput(rest);
+	const resolved = resolvePrCommandInput(rest, directory);
 
 	// resolved is non-null here (rest is non-empty). On a parseable PR ref we
-	// attach it; otherwise the entire input is treated as pasted feedback
-	// instructions (pr-feedback explicitly supports no-PR sessions).
+	// attach it.
 	if (resolved && 'prUrl' in resolved) {
 		const signal = `[MODE: PR_FEEDBACK pr="${resolved.prUrl}"]`;
 		return resolved.instructions
@@ -47,6 +50,22 @@ export function handlePrFeedbackCommand(
 			: signal;
 	}
 
+	// The leading token is shaped like a PR reference (bare number, shorthand, or
+	// URL) but could not be resolved — e.g. a bare number with no reachable
+	// `origin` remote, or a rejected URL. Surface the error instead of silently
+	// demoting an intended PR reference to free-text feedback.
+	if (resolved && 'error' in resolved && looksLikePrRef(rest[0])) {
+		return [
+			`Error: ${resolved.error}`,
+			'',
+			'That looked like a PR reference but could not be resolved. Pass a full',
+			'URL or `owner/repo#N`, or omit the reference to start a no-PR feedback',
+			'session (e.g. `/swarm pr-feedback address the review notes`).',
+		].join('\n');
+	}
+
+	// Otherwise the input is free-text pasted feedback (pr-feedback explicitly
+	// supports no-PR sessions).
 	const instructions = sanitizeInstructions(rest.join(' '));
 	return instructions
 		? `[MODE: PR_FEEDBACK] ${instructions}`

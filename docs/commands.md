@@ -145,10 +145,12 @@ Ingest and close **known** PR feedback — review comments, requested changes, C
 | _(none)_ | No PR reference — a pasted-feedback session; the architect builds the ledger from the current PR/branch and any pasted notes |
 
 **Command forms:**
-- `/swarm pr-feedback 155` — close feedback on PR 155 (resolved against `origin`)
+- `/swarm pr-feedback 155` — close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
 - `/swarm pr-feedback owner/repo#155 also fix the lint errors` — PR + extra instructions
 - `/swarm pr-feedback` — pasted-feedback session on the current branch
-- `/swarm pr-feedback address the review notes about error handling` — a leading token that is not a parseable PR reference is treated as pasted-feedback instructions (the command never errors on this)
+- `/swarm pr-feedback address the review notes about error handling` — a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
+
+A leading token that **is** shaped like a PR reference (bare number, `owner/repo#N`, or URL) but cannot be resolved — for example a bare number when no `origin` remote is reachable — returns an explicit error rather than silently demoting the intended reference to free-text feedback.
 
 **URL sanitization:** identical to `pr-review` — `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames, and strips injected `[MODE: ...]` headers from instructions.
 

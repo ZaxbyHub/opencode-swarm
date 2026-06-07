@@ -1,7 +1,20 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { handlePrFeedbackCommand } from '../../../src/commands/pr-feedback';
+import { _internals } from '../../../src/commands/pr-ref';
 
 const DIR = '/tmp/pr-feedback-test';
+
+const realExecSync = _internals.execSync;
+afterEach(() => {
+	_internals.execSync = realExecSync;
+});
+
+/** Force `detectGitRemote` to report no reachable `origin` remote. */
+function withNoGitRemote(): void {
+	_internals.execSync = (() => {
+		throw new Error('fatal: No such remote');
+	}) as typeof _internals.execSync;
+}
 
 describe('handlePrFeedbackCommand', () => {
 	describe('PR reference (optional)', () => {
@@ -73,6 +86,26 @@ describe('handlePrFeedbackCommand', () => {
 			]);
 			expect(result).toBe('[MODE: PR_FEEDBACK] please fix');
 			expect(result).not.toContain('EXECUTE');
+		});
+	});
+
+	describe('unresolvable PR reference (no origin remote)', () => {
+		test('a bare number that cannot resolve surfaces an error, not a feedback session', () => {
+			withNoGitRemote();
+			const result = handlePrFeedbackCommand(DIR, ['155']);
+			expect(result.startsWith('Error:')).toBe(true);
+			expect(result).not.toBe('[MODE: PR_FEEDBACK] 155');
+		});
+
+		test('free-text leading token still becomes instructions even when no remote exists', () => {
+			withNoGitRemote();
+			const result = handlePrFeedbackCommand(DIR, [
+				'address',
+				'the',
+				'review',
+				'notes',
+			]);
+			expect(result).toBe('[MODE: PR_FEEDBACK] address the review notes');
 		});
 	});
 });

@@ -3,8 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handlePrReviewCommand } from '../../../src/commands/pr-review';
+import { _internals } from '../../../src/commands/pr-ref';
 
 let tempDir: string;
+const realExecSync = _internals.execSync;
 
 beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'pr-review-test-'));
@@ -12,6 +14,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
+	// Restore the subprocess seam after any per-test override.
+	_internals.execSync = realExecSync;
 });
 
 describe('handlePrReviewCommand', () => {
@@ -276,13 +280,36 @@ describe('handlePrReviewCommand', () => {
 	});
 
 	describe('bare number parsing', () => {
-		test('bare number resolves against git remote when available', () => {
-			// In the test environment, the git remote IS available (opencode-swarm repo)
-			// so bare numbers resolve correctly
+		test('bare number resolves against the origin remote in the command directory', () => {
+			// The remote lookup must run in the directory the command was invoked
+			// for (invariant #3), not process.cwd(). Override the subprocess seam to
+			// return a known remote and assert both the resolution and the cwd.
+			let seenCwd: unknown;
+			_internals.execSync = ((
+				_cmd: string,
+				opts: Record<string, unknown>,
+			) => {
+				seenCwd = opts.cwd;
+				return 'https://github.com/acme/widgets.git\n';
+			}) as typeof _internals.execSync;
+
 			const result = handlePrReviewCommand(tempDir, ['42']);
-			// The actual behavior: bare number resolves to the detected git remote
-			expect(result).toContain('[MODE: PR_REVIEW');
-			expect(result).toContain('council=false');
+
+			expect(result).toBe(
+				'[MODE: PR_REVIEW pr="https://github.com/acme/widgets/pull/42" council=false]',
+			);
+			expect(seenCwd).toBe(tempDir);
+		});
+
+		test('bare number errors when no origin remote is reachable', () => {
+			_internals.execSync = (() => {
+				throw new Error('fatal: No such remote');
+			}) as typeof _internals.execSync;
+
+			const result = handlePrReviewCommand(tempDir, ['42']);
+
+			expect(result).toContain('Error:');
+			expect(result).toContain('Usage: /swarm pr-review');
 		});
 	});
 
