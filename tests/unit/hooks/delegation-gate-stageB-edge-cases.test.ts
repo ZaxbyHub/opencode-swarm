@@ -12,6 +12,7 @@
  *  3. Parallel barrier with only one agent (reviewer only) → stays at reviewer_run
  *  4. getSeedTaskId returns null (no currentTaskId or lastCoderDelegationTaskId) → cross-session seeding skipped
  *  5. Cross-session task seeding when task already exists → does not overwrite existing state
+ *  6. advanceTaskState to 'complete' clears stageBCompletion entry for the task (regression: prevents stale barrier data on retry)
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -19,8 +20,10 @@ import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	advanceTaskState,
+	canAdvanceTaskState,
 	ensureAgentSession,
 	getTaskState,
+	recordStageBCompletion,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -189,5 +192,151 @@ describe('Stage B helpers — edge cases', () => {
 		// It should stay at reviewer_run (or advance, not regress).
 		const otherState = getTaskState(other, '1.1');
 		expect(['reviewer_run', 'tests_run', 'complete']).toContain(otherState);
+	});
+
+	it('EC-6: advanceTaskState to complete clears stageBCompletion for the task', () => {
+		startAgentSession('sess-ec6', 'architect');
+		const session = ensureAgentSession('sess-ec6');
+		session.currentTaskId = '1.1';
+
+		// Advance through the required sequence to reach tests_run (prerequisite for complete without council)
+		advanceTaskState(session, '1.1', 'coder_delegated');
+		advanceTaskState(session, '1.1', 'reviewer_run');
+		advanceTaskState(session, '1.1', 'tests_run');
+
+		// Record Stage B completions (mirrors what delegation-gate does on reviewer/test_engineer Task completion)
+		recordStageBCompletion(session, '1.1', 'reviewer');
+		recordStageBCompletion(session, '1.1', 'test_engineer');
+		expect(session.stageBCompletion?.get('1.1')?.size ?? 0).toBe(2);
+		expect(session.stageBCompletion?.has('1.1')).toBe(true);
+
+		// Advance to complete — this must clear the entry (the behavior under test)
+		advanceTaskState(session, '1.1', 'complete');
+
+		// Verify clearing: stageBCompletion no longer contains the taskId
+		expect(session.stageBCompletion?.has('1.1')).toBe(false);
+		expect(session.stageBCompletion?.get('1.1')).toBeUndefined();
+		// Map may still exist (other tasks) but this task's entry is gone
+	});
+
+	it('EC-7: canAdvanceTaskState allows valid forward transitions (idle→coder_delegated, coder_delegated→reviewer_run, reviewer_run→tests_run)', () => {
+		startAgentSession('sess-ec7', 'architect');
+		const session = ensureAgentSession('sess-ec7');
+		session.currentTaskId = '1.1';
+
+		// implicit current='idle'
+		expect(canAdvanceTaskState(session, '1.1', 'coder_delegated')).toBe(true);
+
+		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		expect(canAdvanceTaskState(session, '1.1', 'reviewer_run')).toBe(true);
+
+		session.taskWorkflowStates.set('1.1', 'reviewer_run');
+		expect(canAdvanceTaskState(session, '1.1', 'tests_run')).toBe(true);
+	});
+
+	it('EC-8: canAdvanceTaskState rejects same-state and backward transitions (tests_run→tests_run, complete→*)', () => {
+		startAgentSession('sess-ec8', 'architect');
+		const session = ensureAgentSession('sess-ec8');
+		session.currentTaskId = '1.1';
+
+		session.taskWorkflowStates.set('1.1', 'tests_run');
+		expect(canAdvanceTaskState(session, '1.1', 'tests_run')).toBe(false);
+
+		session.taskWorkflowStates.set('1.1', 'complete');
+		expect(canAdvanceTaskState(session, '1.1', 'coder_delegated')).toBe(false);
+		expect(canAdvanceTaskState(session, '1.1', 'reviewer_run')).toBe(false);
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(false);
+	});
+
+	it('EC-9: canAdvanceTaskState allows complete from tests_run (no council required)', () => {
+		startAgentSession('sess-ec9', 'architect');
+		const session = ensureAgentSession('sess-ec9');
+		session.currentTaskId = '1.1';
+
+		advanceTaskState(session, '1.1', 'coder_delegated');
+		advanceTaskState(session, '1.1', 'reviewer_run');
+		advanceTaskState(session, '1.1', 'tests_run');
+
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(true);
+	});
+
+	it('EC-10: canAdvanceTaskState requires council APPROVE + sufficient quorum + past pre_check_passed for complete from non-tests_run state', () => {
+		startAgentSession('sess-ec10', 'architect');
+		const session = ensureAgentSession('sess-ec10');
+		session.currentTaskId = '1.1';
+
+		// Set to pre_check_passed (past pre-check, but not yet tests_run)
+		advanceTaskState(session, '1.1', 'coder_delegated');
+		advanceTaskState(session, '1.1', 'pre_check_passed');
+
+		// No council entry → false
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(false);
+
+		// Council with wrong verdict → false
+		session.taskCouncilApproved = new Map();
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'CONCERNS',
+			roundNumber: 1,
+			quorumSize: 3,
+		});
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(false);
+
+		// Council APPROVE but insufficient quorum (2 < 3) → false
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'APPROVE',
+			roundNumber: 1,
+			quorumSize: 2,
+		});
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(false);
+
+		// Sufficient quorum but not past pre_check (reset to coder_delegated) → false
+		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'APPROVE',
+			roundNumber: 1,
+			quorumSize: 3,
+		});
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(false);
+
+		// Now at pre_check_passed + APPROVE + quorum>=3 → true (default min=3)
+		session.taskWorkflowStates.set('1.1', 'pre_check_passed');
+		expect(canAdvanceTaskState(session, '1.1', 'complete')).toBe(true);
+
+		// With explicit councilConfig minimumMembers=4, quorum=3 insufficient
+		expect(
+			canAdvanceTaskState(session, '1.1', 'complete', { minimumMembers: 4 }),
+		).toBe(false);
+
+		// quorum=4 sufficient
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'APPROVE',
+			roundNumber: 1,
+			quorumSize: 4,
+		});
+		expect(
+			canAdvanceTaskState(session, '1.1', 'complete', { minimumMembers: 4 }),
+		).toBe(true);
+
+		// requireAllMembers: true forces 5
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'APPROVE',
+			roundNumber: 1,
+			quorumSize: 4,
+		});
+		expect(
+			canAdvanceTaskState(session, '1.1', 'complete', {
+				requireAllMembers: true,
+			}),
+		).toBe(false);
+		session.taskCouncilApproved.set('1.1', {
+			verdict: 'APPROVE',
+			roundNumber: 1,
+			quorumSize: 5,
+		});
+		expect(
+			canAdvanceTaskState(session, '1.1', 'complete', {
+				requireAllMembers: true,
+			}),
+		).toBe(true);
 	});
 });
