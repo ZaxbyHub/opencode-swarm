@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.53.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.3...v7.53.0) (2026-06-07)
+
+
+### Features
+
+* **commands:** add /swarm pr-feedback and fix signal-mode skill discovery ([f0321c8](https://github.com/zaxbysauce/opencode-swarm/commit/f0321c8479f9ba813d9c66574ff4747d81dfd2c1))
+
+
+### Bug Fixes
+
+* **commands:** thread cwd into PR remote lookup and error on unresolvable PR refs ([cc760ce](https://github.com/zaxbysauce/opencode-swarm/commit/cc760ce760942089e693e17c6e7b9ebee7728ab4))
+
 ## [7.52.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.2...v7.52.3) (2026-06-07)
 
 
