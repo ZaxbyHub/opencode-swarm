@@ -36,7 +36,7 @@ export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
 	/\bmkfs\b/,
 	/\bdd\s+if=/,
 	/:\(\)\s*\{/,
-	/\bchmod\s+-R\s+777\b/,
+	/\bchmod\s+-R\s+777\b/i,
 	/\bdeltree\b/,
 	/\brmdir\s+\/s\b/,
 	/\bkill\s+-9\b/,

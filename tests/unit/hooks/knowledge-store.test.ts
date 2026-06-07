@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import {
 	appendKnowledge,
 	appendRejectedLesson,
@@ -26,31 +26,31 @@ import type { RejectedLesson } from '../../../src/hooks/knowledge-types.js';
 describe('knowledge-store', () => {
 	describe('Path resolvers', () => {
 		it('resolveHiveKnowledgePath returns win32 path', () => {
-			vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+			const spy = spyOn(process, 'platform', 'get').mockReturnValue('win32');
 			const result = resolveHiveKnowledgePath();
 			expect(result).toMatch(/opencode-swarm/);
 			expect(result).toMatch(/Data/);
 			expect(result).toMatch(/shared-learnings.jsonl/);
-			vi.restoreAllMocks();
+			spy.mockRestore();
 		});
 
 		it('resolveHiveKnowledgePath returns darwin path', () => {
-			vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+			const spy = spyOn(process, 'platform', 'get').mockReturnValue('darwin');
 			const result = resolveHiveKnowledgePath();
 			expect(result).toMatch(/Library/);
 			expect(result).toMatch(/Application Support/);
 			expect(result).toMatch(/opencode-swarm/);
-			vi.restoreAllMocks();
+			spy.mockRestore();
 		});
 
 		it('resolveHiveKnowledgePath returns linux path', () => {
-			vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+			const spy = spyOn(process, 'platform', 'get').mockReturnValue('linux');
 			const result = resolveHiveKnowledgePath();
 			expect(result).toMatch(/opencode-swarm/);
 			expect(
 				result.match(/\.local\/share/) || result.match(/opencode-swarm/),
 			).toBeTruthy();
-			vi.restoreAllMocks();
+			spy.mockRestore();
 		});
 	});
 

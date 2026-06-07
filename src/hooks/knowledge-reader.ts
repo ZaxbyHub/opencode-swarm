@@ -61,7 +61,7 @@ const HIVE_TIER_BOOST = 0.05;
 
 /** Confidence penalty for same-project hive entries (architect likely knows these). */
 const SAME_PROJECT_PENALTY = -0.05;
-const NORMAL_RETRIEVAL_STATUSES = new Set(['established', 'promoted']);
+const QUARANTINED_STATUS = 'quarantined';
 
 // ============================================================================
 // Internal Helper: computeRelevance
@@ -406,13 +406,15 @@ export async function readMergedKnowledge(
 	// Manual recall opts out (skipScopeFilter) so an explicit text query can
 	// surface stack:/project:-scoped lessons, matching pre-unification behavior.
 	const scopeFilter = config.scope_filter ?? ['global'];
-	// Also filter out entries that are not mature enough for normal retrieval,
-	// and suppress lessons retracted by architect retrospectives.
+	// Filter out quarantined entries and suppress lessons retracted by
+	// architect retrospectives. Using a deny-list (status !== 'quarantined')
+	// instead of an allow-list so entries with unexpected or missing status
+	// values (e.g., after migration) are not silently dropped.
 	const filtered = merged.filter(
 		(entry) =>
 			(opts?.skipScopeFilter ||
 				scopeFilter.some((pattern) => (entry.scope ?? 'global') === pattern)) &&
-			NORMAL_RETRIEVAL_STATUSES.has(entry.status) &&
+			entry.status !== QUARANTINED_STATUS &&
 			!suppressedLessons.has(normalize(entry.lesson)),
 	);
 
