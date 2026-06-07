@@ -12,12 +12,13 @@ import * as path from 'node:path';
 
 import {
 	_internals,
-	MAX_TAIL_BYTES,
 	appendSkillUsageEntry,
+	MAX_TAIL_BYTES,
 	pruneSkillUsageLog,
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
 	type SkillUsageEntry,
+	TAIL_BYTES_DEFAULT,
 } from '../../../src/hooks/skill-usage-log.ts';
 
 // =============================================================================
@@ -718,7 +719,10 @@ describe('_internals DI seam', () => {
 
 	test('triggers best-effort compaction when log exceeds 1 MB', () => {
 		let pruneCalled = false;
-		_internals.pruneSkillUsageLog = (dir: string, maxEntriesPerSkill: number) => {
+		_internals.pruneSkillUsageLog = (
+			dir: string,
+			maxEntriesPerSkill: number,
+		) => {
 			pruneCalled = true;
 			expect(dir).toBe(tempDir);
 			expect(maxEntriesPerSkill).toBe(500);
@@ -848,6 +852,78 @@ describe('readSkillUsageEntriesTail', () => {
 			Number.POSITIVE_INFINITY,
 		);
 		expect(readLength).toBe(MAX_TAIL_BYTES);
+	});
+
+	test('clamps negative maxBytes to 1', () => {
+		const jsonLine = `${JSON.stringify(makeEntry({ sessionID: 'clamp-neg' }))}\n`;
+		let readLength = 0;
+		_internals.existsSync = () => true;
+		_internals.statSync = ((_path: fs.PathLike) => ({
+			size: MAX_TAIL_BYTES * 4,
+		})) as typeof fs.statSync;
+		_internals.openSync = () => 123 as unknown as number;
+		_internals.readSync = (
+			_fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+		) => {
+			readLength = length;
+			buffer.write(jsonLine, offset, 'utf-8');
+			return jsonLine.length;
+		};
+		_internals.closeSync = () => {};
+
+		readSkillUsageEntriesTail(tempDir, { sessionID: 'clamp-neg' }, -100);
+		expect(readLength).toBe(1);
+	});
+
+	test('clamps zero maxBytes to 1', () => {
+		const jsonLine = `${JSON.stringify(makeEntry({ sessionID: 'clamp-zero' }))}\n`;
+		let readLength = 0;
+		_internals.existsSync = () => true;
+		_internals.statSync = ((_path: fs.PathLike) => ({
+			size: MAX_TAIL_BYTES * 4,
+		})) as typeof fs.statSync;
+		_internals.openSync = () => 123 as unknown as number;
+		_internals.readSync = (
+			_fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+		) => {
+			readLength = length;
+			buffer.write(jsonLine, offset, 'utf-8');
+			return jsonLine.length;
+		};
+		_internals.closeSync = () => {};
+
+		readSkillUsageEntriesTail(tempDir, { sessionID: 'clamp-zero' }, 0);
+		expect(readLength).toBe(1);
+	});
+
+	test('falls back to TAIL_BYTES_DEFAULT for NaN maxBytes', () => {
+		const jsonLine = `${JSON.stringify(makeEntry({ sessionID: 'clamp-nan' }))}\n`;
+		let readLength = 0;
+		_internals.existsSync = () => true;
+		_internals.statSync = ((_path: fs.PathLike) => ({
+			size: MAX_TAIL_BYTES * 4,
+		})) as typeof fs.statSync;
+		_internals.openSync = () => 123 as unknown as number;
+		_internals.readSync = (
+			_fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+		) => {
+			readLength = length;
+			buffer.write(jsonLine, offset, 'utf-8');
+			return jsonLine.length;
+		};
+		_internals.closeSync = () => {};
+
+		readSkillUsageEntriesTail(tempDir, { sessionID: 'clamp-nan' }, NaN);
+		expect(readLength).toBe(TAIL_BYTES_DEFAULT);
 	});
 
 	test('returns empty array on I/O error via _internals override', () => {

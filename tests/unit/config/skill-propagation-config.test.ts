@@ -14,6 +14,23 @@ describe('SkillPropagationConfigSchema', () => {
 		const result = SkillPropagationConfigSchema.parse({ enabled: false });
 		expect(result.enabled).toBe(false);
 	});
+
+	test('defaults enforce to false', () => {
+		const result = SkillPropagationConfigSchema.parse({});
+		expect(result.enforce).toBe(false);
+	});
+
+	test('accepts enforce true', () => {
+		const result = SkillPropagationConfigSchema.parse({ enforce: true });
+		expect(result.enforce).toBe(true);
+	});
+
+	test('rejects non-boolean enforce values', () => {
+		expect(() =>
+			SkillPropagationConfigSchema.parse({ enforce: 'yes' }),
+		).toThrow();
+		expect(() => SkillPropagationConfigSchema.parse({ enforce: 1 })).toThrow();
+	});
 });
 
 describe('PluginConfigSchema — skillPropagation field', () => {
@@ -27,5 +44,6 @@ describe('PluginConfigSchema — skillPropagation field', () => {
 			skillPropagation: {},
 		});
 		expect(result.skillPropagation?.enabled).toBe(true);
+		expect(result.skillPropagation?.enforce).toBe(false);
 	});
 });

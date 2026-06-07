@@ -1165,6 +1165,7 @@ export type KnowledgeApplicationConfig = z.infer<
 // Skill propagation gate configuration
 export const SkillPropagationConfigSchema = z.object({
 	enabled: z.boolean().default(true),
+	enforce: z.boolean().default(false),
 });
 
 export type SkillPropagationConfig = z.infer<
