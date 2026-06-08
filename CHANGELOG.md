@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.56.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.1...v7.56.2) (2026-06-08)
+
+
+### Bug Fixes
+
+* **cli:** add defense-in-depth validation for isSafeLockFilePath and improve path warnings ([49a2085](https://github.com/zaxbysauce/opencode-swarm/commit/49a2085e7d496ce4b69a3760e2fc60ec65f4971f))
+* **cli:** add defense-in-depth validation for isSafeLockFilePath and improve path warnings ([8653b51](https://github.com/zaxbysauce/opencode-swarm/commit/8653b519f6502df4e7a0fcad35485cb5a1887396))
+
 ## [7.56.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.0...v7.56.1) (2026-06-08)
 
 
