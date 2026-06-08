@@ -137,7 +137,7 @@ jobs:
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
+          for f in tests/unit/hooks/knowledge-reader-key-normalization.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -189,7 +189,8 @@ jobs:
             tests/unit/hooks/model-limits-log-reclassification.test.ts \
             tests/unit/hooks/model-limits-adversarial.test.ts \
             tests/unit/hooks/log-level-reclassification.test.ts \
-            tests/unit/hooks/context-budget-log-reclassification.test.ts; do
+            tests/unit/hooks/context-budget-log-reclassification.test.ts \
+            tests/unit/hooks/knowledge-reader.test.ts; do
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
