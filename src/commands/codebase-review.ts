@@ -9,7 +9,7 @@ const MAX_SCOPE_LEN = 2000;
 const MAX_TRACKS_LEN = 1000;
 const MAX_RUN_ID_LEN = 128;
 
-const MODES = new Set([
+export const CODEBASE_REVIEW_MODES = [
 	'phase0',
 	'complete',
 	'defect',
@@ -21,7 +21,9 @@ const MODES = new Set([
 	'ai-slop',
 	'enhancements',
 	'custom',
-]);
+] as const;
+
+const MODES = new Set<string>(CODEBASE_REVIEW_MODES);
 
 const DEFAULT_MODE = 'phase0';
 const DEFAULT_SCOPE = 'repository root';
@@ -58,7 +60,7 @@ interface ParsedArgs {
 }
 
 function sanitizeText(raw: string, maxLen: number): string {
-	const stripped = raw.replace(/\[\s*MODE\s*:[^\]]*\]/gi, '');
+	const stripped = raw.replace(/\[+\s*MODE\s*:[^\]]*(?:\]+|$)/gi, '');
 	const normalized = stripped.replace(/\s+/g, ' ').trim();
 	if (normalized.length <= maxLen) return normalized;
 	return `${normalized.slice(0, maxLen)}...`;
@@ -103,11 +105,11 @@ function parseArgs(args: string[]): ParsedArgs {
 				return { ...result, error: `Flag "${token}" requires a value` };
 			}
 			const runId = sanitizeText(args[++i], MAX_RUN_ID_LEN);
-			if (!/^[A-Za-z0-9_.:-]+$/.test(runId)) {
+			if (!/^[A-Za-z0-9_.-]+$/.test(runId)) {
 				return {
 					...result,
 					error:
-						'Invalid --continue value. Use only letters, numbers, dot, underscore, colon, or dash.',
+						'Invalid --continue value. Use only letters, numbers, dot, underscore, or dash.',
 				};
 			}
 			result.continueRun = runId;

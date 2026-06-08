@@ -2,4 +2,4 @@
 "opencode-swarm": minor
 ---
 
-Add the canonical `codebase-review-swarm` review skill package, thin Claude/Codex adapters, and a first-class `/swarm codebase-review` command with shortcut support for repo-agnostic full-codebase review runs. Also restore command shortcut parity for `design-docs` and resync the `phase-wrap` OpenCode/Claude skill mirrors.
+Add the canonical `codebase-review-swarm` review skill package, thin Claude/Codex adapters, and a first-class `/swarm codebase-review` command with command picker shortcut support for repo-agnostic full-codebase review runs. Also preserve phase-wrap operational guardrail guidance while resyncing the OpenCode/Claude skill mirrors.
