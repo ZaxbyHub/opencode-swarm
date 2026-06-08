@@ -133,7 +133,8 @@ Before writing under `.swarm/`, verify `.swarm/` is ignored or locally excluded.
 6. Run 0G after 0B and 0C.
 7. Run 0H and 0I after 0B and 0C.
 8. Run 0J only after all applicable 0B-0I ledgers exist.
-9. Run 0K last. Stop for user track selection unless preselected.
+9. Run 0K after 0J. Stop for user track selection unless preselected.
+10. Run 0L after track selection and before Phase 1 candidate generation. 0L is the last Phase 0 step before Phase 1.
 
 Do not run dependent inventory passes merely to keep agents busy. Missing dependency context is `unknown`, not guessed.
 

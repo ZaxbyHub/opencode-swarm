@@ -797,7 +797,9 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT mutate source code
 - Write artifacts only under \`.swarm/review-v8/runs/<run_id>/\`
 - Run Phase 0 inventory first
-- Stop after Phase 0 for review-mode selection unless the user already selected tracks and explicitly authorized continuing
+- Treat \`mode=phase0\` as inventory-only: stop at 0K for review-mode selection.
+- Treat \`mode=complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements\` as the user's preselected authorization to continue through 0L and the selected tracks after Phase 0.
+- Treat \`mode=custom\` as preselected only when \`tracks\` is non-empty; otherwise stop at 0K for track selection.
 - Every repo-derived factual claim needs quote-grounded evidence with file path and line/range
 - Final report is forbidden until selected-track coverage is closed and final critic passes
 

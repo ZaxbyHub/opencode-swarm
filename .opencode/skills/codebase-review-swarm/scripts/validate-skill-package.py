@@ -27,7 +27,10 @@ def parse_frontmatter(text: str) -> dict[str, str]:
         if not line or line.startswith(" ") or ":" not in line:
             continue
         k, v = line.split(":", 1)
-        fm[k.strip()] = v.strip().strip('"')
+        value = v.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        fm[k.strip()] = value
     return fm
 
 

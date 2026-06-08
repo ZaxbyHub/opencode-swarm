@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -32,6 +32,7 @@ LEDGERS = [
     "strengths-ledger.md",
     "final-critic-check.md",
 ]
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 def run(cmd: list[str], cwd: Path) -> str | None:
@@ -53,6 +54,26 @@ def git_root(cwd: Path) -> Path:
     return Path(out) if out else cwd
 
 
+def validate_run_id(raw: str) -> str:
+    if not RUN_ID_RE.fullmatch(raw) or raw in {".", ".."}:
+        raise ValueError(
+            "Invalid --run-id. Use 1-128 letters, numbers, dot, underscore, or dash; path segments are not allowed."
+        )
+    return raw
+
+
+def resolve_run_dir(repo: Path, run_id: str) -> Path:
+    runs_root = (repo / ".swarm" / "review-v8" / "runs").resolve()
+    run_dir = (runs_root / run_id).resolve()
+    try:
+        run_dir.relative_to(runs_root)
+    except ValueError as exc:
+        raise ValueError("Invalid --run-id. Resolved run directory escapes .swarm/review-v8/runs.") from exc
+    if run_dir == runs_root:
+        raise ValueError("Invalid --run-id. Run id must name a child directory.")
+    return run_dir
+
+
 def is_swarm_ignored(repo: Path) -> bool:
     gitignore = repo / ".gitignore"
     if not gitignore.exists():
@@ -70,8 +91,12 @@ def main() -> int:
 
     cwd = Path(args.root).resolve()
     repo = git_root(cwd)
-    run_id = args.run_id or dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    run_dir = repo / ".swarm" / "review-v8" / "runs" / run_id
+    try:
+        run_id = validate_run_id(args.run_id or dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ"))
+        run_dir = resolve_run_dir(repo, run_id)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     artifacts_dir = run_dir / "artifacts"
     ledgers_dir = run_dir / "ledgers"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
