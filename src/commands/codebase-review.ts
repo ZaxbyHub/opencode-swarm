@@ -27,6 +27,8 @@ const MODES = new Set<string>(CODEBASE_REVIEW_MODES);
 
 const DEFAULT_MODE = 'phase0';
 const DEFAULT_SCOPE = 'repository root';
+const FLAG_VALUE_MISSING = (token: string) =>
+	`Flag "${token}" requires a value`;
 
 const USAGE = `Usage: /swarm codebase-review [scope] [--mode phase0|complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements|custom] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]
 
@@ -66,6 +68,16 @@ function sanitizeText(raw: string, maxLen: number): string {
 	return `${normalized.slice(0, maxLen)}...`;
 }
 
+function hasFlagValue(args: string[], index: number): boolean {
+	return index + 1 < args.length && !args[index + 1].startsWith('--');
+}
+
+function jsonForModeHeader(value: string): string {
+	return JSON.stringify(value).replace(/[[\]]/g, (ch) =>
+		ch === '[' ? '\\u005B' : '\\u005D',
+	);
+}
+
 function parseArgs(args: string[]): ParsedArgs {
 	const result: ParsedArgs = {
 		mode: DEFAULT_MODE,
@@ -84,8 +96,8 @@ function parseArgs(args: string[]): ParsedArgs {
 		if (token === '--help' || token === '-h') {
 			result.help = true;
 		} else if (token === '--mode') {
-			if (i + 1 >= args.length) {
-				return { ...result, error: `Flag "${token}" requires a value` };
+			if (!hasFlagValue(args, i)) {
+				return { ...result, error: FLAG_VALUE_MISSING(token) };
 			}
 			const value = args[++i];
 			if (!MODES.has(value)) {
@@ -96,13 +108,13 @@ function parseArgs(args: string[]): ParsedArgs {
 			}
 			result.mode = value;
 		} else if (token === '--tracks') {
-			if (i + 1 >= args.length) {
-				return { ...result, error: `Flag "${token}" requires a value` };
+			if (!hasFlagValue(args, i)) {
+				return { ...result, error: FLAG_VALUE_MISSING(token) };
 			}
 			result.tracks = sanitizeText(args[++i], MAX_TRACKS_LEN);
 		} else if (token === '--continue') {
-			if (i + 1 >= args.length) {
-				return { ...result, error: `Flag "${token}" requires a value` };
+			if (!hasFlagValue(args, i)) {
+				return { ...result, error: FLAG_VALUE_MISSING(token) };
 			}
 			const runId = sanitizeText(args[++i], MAX_RUN_ID_LEN);
 			if (!/^[A-Za-z0-9_.-]+$/.test(runId)) {
@@ -148,7 +160,7 @@ export async function handleCodebaseReviewCommand(
 		sanitizeText(parsed.rest.join(' '), MAX_SCOPE_LEN) || DEFAULT_SCOPE;
 
 	return [
-		`[MODE: CODEBASE_REVIEW mode=${parsed.mode} output=${parsed.output} update_main=${parsed.updateMain} allow_dirty=${parsed.allowDirty} tracks=${JSON.stringify(parsed.tracks)} continue_run=${JSON.stringify(parsed.continueRun)}]`,
+		`[MODE: CODEBASE_REVIEW mode=${parsed.mode} output=${parsed.output} update_main=${parsed.updateMain} allow_dirty=${parsed.allowDirty} tracks=${jsonForModeHeader(parsed.tracks)} continue_run=${jsonForModeHeader(parsed.continueRun)}]`,
 		`scope=${JSON.stringify(scope)}`,
 	].join(' ');
 }
