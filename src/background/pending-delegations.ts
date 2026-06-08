@@ -96,6 +96,12 @@ function ensureSwarmDir(directory: string): void {
  * Read and fold the store to the latest snapshot per correlationId. Lock-free and
  * defensive: a missing file yields an empty list, and malformed/partial lines are skipped
  * (never throws). Records are returned in first-seen correlationId order.
+ *
+ * Cost: O(lines on disk) per call — a full read + parse + fold with no in-memory cache.
+ * This is intentionally simple and acceptable at Stage A volumes (a swarm has few concurrent
+ * background delegations, and the on-disk log is small). If sustained high-throughput
+ * background load ever makes this hot, a future stage should add a stat-invalidated in-memory
+ * cache and/or JSONL compaction (the same future-compaction work noted in the module header).
  */
 export function readDelegations(
 	directory: string,

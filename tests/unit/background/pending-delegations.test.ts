@@ -92,11 +92,32 @@ describe('pending-delegations store', () => {
 		expect(findByCorrelationId(dir, 'ses_a')?.evidenceTaskId).toBe('9.9');
 	});
 
-	it('sweeps overdue pendings to stale (deterministic via elapsed time)', async () => {
-		await recordPendingDelegation(dir, input({ correlationId: 'ses_stale' }));
-		// Wait so the record is reliably older than the sweep timeout.
-		await new Promise((r) => setTimeout(r, 30));
-		const swept = await sweepStaleDelegations(dir, 1);
+	it('sweeps overdue pendings to stale (deterministic via backdated record)', async () => {
+		// Seed a backdated pending record directly so staleness does not depend on real
+		// elapsed time (avoids flakiness on slow/loaded CI runners). updatedAt is 10 min
+		// in the past; sweeping with a 1 min timeout makes it reliably overdue.
+		const tenMinAgo = Date.now() - 10 * 60_000;
+		const backdated = {
+			schemaVersion: 1,
+			correlationId: 'ses_stale',
+			jobId: 'job_stale',
+			subagentSessionId: 'ses_stale',
+			parentSessionId: 'parent_1',
+			callID: 'call_1',
+			normalizedAgent: 'reviewer',
+			swarmPrefixedAgent: 'reviewer',
+			planTaskId: '1.1',
+			evidenceTaskId: '1.1',
+			status: 'pending',
+			createdAt: tenMinAgo,
+			updatedAt: tenMinAgo,
+		};
+		fs.writeFileSync(
+			path.join(dir, '.swarm', BACKGROUND_DELEGATIONS_FILE),
+			`${JSON.stringify(backdated)}\n`,
+		);
+
+		const swept = await sweepStaleDelegations(dir, 60_000);
 		expect(swept).toBe(1);
 		expect(findByCorrelationId(dir, 'ses_stale')?.status).toBe('stale');
 	});
