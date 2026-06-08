@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.56.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.0...v7.56.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **sast,lang,repo-graph:** deep-dive audit hardening for semgrep subprocess, SAST rules, lang/runtime, syntax-check, and PHP backend ([#1002](https://github.com/zaxbysauce/opencode-swarm/issues/1002)) ([b245696](https://github.com/zaxbysauce/opencode-swarm/commit/b245696d64ab6d69682524de7930558b401befc1))
+
 ## [7.56.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.55.0...v7.56.0) (2026-06-08)
 
 
