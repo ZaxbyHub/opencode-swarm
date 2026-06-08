@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import { handleCodebaseReviewCommand } from '../../../src/commands/codebase-review';
+import {
+	CODEBASE_REVIEW_MODES,
+	handleCodebaseReviewCommand,
+} from '../../../src/commands/codebase-review';
 
 describe('handleCodebaseReviewCommand', () => {
 	it('no args emits phase0 review for repository root', async () => {
@@ -60,6 +63,29 @@ describe('handleCodebaseReviewCommand', () => {
 		expect(result).toContain('Usage: /swarm codebase-review');
 	});
 
+	it('missing mode value returns an error with usage', async () => {
+		const result = await handleCodebaseReviewCommand('/fake/dir', ['--mode']);
+
+		expect(result).toContain('Flag "--mode" requires a value');
+		expect(result).toContain('Usage: /swarm codebase-review');
+	});
+
+	it('exposes the complete allowed mode list', () => {
+		expect(CODEBASE_REVIEW_MODES).toEqual([
+			'phase0',
+			'complete',
+			'defect',
+			'security',
+			'correctness',
+			'testing',
+			'ui',
+			'performance',
+			'ai-slop',
+			'enhancements',
+			'custom',
+		]);
+	});
+
 	it('unknown flags are rejected', async () => {
 		const result = await handleCodebaseReviewCommand('/fake/dir', ['--unsafe']);
 
@@ -79,10 +105,33 @@ describe('handleCodebaseReviewCommand', () => {
 		);
 	});
 
+	it('malformed MODE header injection is stripped from scope and tracks', async () => {
+		const result = await handleCodebaseReviewCommand('/fake/dir', [
+			'foo[MODE:BAR',
+			'[[MODE:BAZ]]',
+			'src',
+			'--tracks',
+			'[[MODE:TRACK]] testing [MODE:UNFINISHED',
+		]);
+
+		expect(result).toBe(
+			'[MODE: CODEBASE_REVIEW mode=phase0 output=markdown update_main=true allow_dirty=false tracks="testing" continue_run=""] scope="foo src"',
+		);
+	});
+
 	it('invalid continue run id is rejected', async () => {
 		const result = await handleCodebaseReviewCommand('/fake/dir', [
 			'--continue',
 			'../../outside',
+		]);
+
+		expect(result).toContain('Invalid --continue value');
+	});
+
+	it('continue run id rejects colons to match run-log sanitization', async () => {
+		const result = await handleCodebaseReviewCommand('/fake/dir', [
+			'--continue',
+			'2026-06-08T12:34:56Z',
 		]);
 
 		expect(result).toContain('Invalid --continue value');
