@@ -75,6 +75,7 @@ isolation_basenames=(
   "full-auto-intercept.adversarial.test.ts"
   "full-auto-intercept.dispatch.test.ts"
   "utils.test.ts"
+  "knowledge-reader.test.ts"
   "system-enhancer-coder-context.test.ts"
   "model-limits-log-reclassification.test.ts"
   "model-limits-adversarial.test.ts"
