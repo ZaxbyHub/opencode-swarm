@@ -48,7 +48,7 @@ async function execGit(
 			child_process.execFile(
 				'git',
 				args,
-				execOpts as any,
+				execOpts as child_process.ExecFileOptionsWithStringEncoding,
 				(
 					error: child_process.ExecFileException | null,
 					output: string,

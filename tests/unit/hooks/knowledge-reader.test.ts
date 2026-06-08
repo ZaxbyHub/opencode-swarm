@@ -397,6 +397,70 @@ describe('readMergedKnowledge — basic merge', () => {
 		expect(result.length).toBe(1);
 		expect(result[0].id).toBe(activeEntry.id);
 	});
+
+	it('Test 5d: established status entries are included by deny-list', async () => {
+		const establishedEntry = makeSwarmEntry({
+			lesson: 'Established lesson that should be included',
+			status: 'established',
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [establishedEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		const config = makeConfig();
+		const result = await readMergedKnowledge('/proj', config);
+
+		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(establishedEntry.id);
+	});
+
+	it('Test 5e: promoted status entries are included by deny-list', async () => {
+		const promotedEntry = makeSwarmEntry({
+			lesson: 'Promoted lesson that should be included',
+			status: 'promoted',
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [promotedEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		const config = makeConfig();
+		const result = await readMergedKnowledge('/proj', config);
+
+		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(promotedEntry.id);
+	});
+
+	it('Test 5f: null status entries are included by deny-list', async () => {
+		const nullStatusEntry = makeSwarmEntry({
+			lesson: 'Lesson with null status that should be included',
+			// @ts-expect-error — simulating a legacy entry with null status
+			status: null,
+		});
+
+		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
+			async (path: string) => {
+				if (path.includes('swarm')) return [nullStatusEntry];
+				if (path.includes('hive')) return [];
+				return [];
+			},
+		);
+
+		const config = makeConfig();
+		const result = await readMergedKnowledge('/proj', config);
+
+		expect(result.length).toBe(1);
+		expect(result[0].id).toBe(nullStatusEntry.id);
+	});
 });
 
 // ============================================================================

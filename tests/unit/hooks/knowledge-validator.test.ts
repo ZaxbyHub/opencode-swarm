@@ -378,6 +378,21 @@ describe('knowledge-validator', () => {
 			});
 		});
 
+		it('blocks "chmod -R 777" (uppercase -R, /i flag regression test)', () => {
+			const lesson = 'Run chmod -R 777 /var to fix permissions quickly';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
 		it('passes safe commands like "git commit"', () => {
 			const lesson =
 				'Use git commit to save your changes with a descriptive message';
