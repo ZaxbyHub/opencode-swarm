@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.55.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.54.0...v7.55.0) (2026-06-08)
+
+
+### Features
+
+* **delegation-gate:** opt-in durable tracking + observer for background subagents ([#1151](https://github.com/zaxbysauce/opencode-swarm/issues/1151)) ([ca9a528](https://github.com/zaxbysauce/opencode-swarm/commit/ca9a52854a1a63cc3966e1afacb3da56df3aea0e))
+
 ## [7.54.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.53.0...v7.54.0) (2026-06-07)
 
 
