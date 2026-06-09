@@ -1198,10 +1198,13 @@ and re-call \`submit_phase_council_verdicts\`.
 - **APPROVE**: Call \`phase_complete\`. Gate 5 will pass.
   If \`advisoryFindingsCount > 0\`, deliver \`unifiedFeedbackMd\` as a single
   non-blocking advisory note to the team before proceeding.
-- **CONCERNS**: Evaluate severity. Minor concerns → call \`phase_complete\` and
-  surface \`unifiedFeedbackMd\` as a non-blocking note. Significant concerns →
-  send \`unifiedFeedbackMd\` to the coder as ONE coherent document for resolution
-  before calling \`phase_complete\`. Increment \`roundNumber\` on re-council.
+- **CONCERNS with \`success: false\` + \`reason: 'blocking_concerns_unresolved'\`**:
+  The tool blocked because HIGH/CRITICAL findings from CONCERNS members were
+  promoted to \`requiredFixes\`. No evidence was written. Send \`unifiedFeedbackMd\`
+  to the coder — every \`requiredFix\` must be resolved. Increment \`roundNumber\`
+  and re-convene council after fixes. This is tool-enforced: you cannot bypass it.
+- **CONCERNS with \`success: true\`**: Only MEDIUM/LOW advisory findings remain.
+  Call \`phase_complete\` and surface \`unifiedFeedbackMd\` as a non-blocking note.
 - **REJECT**: Block advancement. Send \`unifiedFeedbackMd\` to the coder
   with the BLOCKING flag. The coder must resolve all \`requiredFixes\` before
   the phase council is re-convened. Maximum \`council.maxRounds\` rounds (default 3).

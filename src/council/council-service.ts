@@ -66,7 +66,10 @@ export function synthesizeCouncilVerdicts(
 		.flatMap((v) => v.findings);
 
 	const requiredFixes = vetoFindings.filter(
-		(f) => f.severity === 'HIGH' || f.severity === 'MEDIUM',
+		(f) =>
+			f.severity === 'CRITICAL' ||
+			f.severity === 'HIGH' ||
+			f.severity === 'MEDIUM',
 	);
 
 	const advisoryFindings: CouncilFinding[] = [
@@ -75,6 +78,14 @@ export function synthesizeCouncilVerdicts(
 			.filter((v) => !rejectingSet.has(v.agent))
 			.flatMap((v) => v.findings),
 	];
+
+	// ── Blocking concerns promotion ──────────────────────────────────────
+	const blockingConcernsCount = promoteBlockingConcerns(
+		verdicts,
+		rejectingSet,
+		requiredFixes,
+		advisoryFindings,
+	);
 
 	// ── Criteria assessment ───────────────────────────────────────────────
 	// A mandatory criterion counts as "met" only when it was actually assessed
@@ -100,6 +111,7 @@ export function synthesizeCouncilVerdicts(
 		unresolvedConflicts,
 		roundNumber,
 		cfg.maxRounds,
+		blockingConcernsCount,
 	);
 
 	return {
@@ -116,8 +128,40 @@ export function synthesizeCouncilVerdicts(
 		roundNumber,
 		allCriteriaMet,
 		quorumSize,
+		blockingConcernsCount,
 		...(verdicts.length === 0 && { emptyVerdictsWarning: true }),
 	};
+}
+
+// ── Blocking concerns promotion ──────────────────────────────────────────────
+// HIGH and CRITICAL findings from CONCERNS members are mandatory — they must be
+// investigated and resolved before the verdict is accepted. This function moves
+// them from advisoryFindings into requiredFixes (mutating both arrays in place)
+// and returns the count of promoted findings.
+function promoteBlockingConcerns(
+	verdicts: CouncilMemberVerdict[],
+	rejectingSet: Set<CouncilAgent>,
+	requiredFixes: CouncilFinding[],
+	advisoryFindings: CouncilFinding[],
+): number {
+	const concernsFindings = verdicts
+		.filter(
+			(v) => v.verdict === 'CONCERNS' && !rejectingSet.has(v.agent),
+		)
+		.flatMap((v) => v.findings);
+	const blocking = concernsFindings.filter(
+		(f) => f.severity === 'CRITICAL' || f.severity === 'HIGH',
+	);
+	if (blocking.length === 0) return 0;
+
+	requiredFixes.push(...blocking);
+	const blockingSet = new Set(blocking);
+	for (let i = advisoryFindings.length - 1; i >= 0; i--) {
+		if (blockingSet.has(advisoryFindings[i])) {
+			advisoryFindings.splice(i, 1);
+		}
+	}
+	return blocking.length;
 }
 
 // ── Conflict detection ────────────────────────────────────────────────────────
@@ -178,6 +222,7 @@ function buildUnifiedFeedback(
 	conflicts: string[],
 	roundNumber: number,
 	maxRounds: number,
+	blockingConcernsCount = 0,
 ): string {
 	const lines: string[] = [
 		`## Work Complete Council — Round ${roundNumber}/${maxRounds}`,
@@ -187,6 +232,13 @@ function buildUnifiedFeedback(
 
 	if (vetoedBy.length > 0) {
 		lines.push(`> ⛔ **BLOCKED** by: ${vetoedBy.join(', ')}`);
+		lines.push('');
+	}
+
+	if (blockingConcernsCount > 0) {
+		lines.push(
+			`> ⚠️ **BLOCKING CONCERNS**: ${blockingConcernsCount} HIGH/CRITICAL finding(s) from CONCERNS members require investigation and resolution before advancement.`,
+		);
 		lines.push('');
 	}
 
@@ -282,7 +334,10 @@ export function synthesizePhaseCouncilAdvisory(
 		.filter((v) => rejectingSet.has(v.agent))
 		.flatMap((v) => v.findings);
 	const requiredFixes = vetoFindings.filter(
-		(f) => f.severity === 'HIGH' || f.severity === 'MEDIUM',
+		(f) =>
+			f.severity === 'CRITICAL' ||
+			f.severity === 'HIGH' ||
+			f.severity === 'MEDIUM',
 	);
 	const advisoryFindings: CouncilFinding[] = [
 		...vetoFindings.filter((f) => f.severity === 'LOW'),
@@ -290,6 +345,14 @@ export function synthesizePhaseCouncilAdvisory(
 			.filter((v) => !rejectingSet.has(v.agent))
 			.flatMap((v) => v.findings),
 	];
+
+	// ── Blocking concerns promotion ──────────────────────────────────────
+	const blockingConcernsCount = promoteBlockingConcerns(
+		verdicts,
+		rejectingSet,
+		requiredFixes,
+		advisoryFindings,
+	);
 
 	// ── Advisory notes ──────────────────────────────────────────────────
 	const advisoryNotes: string[] = [];
@@ -321,6 +384,7 @@ export function synthesizePhaseCouncilAdvisory(
 		unresolvedConflicts,
 		roundNumber,
 		cfg.maxRounds,
+		blockingConcernsCount,
 	);
 
 	// ── Evidence path ───────────────────────────────────────────────────
@@ -341,6 +405,7 @@ export function synthesizePhaseCouncilAdvisory(
 		roundNumber,
 		allCriteriaMet,
 		quorumSize,
+		blockingConcernsCount,
 		evidencePath,
 		phaseSummary,
 	};
@@ -359,6 +424,7 @@ function buildPhaseCouncilFeedback(
 	conflicts: string[],
 	roundNumber: number,
 	maxRounds: number,
+	blockingConcernsCount = 0,
 ): string {
 	const lines: string[] = [
 		`## Phase Council Review — Round ${roundNumber}/${maxRounds}`,
@@ -373,6 +439,13 @@ function buildPhaseCouncilFeedback(
 
 	if (vetoedBy.length > 0) {
 		lines.push(`> ⛔ **BLOCKED** by: ${vetoedBy.join(', ')}`);
+		lines.push('');
+	}
+
+	if (blockingConcernsCount > 0) {
+		lines.push(
+			`> ⚠️ **BLOCKING CONCERNS**: ${blockingConcernsCount} HIGH/CRITICAL finding(s) from CONCERNS members require investigation and resolution before phase completion.`,
+		);
 		lines.push('');
 	}
 
@@ -457,7 +530,10 @@ export function synthesizeFinalCouncilAdvisory(
 		.filter((v) => rejectingSet.has(v.agent))
 		.flatMap((v) => v.findings);
 	const requiredFixes = vetoFindings.filter(
-		(f) => f.severity === 'HIGH' || f.severity === 'MEDIUM',
+		(f) =>
+			f.severity === 'CRITICAL' ||
+			f.severity === 'HIGH' ||
+			f.severity === 'MEDIUM',
 	);
 	const advisoryFindings: CouncilFinding[] = [
 		...vetoFindings.filter((f) => f.severity === 'LOW'),
@@ -465,6 +541,14 @@ export function synthesizeFinalCouncilAdvisory(
 			.filter((v) => !rejectingSet.has(v.agent))
 			.flatMap((v) => v.findings),
 	];
+
+	// ── Blocking concerns promotion ──────────────────────────────────────
+	const blockingConcernsCount = promoteBlockingConcerns(
+		verdicts,
+		rejectingSet,
+		requiredFixes,
+		advisoryFindings,
+	);
 
 	const advisoryNotes: string[] = [];
 	if (advisoryFindings.length > 0) {
@@ -490,6 +574,7 @@ export function synthesizeFinalCouncilAdvisory(
 		unresolvedConflicts,
 		roundNumber,
 		cfg.maxRounds,
+		blockingConcernsCount,
 	);
 
 	return {
@@ -507,6 +592,7 @@ export function synthesizeFinalCouncilAdvisory(
 		allCriteriaMet,
 		quorumSize,
 		evidencePath: '.swarm/evidence/final-council.json',
+		blockingConcernsCount,
 		projectSummary,
 	};
 }
@@ -520,6 +606,7 @@ function buildFinalCouncilFeedback(
 	conflicts: string[],
 	roundNumber: number,
 	maxRounds: number,
+	blockingConcernsCount = 0,
 ): string {
 	const lines: string[] = [
 		`## Final Council Review - Round ${roundNumber}/${maxRounds}`,
@@ -529,6 +616,13 @@ function buildFinalCouncilFeedback(
 
 	if (projectSummary) {
 		lines.push(`**Project Summary:** ${projectSummary}`);
+		lines.push('');
+	}
+
+	if (blockingConcernsCount > 0) {
+		lines.push(
+			`> ⚠️ **BLOCKING CONCERNS**: ${blockingConcernsCount} HIGH/CRITICAL finding(s) from CONCERNS members require investigation and resolution before project close.`,
+		);
 		lines.push('');
 	}
 

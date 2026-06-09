@@ -22,7 +22,7 @@ const VerdictSchema = z.object({
 	confidence: z.number().min(0).max(1),
 	findings: z.array(
 		z.object({
-			severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+			severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 			category: z.string().min(1),
 			location: z.string(),
 			detail: z.string(),
@@ -87,7 +87,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 						confidence: z.number().min(0).max(1),
 						findings: z.array(
 							z.object({
-								severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+								severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 								category: z.string().min(1),
 								location: z.string(),
 								detail: z.string(),
@@ -229,6 +229,27 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 			if (mutationGapFinding) {
 				addMutationGapFindingToSynthesis(synthesis, mutationGapFinding);
 			}
+
+			// ── Blocking concerns gate ────────────────────────────────────────
+			if (
+				synthesis.overallVerdict === 'CONCERNS' &&
+				synthesis.blockingConcernsCount > 0
+			) {
+				return JSON.stringify(
+					{
+						success: false,
+						reason: 'blocking_concerns_unresolved',
+						overallVerdict: synthesis.overallVerdict,
+						blockingConcernsCount: synthesis.blockingConcernsCount,
+						requiredFixes: synthesis.requiredFixes,
+						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						message: `Phase council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the phase can complete. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
+					},
+					null,
+					2,
+				);
+			}
+
 			writePhaseCouncilEvidence(workingDir, synthesis);
 
 			return JSON.stringify(
@@ -419,7 +440,11 @@ function addMutationGapFindingToSynthesis(
 	},
 	finding: CouncilFinding,
 ): void {
-	if (finding.severity === 'HIGH' || finding.severity === 'MEDIUM') {
+	if (
+		finding.severity === 'CRITICAL' ||
+		finding.severity === 'HIGH' ||
+		finding.severity === 'MEDIUM'
+	) {
 		synthesis.requiredFixes.push(finding);
 	} else {
 		synthesis.advisoryFindings.push(finding);

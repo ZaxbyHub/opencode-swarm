@@ -41,7 +41,7 @@ function makeVerdict(
 }
 
 function makeFinding(
-	severity: 'HIGH' | 'MEDIUM' | 'LOW',
+	severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
 	location: string,
 	detail: string,
 ): CouncilFinding {

@@ -1431,7 +1431,7 @@ export const CouncilConfigSchema = z
 			.boolean()
 			.default(true)
 			.describe(
-				'When true, a phase-level council CONCERNS verdict does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Default: true (CONCERNS is advisory).',
+				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
