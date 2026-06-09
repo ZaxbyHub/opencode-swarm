@@ -7,7 +7,7 @@
  * 3. removeWorktree uses bounded retry on Windows EBUSY/EPERM (DD-10) and
  *    abandons (never falls back to --force).
  *
- * Uses the _internals DI seam pattern — no mock.module() calls.
+ * Uses the _internals DI seam pattern — no mock.module calls.
  */
 
 import {

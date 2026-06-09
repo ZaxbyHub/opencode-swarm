@@ -11,7 +11,7 @@
  *    `startupOrphanRecovery` is called during `runPhase` when worktree_isolation
  *    is enabled, and NOT during runner construction or other lifecycle points.
  *
- * Uses the _internals DI seam pattern — no mock.module() calls.
+ * Uses the _internals DI seam pattern — no mock.module calls.
  */
 
 import {
