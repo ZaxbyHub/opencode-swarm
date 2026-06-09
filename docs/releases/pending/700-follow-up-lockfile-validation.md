@@ -5,7 +5,7 @@
 Enhanced defense-in-depth validation for lock file deletion safety:
 
 - Added grandparent directory check to `isSafeLockFilePath()` to reject misconfigured nested paths like `opencode/opencode/filename`
-- Improved error messages in `close.ts` to show full paths instead of just basenames, enabling better debugging of path-related issues
+- Improved the `SWARM_PLAN` path-removal warning in `src/commands/close.ts:843-847` to show the full candidate path instead of just the basename, enabling better debugging of path-related issues
 - Clarified documentation explaining why `isSafeLockFilePath()` and `isSafeCachePath()` are kept separate (different validation rules)
 
 ## Why
