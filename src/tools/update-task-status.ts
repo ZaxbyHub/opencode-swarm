@@ -926,8 +926,8 @@ export async function executeUpdateTaskStatus(
 	}
 
 	const resolveResult = resolveWorkingDirectory(
-		args.working_directory ?? fallbackDir,
-		fallbackDir!,
+		args.working_directory,
+		fallbackDir,
 	);
 	if (!resolveResult.success) {
 		return {

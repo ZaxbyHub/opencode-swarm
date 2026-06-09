@@ -105,6 +105,30 @@ describe('resolveWorkingDirectory', () => {
 		}
 	});
 
+	test('accepts explicit working_directory when fallbackDirectory is undefined', () => {
+		const result = resolveWorkingDirectory(testDir, undefined);
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.directory).toContain('resolve-wd-test-');
+		}
+	});
+
+	test('rejects non-string working_directory values', () => {
+		const result = resolveWorkingDirectory(123 as unknown as string, testDir);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.message).toContain('must be a string');
+		}
+	});
+
+	test('rejects missing working_directory and missing fallbackDirectory', () => {
+		const result = resolveWorkingDirectory(undefined, undefined);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.message).toContain('fallbackDirectory is undefined');
+		}
+	});
+
 	test('resolves symlinks to real path', () => {
 		// This test verifies realpathSync is used (the exact behavior depends on OS)
 		const result = resolveWorkingDirectory(testDir, '/fallback');

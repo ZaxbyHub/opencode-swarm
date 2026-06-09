@@ -47,11 +47,25 @@ export interface ResolveError {
  */
 export function resolveWorkingDirectory(
 	workingDirectory: string | undefined | null,
-	fallbackDirectory: string,
+	fallbackDirectory?: string | null,
 ): ResolveResult | ResolveError {
 	if (workingDirectory == null || workingDirectory === '') {
+		if (typeof fallbackDirectory !== 'string' || fallbackDirectory === '') {
+			return {
+				success: false,
+				message:
+					'Invalid working_directory: no explicit working_directory was provided and fallbackDirectory is undefined',
+			};
+		}
 		// No explicit override — use the injected directory from createSwarmTool
 		return { success: true, directory: fallbackDirectory };
+	}
+
+	if (typeof workingDirectory !== 'string') {
+		return {
+			success: false,
+			message: 'Invalid working_directory: path must be a string',
+		};
 	}
 
 	// Null-byte injection check
@@ -107,6 +121,10 @@ export function resolveWorkingDirectory(
 	}
 
 	// Check if fallbackDirectory exists (used to detect CWD mismatch scenario)
+	if (typeof fallbackDirectory !== 'string' || fallbackDirectory === '') {
+		return { success: true, directory: resolvedDir };
+	}
+
 	const resolvedFallback = path.resolve(fallbackDirectory);
 	let fallbackExists = false;
 	try {

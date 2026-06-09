@@ -394,7 +394,7 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 		expect(result.blocked).toBe(false);
 	});
 
-	test('7. evidence with empty required_gates -> blocked: false', () => {
+	test('7. evidence with empty required_gates -> blocked: true until an agent records requirements', () => {
 		const evidence: TaskEvidence = {
 			taskId: '1.1',
 			required_gates: [],
@@ -411,8 +411,9 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 
 		const result = checkReviewerGate('1.1', tempDir);
 
-		// Empty required_gates means no gates needed -> passes
-		expect(result.blocked).toBe(false);
+		// Empty required_gates from the in_progress seed does not prove QA passed.
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('no required gates');
 	});
 
 	test('8. evidence with extra gates beyond required -> blocked: false', () => {
