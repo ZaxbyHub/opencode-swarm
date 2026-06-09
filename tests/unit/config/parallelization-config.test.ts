@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
 	ParallelizationConfigSchema,
 	PluginConfigSchema,
+	WorktreeIsolationConfigSchema,
 } from '../../../src/config/schema';
 
 describe('ParallelizationConfigSchema', () => {
@@ -74,5 +75,52 @@ describe('PluginConfigSchema — parallelization field', () => {
 		// they get undefined (falsy), not true.
 		const enabled = result.parallelization?.enabled;
 		expect(enabled).toBeFalsy();
+	});
+});
+
+describe('WorktreeIsolationConfigSchema', () => {
+	test('defaults to auto isolation with merge strategy and no custom directory', () => {
+		const result = WorktreeIsolationConfigSchema.parse({});
+		expect(result.policy).toBe('auto');
+		expect(result.merge_strategy).toBe('merge');
+		expect(result.deps_strategy).toBe('skip');
+		expect(result.worktree_dir).toBeUndefined();
+	});
+
+	test('accepts required policy with rebase merge-back', () => {
+		const result = WorktreeIsolationConfigSchema.parse({
+			policy: 'required',
+			merge_strategy: 'rebase',
+			worktree_dir: '.swarm-worktrees',
+		});
+		expect(result.policy).toBe('required');
+		expect(result.merge_strategy).toBe('rebase');
+		expect(result.worktree_dir).toBe('.swarm-worktrees');
+	});
+
+	test('rejects invalid policy values', () => {
+		expect(() =>
+			WorktreeIsolationConfigSchema.parse({ policy: 'best-effort' }),
+		).toThrow();
+	});
+});
+
+describe('PluginConfigSchema — worktree isolation field', () => {
+	test('worktree field is optional and absent by default', () => {
+		const result = PluginConfigSchema.parse({});
+		expect(result.worktree).toBeUndefined();
+	});
+
+	test('worktree field parses standard parallel isolation policy', () => {
+		const result = PluginConfigSchema.parse({
+			worktree: {
+				policy: 'required',
+				merge_strategy: 'cherry-pick',
+				deps_strategy: 'copy',
+			},
+		});
+		expect(result.worktree?.policy).toBe('required');
+		expect(result.worktree?.merge_strategy).toBe('cherry-pick');
+		expect(result.worktree?.deps_strategy).toBe('copy');
 	});
 });

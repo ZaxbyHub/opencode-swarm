@@ -1460,6 +1460,26 @@ export const ParallelizationConfigSchema = z.object({
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
 
+export const WorktreeIsolationConfigSchema = z.object({
+	/**
+	 * auto: use isolated worktrees for eligible parallel coder dispatches; if
+	 * isolation cannot be prepared, block additional parallel coder dispatches so
+	 * execution serializes in the primary tree.
+	 *
+	 * required: block the coder dispatch if isolation cannot be prepared.
+	 *
+	 * disabled: preserve current shared-tree behavior.
+	 */
+	policy: z.enum(['auto', 'required', 'disabled']).default('auto'),
+	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
+	worktree_dir: z.string().optional(),
+	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+});
+
+export type WorktreeIsolationConfig = z.infer<
+	typeof WorktreeIsolationConfigSchema
+>;
+
 // Turbo configuration schema (Phase 1 Task 1.1)
 export const LeanTurboConfigSchema = z.object({
 	/** Maximum parallel coders in lean mode. 1 = serial. */
@@ -1745,6 +1765,11 @@ export const PluginConfigSchema = z.object({
 	// Parallelization configuration (PR 1 dark foundation — disabled by default)
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
+
+	// Worktree isolation policy for standard execution-profile parallel coder
+	// dispatches. Lean Turbo keeps its legacy per-mode fields for backward
+	// compatibility; this top-level block is the general lane-isolation surface.
+	worktree: WorktreeIsolationConfigSchema.optional(),
 
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
 	// Backward compatible: no turbo key means current behavior unchanged.

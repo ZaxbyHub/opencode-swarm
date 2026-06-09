@@ -9,7 +9,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
 
-import type { PluginConfig } from '../config';
+import type { PluginConfig, WorktreeIsolationConfig } from '../config';
+import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../config/constants';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
@@ -37,6 +38,14 @@ import type {
 } from '../types/delegation.js';
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
+import type { WorktreeHandle } from '../worktree';
+import {
+	attemptMergeBackFromDirty,
+	getMergeStrategy,
+	postMergeCleanup,
+	provisionWorktree,
+	removeWorktree,
+} from '../worktree';
 import { deleteStoredInputArgs, getStoredInputArgs } from './guardrails';
 import { normalizeToolName } from './normalize-tool-name';
 import { validateSwarmPath } from './utils';
@@ -430,6 +439,198 @@ const ACTIVE_PARALLEL_TASK_STATES = new Set([
 	'tests_run',
 ]);
 
+const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
+
+interface StandardWorktreeDispatch {
+	callID: string;
+	parentSessionID: string;
+	taskId: string;
+	planTaskId?: string;
+	handle: WorktreeHandle;
+	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
+}
+
+const standardWorktreeByCallID = new Map<string, StandardWorktreeDispatch>();
+const standardWorktreeSerializationSessions = new Set<string>();
+let standardWorktreeMergeQueue: Promise<unknown> = Promise.resolve();
+
+function rememberStandardWorktreeDispatch(
+	dispatch: StandardWorktreeDispatch,
+): void {
+	if (standardWorktreeByCallID.size >= MAX_TRACKED_STANDARD_WORKTREE_CALLS) {
+		const oldest = standardWorktreeByCallID.keys().next().value as
+			| string
+			| undefined;
+		if (oldest) standardWorktreeByCallID.delete(oldest);
+	}
+	standardWorktreeByCallID.set(dispatch.callID, dispatch);
+}
+
+function rememberStandardWorktreeSerializationSession(sessionID: string): void {
+	if (
+		standardWorktreeSerializationSessions.size >=
+		MAX_TRACKED_STANDARD_WORKTREE_CALLS
+	) {
+		const oldest = standardWorktreeSerializationSessions.values().next()
+			.value as string | undefined;
+		if (oldest) standardWorktreeSerializationSessions.delete(oldest);
+	}
+	standardWorktreeSerializationSessions.add(sessionID);
+}
+
+function sanitizeWorktreeTaskId(raw: string): string {
+	const sanitized = raw.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
+	return sanitized || 'task';
+}
+
+function resolveWorktreeIsolationConfig(
+	config: PluginConfig,
+): WorktreeIsolationConfig {
+	if (config.worktree) {
+		return { ...DEFAULT_WORKTREE_ISOLATION_CONFIG, ...config.worktree };
+	}
+	const lean =
+		config.turbo?.strategy === 'lean' ? config.turbo.lean : undefined;
+	if (lean?.worktree_isolation) {
+		return {
+			...DEFAULT_WORKTREE_ISOLATION_CONFIG,
+			policy: 'auto',
+			merge_strategy: lean.merge_strategy ?? 'merge',
+			worktree_dir: lean.worktree_dir,
+		};
+	}
+	return DEFAULT_WORKTREE_ISOLATION_CONFIG;
+}
+
+async function precreateStandardWorktreeSession(args: {
+	config: PluginConfig;
+	directory: string;
+	parentSessionID: string;
+	callID: string;
+	taskId: string;
+	planTaskId?: string;
+	description?: string;
+	outputArgs: Record<string, unknown>;
+}): Promise<void> {
+	const worktreeConfig = resolveWorktreeIsolationConfig(args.config);
+	if (worktreeConfig.policy === 'disabled') return;
+
+	const client = swarmState.opencodeClient;
+	if (!client) {
+		const message =
+			'STANDARD_WORKTREE_ISOLATION_UNAVAILABLE: OpenCode SDK client is unavailable; standard parallel coder work cannot be isolated.';
+		if (worktreeConfig.policy === 'required') throw new Error(message);
+		rememberStandardWorktreeSerializationSession(args.parentSessionID);
+		ensureAgentSession(args.parentSessionID).maxConcurrencyOverride = 1;
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages ??= [];
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages?.push(
+			`${message} Serializing standard coder dispatches for this session.`,
+		);
+		return;
+	}
+
+	const provisionResult = await _internals.provisionWorktree(
+		args.directory,
+		args.taskId,
+		args.parentSessionID,
+		{
+			purpose: 'lane',
+			worktreeDir: worktreeConfig.worktree_dir,
+			mergeStrategy: worktreeConfig.merge_strategy,
+		},
+	);
+	if ('error' in provisionResult) {
+		const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}`;
+		if (worktreeConfig.policy === 'required') throw new Error(message);
+		rememberStandardWorktreeSerializationSession(args.parentSessionID);
+		ensureAgentSession(args.parentSessionID).maxConcurrencyOverride = 1;
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages ??= [];
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages?.push(
+			`${message}. Serializing standard coder dispatches for this session.`,
+		);
+		return;
+	}
+
+	const createResult = await client.session.create({
+		body: {
+			parentID: args.parentSessionID,
+			title: `${args.description ?? args.taskId} (worktree lane)`,
+		},
+		query: { directory: provisionResult.worktreePath },
+	});
+	if (!createResult.data?.id) {
+		await _internals
+			.removeWorktree(provisionResult.worktreePath, args.directory)
+			.catch(() => {});
+		const createError = (createResult as { error?: unknown }).error;
+		const detail =
+			typeof createError === 'string'
+				? createError
+				: JSON.stringify(createError ?? 'missing session id');
+		const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}`;
+		if (worktreeConfig.policy === 'required') throw new Error(message);
+		rememberStandardWorktreeSerializationSession(args.parentSessionID);
+		ensureAgentSession(args.parentSessionID).maxConcurrencyOverride = 1;
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages ??= [];
+		ensureAgentSession(args.parentSessionID).pendingAdvisoryMessages?.push(
+			`${message}. Serializing standard coder dispatches for this session.`,
+		);
+		return;
+	}
+
+	args.outputArgs.task_id = createResult.data.id;
+	rememberStandardWorktreeDispatch({
+		callID: args.callID,
+		parentSessionID: args.parentSessionID,
+		taskId: args.taskId,
+		planTaskId: args.planTaskId,
+		handle: provisionResult,
+		mergeStrategy: worktreeConfig.merge_strategy,
+	});
+}
+
+async function finishStandardWorktreeDispatch(
+	directory: string,
+	dispatch: StandardWorktreeDispatch,
+): Promise<void> {
+	const run = async () => {
+		const mergeResult = await _internals.attemptMergeBackFromDirty(
+			dispatch.handle.worktreePath,
+			dispatch.handle.branchName,
+			directory,
+			getMergeStrategy({ merge_strategy: dispatch.mergeStrategy }),
+		);
+		if ('merged' in mergeResult && mergeResult.merged) {
+			await _internals
+				.removeWorktree(dispatch.handle.worktreePath, directory)
+				.catch(() => {});
+			await _internals
+				.postMergeCleanup(directory, dispatch.handle.branchName)
+				.catch(() => {});
+			return;
+		}
+		if ('partial' in mergeResult) {
+			const session = ensureAgentSession(dispatch.parentSessionID);
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(
+				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
+			);
+			return;
+		}
+
+		if ('failed' in mergeResult) {
+			const session = ensureAgentSession(dispatch.parentSessionID);
+			session.pendingAdvisoryMessages ??= [];
+			session.pendingAdvisoryMessages.push(
+				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
+			);
+		}
+	};
+
+	standardWorktreeMergeQueue = standardWorktreeMergeQueue.then(run, run);
+	await standardWorktreeMergeQueue;
+}
+
 function isTaskCompletedForParallelGuidance(task: Task): boolean {
 	const status = task.status ?? 'pending';
 	return status === 'completed' || status === 'closed';
@@ -773,6 +974,16 @@ export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
 	buildParallelExecutionGuidance,
+	loadPlanJsonOnly,
+	provisionWorktree,
+	removeWorktree,
+	attemptMergeBackFromDirty,
+	postMergeCleanup,
+	resetStandardWorktreeIsolationState: () => {
+		standardWorktreeByCallID.clear();
+		standardWorktreeSerializationSessions.clear();
+		standardWorktreeMergeQueue = Promise.resolve();
+	},
 };
 
 /**
@@ -961,7 +1172,7 @@ export function createDelegationGateHook(
 		if (targetAgent !== 'coder') return;
 
 		// Only check for the architect session (the orchestrator)
-		const session = swarmState.agentSessions.get(input.sessionID);
+		const session = ensureAgentSession(input.sessionID);
 		if (!session || !session.taskWorkflowStates) return;
 
 		// Check if ANY task is in coder_delegated state (coder ran, no reviewer yet)
@@ -1010,6 +1221,38 @@ export function createDelegationGateHook(
 					`If this is stale state from a prior session, run /swarm reset-session to clear workflow state.`,
 			);
 		}
+
+		if (standardWorktreeSerializationSessions.has(input.sessionID)) {
+			throw new Error(
+				'STANDARD_WORKTREE_ISOLATION_SERIALIZED: prior standard worktree isolation setup failed in this session; wait for the active coder task to finish before dispatching another coder.',
+			);
+		}
+
+		const plan = await _internals.loadPlanJsonOnly(directory);
+		if (!plan) return;
+		const profile = plan.execution_profile;
+		const parallelEnabled = profile?.parallelization_enabled === true;
+		const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+		const effectiveMaxConcurrent =
+			session.maxConcurrencyOverride ?? maxConcurrent;
+		if (!parallelEnabled || effectiveMaxConcurrent <= 1) return;
+		if (hasActiveLeanTurbo(input.sessionID)) return;
+
+		const planTaskIds = new Set(
+			plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
+		);
+		const resolvedTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+		await precreateStandardWorktreeSession({
+			config,
+			directory,
+			parentSessionID: input.sessionID,
+			callID: input.callID,
+			taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
+			planTaskId: resolvedTaskId ?? undefined,
+			description:
+				typeof args.description === 'string' ? args.description : undefined,
+			outputArgs: args,
+		});
 	};
 
 	// toolAfter: resets qaSkip fields and advances task states based on delegation type
@@ -1154,7 +1397,16 @@ export function createDelegationGateHook(
 		if (normalized === 'Task' || normalized === 'task') {
 			// Primary source: input.args from OpenCode's tool.execute.after hook (authoritative)
 			// Fallback: stored args from guardrails toolBefore (legacy path)
-			const directArgs = input.args as Record<string, unknown> | undefined;
+			const standardDispatch = standardWorktreeByCallID.get(input.callID);
+			const directArgsRaw = input.args as Record<string, unknown> | undefined;
+			const directArgs = directArgsRaw ? { ...directArgsRaw } : undefined;
+			if (standardDispatch && directArgs) {
+				if (standardDispatch.planTaskId) {
+					directArgs.task_id = standardDispatch.planTaskId;
+				} else {
+					delete directArgs.task_id;
+				}
+			}
 			const storedArgs = getStoredInputArgs(input.callID) as
 				| Record<string, unknown>
 				| undefined;
@@ -1224,6 +1476,24 @@ export function createDelegationGateHook(
 				}
 				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				return;
+			}
+
+			if (standardDispatch) {
+				standardWorktreeByCallID.delete(input.callID);
+				await finishStandardWorktreeDispatch(directory, standardDispatch).catch(
+					(err) => {
+						logger.warn(
+							`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${err instanceof Error ? err.message : String(err)}`,
+						);
+						const dispatchSession = ensureAgentSession(
+							standardDispatch.parentSessionID,
+						);
+						dispatchSession.pendingAdvisoryMessages ??= [];
+						dispatchSession.pendingAdvisoryMessages.push(
+							`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${err instanceof Error ? err.message : String(err)}.`,
+						);
+					},
+				);
 			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args
