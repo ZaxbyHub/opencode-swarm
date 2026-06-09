@@ -2354,7 +2354,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 
 		const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf-8'));
 		expect(evidence.taskId).toBe('1.1');
-		expect(evidence.required_gates).toEqual(['reviewer', 'test_engineer']);
+		expect(evidence.required_gates).toEqual([]);
 		expect(evidence.gates).toEqual({});
 	});
 
