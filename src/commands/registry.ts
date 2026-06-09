@@ -682,7 +682,7 @@ export const COMMAND_REGISTRY = {
 			'View or modify QA gate profile for the current plan [enable|override <gate>...]',
 		args: '[show|enable|override] <gate>...',
 		details:
-			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, council_general_review, drift_check.',
+			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, phase_council, drift_check, final_council.',
 		category: 'config',
 	},
 	promote: {

@@ -101,7 +101,7 @@ Enter architect MODE: COUNCIL — convene a fixed three-agent General Council (`
 
 | Flag | Effect |
 |------|--------|
-| `--spec-review` | Switch to single-pass advisory mode. Used by the `council_general_review` QA gate during MODE: SPECIFY to fold council input into a draft spec — no Round 2 deliberation. |
+| `--spec-review` | Switch to single-pass advisory mode. Can be invoked manually to fold council input into a draft spec — no Round 2 deliberation. |
 
 **Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. The deprecated `members`, `presets`, `moderator`, and `moderatorModel` fields are accepted for compatibility but ignored at runtime. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
 
@@ -383,14 +383,15 @@ View or modify QA gate profile for the current plan.
 - `enable`: persist gate(s) into the locked profile. Architect-only. Rejected after critic approval lock.
 - `override`: session-only ratchet-tighter enable.
 
-Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `council_general_review`, `final_council`.
+Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `phase_council`, `final_council`.
 
 **Gate descriptions:**
 
-- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
+- `council_mode` — Per-task council gate. When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config.
 
+- `phase_council` — Phase-level council gate. When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates.
 
-- `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.
+- `final_council` — Project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) — NOT the General Council — rerun at project scope. Does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry

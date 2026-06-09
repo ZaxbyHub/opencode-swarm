@@ -744,11 +744,12 @@ export interface CouncilGateResult {
  * Check the council gate for a completion transition. Pure — reads config and
  * evidence only, no state mutation. Exported for focused unit testing.
  *
- * AND semantics (mirrors isCouncilGateActive in state.ts): the gate only
- * activates when BOTH pluginConfig.council.enabled === true AND the QA gate
- * profile for this plan has council_mode === true.  When council.enabled is
- * true but council_mode is false (or the profile is absent), the gate is
- * treated as inactive — the operator has disabled it at the profile level.
+ * AND semantics: the gate only activates when BOTH pluginConfig.council.enabled
+ * === true AND the QA gate profile has council_mode === true. When active, the
+ * per-task full 5-member council verdict (via submit_council_verdicts) is
+ * required before task advancement. When council.enabled is true but
+ * council_mode is false (or the profile is absent), the gate is treated as
+ * inactive — the operator has disabled it at the profile level.
  *
  * @param workingDirectory - Validated project root (contains .swarm/evidence/)
  * @param taskId - Task ID in N.M or N.M.P format

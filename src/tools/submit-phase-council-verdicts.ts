@@ -52,7 +52,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 			'collect their verdict responses BEFORE calling this tool. This tool performs ' +
 			'synthesis only — it does NOT dispatch, invoke, or contact council members. ' +
 			'Writes .swarm/evidence/{phase}/phase-council.json which is required by ' +
-			'phase_complete Gate 5 when council_mode is enabled. ' +
+			'phase_complete Gate 5 when phase_council is enabled. ' +
 			'Architect-only. Config-gated via council.enabled.',
 		args: {
 			phaseNumber: z

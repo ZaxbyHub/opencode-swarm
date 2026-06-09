@@ -1,9 +1,9 @@
 /**
  * Tests for fallback delegation-chain path with council mode active.
  *
- * The fallback path (delegationChains) must run Stage B advancement
- * unconditionally, just like the primary path. These tests verify the fix
- * for the incomplete guard removal discovered in adversarial review.
+ * When council mode is active, the fallback path (delegationChains) skips
+ * Stage B advancement — council replaces Stage B per-task. qaSkip reset
+ * still runs (it's outside the council guard).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -102,8 +102,8 @@ afterEach(() => {
 	}
 });
 
-describe('Fallback path Stage B advancement with council mode active', () => {
-	it('fallback path advances states when delegationChains present but no stored args', async () => {
+describe('Fallback path Stage B SKIPPED with council mode active', () => {
+	it('fallback path does NOT advance states when council replaces Stage B', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -148,13 +148,11 @@ describe('Fallback path Stage B advancement with council mode active', () => {
 			{},
 		);
 
-		// Since both reviewer and test_engineer are in the chain, both fallback passes
-		// execute in sequence: Fallback Pass 1 advances coder_delegated → reviewer_run,
-		// then Fallback Pass 2 advances reviewer_run → tests_run, all in one call.
-		expect(getTaskState(session, '1.1')).toBe('tests_run');
+		// Stage B is skipped when council replaces it — state stays at coder_delegated.
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 
-	it('fallback path advances both states when reviewer and test_engineer in chain', async () => {
+	it('fallback path does NOT advance states even with both reviewer and test_engineer in chain', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -195,12 +193,11 @@ describe('Fallback path Stage B advancement with council mode active', () => {
 			{},
 		);
 
-		// Both Fallback Pass 1 and Pass 2 execute in sequence within a single toolAfter call,
-		// advancing coder_delegated → reviewer_run → tests_run in one invocation.
-		expect(getTaskState(session, '1.1')).toBe('tests_run');
+		// Stage B is skipped when council replaces it — state stays at coder_delegated.
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 
-	it('fallback path respects qaSkip reset when both reviewer and test_engineer seen', async () => {
+	it('fallback path still resets qaSkip when both reviewer and test_engineer seen (qaSkip is outside council guard)', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -246,10 +243,11 @@ describe('Fallback path Stage B advancement with council mode active', () => {
 		);
 
 		// qaSkip should be reset when both roles are detected in chain
+		// (qaSkip reset is outside the council guard)
 		expect(session.qaSkipCount).toBe(0);
 		expect(session.qaSkipTaskIds).toHaveLength(0);
 
-		// State should advance through both passes to tests_run
-		expect(getTaskState(session, '1.1')).toBe('tests_run');
+		// State stays at coder_delegated — Stage B is skipped when council is active
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 });

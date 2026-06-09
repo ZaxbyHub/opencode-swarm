@@ -437,7 +437,7 @@ Distinct from the Work Complete Council above. Where the Work Complete Council i
 
 The three council agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — for General Council dispatch, the architect runs `web_search` 1–3 times before dispatch and passes the results in. Separately, SME agents may call `web_search` directly for external skill/source research when `council.general.enabled=true` and a Tavily or Brave API key is configured.
 
-Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or by enabling the `council_general_review` QA gate (which runs the council on a draft spec during MODE: SPECIFY).
+Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or offered as an early workflow option in MODE: BRAINSTORM (Phase 1b) when enabled.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -547,7 +547,9 @@ All gates are **ratchet-tighter** — once enabled they cannot be disabled until
 | `sme_enabled` | ON | SME consultation during planning / clarification |
 | `critic_pre_plan` | ON | Critic review before plan finalization |
 | `sast_enabled` | ON | Static security scanning |
-| `council_mode` | OFF | Multi-member Work Complete Council gate (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code) |
+| `council_mode` | OFF | Replaces per-task Stage B (reviewer + test_engineer) with full 5-member council per task (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code) |
 | `hallucination_guard` | OFF | Mandatory per-phase API/signature/claim/citation verification at PHASE-WRAP; blocks `phase_complete` until evidence is APPROVED |
 | `mutation_test` | OFF | Runs mutation testing on source files touched this phase at PHASE-WRAP; FAIL blocks `phase_complete`, WARN is non-blocking |
-| `council_general_review` | OFF | When enabled, MODE: SPECIFY runs `convene_general_council` on the draft spec before the critic-gate; multi-model deliberation folded into the spec. Requires `council.general.enabled: true` and a search API key. |
+| `drift_check` | ON | Mandatory per-phase drift verification at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks `phase_complete` when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists |
+| `phase_council` | OFF | Full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates. |
+| `final_council` | OFF | Full 5-member council (NOT General Council) reviews the entire project at the last phase. Requires approved `.swarm/evidence/final-council.json`. |

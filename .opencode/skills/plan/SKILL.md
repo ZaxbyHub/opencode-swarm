@@ -185,20 +185,23 @@ After `save_plan` succeeds, read `.swarm/context.md`:
 - If a `## Pending QA Gate Selection` section exists: parse the gate values, call `set_qa_gates` with those flags, confirm with the user ("QA gates applied: <list>"), then remove the section from context.md.
 - If a `## Pending Parallelization Config` section also exists: parse the values and call `save_plan` again with `execution_profile` set to `{ parallelization_enabled: <parsed>, max_concurrent_tasks: <parsed>, council_parallel: false, locked: true }`. Then remove the section from context.md. If the plan already had `execution_profile.locked: true`, skip this step — the profile is already locked and immutable.
 - If a `## Task Completion Commit Policy` section exists: preserve it in `.swarm/context.md` (do NOT remove). This section is execution-time guidance for optional per-task checkpoint commits after `update_task_status(status="completed")`.
-- If no pending section exists, ask the user inline now. Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user-facing question. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
+- If no pending section exists, ask the user inline now. Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder count, and commit frequency as a single user-facing section. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
   - reviewer (default: ON) - code review of coder output
   - test_engineer (default: ON) - test verification of coder output
   - sme_enabled (default: ON) - SME consultation during planning/clarification
   - critic_pre_plan (default: ON) - critic review before plan finalization
   - sast_enabled (default: ON) - static security scanning
-  - council_mode (default: OFF) - multi-member council gate
+  - council_mode (default: OFF) - replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Requires council.enabled: true in config.
   - hallucination_guard (default: OFF) - mandatory per-phase API/signature/claim/citation verification at PHASE-WRAP
   - mutation_test (default: OFF) - mutation testing on source files touched this phase at PHASE-WRAP
-  - council_general_review (default: OFF) - General Council review during MODE: SPECIFY when council.general.enabled is true
+  - phase_council (default: OFF) - full 5-member council reviews all work in a phase holistically at phase_complete time. Requires council.enabled: true in config.
   - drift_check (default: ON) - mandatory per-phase drift verification at PHASE-WRAP
-  - final_council (default: OFF) - final project-scope council after all phases complete
-  One question, one message, defaults pre-stated. Wait for the user's answer.
-  If the user answered the gate question, immediately follow up with one more question: "How many coders should run in parallel? (default: 1, range: 1-4)" If the user says a number greater than 1, also write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:
+  - final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) -- NOT the General Council -- at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
+  Additionally, present these two sub-items as part of the same exchange:
+  - Parallel coders (default: 1, range: 1-4) - how many coders should run in parallel.
+  - Commit frequency (default: phase-level only) - optional per-task checkpoint commit after each task completion.
+  The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
+  If the user says parallel coders > 1, write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:
   ```
   ## Pending Parallelization Config
   - parallelization_enabled: true
@@ -208,7 +211,6 @@ After `save_plan` succeeds, read `.swarm/context.md`:
   - recorded_at: <ISO timestamp>
   ```
   If the user accepts the default (1), skip writing this section entirely; serial execution is the default and needs no config.
-  After asking the parallelization question, immediately follow up with one more question: "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)".
   If the user chooses per-task commits, write this section to `.swarm/context.md`:
   ```
   ## Task Completion Commit Policy

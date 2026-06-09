@@ -56,7 +56,7 @@ DELEGATION RULES:
 ${complianceHeader}
 - Reviewer delegation is MANDATORY for every coder task.
 - pre_check_batch is NOT a substitute for reviewer.
-- Stage A (tools) + Stage B (agents) = BOTH required.
+- Stage A (automated tools) + Stage B/Council (agent review) = BOTH required.
 ${
 	phaseNumber !== null && phaseNumber >= 4
 		? `\n⚠️ You are in Phase ${phaseNumber}. Compliance degrades with time. Do not skip reviewer or test_engineer.`
