@@ -509,7 +509,7 @@ Behavioral changes:
 /**
  * Canonical default Lean Turbo configuration.
  *
- * This is the single source of truth for all 9 LeanTurboConfig fields.
+ * This is the single source of truth for all LeanTurboConfig fields.
  * Consumers MUST reference this constant instead of hardcoding their own
  * defaults — see v7.4.x config-drift fix (3 of 9 fields disagreed across
  * runner.ts, lean-turbo-plan-lanes.ts, lean-turbo-status.ts, and the
@@ -525,6 +525,8 @@ export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
 	integrated_diff_required: true,
 	allow_docs_only_without_reviewer: false,
 	worktree_isolation: false,
+	merge_strategy: 'merge' as const,
+	worktree_dir: undefined,
 };
 
 export const LEAN_TURBO_BANNER = `## 🛤️ LEAN TURBO ACTIVE

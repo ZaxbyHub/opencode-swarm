@@ -1478,14 +1478,15 @@ export const LeanTurboConfigSchema = z.object({
 	integrated_diff_required: z.boolean().default(true),
 	/** Allow docs-only phases when reviewer is not available. */
 	allow_docs_only_without_reviewer: z.boolean().default(false),
-	/** Use worktree isolation for parallel coders. NOT YET IMPLEMENTED — must be false. */
-	worktree_isolation: z
-		.boolean()
-		.default(false)
-		.refine((val) => val === false, {
-			message:
-				'worktree_isolation: true is not yet implemented. Use false (the default) for in-repo parallel execution. Full worktree isolation will be available in a future release.',
-		}),
+	/** Use worktree isolation for parallel coders. When true, each lane gets its own worktree. */
+	worktree_isolation: z.boolean().default(false),
+	/** Branch merge strategy after lane worktree completion. */
+	merge_strategy: z
+		.enum(['merge', 'rebase', 'cherry-pick'])
+		.default('merge')
+		.optional(),
+	/** Optional user-specified worktree directory override. */
+	worktree_dir: z.string().optional(),
 });
 
 export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;

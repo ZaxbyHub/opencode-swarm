@@ -645,10 +645,10 @@ describe('ATTACK VECTOR 3 — integrated_diff_required=false skips diff summary'
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
-// ATTACK VECTOR 4: worktree_isolation=true via type coercion bypass
+// ATTACK VECTOR 4: worktree_isolation — non-boolean coercion still rejected, boolean true now accepted
 // ════════════════════════════════════════════════════════════════════════════════
 
-describe('ATTACK VECTOR 4 — worktree_isolation=true via type coercion bypass', () => {
+describe('ATTACK VECTOR 4 — worktree_isolation coercion from non-boolean values', () => {
 	test('schema: string "true" is rejected by z.boolean() (no coerce)', () => {
 		// The schema uses z.boolean() without coerce — string "true" should NOT pass
 		const result = LeanTurboConfigSchema.safeParse({
@@ -659,23 +659,20 @@ describe('ATTACK VECTOR 4 — worktree_isolation=true via type coercion bypass',
 		expect(result.success).toBe(false);
 	});
 
-	test('schema: boolean true fails the .refine() that val === false', () => {
-		// Even if coercion somehow produces boolean true, the refine rejects it
+	test('schema: boolean true is now accepted (refine gate removed)', () => {
+		// The .refine() gate was removed in v1 — worktree_isolation: true is now accepted
 		const result = LeanTurboConfigSchema.safeParse({
 			max_parallel_coders: 4,
-			worktree_isolation: true, // explicitly true — rejected by refine
+			worktree_isolation: true,
 		});
 
-		expect(result.success).toBe(false);
-		if (!result.success) {
-			const issue = result.error.issues.find((i) =>
-				i.path.includes('worktree_isolation'),
-			);
-			expect(issue).toBeDefined();
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.worktree_isolation).toBe(true);
 		}
 	});
 
-	test('schema: worktree_isolation=false (the only valid value) passes', () => {
+	test('schema: worktree_isolation=false passes', () => {
 		const result = LeanTurboConfigSchema.safeParse({
 			max_parallel_coders: 4,
 			worktree_isolation: false,

@@ -344,6 +344,23 @@ interface LeanTurboLanePlan {
 // isGlobalFile(normalizedPath) → boolean
 // isProtectedPath(normalizedPath) → boolean
 // readTaskScopes(directory, taskId) → string[] | null (reads .swarm/scopes/scope-{taskId}.json)
+
+// src/turbo/lean/worktree.ts
+// provisionWorktree(laneId, branchName, baseBranch, config) → Promise<WorktreeResult>
+// removeWorktree(laneId) → Promise<void>
+// assertCleanWorkingTree() → void (throws if dirty)
+// isCleanWorktree() → Promise<boolean>
+// autoCommitDirty(message) → Promise<string> (returns commit hash)
+// cleanUntrackedFiles() → Promise<void>
+
+// src/turbo/lean/merge-back.ts
+// getMergeStrategy(config) → 'merge' | 'rebase' | 'cherry-pick'
+// mergeLaneBranch(laneId, strategy) → Promise<MergeSuccess | MergeFailure | MergeConflict>
+// postMergeCleanup(laneId) → Promise<CleanupSuccess | CleanupFailure>
+// handleMergeConflict(conflictInfo) → Promise<ConflictHandlingError | null>
+// attemptMergeBackFromDirty(laneId, strategy) → Promise<DirtyMergeSuccess | DirtyMergeFailure | DirtyMergePartial>
+// cleanupOrphanedBranches() → Promise<OrphanCleanupResult>
+// startupOrphanRecovery() → Promise<StartupRecoveryResult>
 ```
 
 ### Commands

@@ -96,6 +96,108 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
+// MERGE-BACK FAILURES PROPAGATION TESTS
+// ---------------------------------------------------------------------------
+
+describe('mergeBackFailures propagation', () => {
+	test('executeLeanTurboRunPhase propagates mergeBackFailures from runner result', async () => {
+		// Configure mock to return mergeBackFailures
+		const mockFailures = [
+			{ laneId: 'lane-1', reason: 'merge conflict on src/main.ts' },
+			{
+				laneId: 'lane-2',
+				reason: 'rebase failed',
+				conflictFiles: ['src/utils.ts', 'src/index.ts'],
+			},
+		];
+
+		// Replace the default runPhase mock to include mergeBackFailures
+		const mockRunnerInstance = {
+			runPhase: mock(async () => ({
+				ok: true,
+				lanes: [],
+				degradedTasks: [],
+				serializedTasks: [],
+				mergeBackFailures: mockFailures,
+			})),
+			cleanup: mock(async () => {}),
+			cleanupAfterSuccess: mock(async () => {}),
+			cleanupAfterFailure: mock(async () => {}),
+		};
+
+		// Override the mock constructor for this test
+		const origConstructor = MockLeanTurboRunner;
+		_internals.LeanTurboRunner = mock(function CustomRunner(_options: unknown) {
+			return mockRunnerInstance;
+		}) as any;
+
+		const args: LeanTurboRunPhaseArgs = {
+			directory: tmpDir,
+			phase: 1,
+			sessionID: 'test-session',
+		};
+
+		const result = await executeLeanTurboRunPhase(args);
+
+		// Verify mergeBackFailures are present in the tool response
+		expect(result.success).toBe(true);
+		expect(result.mergeBackFailures).toBeDefined();
+		expect(result.mergeBackFailures).toHaveLength(2);
+		expect(result.mergeBackFailures).toEqual(mockFailures);
+
+		// Restore original constructor
+		_internals.LeanTurboRunner = origConstructor;
+	});
+
+	test('executeLeanTurboRunPhase propagates empty mergeBackFailures array', async () => {
+		const mockRunnerInstance = {
+			runPhase: mock(async () => ({
+				ok: true,
+				lanes: [],
+				degradedTasks: [],
+				serializedTasks: [],
+				mergeBackFailures: [],
+			})),
+			cleanup: mock(async () => {}),
+			cleanupAfterSuccess: mock(async () => {}),
+			cleanupAfterFailure: mock(async () => {}),
+		};
+
+		const origConstructor = MockLeanTurboRunner;
+		_internals.LeanTurboRunner = mock(function CustomRunner(_options: unknown) {
+			return mockRunnerInstance;
+		}) as any;
+
+		const args: LeanTurboRunPhaseArgs = {
+			directory: tmpDir,
+			phase: 1,
+			sessionID: 'test-session',
+		};
+
+		const result = await executeLeanTurboRunPhase(args);
+
+		expect(result.success).toBe(true);
+		expect(result.mergeBackFailures).toEqual([]);
+
+		_internals.LeanTurboRunner = origConstructor;
+	});
+
+	test('executeLeanTurboRunPhase includes undefined mergeBackFailures when runner omits it', async () => {
+		// The default MockLeanTurboRunner returns no mergeBackFailures
+		const args: LeanTurboRunPhaseArgs = {
+			directory: tmpDir,
+			phase: 1,
+			sessionID: 'test-session',
+		};
+
+		const result = await executeLeanTurboRunPhase(args);
+
+		expect(result.success).toBe(true);
+		expect(result.mergeBackFailures).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // CONFIG PROPAGATION TESTS
 // ---------------------------------------------------------------------------
 

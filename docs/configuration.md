@@ -506,8 +506,10 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
 | `integrated_diff_required` | boolean | `true` | Require an integrated diff before accepting changes from a lane. Ensures cross-lane file changes are coherent. |
 | `allow_docs_only_without_reviewer` | boolean | `false` | Allow docs-only phases to complete when the reviewer agent is not available. |
 | `worktree_isolation` | boolean | `false` | Use git worktree isolation for parallel coders to enable true file-system-level parallelism. |
+| `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. Controls how completed lane branches are merged back into the main branch. |
+| `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `.swarm-worktrees/<sessionId>/<laneId>`. Accepts absolute and relative paths (relative paths are resolved against the project root). |
 
-**Example** — Enable Lean Turbo with defaults:
+**Example** — Enable Lean Turbo with worktree isolation and rebase strategy:
 
 ```json
 {
@@ -522,7 +524,9 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
       "phase_critic": true,
       "integrated_diff_required": true,
       "allow_docs_only_without_reviewer": false,
-      "worktree_isolation": false
+      "worktree_isolation": true,
+      "merge_strategy": "rebase",
+      "worktree_dir": ".worktrees"
     }
   }
 }

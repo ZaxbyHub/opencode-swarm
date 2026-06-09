@@ -24,6 +24,16 @@ export interface LeanTurboLane {
 	error?: string;
 	agent?: string;
 	sessionId?: string;
+	/** Worktree path for isolated lane execution (undefined when worktree_isolation is disabled) */
+	worktreePath?: string;
+	/** Branch name for the lane's worktree (swarm-lane/<sessionId>/<laneId>) */
+	branchName?: string;
+	/**
+	 * In-memory-only flag: set when dispatch fails with a provisioned worktree.
+	 * Signals that _sequentialWorktreeCleanup should run attemptMergeBackFromDirty
+	 * + removeWorktree for this lane. Never persisted to disk.
+	 */
+	_failureCleanupPending?: boolean;
 }
 
 export interface LeanTurboDegradedTask {

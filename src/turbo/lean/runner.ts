@@ -24,10 +24,22 @@ import { loadPlanJsonOnly } from '../../plan/manager';
 import { hasActiveFullAuto, swarmState } from '../../state';
 import type { LaneEvidence } from './evidence';
 import { writeLaneEvidence } from './evidence';
+import {
+	attemptMergeBackFromDirty,
+	getMergeStrategy,
+	mergeLaneBranch,
+	postMergeCleanup,
+	startupOrphanRecovery,
+} from './merge-back';
 import type { LeanTurboLanePlan } from './planner';
 import { planLeanTurboLanes } from './planner';
 import type { LeanTurboLane } from './state';
 import { loadLeanTurboRunState, saveLeanTurboRunState } from './state';
+import {
+	assertCleanWorkingTree,
+	provisionWorktree,
+	removeWorktree,
+} from './worktree';
 
 /**
  * Shape of the OpencodeClient session API used by the runner.
@@ -68,6 +80,18 @@ export interface LaneDispatchResult {
 }
 
 /**
+ * Describes a merge-back failure for a completed lane.
+ */
+export interface MergeBackFailureInfo {
+	/** Lane identifier */
+	laneId: string;
+	/** Human-readable reason for the merge-back failure */
+	reason: string;
+	/** Conflict files if the failure was a merge conflict */
+	conflictFiles?: string[];
+}
+
+/**
  * Result of a single lane's processing.
  */
 export interface LaneResult {
@@ -83,6 +107,8 @@ export interface LaneResult {
 	sessionId?: string;
 	/** Error message if status is 'failed' or 'blocked' */
 	error?: string;
+	/** Merge-back failure info if the coder completed but integration back to primary failed */
+	mergeBackFailure?: MergeBackFailureInfo;
 }
 
 /**
@@ -99,6 +125,8 @@ export interface LeanTurboPhaseResult {
 	degradedTasks: string[];
 	/** Task IDs excluded from parallel lanes, must complete via standard serial flow */
 	serializedTasks: string[];
+	/** Lanes whose coder completed but merge-back to primary branch failed */
+	mergeBackFailures?: MergeBackFailureInfo[];
 }
 
 // ─── Internal Types ───────────────────────────────────────────────────────────
@@ -108,6 +136,61 @@ export interface LeanTurboPhaseResult {
  * Used by cleanup() to release all held locks.
  */
 type LaneLockMap = Record<string, string[]>;
+
+// ─── Transient Error Detection ─────────────────────────────────────────────
+
+/**
+ * Determines whether a worktree provisioning error is transient and worth retrying.
+ *
+ * Transient errors include well-known system error codes (ENOENT, EBUSY, EPERM, etc.),
+ * disk-space messages, and git "fatal:" stderr that doesn't indicate a permanent
+ * condition like "already exists" or "not a git repository".
+ */
+function isTransientProvisionError(errorMsg: string): boolean {
+	const lower = errorMsg.toLowerCase();
+
+	// Permanent conditions — never retry
+	if (
+		lower.includes('already exists') ||
+		lower.includes('not a git repository')
+	) {
+		return false;
+	}
+
+	// Known transient system error codes
+	const transientCodes = [
+		'enoent',
+		'econnrefused',
+		'etimedout',
+		'ebusy',
+		'eperm',
+		'enomem',
+	];
+	for (const code of transientCodes) {
+		if (lower.includes(code)) {
+			return true;
+		}
+	}
+
+	// Transient disk/resource messages
+	const transientMessages = [
+		'disk full',
+		'no space left',
+		'resource temporarily unavailable',
+	];
+	for (const msg of transientMessages) {
+		if (lower.includes(msg)) {
+			return true;
+		}
+	}
+
+	// Git "fatal:" stderr with non-zero exit — transient unless excluded above
+	if (lower.includes('fatal:')) {
+		return true;
+	}
+
+	return false;
+}
 
 // ─── Runner Class ────────────────────────────────────────────────────────────
 
@@ -147,6 +230,14 @@ export class LeanTurboRunner {
 		writeLaneEvidence: typeof writeLaneEvidence;
 		/** Timeout for lane dispatch (session.create + session.prompt) in ms. Undefined = no timeout. */
 		laneDispatchTimeoutMs: number | undefined;
+		provisionWorktree: typeof provisionWorktree;
+		removeWorktree: typeof removeWorktree;
+		mergeLaneBranch: typeof mergeLaneBranch;
+		postMergeCleanup: typeof postMergeCleanup;
+		attemptMergeBackFromDirty: typeof attemptMergeBackFromDirty;
+		startupOrphanRecovery: typeof startupOrphanRecovery;
+		getMergeStrategy: typeof getMergeStrategy;
+		assertCleanWorkingTree: typeof assertCleanWorkingTree;
 	} = {
 		loadPlanJsonOnly,
 		planLeanTurboLanes,
@@ -158,6 +249,14 @@ export class LeanTurboRunner {
 		loadFullAutoRunState,
 		writeLaneEvidence,
 		laneDispatchTimeoutMs: undefined,
+		provisionWorktree,
+		removeWorktree,
+		mergeLaneBranch,
+		postMergeCleanup,
+		attemptMergeBackFromDirty,
+		startupOrphanRecovery,
+		getMergeStrategy,
+		assertCleanWorkingTree,
 	};
 
 	/**
@@ -297,6 +396,36 @@ export class LeanTurboRunner {
 		// Get lean config (use stored config or defaults if not set)
 		const leanConfig = this._getLeanConfig(this._leanConfig);
 
+		// Startup orphan recovery (FR-002) — only when worktree isolation is enabled
+		if (leanConfig.worktree_isolation) {
+			await LeanTurboRunner._internals.startupOrphanRecovery(this._directory, [
+				this._sessionID,
+			]);
+
+			// DD-2: Assert clean working tree before provisioning worktrees.
+			// If dirty, degrade ALL lanes to shared-directory execution for this phase.
+			try {
+				const cleanResult =
+					await LeanTurboRunner._internals.assertCleanWorkingTree(
+						this._directory,
+					);
+				if (!cleanResult.clean) {
+					console.warn(
+						`[lean-turbo] worktree isolation requires clean working tree: ${cleanResult.error}`,
+					);
+					leanConfig.worktree_isolation = false;
+				}
+			} catch (assertErr) {
+				// If the check itself fails (e.g. not a git repo), degrade gracefully
+				const assertMsg =
+					assertErr instanceof Error ? assertErr.message : String(assertErr);
+				console.warn(
+					`[lean-turbo] unable to verify working tree cleanliness: ${assertMsg} — degrading to shared directory`,
+				);
+				leanConfig.worktree_isolation = false;
+			}
+		}
+
 		// Plan lane distribution — type cast needed because Phase (schema) is structurally
 		// wider than PlanPhase (planner) but at runtime all used fields are compatible
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -350,15 +479,27 @@ export class LeanTurboRunner {
 
 		// Process lanes concurrently for maximum throughput
 		const results = await Promise.all(
-			lanePlan.lanes.map((lane) => this._processLane(lane)),
+			lanePlan.lanes.map((lane) => this._processLane(lane, leanConfig)),
 		);
 		laneResults.push(...results);
+
+		// Sequential worktree cleanup: after ALL lanes complete, handle worktree
+		// lanes one at a time to prevent concurrent git merge/rebase/cherry-pick
+		// from corrupting the shared .git index (race condition fix).
+		// Handles both SUCCESS lanes (mergeLaneBranch + cleanup + removeWorktree)
+		// and FAILURE lanes (attemptMergeBackFromDirty + removeWorktree).
+		const mergeBackFailures = await this._sequentialWorktreeCleanup(
+			laneResults,
+			leanConfig,
+		);
 
 		return {
 			ok: true,
 			lanes: laneResults,
 			degradedTasks,
 			serializedTasks: lanePlan.serializedTasks,
+			mergeBackFailures:
+				mergeBackFailures.length > 0 ? mergeBackFailures : undefined,
 		};
 	}
 
@@ -374,6 +515,7 @@ export class LeanTurboRunner {
 	async dispatchLane(
 		lane: LeanTurboLane,
 		agentName: string,
+		worktreeDirectory?: string,
 	): Promise<LaneDispatchResult> {
 		const session =
 			this._sessionOps ??
@@ -383,7 +525,12 @@ export class LeanTurboRunner {
 		}
 
 		// Build a promise that does the full dispatch
-		const dispatchPromise = this._doDispatch(session, lane, agentName);
+		const dispatchPromise = this._doDispatch(
+			session,
+			lane,
+			agentName,
+			worktreeDirectory,
+		);
 
 		// Apply timeout if configured via _internals
 		const timeoutMs = LeanTurboRunner._internals.laneDispatchTimeoutMs;
@@ -443,11 +590,14 @@ export class LeanTurboRunner {
 		session: SessionClient,
 		lane: LeanTurboLane,
 		agentName: string,
+		worktreeDirectory?: string,
 	): Promise<LaneDispatchResult> {
 		try {
+			// Use worktree directory when provided, otherwise use primary directory
+			const effectiveDirectory = worktreeDirectory ?? this._directory;
 			// Create ephemeral session
 			const createResult = await session.create({
-				query: { directory: this._directory },
+				query: { directory: effectiveDirectory },
 			});
 
 			if (!createResult.data) {
@@ -533,6 +683,20 @@ export class LeanTurboRunner {
 		}
 
 		this._laneLockMap = {};
+
+		// Remove worktrees for lanes that were active
+		for (const [_laneId, lane] of this._laneStatuses) {
+			if (lane.worktreePath) {
+				try {
+					await LeanTurboRunner._internals.removeWorktree(
+						lane.worktreePath,
+						this._directory,
+					);
+				} catch {
+					// Best-effort cleanup
+				}
+			}
+		}
 
 		// Update durable state to reflect released lanes
 		// Use _withStateLock to prevent races with concurrent lane status updates
@@ -661,7 +825,10 @@ export class LeanTurboRunner {
 	 * On lock acquisition failure (Bug #4), the lane's tasks are routed to
 	 * the serialized tasks set for standard serial fallback.
 	 */
-	private async _processLane(lane: LeanTurboLane): Promise<LaneResult> {
+	private async _processLane(
+		lane: LeanTurboLane,
+		leanConfig: LeanTurboConfig,
+	): Promise<LaneResult> {
 		// Update status to running
 		const laneInState = this._laneStatuses.get(lane.laneId);
 		if (laneInState) {
@@ -728,8 +895,140 @@ export class LeanTurboRunner {
 		// Track locked files for cleanup
 		this._laneLockMap[lane.laneId] = [...lane.files];
 
+		// Worktree provisioning (if enabled)
+		let worktreeDirectory: string | undefined;
+		if (leanConfig.worktree_isolation) {
+			let provisionError: string | undefined;
+			try {
+				const provisionResult =
+					await LeanTurboRunner._internals.provisionWorktree(
+						this._directory,
+						lane.laneId,
+						this._sessionID,
+						leanConfig,
+					);
+				if ('worktreePath' in provisionResult) {
+					worktreeDirectory = provisionResult.worktreePath;
+					// Track in state and persist to durable storage
+					if (laneInState) {
+						laneInState.worktreePath = provisionResult.worktreePath;
+						laneInState.branchName = provisionResult.branchName;
+					}
+					await this._persistLaneWorktreeFields(
+						lane.laneId,
+						provisionResult.worktreePath,
+						provisionResult.branchName,
+					);
+				} else {
+					provisionError = provisionResult.error;
+				}
+			} catch (provisionErr) {
+				provisionError =
+					provisionErr instanceof Error
+						? provisionErr.message
+						: String(provisionErr);
+			}
+
+			// Retry once for transient errors, fail immediately for permanent ones
+			if (provisionError) {
+				if (isTransientProvisionError(provisionError)) {
+					console.warn(
+						`[lean-turbo] worktree provision failed for lane ${lane.laneId}: ${provisionError} — retrying once...`,
+					);
+					await new Promise<void>((r) => setTimeout(r, 100));
+					try {
+						const retryResult =
+							await LeanTurboRunner._internals.provisionWorktree(
+								this._directory,
+								lane.laneId,
+								this._sessionID,
+								leanConfig,
+							);
+						if ('worktreePath' in retryResult) {
+							worktreeDirectory = retryResult.worktreePath;
+							if (laneInState) {
+								laneInState.worktreePath = retryResult.worktreePath;
+								laneInState.branchName = retryResult.branchName;
+							}
+							await this._persistLaneWorktreeFields(
+								lane.laneId,
+								retryResult.worktreePath,
+								retryResult.branchName,
+							);
+							console.warn(
+								`[lean-turbo] worktree provision retry succeeded for lane ${lane.laneId}`,
+							);
+							// Retry succeeded — clear provisionError so we don't fail below
+							provisionError = undefined;
+						} else {
+							// Retry returned an error — keep provisionError set
+							provisionError = retryResult.error;
+							console.warn(
+								`[lean-turbo] worktree provision retry failed for lane ${lane.laneId}: ${retryResult.error}`,
+							);
+						}
+					} catch (retryErr) {
+						const retryMsg =
+							retryErr instanceof Error ? retryErr.message : String(retryErr);
+						// Retry threw — keep provisionError set
+						console.warn(
+							`[lean-turbo] worktree provision retry threw for lane ${lane.laneId}: ${retryMsg}`,
+						);
+					}
+				} else {
+					// Permanent error — log and fail (no retry)
+					console.warn(
+						`[lean-turbo] worktree provision failed for lane ${lane.laneId}: ${provisionError}`,
+					);
+				}
+			}
+
+			// After retry, if worktreeDirectory is still undefined, the lane cannot
+			// proceed under worktree isolation — fail explicitly rather than silently
+			// degrading to the shared directory (which would break the isolation contract).
+			if (!worktreeDirectory) {
+				const failMsg = `worktree provision failed: ${provisionError ?? 'unknown error'}`;
+
+				// Release locks — this lane will not proceed
+				try {
+					await LeanTurboRunner._internals.releaseLaneLocks(
+						this._directory,
+						lane.laneId,
+					);
+				} catch {
+					// Best-effort
+				}
+				delete this._laneLockMap[lane.laneId];
+
+				if (laneInState) {
+					laneInState.status = 'failed';
+					laneInState.error = failMsg;
+				}
+				await this._updateDurableStateLaneStatus(lane.laneId, 'failed');
+
+				// Write evidence for failed lane
+				await this._writeLaneEvidenceSafely(lane, 'failed', {
+					status: 'failed',
+					error: failMsg,
+					agent,
+				});
+
+				return {
+					laneId: lane.laneId,
+					status: 'failed',
+					taskIds: lane.taskIds,
+					agent,
+					error: failMsg,
+				};
+			}
+		}
+
 		// Dispatch to selected agent
-		const dispatchResult = await this.dispatchLane(lane, agent);
+		const dispatchResult = await this.dispatchLane(
+			lane,
+			agent,
+			worktreeDirectory,
+		);
 
 		if (!dispatchResult.ok) {
 			// Dispatch failed — release locks immediately
@@ -742,6 +1041,14 @@ export class LeanTurboRunner {
 				// Best-effort
 			}
 			delete this._laneLockMap[lane.laneId];
+
+			// Mark lane as needing failure cleanup in sequential post-processing.
+			// Do NOT call attemptMergeBackFromDirty / removeWorktree here because
+			// this runs inside Promise.all (concurrent lanes) and concurrent git
+			// mutations on the shared .git index cause race conditions.
+			if (worktreeDirectory && laneInState) {
+				laneInState._failureCleanupPending = true;
+			}
 
 			if (laneInState) {
 				laneInState.status = 'failed';
@@ -803,6 +1110,132 @@ export class LeanTurboRunner {
 			agent,
 			sessionId: dispatchResult.sessionId,
 		};
+	}
+
+	/**
+	 * Sequential worktree cleanup for completed and failed worktree lanes.
+	 *
+	 * Runs AFTER all lanes have been dispatched and completed via Promise.all.
+	 * Each worktree lane is processed one at a time, preventing concurrent
+	 * git merge/rebase/cherry-pick from corrupting the shared .git index.
+	 *
+	 * - **Success lanes**: mergeLaneBranch → removeWorktree → postMergeCleanup
+	 * - **Success lanes with merge failure**: log warning, keep worktree, update lane result
+	 * - **Failed lanes**: attemptMergeBackFromDirty → removeWorktree
+	 *
+	 * @returns Array of MergeBackFailureInfo for lanes where merge-back failed
+	 */
+	private async _sequentialWorktreeCleanup(
+		laneResults: LaneResult[],
+		leanConfig: LeanTurboConfig,
+	): Promise<MergeBackFailureInfo[]> {
+		const mergeBackFailures: MergeBackFailureInfo[] = [];
+
+		for (const lr of laneResults) {
+			const laneInState = this._laneStatuses.get(lr.laneId);
+			if (!laneInState?.worktreePath) continue;
+
+			let needsPostMergeCleanup = false;
+
+			if (lr.status === 'completed') {
+				// Success path: merge the lane branch back into HEAD
+				if (!laneInState.branchName) continue;
+
+				try {
+					const strategy =
+						LeanTurboRunner._internals.getMergeStrategy(leanConfig);
+					const mergeResult = await LeanTurboRunner._internals.mergeLaneBranch(
+						this._directory,
+						laneInState.branchName,
+						strategy,
+					);
+					if ('merged' in mergeResult && mergeResult.merged) {
+						// Mark for post-merge cleanup AFTER worktree removal (branch delete
+						// fails while the branch is still checked out in an active worktree).
+						needsPostMergeCleanup = true;
+					} else if ('conflict' in mergeResult && mergeResult.conflict) {
+						// Merge conflict: log warning, do NOT remove worktree, record failure
+						const failureInfo: MergeBackFailureInfo = {
+							laneId: lr.laneId,
+							reason: mergeResult.message || 'merge conflict',
+							conflictFiles: mergeResult.files,
+						};
+						mergeBackFailures.push(failureInfo);
+						lr.mergeBackFailure = failureInfo;
+						console.warn(
+							`[lean-turbo] merge-back CONFLICT for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
+						);
+						continue; // Skip removeWorktree — keep worktree for manual recovery
+					} else if ('error' in mergeResult && mergeResult.error) {
+						// Merge error: log warning, do NOT remove worktree, record failure
+						const failureInfo: MergeBackFailureInfo = {
+							laneId: lr.laneId,
+							reason: mergeResult.error,
+						};
+						mergeBackFailures.push(failureInfo);
+						lr.mergeBackFailure = failureInfo;
+						console.warn(
+							`[lean-turbo] merge-back ERROR for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
+						);
+						continue; // Skip removeWorktree — keep worktree for manual recovery
+					}
+				} catch (err) {
+					// Unexpected error during merge — log but do NOT remove worktree
+					const errMsg = err instanceof Error ? err.message : String(err);
+					const failureInfo: MergeBackFailureInfo = {
+						laneId: lr.laneId,
+						reason: errMsg,
+					};
+					mergeBackFailures.push(failureInfo);
+					lr.mergeBackFailure = failureInfo;
+					console.warn(
+						`[lean-turbo] merge-back EXCEPTION for lane ${lr.laneId}: ${errMsg} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
+					);
+					continue; // Skip removeWorktree — keep worktree for manual recovery
+				}
+			} else if (lr.status === 'failed' && laneInState._failureCleanupPending) {
+				// Failure path: attempt dirty merge-back before removing worktree
+				try {
+					const strategy =
+						LeanTurboRunner._internals.getMergeStrategy(leanConfig);
+					await LeanTurboRunner._internals.attemptMergeBackFromDirty(
+						laneInState.worktreePath,
+						laneInState.branchName ??
+							`swarm-lane/${this._sessionID}/${lr.laneId}`,
+						this._directory,
+						strategy,
+					);
+				} catch {
+					// Best-effort merge-back — worktree still needs removal
+				}
+			}
+
+			// Both success-with-merge-ok and failure paths remove the worktree
+			try {
+				await LeanTurboRunner._internals.removeWorktree(
+					laneInState.worktreePath,
+					this._directory,
+				);
+			} catch {
+				// Best-effort cleanup
+			}
+
+			// Post-merge cleanup (branch delete + prune) must happen AFTER
+			// removeWorktree because git refuses to delete a branch that is
+			// still checked out in an active worktree.
+			if (needsPostMergeCleanup && laneInState.branchName) {
+				try {
+					await LeanTurboRunner._internals.postMergeCleanup(
+						this._directory,
+						laneInState.branchName,
+					);
+				} catch {
+					// Best-effort — branch/prune cleanup is not critical
+				}
+			}
+		}
+
+		return mergeBackFailures;
 	}
 
 	/**
@@ -953,6 +1386,40 @@ export class LeanTurboRunner {
 		} catch {
 			// Durable state write failure is non-fatal for runner operation
 		}
+	}
+
+	/**
+	 * Persist a lane's worktreePath and branchName to durable state.
+	 *
+	 * Called after provisioning so that after a crash/restart these fields
+	 * are recoverable from turbo-state.json.
+	 */
+	private async _persistLaneWorktreeFields(
+		laneId: string,
+		worktreePath: string,
+		branchName: string,
+	): Promise<void> {
+		await this._withStateLock(async () => {
+			try {
+				const runState = LeanTurboRunner._internals.loadLeanTurboRunState(
+					this._directory,
+					this._sessionID,
+				);
+				if (!runState) return;
+
+				const lane = runState.lanes.find((l) => l.laneId === laneId);
+				if (lane) {
+					lane.worktreePath = worktreePath;
+					lane.branchName = branchName;
+					LeanTurboRunner._internals.saveLeanTurboRunState(
+						this._directory,
+						runState,
+					);
+				}
+			} catch {
+				// Non-fatal — worktree metadata loss is recoverable via orphan cleanup
+			}
+		});
 	}
 
 	/**

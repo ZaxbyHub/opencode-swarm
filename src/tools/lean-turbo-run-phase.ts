@@ -7,7 +7,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../config';
 import { swarmState } from '../state';
-import type { LaneResult } from '../turbo/lean/runner';
+import type { LaneResult, MergeBackFailureInfo } from '../turbo/lean/runner';
 import { LeanTurboRunner as LeanTurboRunner_import } from '../turbo/lean/runner';
 import { createSwarmTool } from './create-tool';
 
@@ -28,6 +28,7 @@ export interface LeanTurboRunPhaseResult {
 	lanes?: LaneResult[];
 	degradedTasks?: string[];
 	serializedTasks?: string[];
+	mergeBackFailures?: MergeBackFailureInfo[];
 	reason?: string;
 	errors?: string[];
 }
@@ -56,6 +57,7 @@ export async function executeLeanTurboRunPhase(
 		lanes?: LaneResult[];
 		degradedTasks?: string[];
 		serializedTasks?: string[];
+		mergeBackFailures?: MergeBackFailureInfo[];
 		reason?: string;
 	} | null = null;
 	let runError: Error | null = null;
@@ -110,6 +112,7 @@ export async function executeLeanTurboRunPhase(
 		lanes: runResult!.lanes,
 		degradedTasks: runResult!.degradedTasks,
 		serializedTasks: runResult!.serializedTasks,
+		mergeBackFailures: runResult!.mergeBackFailures,
 		reason: runResult!.reason,
 	};
 }
