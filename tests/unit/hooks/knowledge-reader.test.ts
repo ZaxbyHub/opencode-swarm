@@ -354,7 +354,7 @@ describe('readMergedKnowledge — basic merge', () => {
 	});
 	// Regression for #828: entries with undefined/unexpected status are not
 	// silently excluded — only 'quarantined' entries are filtered out.
-	it('Test 5b: entries with undefined status are included (quarantine deny-list)', async () => {
+	it('Test 5a: entries with undefined status are included (quarantine deny-list)', async () => {
 		const entryWithUndefinedStatus = makeSwarmEntry({
 			lesson: 'Lesson with missing status after migration',
 			// @ts-expect-error — simulating a legacy entry with undefined status

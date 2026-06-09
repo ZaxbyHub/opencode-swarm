@@ -144,10 +144,10 @@ describe('searchKnowledge (action-aware injection)', () => {
 		);
 	});
 
-	it('excludes candidate entries from default retrieval', async () => {
+	it('includes candidate entries in default retrieval (deny-list, not allow-list)', async () => {
 		await seed([
 			entry('cccccccc-1111-4ccc-9ccc-cccccccccccc', {
-				lesson: 'candidate lesson should stay hidden',
+				lesson: 'candidate lesson should now be retrievable',
 				status: 'candidate',
 			}),
 			entry('dddddddd-1111-4ddd-9ddd-dddddddddddd', {
@@ -159,7 +159,8 @@ describe('searchKnowledge (action-aware injection)', () => {
 			projectName: 't',
 			currentPhase: 'Phase 1',
 		});
-		expect(result.map((r) => r.id)).not.toContain(
+		// Deny-list semantics: candidate entries pass through (only quarantined excluded)
+		expect(result.map((r) => r.id)).toContain(
 			'cccccccc-1111-4ccc-9ccc-cccccccccccc',
 		);
 		expect(result.map((r) => r.id)).toContain(
