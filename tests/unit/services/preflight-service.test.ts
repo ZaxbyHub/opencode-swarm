@@ -39,6 +39,10 @@ describe('Preflight Service', () => {
 	function writePlanWithCompletedTask(): void {
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
 		fs.writeFileSync(
+			path.join(testDir, '.swarm', 'spec.md'),
+			'# Test Plan\n\n- FR-001 MUST be covered by implementation evidence.\n',
+		);
+		fs.writeFileSync(
 			path.join(testDir, '.swarm', 'plan.json'),
 			JSON.stringify({
 				schema_version: '1.0.0',

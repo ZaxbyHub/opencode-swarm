@@ -976,7 +976,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1110,6 +1110,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm design-docs $ARGUMENTS',
 					description:
 						'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
+				},
+				'swarm-sdd': {
+					template: '/swarm sdd $ARGUMENTS',
+					description:
+						'Use /swarm sdd to inspect OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-status': {
+					template: '/swarm sdd status',
+					description:
+						'Use /swarm sdd status to show effective spec and OpenSpec artifact status',
+				},
+				'swarm-sdd-validate': {
+					template: '/swarm sdd validate $ARGUMENTS',
+					description:
+						'Use /swarm sdd validate to validate OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-project': {
+					template: '/swarm sdd project $ARGUMENTS',
+					description:
+						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
 				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',

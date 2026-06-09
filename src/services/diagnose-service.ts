@@ -10,6 +10,7 @@ import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js'
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { deferredWarnings } from './warning-buffer.js';
@@ -390,13 +391,13 @@ async function checkSpecStaleness(
 	directory: string,
 	plan: Plan | null,
 ): Promise<HealthCheck> {
-	const specContent = await readSwarmFileAsync(directory, 'spec.md');
+	const specContent = readEffectiveSpecSync(directory)?.content ?? null;
 
 	if (!specContent) {
 		return {
 			name: 'Spec Staleness',
 			status: '✅',
-			detail: 'No spec file present',
+			detail: 'No effective spec present',
 		};
 	}
 

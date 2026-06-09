@@ -91,6 +91,21 @@ Refine an existing `spec.md` by clarifying ambiguous requirements.
 
 Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful before running a phase — identifies requirements not covered by any task.
 
+### `/swarm sdd ...`
+
+Inspect and project OpenSpec-compatible spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files.
+
+```text
+/swarm sdd status             # show .swarm/spec.md plus openspec/ artifact status
+/swarm sdd status --json      # machine-readable status
+/swarm sdd validate           # validate the OpenSpec projection
+/swarm sdd validate --change add-login
+/swarm sdd project --dry-run  # preview .swarm/spec.md materialization
+/swarm sdd project            # write .swarm/spec.md from OpenSpec artifacts
+```
+
+`openspec/changes/*/tasks.md` is proposal input only. Execution state still lives in `.swarm/plan-ledger.jsonl`; never hand-edit `.swarm/plan.json` or `.swarm/plan.md`.
+
 ### `/swarm brainstorm [topic]`
 
 Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN → DIALOGUE → APPROACHES → DESIGN → SPEC → SELF-REVIEW → GATE SELECTION → TRANSITION.

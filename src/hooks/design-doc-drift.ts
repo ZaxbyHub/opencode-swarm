@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { getGlobalEventBus } from '../background/event-bus.js';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger';
 import type { DocDriftReport } from './curator-types.js';
 import { validateSwarmPath } from './utils.js';
@@ -136,7 +137,13 @@ export async function runDesignDocDriftCheck(
 		const noDocs = checkedDocs.length === 0 || registry === null;
 
 		// 3. Spec mtime — a spec.md change after a doc implies the doc may be stale.
-		const specMtime = mtimeMsOrNull(path.join(root, '.swarm', 'spec.md'));
+		const effectiveSpec = readEffectiveSpecSync(root);
+		const specMtime =
+			effectiveSpec?.source === 'swarm'
+				? mtimeMsOrNull(path.join(root, '.swarm', 'spec.md'))
+				: effectiveSpec?.mtime
+					? Date.parse(effectiveSpec.mtime)
+					: null;
 
 		// 4. Walk sections; flag a section stale when a mapped code anchor (or the
 		//    spec, if the section cites FRs) is newer than its owning doc.
@@ -185,7 +192,7 @@ export async function runDesignDocDriftCheck(
 					staleSections.push({
 						section_id: section.section_id,
 						doc: section.doc,
-						reason: 'spec.md changed after the doc',
+						reason: 'effective spec changed after the doc',
 					});
 				}
 			}

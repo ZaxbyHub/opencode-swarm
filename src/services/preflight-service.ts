@@ -20,6 +20,7 @@ import {
 	listEvidenceTaskIds,
 } from '../evidence/manager';
 import { loadPlan } from '../plan/manager';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { runLint } from '../tools/lint';
 import { runSecretscan, type SecretscanResult } from '../tools/secretscan';
 import { runTests, type TestResult } from '../tools/test-runner';
@@ -644,14 +645,12 @@ async function runRequirementCoverageCheck(
 	const startTime = Date.now();
 
 	try {
-		const specPath = path.join(dir, '.swarm', 'spec.md');
-
-		// Check if spec.md exists
-		if (!fs.existsSync(specPath)) {
+		// Check if an effective spec exists
+		if (readEffectiveSpecSync(dir) === null) {
 			return {
 				type: 'req_coverage',
 				status: 'skip',
-				message: 'No spec found, requirement coverage not required',
+				message: 'No effective spec found, requirement coverage not required',
 				details: {},
 				durationMs: Date.now() - startTime,
 			};
@@ -673,7 +672,7 @@ async function runRequirementCoverageCheck(
 		return {
 			type: 'req_coverage',
 			status: 'fail',
-			message: 'Requirement coverage report missing but spec exists',
+			message: 'Requirement coverage report missing but effective spec exists',
 			details: { expectedPath: coverage.path },
 			durationMs: Date.now() - startTime,
 		};

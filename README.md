@@ -1035,6 +1035,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm specify [description]` | Generate or import a feature specification |
 | `/swarm clarify [topic]` | Clarify and refine an existing feature specification |
 | `/swarm analyze` | Analyze spec.md vs plan.md for requirement coverage gaps |
+| `/swarm sdd ...` | Inspect, validate, or project OpenSpec-compatible SDD artifacts into `.swarm/spec.md` |
 | `/swarm brainstorm [topic]` | Enter BRAINSTORM mode for structured requirement discovery before a spec |
 | `/swarm council <question> [--preset <name>] [--spec-review]` | Convene a multi-model General Council for advisory deliberation |
 | `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace]` | Ingest a GitHub issue for localization and resolution |
