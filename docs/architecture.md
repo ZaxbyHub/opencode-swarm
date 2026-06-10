@@ -398,7 +398,7 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/drift-verifier.json (written by @critic_drift_verifier)
 │         - .swarm/evidence/{phase}/hallucination-guard.json (if hallucination_guard enabled; written by write_hallucination_evidence)
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
-│         - .swarm/evidence/{phase}/phase-council.json (if council_mode enabled; written by submit_phase_council_verdicts)
+│         - .swarm/evidence/{phase}/phase-council.json (if phase_council enabled; written by submit_phase_council_verdicts)
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         If either missing: run the missing gate first
@@ -408,7 +408,7 @@ All tasks in phase done
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
-│         - Gate 5: phase council — reads phase-council.json for approved verdict (if council_mode enabled)
+│         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Gates 1–5 bypassed when turbo mode is active; Gates 5b and 6 are never bypassed
@@ -425,7 +425,7 @@ The `phase_complete` tool enforces up to seven gates before marking a phase comp
 | `drift-verifier` | Evidence-based check that `critic_drift_verifier` approved the implementation | `DRIFT_VERIFICATION_MISSING` or `DRIFT_VERIFICATION_REJECTED` | Yes |
 | `hallucination-guard` | Evidence-based check that `critic_hallucination_verifier` approved plan/implementation claims | `HALLUCINATION_VERIFICATION_MISSING` or `HALLUCINATION_VERIFICATION_REJECTED` | Yes |
 | `mutation-test` | Evidence-based check that mutation tests achieved a passing kill rate | `MUTATION_GATE_MISSING` or `MUTATION_GATE_FAIL` | Yes |
-| `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
+| `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved (if `phase_council` enabled) | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
 

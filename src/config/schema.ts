@@ -1431,7 +1431,7 @@ export const CouncilConfigSchema = z
 			.boolean()
 			.default(true)
 			.describe(
-				'When true, a phase-level council CONCERNS verdict does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Default: true (CONCERNS is advisory).',
+				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -1459,6 +1459,26 @@ export const ParallelizationConfigSchema = z.object({
 });
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
+
+export const WorktreeIsolationConfigSchema = z.object({
+	/**
+	 * auto: use isolated worktrees for eligible parallel coder dispatches; if
+	 * isolation cannot be prepared, block additional parallel coder dispatches so
+	 * execution serializes in the primary tree.
+	 *
+	 * required: block the coder dispatch if isolation cannot be prepared.
+	 *
+	 * disabled: preserve current shared-tree behavior.
+	 */
+	policy: z.enum(['auto', 'required', 'disabled']).default('auto'),
+	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
+	worktree_dir: z.string().optional(),
+	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+});
+
+export type WorktreeIsolationConfig = z.infer<
+	typeof WorktreeIsolationConfigSchema
+>;
 
 // Turbo configuration schema (Phase 1 Task 1.1)
 export const LeanTurboConfigSchema = z.object({
@@ -1745,6 +1765,11 @@ export const PluginConfigSchema = z.object({
 	// Parallelization configuration (PR 1 dark foundation — disabled by default)
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
+
+	// Worktree isolation policy for standard execution-profile parallel coder
+	// dispatches. Lean Turbo keeps its legacy per-mode fields for backward
+	// compatibility; this top-level block is the general lane-isolation surface.
+	worktree: WorktreeIsolationConfigSchema.optional(),
 
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
 	// Backward compatible: no turbo key means current behavior unchanged.

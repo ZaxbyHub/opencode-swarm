@@ -738,17 +738,20 @@ export function recoverTaskStateFromDelegations(
 export interface CouncilGateResult {
 	blocked: boolean;
 	reason: string;
+	/** True when council is active for this plan (i.e. council.enabled and council_mode on). */
+	active: boolean;
 }
 
 /**
  * Check the council gate for a completion transition. Pure — reads config and
  * evidence only, no state mutation. Exported for focused unit testing.
  *
- * AND semantics (mirrors isCouncilGateActive in state.ts): the gate only
- * activates when BOTH pluginConfig.council.enabled === true AND the QA gate
- * profile for this plan has council_mode === true.  When council.enabled is
- * true but council_mode is false (or the profile is absent), the gate is
- * treated as inactive — the operator has disabled it at the profile level.
+ * AND semantics: the gate only activates when BOTH pluginConfig.council.enabled
+ * === true AND the QA gate profile has council_mode === true. When active, the
+ * per-task full 5-member council verdict (via submit_council_verdicts) is
+ * required before task advancement. When council.enabled is true but
+ * council_mode is false (or the profile is absent), the gate is treated as
+ * inactive — the operator has disabled it at the profile level.
  *
  * @param workingDirectory - Validated project root (contains .swarm/evidence/)
  * @param taskId - Task ID in N.M or N.M.P format
@@ -770,11 +773,11 @@ export function checkCouncilGate(
 			: (config.council?.minimumMembers ?? 3);
 	} catch {
 		// Config load failure — treat council as disabled (no regression)
-		return { blocked: false, reason: '' };
+		return { blocked: false, reason: '', active: false };
 	}
 
 	if (!councilEnabled) {
-		return { blocked: false, reason: '' };
+		return { blocked: false, reason: '', active: false };
 	}
 
 	// AND gate: also require council_mode === true in the QA gate profile.
@@ -789,15 +792,16 @@ export function checkCouncilGate(
 			const planId = derivePlanId(planObj as { swarm: string; title: string });
 			const profile = getProfile(workingDirectory, planId);
 			if (!profile || !profile.gates.council_mode) {
-				return { blocked: false, reason: '' };
+				return { blocked: false, reason: '', active: false };
 			}
 		}
 	} catch {
 		// plan.json missing, unreadable, or profile DB absent — fall back to
 		// treating the gate as inactive (no regression; same as isCouncilGateActive).
-		return { blocked: false, reason: '' };
+		return { blocked: false, reason: '', active: false };
 	}
 
+	// Both conditions confirmed — council gate is active for this plan.
 	let evidence: ReturnType<typeof readTaskEvidenceRaw>;
 	try {
 		evidence = readTaskEvidenceRaw(workingDirectory, taskId);
@@ -807,6 +811,7 @@ export function checkCouncilGate(
 			blocked: true,
 			reason:
 				'council gate required but not yet run — architect must call submit_council_verdicts before advancing this task',
+			active: true,
 		};
 	}
 
@@ -818,6 +823,7 @@ export function checkCouncilGate(
 			blocked: true,
 			reason:
 				'council gate required but not yet run — architect must call submit_council_verdicts before advancing this task',
+			active: true,
 		};
 	}
 
@@ -826,6 +832,7 @@ export function checkCouncilGate(
 			blocked: true,
 			reason:
 				'council gate blocked advancement — resolve requiredFixes and re-run submit_council_verdicts',
+			active: true,
 		};
 	}
 
@@ -844,11 +851,12 @@ export function checkCouncilGate(
 		return {
 			blocked: true,
 			reason: `council gate blocked advancement — recorded verdict has insufficient quorum (${quorumSize} of ${effectiveMinimum} required members). Re-run submit_council_verdicts with the missing council members.`,
+			active: true,
 		};
 	}
 
 	// APPROVE or CONCERNS with sufficient quorum → allow
-	return { blocked: false, reason: '' };
+	return { blocked: false, reason: '', active: true };
 }
 
 /**
@@ -1044,7 +1052,21 @@ export async function executeUpdateTaskStatus(
 			// plan.json missing or unreadable — default to requiring reviewer
 		}
 
-		if (phaseRequiresReviewer) {
+		// Council gate: when council_mode is active, council evidence replaces
+		// Stage B (reviewer/test_engineer). Check council first so the right error
+		// is surfaced; when council is active, skip the reviewer gate entirely.
+		const councilCheck = checkCouncilGate(directory, args.task_id);
+		if (councilCheck.blocked) {
+			return {
+				success: false,
+				message:
+					'Gate check failed: council gate not yet satisfied for task ' +
+					args.task_id,
+				errors: [councilCheck.reason],
+			};
+		}
+
+		if (phaseRequiresReviewer && !councilCheck.active) {
 			const reviewerCheck = await checkReviewerGateWithScope(
 				args.task_id,
 				directory,

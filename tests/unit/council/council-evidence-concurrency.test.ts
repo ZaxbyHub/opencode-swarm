@@ -44,6 +44,7 @@ const makeSynthesis = (
 	roundNumber: 1,
 	allCriteriaMet: true,
 	quorumSize: 3,
+	blockingConcernsCount: 0,
 	...overrides,
 });
 

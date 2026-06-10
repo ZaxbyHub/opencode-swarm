@@ -14,13 +14,20 @@ import { ORCHESTRATOR_NAME } from './config/constants';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
 import type { CouncilAgent } from './council/types';
-import { getProfile, type QaGates } from './db/qa-gate-profile.js';
+import {
+	getEffectiveGates,
+	getProfile,
+	type QaGates,
+} from './db/qa-gate-profile.js';
 import {
 	detectEnvironmentProfile,
 	type EnvironmentProfile,
 } from './environment/profile.js';
 import type { TaskEvidence } from './gate-evidence';
-import { clearPendingCoderScope } from './hooks/delegation-gate.js';
+import {
+	clearPendingCoderScope,
+	resetStandardWorktreeIsolationState,
+} from './hooks/delegation-gate.js';
 import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
@@ -476,6 +483,7 @@ export function resetSwarmState(): void {
 	// map so a /swarm close + new session with a colliding taskId (e.g. "1.1")
 	// cannot inherit stale scope from the previous swarm.
 	clearPendingCoderScope();
+	resetStandardWorktreeIsolationState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.
 	_councilDisagreementWarned.clear();
@@ -1051,9 +1059,10 @@ export function advanceTaskState(
 
 	// 'complete' can only be reached from 'tests_run' — enforce sequential progression
 	if (newState === 'complete' && current !== 'tests_run') {
-		// Council fast-path: if submit_council_verdicts recorded an APPROVE verdict for this task,
-		// allow advancement from any non-idle prior state. Pre-check (pre_check_passed) is
-		// still required to avoid skipping Stage A.
+		// Council fast-path: if council_mode is enabled and submit_council_verdicts
+		// recorded an APPROVE verdict, allow advancement from any state past
+		// pre_check_passed, bypassing the Stage B states (reviewer_run, tests_run).
+		// Pre-check (pre_check_passed) is still required to avoid skipping Stage A.
 		// Quorum gate: an APPROVE verdict only short-circuits the gate sequence
 		// when it was recorded with at least `minimumMembers` distinct member
 		// verdicts. Default 3; `requireAllMembers: true` overrides to 5.
@@ -1255,9 +1264,9 @@ export function hasBothStageBCompletions(
 }
 
 /**
- * Returns true iff council is authoritative for the current plan.
+ * Returns true iff per-task council mode is active (replaces Stage B).
  *
- * AND semantics: council is authoritative when BOTH `pluginConfig.council.enabled === true`
+ * AND semantics: requires BOTH `pluginConfig.council.enabled === true`
  * AND `QaGates.council_mode === true` for the plan associated with this directory.
  *
  * If exactly one of the two flags is true, a one-time warning is logged per plan_id
@@ -1270,6 +1279,7 @@ export function hasBothStageBCompletions(
 export async function isCouncilGateActive(
 	directory: string,
 	council: { enabled?: boolean } | undefined,
+	sessionOverrides: Partial<QaGates> = {},
 ): Promise<boolean> {
 	const enabled = council?.enabled === true;
 
@@ -1303,7 +1313,8 @@ export async function isCouncilGateActive(
 		return false;
 	}
 
-	const councilMode = profile.gates.council_mode === true;
+	const councilMode =
+		getEffectiveGates(profile, sessionOverrides).council_mode === true;
 
 	if (enabled && councilMode) {
 		return true;
@@ -1315,7 +1326,7 @@ export async function isCouncilGateActive(
 		logger.warn(
 			`[delegation-gate] Council mode mismatch for plan ${planId}: ` +
 				`pluginConfig.council.enabled=${enabled}, QaGates.council_mode=${councilMode}. ` +
-				'Falling back to Stage B (non-council) advancement.',
+				'Falling back to Stage B (non-council) per-task advancement.',
 		);
 	}
 

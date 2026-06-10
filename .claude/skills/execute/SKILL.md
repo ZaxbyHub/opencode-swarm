@@ -95,6 +95,18 @@ It does NOT mean "code is reviewed." It does NOT mean "code is tested."
 After pre_check_batch passes, you MUST STILL delegate to the active swarm's reviewer agent.
 Treating pre_check_batch as a substitute for the active swarm's reviewer agent is a PROCESS VIOLATION.
 
+    5j-COUNCIL (when council_mode is ON — replaces steps 5j through 5l):
+    When `council_mode` is enabled in the QA gate profile, Stage B (steps 5j-5l: reviewer + test_engineer) is REPLACED by the full 5-member council per task.
+
+    After Stage A (pre_check_batch) passes:
+    1. Ensure `declare_council_criteria` was called for this task (prerequisite).
+    2. Dispatch all 5 council members (critic, reviewer, sme, test_engineer, explorer) in PARALLEL with task-scoped context.
+    3. Collect all 5 verdict objects. Do NOT fabricate or substitute verdicts.
+    4. Call `submit_council_verdicts` with the collected verdicts.
+    5. Act on the verdict: APPROVE → task passes. CONCERNS with `success: false` + `reason: 'blocking_concerns_unresolved'` → HIGH/CRITICAL findings are blocking, no evidence written, return to coder with requiredFixes and re-council after fixes. CONCERNS with `success: true` → only MEDIUM/LOW advisory findings, task passes. REJECT → return to coder with requiredFixes.
+
+    When `council_mode` is OFF, the standard Stage B flow (steps 5j-5l: reviewer + test_engineer) runs as normal.
+
     5j. the active swarm's reviewer agent - General review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate.
     → REQUIRED: Print "reviewer: [APPROVED | REJECTED — reason]"
     5k. Security gate: if change matches TIER 3 criteria OR content contains SECURITY_KEYWORDS OR secretscan has ANY findings OR sast_scan has ANY findings at or above threshold → MUST delegate the active swarm's reviewer agent security-only review. REJECTED before the configured QA retry limit → coder retry. REJECTED at the configured QA retry limit → escalate to user.

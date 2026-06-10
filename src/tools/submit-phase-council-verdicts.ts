@@ -22,7 +22,7 @@ const VerdictSchema = z.object({
 	confidence: z.number().min(0).max(1),
 	findings: z.array(
 		z.object({
-			severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+			severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 			category: z.string().min(1),
 			location: z.string(),
 			detail: z.string(),
@@ -52,7 +52,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 			'collect their verdict responses BEFORE calling this tool. This tool performs ' +
 			'synthesis only — it does NOT dispatch, invoke, or contact council members. ' +
 			'Writes .swarm/evidence/{phase}/phase-council.json which is required by ' +
-			'phase_complete Gate 5 when council_mode is enabled. ' +
+			'phase_complete Gate 5 when phase_council is enabled. ' +
 			'Architect-only. Config-gated via council.enabled.',
 		args: {
 			phaseNumber: z
@@ -87,7 +87,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 						confidence: z.number().min(0).max(1),
 						findings: z.array(
 							z.object({
-								severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+								severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 								category: z.string().min(1),
 								location: z.string(),
 								detail: z.string(),
@@ -228,7 +228,34 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				: getPhaseMutationGapFinding(input.phaseNumber, workingDir);
 			if (mutationGapFinding) {
 				addMutationGapFindingToSynthesis(synthesis, mutationGapFinding);
+				if (
+					mutationGapFinding.severity === 'CRITICAL' ||
+					mutationGapFinding.severity === 'HIGH'
+				) {
+					synthesis.blockingConcernsCount++;
+				}
 			}
+
+			// ── Blocking concerns gate ────────────────────────────────────────
+			// Block whenever blockingConcernsCount > 0 regardless of overall verdict:
+			// HIGH/CRITICAL mutation gap findings are injected above and can exist
+			// even on an APPROVE verdict — evidence must not be written in that case.
+			if (synthesis.blockingConcernsCount > 0) {
+				return JSON.stringify(
+					{
+						success: false,
+						reason: 'blocking_concerns_unresolved',
+						overallVerdict: synthesis.overallVerdict,
+						blockingConcernsCount: synthesis.blockingConcernsCount,
+						requiredFixes: synthesis.requiredFixes,
+						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						message: `Phase council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the phase can complete. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
+					},
+					null,
+					2,
+				);
+			}
+
 			writePhaseCouncilEvidence(workingDir, synthesis);
 
 			return JSON.stringify(
@@ -419,7 +446,11 @@ function addMutationGapFindingToSynthesis(
 	},
 	finding: CouncilFinding,
 ): void {
-	if (finding.severity === 'HIGH' || finding.severity === 'MEDIUM') {
+	if (
+		finding.severity === 'CRITICAL' ||
+		finding.severity === 'HIGH' ||
+		finding.severity === 'MEDIUM'
+	) {
 		synthesis.requiredFixes.push(finding);
 	} else {
 		synthesis.advisoryFindings.push(finding);

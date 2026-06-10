@@ -43,6 +43,11 @@ function writePlan() {
 
 function writePluginConfig(overrides?: { council?: Record<string, unknown> }) {
 	mkdirSync(join(tempDir, '.opencode'), { recursive: true });
+	// Always include council.enabled: true when a council override is provided —
+	// phase-council-gate AND-gates on both phase_council gate AND council.enabled.
+	const councilConfig = overrides?.council
+		? { enabled: true, ...overrides.council }
+		: undefined;
 	writeFileSync(
 		join(tempDir, '.opencode', 'opencode-swarm.json'),
 		JSON.stringify({
@@ -52,7 +57,7 @@ function writePluginConfig(overrides?: { council?: Record<string, unknown> }) {
 				require_docs: false,
 				policy: 'warn',
 			},
-			...(overrides?.council ? { council: overrides.council } : {}),
+			...(councilConfig ? { council: councilConfig } : {}),
 		}),
 	);
 }
@@ -94,7 +99,7 @@ function writeRetro() {
 
 function enableCouncilMode() {
 	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { council_mode: true });
+	setGates(tempDir, PLAN_ID, { phase_council: true });
 }
 
 function writePhaseCouncil(options: {
@@ -134,7 +139,9 @@ function writePhaseCouncil(options: {
 
 function setup(councilMode: boolean) {
 	writePlan();
-	writePluginConfig();
+	// When council mode is active, write plugin config with council.enabled: true
+	// since phase-council-gate AND-gates on both the QA gate flag and the config flag.
+	writePluginConfig(councilMode ? { council: {} } : undefined);
 	writeRetro();
 	if (councilMode) enableCouncilMode();
 }

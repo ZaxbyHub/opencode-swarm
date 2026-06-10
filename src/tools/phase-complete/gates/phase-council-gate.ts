@@ -1,6 +1,6 @@
 /**
  * Gate 5 – Phase Council.
- * Conditional on council_mode QA gate flag.
+ * Conditional on phase_council QA gate flag.
  */
 
 import * as fs from 'node:fs';
@@ -31,7 +31,10 @@ export async function runPhaseCouncilGate(
 				const overrides = session?.qaGateSessionOverrides ?? {};
 				const effective = getEffectiveGates(profile, overrides);
 
-				if (effective.council_mode === true) {
+				if (
+					effective.phase_council === true &&
+					pluginConfig.council?.enabled === true
+				) {
 					councilModeEnabled = true;
 					const pcPath = path.join(
 						dir,
@@ -188,7 +191,7 @@ export async function runPhaseCouncilGate(
 							blocked: true,
 							reason: 'PHASE_COUNCIL_REQUIRED',
 							phase_council_required: true,
-							message: `Phase ${phase} cannot be completed: council_mode is enabled and phase council evidence not found at .swarm/evidence/${phase}/phase-council.json. Convene a phase-level council (dispatch 5 members, collect verdicts, call submit_phase_council_verdicts) before completing the phase.`,
+							message: `Phase ${phase} cannot be completed: phase_council is enabled and phase council evidence not found at .swarm/evidence/${phase}/phase-council.json. Convene a phase-level council (dispatch 5 members, collect verdicts, call submit_phase_council_verdicts) before completing the phase.`,
 							agentsDispatched,
 							agentsMissing: [],
 							warnings: [
@@ -252,13 +255,13 @@ export async function runPhaseCouncilGate(
 			return {
 				blocked: true,
 				reason: 'PHASE_COUNCIL_ERROR',
-				message: `Phase ${phase} cannot be completed: phase council gate encountered an error when council_mode was enabled. Error: ${String(pcError)}`,
+				message: `Phase ${phase} cannot be completed: phase council gate encountered an error when phase_council was enabled. Error: ${String(pcError)}`,
 				agentsDispatched,
 				agentsMissing: [],
 				warnings: [`PHASE_COUNCIL_ERROR: ${String(pcError)}`],
 			};
 		} else {
-			// Non-blocking when council_mode is off
+			// Non-blocking when phase_council is off
 			safeWarn(
 				`[phase_complete] Phase council gate error (non-blocking):`,
 				pcError,

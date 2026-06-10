@@ -382,7 +382,11 @@ export function isSubagent(name: string): boolean {
 }
 
 import { deepMerge } from '../utils/merge';
-import type { LeanTurboConfig, ScoringConfig } from './schema';
+import type {
+	LeanTurboConfig,
+	ScoringConfig,
+	WorktreeIsolationConfig,
+} from './schema';
 
 // Default scoring configuration
 export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
@@ -527,6 +531,13 @@ export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
 	worktree_isolation: false,
 	merge_strategy: 'merge' as const,
 	worktree_dir: undefined,
+};
+
+export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
+	policy: 'auto',
+	merge_strategy: 'merge',
+	worktree_dir: undefined,
+	deps_strategy: 'skip',
 };
 
 export const LEAN_TURBO_BANNER = `## 🛤️ LEAN TURBO ACTIVE
