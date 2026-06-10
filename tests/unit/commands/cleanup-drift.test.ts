@@ -57,7 +57,6 @@ export const PRESERVED_SWARM_PATHS = [
 	// and final council; must survive the session that produced them)
 	'spec-staleness.json',
 	'dark-matter.md',
-	'doc-drift-phase-',
 	'drift-report-phase-',
 	'curator-findings.json',
 
