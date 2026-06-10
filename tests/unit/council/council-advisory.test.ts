@@ -37,6 +37,7 @@ function makeSynthesis(
 		roundNumber: 1,
 		allCriteriaMet: verdict === 'APPROVE',
 		quorumSize: 3,
+		blockingConcernsCount: 0,
 		...overrides,
 	};
 }

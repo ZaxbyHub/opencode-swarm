@@ -49,8 +49,12 @@ export const javaRules: SastRule[] = [
 		description: 'Potential hardcoded API key, password, or token detected',
 		remediation:
 			'Move secrets to environment variables or a secure configuration manager.',
+		// Minimum length aligned with the other C-family static languages (Go,
+		// C# both use {10,}). The previous {5,} flagged 5-char strings like
+		// token: "abcde" as critical, producing far more false positives in
+		// Java codebases than in any other supported language (DD-C015).
 		pattern:
-			/(?:api_key|password|secret|token|auth)[_-]?\w*\s*=\s*["'][a-zA-Z0-9_-]{5,}["']/i,
+			/(?:api_key|password|secret|token|auth)[_-]?\w*\s*=\s*["'][a-zA-Z0-9_-]{10,}["']/i,
 	},
 	{
 		id: 'sast/java-xxe',

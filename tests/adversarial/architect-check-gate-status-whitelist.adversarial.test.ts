@@ -80,88 +80,91 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 	});
 
 	describe('ACCIDENTAL MUTATION: other role tool lists must remain unchanged', () => {
-		it('explorer should retain expected 16 tools', () => {
+		it('explorer should retain expected 17 tools', () => {
 			const expected = [
-				'complexity_hotspots',
-				'detect_domains',
-				'extract_code_blocks',
-				'gitingest',
 				'imports',
-				'retrieve_summary',
-				'schema_drift',
-				'search',
-				'batch_symbols',
 				'symbols',
+				'complexity_hotspots',
+				'schema_drift',
 				'todo_extract',
+				'detect_domains',
+				'git_blame',
+				'gitingest',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'doc_scan',
 				'knowledge_recall',
+				'search',
+				'batch_symbols',
 				'repo_map',
-				'summarize_work',
 				'swarm_command',
+				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['explorer']).toEqual(expected);
 		});
 
-		it('coder should retain expected 15 tools', () => {
+		it('coder should retain expected 16 tools', () => {
 			const expected = [
 				'diff',
+				'syntax_check',
 				'imports',
 				'lint',
-				'symbols',
-				'extract_code_blocks',
-				'retrieve_summary',
-				'search',
 				'build_check',
-				'syntax_check',
+				'symbols',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'knowledge_add',
 				'knowledge_recall',
-				'knowledge_receipt',
+				'search',
 				'repo_map',
-				'summarize_work',
+				'knowledge_receipt',
 				'swarm_command',
+				'summarize_work',
+				'apply_patch',
 			];
 			expect(AGENT_TOOL_MAP['coder']).toEqual(expected);
 		});
 
 		it('test_engineer should retain expected 16 tools', () => {
 			const expected = [
+				'diff',
+				'syntax_check',
+				'imports',
+				'build_check',
+				'symbols',
+				'complexity_hotspots',
+				'pkg_audit',
 				'test_runner',
 				'test_impact',
 				'mutation_test',
-				'diff',
-				'symbols',
-				'extract_code_blocks',
 				'retrieve_summary',
-				'imports',
-				'complexity_hotspots',
-				'pkg_audit',
-				'build_check',
-				'syntax_check',
-				'search',
-				'summarize_work',
+				'extract_code_blocks',
 				'knowledge_recall',
+				'search',
 				'swarm_command',
+				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['test_engineer']).toEqual(expected);
 		});
 
-		it('reviewer should retain expected 21 tools', () => {
+		it('reviewer should retain expected 22 tools', () => {
 			const expected = [
 				'diff',
 				'diff_summary',
+				'placeholder_scan',
 				'imports',
 				'lint',
-				'pkg_audit',
-				'pre_check_batch',
 				'secretscan',
+				'sast_scan',
+				'pre_check_batch',
 				'symbols',
 				'complexity_hotspots',
-				'retrieve_summary',
-				'extract_code_blocks',
+				'pkg_audit',
 				'test_runner',
 				'test_impact',
-				'sast_scan',
-				'placeholder_scan',
+				'git_blame',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'knowledge_recall',
 				'search',
 				'batch_symbols',
@@ -172,30 +175,31 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['reviewer']).toEqual(expected);
 		});
 
-		it('sme should retain expected 11 tools', () => {
+		it('sme should retain expected 12 tools', () => {
 			const expected = [
-				'complexity_hotspots',
-				'detect_domains',
-				'extract_code_blocks',
 				'imports',
-				'retrieve_summary',
-				'schema_drift',
-				'search',
 				'symbols',
+				'complexity_hotspots',
+				'schema_drift',
+				'detect_domains',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'knowledge_recall',
-				'summarize_work',
+				'search',
+				'web_search',
 				'swarm_command',
+				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['sme']).toEqual(expected);
 		});
 
 		it('critic should retain expected 10 tools', () => {
 			const expected = [
+				'imports',
+				'symbols',
 				'complexity_hotspots',
 				'detect_domains',
-				'imports',
 				'retrieve_summary',
-				'symbols',
 				'knowledge_recall',
 				'req_coverage',
 				'get_approved_plan',
@@ -207,39 +211,39 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 
 		it('docs should retain expected 12 tools', () => {
 			const expected = [
-				'detect_domains',
-				'extract_code_blocks',
-				'gitingest',
 				'imports',
-				'retrieve_summary',
-				'schema_drift',
-				'search',
 				'symbols',
+				'schema_drift',
 				'todo_extract',
+				'detect_domains',
+				'gitingest',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'knowledge_recall',
-				'summarize_work',
+				'search',
 				'swarm_command',
+				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['docs']).toEqual(expected);
 		});
 
 		it('designer should retain expected 7 tools', () => {
 			const expected = [
-				'extract_code_blocks',
-				'retrieve_summary',
-				'search',
 				'symbols',
+				'retrieve_summary',
+				'extract_code_blocks',
 				'knowledge_recall',
-				'summarize_work',
+				'search',
 				'swarm_command',
+				'summarize_work',
 			];
 			expect(AGENT_TOOL_MAP['designer']).toEqual(expected);
 		});
 	});
 
 	describe('BOUNDARY: architect tool count and composition', () => {
-		it('architect should have 77 tools', () => {
-			expect(AGENT_TOOL_MAP['architect'].length).toBe(77);
+		it('architect should have 78 tools', () => {
+			expect(AGENT_TOOL_MAP['architect'].length).toBe(78);
 		});
 
 		it('architect should include all orchestrator-specific tools', () => {
@@ -269,7 +273,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 		it('architect array should not have unexpected length changes', () => {
 			const originalLength = AGENT_TOOL_MAP['architect'].length;
 			// Verify current state matches expected
-			expect(originalLength).toBe(77);
+			expect(originalLength).toBe(78);
 		});
 	});
 });

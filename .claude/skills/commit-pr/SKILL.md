@@ -136,9 +136,12 @@ Run the full validation stack before pushing. The exact commands may be narrowed
 
 ### Pre-flight
 
+`dist/` is generated output and is **not** committed (#1047). Confirm the build still
+succeeds and the bundle loads — do not stage `dist/`:
+
 ```bash
 bun run build
-git diff --exit-code -- dist/
+node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"
 ```
 
 ### Tier 1 - quality
@@ -193,31 +196,17 @@ git worktree remove /tmp/repro-check
 
 If the failure reproduces on `main`, document it under `## Pre-existing failures`. Do not silently inherit it.
 
-### dist-check is never pre-existing
+### dist/ is generated, not committed
 
-`dist-check` is a **hard gate**. Unlike test failures, a `dist-check` failure is never "pre-existing" and must be resolved before the PR merges.
+`dist/` is build output and is git-ignored (#1047); do **not** stage or commit it, and
+there is no `dist-check` drift gate. The authoritative artifact check is `package-check`,
+which runs `npm pack` and verifies the packed tarball is complete (type declarations,
+grammar assets), installs it in a temp project, imports it under Node, and runs the CLI.
 
-- **If your PR touches `src/`**: You must run `bun run build`, verify `git diff -- dist/` shows only expected changes from your source edits, and commit `dist/` in the same PR.
-- **If your PR does NOT touch `src/` but `dist-check` fails**: `origin/main` has generated-output (`dist/`) drift. Do **not** commit rebuilt `dist/` to your PR. The fix belongs on `main`, not in your PR. Notify maintainers.
-- **Never** commit rebuilt `dist/` solely to make CI green when your PR does not touch source files.
-- **If CI `dist-check` fails after a source-touching PR already rebuilt `dist/` locally**: inspect the CI log before classifying the failure, then refresh dependency-generated output with `bun install --frozen-lockfile --force`, rerun `bun run build`, verify the `dist/` diff is expected, and commit the regenerated files. Stale nested dependencies can make local `dist/` output differ from CI even when the build command succeeds.
-
-Concrete recovery sequence for source-touching generated-output drift:
-
-```bash
-gh run view <run-id> --job <job-id> --log
-bun install --frozen-lockfile --force
-bun run build
-node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"
-bun --smol test tests/unit/build/bundle-portability.test.ts tests/unit/build/bundle-plugin-shape.test.ts --timeout 30000
-git diff -- dist/
-git diff --check
-```
-
-On Windows, if the forced install causes `EPERM` while later commands read
-`node_modules`, treat it as host permission friction first: rerun the exact
-focused command that failed, such as the build, import, or focused test command,
-with approved access before diagnosing a code or test failure.
+A `package-check` failure is a source / build / `package.json#files` problem — fix the
+source or manifest and rebuild; never "commit dist to make CI green." CI builds `dist/`
+itself (the `unit`, `package-check`, and `smoke` jobs run `bun run build`), and
+release/publish builds from source.
 
 ## Step 4 - Workflow changes
 
@@ -260,6 +249,21 @@ PR body requirements:
 - `## Invariant audit`
 - `## Test plan`
 
+### Publication-gate evidence
+
+A repository publication gate (`.github/hooks/pr-publication-gate.json` ->
+`scripts/copilot-pr-publication-gate.sh`) may block `gh pr create`, `gh pr edit`,
+and `gh pr ready` until publication evidence exists. Before publishing, write:
+
+- `.swarm/evidence/pr_body.md` — the exact PR body you will publish (must contain
+  `## Summary`, `## Invariant audit`, and `## Test plan`).
+- `.swarm/evidence/commit-pr-validation.md` — the validation commands you ran and
+  their results.
+
+These files live under `.swarm/` (runtime state, never committed) and double as the
+evidence the gate checks. Keep them current if you edit the PR body or rerun
+validation. The CI `pr-standards` check enforces the same body contract server-side.
+
 PowerShell-safe pattern:
 
 ```powershell
@@ -276,8 +280,10 @@ Closes #<issue-number>
 ## Test plan
 - [ ] <validation item>
 "@
-$body | Out-File "$env:TEMP\pr_body.txt" -Encoding UTF8
-gh pr create --title "<type>(<scope>): <description>" --body-file "$env:TEMP\pr_body.txt" --base main
+$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+$prBodyPath = Join-Path ([System.IO.Path]::GetTempPath()) "pr_body.txt"
+[System.IO.File]::WriteAllText($prBodyPath, $body, $utf8NoBom)
+gh pr create --title "<type>(<scope>): <description>" --body-file $prBodyPath --base main
 ```
 
 ## Step 6.5 - Issue comment
@@ -309,8 +315,10 @@ Fixed in PR #<pr-number>.
 ## Migration
 No migration required.
 "@
-$comment | Out-File "$env:TEMP\issue-comment.txt" -Encoding UTF8
-gh issue comment <issue-number> --body-file "$env:TEMP\issue-comment.txt"
+$utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+$issueCommentPath = Join-Path ([System.IO.Path]::GetTempPath()) "issue-comment.txt"
+[System.IO.File]::WriteAllText($issueCommentPath, $comment, $utf8NoBom)
+gh issue comment <issue-number> --body-file $issueCommentPath
 ````
 
 If the PR merged before this was done, post the missing issue comment immediately.
@@ -356,22 +364,23 @@ conflict is resolved.
 
 ### GitHub auto-merge race condition
 
-When `main` advances while your PR is open, GitHub's PR sync machinery may
-**automatically push a merge commit to your branch** in the window between when
-you fetch and when you push. This is distinct from a conflict — it is GitHub
-creating a merge commit on your behalf without rebuilding generated outputs
-(`dist/`, lockfiles, etc.).
+With a merge queue enabled, prefer queuing over manual freshness rebases, which
+avoids this race entirely. It can still occur if you rebase manually: when `main`
+advances while your PR is open, GitHub's PR sync machinery may **automatically push a
+merge commit to your branch** in the window between when you fetch and when you push.
+This is distinct from a conflict — it is GitHub creating a merge commit on your behalf
+without rebuilding generated outputs (lockfiles, etc.).
 
 Symptoms:
 - `git push` is rejected with "fetch first" even though you just fetched
 - `git log HEAD..origin/<branch>` shows a commit authored by GitHub/the repo owner with message `Merge branch 'main' into <branch>`
-- CI `dist-check` fails on that auto-merge commit because it was not rebuilt
+- generated outputs (e.g. lockfiles) on that auto-merge commit are stale because it was not rebuilt
 
 Recovery:
 ```bash
 git fetch origin <branch>
 git log HEAD..origin/<branch>   # confirm it's only the GitHub auto-merge
-# Your local commit is correct (it has the rebuilt dist/). Force-push it:
+# Your local commit is correct. Force-push it:
 git push origin <branch> --force-with-lease
 ```
 
@@ -389,6 +398,12 @@ gh run cancel <stale-run-id>
 downstream jobs. When the PR checks view looks stale, missing, or inconsistent,
 use the workflow run as the authoritative detail:
 
+> **MCP environments:** When using GitHub MCP tools instead of `gh`, prefer
+> `get_check_runs` over `get_status`. The `get_status` method uses GitHub's
+> legacy commit status API: it returns `state: "pending"` even when all GitHub
+> Actions jobs are green, because Actions creates check-runs (not legacy
+> statuses). `get_check_runs` returns the actual job results.
+
 ```powershell
 gh run view <run-id> --json headSha,status,conclusion,jobs,url
 ```
@@ -405,6 +420,23 @@ validating, then wait for the current-head checks to complete.
 
 If you edit the PR body after checks are green, expect PR Standards / title
 checks to rerun. Re-check before claiming final green or merge-readiness.
+
+### Merge queue (current-base validation)
+
+When `main` has a GitHub **merge queue** enabled, do not rebase or force-push a PR
+*solely because `main` advanced*. Once required checks and review are green, add the
+PR to the merge queue; GitHub re-runs the required workflows against the queued
+change on top of the latest `main` (and any earlier queued PRs) before merging, so
+manual "freshness" rebases are unnecessary.
+
+Still rebase/force-push when there is a **real** reason: a genuine merge conflict,
+a stale review thread that depends on current SHAs, or a correctness issue that only
+appears against current `main`. The queue handles up-to-date validation; it does not
+resolve conflicts for you.
+
+Required workflows trigger on both `pull_request` and `merge_group`. PR-only checks
+(title/body validation) no-op to success on `merge_group` because the PR already
+satisfied them before being queued.
 
 ## Step 8 - Cancelled jobs and skipped dependents
 
@@ -436,7 +468,7 @@ Do not call the PR green or merge-ready while a required job is `cancelled`, `sk
 - [ ] required build and validation commands ran for touched invariants
 - [ ] `test_runner` was not used with broad repo-validation scopes
 - [ ] release fragment exists and version files are untouched
-- [ ] `dist/` was rebuilt and staged when tracked outputs changed
+- [ ] `dist/` was NOT staged (it is generated output, not committed — #1047)
 - [ ] PR body has `Closes`, `## Summary`, `## Invariant audit`, and `## Test plan`
 - [ ] if this was review follow-up, the PR body was refreshed to match current evidence
 - [ ] if the PR resolves an issue, the issue comment was posted with PR link, what changed, how to use it, and migration notes

@@ -188,3 +188,117 @@ describe('council agent registration — deprecation warning pathway', () => {
 		expect(matched.length).toBe(0);
 	});
 });
+
+describe('council agent registration — reduced-council warning (councilAgentsCreated < 3)', () => {
+	test('no council-reduction warning when all three base agents are enabled', () => {
+		createAgents(
+			config({
+				council: { general: { enabled: true } },
+				quiet: true,
+			}),
+		);
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBe(0);
+	});
+
+	test('fires warning listing council_generalist when reviewer is disabled', () => {
+		createAgents(
+			config({
+				council: { general: { enabled: true } },
+				agents: { reviewer: { disabled: true } },
+				quiet: true,
+			}),
+		);
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBeGreaterThan(0);
+		expect(matched[0]).toContain('council_generalist (requires reviewer)');
+		expect(matched[0]).toContain('2/3');
+	});
+
+	test('fires warning listing council_skeptic when critic is disabled', () => {
+		createAgents(
+			config({
+				council: { general: { enabled: true } },
+				agents: { critic: { disabled: true } },
+				quiet: true,
+			}),
+		);
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBeGreaterThan(0);
+		expect(matched[0]).toContain('council_skeptic (requires critic)');
+		expect(matched[0]).toContain('2/3');
+	});
+
+	test('fires warning listing council_domain_expert when sme is disabled', () => {
+		createAgents(
+			config({
+				council: { general: { enabled: true } },
+				agents: { sme: { disabled: true } },
+				quiet: true,
+			}),
+		);
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBeGreaterThan(0);
+		expect(matched[0]).toContain('council_domain_expert (requires sme)');
+		expect(matched[0]).toContain('2/3');
+	});
+
+	test('when all three base agents are disabled, zero council agents are registered and warning lists all three', () => {
+		const agents = createAgents(
+			config({
+				council: { general: { enabled: true } },
+				agents: {
+					reviewer: { disabled: true },
+					critic: { disabled: true },
+					sme: { disabled: true },
+				},
+				quiet: true,
+			}),
+		);
+		// No council agents registered
+		const councilAgents = agents.filter((a) =>
+			COUNCIL_AGENTS.includes(a.name as (typeof COUNCIL_AGENTS)[number]),
+		);
+		expect(councilAgents).toHaveLength(0);
+		// Warning names all three missing roles and shows 0/3
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBeGreaterThan(0);
+		const warning = matched[0];
+		expect(warning).toContain('0/3');
+		expect(warning).toContain('council_generalist (requires reviewer)');
+		expect(warning).toContain('council_skeptic (requires critic)');
+		expect(warning).toContain('council_domain_expert (requires sme)');
+	});
+
+	test('fires warning for a named swarm when its reviewer is disabled (isAgentDisabled with swarmPrefix)', () => {
+		// In multi-swarm mode the swarm prefix is prepended to agent names.
+		// isAgentDisabled must correctly strip the prefix before looking up swarmAgents.
+		createAgents(
+			config({
+				swarms: {
+					local: {
+						name: 'Local',
+						agents: { reviewer: { disabled: true } },
+					},
+				},
+				council: { general: { enabled: true } },
+				quiet: true,
+			}),
+		);
+		const matched = deferredWarnings.filter((w) =>
+			w.includes('council agents could be registered'),
+		);
+		expect(matched.length).toBeGreaterThan(0);
+		expect(matched[0]).toContain('council_generalist (requires reviewer)');
+	});
+});

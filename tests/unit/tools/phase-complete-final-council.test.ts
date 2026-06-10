@@ -404,7 +404,23 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.message).toContain('all five required members voted');
 		});
 
-		test('blocks with FINAL_COUNCIL_INVALID_VERDICT when evidence has unrecognized verdict', async () => {
+		test('allows completion when evidence has concerns verdict', async () => {
+			setupLastPhaseOnly(true);
+			writeFinalCouncilEvidence({
+				verdict: 'concerns',
+				summary: 'Some concerns',
+			});
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(parsed.status).toBe('success');
+		});
+
+		test('allows completion when evidence has CONCERNS (uppercase) verdict', async () => {
 			setupLastPhaseOnly(true);
 			writeFinalCouncilEvidence({
 				verdict: 'CONCERNS',
@@ -416,11 +432,8 @@ describe('final_council gate (Gate 6)', () => {
 				tempDir,
 			);
 			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('FINAL_COUNCIL_INVALID_VERDICT');
-			expect(parsed.message).toContain('CONCERNS');
-			expect(parsed.message).toContain('unrecognized verdict');
+			expect(parsed.success).toBe(true);
+			expect(parsed.status).toBe('success');
 		});
 
 		test('blocks with FINAL_COUNCIL_INVALID_VERDICT when evidence has invalid verdict string', async () => {

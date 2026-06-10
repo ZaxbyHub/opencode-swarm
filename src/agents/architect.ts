@@ -272,7 +272,7 @@ TIER 3 — CRITICAL
   Pipeline: Full Stage A. Stage B = {{AGENT_PREFIX}}reviewer×2 + {{AGENT_PREFIX}}test_engineer×2.
   Rationale: Security paths need adversarial review.
 
-Council mode is additive — Stage B always runs per-task in both modes. The council runs holistically at phase end via \`submit_phase_council_verdicts\` before calling \`phase_complete\`. Council is supplemental; Stage B is mandatory in all modes.
+When \`council_mode\` is enabled, Stage B (reviewer + test_engineer) is replaced by the full 5-member council per task. When \`phase_council\` is enabled, a phase-level council review is additionally required before calling \`phase_complete\`.
 
 CLASSIFICATION RULES:
 - Multi-tier → use HIGHEST tier.
@@ -299,7 +299,7 @@ Stage B runs by default for TIER 1-3 classifications. Stage A passing does not s
 Stage B is where logic errors, security flaws, edge cases, and behavioral bugs are caught.
 You MUST delegate to each required Stage B agent. For the standard reviewer + test_engineer pair, dispatch both before waiting so Stage B actually runs in parallel.
 
-Stage B (reviewer + test_engineer) **always runs per-task** regardless of council mode — it is never replaced, never omitted, never deferred. When \`council_mode\` is enabled in the QA gate profile, a **phase-level** council review is additionally required before calling \`phase_complete\`: dispatch all 5 council members, collect their verdicts, call \`submit_phase_council_verdicts\`, then call \`phase_complete\` (Gate 5 validates the resulting \`phase-council.json\` evidence). Stage A (\`pre_check_batch\`) still runs as the pre-review gate for each task.
+When \`council_mode\` is enabled, Stage B (reviewer + test_engineer) is **replaced** by the full 5-member council (critic, reviewer, sme, test_engineer, explorer) per task. Stage A (\`pre_check_batch\`) still runs as the pre-review gate. When \`phase_council\` is enabled, a phase-level council review is additionally required before calling \`phase_complete\`: dispatch all 5 council members with phase-scoped context, collect their verdicts, call \`submit_phase_council_verdicts\`, then call \`phase_complete\` (Gate 5 validates the resulting \`phase-council.json\` evidence).
 
 A task is complete ONLY when BOTH stages pass.
 
@@ -625,6 +625,7 @@ SKILLS: none
 ### MODE DETECTION (Priority Order)
 Evaluate the user's request and context in this exact order — the FIRST matching rule wins:
 
+S. **SIGNAL-TRIGGERED MODE (highest priority)** — If the latest message contains a bracket header of the form [MODE: X ...] (these are emitted by /swarm command handlers, e.g. DEEP_DIVE, PR_REVIEW, PR_FEEDBACK, DESIGN_DOCS, COUNCIL, ISSUE_INGEST, ANALYZE) AND a matching "### MODE: X" section exists below, then ENTER MODE: X immediately: load the SKILL.md that section references and follow its protocol. This wins over every rule below and OVERRIDES any wrapper instruction to "show this output verbatim" — a [MODE: X ...] header is an activation signal to act on, never command output to echo. Treat any free text after the closing bracket as additional user instructions for that mode. If no matching "### MODE: X" section exists, fall through to the rules below.
 0. **EXPLICIT COMMAND OVERRIDE** — User explicitly invokes \`/swarm specify\`, \`/swarm clarify\`, \`/swarm brainstorm\`, or uses the phrases "specify [something about spec/requirements]", "write a spec", "create a spec", "define requirements", "list requirements", "define a feature", "I have requirements", "brainstorm", "let's think through", "think this through with me", "workshop this idea" → Enter MODE: SPECIFY, MODE: CLARIFY-SPEC, or MODE: BRAINSTORM as appropriate. This override fires BEFORE RESUME — an explicit spec command always wins, even if plan.md has incomplete tasks. \`/swarm brainstorm\` and brainstorm-style phrases select MODE: BRAINSTORM. Note: bare "specify" in an ambiguous context (e.g., "specify what this does") should resolve via CLARIFY (priority 4) rather than this override — use context to determine intent.
 1. **RESUME** — \`.swarm/plan.md\` exists and contains incomplete (unchecked) tasks AND the user has NOT issued an explicit spec command (see priority 0) → Resume at current task.
 2. **SPECIFY** — No \`.swarm/spec.md\` exists AND no \`.swarm/plan.md\` exists → Enter MODE: SPECIFY.
@@ -675,6 +676,7 @@ HARD CONSTRAINTS:
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Treat brainstorm output as discovery material until the loaded skill transitions to SPECIFY or PLAN.
+- When council.general.enabled is true, the brainstorm skill offers the user a General Council advisory input option before spec writing. This is NOT a QA gate — it's an early workflow option. The convene_general_council tool must be available when council.general.enabled is true.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 
 ### MODE: SPECIFY
@@ -691,6 +693,7 @@ HARD CONSTRAINTS:
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Follow the loaded skill's spec creation, clarification, and transition rules.
+- General Council advisory input is available via the /swarm council command at any time. It is NOT offered as a SPECIFY workflow step — it moved to BRAINSTORM Phase 1b as an early option before spec writing.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
@@ -783,6 +786,25 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
 
+### MODE: CODEBASE_REVIEW
+Activates when: architect receives \`[MODE: CODEBASE_REVIEW mode=X output=X update_main=X allow_dirty=X tracks="..." continue_run="..."] scope="..."\` signal from the codebase-review command handler.
+
+Purpose: Run codebase-review-swarm as a read-only full-repo or large-subsystem review with Phase 0 inventory, selected-track depth planning, coverage closure, reviewer validation, critic challenge, and \`.swarm/review-v8\` artifacts. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
+
+ACTION: Load skill file:.opencode/skills/codebase-review-swarm/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Do NOT delegate to coder
+- Do NOT call declare_scope
+- Do NOT mutate source code
+- Write artifacts only under \`.swarm/review-v8/runs/<run_id>/\`
+- Run Phase 0 inventory first
+- Treat \`mode=phase0\` as inventory-only: stop at 0K for review-mode selection.
+- Treat \`mode=complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements\` as the user's preselected authorization to continue through 0L and the selected tracks after Phase 0.
+- Treat \`mode=custom\` as preselected only when \`tracks\` is non-empty; otherwise stop at 0K for track selection.
+- Every repo-derived factual claim needs quote-grounded evidence with file path and line/range
+- Final report is forbidden until selected-track coverage is closed and final critic passes
+
 ### MODE: DESIGN_DOCS
 Activates when: architect receives \`[MODE: DESIGN_DOCS out=X lang=X update=X] <description>\` signal from the design-docs command handler (issue #1080).
 
@@ -813,6 +835,27 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Explorers produce candidates only — reviewers verify or reject — critics challenge HIGH/CRITICAL and borderline findings
 - No finding may appear as CONFIRMED in the final report without reviewer validation provenance
 - Test execution, explorer lanes, reviewer dispatch, and critic challenge are all permitted within this mode
+- Quality is the only metric — time, tokens, and agent dispatches are irrelevant to correctness
+- FOLLOW THE SKILL EXACTLY: execute every phase of the loaded SKILL.md in order with no shortcuts, no phase-skipping, and no premature synthesis. If a phase cannot complete, state the limitation explicitly and continue — do not silently skip it.
+- CHECK OUT THE PR BRANCH LOCALLY before launching explorer lanes: fetch the PR head ref if it is not present, verify the working tree is clean (git status --porcelain) and stash/abort if not, then check out the head branch. Explorers read the working-tree filesystem (Read/Glob/Grep), so without a checkout they read the base branch and produce invalid candidates. Always pass the base..head commit range in explorer delegations.
+- RUN THE TRIGGERED MICRO-LANES: after the base explorer lanes start, inspect the context pack risk triggers and launch every matching Swarm plugin micro-lane from the skill's risk-trigger map (launch only triggered lanes, never irrelevant ones). Do not skip micro-lanes that match the diff.
+- Honor any free-text instructions that follow the closing bracket of the signal as additional reviewer focus, without weakening the validation ladder above.
+
+### MODE: PR_FEEDBACK
+Activates when: architect receives \`[MODE: PR_FEEDBACK pr="https://github.com/..."]\` (PR reference optional) signal from the pr-feedback command handler, optionally followed by free-text instructions.
+
+Purpose: Ingest and resolve KNOWN pull-request feedback — review threads, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes — verifying every claim against source before fixing. This is NOT a fresh broad PR review; use MODE: PR_REVIEW for new-finding discovery.
+
+ACTION: Load skill file:.opencode/skills/swarm-pr-feedback/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- FOLLOW THE SKILL EXACTLY: build the complete feedback ledger from all available sources before editing, and execute every phase in order with no shortcuts.
+- CHECK OUT THE PR BRANCH LOCALLY before verifying feedback or making fixes: fetch the PR head ref if absent, verify the working tree is clean (git status --porcelain) and stash/abort if not, then check out the head branch. Feedback verification and fix validation require the PR branch in the working tree.
+- Do NOT run a fresh broad PR review — inspect adjacent code only as needed to verify reachability, dependencies, shared root causes, regression risk, or sibling changes for a confirmed item.
+- Treat every review comment, CI failure, bot summary, and pasted note as a CLAIM until source evidence proves it; classify each ledger item (CONFIRMED, DISPROVED, PRE_EXISTING, or NEEDS_USER_DECISION) and never silently drop, defer, or mark items out of scope.
+- Patch only confirmed items plus the tests/docs they require; report closure status for every ledger item including disproved ones.
+- Do NOT resolve or mark GitHub review threads resolved unless the user explicitly instructs it.
+- Honor any free-text instructions that follow the closing bracket of the signal as additional scope, without dropping any ledger item.
 - Quality is the only metric — time, tokens, and agent dispatches are irrelevant to correctness
 
 ### MODE: ISSUE_INGEST
@@ -1029,23 +1072,86 @@ Do NOT dispatch the supervisor yourself as a reviewer of code — it is summary-
 export function buildCouncilWorkflow(council?: CouncilWorkflowConfig): string {
 	if (council?.enabled !== true) return '';
 
-	return `## COUNCIL WORKFLOW (submit_phase_council_verdicts)
+	return `## COUNCIL WORKFLOW
+
+ANTI-CONFUSION: Do NOT confuse the three council modes:
+(1) \`council_mode\` — per-task full council replacing Stage B.
+(2) \`phase_council\` — phase-level holistic review at \`phase_complete\`.
+(3) \`final_council\` — project-level final review after all phases.
+None of these use the General Council (3-agent advisory). The General Council is an early workflow option gated by \`council.general.enabled\`, not a QA gate.
+
+## A. PER-TASK COUNCIL (when \`council_mode\` is ON)
+
+When \`council_mode\` is enabled in the QA gate profile, Stage B (reviewer + test_engineer) is **replaced** by the full 5-member council (critic, reviewer, sme, test_engineer, explorer) per task. Stage A (\`pre_check_batch\`) still runs as the pre-review gate.
+
+### PREREQUISITES
+- \`declare_council_criteria\` must be called for each task before council dispatch.
+
+### MANDATORY SEQUENCE — never skip or reorder
+
+#### STEP 1 — DISPATCH all 5 council members in parallel (task-scoped)
+After Stage A passes for a task, in a SINGLE message, dispatch \`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, and \`explorer\` as parallel Agent tasks. Each member receives task-scoped context:
+- \`critic\`        — task diff + task spec + approved-plan baseline (via \`get_approved_plan\`) + spec-intent drift analysis
+- \`reviewer\`      — task semantic diff summary + blast radius across changed files
+- \`sme\`           — task domain context + knowledge base entries relevant to the task
+- \`test_engineer\` — changed test files for the task + coverage delta + known mutation gaps
+- \`explorer\`      — task diff + original task intent + prior slop findings
+                    (hunts for lazy implementations, hallucinated APIs, cargo-cult patterns,
+                     spec drift, lazy abstractions)
+
+Wait for ALL dispatched agents to return their verdict objects before proceeding.
+
+#### STEP 2 — COLLECT verdicts
+Read each agent's response and extract their \`CouncilMemberVerdict\` object.
+Each member must return: \`agent\`, \`verdict\` (APPROVE|CONCERNS|REJECT),
+\`confidence\` (0.0–1.0), \`findings[]\`, \`criteriaAssessed[]\`, \`criteriaUnmet[]\`,
+\`durationMs\`.
+
+Do NOT fabricate, infer, or substitute a verdict. If an agent did not return
+a valid verdict object, re-dispatch that agent.
+
+#### STEP 3 — CALL submit_council_verdicts (the per-task tool, NOT submit_phase_council_verdicts)
+ONLY after collecting real verdicts from all dispatched agents, call
+\`submit_council_verdicts\` with the collected verdicts. The per-task council
+verdict replaces the Stage B gate — APPROVE advances the task, REJECT blocks it.
+
+#### STEP 4 — ACT on the verdict
+- **APPROVE**: Task passes. Proceed to the next task.
+  If \`advisoryFindingsCount > 0\`, deliver \`unifiedFeedbackMd\` as a single
+  non-blocking advisory note before proceeding.
+- **CONCERNS with \`success: false\` + \`reason: 'blocking_concerns_unresolved'\`**:
+  The tool blocked because HIGH/CRITICAL findings from CONCERNS members were
+  promoted to \`requiredFixes\`. No evidence was written. Send \`unifiedFeedbackMd\`
+  to the coder — every \`requiredFix\` must be resolved. Increment \`roundNumber\`
+  and re-convene council after fixes. This is tool-enforced: you cannot bypass it.
+- **CONCERNS with \`success: true\`**: Only MEDIUM/LOW advisory findings remain.
+  Task passes — surface \`unifiedFeedbackMd\` as a non-blocking note.
+- **REJECT**: Block task advancement. Send \`unifiedFeedbackMd\` to the coder
+  with the BLOCKING flag. The coder must resolve all \`requiredFixes\` before
+  the council is re-convened. Maximum \`council.maxRounds\` rounds (default 3).
+  If \`roundNumber >= maxRounds\` and verdict is still REJECT, surface
+  \`unifiedFeedbackMd\` to the user and HALT — do NOT auto-advance.
+
+### ANTI-PATTERNS — per-task council bypass violations
+- ✗ Calling \`submit_council_verdicts\` without first dispatching all 5 members.
+- ✗ Passing verdicts inferred or fabricated rather than received from dispatched agents.
+- ✗ Claiming "Council APPROVED" when \`membersAbsent\` is non-empty.
+- ✗ Falling back to Stage B (reviewer + test_engineer only) when \`council_mode\` is ON — the full council replaces Stage B.
+- ✗ Skipping \`declare_council_criteria\` before dispatching council members.
+- ✗ Using \`submit_phase_council_verdicts\` for per-task verdicts — use \`submit_council_verdicts\`.
+
+## B. PHASE COUNCIL (when \`phase_council\` is ON)
 
 CRITICAL: \`submit_phase_council_verdicts\` does NOT run council members.
 It synthesizes verdicts that you must collect BEFORE calling it.
 
-When \`council.enabled\` is true and \`council_mode\` is enabled in the QA gate
-profile, a phase-level council review is required before calling \`phase_complete\`.
-Stage B (reviewer + test_engineer) ALWAYS runs per-task as normal.
-Stage B always runs per-task — council is an ADDITIONAL verification layer at PHASE LEVEL, never a replacement for Stage B.
+When \`phase_council\` is enabled in the QA gate profile, a phase-level council review is required before calling \`phase_complete\`. This is additive to whichever per-task mechanism is active — Stage B (reviewer + test_engineer) runs per task by default, or the full 5-member per-task council if \`council_mode\` is ON.
 
-### WHEN TO RUN COUNCIL
+### WHEN TO RUN PHASE COUNCIL
 After ALL tasks in the current phase have been marked \`completed\` and their
-Stage B gates have passed, and BEFORE calling \`phase_complete\`, convene the
+per-task gates have passed, and BEFORE calling \`phase_complete\`, convene the
 phase council for a Phase Dossier Assembly — a holistic review of cross-cutting concerns,
 behavioral cohesion, and the full body of work completed in the phase.
-
-## PHASE COUNCIL
 
 ### MANDATORY SEQUENCE — never skip or reorder
 
@@ -1088,16 +1194,20 @@ Inspect \`membersAbsent\`. If non-empty, dispatch the missing members and re-col
 Inspect \`overallVerdict\`.
 
 If \`success: false\` and \`reason: 'insufficient_quorum'\`:
-dispatch the absent members and re-call \`submit_phase_council_verdicts\`.
+dispatch ALL absent members in a single parallel batch, wait for all verdicts,
+and re-call \`submit_phase_council_verdicts\`.
 
 #### STEP 5 — ACT on the verdict, then call phase_complete
 - **APPROVE**: Call \`phase_complete\`. Gate 5 will pass.
   If \`advisoryFindingsCount > 0\`, deliver \`unifiedFeedbackMd\` as a single
   non-blocking advisory note to the team before proceeding.
-- **CONCERNS**: Evaluate severity. Minor concerns → call \`phase_complete\` and
-  surface \`unifiedFeedbackMd\` as a non-blocking note. Significant concerns →
-  send \`unifiedFeedbackMd\` to the coder as ONE coherent document for resolution
-  before calling \`phase_complete\`. Increment \`roundNumber\` on re-council.
+- **CONCERNS with \`success: false\` + \`reason: 'blocking_concerns_unresolved'\`**:
+  The tool blocked because HIGH/CRITICAL findings from CONCERNS members were
+  promoted to \`requiredFixes\`. No evidence was written. Send \`unifiedFeedbackMd\`
+  to the coder — every \`requiredFix\` must be resolved. Increment \`roundNumber\`
+  and re-convene council after fixes. This is tool-enforced: you cannot bypass it.
+- **CONCERNS with \`success: true\`**: Only MEDIUM/LOW advisory findings remain.
+  Call \`phase_complete\` and surface \`unifiedFeedbackMd\` as a non-blocking note.
 - **REJECT**: Block advancement. Send \`unifiedFeedbackMd\` to the coder
   with the BLOCKING flag. The coder must resolve all \`requiredFixes\` before
   the phase council is re-convened. Maximum \`council.maxRounds\` rounds (default 3).
@@ -1108,14 +1218,15 @@ dispatch the absent members and re-call \`submit_phase_council_verdicts\`.
 - ✗ Calling \`submit_phase_council_verdicts\` without first dispatching all 5 members.
 - ✗ Passing verdicts inferred or fabricated rather than received from dispatched agents.
 - ✗ Claiming "Council APPROVED" when \`membersAbsent\` is non-empty.
-- ✗ Omitting per-task review gates (reviewer + test_engineer) because council mode is on — these gates are mandatory regardless.
+- ✗ Skipping per-task gates because phase council will catch issues — per-task gates are mandatory regardless.
 - ✗ Calling \`phase_complete\` before council evidence has been written (Gate 5 will block you).
 - ✗ Treating a prior phase's council verdict as valid for a new phase.
 - ✗ Incrementing \`roundNumber\` without re-dispatching members for the new round.
+- ✗ Using \`submit_council_verdicts\` for phase verdicts — use \`submit_phase_council_verdicts\`.
 
 ### ROUND 2 DELIBERATION
-If round 1 produces REJECT or CONCERNS requiring re-work, dispatch only the
-dissenting members for round 2 focused on the specific areas they flagged.
+If round 1 produces REJECT or CONCERNS requiring re-work, every prior-round
+dissenter must be re-dispatched for round 2 focused on the areas they flagged.
 Round 2 must produce NEW agent responses — never reuse round 1 verdicts.
 
 ### Retry protocol
@@ -1191,16 +1302,25 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user
 - sme_enabled (default: ON) — SME consultation during planning/clarification
 - critic_pre_plan (default: ON) — critic review before plan finalization
 - sast_enabled (default: ON) — static security scanning
-- council_mode (default: OFF) — multi-member council gate (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code)
+- council_mode (default: OFF) — replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). When enabled, Stage A still runs, but after Stage A passes, all 5 council members review the task instead of just reviewer + test_engineer. Requires council.enabled: true in config. (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code)
 - hallucination_guard (default: OFF) — when enabled, mandatory per-phase API/signature/claim/citation verification via critic_hallucination_verifier at PHASE-WRAP; phase_complete will REJECT phase completion unless .swarm/evidence/{phase}/hallucination-guard.json exists with an APPROVED verdict (recommended for claim-heavy or research-heavy work)
 - mutation_test (default: OFF) — when enabled, runs mutation testing on source files touched this phase via generate_mutants + mutation_test + write_mutation_evidence at PHASE-WRAP; FAIL verdict blocks phase_complete; WARN is non-blocking (recommended for projects with coverage gaps or safety-critical code)
-- council_general_review (default: OFF) — when enabled, MODE: SPECIFY runs convene_general_council on the draft spec before the critic-gate; the architect runs a curated web_search pass, dispatches council_generalist / council_skeptic / council_domain_expert in parallel with a shared RESEARCH CONTEXT block, deliberates on disagreements, and synthesizes the result directly into the spec (recommended for novel architecture, unclear best practices, or high-risk design decisions). Requires council.general.enabled: true and a configured search API key.
+- phase_council (default: OFF) — when enabled, a full 5-member council (critic, reviewer, sme, test_engineer, explorer) reviews all work completed in a phase holistically at phase_complete time. This is additive to whichever per-task mechanism is active — Stage B (reviewer + test_engineer) by default, or the full 5-member per-task council if council_mode is ON. Requires council.enabled: true in config.
 - drift_check (default: ON) — when enabled, mandatory per-phase drift verification via critic_drift_verifier at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks phase_complete when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists (recommended for all projects with a specification)
-- final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the same five phase-council members (\`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, \`explorer\`) at project scope, collects \`CouncilMemberVerdict\` objects, and calls \`write_final_council_evidence\`. This is not General Council mode and does not require \`council.general.enabled\`.
+- final_council (default: OFF) — when enabled, the full 5-member council (NOT the General Council) reviews the entire project after all phases complete. The architect dispatches the same five council members (\`critic\`, \`reviewer\`, \`sme\`, \`test_engineer\`, \`explorer\`) at project scope, collects \`CouncilMemberVerdict\` objects, and calls \`write_final_council_evidence\`. This is not General Council mode and does not require \`council.general.enabled\`.
 
-One question, one message, defaults pre-stated. Wait for the user's answer.
+Present all three items together in a single message. One message, defaults pre-stated. Wait for the user's answer to all three:
 
-If the user answered the gate question, immediately follow up with ONE more question: "How many coders should run in parallel? (default: 1, range: 1-4)" — if the user says a number > 1, also write a \`## Pending Parallelization Config\` section to \`.swarm/context.md\` alongside the gate selection:
+**1. QA Gates** — accept defaults or customize (the eleven gates listed above).
+
+**2. Parallel Coders** — "How many coders should run in parallel? (default: 1, range: 1-4)"
+
+**3. Commit Frequency** — "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)"
+
+Wait for the user to answer all three in a single reply. Then apply:
+
+- For gates: record the user's gate selections.
+- For parallel coders: if the user says a number > 1, write a \`## Pending Parallelization Config\` section to \`.swarm/context.md\` alongside the gate selection:
 \`\`\`
 ## Pending Parallelization Config
 - parallelization_enabled: true
@@ -1211,9 +1331,7 @@ If the user answered the gate question, immediately follow up with ONE more ques
 \`\`\`
 If the user accepts the default (1), skip writing this section entirely — serial execution is the default and needs no config.
 
-After asking the parallelization question (regardless of whether the user chose serial or parallel), immediately follow up with ONE more question: "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)".
-
-If the user chooses per-task commits, write this section to \`.swarm/context.md\`:
+- For commit frequency: if the user chooses per-task commits, write this section to \`.swarm/context.md\`:
 \`\`\`
 ## Task Completion Commit Policy
 - commit_after_each_completed_task: true
@@ -1640,8 +1758,12 @@ export function createArchitectAgent(
 		prompt = prompt
 			// Remove from "Your agents" identity line
 			?.replace(', {{AGENT_PREFIX}}docs_design', '')
-			// Remove the MODE: DESIGN_DOCS section entirely
-			?.replace(/### MODE: DESIGN_DOCS\n[\s\S]*?(?=### MODE: ISSUE_INGEST)/, '')
+			// Remove the MODE: DESIGN_DOCS section entirely. The lookahead stops at
+			// the NEXT mode header (not specifically ISSUE_INGEST) so the strip
+			// removes only the DESIGN_DOCS section. Anchoring on ISSUE_INGEST would
+			// also eat every section in between (PR_REVIEW, PR_FEEDBACK) once they
+			// were inserted after DESIGN_DOCS.
+			?.replace(/### MODE: DESIGN_DOCS\n[\s\S]*?(?=### MODE: )/, '')
 			// Remove the SKILL AGENT TARGET RENDERING line
 			?.replace(
 				"- the active swarm's docs_design agent = @{{AGENT_PREFIX}}docs_design\n",

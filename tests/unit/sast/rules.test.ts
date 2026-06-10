@@ -104,6 +104,18 @@ describe('SAST Rule Engine', () => {
 		});
 	});
 
+	describe('rule registration integrity', () => {
+		it('should not register duplicate rule IDs (DD-C003)', () => {
+			const rules = getAllRules();
+			const seen = new Map<string, number>();
+			for (const rule of rules) {
+				seen.set(rule.id, (seen.get(rule.id) ?? 0) + 1);
+			}
+			const duplicates = [...seen.entries()].filter(([, count]) => count > 1);
+			expect(duplicates).toEqual([]);
+		});
+	});
+
 	describe('JavaScript/TypeScript Rule Detection', () => {
 		it('should detect eval() usage', () => {
 			const findings = executeRulesSync(
@@ -322,6 +334,20 @@ describe('SAST Rule Engine', () => {
 			);
 			expect(finding).toBeDefined();
 		});
+
+		it('should not flag short strings as Java secrets (DD-C015)', () => {
+			// A 5-char string was flagged as critical under the old {5,} threshold.
+			// The aligned {10,} threshold must not flag it.
+			const findings = executeRulesSync(
+				'test.java',
+				'String token = "abcde";',
+				'java',
+			);
+			const finding = findings.find(
+				(f) => f.rule_id === 'sast/java-hardcoded-secret',
+			);
+			expect(finding).toBeUndefined();
+		});
 	});
 
 	describe('PHP Rule Detection', () => {
@@ -429,6 +455,25 @@ describe('SAST Rule Engine', () => {
 			);
 			expect(finding).toBeDefined();
 			expect(finding?.severity).toBe('critical');
+		});
+
+		it('should NOT flag Process.Start when UseShellExecute=false (DD-C016)', () => {
+			const findings = executeRulesSync(
+				'test.cs',
+				[
+					'var psi = new ProcessStartInfo {',
+					'  FileName = "git",',
+					'  Arguments = "status",',
+					'  UseShellExecute = false,',
+					'};',
+					'Process.Start(psi);',
+				].join('\n'),
+				'csharp',
+			);
+			const finding = findings.find(
+				(f) => f.rule_id === 'sast/cs-command-injection',
+			);
+			expect(finding).toBeUndefined();
 		});
 
 		it('should detect BinaryFormatter', () => {

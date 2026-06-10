@@ -96,6 +96,7 @@ export type TestScope = 'all' | 'convention' | 'graph' | 'impact';
 export interface BuildTestCommandOpts {
 	scope?: TestScope;
 	coverage?: boolean;
+	bail?: boolean;
 }
 
 /**

@@ -59,6 +59,26 @@ function rejectingVerdicts(): CouncilMemberVerdict[] {
 	];
 }
 
+function concernsVerdicts(): CouncilMemberVerdict[] {
+	return [
+		verdict('test_engineer', {
+			verdict: 'CONCERNS',
+			findings: [
+				{
+					severity: 'MEDIUM',
+					category: 'maintainability',
+					location: 'src/example.ts:12',
+					detail: 'Add more edge-case validation coverage.',
+					evidence: 'Test engineer flagged advisory concern.',
+				},
+			],
+		}),
+		...members
+			.filter((member) => member !== 'test_engineer')
+			.map((member) => verdict(member)),
+	];
+}
+
 describe('executeWriteFinalCouncilEvidence', () => {
 	let tempDir: string;
 
@@ -121,7 +141,7 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		expect(new Date(entry.timestamp).toISOString()).toBe(entry.timestamp);
 	});
 
-	test('normalizes rejecting or concern final council verdicts to rejected evidence verdict', async () => {
+	test('normalizes rejecting final council verdicts to rejected evidence verdict', async () => {
 		const result = await executeWriteFinalCouncilEvidence(
 			{
 				phase: 2,
@@ -145,6 +165,33 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		expect(entry.verdict).toBe('rejected');
 		expect(entry.requiredFixes).toHaveLength(1);
 		expect(entry.allCriteriaMet).toBe(false);
+	});
+
+	test('normalizes advisory CONCERNS verdict to non-blocking concerns evidence verdict', async () => {
+		const result = await executeWriteFinalCouncilEvidence(
+			{
+				phase: 2,
+				projectSummary: 'Project complete with advisory concerns only.',
+				verdicts: concernsVerdicts(),
+			},
+			tempDir,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(true);
+		expect(parsed.overallVerdict).toBe('CONCERNS');
+		expect(parsed.verdict).toBe('concerns');
+		expect(parsed.requiredFixesCount).toBe(0);
+		expect(parsed.advisoryFindingsCount).toBe(1);
+
+		const content = await fs.promises.readFile(
+			path.join(tempDir, '.swarm', 'evidence', 'final-council.json'),
+			'utf-8',
+		);
+		const entry = JSON.parse(content).entries[0];
+		expect(entry.verdict).toBe('concerns');
+		expect(entry.requiredFixes).toHaveLength(0);
+		expect(entry.rawCouncilVerdict).toBe('CONCERNS');
 	});
 
 	test('rejects invalid phase and missing project summary', async () => {

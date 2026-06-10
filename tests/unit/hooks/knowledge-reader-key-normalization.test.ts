@@ -26,48 +26,62 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Mocks
 // ============================================================================
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	jaccardBigram: vi.fn((a: Set<string>, b: Set<string>) => {
-		if (a.size === 0 && b.size === 0) return 1.0;
-		const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
-		const union = new Set([...Array.from(a), ...Array.from(b)]);
-		return intersection.size / union.size;
-	}),
-	normalize: vi.fn((text: string) =>
-		text
-			.toLowerCase()
-			.replace(/[^\w\s]/g, ' ')
-			.replace(/\s+/g, ' ')
-			.trim(),
-	),
-	readKnowledge: vi.fn(async () => []),
-	rewriteKnowledge: vi.fn(async () => {}),
-	resolveSwarmKnowledgePath: vi.fn(() => '/mock/.swarm/knowledge.jsonl'),
-	resolveHiveKnowledgePath: vi.fn(() => '/mock/hive/shared-learnings.jsonl'),
-	wordBigrams: vi.fn((text: string) => {
-		const words = text
-			.toLowerCase()
-			.replace(/[^\w\s]/g, ' ')
-			.replace(/\s+/g, ' ')
-			.trim()
-			.split(' ')
-			.filter(Boolean);
-		const bigrams = new Set<string>();
-		for (let i = 0; i < words.length - 1; i++) {
-			bigrams.add(`${words[i]} ${words[i + 1]}`);
-		}
-		return bigrams;
-	}),
-	enforceKnowledgeCap: async () => {},
-	sweepAgedEntries: async () => {},
-	sweepStaleTodos: async () => {},
-	bumpKnowledgeConfidenceBatch: async () => {},
-}));
+vi.mock('../../../src/hooks/knowledge-store.js', () => {
+	const readKnowledge = vi.fn(async () => []);
+	return {
+		jaccardBigram: vi.fn((a: Set<string>, b: Set<string>) => {
+			if (a.size === 0 && b.size === 0) return 1.0;
+			const intersection = new Set(Array.from(a).filter((x) => b.has(x)));
+			const union = new Set([...Array.from(a), ...Array.from(b)]);
+			return intersection.size / union.size;
+		}),
+		normalize: vi.fn((text: string) =>
+			text
+				.toLowerCase()
+				.replace(/[^\w\s]/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim(),
+		),
+		readKnowledge,
+		readRetractionRecords: vi.fn(async () => []),
+		rewriteKnowledge: vi.fn(async () => {}),
+		transactFile: vi.fn(async () => true),
+		transactKnowledge: vi.fn(
+			async <T>(filePath: string, mutate: (entries: T[]) => T[] | null) => {
+				// Apply mutation to entries read via readKnowledge mock
+				const entries = await readKnowledge(filePath);
+				const result = mutate(entries as T[]);
+				return result !== null;
+			},
+		),
+		resolveSwarmKnowledgePath: vi.fn(() => '/mock/.swarm/knowledge.jsonl'),
+		resolveHiveKnowledgePath: vi.fn(() => '/mock/hive/shared-learnings.jsonl'),
+		wordBigrams: vi.fn((text: string) => {
+			const words = text
+				.toLowerCase()
+				.replace(/[^\w\s]/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim()
+				.split(' ')
+				.filter(Boolean);
+			const bigrams = new Set<string>();
+			for (let i = 0; i < words.length - 1; i++) {
+				bigrams.add(`${words[i]} ${words[i + 1]}`);
+			}
+			return bigrams;
+		}),
+		enforceKnowledgeCap: async () => {},
+		sweepAgedEntries: async () => {},
+		sweepStaleTodos: async () => {},
+		bumpKnowledgeConfidenceBatch: async () => {},
+	};
+});
 
 import { updateRetrievalOutcome } from '../../../src/hooks/knowledge-reader.js';
 import {
 	readKnowledge,
 	rewriteKnowledge,
+	transactKnowledge,
 } from '../../../src/hooks/knowledge-store.js';
 
 // ============================================================================
@@ -136,11 +150,10 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 1', true);
 
-		// rewriteKnowledge should have been called with the updated entry
-		expect(rewriteKnowledge).toHaveBeenCalled();
-		const [, writtenEntries] = (rewriteKnowledge as ReturnType<typeof vi.fn>)
-			.mock.calls[0];
-		const updated = writtenEntries.find((e: typeof entry) => e.id === lessonId);
+		// transactKnowledge mock mutates entries in-place via readKnowledge mock
+		expect(transactKnowledge).toHaveBeenCalled();
+		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
+		const updated = mutatedEntries.find((e: typeof entry) => e.id === lessonId);
 		expect(updated).toBeDefined();
 		// v2: applied_count is FROZEN (not auto-incremented from shown)
 		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(1);
@@ -173,9 +186,10 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 2', true);
 
-		const [, writtenEntries] = (rewriteKnowledge as ReturnType<typeof vi.fn>)
-			.mock.calls[0];
-		const updated = writtenEntries.find((e: typeof entry) => e.id === id);
+		// transactKnowledge mock mutates entries in-place via readKnowledge mock
+		expect(transactKnowledge).toHaveBeenCalled();
+		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
+		const updated = mutatedEntries.find((e: typeof entry) => e.id === id);
 		// v2: applied_count is FROZEN — should stay at 2
 		expect(updated.retrieval_outcomes.applied_count).toBe(2);
 		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(2); // was 1
@@ -208,9 +222,10 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 3', false);
 
-		const [, writtenEntries] = (rewriteKnowledge as ReturnType<typeof vi.fn>)
-			.mock.calls[0];
-		const updated = writtenEntries.find((e: typeof entry) => e.id === id);
+		// transactKnowledge mock mutates entries in-place via readKnowledge mock
+		expect(transactKnowledge).toHaveBeenCalled();
+		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
+		const updated = mutatedEntries.find((e: typeof entry) => e.id === id);
 		// v2: applied_count is FROZEN — should stay at 1
 		expect(updated.retrieval_outcomes.applied_count).toBe(1);
 		expect(updated.retrieval_outcomes.failed_after_shown_count).toBe(1);
@@ -223,8 +238,8 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 2', true);
 
-		// No lessons shown for Phase 2, so rewriteKnowledge should not be called
-		expect(rewriteKnowledge).not.toHaveBeenCalled();
+		// No lessons shown for Phase 2, so transactKnowledge should not be called
+		expect(transactKnowledge).not.toHaveBeenCalled();
 	});
 
 	it('does nothing when .knowledge-shown.json does not exist', async () => {
@@ -233,7 +248,7 @@ describe('updateRetrievalOutcome — Phase N key lookup', () => {
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 1', true);
 
-		expect(rewriteKnowledge).not.toHaveBeenCalled();
+		expect(transactKnowledge).not.toHaveBeenCalled();
 	});
 });
 

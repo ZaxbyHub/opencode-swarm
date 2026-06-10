@@ -47,7 +47,7 @@ For test changes, also load [`.claude/skills/writing-tests/SKILL.md`](../writing
 
 The OpenCode `test_runner` tool is for **targeted agent validation** with explicit `files: [...]` or small targeted scopes. It is not the way to validate the full repo from inside a Claude Code session that orchestrates OpenCode. In this repo:
 
-- `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP. Do not lean on this — broad scopes can stall or kill OpenCode before that guard fires.
+- `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP. Do not lean on this — broad scopes can stall or kill OpenCode before that guard fires.
 - For repo validation, run the shell commands in `contributing.md` / `TESTING.md` directly (per-file isolation loops + tier orchestration).
 - `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Default to `files: [...]` instead.
 

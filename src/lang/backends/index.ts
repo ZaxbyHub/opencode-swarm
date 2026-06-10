@@ -11,6 +11,7 @@
 
 import { LANGUAGE_BACKEND_REGISTRY } from '../registry-backend';
 import { buildGoBackend } from './go';
+import { buildPhpBackend } from './php';
 import { buildPythonBackend } from './python';
 import { buildTypescriptBackend } from './typescript';
 
@@ -31,6 +32,7 @@ export function registerAllBackends(): void {
 	LANGUAGE_BACKEND_REGISTRY.register(buildTypescriptBackend());
 	LANGUAGE_BACKEND_REGISTRY.register(buildPythonBackend());
 	LANGUAGE_BACKEND_REGISTRY.register(buildGoBackend());
+	LANGUAGE_BACKEND_REGISTRY.register(buildPhpBackend());
 	registered = true;
 }
 
@@ -47,4 +49,5 @@ export function _resetForTesting(): void {
 	LANGUAGE_BACKEND_REGISTRY.unregister('typescript');
 	LANGUAGE_BACKEND_REGISTRY.unregister('python');
 	LANGUAGE_BACKEND_REGISTRY.unregister('go');
+	LANGUAGE_BACKEND_REGISTRY.unregister('php');
 }

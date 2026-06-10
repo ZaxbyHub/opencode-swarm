@@ -1,8 +1,10 @@
 # Commands Reference
 
-All `/swarm` subcommands available in OpenCode Swarm v6.81.0. The authoritative source is `src/commands/registry.ts`.
+All `/swarm` subcommands available in the current OpenCode Swarm source tree. The authoritative source is `src/commands/registry.ts`; this page explains the user-facing behavior and calls out deprecated aliases.
 
 Commands are grouped by function. Compound commands (e.g., `/swarm config doctor`) resolve the two-word form first, then fall back to the first token.
+
+First-class MODE commands are repo-agnostic. The npm package ships the built-in OpenCode mode skills and, when a command needs one, materializes missing copies under the target repository's `.opencode/skills/` tree before emitting the MODE signal. Existing project skill files are never overwritten.
 
 ---
 
@@ -93,20 +95,19 @@ Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful be
 
 Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN → DIALOGUE → APPROACHES → DESIGN → SPEC → SELF-REVIEW → GATE SELECTION → TRANSITION.
 
-### `/swarm council <question> [--preset <name>] [--spec-review]`
+### `/swarm council <question> [--spec-review]`
 
-Enter architect MODE: COUNCIL — convene a configurable multi-model General Council for an advisory deliberation. Each council member independently web-searches and answers; the architect routes any disagreements back for one targeted reconciliation round; an optional moderator pass synthesizes the final user-facing answer.
+Enter architect MODE: COUNCIL — convene a fixed three-agent General Council (`council_generalist`, `council_skeptic`, `council_domain_expert`) for an advisory deliberation. The architect runs a web-search pre-pass and supplies all agents with a RESEARCH CONTEXT block; agents answer in parallel without individual web access. The architect routes any disagreements back for one targeted Round 2 reconciliation, then synthesizes the final answer directly using inline output rules (no separate moderator pass).
 
 | Flag | Effect |
 |------|--------|
-| `--preset <name>` | Use a named member group from `council.general.presets` instead of `council.general.members`. Preset name must match `[A-Za-z0-9_-]{1,64}`. |
-| `--spec-review` | Switch to single-pass advisory mode. Used by the `council_general_review` QA gate during MODE: SPECIFY to fold council input into a draft spec — no Round 2 deliberation. |
+| `--spec-review` | Switch to single-pass advisory mode. Can be invoked manually to fold council input into a draft spec — no Round 2 deliberation. |
 
-**Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
+**Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. The deprecated `members`, `presets`, `moderator`, and `moderatorModel` fields are accepted for compatibility but ignored at runtime. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
 
-**No-args behavior:** prints a usage string. The command never throws on bad input — invalid preset names and injected `[MODE: ...]` headers are silently dropped.
+**No-args behavior:** prints a usage string. The command never throws on bad input — unsupported legacy preset arguments and injected `[MODE: ...]` headers are silently dropped.
 
-### `/swarm pr-review <pr-url|owner/repo#N|N> [--council]`
+### `/swarm pr-review <pr-url|owner/repo#N|N> [--council] [instructions...]`
 
 Launch a structured deep PR review using multi-lane parallel analysis with independent confirmation and critic challenge.
 
@@ -116,8 +117,9 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 | `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
 | `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
 | `--council` | Enable adversarial multi-model council review variant |
+| `[instructions...]` | Optional free text after the PR reference, forwarded to the reviewer as extra focus (e.g. `/swarm pr-review 155 focus on the auth refactor`) |
 
-**URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames.
+**URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames. Unknown `--flags` are rejected with an explicit error; trailing non-flag words become instructions.
 
 **Workflow:**
 1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
@@ -126,9 +128,43 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** — Obligation assessment, findings table, merge recommendation
 
+The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically — you no longer need to ask for these by hand.
+
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
 **No-args behavior:** prints a usage string. The command never throws on bad input.
+
+### `/swarm pr-feedback [<pr-url|owner/repo#N|N>] [instructions...]`
+
+Ingest and close **known** PR feedback — review comments, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes — verifying every claim against source before fixing. This is distinct from `/swarm pr-review`, which discovers *new* findings; `pr-feedback` closes *existing* feedback without running a fresh broad review.
+
+| Argument | Description |
+|----------|-------------|
+| `<pr-url>` | Full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/42`) |
+| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
+| `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
+| `[instructions...]` | Optional free text forwarded to the feedback session |
+| _(none)_ | No PR reference — a pasted-feedback session; the architect builds the ledger from the current PR/branch and any pasted notes |
+
+**Command forms:**
+- `/swarm pr-feedback 155` — close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
+- `/swarm pr-feedback owner/repo#155 also fix the lint errors` — PR + extra instructions
+- `/swarm pr-feedback` — pasted-feedback session on the current branch
+- `/swarm pr-feedback address the review notes about error handling` — a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
+
+A leading token that **is** shaped like a PR reference (bare number, `owner/repo#N`, or URL) but cannot be resolved — for example a bare number when no `origin` remote is reachable — returns an explicit error rather than silently demoting the intended reference to free-text feedback.
+
+**URL sanitization:** identical to `pr-review` — `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames, and strips injected `[MODE: ...]` headers from instructions.
+
+**Workflow** (`MODE: PR_FEEDBACK`, loads `swarm-pr-feedback/SKILL.md`):
+1. **Check out the PR branch locally** — fetch the head ref, verify the working tree is clean, then check it out so verification and fixes run against the PR branch
+2. **Build the feedback ledger** — collect every feedback surface (review threads, requested-changes reviews, CI failures, conflicts, stale-branch state, PR-body claims, pasted notes) before editing
+3. **Verify each claim** — treat every item as a claim until source evidence proves it; classify as CONFIRMED, DISPROVED, PRE_EXISTING, or NEEDS_USER_DECISION
+4. **Fix confirmed items** — patch only confirmed items plus the tests/docs they require; do not run a fresh broad review
+5. **Closure ledger** — report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
+
+**No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
+
 
 ### `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>] [--json] [--skip-update] [--allow-dirty]`
 
@@ -175,6 +211,43 @@ Read-only codebase audit using parallel explorer waves with independent reviewer
 **Note:** This is a read-only audit. It does not modify source code, create branches, or write to the codebase.
 
 **No-args behavior:** prints a usage string. The command never throws on bad input.
+
+### `/swarm codebase-review [scope] [--mode <name>] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]`
+
+Launch the `codebase-review-swarm` skill for a quote-grounded full-repo or large-subsystem audit. This command is repo-agnostic: the plugin ships the skill package, materializes it into `.opencode/skills/codebase-review-swarm/` when missing, emits a `MODE: CODEBASE_REVIEW` signal in the current project, and then the architect loads `.opencode/skills/codebase-review-swarm/SKILL.md`.
+
+| Alias |
+|-------|
+| `/swarm codebase review` |
+
+**Command forms:**
+- `/swarm codebase-review` - run Phase 0 inventory at repository root, then stop for review-mode selection
+- `/swarm codebase-review src/auth --mode security` - run the security-focused review workflow for a subsystem
+- `/swarm codebase review "frontend accessibility" --mode ui --json` - alias form with JSON-compatible report blocks
+- `/swarm codebase-review --mode custom --tracks "security,testing"` - preselect a custom track set
+
+**Workflow:**
+1. **Phase 0 Inventory** - capture repository context, manifests, public surfaces, trust boundaries, tests, UI, AI surfaces, and claims
+2. **Review Mode Gate** - stop for user track selection unless the command already preselected tracks and continuing is explicitly authorized
+3. **Review Depth Plan** - prove selected tracks receive non-diluted depth
+4. **Candidate Generation** - produce quote-grounded candidates only for selected tracks
+5. **Reviewer and Critic Validation** - validate candidates, challenge high-risk findings and enhancements
+6. **Final Report** - write `.swarm/review-v8/runs/<run_id>/review-report.md` after coverage closure and final critic PASS
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode <name>` | `phase0` | Review mode: `phase0`, `complete`, `defect`, `security`, `correctness`, `testing`, `ui`, `performance`, `ai-slop`, `enhancements`, or `custom` |
+| `--tracks <list>` | empty | Custom selected tracks or notes for the workflow |
+| `--continue <run-id>` | empty | Continue an existing `.swarm/review-v8` run |
+| `--json` | markdown | Request JSON-compatible report blocks |
+| `--skip-update` | false | Skip the repo update-to-main preflight |
+| `--allow-dirty` | false | Allow review to proceed with a dirty git worktree |
+
+**Note:** This is a read-only review workflow. It may write review artifacts under `.swarm/review-v8/`, but it must not mutate source files, create branches, or delegate to coder.
+
+**No-args behavior:** runs Phase 0 inventory for `repository root` and stops for review-mode selection unless the user already selected tracks.
 
 ### `/swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]`
 
@@ -244,7 +317,7 @@ Ingest a GitHub issue into the swarm workflow for root-cause localization and re
 
 ### `/swarm sync-plan`
 
-Force `plan.md` regeneration from canonical `plan-ledger.jsonl`. Safe, read-only.
+Force `plan.md` regeneration from the canonical plan ledger when the markdown projection is stale. This can update `.swarm/plan.md`; it does not edit source files.
 
 ### `/swarm preflight`
 
@@ -310,14 +383,15 @@ View or modify QA gate profile for the current plan.
 - `enable`: persist gate(s) into the locked profile. Architect-only. Rejected after critic approval lock.
 - `override`: session-only ratchet-tighter enable.
 
-Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `council_general_review`, `final_council`.
+Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `phase_council`, `final_council`.
 
 **Gate descriptions:**
 
-- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
+- `council_mode` — Per-task council gate. When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config.
 
+- `phase_council` — Phase-level council gate. When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates.
 
-- `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.
+- `final_council` — Project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) — NOT the General Council — rerun at project scope. Does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry
@@ -393,6 +467,10 @@ List expired scratch memories, deleted tombstones, superseded chains, and low-ut
 
 Dry-run compaction for deleted, superseded, and expired scratch memory records. Pass `--confirm` to apply the cleanup. There is no automatic destructive compaction.
 
+### `/swarm memory evaluate`
+
+Run the golden memory recall fixtures. Use `/swarm memory evaluate --json` for a machine-readable report. Custom fixture directories are available through direct CLI execution.
+
 ### `/swarm memory export`
 
 Export current memory records and proposals to `.swarm/memory/export/memories.jsonl` and `.swarm/memory/export/proposals.jsonl`.
@@ -413,13 +491,24 @@ Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson 
 
 Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse.
 
+### `/swarm concurrency <set|status|reset>`
+
+Manage the session-scoped runtime concurrency override for plan execution. This requires an active OpenCode session.
+
+```text
+/swarm concurrency set 3
+/swarm concurrency set max
+/swarm concurrency status
+/swarm concurrency reset
+```
+
 ---
 
 ## State and Recovery
 
 ### `/swarm reset --confirm`
 
-DELETE `plan.md`, `context.md`, and `summaries/` from `.swarm/`. Stops background automation and clears in-memory queues. **Requires `--confirm` — without it, shows a warning and a tip to export first.**
+DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` — without it, shows a warning and a tip to export first.**
 
 ### `/swarm reset-session`
 
@@ -562,7 +651,7 @@ Type `/swarm <subcommand>` in the chat. All commands in this reference work here
 
 ### Standalone CLI
 
-The standalone binary accepts three top-level commands: `install`, `uninstall`, and `run`. To invoke a registry command from the shell, prefix it with `run`:
+The standalone binary accepts four top-level commands: `install`, `update`, `uninstall`, and `run`. To invoke a registry command from the shell, prefix it with `run`:
 
 ```bash
 opencode-swarm run status

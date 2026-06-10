@@ -71,9 +71,17 @@ export function isSafeCachePath(p: string): boolean {
 
 /**
  * Safety guard for lock file deletion. Lock files have different basenames
- * than cache directories so they need a separate check. Mirrors
- * isSafeCachePath()'s defense-in-depth: minimum segment depth, recognized
- * basename, and parent directory must be 'opencode'.
+ * and directory structure than cache directories, requiring separate validation
+ * logic. While both functions share defense-in-depth principles, they are kept
+ * separate rather than extracted to a parameterized helper because the
+ * validation rules differ significantly:
+ * - Cache paths verify: parent ∈ {packages, node_modules}, grandparent === 'opencode'
+ * - Lock file paths verify: parent === 'opencode', grandparent !== 'opencode'
+ * This separation maintains clarity and avoids over-parameterization.
+ *
+ * This function mirrors isSafeCachePath()'s defense-in-depth: minimum segment
+ * depth, recognized basename, parent directory must be 'opencode', and
+ * grandparent structure validation to prevent misconfigured nested paths.
  */
 export function isSafeLockFilePath(p: string): boolean {
 	const resolved = path.resolve(p);
@@ -95,6 +103,12 @@ export function isSafeLockFilePath(p: string): boolean {
 	}
 	const parent = path.basename(path.dirname(resolved));
 	if (parent !== 'opencode') {
+		return false;
+	}
+	// Verify grandparent to ensure the path structure is correct and prevent
+	// misconfigured nested paths like opencode/opencode/filename.
+	const grandparent = path.basename(path.dirname(path.dirname(resolved)));
+	if (grandparent === 'opencode') {
 		return false;
 	}
 	return true;

@@ -150,6 +150,26 @@ describe('detectProjectLanguages', () => {
 		expect(ids).toContain('kotlin');
 	});
 
+	it('Dir with only a *.csproj file → detects csharp via glob (DD-C025)', async () => {
+		await writeFile(
+			join(tempDir, 'MyApp.csproj'),
+			'<Project Sdk="Microsoft.NET.Sdk"></Project>',
+		);
+		const profiles = await detectProjectLanguages(tempDir);
+		const ids = profiles.map((p) => p.id);
+		expect(ids).toContain('csharp');
+	});
+
+	it('Dir with only a *.sln file → detects csharp via glob (DD-C025)', async () => {
+		await writeFile(
+			join(tempDir, 'MyApp.sln'),
+			'Microsoft Visual Studio Solution File',
+		);
+		const profiles = await detectProjectLanguages(tempDir);
+		const ids = profiles.map((p) => p.id);
+		expect(ids).toContain('csharp');
+	});
+
 	it('Empty directory → returns empty array []', async () => {
 		const profiles = await detectProjectLanguages(tempDir);
 		expect(profiles).toEqual([]);

@@ -18,6 +18,7 @@ export async function runFinalCouncilGate(
 	const { phase, dir, sessionID, agentsDispatched, safeWarn } = ctx;
 
 	let finalCouncilEnabled = false;
+	const gateWarnings: string[] = [];
 
 	try {
 		const plan = await loadPlan(dir);
@@ -149,13 +150,33 @@ export async function runFinalCouncilGate(
 									}
 
 									if (
+										entry.verdict === 'concerns' ||
+										entry.verdict === 'CONCERNS'
+									) {
+										const advisoryNotes = Array.isArray(entry.advisoryNotes)
+											? entry.advisoryNotes.filter(
+													(note: unknown): note is string =>
+														typeof note === 'string',
+												)
+											: [];
+										const warning =
+											advisoryNotes.length > 0
+												? `Final council returned CONCERNS (non-blocking): ${advisoryNotes.join('; ')}`
+												: 'Final council returned CONCERNS (non-blocking).';
+										gateWarnings.push(warning);
+										safeWarn(`[phase_complete] ${warning}`, undefined);
+									}
+
+									if (
 										entry.verdict !== 'approved' &&
-										entry.verdict !== 'APPROVED'
+										entry.verdict !== 'APPROVED' &&
+										entry.verdict !== 'concerns' &&
+										entry.verdict !== 'CONCERNS'
 									) {
 										return {
 											blocked: true,
 											reason: 'FINAL_COUNCIL_INVALID_VERDICT',
-											message: `Phase ${phase} (last phase) cannot be completed: final council evidence contains unrecognized verdict '${entry.verdict}'. Expected 'approved'.`,
+											message: `Phase ${phase} (last phase) cannot be completed: final council evidence contains unrecognized verdict '${entry.verdict}'. Expected one of: approved, concerns, rejected.`,
 											agentsDispatched,
 											agentsMissing: [],
 											warnings: [],
@@ -208,5 +229,10 @@ export async function runFinalCouncilGate(
 		}
 	}
 
-	return { blocked: false, agentsDispatched, agentsMissing: [], warnings: [] };
+	return {
+		blocked: false,
+		agentsDispatched,
+		agentsMissing: [],
+		warnings: gateWarnings,
+	};
 }

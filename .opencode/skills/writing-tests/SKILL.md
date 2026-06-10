@@ -9,7 +9,7 @@ description: >
 
 # Writing Tests for opencode-swarm
 
-> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`) guard fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. `allow_full_suite` should be used only when intentional and justified in the PR description. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
+> **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors only. Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. `allow_full_suite` should be used only when intentional and justified in the PR description. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
 
 ## ⛔ STOP — Read Before Running Any Tests
 
@@ -399,8 +399,8 @@ const actual = readFileSync(path, 'utf-8').replace(/\r\n/g, '\n');
 
 The CI runs on three platforms (ubuntu, macos, windows). Tests are split into sequential steps within each platform's job.
 
-```
-Step 1: hooks (Linux/macOS only, skipped on Windows) — batch per-group
+```text
+Step 1: hooks — per-file isolation loop on every platform
 Step 2: cli — batch
 Step 3: commands + config — batch
 Step 4: tools — per-file isolation loop
@@ -408,7 +408,7 @@ Step 5: services + build + quality + sast + sbom + scripts — per-file isolatio
 Step 6: state + agents + knowledge + evidence + plan + misc — per-file isolation loop
 ```
 
-**Steps 4-6 use per-file isolation:** each `.test.ts` file runs in its own `bun --smol` process to prevent `mock.module()` cache poisoning (#330). Steps 1-3 run files in batch (one process per step) because they have fewer mock conflicts.
+**Steps 1 and 4-6 use per-file isolation:** each `.test.ts` file runs in its own `bun --smol` process to prevent `mock.module()` cache poisoning (#330). Steps 2-3 run files in batch (one process per step) because they have fewer mock conflicts.
 
 When writing a test, know which step your file will run in. In batch steps, do not assume isolation from other files in the same step.
 
@@ -460,17 +460,15 @@ Examples in-tree: `tests/unit/graph/graph-query.test.ts`, `tests/unit/graph/impo
 
 ## Cross-Entry Invariants (config maps)
 
-When you modify any entry of a "map of agents/tools/roles" in `src/config/constants.ts` (`AGENT_TOOL_MAP`, `DEFAULT_MODELS`, `QA_AGENTS`, `PIPELINE_AGENTS`, etc.), there are tests that assert **parity across sibling entries**, not just shape of one entry.
+When you modify any entry of a "map of agents/tools/roles" in `src/config/constants.ts` (`AGENT_TOOL_MAP`, `DEFAULT_MODELS`, `QA_AGENTS`, `PIPELINE_AGENTS`, etc.) or tool-name registration in `src/tools/tool-names.ts`, there are tests that assert **parity across sibling entries**, not just shape of one entry.
 
 Known parity assertions:
 
 | Test | Invariant |
 |---|---|
-| `tests/unit/config/critic-registration.test.ts:67` | `AGENT_TOOL_MAP.critic_sounding_board.length === AGENT_TOOL_MAP.critic.length` |
-| `tests/unit/config/agent-tool-map.test.ts:26` | `AGENT_TOOL_MAP.architect.length` is strictly greater than every other agent's |
-| `tests/unit/config/agent-tool-map.test.ts:34` | every subagent's tool list `<= 20` entries |
-| `tests/unit/config/constants.test.ts:48` | `ALL_SUBAGENT_NAMES.length === 13` |
-| `tests/unit/config/constants.test.ts:137` | `Object.keys(DEFAULT_MODELS).length === 14` |
+| `tests/unit/config/critic-registration.test.ts` | critic sibling maps include required shared tools such as `get_approved_plan` |
+| `tests/unit/config/agent-tool-map.test.ts` | architect has broader access than subagents, and subagent tool lists stay bounded |
+| `tests/unit/config/constants.test.ts` | declared agents, default models, and tool metadata stay coherent |
 
 Workflow when adding a tool to a single agent:
 1. Add the entry.
@@ -485,9 +483,7 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 1. **Identify the actual failing test from the job log first.** Do not assume it's a pre-existing failure based on a local repro of a different test. Open the failing job's URL and find the `<file>:<line>` in the Bun output. WebFetch can scrape this if the `gh` CLI isn't available.
 2. **Reproduce that exact file locally:** `bun --smol test tests/unit/<dir>/<file>.test.ts --timeout 30000`.
 3. **Then check if the same failure reproduces on `main`.** If yes, document as pre-existing in the PR description and continue with your branch's work; do not silently inherit the failure.
-4. **For dist-check failures:** `dist-check` is a **hard gate** — never bypass or ignore it.
-   - If your PR touches `src/`: run `bun run build`, examine `git diff -- dist/`, and commit the rebuilt `dist/` in the same PR.
-   - If your PR does **not** touch `src/` but `dist-check` fails: `origin/main` has a dist drift. Do **not** commit rebuilt dist to your PR. The fix belongs on `main`, not in your PR.
+4. **For `package-check` failures:** `package-check` validates the npm tarball (`npm pack` + tarball contents). A failing `package-check` is a source/build/package-manifest problem, not generated-file drift. `dist/` is generated and NOT committed — do not stage it; run `bun run build` locally only when you need the bundle. There is no longer a committed-dist drift check.
 
 ## Test Quality Standards
 
@@ -557,7 +553,7 @@ if (isWindows) test.skip('reason', () => {});
 
 ```bash
 # Single file
-bun test tests/unit/hooks/scope-guard.test.ts
+bun test src/hooks/scope-guard.test.ts
 
 # Batch directory (safe for dirs without mock conflicts)
 bun --smol test tests/unit/hooks --timeout 30000
@@ -574,7 +570,7 @@ bun --smol test tests/unit/commands tests/unit/config --timeout 120000
 
 ```powershell
 # Single file
-bun test tests/unit/hooks/scope-guard.test.ts
+bun test src/hooks/scope-guard.test.ts
 
 # Batch directory (safe for dirs without mock conflicts)
 bun --smol test tests/unit/hooks --timeout 30000

@@ -2,13 +2,13 @@
 
 ## Choose Your Path
 
-**I want to install on my machine** (macOS, Linux, Windows, or Docker)  
+**I want to install on my machine** (macOS, Linux, Windows, or Docker)
 → See [Installation: Linux, Windows, and Docker](installation-linux-docker.md)
 
-**I am an LLM or automation tool installing for a user**  
+**I am an LLM or automation tool installing for a user**
 → See [Installation: LLM Operator Guide](installation-llm-operator.md) (executable runbook)
 
-**I want the full reference** (configuration, troubleshooting, all options)  
+**I want the full reference** (configuration, troubleshooting, all options)
 → Continue below
 
 ---
@@ -155,9 +155,9 @@ Run multiple independent swarms with different model configurations.
 
 ### How It Works
 
-1. **First swarm is default**: The first swarm (or one named "default") creates standard agent names (`architect`, `coder`, etc.)
+1. **`default` swarm is unprefixed**: A swarm explicitly named `"default"` creates standard agent names (`architect`, `coder`, etc.). Other swarm IDs are prefixed.
 
-2. **Additional swarms are prefixed**: Other swarms prefix all agents with the swarm ID:
+2. **Non-default swarms are prefixed**: Other swarms prefix all agents with the swarm ID:
    - `local_architect`
    - `local_coder`
    - `local_sme`
@@ -379,24 +379,26 @@ Swarm creates a `.swarm/` directory in your project:
 
 ```
 .swarm/
-├── plan.md        # Legacy phased roadmap (migrated to plan.json)
-├── plan.json      # Machine-readable plan with Zod-validated schema
-├── context.md     # Project knowledge, SME cache
-├── evidence/      # Per-task execution evidence bundles
-└── history/       # Archived phase summaries
+├── plan-ledger.jsonl  # Authoritative append-only plan history
+├── plan.json          # Derived structured plan projection
+├── plan.md            # Derived human-readable plan projection
+├── context.md         # Project context and selected workflow notes
+├── memory/            # Optional memory database and migration artifacts
+├── evidence/          # Per-task execution evidence bundles
+└── session/           # Session-scoped runtime state
 ```
 
 ### Should I Commit These?
 
-**Yes.** These files are:
-- Human-readable documentation
-- Useful for onboarding
-- Part of project history
+**Usually no.** `.swarm/` is runtime state, not normal source documentation. It can contain plans, evidence, shell audit data, local memory, and session files. The plugin checks Git exclusions because tracked `.swarm/` files create noisy diffs and can expose sensitive operational details.
 
-Add to `.gitignore` if you prefer not to track:
+Keep `.swarm/` out of Git unless you have a deliberate, reviewed reason to commit a specific export artifact:
+
 ```
 .swarm/
 ```
+
+Use `/swarm export`, `/swarm evidence`, `/swarm handoff`, or archived evidence bundles when you need to share state intentionally.
 
 ---
 
@@ -408,14 +410,16 @@ Swarm automatically resumes projects:
 2. If found, reads current phase and task
 3. Continues from where it left off
 
-To start fresh:
-```bash
-rm -rf .swarm/
-```
+To start fresh, prefer the built-in command:
 
-Or use the slash command:
 ```
 /swarm reset --confirm
+```
+
+For a session-only reset that preserves plan, evidence, and knowledge, use:
+
+```
+/swarm reset-session
 ```
 
 ---
@@ -472,19 +476,21 @@ Control which hooks are active:
 "knowledge": {
   "enabled": true,
   "swarm_max_entries": 100,
-  "hive_max_entries": 1000,
-  "auto_promote_days": 30,
+  "hive_max_entries": 200,
+  "auto_promote_days": 90,
   "max_inject_count": 5,
+  "inject_char_budget": 2000,
+  "max_lesson_display_chars": 120,
   "dedup_threshold": 0.6,
   "scope_filter": ["global"],
   "hive_enabled": true,
-  "rejected_max_entries": 200,
+  "rejected_max_entries": 20,
   "validation_enabled": true,
-  "evergreen_confidence": 0.8,
-  "evergreen_utility": 0.5,
-  "low_utility_threshold": 0.2,
+  "evergreen_confidence": 0.9,
+  "evergreen_utility": 0.8,
+  "low_utility_threshold": 0.3,
   "min_retrievals_for_utility": 3,
-  "schema_version": "v6.17"
+  "schema_version": 1
 }
 ```
 
@@ -1076,9 +1082,9 @@ Or disable all gates:
 }
 ```
 
-### Local-Only Guarantee
+### Local Quality Gates
 
-Quality gates run entirely on your machine: no Docker, no network calls, no external APIs, no cloud services.
+Quality gates run on your machine and require no Docker. Optional search-backed features such as General Council use external APIs only when you explicitly enable them and configure credentials.
 
 Optional enhancement: Semgrep CLI (if already on PATH, not required).
 
@@ -1086,7 +1092,7 @@ Optional enhancement: Semgrep CLI (if already on PATH, not required).
 
 ## Slash Commands
 
-Twelve commands are available under `/swarm`:
+Run `/swarm help` for the current command list. The command registry in `src/commands/registry.ts` is the source of truth, and [`docs/commands.md`](commands.md) explains the user-facing behavior.
 
 ### `/swarm status`
 
@@ -1101,16 +1107,18 @@ Tasks: 3/5 complete
 Agents: 9 registered
 ```
 
-### `/swarm plan`
+### `/swarm show-plan`
 
 Displays the full `.swarm/plan.md` content.
 
-### `/swarm plan N`
+`/swarm plan` remains available as a deprecated alias. Prefer `/swarm show-plan` in documentation and scripts.
+
+### `/swarm show-plan N`
 
 Displays only Phase N from the plan. Example:
 
 ```
-/swarm plan 2
+/swarm show-plan 2
 ```
 
 Shows the Phase 2 section including all tasks, dependencies, and status.

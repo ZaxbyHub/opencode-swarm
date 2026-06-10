@@ -1,9 +1,11 @@
 ---
 name: commit-pr
 description: >
-  Codex-native adapter for the opencode-swarm publish workflow. Use when asked to
-  commit, push, open or update a PR, refresh PR body text, mark a PR ready, or
-  close out remote CI before merge.
+  Mandatory Codex/Copilot publication adapter for opencode-swarm. Use for every
+  GitHub issue assignment that results in code changes, commits, pushes, draft PRs,
+  PR body edits, PR readying, release notes, or CI closeout. Must be loaded before
+  `git push`, `gh pr create`, `gh pr edit`, or `gh pr ready`. Routes to the single
+  canonical source of truth at `.claude/skills/commit-pr/SKILL.md`.
 ---
 
 # Commit & PR
@@ -85,7 +87,7 @@ gh run view <run-id> --json headSha,status,conclusion,jobs,url
 gh run rerun <run-id> --failed
 ```
 
-For CI `dist-check` failures on source-touching PRs, inspect the CI log first. If the failure is generated-output (`dist/`) drift from stale local dependencies, use the canonical executable recovery sequence in the source-of-truth skill, verify the `dist/` diff, and commit the regenerated files instead of calling the check pre-existing.
+`dist/` is generated output and is not committed (#1047); do not stage it and there is no `dist-check` drift gate. If `package-check` fails, inspect the CI log: it is a source / build / `package.json#files` problem (an incomplete or unbuildable tarball), not generated-file drift. Fix the source or manifest and rerun `bun run package:smoke` locally.
 
 After a forced install on Windows, `EPERM` while reading refreshed `node_modules`
 is usually host friction; rerun the exact focused command with approved access

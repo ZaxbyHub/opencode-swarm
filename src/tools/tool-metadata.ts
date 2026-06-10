@@ -45,7 +45,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	syntax_check: {
-		description: 'syntax validation',
+		description:
+			'check syntax of source files using tree-sitter parsers across multiple languages, returning per-file errors',
 		agents: ['architect', 'coder', 'test_engineer'],
 	},
 	placeholder_scan: {
@@ -53,7 +54,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer'],
 	},
 	imports: {
-		description: 'dependency audit',
+		description:
+			'find all consumers that import from a given file — use before refactoring shared modules to avoid breaking unseen dependents',
 		agents: [
 			'architect',
 			'sme',
@@ -71,11 +73,13 @@ export const TOOL_METADATA = {
 		],
 	},
 	lint: {
-		description: 'code quality',
+		description:
+			'run project linter in check or fix mode; supports biome, eslint, ruff, clippy, and more, returns structured results',
 		agents: ['architect', 'reviewer', 'coder'],
 	},
 	secretscan: {
-		description: 'secret detection',
+		description:
+			'scan for secrets (API keys, tokens, passwords) via regex and entropy; returns redacted previews, excludes common dirs',
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	sast_scan: {
@@ -83,7 +87,8 @@ export const TOOL_METADATA = {
 		agents: ['architect', 'reviewer', 'critic_oversight'],
 	},
 	build_check: {
-		description: 'build verification',
+		description:
+			'discover and run build, typecheck, and test commands for various project ecosystems in the working directory',
 		agents: ['architect', 'coder', 'test_engineer'],
 	},
 	pre_check_batch: {
@@ -96,7 +101,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	symbols: {
-		description: 'code symbol search',
+		description:
+			'extract exported symbols (functions, classes, interfaces, types) from source files; supports TypeScript, JavaScript, and Python',
 		agents: [
 			'architect',
 			'sme',
@@ -170,7 +176,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	checkpoint: {
-		description: 'state snapshots',
+		description:
+			'create named git checkpoints for save, restore, and delete — use before risky operations to enable rollback',
 		agents: ['architect'],
 	},
 	pkg_audit: {
@@ -216,6 +223,11 @@ export const TOOL_METADATA = {
 			'critic_oversight',
 			'explorer',
 		],
+	},
+	git_blame: {
+		description:
+			'per-line git blame metadata: sha, author, date, summary for each line in a file',
+		agents: ['reviewer', 'explorer', 'architect'],
 	},
 	gitingest: {
 		description: 'fetch a GitHub repository full content via gitingest.com',
@@ -426,22 +438,22 @@ export const TOOL_METADATA = {
 	},
 	get_qa_gate_profile: {
 		description:
-			'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council), lock state, and profile hash. Read-only.',
+			'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council), lock state, and profile hash. Read-only.',
 		agents: ['architect'],
 	},
 	set_qa_gates: {
 		description:
-			'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council.',
+			'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council.',
 		agents: ['architect'],
 	},
 	web_search: {
 		description:
-			'External web search (Tavily or Brave) for architect-driven council research. Returns titled results with snippets and URLs. Config-gated on council.general.enabled; requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents.',
-		agents: ['architect', 'skill_improver'],
+			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents and by SME for opt-in external skill/source evaluation.',
+		agents: ['architect', 'sme', 'skill_improver'],
 	},
 	convene_general_council: {
 		description:
-			'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled.',
+			'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 		agents: ['architect'],
 	},
 	write_final_council_evidence: {

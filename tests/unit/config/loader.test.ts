@@ -207,9 +207,54 @@ describe('config/loader', () => {
 				adversarial_testing: { enabled: true, scope: 'all' },
 				full_auto: {
 					enabled: false,
+					mode: 'supervised',
 					max_interactions_per_phase: 50,
 					deadlock_threshold: 3,
 					escalation_mode: 'pause',
+					fail_closed: true,
+					permission_policy: {
+						enabled: true,
+						allow_defaults: true,
+						trusted_roots: ['.'],
+						trusted_domains: [],
+						protected_paths: [
+							'.git',
+							'.github/workflows',
+							'.swarm',
+							'package.json',
+							'package-lock.json',
+							'bun.lock',
+							'CHANGELOG.md',
+							'.release-please-manifest.json',
+							'release-please-config.json',
+							'src/index.ts',
+							'src/hooks/guardrails.ts',
+							'src/hooks/delegation-gate.ts',
+							'src/hooks/scope-guard.ts',
+							'src/hooks/full-auto-permission.ts',
+							'src/hooks/full-auto-intercept.ts',
+							'src/full-auto',
+							'src/config/schema.ts',
+							'src/config/constants.ts',
+							'src/tools/phase-complete.ts',
+							'dist',
+						],
+					},
+					oversight: {
+						every_architect_turns: 5,
+						every_tool_calls: 25,
+						every_minutes: 20,
+						on_phase_boundary: true,
+						on_task_completion: false,
+						on_plan_change: true,
+						on_high_risk_action: true,
+						on_subagent_return_warning: true,
+					},
+					denials: {
+						max_consecutive: 3,
+						max_total: 20,
+						on_limit: 'pause',
+					},
 				},
 			});
 		});
@@ -286,6 +331,88 @@ describe('config/loader', () => {
 			expect(result.inject_phase_reminders).toBe(true); // Default value
 
 			// Clean up project directory
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('uses global council.general config when project config has no council override', () => {
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					council: {
+						enabled: true,
+						general: {
+							enabled: true,
+							searchProvider: 'tavily',
+							searchApiKey: 'global-key',
+							maxSourcesPerMember: 4,
+						},
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+			const configDir = path.join(projectDir, '.opencode');
+			const configFile = path.join(configDir, 'opencode-swarm.json');
+			fs.mkdirSync(configDir, { recursive: true });
+			fs.writeFileSync(configFile, JSON.stringify({ agents: {} }));
+
+			const result = loadPluginConfig(projectDir);
+
+			expect(result.council?.enabled).toBe(true);
+			expect(result.council?.general?.enabled).toBe(true);
+			expect(result.council?.general?.searchProvider).toBe('tavily');
+			expect(result.council?.general?.searchApiKey).toBe('global-key');
+			expect(result.council?.general?.maxSourcesPerMember).toBe(4);
+
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		});
+
+		it('allows project config to explicitly override global council.general config', () => {
+			const userConfigDir = path.join(tempDir, 'opencode');
+			const userConfigFile = path.join(userConfigDir, 'opencode-swarm.json');
+			fs.mkdirSync(userConfigDir, { recursive: true });
+			fs.writeFileSync(
+				userConfigFile,
+				JSON.stringify({
+					council: {
+						enabled: true,
+						general: {
+							enabled: true,
+							searchProvider: 'tavily',
+							searchApiKey: 'global-key',
+						},
+					},
+				}),
+			);
+
+			const projectDir = fs.realpathSync(
+				fs.mkdtempSync(path.join(os.tmpdir(), 'project-test-')),
+			);
+			const configDir = path.join(projectDir, '.opencode');
+			const configFile = path.join(configDir, 'opencode-swarm.json');
+			fs.mkdirSync(configDir, { recursive: true });
+			fs.writeFileSync(
+				configFile,
+				JSON.stringify({
+					council: {
+						general: {
+							enabled: false,
+						},
+					},
+				}),
+			);
+
+			const result = loadPluginConfig(projectDir);
+
+			expect(result.council?.enabled).toBe(true);
+			expect(result.council?.general?.enabled).toBe(false);
+			expect(result.council?.general?.searchApiKey).toBe('global-key');
+
 			fs.rmSync(projectDir, { recursive: true, force: true });
 		});
 

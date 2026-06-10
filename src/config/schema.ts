@@ -181,6 +181,24 @@ export const HooksConfigSchema = z.object({
 	agent_awareness_max_chars: z.number().min(50).max(2000).default(300),
 	delegation_gate: z.boolean().default(true),
 	delegation_max_chars: z.number().min(500).max(20000).default(4000),
+	/**
+	 * Issue #1151 PR 2 (Stage A): opt-in support for OpenCode background subagents.
+	 * When false (default) swarm fail-closed-blocks background swarm `Task` dispatches
+	 * (PR 1 behavior). When true, background swarm dispatches are allowed and tracked as
+	 * durable pending records under `.swarm/background-delegations.jsonl`, and a read-only
+	 * completion observer logs the upstream completion signal — but NO workflow gate is
+	 * advanced from a background completion in Stage A (gate-affecting ingestion is Stage B).
+	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` to have any effect.
+	 */
+	background_subagents: z.boolean().default(false),
+	/** Bounded lifetime (minutes) after which a tracked pending background delegation is
+	 *  swept to `stale` so `.swarm/` does not accumulate permanently-running entries. */
+	background_pending_timeout_minutes: z
+		.number()
+		.int()
+		.min(1)
+		.max(1440)
+		.default(30),
 });
 
 export type HooksConfig = z.infer<typeof HooksConfigSchema>;
@@ -854,6 +872,24 @@ export const PlanCursorConfigSchema = z.object({
 // Type alias for downstream usage
 export type PlanCursorConfig = z.infer<typeof PlanCursorConfigSchema>;
 
+// Context Map configuration (issue #1104, FR-006 — opt-in)
+// Controls the Context Map / Context Capsules feature: file-level summaries
+// (capsules) that replace full file reads when context budgets are tight.
+export const ContextMapConfigSchema = z.object({
+	/** Enable the context map feature. Default: false (opt-in). */
+	enabled: z.boolean().default(false),
+	/** Controls how aggressively capsules replace file reads. Default: balanced. */
+	mode: z.enum(['conservative', 'balanced', 'aggressive']).default('balanced'),
+	/** Token budget per capsule summary. Default: 2000. */
+	max_capsule_tokens: z.number().int().positive().default(2000),
+	/** Whether content hash changes invalidate cached file summaries. Default: true. */
+	invalidate_on_hash_change: z.boolean().default(true),
+	/** Maps agent role names to capsule strategy names. Default: {}. */
+	agent_profiles: z.record(z.string(), z.string()).default({}),
+});
+
+export type ContextMapConfig = z.infer<typeof ContextMapConfigSchema>;
+
 // Checkpoint configuration
 export const CheckpointConfigSchema = z
 	.object({
@@ -1144,6 +1180,16 @@ export type KnowledgeApplicationConfig = z.infer<
 	typeof KnowledgeApplicationConfigSchema
 >;
 
+// Skill propagation gate configuration
+export const SkillPropagationConfigSchema = z.object({
+	enabled: z.boolean().default(true),
+	enforce: z.boolean().default(false),
+});
+
+export type SkillPropagationConfig = z.infer<
+	typeof SkillPropagationConfigSchema
+>;
+
 // Skill-improver agent configuration (issue #629)
 export const SkillImproverConfigSchema = z.object({
 	/** Default: false. Must be explicitly enabled. */
@@ -1385,7 +1431,7 @@ export const CouncilConfigSchema = z
 			.boolean()
 			.default(true)
 			.describe(
-				'When true, a phase-level council CONCERNS verdict does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Default: true (CONCERNS is advisory).',
+				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -1414,6 +1460,26 @@ export const ParallelizationConfigSchema = z.object({
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
 
+export const WorktreeIsolationConfigSchema = z.object({
+	/**
+	 * auto: use isolated worktrees for eligible parallel coder dispatches; if
+	 * isolation cannot be prepared, block additional parallel coder dispatches so
+	 * execution serializes in the primary tree.
+	 *
+	 * required: block the coder dispatch if isolation cannot be prepared.
+	 *
+	 * disabled: preserve current shared-tree behavior.
+	 */
+	policy: z.enum(['auto', 'required', 'disabled']).default('auto'),
+	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
+	worktree_dir: z.string().optional(),
+	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+});
+
+export type WorktreeIsolationConfig = z.infer<
+	typeof WorktreeIsolationConfigSchema
+>;
+
 // Turbo configuration schema (Phase 1 Task 1.1)
 export const LeanTurboConfigSchema = z.object({
 	/** Maximum parallel coders in lean mode. 1 = serial. */
@@ -1432,14 +1498,15 @@ export const LeanTurboConfigSchema = z.object({
 	integrated_diff_required: z.boolean().default(true),
 	/** Allow docs-only phases when reviewer is not available. */
 	allow_docs_only_without_reviewer: z.boolean().default(false),
-	/** Use worktree isolation for parallel coders. NOT YET IMPLEMENTED — must be false. */
-	worktree_isolation: z
-		.boolean()
-		.default(false)
-		.refine((val) => val === false, {
-			message:
-				'worktree_isolation: true is not yet implemented. Use false (the default) for in-repo parallel execution. Full worktree isolation will be available in a future release.',
-		}),
+	/** Use worktree isolation for parallel coders. When true, each lane gets its own worktree. */
+	worktree_isolation: z.boolean().default(false),
+	/** Branch merge strategy after lane worktree completion. */
+	merge_strategy: z
+		.enum(['merge', 'rebase', 'cherry-pick'])
+		.default('merge')
+		.optional(),
+	/** Optional user-specified worktree directory override. */
+	worktree_dir: z.string().optional(),
 });
 
 export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
@@ -1574,6 +1641,9 @@ export const PluginConfigSchema = z.object({
 	// Plan cursor configuration - controls compressed plan summary injection
 	plan_cursor: PlanCursorConfigSchema.optional(),
 
+	// Context Map configuration (issue #1104, FR-006 — opt-in)
+	context_map: ContextMapConfigSchema.optional(),
+
 	// Evidence configuration
 	evidence: EvidenceConfigSchema.optional(),
 
@@ -1631,6 +1701,9 @@ export const PluginConfigSchema = z.object({
 
 	// v2: Knowledge-application contract (warn|enforce, ack tracking)
 	knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+
+	// Skill propagation gate/injection configuration
+	skillPropagation: SkillPropagationConfigSchema.optional(),
 
 	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
 	skill_improver: SkillImproverConfigSchema.optional(),
@@ -1692,6 +1765,11 @@ export const PluginConfigSchema = z.object({
 	// Parallelization configuration (PR 1 dark foundation — disabled by default)
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
+
+	// Worktree isolation policy for standard execution-profile parallel coder
+	// dispatches. Lean Turbo keeps its legacy per-mode fields for backward
+	// compatibility; this top-level block is the general lane-isolation surface.
+	worktree: WorktreeIsolationConfigSchema.optional(),
 
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
 	// Backward compatible: no turbo key means current behavior unchanged.

@@ -103,7 +103,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 			'Synthesize responses from a multi-model General Council. Accepts parallel member ' +
 			'responses (Round 1, optionally Round 2), detects disagreements, and returns ' +
 			'consensus points, persisting disagreements, and a structured synthesis. ' +
-			'Architect-only. Config-gated on council.general.enabled.',
+			'Architect-only. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 		args: {
 			question: z
 				.string()
@@ -229,7 +229,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 					success: false,
 					reason: 'council_general_disabled',
 					message:
-						'convene_general_council requires council.general.enabled: true in opencode-swarm.json.',
+						'convene_general_council requires council.general.enabled: true in the resolved config: global ~/.config/opencode/opencode-swarm.json or project .opencode/opencode-swarm.json.',
 				};
 				return JSON.stringify(fail, null, 2);
 			}

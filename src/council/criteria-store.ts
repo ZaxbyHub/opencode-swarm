@@ -7,9 +7,26 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { z } from 'zod';
 import type { CouncilCriteria, CouncilCriteriaItem } from './types';
 
 const COUNCIL_DIR = '.swarm/council';
+const CouncilCriteriaSchema = z.object({
+	taskId: z.string(),
+	criteria: z.array(
+		z.object({
+			id: z.string(),
+			description: z.string(),
+			mandatory: z.boolean(),
+		}),
+	),
+	declaredAt: z.string(),
+});
+// Intentionally NO .passthrough() — Zod strips unknown keys by default.
+// This provides built-in protection against prototype pollution via
+// `__proto__`, `constructor`, or `prototype` own-property keys in
+// persisted .swarm/council/*.json files. (council-evidence-writer.ts
+// uses safeAssignOwnProps for the same purpose on evidence files.)
 
 export function writeCriteria(
 	workingDir: string,
@@ -36,16 +53,9 @@ export function readCriteria(
 	const filePath = join(workingDir, COUNCIL_DIR, `${safeId(taskId)}.json`);
 	if (!existsSync(filePath)) return null;
 	try {
-		const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown;
-		if (
-			parsed &&
-			typeof parsed === 'object' &&
-			typeof (parsed as CouncilCriteria).taskId === 'string' &&
-			Array.isArray((parsed as CouncilCriteria).criteria)
-		) {
-			return parsed as CouncilCriteria;
-		}
-		return null;
+		return CouncilCriteriaSchema.parse(
+			JSON.parse(readFileSync(filePath, 'utf-8')),
+		);
 	} catch {
 		return null;
 	}

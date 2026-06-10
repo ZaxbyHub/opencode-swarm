@@ -18,7 +18,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	readKnowledge,
@@ -33,7 +33,11 @@ import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
-import { generateSkills, listSkills } from './skill-generator.js';
+import {
+	generateSkills,
+	listSkills,
+	parseDraftFrontmatter,
+} from './skill-generator.js';
 import {
 	type QuotaWindow,
 	releaseQuota,
@@ -105,9 +109,15 @@ async function atomicWrite(p: string, content: string): Promise<void> {
 
 interface InventorySnapshot {
 	knowledge: { swarm: number; hive: number; archived: number };
-	skills: { proposals: number; active: number };
+	skills: {
+		proposals: number;
+		active: number;
+		stale: number;
+		metadataReadable: number;
+	};
 	highConfidenceClusters: number;
 	matureCandidates: SwarmKnowledgeEntry[];
+	staleActiveSkills: Array<{ slug: string; reasons: string[] }>;
 }
 
 async function gatherInventory(directory: string): Promise<InventorySnapshot> {
@@ -122,6 +132,52 @@ async function gatherInventory(directory: string): Promise<InventorySnapshot> {
 		(e) => e.status === 'archived',
 	).length;
 	const skills = await listSkills(directory);
+	const knowledgeById = new Map(
+		[...swarm, ...hive].map((entry) => [entry.id, entry]),
+	);
+	const staleActiveSkills: Array<{ slug: string; reasons: string[] }> = [];
+	let metadataReadable = 0;
+	for (const skill of skills.active) {
+		let content: string;
+		try {
+			content = await readFile(skill.path, 'utf-8');
+		} catch {
+			continue;
+		}
+		const fm = parseDraftFrontmatter(content);
+		if (!fm) continue;
+		metadataReadable += 1;
+		const reasons: string[] = [];
+		if (fm.sourceKnowledgeIds.length === 0) {
+			reasons.push('missing_source_knowledge_ids');
+		}
+		if (!fm.generatedAt) {
+			reasons.push('missing_generated_at');
+		} else {
+			const generatedAtMs = Date.parse(fm.generatedAt);
+			if (!Number.isFinite(generatedAtMs)) {
+				reasons.push('invalid_generated_at');
+			} else {
+				for (const id of fm.sourceKnowledgeIds) {
+					const source = knowledgeById.get(id);
+					if (!source) {
+						reasons.push(`missing_source:${id}`);
+						continue;
+					}
+					const updatedAtMs = Date.parse(source.updated_at);
+					if (Number.isFinite(updatedAtMs) && updatedAtMs > generatedAtMs) {
+						reasons.push(`updated_after_generation:${id}`);
+					}
+				}
+			}
+		}
+		if (reasons.length > 0) {
+			staleActiveSkills.push({
+				slug: skill.slug,
+				reasons: reasons.slice(0, 6),
+			});
+		}
+	}
 	const matureCandidates = swarm
 		.concat(hive as unknown as SwarmKnowledgeEntry[])
 		.filter(
@@ -136,9 +192,12 @@ async function gatherInventory(directory: string): Promise<InventorySnapshot> {
 		skills: {
 			proposals: skills.proposals.length,
 			active: skills.active.length,
+			stale: staleActiveSkills.length,
+			metadataReadable,
 		},
 		highConfidenceClusters: matureCandidates.length,
 		matureCandidates,
+		staleActiveSkills,
 	};
 }
 
@@ -172,10 +231,20 @@ hive_entries: ${inv.knowledge.hive}
 archived: ${inv.knowledge.archived}
 draft_skills: ${inv.skills.proposals}
 active_skills: ${inv.skills.active}
+active_skills_with_readable_metadata: ${inv.skills.metadataReadable}
+stale_active_skills: ${inv.skills.stale}
 mature_uncompiled_clusters: ${inv.highConfidenceClusters}
 
 TOP MATURE CANDIDATES (first 25):
 ${matureRows || '(none)'}
+
+STALE ACTIVE SKILLS (first 10):
+${
+	inv.staleActiveSkills
+		.slice(0, 10)
+		.map((s) => `- ${s.slug} | ${s.reasons.join(', ')}`)
+		.join('\n') || '(none)'
+}
 `;
 }
 
@@ -221,8 +290,16 @@ function buildDeterministicProposal(args: {
 		`- Generated skills: proposals=${args.inventory.skills.proposals}, active=${args.inventory.skills.active}`,
 	);
 	lines.push(
+		`- Active skills with readable metadata: ${args.inventory.skills.metadataReadable} (stale=${args.inventory.skills.stale})`,
+	);
+	lines.push(
 		`- High-confidence un-skill'd clusters: ${args.inventory.highConfidenceClusters}`,
 	);
+	if (args.inventory.staleActiveSkills.length > 0) {
+		lines.push(
+			`- Stale active skills: ${args.inventory.staleActiveSkills.map((s) => s.slug).join(', ')}`,
+		);
+	}
 	lines.push('');
 	lines.push('## Recommendations');
 	if (args.inventory.highConfidenceClusters > 0) {

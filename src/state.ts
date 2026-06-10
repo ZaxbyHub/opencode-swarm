@@ -13,13 +13,21 @@ import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
-import { getProfile, type QaGates } from './db/qa-gate-profile.js';
+import type { CouncilAgent } from './council/types';
+import {
+	getEffectiveGates,
+	getProfile,
+	type QaGates,
+} from './db/qa-gate-profile.js';
 import {
 	detectEnvironmentProfile,
 	type EnvironmentProfile,
 } from './environment/profile.js';
 import type { TaskEvidence } from './gate-evidence';
-import { clearPendingCoderScope } from './hooks/delegation-gate.js';
+import {
+	clearPendingCoderScope,
+	resetStandardWorktreeIsolationState,
+} from './hooks/delegation-gate.js';
 import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
@@ -100,6 +108,21 @@ export type TaskWorkflowState =
 	| 'reviewer_run'
 	| 'tests_run'
 	| 'complete';
+
+/**
+ * Canonical ordering of TaskWorkflowState values for forward-only transition checks.
+ * Used by advanceTaskState, canAdvanceTaskState, and applyRehydrationCache.
+ * Extracted from three duplicate local literals to a single module-level constant
+ * to eliminate duplication and prevent future drift.
+ */
+const STATE_ORDER: TaskWorkflowState[] = [
+	'idle',
+	'coder_delegated',
+	'pre_check_passed',
+	'reviewer_run',
+	'tests_run',
+	'complete',
+];
 
 /**
  * Represents per-session state for guardrail tracking.
@@ -183,6 +206,11 @@ export interface AgentSessionState {
 			quorumSize: number;
 		}
 	>;
+	/**
+	 * Per-(task,round) required council members for the next submission attempt.
+	 * Key format: `${taskId}:${roundNumber}`.
+	 */
+	pendingCouncilRequirements?: Map<string, Set<CouncilAgent>>;
 	/** Last gate outcome for deliberation preamble injection */
 	lastGateOutcome: {
 		gate: string;
@@ -455,6 +483,7 @@ export function resetSwarmState(): void {
 	// map so a /swarm close + new session with a colliding taskId (e.g. "1.1")
 	// cannot inherit stale scope from the previous swarm.
 	clearPendingCoderScope();
+	resetStandardWorktreeIsolationState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.
 	_councilDisagreementWarned.clear();
@@ -559,6 +588,7 @@ export function startAgentSession(
 		taskWorkflowStates: new Map(),
 		stageBCompletion: new Map(),
 		taskCouncilApproved: new Map(),
+		pendingCouncilRequirements: new Map(),
 		lastGateOutcome: null,
 		declaredCoderScope: null,
 		lastScopeViolation: null,
@@ -756,6 +786,9 @@ export function ensureAgentSession(
 		// v6.71+ Council mode migration safety
 		if (!session.taskCouncilApproved) {
 			session.taskCouncilApproved = new Map();
+		}
+		if (!session.pendingCouncilRequirements) {
+			session.pendingCouncilRequirements = new Map();
 		}
 		if (session.lastGateOutcome === undefined) {
 			session.lastGateOutcome = null;
@@ -1050,15 +1083,6 @@ export function advanceTaskState(
 		);
 	}
 
-	const STATE_ORDER: TaskWorkflowState[] = [
-		'idle',
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-		'complete',
-	];
-
 	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
 	const currentIndex = STATE_ORDER.indexOf(current);
 	const newIndex = STATE_ORDER.indexOf(newState);
@@ -1071,9 +1095,10 @@ export function advanceTaskState(
 
 	// 'complete' can only be reached from 'tests_run' — enforce sequential progression
 	if (newState === 'complete' && current !== 'tests_run') {
-		// Council fast-path: if submit_council_verdicts recorded an APPROVE verdict for this task,
-		// allow advancement from any non-idle prior state. Pre-check (pre_check_passed) is
-		// still required to avoid skipping Stage A.
+		// Council fast-path: if council_mode is enabled and submit_council_verdicts
+		// recorded an APPROVE verdict, allow advancement from any state past
+		// pre_check_passed, bypassing the Stage B states (reviewer_run, tests_run).
+		// Pre-check (pre_check_passed) is still required to avoid skipping Stage A.
 		// Quorum gate: an APPROVE verdict only short-circuits the gate sequence
 		// when it was recorded with at least `minimumMembers` distinct member
 		// verdicts. Default 3; `requireAllMembers: true` overrides to 5.
@@ -1099,6 +1124,12 @@ export function advanceTaskState(
 	}
 
 	session.taskWorkflowStates.set(taskId, newState);
+	// Clear Stage B completion bits when a task reaches 'complete' so that
+	// any future retry/restart cycle starts the barrier fresh and does not
+	// fire prematurely from stale completion data.
+	if (newState === 'complete') {
+		session.stageBCompletion?.delete(taskId);
+	}
 	if (options?.emitTelemetry !== false) {
 		telemetry.taskStateChanged(
 			options?.telemetrySessionId ?? session.agentName,
@@ -1107,6 +1138,49 @@ export function advanceTaskState(
 			current,
 		);
 	}
+}
+
+/**
+ * Returns true iff calling `advanceTaskState(session, taskId, newState)` would
+ * succeed without throwing. Use this predicate to guard call sites that cannot
+ * catch `INVALID_TASK_STATE_TRANSITION` as a control-flow mechanism.
+ *
+ * Does NOT perform side effects or emit telemetry.
+ *
+ * @param session - The agent session state
+ * @param taskId - The task identifier
+ * @param newState - The requested new state
+ * @param councilConfig - Optional council quorum config (required when newState='complete')
+ */
+export function canAdvanceTaskState(
+	session: AgentSessionState,
+	taskId: string,
+	newState: TaskWorkflowState,
+	councilConfig?: { minimumMembers?: number; requireAllMembers?: boolean },
+): boolean {
+	if (!isValidTaskId(taskId)) return false;
+	if (!session || !(session.taskWorkflowStates instanceof Map)) return false;
+
+	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
+	const currentIndex = STATE_ORDER.indexOf(current);
+	const newIndex = STATE_ORDER.indexOf(newState);
+
+	if (newIndex <= currentIndex) return false;
+
+	if (newState === 'complete' && current !== 'tests_run') {
+		const councilEntry = session.taskCouncilApproved?.get(taskId);
+		const effectiveMinimum = councilConfig?.requireAllMembers
+			? 5
+			: (councilConfig?.minimumMembers ?? 3);
+		const councilApproved =
+			councilEntry?.verdict === 'APPROVE' &&
+			(councilEntry.quorumSize ?? 0) >= effectiveMinimum;
+		const pastPreCheck =
+			currentIndex >= STATE_ORDER.indexOf('pre_check_passed');
+		if (!councilApproved || !pastPreCheck) return false;
+	}
+
+	return true;
 }
 
 /**
@@ -1226,9 +1300,9 @@ export function hasBothStageBCompletions(
 }
 
 /**
- * Returns true iff council is authoritative for the current plan.
+ * Returns true iff per-task council mode is active (replaces Stage B).
  *
- * AND semantics: council is authoritative when BOTH `pluginConfig.council.enabled === true`
+ * AND semantics: requires BOTH `pluginConfig.council.enabled === true`
  * AND `QaGates.council_mode === true` for the plan associated with this directory.
  *
  * If exactly one of the two flags is true, a one-time warning is logged per plan_id
@@ -1241,6 +1315,7 @@ export function hasBothStageBCompletions(
 export async function isCouncilGateActive(
 	directory: string,
 	council: { enabled?: boolean } | undefined,
+	sessionOverrides: Partial<QaGates> = {},
 ): Promise<boolean> {
 	const enabled = council?.enabled === true;
 
@@ -1274,7 +1349,8 @@ export async function isCouncilGateActive(
 		return false;
 	}
 
-	const councilMode = profile.gates.council_mode === true;
+	const councilMode =
+		getEffectiveGates(profile, sessionOverrides).council_mode === true;
 
 	if (enabled && councilMode) {
 		return true;
@@ -1286,7 +1362,7 @@ export async function isCouncilGateActive(
 		logger.warn(
 			`[delegation-gate] Council mode mismatch for plan ${planId}: ` +
 				`pluginConfig.council.enabled=${enabled}, QaGates.council_mode=${councilMode}. ` +
-				'Falling back to Stage B (non-council) advancement.',
+				'Falling back to Stage B (non-council) per-task advancement.',
 		);
 	}
 
@@ -1480,15 +1556,6 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 	}
 
 	const { planTaskStates, evidenceMap } = _rehydrationCache;
-
-	const STATE_ORDER: TaskWorkflowState[] = [
-		'idle',
-		'coder_delegated',
-		'pre_check_passed',
-		'reviewer_run',
-		'tests_run',
-		'complete',
-	];
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);

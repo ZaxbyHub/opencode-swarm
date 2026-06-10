@@ -38,7 +38,8 @@ Every PR that touches a relevant area must list which of these invariants it tou
 - The main plugin bundle (`dist/index.js`) must remain Node-ESM-loadable. **No top-level `bun:` imports** (see v6.86.8 / `bundle-portability.test.ts`).
 - **No direct `Bun.*` calls** outside `src/utils/bun-compat.ts`. CLI-only modules that intentionally `--target bun` are the only exception.
 - The default export must remain the v1 plugin object shape `{ id, server }` (see v6.86.9 / `bundle-plugin-shape.test.ts`).
-- Any change touching `src/index.ts`, package exports, `package.json#main`, `bun build` config, `dist/`, or plugin entry shape must run the bundle-portability and plugin-shape tests AND `node --input-type=module -e "await import('./dist/index.js')"`.
+- Any change touching `src/index.ts`, package exports, `package.json#main`, `bun build` config, or plugin entry shape must run the bundle-portability and plugin-shape tests AND `node --input-type=module -e "await import('./dist/index.js')"`.
+- `dist/` is **generated build output and is not committed** (#1047). Do not stage it. CI builds it (`unit`, `package-check`, `smoke` run `bun run build`) and `package-check` validates the packed npm tarball; release/publish builds from source.
 
 ### 3. Subprocesses — bounded, non-interactive, killable, portable
 
@@ -69,7 +70,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
 ### 6. Test execution — do not use broad `test_runner` for repo validation
 
 - Do not use the OpenCode `test_runner` tool with `scope: 'all'` or broad `'graph'` / `'impact'` scope for **whole-repo validation**. `scope: 'all'` requires `allow_full_suite: true` and is intended for opt-in CI mirrors, not interactive use.
-- `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts:26`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP instruction; broad scopes can stall or kill OpenCode.
+- `MAX_SAFE_TEST_FILES = 50` (`src/tools/test-runner.ts`). Resolutions exceeding this return `outcome: 'scope_exceeded'` with a SKIP instruction; broad scopes can stall or kill OpenCode.
 - For repo validation, prefer **shell commands** (the per-file isolation loops in `contributing.md` / `TESTING.md`).
 - For targeted agent validation, use `test_runner` with explicit `files: [...]` or small targeted scopes.
 
@@ -103,10 +104,10 @@ Every PR that touches a relevant area must list which of these invariants it tou
 
 ### 11. Tool registration + agent-map coherence
 
-- A tool addition is **incomplete** until: (a) export from `src/tools/index.ts`, (b) registration in the plugin `tool: {}` block in `src/index.ts`, (c) entry in `TOOL_NAMES` and `AGENT_TOOL_MAP` in `src/config/constants.ts`, (d) help/documentation surfaces, (e) tests covering the new entry.
+- A tool addition is **incomplete** until: (a) export from `src/tools/index.ts`, (b) registration in the plugin `tool: {}` block in `src/index.ts`, (c) entry in `TOOL_NAMES` (`src/tools/tool-names.ts`) and the relevant agent tool map (`AGENT_TOOL_MAP` or an opt-in map in `src/config/constants.ts`), (d) help/documentation surfaces, (e) tests covering the new entry.
 - Run `tests/unit/config/*.test.ts` and `/swarm doctor tools` after any tool, agent-map, command, or help change. See v6.48.0.
 - Parity assertions across sibling map entries are intentional. If a parity test fails, mirror the change to siblings (most common) or update the invariant test if the design intent has actually changed.
-- **Opt-in tool maps**: Some tools are intentionally gated behind feature flags and use separate opt-in maps (e.g., `MEMORY_AGENT_TOOL_MAP` for memory tools when `memory.enabled === true`). These tools must still be exported, registered in the plugin, and have `TOOL_NAMES` entries, but are merged into agent configs conditionally at build time. Opt-in maps must be validated by tests that verify: (a) tools do NOT appear when the feature is disabled, (b) tools DO appear when the feature is enabled, (c) the merged tool set is correct for each agent role. See `src/agents/index.ts:913-936` and `tests/unit/agents/memory-tool-gating.test.ts` for the memory tools pattern.
+- **Opt-in tool maps**: Some tools are intentionally gated behind feature flags and use separate opt-in maps (e.g., `MEMORY_AGENT_TOOL_MAP` for memory tools when `memory.enabled === true`). These tools must still be exported, registered in the plugin, and have `TOOL_NAMES` entries, but are merged into agent configs conditionally at build time. Opt-in maps must be validated by tests that verify: (a) tools do NOT appear when the feature is disabled, (b) tools DO appear when the feature is enabled, (c) the merged tool set is correct for each agent role. See the memory-tool merge path in `src/agents/index.ts` and `tests/unit/agents/memory-tool-gating.test.ts` for the current pattern.
 - **Agent registration changes must test both legacy unprefixed AND multi-swarm prefixed agent names.** v7.3.x regression: a schema default on `default_agent` ("architect") combined with strict equality demoted every `*_architect` to subagent in multi-swarm configs, so OpenCode showed the plugin as loaded but no swarm architect agents appeared. Tests that only used legacy unprefixed `architect` missed the bug entirely. Any change to primary/subagent selection, `default_agent`, or `getAgentConfigs` MUST include a multi-swarm `swarms: { local: ..., mega: ... }` test that asserts at least one prefixed agent is `mode: 'primary'`.
 
 ### 12. Release / cache hygiene

@@ -1,5 +1,279 @@
 # Changelog
 
+## [7.61.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.60.0...v7.61.0) (2026-06-09)
+
+
+### Features
+
+* **council:** make HIGH/CRITICAL concerns blocking at tool level ([110d400](https://github.com/zaxbysauce/opencode-swarm/commit/110d4008628d096e39ee3531ebdfbe2e09403c0a))
+
+
+### Bug Fixes
+
+* **council:** address Copilot PR review findings ([1c307bf](https://github.com/zaxbysauce/opencode-swarm/commit/1c307bfabacba5a73ef17639021a7b0ff8a9c19e))
+* **council:** address swarm-pr-review findings F-001 through F-006 ([d9bede0](https://github.com/zaxbysauce/opencode-swarm/commit/d9bede084ab790a388f49fcc0894f4fab154fd6e))
+* **council:** biome formatting in promoteBlockingConcerns ([78c258f](https://github.com/zaxbysauce/opencode-swarm/commit/78c258f1a51656bf7a5511f4cb8a1b164ae4150c))
+* **council:** mutation gap HIGH/CRITICAL findings now increment blockingConcernsCount ([6ee5f6d](https://github.com/zaxbysauce/opencode-swarm/commit/6ee5f6d42901fc4d7bc0047e2e7289a188398fe7))
+* **test:** add blockingConcernsCount to council test helpers ([7ca2320](https://github.com/zaxbysauce/opencode-swarm/commit/7ca2320952a0a756f9ffd6df9e8692d920d10672))
+
+## [7.60.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.59.1...v7.60.0) (2026-06-09)
+
+
+### Features
+
+* **worktree:** isolate standard parallel coder lanes ([a72c2e0](https://github.com/zaxbysauce/opencode-swarm/commit/a72c2e0cdc48c28e797a4f1cf097f7d038f13add))
+
+
+### Bug Fixes
+
+* **worktree:** preserve standard isolation tracking ([3ed48cc](https://github.com/zaxbysauce/opencode-swarm/commit/3ed48cc6fef26147f46d59a03883c38cca03508b))
+
+## [7.59.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.59.0...v7.59.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **ci:** add missing mock.module targets to allowlist ([73295c8](https://github.com/zaxbysauce/opencode-swarm/commit/73295c896e7878748006c4b03c2f6545d82c2b68))
+* **ci:** isolate knowledge-reader.test.ts from other hook tests ([b6cd846](https://github.com/zaxbysauce/opencode-swarm/commit/b6cd8463974b6b6255e5e6047782ce061ce78310))
+* **cli:** address PR [#1154](https://github.com/zaxbysauce/opencode-swarm/issues/1154) review follow-ups (docs + test coverage) ([80981b8](https://github.com/zaxbysauce/opencode-swarm/commit/80981b8e84e477f3e607c2fa9ef45ecf18dc4f8c))
+* **knowledge:** chmod case-sensitivity, quarantine filter, vitest→bun:test migration ([#828](https://github.com/zaxbysauce/opencode-swarm/issues/828)) ([c20299b](https://github.com/zaxbysauce/opencode-swarm/commit/c20299b7b8bb3450aaef3b744c00cf33e6c0ac65))
+* **knowledge:** resolve PR [#1170](https://github.com/zaxbysauce/opencode-swarm/issues/1170) review findings and biome CI warnings ([5380597](https://github.com/zaxbysauce/opencode-swarm/commit/53805972e221485835f37e736c9024c73ff3f6da))
+* **tests:** document mock.module isolation exception in knowledge-reader.test.ts ([42afe3f](https://github.com/zaxbysauce/opencode-swarm/commit/42afe3f343d6bf2ae7a215aef610362edb2aacb8))
+* **test:** update candidate-entry test for deny-list semantics ([295aa9d](https://github.com/zaxbysauce/opencode-swarm/commit/295aa9d81b4d308d4235e3494ada067e89bc9c2e))
+
+## [7.59.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.58.1...v7.59.0) (2026-06-09)
+
+
+### Features
+
+* **turbo:** git worktree isolation for parallel lean turbo lanes ([2e801f3](https://github.com/zaxbysauce/opencode-swarm/commit/2e801f3bacd6b21306c4166f21c858828a1b200d))
+
+
+### Bug Fixes
+
+* **test:** remove mock.module() from comments to fix CI false positive ([ab19bb8](https://github.com/zaxbysauce/opencode-swarm/commit/ab19bb8b34af8d483b8a7cc43e1aec7a15060c84))
+
+## [7.58.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.58.0...v7.58.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **commands:** bundle mode skills for portable commands ([e1e6e0c](https://github.com/zaxbysauce/opencode-swarm/commit/e1e6e0c1ff4266f5811eef1213e873b586530cd7))
+* **commands:** harden bundled skill packaging ([4b729d5](https://github.com/zaxbysauce/opencode-swarm/commit/4b729d55951574795048fef207200b51367259c8))
+
+## [7.58.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.57.0...v7.58.0) (2026-06-08)
+
+
+### Features
+
+* **sme:** enable external skill research ([f571249](https://github.com/zaxbysauce/opencode-swarm/commit/f5712495667d06fab1e344941e93df3c55024b7a))
+
+
+### Bug Fixes
+
+* **sme:** address external research review feedback ([b2f61f1](https://github.com/zaxbysauce/opencode-swarm/commit/b2f61f1722eb1cd6ab4434aa2a800d7341eb508f))
+
+## [7.57.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.3...v7.57.0) (2026-06-08)
+
+
+### Features
+
+* **commands:** add codebase review swarm command ([a9a3feb](https://github.com/zaxbysauce/opencode-swarm/commit/a9a3febc04156164f7b62e66c1d3e182665dbd2a))
+* **commands:** add codebase review swarm command ([7c1ccf8](https://github.com/zaxbysauce/opencode-swarm/commit/7c1ccf8be7cf4669e8c97a1438caa9bd6e6fdd7d))
+
+
+### Bug Fixes
+
+* **commands:** address codebase review feedback ([3523a4f](https://github.com/zaxbysauce/opencode-swarm/commit/3523a4f5860aee808472849d5a8e1cad194ce295))
+* **commands:** resolve codebase review PR comments ([2da4c34](https://github.com/zaxbysauce/opencode-swarm/commit/2da4c344c896337324d7dd6e437dcd3b3eb79726))
+
+## [7.56.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.2...v7.56.3) (2026-06-08)
+
+
+### Bug Fixes
+
+* treat advisory final council concerns as non-blocking ([a4861e0](https://github.com/zaxbysauce/opencode-swarm/commit/a4861e0b4d553701c273f590db7af8593044c858))
+
+## [7.56.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.1...v7.56.2) (2026-06-08)
+
+
+### Bug Fixes
+
+* **cli:** add defense-in-depth validation for isSafeLockFilePath and improve path warnings ([49a2085](https://github.com/zaxbysauce/opencode-swarm/commit/49a2085e7d496ce4b69a3760e2fc60ec65f4971f))
+* **cli:** add defense-in-depth validation for isSafeLockFilePath and improve path warnings ([8653b51](https://github.com/zaxbysauce/opencode-swarm/commit/8653b519f6502df4e7a0fcad35485cb5a1887396))
+
+## [7.56.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.56.0...v7.56.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **sast,lang,repo-graph:** deep-dive audit hardening for semgrep subprocess, SAST rules, lang/runtime, syntax-check, and PHP backend ([#1002](https://github.com/zaxbysauce/opencode-swarm/issues/1002)) ([b245696](https://github.com/zaxbysauce/opencode-swarm/commit/b245696d64ab6d69682524de7930558b401befc1))
+
+## [7.56.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.55.0...v7.56.0) (2026-06-08)
+
+
+### Features
+
+* add generated skill staleness frontmatter metadata ([a1b79de](https://github.com/zaxbysauce/opencode-swarm/commit/a1b79de739d3d5bf5a7a075ee89fc49e85d05fa7))
+
+## [7.55.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.54.0...v7.55.0) (2026-06-08)
+
+
+### Features
+
+* **delegation-gate:** opt-in durable tracking + observer for background subagents ([#1151](https://github.com/zaxbysauce/opencode-swarm/issues/1151)) ([ca9a528](https://github.com/zaxbysauce/opencode-swarm/commit/ca9a52854a1a63cc3966e1afacb3da56df3aea0e))
+
+## [7.54.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.53.0...v7.54.0) (2026-06-07)
+
+
+### Features
+
+* **council:** harden general council grounding ([7036c5d](https://github.com/zaxbysauce/opencode-swarm/commit/7036c5d547ff7f47f4ed8b2d959dbcfa49b69fd3))
+
+
+### Bug Fixes
+
+* **delegation-gate:** fail-closed guard for OpenCode background subagents ([#1151](https://github.com/zaxbysauce/opencode-swarm/issues/1151)) ([197a21a](https://github.com/zaxbysauce/opencode-swarm/commit/197a21ae278e5608fed1cc242c53637b410435f2))
+
+## [7.53.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.3...v7.53.0) (2026-06-07)
+
+
+### Features
+
+* **commands:** add /swarm pr-feedback and fix signal-mode skill discovery ([f0321c8](https://github.com/zaxbysauce/opencode-swarm/commit/f0321c8479f9ba813d9c66574ff4747d81dfd2c1))
+
+
+### Bug Fixes
+
+* **commands:** thread cwd into PR remote lookup and error on unresolvable PR refs ([cc760ce](https://github.com/zaxbysauce/opencode-swarm/commit/cc760ce760942089e693e17c6e7b9ebee7728ab4))
+
+## [7.52.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.2...v7.52.3) (2026-06-07)
+
+
+### Bug Fixes
+
+* council-mode follow-up items from PR [#728](https://github.com/zaxbysauce/opencode-swarm/issues/728) review ([6e78e96](https://github.com/zaxbysauce/opencode-swarm/commit/6e78e964db0fff0197ae17141df0234d5e0e2074))
+* **council:** address advisory findings from PR [#1140](https://github.com/zaxbysauce/opencode-swarm/issues/1140) review ([b483241](https://github.com/zaxbysauce/opencode-swarm/commit/b48324160fcfc6d0a275b39c7443e62d2cf6b29a))
+
+## [7.52.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.1...v7.52.2) (2026-06-07)
+
+
+### Bug Fixes
+
+* **skill-propagation:** add enforce field to schema and add boundary tests ([8da2214](https://github.com/zaxbysauce/opencode-swarm/commit/8da22142dd19c756e07cd8d9f492c0c460a8b4e1))
+* **skill-propagation:** harden bounded reads, rotation, and config toggle ([bcf941d](https://github.com/zaxbysauce/opencode-swarm/commit/bcf941d78268c294f2a3c78b0fe6973dff0a994b))
+
+## [7.52.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.52.0...v7.52.1) (2026-06-07)
+
+
+### Bug Fixes
+
+* **delegation-gate:** prioritize TASK-line IDs for evidence task resolution ([bfdee12](https://github.com/zaxbysauce/opencode-swarm/commit/bfdee12018e94673c28f92fb1ecd627b4b0f99b1))
+
+## [7.52.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.6...v7.52.0) (2026-06-07)
+
+
+### Features
+
+* **context-map:** add context map and context capsules for agent context reuse ([6f9089d](https://github.com/zaxbysauce/opencode-swarm/commit/6f9089d48c19f9131fbe6a0113b131f0db022230))
+
+
+### Bug Fixes
+
+* address PR review findings F-001, F-002, F-003 ([2af6670](https://github.com/zaxbysauce/opencode-swarm/commit/2af6670f2d7f198ee4f14980476e4ca5f8942d82))
+* **council:** address review findings on quorum and stale verdict detection ([d4815a1](https://github.com/zaxbysauce/opencode-swarm/commit/d4815a1fe3eb7ff4caeffbfaf7608e7b850ed43d))
+* **council:** enforce cross-round quorum integrity requirements ([7ff028a](https://github.com/zaxbysauce/opencode-swarm/commit/7ff028aaf7b437be868a4aacbc561793b1ef1830))
+* reword comment to avoid CI invariant scanner false positive ([d8bb3c2](https://github.com/zaxbysauce/opencode-swarm/commit/d8bb3c25a7eea9779967522f3467d3a1108b7100))
+
+## [7.51.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.5...v7.51.6) (2026-06-06)
+
+
+### Performance Improvements
+
+* **repo-graph:** build workspace graph in O(n) to fix slow plugin startup ([99aa75f](https://github.com/zaxbysauce/opencode-swarm/commit/99aa75f506d63b35c6b3e8b387b0d82b558c95d1)), closes [#1144](https://github.com/zaxbysauce/opencode-swarm/issues/1144)
+
+## [7.51.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.4...v7.51.5) (2026-06-06)
+
+
+### Bug Fixes
+
+* **council:** add design-invariant comment to hardcoded 3-agent threshold ([e7abefa](https://github.com/zaxbysauce/opencode-swarm/commit/e7abefa3f75ec84cd7e8c9083a26307da076b66a))
+* **council:** docs update, appendPrompt comment, silent-reduction warning ([947dd1e](https://github.com/zaxbysauce/opencode-swarm/commit/947dd1e8ae36754ce43e2dfe48ec475a0fe8e9cf))
+* **council:** remove committed dist/ artifacts and add reduction-warning tests ([4a07b2b](https://github.com/zaxbysauce/opencode-swarm/commit/4a07b2be164fffb6d9338e9399e46e630a052688))
+* **council:** remove stale preset-names mention from no-args note ([bddc9e2](https://github.com/zaxbysauce/opencode-swarm/commit/bddc9e2ddb6e86747b7857b3582150883c2a0c29))
+
+## [7.51.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.3...v7.51.4) (2026-06-06)
+
+
+### Bug Fixes
+
+* follow-up items from PR [#640](https://github.com/zaxbysauce/opencode-swarm/issues/640) and [#641](https://github.com/zaxbysauce/opencode-swarm/issues/641) reviews ([427cc00](https://github.com/zaxbysauce/opencode-swarm/commit/427cc0011470be531398e673dddc16cdbd545e3d))
+* use consistent import path for utils warn in knowledge-add.ts ([797aeb5](https://github.com/zaxbysauce/opencode-swarm/commit/797aeb5e191eee52860f4e40abac839dcb6ce4f9))
+
+## [7.51.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.2...v7.51.3) (2026-06-06)
+
+
+### Bug Fixes
+
+* **knowledge:** make JSONL persistence transactional, race-safe, and crash-atomic ([24f03e5](https://github.com/zaxbysauce/opencode-swarm/commit/24f03e50ec1e0b9d225a5ea708f1d8b8ca7a0902))
+* **knowledge:** resolve PR review findings - lock params, tests, DRY refactor ([724accf](https://github.com/zaxbysauce/opencode-swarm/commit/724accfbedd13076e109d6498b7abee7a815bbe5))
+* **knowledge:** sanitize all architect-context injection blocks to prevent prompt injection ([175b0df](https://github.com/zaxbysauce/opencode-swarm/commit/175b0df7f2848b9fb82b8e54f1e1164dfffc9638))
+* **lint:** remove unused imports in curator.ts and knowledge-curator.ts ([3ce8408](https://github.com/zaxbysauce/opencode-swarm/commit/3ce84088785b76f55df34fef1e216d4f3b070f94))
+* **prompt-injection:** block closing XML tags and add adversarial tests for drift/briefing paths ([4089584](https://github.com/zaxbysauce/opencode-swarm/commit/40895843cde77431c0f47789d621245f4dec7ed9))
+* **tests:** add transactKnowledge mock to knowledge-injector adversarial tests ([c02430e](https://github.com/zaxbysauce/opencode-swarm/commit/c02430e4f948a252c4f9a4f4975eeb527e309f7a))
+* **transactFile:** add error handling for mkdir on adversarial paths (path traversal, null bytes) — return false instead of crashing ([0852581](https://github.com/zaxbysauce/opencode-swarm/commit/0852581fa47a88491d5c0e226f1d9a1f2b4402fc))
+* **transactShownFile:** return boolean result so callers can detect mkdir failures and log warnings ([7ce393b](https://github.com/zaxbysauce/opencode-swarm/commit/7ce393bf7e86ddbc69437c704a65810c833e722f))
+
+## [7.51.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.1...v7.51.2) (2026-06-05)
+
+
+### Bug Fixes
+
+* **build:** build dist on source installs via prepare script ([9133fe6](https://github.com/zaxbysauce/opencode-swarm/commit/9133fe6a25918b9dbcd2cd06676b78a253b4b9d5))
+* **package-smoke:** tolerate prepare build output in npm pack --json ([d878f3f](https://github.com/zaxbysauce/opencode-swarm/commit/d878f3ff083e9e68f0e1111af988e8063d6fb05a))
+
+## [7.51.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.51.0...v7.51.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **commit-pr:** replace BOM-generating Out-File with BOM-free WriteAllText ([3b90716](https://github.com/zaxbysauce/opencode-swarm/commit/3b9071601bf908b29fc09cf3a858d17be270030d))
+
+## [7.51.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.4...v7.51.0) (2026-06-05)
+
+
+### Features
+
+* add git_blame tool, improve suggest_patch/test_runner/symbols/diff, expand descriptions, add skills ([#1123](https://github.com/zaxbysauce/opencode-swarm/issues/1123)) ([8079900](https://github.com/zaxbysauce/opencode-swarm/commit/807990044febe90d514198c104d579928091e49c))
+
+## [7.50.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.3...v7.50.4) (2026-06-05)
+
+
+### Bug Fixes
+
+* **validation:** harden sibling JSON readers with Zod schema parsing ([#1111](https://github.com/zaxbysauce/opencode-swarm/issues/1111)) ([e1d7299](https://github.com/zaxbysauce/opencode-swarm/commit/e1d7299f9a4a23d5c6ad3c2e3cb33c0675bf3cd1))
+
+## [7.50.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.2...v7.50.3) (2026-06-05)
+
+
+### Bug Fixes
+
+* **gate-evidence:** harden evidence writes against symlink path escape ([#1110](https://github.com/zaxbysauce/opencode-swarm/issues/1110)) ([27159e2](https://github.com/zaxbysauce/opencode-swarm/commit/27159e218e02149bd69b9290521269b61352bce4))
+
+## [7.50.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.1...v7.50.2) (2026-06-04)
+
+
+### Bug Fixes
+
+* **test-impact:** harden appendTestRun against concurrent writers ([#1109](https://github.com/zaxbysauce/opencode-swarm/issues/1109)) ([bbc6bc3](https://github.com/zaxbysauce/opencode-swarm/commit/bbc6bc3ba51c5a38afa8603cd5312c74c7595925))
+
+## [7.50.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.50.0...v7.50.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **test-impact:** add pass-rate variance to flaky scoring ([#1108](https://github.com/zaxbysauce/opencode-swarm/issues/1108)) ([a2cc05e](https://github.com/zaxbysauce/opencode-swarm/commit/a2cc05ea570dbf22013e664cc633d3d2279f8e0c))
+
 ## [7.50.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.49.1...v7.50.0) (2026-06-04)
 
 

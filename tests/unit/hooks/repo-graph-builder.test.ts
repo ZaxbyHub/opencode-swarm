@@ -20,9 +20,11 @@ import * as path from 'node:path';
 import { createRepoGraphBuilderHook } from '../../../src/hooks/repo-graph-builder';
 import * as logger from '../../../src/utils/logger';
 
-// Create a real temp workspace directory for cross-platform compatibility
+// Create a real temp workspace directory for cross-platform compatibility.
+// Use os.tmpdir() (AGENTS.md invariant 7) so a cleanup failure cannot leave
+// artifacts inside the project tree.
 const tempWorkspace = fs.mkdtempSync(
-	path.join(process.cwd(), 'repo-graph-hook-test-'),
+	path.join(os.tmpdir(), 'repo-graph-hook-test-'),
 );
 
 // Cleanup temp workspace at end of all tests
@@ -395,402 +397,6 @@ describe('toolAfter hook', () => {
 	});
 });
 
-describe('workspace boundary validation', () => {
-	let tempDir: string;
-	let workspaceRoot: string;
-
-	beforeEach(() => {
-		mockUpdateGraphForFiles.mockClear();
-		mockBuildWorkspaceGraph.mockClear();
-		mockSaveGraph.mockClear();
-		// Create a real temp workspace directory
-		tempDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'repo-graph-boundary-test-'),
-		);
-		workspaceRoot = tempDir;
-	});
-
-	afterEach(() => {
-		// Clean up temp directory
-		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
-	});
-
-	test('file inside workspace triggers updateGraphForFiles', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a file inside workspace
-		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, 'export const x = 1;');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: filePath } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).toHaveBeenCalledTimes(1);
-		expect(mockUpdateGraphForFiles).toHaveBeenCalledWith(workspaceRoot, [
-			filePath,
-		]);
-	});
-
-	test('relative file path inside workspace triggers updateGraphForFiles', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a file inside workspace
-		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, 'export const x = 1;');
-
-		// Pass relative path
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: 'src/index.ts' } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).toHaveBeenCalledTimes(1);
-		expect(mockUpdateGraphForFiles).toHaveBeenCalledWith(workspaceRoot, [
-			filePath,
-		]);
-	});
-
-	test('absolute file outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a file OUTSIDE workspace
-		const outsideFile = path.join(os.tmpdir(), 'outside-workspace.txt');
-		fs.writeFileSync(outsideFile, 'secret');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: outsideFile } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('relative path resolving outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a sibling directory
-		const siblingDir = path.join(workspaceRoot, '..', 'sibling-workspace');
-		fs.mkdirSync(siblingDir, { recursive: true });
-
-		// Pass a relative path that resolves outside workspace
-		await hook.toolAfter(
-			{
-				tool: 'write',
-				sessionID: 'test',
-				args: { file_path: '../sibling-workspace/file.txt' },
-			},
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('path traversal attempt ../../../etc/passwd is rejected after resolution', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Attempt path traversal to escape workspace
-		await hook.toolAfter(
-			{
-				tool: 'write',
-				sessionID: 'test',
-				args: { file_path: '../../../etc/passwd' },
-			},
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('absolute path traversal attempt is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a sibling directory for the traversal target
-		const siblingDir = path.join(workspaceRoot, '..', 'target');
-		fs.mkdirSync(siblingDir, { recursive: true });
-
-		// Path that resolves to workspace root's parent or beyond
-		const traversalPath = path.join(
-			workspaceRoot,
-			'..',
-			'..',
-			'..',
-			'target',
-			'file.ts',
-		);
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: traversalPath } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('workspace root itself is allowed (edge case)', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// The boundary check allows: startsWith(workspaceRoot + path.sep) OR equals workspaceRoot
-		// A file at workspace root level should be allowed
-		const rootLevelFile = path.join(workspaceRoot, 'root.ts');
-		fs.writeFileSync(rootLevelFile, '// marker');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: 'root.ts' } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).toHaveBeenCalledTimes(1);
-	});
-
-	test('similar-name directory outside workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a "similar" directory name that shares prefix but is NOT the workspace
-		const similarRoot = path.join(
-			os.tmpdir(),
-			'repo-graph-boundary-test-similar',
-		);
-		fs.mkdirSync(similarRoot, { recursive: true });
-		const similarFile = path.join(similarRoot, 'file.ts');
-		fs.writeFileSync(similarFile, 'similar');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: similarFile } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('file in parent directory of workspace is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a file in the parent of workspace
-		const parentFile = path.join(workspaceRoot, '..', 'parent-file.ts');
-		fs.writeFileSync(parentFile, 'parent');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: parentFile } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('unsupported extension is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Even a file inside workspace with unsupported extension should not trigger update
-		const filePath = path.join(workspaceRoot, 'data.json');
-		fs.writeFileSync(filePath, '{}');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: filePath } },
-			{ output: undefined },
-		);
-
-		// Should be filtered by isSupportedSourceFile before boundary check
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('non-write tool is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		const filePath = path.join(workspaceRoot, 'file.ts');
-		fs.writeFileSync(filePath, 'content');
-
-		// Send a read tool
-		await hook.toolAfter(
-			{ tool: 'Read', sessionID: 'test', args: { file_path: filePath } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('missing file_path arg is filtered before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: {} },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('toolAfter skips update when safeRealpathSync returns null', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-			safeRealpathSync: () => null, // mock returns null
-		});
-
-		// Create a file inside workspace
-		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, 'export const x = 1;');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: filePath } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-
-	test('symlink pointing outside workspace is rejected via realpathSync', async () => {
-		// Skip on platforms where symlinks are not reliably supported in tmpdir
-		if (process.platform === 'win32') return;
-
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a real file OUTSIDE the workspace
-		const outsideDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'outside-workspace-'),
-		);
-		const outsideFile = path.join(outsideDir, 'secret.ts');
-		fs.writeFileSync(outsideFile, 'export const secret = 42;');
-
-		// Create a symlink INSIDE the workspace that points outside
-		const symlinkInWorkspace = path.join(workspaceRoot, 'src', 'escape.ts');
-		fs.mkdirSync(path.dirname(symlinkInWorkspace), { recursive: true });
-		try {
-			fs.symlinkSync(outsideFile, symlinkInWorkspace);
-		} catch {
-			// If symlink creation fails (e.g., insufficient perms), skip test
-			fs.rmSync(outsideDir, { recursive: true, force: true });
-			return;
-		}
-
-		try {
-			// The symlink path is inside workspace, but realpathSync should
-			// resolve it to the real (outside) path and reject it
-			await hook.toolAfter(
-				{
-					tool: 'write',
-					sessionID: 'test',
-					args: { file_path: symlinkInWorkspace },
-				},
-				{ output: undefined },
-			);
-
-			expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-		} finally {
-			fs.rmSync(outsideDir, { recursive: true, force: true });
-		}
-	});
-
-	test('URL-encoded path is decoded before boundary check', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// Create a file inside workspace with a name that would be URL-encoded
-		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, 'export const x = 1;');
-
-		// URL-encode the path (e.g., spaces encoded as %20, etc.)
-		// The most practical case: encode the path separator or other chars
-		const encodedPath = filePath.replace('index.ts', 'index%2Ets');
-		// Note: %2E = '.' so index%2Ets decodes to index.ts
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: encodedPath } },
-			{ output: undefined },
-		);
-
-		// After URL-decode, the path should resolve to index.ts which is inside workspace
-		// The decoded path would be 'index.ts' — but the encoded form depends on whether
-		// it decodes to a valid path. Let's use a simpler approach.
-		// This test verifies that URL-encoded paths don't crash the hook
-		// and either work (if decoded path is valid inside workspace) or are filtered.
-		// We verify no exception was thrown by reaching this assertion.
-		expect(true).toBe(true);
-	});
-
-	test('URL-encoded null byte in path is rejected', async () => {
-		const hook = createRepoGraphBuilderHook(workspaceRoot, {
-			buildWorkspaceGraph: mockBuildWorkspaceGraph,
-			saveGraph: mockSaveGraph,
-			updateGraphForFiles: mockUpdateGraphForFiles,
-		});
-
-		// %00 decodes to null byte \0 which should be rejected
-		const nullBytePath = path.join(workspaceRoot, 'src%00', 'index.ts');
-
-		await hook.toolAfter(
-			{ tool: 'write', sessionID: 'test', args: { file_path: nullBytePath } },
-			{ output: undefined },
-		);
-
-		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
-	});
-});
-
 describe('error escalation advisory', () => {
 	let tempDir: string;
 	let workspaceRoot: string;
@@ -910,6 +516,49 @@ describe('error escalation advisory', () => {
 				);
 			}
 			expect(warnSpy).not.toHaveBeenCalledWith(
+				expect.stringContaining('consecutive'),
+			);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test('failures are tracked per session, not pooled across sessions (DD-C011)', async () => {
+		mockUpdateGraphForFiles.mockImplementation(() => {
+			throw new Error('simulated failure');
+		});
+
+		const hook = createRepoGraphBuilderHook(workspaceRoot, {
+			buildWorkspaceGraph: mockBuildWorkspaceGraph,
+			saveGraph: mockSaveGraph,
+			updateGraphForFiles: mockUpdateGraphForFiles,
+		});
+
+		const warnSpy = spyOn(logger, 'warn').mockImplementation(() => {});
+
+		const tsFile = path.join(workspaceRoot, 'test.ts');
+		fs.writeFileSync(tsFile, 'export const x = 1;');
+
+		try {
+			// 2 failures in session 'a' and 2 in session 'b'. A pooled counter
+			// would reach 4 and fire the advisory; per-session counting keeps each
+			// at 2 (< threshold 3), so no advisory.
+			for (const sessionID of ['a', 'a', 'b', 'b']) {
+				await hook.toolAfter(
+					{ tool: 'write', sessionID, args: { file_path: tsFile } },
+					{ output: undefined },
+				);
+			}
+			expect(warnSpy).not.toHaveBeenCalledWith(
+				expect.stringContaining('consecutive'),
+			);
+
+			// A 3rd failure in session 'a' alone crosses the threshold.
+			await hook.toolAfter(
+				{ tool: 'write', sessionID: 'a', args: { file_path: tsFile } },
+				{ output: undefined },
+			);
+			expect(warnSpy).toHaveBeenCalledWith(
 				expect.stringContaining('consecutive'),
 			);
 		} finally {

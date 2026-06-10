@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "*",
+        "command": "bash scripts/copilot-pr-publication-gate.sh",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

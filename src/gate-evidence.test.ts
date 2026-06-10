@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
@@ -104,6 +106,31 @@ describe('recordGateEvidence', () => {
 		expect(evidence!.gates.reviewer.sessionId).toBe('session-1');
 		expect(evidence!.gates.test_engineer.sessionId).toBe('session-2');
 	});
+
+	it('9b. blocks writes when .swarm/evidence is a symlink escape', async () => {
+		const attackerDir = path.join(tmpDir, 'attacker-escape-dir');
+		mkdirSync(attackerDir, { recursive: true });
+		const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
+		try {
+			symlinkSync(attackerDir, evidenceDir, 'dir');
+		} catch {
+			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
+			return;
+		}
+
+		try {
+			await expect(
+				recordGateEvidence(tmpDir, '1.9', 'reviewer', 'session-1'),
+			).rejects.toThrow(/escapes \.swarm boundary/);
+			expect(existsSync(path.join(attackerDir, '1.9.json'))).toBe(false);
+		} finally {
+			try {
+				rmSync(attackerDir, { recursive: true, force: true });
+			} catch {
+				// Best-effort cleanup
+			}
+		}
+	});
 });
 
 // ── recordAgentDispatch ─────────────────────────────────────────────────────
@@ -128,6 +155,31 @@ describe('recordAgentDispatch', () => {
 		]);
 		// docs gate entry still present
 		expect(evidence!.gates.docs).toBeDefined();
+	});
+
+	it('11b. blocks dispatch writes when .swarm/evidence is a symlink escape', async () => {
+		const attackerDir = path.join(tmpDir, 'attacker-escape-dir');
+		mkdirSync(attackerDir, { recursive: true });
+		const evidenceDir = path.join(tmpDir, '.swarm', 'evidence');
+		try {
+			symlinkSync(attackerDir, evidenceDir, 'dir');
+		} catch {
+			// Some environments (notably Windows without symlink privileges) cannot create dir symlinks.
+			return;
+		}
+
+		try {
+			await expect(
+				recordAgentDispatch(tmpDir, '1.10', 'coder'),
+			).rejects.toThrow(/escapes \.swarm boundary/);
+			expect(existsSync(path.join(attackerDir, '1.10.json'))).toBe(false);
+		} finally {
+			try {
+				rmSync(attackerDir, { recursive: true, force: true });
+			} catch {
+				// Best-effort cleanup
+			}
+		}
 	});
 });
 

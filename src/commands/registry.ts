@@ -1,4 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
+import { syncBundledProjectSkillsIfMissing } from '../config/bundled-skills.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -8,6 +9,7 @@ import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
 import { handleClarifyCommand } from './clarify.js';
 import { handleCloseCommand } from './close.js';
+import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
 import { handleCouncilCommand } from './council.js';
@@ -45,6 +47,7 @@ import {
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
+import { handlePrFeedbackCommand } from './pr-feedback.js';
 import { handlePrReviewCommand } from './pr-review.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
@@ -204,6 +207,7 @@ export type CommandContext = {
 	args: string[];
 	sessionID: string;
 	agents: Record<string, AgentDefinition>;
+	packageRoot?: string;
 	/**
 	 * Dispatch path identifier. Issue #890: forensic audit trail for
 	 * commands that need to distinguish "user typed /swarm <cmd>" (chat)
@@ -215,6 +219,16 @@ export type CommandContext = {
 };
 
 export type CommandResult = Promise<string>;
+
+async function handleModeCommandWithBundledSkills(
+	ctx: CommandContext,
+	handler: (directory: string, args: string[]) => string | CommandResult,
+): CommandResult {
+	if (ctx.packageRoot) {
+		syncBundledProjectSkillsIfMissing(ctx.directory, ctx.packageRoot);
+	}
+	return Promise.resolve(handler(ctx.directory, ctx.args));
+}
 
 export type CommandCategory =
 	| 'core'
@@ -534,19 +548,22 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 	},
 	clarify: {
-		handler: (ctx) => handleClarifyCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleClarifyCommand),
 		description: 'Clarify and refine an existing feature specification',
 		args: '[description-text]',
 		category: 'agent',
 	},
 	specify: {
-		handler: (ctx) => handleSpecifyCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleSpecifyCommand),
 		description: 'Generate or import a feature specification [description]',
 		args: '[description-text]',
 		category: 'agent',
 	},
 	brainstorm: {
-		handler: (ctx) => handleBrainstormCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleBrainstormCommand),
 		description:
 			'Enter architect MODE: BRAINSTORM — structured seven-phase planning workflow [topic]',
 		args: '[topic-text]',
@@ -555,7 +572,8 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 	},
 	council: {
-		handler: (ctx) => handleCouncilCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleCouncilCommand),
 		description:
 			'Enter architect MODE: COUNCIL — multi-model deliberation [question] [--preset <name>] [--spec-review]',
 		args: '<question> [--preset <name>] [--spec-review]',
@@ -569,11 +587,12 @@ export const COMMAND_REGISTRY = {
 			'Round 2 MAINTAIN/CONCEDE/NUANCE for disagreements). ' +
 			'The architect synthesizes the final answer directly from convene_general_council output. ' +
 			'--spec-review switches to single-pass advisory mode for spec review. ' +
-			'Requires council.general.enabled: true and a search API key in opencode-swarm.json.',
+			'Requires council.general.enabled: true and a search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 		category: 'agent',
 	},
 	'pr-review': {
-		handler: async (ctx) => handlePrReviewCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handlePrReviewCommand),
 		description:
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
@@ -581,8 +600,19 @@ export const COMMAND_REGISTRY = {
 			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
 	},
+	'pr-feedback': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handlePrFeedbackCommand),
+		description:
+			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
+		args: '[url|owner/repo#N|N] [instructions...]',
+		details:
+			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+		category: 'agent',
+	},
 	'deep-dive': {
-		handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepDiveCommand),
 		description:
 			'Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]',
 		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
@@ -591,14 +621,35 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 	},
 	'deep dive': {
-		handler: async (ctx) => handleDeepDiveCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepDiveCommand),
 		description: 'Alias for /swarm deep-dive — launch deep codebase audit',
 		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
 		category: 'agent',
 		aliasOf: 'deep-dive',
 	},
+	'codebase-review': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleCodebaseReviewCommand),
+		description:
+			'Launch codebase-review-swarm for a quote-grounded full-repo or large-subsystem audit',
+		args: '[scope] [--mode phase0|complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements|custom] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]',
+		details:
+			'Runs the codebase-review-swarm workflow: Phase 0 inventory, selected-track depth planning, non-diluting review passes, coverage closure, reviewer validation, critic challenge, and .swarm/review-v8 artifacts. Materializes the bundled skill package if missing, then emits a MODE signal; the architect workflow must not mutate source files.',
+		category: 'agent',
+	},
+	'codebase review': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleCodebaseReviewCommand),
+		description:
+			'Alias for /swarm codebase-review - launch codebase-review-swarm',
+		args: '[scope] [--mode phase0|complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements|custom] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]',
+		category: 'agent',
+		aliasOf: 'codebase-review',
+	},
 	'design-docs': {
-		handler: async (ctx) => handleDesignDocsCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDesignDocsCommand),
 		description:
 			'Generate or sync language-agnostic design docs (domain, technical-spec, behavior-spec, reference/) for the project under build [description]',
 		args: '<description> [--out <dir>] [--lang <name>] [--update]',
@@ -607,14 +658,16 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 	},
 	'design docs': {
-		handler: async (ctx) => handleDesignDocsCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDesignDocsCommand),
 		description: 'Alias for /swarm design-docs — generate or sync design docs',
 		args: '<description> [--out <dir>] [--lang <name>] [--update]',
 		category: 'agent',
 		aliasOf: 'design-docs',
 	},
 	issue: {
-		handler: async (ctx) => handleIssueCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleIssueCommand),
 		description:
 			'Ingest a GitHub issue into the swarm workflow [url] [--plan] [--trace] [--no-repro]',
 		args: '<issue-url|owner/repo#N|N> [--plan] [--trace] [--no-repro]',
@@ -629,7 +682,7 @@ export const COMMAND_REGISTRY = {
 			'View or modify QA gate profile for the current plan [enable|override <gate>...]',
 		args: '[show|enable|override] <gate>...',
 		details:
-			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, council_general_review, drift_check.',
+			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, phase_council, drift_check, final_council.',
 		category: 'config',
 	},
 	promote: {

@@ -173,9 +173,11 @@ export async function searchKnowledge(
 		);
 		const counterRollups = await readKnowledgeCounterRollups(directory);
 
-		// Tier post-filter (hive-only) and quarantined exclusion. readMergedKnowledge
-		// already excludes archived; quarantined entries must also be hidden.
+		// Tier post-filter (hive-only), quarantined exclusion, and archived exclusion.
+		// readMergedKnowledge uses a deny-list (excludes only quarantined); archived
+		// entries must also be hidden here.
 		candidates = candidates.filter((e) => {
+			if (e.status === 'archived') return false;
 			if (e.status === 'quarantined') return false;
 			if (tier === 'hive' && e.tier !== 'hive') return false;
 			return true;

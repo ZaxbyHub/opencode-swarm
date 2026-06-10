@@ -21,8 +21,8 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 	// were chosen to NOT overlap with the auto-generated tool-description list,
 	// so they truly identify the block itself. Keep in sync with buildCouncilWorkflow().
 	const COUNCIL_SENTINELS = [
-		'## COUNCIL WORKFLOW (submit_phase_council_verdicts)',
-		'WHEN TO RUN COUNCIL',
+		'## COUNCIL WORKFLOW',
+		'WHEN TO RUN PHASE COUNCIL',
 		'STEP 1 — DISPATCH',
 		'STEP 3 — CALL submit_phase_council_verdicts',
 		'STEP 5 — ACT on the verdict',
@@ -48,8 +48,8 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).toContain('## COUNCIL WORKFLOW');
 		});
 
-		it('includes WHEN TO RUN COUNCIL section and STEP 1..STEP 5', () => {
-			expect(prompt).toContain('WHEN TO RUN COUNCIL');
+		it('includes WHEN TO RUN PHASE COUNCIL section and STEP 1..STEP 5', () => {
+			expect(prompt).toContain('WHEN TO RUN PHASE COUNCIL');
 			expect(prompt).toContain('STEP 1');
 			expect(prompt).toContain('STEP 2');
 			expect(prompt).toContain('STEP 3');
@@ -100,20 +100,17 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			expect(prompt).not.toContain('supplements — does NOT replace');
 		});
 
-		it('contains the ADDITIONAL verification layer wording inside the council block', () => {
-			// Council is "ADDITIONAL" verification layer, NOT a replacement for Stage B
-			expect(prompt).toContain('ADDITIONAL verification layer');
+		it('contains council_mode replacement semantics and Stage A/B references', () => {
+			expect(prompt).toMatch(/council_mode.*replac|Stage B.*replaced/i);
 			expect(prompt).toContain('Stage B');
 			expect(prompt).toContain('Stage A');
 			expect(prompt).toContain('pre_check_batch');
 		});
 
-		it('does NOT contain REPLACES Stage B wording anywhere in the prompt', () => {
-			// "council REPLACES Stage B" is wrong - but "council never replaces Stage B" is correct
-			// So we check for the specific pattern "council REPLACES Stage B" (with REPLACES as a verb)
-			expect(prompt).not.toMatch(/council\s+REPLACES\s+Stage\s+B/i);
-			// Also check lowercase variant
-			expect(prompt).not.toMatch(/council\s+replaces\s+Stage\s+B/);
+		it('contains council replaces Stage B wording', () => {
+			expect(prompt).toMatch(
+				/council.*replaces\s+Stage\s+B|Stage B.*replaced.*council/i,
+			);
 		});
 
 		it('contains the ANTI-PATTERNS section listing 5 council bypass violations', () => {
@@ -125,6 +122,18 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 
 		it('contains the ROUND 2 DELIBERATION rule', () => {
 			expect(prompt).toContain('ROUND 2 DELIBERATION');
+		});
+
+		it('requires re-dispatch of all absent members after insufficient_quorum', () => {
+			expect(prompt).toMatch(
+				/dispatch ALL absent members.*single parallel batch/i,
+			);
+		});
+
+		it('requires prior-round dissenters to be re-dispatched', () => {
+			expect(prompt).toMatch(
+				/every prior-round\s+dissenter[\s\S]*re-dispatched/i,
+			);
 		});
 
 		describe('critic dispatch includes approved-plan baseline and drift analysis', () => {
@@ -218,19 +227,15 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 		const prompt = agent.config.prompt!;
 
 		it('council workflow block does not reference critic_oversight', () => {
-			// The council workflow dispatches a plan_critic (council critic) for
-			// live plan-review. The full-auto intercept uses a separate
-			// critic_oversight agent that operates outside council scope.
-			// Verifying the council block does not mention critic_oversight
-			// confirms these are separate dispatch paths.
-			expect(prompt).not.toContain('critic_oversight');
+			const { buildCouncilWorkflow } = require('../../../src/agents/architect');
+			const councilBlock = buildCouncilWorkflow({ enabled: true });
+			expect(councilBlock).not.toContain('critic_oversight');
 		});
 
 		it('council workflow block does not reference AUTONOMOUS_OVERSIGHT', () => {
-			// The autonomous oversight path is a distinct full-auto intercept,
-			// not part of the council workflow. The council block should be
-			// silent about autonomous oversight.
-			expect(prompt).not.toContain('AUTONOMOUS_OVERSIGHT');
+			const { buildCouncilWorkflow } = require('../../../src/agents/architect');
+			const councilBlock = buildCouncilWorkflow({ enabled: true });
+			expect(councilBlock).not.toContain('AUTONOMOUS_OVERSIGHT');
 		});
 
 		it('critic dispatch in council block refers to council critic (not critic_oversight)', () => {
@@ -280,15 +285,15 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 		});
 	});
 
-	describe('council_mode rewrite — ADDITIONAL gate semantics + phase-level council (post-patch)', () => {
+	describe('council_mode rewrite — per-task replacement + phase-level council (post-patch)', () => {
 		// These tests verify the council_mode prompt rewrite:
-		// 1. Council is "ADDITIONAL" gate at PHASE LEVEL, not a replacement for Stage B
-		// 2. PHASE COUNCIL section added for phase-level holistic review
+		// 1. council_mode replaces per-task Stage B with the full 5-member council
+		// 2. phase_council added for holistic phase-level review (additive)
 		// Stage B parallel dispatch is covered through createAgents() in
 		// architect-parallelization-config.test.ts, where the PARALLELIZATION
 		// CONFIG placeholder is actually expanded.
 
-		describe('Council is ADDITIONAL gate at PHASE LEVEL (not replacement)', () => {
+		describe('council_mode replaces per-task Stage B', () => {
 			const agent = createArchitectAgent(
 				'test-model',
 				undefined,
@@ -298,29 +303,20 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			);
 			const prompt = agent.config.prompt!;
 
-			it('contains "ADDITIONAL gate at PHASE LEVEL" or similar wording', () => {
-				// Council runs as an ADDITIONAL gate at PHASE LEVEL
+			it('describes council_mode as replacing Stage B', () => {
 				expect(prompt).toMatch(
-					/ADDITIONAL.*gate.*PHASE LEVEL|ADDITIONAL verification layer/i,
+					/council_mode.*replac.*Stage B|Stage B.*replaced.*council/i,
 				);
 			});
 
-			it('contains "council never replaces Stage B" or equivalent', () => {
-				// Stage B always runs per-task — council never replaces it
+			it('mentions full 5-member council per task', () => {
 				expect(prompt).toMatch(
-					/council.*never.*replace.*Stage B|Stage B.*always.*runs.*per-task/i,
+					/5-member council.*per task|full.*council.*per task/i,
 				);
 			});
 
-			it('contains "Stage B always runs per-task"', () => {
-				expect(prompt).toContain('Stage B always runs per-task');
-			});
-
-			it('does NOT claim council replaces Stage B', () => {
-				// Must not say "council REPLACES Stage B" - but "council never replaces" is fine
-				expect(prompt).not.toMatch(/council\s+replaces\s+Stage\s+B/i);
-				// Also check for "replaces it" in context of Stage B
-				expect(prompt).not.toMatch(/replaces\s+it.*Stage\s+B/i);
+			it('states Stage A still runs when council_mode is on', () => {
+				expect(prompt).toMatch(/Stage A.*still runs/i);
 			});
 		});
 
@@ -401,17 +397,17 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 				expect(result).toContain('PHASE COUNCIL');
 			});
 
-			it('returns string containing ADDITIONAL verification layer', () => {
+			it('returns string describing council_mode as replacing Stage B', () => {
 				const result = buildCouncilWorkflow({ enabled: true });
 				expect(result).toMatch(
-					/ADDITIONAL.*verification layer|verification layer.*ADDITIONAL/i,
+					/council_mode.*replac|Stage B.*replaced.*council/i,
 				);
 			});
 
-			it('returns string containing Stage B ALWAYS runs per-task', () => {
+			it('returns string describing per-task and phase council as distinct', () => {
 				const result = buildCouncilWorkflow({ enabled: true });
-				// The actual text uses uppercase ALWAYS
-				expect(result).toMatch(/Stage B.*ALWAYS\s+runs\s+per-task/i);
+				expect(result).toContain('PER-TASK COUNCIL');
+				expect(result).toContain('PHASE COUNCIL');
 			});
 		});
 

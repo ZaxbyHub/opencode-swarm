@@ -18,6 +18,14 @@ export const csharpRules: SastRule[] = [
 		remediation:
 			'Use ProcessStartInfo with Arguments property, or sanitize input thoroughly.',
 		pattern: /Process\.Start/,
+		// Context-aware filtering (DD-C016). `Process.Start` alone is not a
+		// vulnerability — the canonical .NET mitigation is a ProcessStartInfo
+		// with UseShellExecute disabled (no shell interpretation). When the
+		// file demonstrates that safe pattern, suppress the critical finding to
+		// avoid blocking the coder workflow on legitimate process invocation.
+		validate: (_match, context) => {
+			return !/UseShellExecute\s*=\s*false/i.test(context.content);
+		},
 	},
 	{
 		id: 'sast/cs-sqli',

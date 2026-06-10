@@ -386,6 +386,45 @@ describe('evictLockFiles', () => {
 		expect(stdout).toMatch(/cache[\\/]opencode[\\/]bun\.lockb/);
 		expect(stdout).toMatch(/config[\\/]opencode[\\/]package-lock\.json/);
 	});
+
+	test('full CLI path refuses misconfigured nested opencode/opencode/bun.lock (integration)', async () => {
+		// End-to-end coverage of the PR #1154 grandparent guard through the
+		// full CLI path: getPluginLockFilePaths() → isSafeLockFilePath() →
+		// evictLockFiles() → console.error with full path → exit code 1 →
+		// file is NOT deleted.
+		//
+		// To produce a resolved lock path whose grandparent segment is
+		// literally 'opencode', the XDG_CACHE_HOME itself must end in
+		// 'opencode' (so the constructed path <XDG>/opencode/bun.lock becomes
+		// <X>/opencode/opencode/bun.lock). The child process must own
+		// the file, so we create a temp dir and pass its absolute path.
+		const nestedCacheBase = join(tempDir, 'opencode');
+		const nestedLockPath = join(nestedCacheBase, 'opencode', 'bun.lock');
+		await mkdir(join(nestedCacheBase, 'opencode'), { recursive: true });
+		await writeFile(nestedLockPath, '{}');
+
+		const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, 'update'], {
+			env: {
+				...process.env,
+				XDG_CACHE_HOME: nestedCacheBase,
+				XDG_CONFIG_HOME: xdgConfigHome,
+			},
+			stdout: 'pipe',
+			stderr: 'pipe',
+		});
+		const exitCode = await proc.exited;
+		const stderr = await new Response(proc.stderr).text();
+
+		// 1. Non-zero exit code signals the safety check tripped.
+		expect(exitCode).toBe(1);
+		// 2. The full path (not just the basename) appears in stderr — this
+		// is the diagnostic improvement PR #1154 also standardized on.
+		expect(stderr).toContain(nestedLockPath);
+		expect(stderr).toContain('refused: failed safety check');
+		// 3. The lock file MUST still exist — the guard must have refused
+		// before the unlink attempt.
+		expect(existsSync(nestedLockPath)).toBe(true);
+	});
 });
 
 describe('isSafeLockFilePath', () => {
@@ -427,6 +466,50 @@ describe('isSafeLockFilePath', () => {
 		} finally {
 			await rm(tmp, { recursive: true, force: true });
 		}
+	});
+
+	test('rejects nested opencode path like opencode/opencode/bun.lock (grandparent check)', () => {
+		// Defense-in-depth: reject paths where grandparent is also 'opencode'.
+		// This prevents misconfigured nested paths like /tmp/opencode/opencode/bun.lock.
+		expect(isSafeLockFilePath('/tmp/opencode/opencode/bun.lock')).toBe(false);
+		expect(isSafeLockFilePath('/var/opencode/opencode/bun.lockb')).toBe(false);
+	});
+
+	test('rejects nested opencode path on Windows-style absolute path (grandparent check)', () => {
+		// path.resolve() normalizes the separators, so on Linux CI we use a
+		// forward-slash Windows-style path. The check is platform-safe: it
+		// splits on path.sep after resolution, so a Windows-style
+		// C:\\opencode\\opencode\\bun.lock would produce the same 4-segment
+		// /c/opencode/opencode/bun.lock shape on this runner and trip the
+		// grandparent guard.
+		const winNested = '/c/opencode/opencode/bun.lock';
+		expect(isSafeLockFilePath(winNested)).toBe(false);
+		const winNestedLockb = '/c/Users/testuser/opencode/opencode/bun.lockb';
+		expect(isSafeLockFilePath(winNestedLockb)).toBe(false);
+	});
+
+	test('grandparent check is case-sensitive: documents current strict-equality behavior', () => {
+		// Documents the strict case-sensitive behavior of the grandparent
+		// check. The check is `grandparent === 'opencode'` (byte-exact), so
+		// a grandparent segment like 'OpenCode' would NOT trip the guard.
+		// The mitigations are: (a) the parent check (`parent === 'opencode'`)
+		// also fails case-sensitively, so `/tmp/OPENCODE/OPENCODE/bun.lock`
+		// is still rejected because its parent 'OPENCODE' ≠ 'opencode';
+		// (b) on case-insensitive filesystems (macOS HFS+ default, Windows
+		// NTFS) the OS normalizes case at the FS layer before any path
+		// comparison, so the case-mismatch path simply does not exist
+		// on disk. This test pins the current behavior so any future
+		// case-insensitive change is intentional.
+		//
+		// Case A: ALL-uppercase — rejected by the parent check (parent is
+		// 'OPENCODE', not 'opencode'), NOT by the grandparent check.
+		expect(isSafeLockFilePath('/tmp/OPENCODE/OPENCODE/bun.lock')).toBe(false);
+		// Case B: mixed-case grandparent — actually ACCEPTED, because the
+		// parent segment is the legitimate lowercase 'opencode' and the
+		// byte-exact grandparent guard does not match 'OpenCode'. The
+		// path is "safe-looking" from the validator's perspective even
+		// though it is unlikely to arise in practice.
+		expect(isSafeLockFilePath('/var/OpenCode/opencode/bun.lock')).toBe(true);
 	});
 });
 

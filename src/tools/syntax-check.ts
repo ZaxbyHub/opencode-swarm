@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
+import pLimit from 'p-limit';
 import { z } from 'zod';
 import type { PluginConfig } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
@@ -40,6 +41,10 @@ export interface SyntaxCheckResult {
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB — WASM tree-sitter aborts on larger files
 const BINARY_CHECK_BYTES = 8192; // 8KB
 const BINARY_NULL_THRESHOLD = 0.1; // 10% null bytes
+// Bounded concurrency for per-file processing. Each file does a sync read +
+// sync parse; the cap keeps file-descriptor and memory pressure predictable
+// for large diffs while overlapping the async grammar-load awaits.
+const SYNTAX_CHECK_CONCURRENCY = 8;
 
 /**
  * Check if file content appears to be binary
@@ -71,9 +76,16 @@ function extractSyntaxErrors(
 
 	const errors: Array<{ line: number; column: number; message: string }> = [];
 
-	// Walk the tree to find ERROR and MISSING nodes
+	// Walk the tree to find ERROR and MISSING nodes using an explicit stack
+	// rather than recursion. A deeply nested parse tree (heavily nested JSON,
+	// minified code) could otherwise overflow the JS call stack (DD-C018);
+	// the explicit stack moves the traversal onto the heap. Children are
+	// pushed in reverse so they are visited left-to-right (pre-order),
+	// matching the previous recursive order.
 	// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
-	function walkNode(node: any) {
+	const stack: any[] = [tree.rootNode];
+	while (stack.length > 0) {
+		const node = stack.pop();
 		if (node.type === 'ERROR') {
 			errors.push({
 				line: node.startPosition.row + 1, // 1-indexed
@@ -87,12 +99,11 @@ function extractSyntaxErrors(
 				message: `Missing '${node.type}'`,
 			});
 		}
-		for (const child of node.children) {
-			walkNode(child);
+		const children = node.children;
+		for (let i = children.length - 1; i >= 0; i--) {
+			stack.push(children[i]);
 		}
 	}
-
-	walkNode(tree.rootNode);
 
 	// Fallback: if tree-walking found no explicit ERROR/MISSING nodes but the
 	// root reports hasError, flag the file so errors aren't silently swallowed
@@ -151,12 +162,29 @@ export async function syntaxCheck(
 		});
 	}
 
-	const results: SyntaxCheckFileResult[] = [];
-	let filesChecked = 0;
-	let filesFailed = 0;
-	let skippedCount = 0;
+	// Hoist the runtime module import out of the per-file loop (DD-C020). ESM
+	// caches the module, but loading it once before the fan-out keeps the hot
+	// path free of a redundant dynamic-import expression per file.
+	const { loadGrammar } = await import('../lang/runtime');
 
-	for (const fileInfo of filesToCheck) {
+	/**
+	 * Per-file processing outcome. `counted`/`failed`/`skipped` reproduce the
+	 * exact counter semantics of the original sequential loop so the summary
+	 * numbers are unchanged: early skips (unsupported/read-error/too-large/
+	 * binary) are counted as skipped only; parse outcomes are counted; a thrown
+	 * error during processing counts as both skipped and checked.
+	 */
+	interface FileOutcome {
+		result: SyntaxCheckFileResult;
+		counted: boolean;
+		failed: boolean;
+		skipped: boolean;
+	}
+
+	async function checkOneFile(fileInfo: {
+		path: string;
+		additions: number;
+	}): Promise<FileOutcome> {
 		const { path: filePath } = fileInfo;
 		const fullPath = path.isAbsolute(filePath)
 			? filePath
@@ -175,7 +203,6 @@ export async function syntaxCheck(
 			const grammarId = profile?.treeSitter?.grammarId;
 			let parser: Parser | null = null;
 			if (grammarId) {
-				const { loadGrammar } = await import('../lang/runtime');
 				try {
 					parser = await loadGrammar(grammarId);
 				} catch {
@@ -188,9 +215,21 @@ export async function syntaxCheck(
 			}
 			if (!parser) {
 				result.skipped_reason = 'unsupported_language';
-				skippedCount++;
-				results.push(result);
-				continue;
+				return { result, counted: false, failed: false, skipped: true };
+			}
+
+			// Size pre-check via stat to avoid reading large files into memory
+			// just to reject them (DD-C017). stat is a best-effort optimization:
+			// if it is unavailable or throws, fall through to the read, whose own
+			// error handling and the post-read size guard still apply.
+			try {
+				const stat = fs.statSync(fullPath);
+				if (stat.size >= MAX_FILE_SIZE) {
+					result.skipped_reason = 'file_too_large';
+					return { result, counted: false, failed: false, skipped: true };
+				}
+			} catch {
+				// stat unavailable/failed — proceed to read below
 			}
 
 			// Read file content
@@ -199,25 +238,19 @@ export async function syntaxCheck(
 				content = fs.readFileSync(fullPath, 'utf8');
 			} catch {
 				result.skipped_reason = 'file_read_error';
-				skippedCount++;
-				results.push(result);
-				continue;
+				return { result, counted: false, failed: false, skipped: true };
 			}
 
-			// Check file size
+			// Check file size (defensive: character length, post-read)
 			if (content.length >= MAX_FILE_SIZE) {
 				result.skipped_reason = 'file_too_large';
-				skippedCount++;
-				results.push(result);
-				continue;
+				return { result, counted: false, failed: false, skipped: true };
 			}
 
 			// Check for binary content
 			if (isBinaryContent(content)) {
 				result.skipped_reason = 'binary_file';
-				skippedCount++;
-				results.push(result);
-				continue;
+				return { result, counted: false, failed: false, skipped: true };
 			}
 
 			// Resolve language ID: prefer profile, fall back to registry
@@ -231,18 +264,34 @@ export async function syntaxCheck(
 			if (errors.length > 0) {
 				result.ok = false;
 				result.errors = errors;
-				filesFailed++;
-			} else {
-				result.ok = true;
+				return { result, counted: true, failed: true, skipped: false };
 			}
+			result.ok = true;
+			return { result, counted: true, failed: false, skipped: false };
 		} catch (error) {
 			result.skipped_reason =
 				error instanceof Error ? error.message : 'unknown_error';
-			skippedCount++;
+			return { result, counted: true, failed: false, skipped: true };
 		}
+	}
 
-		results.push(result);
-		filesChecked++;
+	// Process files with bounded concurrency (DD-C019). Order is preserved by
+	// mapping over the input array; counters are aggregated deterministically
+	// from the resolved outcomes afterward.
+	const limit = pLimit(SYNTAX_CHECK_CONCURRENCY);
+	const outcomes = await Promise.all(
+		filesToCheck.map((fileInfo) => limit(() => checkOneFile(fileInfo))),
+	);
+
+	const results: SyntaxCheckFileResult[] = [];
+	let filesChecked = 0;
+	let filesFailed = 0;
+	let skippedCount = 0;
+	for (const outcome of outcomes) {
+		results.push(outcome.result);
+		if (outcome.counted) filesChecked++;
+		if (outcome.failed) filesFailed++;
+		if (outcome.skipped) skippedCount++;
 	}
 
 	const verdict: EvidenceVerdict = filesFailed > 0 ? 'fail' : 'pass';

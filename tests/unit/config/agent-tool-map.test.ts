@@ -35,10 +35,10 @@ describe('AGENT_TOOL_MAP', () => {
 		}
 	});
 
-	it('subagent tool counts are <= 21', () => {
+	it('subagent tool counts are <= 22', () => {
 		for (const agent of allAgentNames) {
 			if (agent === 'architect') continue;
-			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(21);
+			expect(AGENT_TOOL_MAP[agent].length).toBeLessThanOrEqual(22);
 		}
 	});
 
@@ -60,6 +60,13 @@ describe('AGENT_TOOL_MAP', () => {
 		const reviewerTools = AGENT_TOOL_MAP.reviewer;
 		expect(reviewerTools).toContain('secretscan');
 		expect(reviewerTools).toContain('pkg_audit');
+	});
+
+	it('sme can run opt-in external research but remains read-only', () => {
+		const smeTools = AGENT_TOOL_MAP.sme;
+		expect(smeTools).toContain('web_search');
+		expect(smeTools).not.toContain('knowledge_add');
+		expect(smeTools).not.toContain('apply_patch');
 	});
 
 	it('architect has all critical tools', () => {

@@ -235,13 +235,17 @@ Skips the compaction service. Use when you're hitting context pressure on short 
 
 ## QA Gate Reference
 
-### `council_mode` (Phase-Level Council)
+### `council_mode` (Per-Task Council)
 
-When enabled, a phase-level council of 5 members (critic, reviewer, sme, test_engineer, explorer) reviews the entire phase's work holistically at `phase_complete` time. Stage B gates (reviewer + test_engineer in parallel) always run per-task — council is additive, never a replacement. Evidence is written to `.swarm/evidence/{phase}/phase-council.json` and validated for verdict, quorum, timestamp, and phase number.
+When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config. Evidence is written to `.swarm/evidence/{taskId}.json` under `gates.council` and validated for verdict, quorum, and timestamp.
+
+### `phase_council` (Phase-Level Council)
+
+When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates. Evidence is written to `.swarm/evidence/{phase}/phase-council.json` and validated for verdict, quorum, timestamp, and phase number.
 
 ### `final_council` (Project-Level Final Council)
 
-When enabled, the final phase cannot complete until the architect dispatches the same 5 council members used by phase council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) with completed-project context and calls `write_final_council_evidence` with their collected `CouncilMemberVerdict` objects. Evidence is written to `.swarm/evidence/final-council.json` and validated for approved verdict, plan binding, and quorum metadata. This is not General Council mode and does not use `convene_general_council`.
+When enabled, the final phase cannot complete until the architect dispatches the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) — NOT the General Council — with completed-project context and calls `write_final_council_evidence` with their collected `CouncilMemberVerdict` objects. Evidence is written to `.swarm/evidence/final-council.json` and validated for approved verdict, plan binding, and quorum metadata. This is the full 5-member council (not General Council mode) and does not use `convene_general_council`.
 ---
 
 ## Lean Turbo Lane Planning Engine
@@ -344,6 +348,23 @@ interface LeanTurboLanePlan {
 // isGlobalFile(normalizedPath) → boolean
 // isProtectedPath(normalizedPath) → boolean
 // readTaskScopes(directory, taskId) → string[] | null (reads .swarm/scopes/scope-{taskId}.json)
+
+// src/turbo/lean/worktree.ts
+// provisionWorktree(laneId, branchName, baseBranch, config) → Promise<WorktreeResult>
+// removeWorktree(laneId) → Promise<void>
+// assertCleanWorkingTree() → void (throws if dirty)
+// isCleanWorktree() → Promise<boolean>
+// autoCommitDirty(message) → Promise<string> (returns commit hash)
+// cleanUntrackedFiles() → Promise<void>
+
+// src/turbo/lean/merge-back.ts
+// getMergeStrategy(config) → 'merge' | 'rebase' | 'cherry-pick'
+// mergeLaneBranch(laneId, strategy) → Promise<MergeSuccess | MergeFailure | MergeConflict>
+// postMergeCleanup(laneId) → Promise<CleanupSuccess | CleanupFailure>
+// handleMergeConflict(conflictInfo) → Promise<ConflictHandlingError | null>
+// attemptMergeBackFromDirty(laneId, strategy) → Promise<DirtyMergeSuccess | DirtyMergeFailure | DirtyMergePartial>
+// cleanupOrphanedBranches() → Promise<OrphanCleanupResult>
+// startupOrphanRecovery() → Promise<StartupRecoveryResult>
 ```
 
 ### Commands
@@ -467,8 +488,12 @@ The lane planner (`src/turbo/lean/planner.ts`) uses five conflict rules: exact-f
 
 ---
 
+## Signal-Triggered Architect Modes (distinct from session modes)
+
+The session/project modes above control *how* the swarm executes a plan. Separately, certain `/swarm` commands put the architect into a one-shot **signal-triggered workflow mode** by emitting a `[MODE: X ...]` activation signal that loads a dedicated skill on demand: `deep-dive` → `DEEP_DIVE`, `pr-review` → `PR_REVIEW`, `pr-feedback` → `PR_FEEDBACK`, `design-docs` → `DESIGN_DOCS`, `council` → `COUNCIL`, `issue` → `ISSUE_INGEST`, plus the spec-workflow modes (`specify`, `brainstorm`, `clarify`). These are not session modes and do not change `execution_mode`. See [Architecture Deep Dive — Signal-Triggered Modes](architecture.md#signal-triggered-modes-on-demand-skills) and the [Commands Reference](commands.md).
+
 ## Related
 
-- [Commands Reference](commands.md) — `/swarm turbo`, `/swarm full-auto`, `/swarm status`
+- [Commands Reference](commands.md) — `/swarm turbo`, `/swarm full-auto`, `/swarm status`, `/swarm pr-review`, `/swarm pr-feedback`
 - [Configuration](configuration.md) — `execution_mode`, `full_auto.*`, `turbo.lean.*`
-- [Architecture Deep Dive](architecture.md) — QA gates, Stage B, Tier 3
+- [Architecture Deep Dive](architecture.md) — QA gates, Stage B, Tier 3, signal-triggered modes

@@ -94,6 +94,7 @@ export async function executeSwarmCommand(args: {
 	agents: Record<string, AgentDefinition>;
 	sessionID: string;
 	tokens: string[];
+	packageRoot?: string;
 	includeWelcome?: boolean;
 	buildHelpText?: () => string;
 	policy?: SwarmCommandPolicy;
@@ -103,6 +104,7 @@ export async function executeSwarmCommand(args: {
 		agents,
 		sessionID,
 		tokens,
+		packageRoot,
 		includeWelcome = false,
 		buildHelpText,
 		policy,
@@ -127,6 +129,7 @@ export async function executeSwarmCommand(args: {
 					args: resolved.remainingArgs,
 					sessionID,
 					agents,
+					packageRoot,
 					source: 'chat',
 				});
 			} catch (_err) {

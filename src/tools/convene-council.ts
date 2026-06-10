@@ -30,7 +30,7 @@ import { resolveWorkingDirectory } from './resolve-working-directory';
 // z declares the public args surface for the plugin host.
 // We additionally validate with zod for strict runtime safety and clear errors.
 const FindingSchema = z.object({
-	severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+	severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 	category: z.string().min(1),
 	location: z.string(),
 	detail: z.string(),
@@ -40,6 +40,7 @@ const FindingSchema = z.object({
 const VerdictSchema = z.object({
 	agent: z.enum(['critic', 'reviewer', 'sme', 'test_engineer', 'explorer']),
 	verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
+	verdictRound: z.number().int().min(1).max(10).optional(),
 	confidence: z.number().min(0).max(1),
 	findings: z.array(FindingSchema),
 	criteriaAssessed: z.array(z.string()),
@@ -100,10 +101,11 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 							'explorer',
 						]),
 						verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
+						verdictRound: z.number().int().min(1).max(10).optional(),
 						confidence: z.number().min(0).max(1),
 						findings: z.array(
 							z.object({
-								severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+								severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 								category: z.string().min(1),
 								location: z.string(),
 								detail: z.string(),
@@ -197,8 +199,43 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			);
 			const membersVoted = [...distinctMembers];
 			const membersAbsent = ALL_MEMBERS.filter((m) => !distinctMembers.has(m));
+			const sessionID = ctx?.sessionID;
+			const session = sessionID ? getAgentSession(sessionID) : undefined;
+			const requirementKey = `${input.taskId}:${input.roundNumber}`;
+			if (session && !session.pendingCouncilRequirements) {
+				session.pendingCouncilRequirements = new Map();
+			}
+			const pendingRequirements =
+				session?.pendingCouncilRequirements?.get(requirementKey);
+			if (pendingRequirements && pendingRequirements.size > 0) {
+				const stillMissingMembers = [...pendingRequirements].filter(
+					(member) => !distinctMembers.has(member),
+				);
+				if (stillMissingMembers.length > 0) {
+					return JSON.stringify(
+						{
+							success: false,
+							reason: 'cherry_pick_detected',
+							message:
+								`Incomplete re-dispatch: ${stillMissingMembers.join(', ')} ` +
+								'were required from the previous insufficient_quorum response ' +
+								'but are still absent. Dispatch ALL absent members in one parallel batch.',
+							stillMissingMembers,
+							membersProvided: membersVoted,
+						},
+						null,
+						2,
+					);
+				}
+			}
 
 			if (membersVoted.length < effectiveMinimum) {
+				if (session?.pendingCouncilRequirements) {
+					session.pendingCouncilRequirements.set(
+						requirementKey,
+						new Set(membersAbsent),
+					);
+				}
 				return JSON.stringify(
 					{
 						success: false,
@@ -216,6 +253,29 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 					2,
 				);
 			}
+			const staleVerdicts =
+				input.roundNumber > 1
+					? input.verdicts.filter(
+							(v) => (v.verdictRound ?? 1) < input.roundNumber,
+						)
+					: [];
+			if (staleVerdicts.length > 0) {
+				return JSON.stringify(
+					{
+						success: false,
+						reason: 'stale_verdict_detected',
+						message:
+							`Round ${input.roundNumber} requires fresh verdicts. ` +
+							'One or more submitted verdicts are from an older round.',
+						staleVerdicts: staleVerdicts.map((v) => ({
+							agent: v.agent,
+							verdictRound: v.verdictRound,
+						})),
+					},
+					null,
+					2,
+				);
+			}
 
 			// ── Council evaluation ────────────────────────────────────────────
 			const criteria = readCriteria(workingDir, input.taskId);
@@ -228,6 +288,39 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 				input.roundNumber,
 				config.council,
 			);
+			const dissenters = synthesis.memberVerdicts
+				.filter((v) => v.verdict === 'CONCERNS' || v.verdict === 'REJECT')
+				.map((v) => v.agent);
+			if (session?.pendingCouncilRequirements) {
+				session.pendingCouncilRequirements.delete(requirementKey);
+				if (dissenters.length > 0) {
+					const nextRoundKey = `${input.taskId}:${input.roundNumber + 1}`;
+					session.pendingCouncilRequirements.set(
+						nextRoundKey,
+						new Set(dissenters),
+					);
+				}
+			}
+
+			// ── Blocking concerns gate ────────────────────────────────────────
+			if (
+				synthesis.overallVerdict === 'CONCERNS' &&
+				synthesis.blockingConcernsCount > 0
+			) {
+				return JSON.stringify(
+					{
+						success: false,
+						reason: 'blocking_concerns_unresolved',
+						overallVerdict: synthesis.overallVerdict,
+						blockingConcernsCount: synthesis.blockingConcernsCount,
+						requiredFixes: synthesis.requiredFixes,
+						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						message: `Council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the task can advance. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
+					},
+					null,
+					2,
+				);
+			}
 
 			// ── Evidence write ────────────────────────────────────────────────
 			// Awaited: writeCouncilEvidence now acquires the shared evidence lock
@@ -242,9 +335,7 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			// is best-effort: missing sessionID, session not found, or a thrown
 			// error all silently skip — the advisory is never critical-path.
 			try {
-				const sessionID = ctx?.sessionID;
 				if (sessionID) {
-					const session = getAgentSession(sessionID);
 					if (session) {
 						pushCouncilAdvisory(session, synthesis);
 					}

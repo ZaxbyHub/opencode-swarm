@@ -8,7 +8,7 @@ Get your first swarm task running in under 15 minutes. By the end, you'll have o
 
 Before you start, verify you have:
 
-- **Bun >=1.0.0** — required by the swarm plugin
+- **Bun >=1.3.13** — required by the swarm plugin
   ```bash
   bun --version
   ```
@@ -37,10 +37,11 @@ bunx opencode-swarm install
 **Expected output:**
 
 ```
-✓ Registered opencode-swarm plugin with OpenCode
-✓ Created global config: ~/.config/opencode/opencode-swarm.json
-✓ Disabled default OpenCode agents (explore, general) to avoid conflicts
-✓ Ready to use. Open OpenCode and select an architect agent.
+✓ Added opencode-swarm to OpenCode plugins
+✓ Disabled default OpenCode agents (explore, general)
+✓ Created default plugin config at: ~/.config/opencode/opencode-swarm.json
+✓ Created project config at: .opencode/opencode-swarm.json
+✓ Installation complete
 ```
 
 **What just happened:**
@@ -49,7 +50,7 @@ bunx opencode-swarm install
   - **Global:** `~/.config/opencode/opencode-swarm.json` (applies to all projects)
   - **Project-local override (if needed):** `.opencode/opencode-swarm.json` (applies only to this project)
 
-If the command fails:
+Exact output varies by platform and whether config files already exist. If the command fails:
 - **"bunx not found"** — Bun is not installed. Install it from [bun.sh](https://bun.sh), then retry `bunx opencode-swarm install`.
 - **"opencode-swarm not found"** — Bun is installed but can't find the package. Try `bun install -g opencode-swarm` first, or if you only have npm available: `npm install -g opencode-swarm && opencode-swarm install`.
 - **Permission denied on ~/.config** — Ensure you have write permissions to your home directory.
@@ -97,11 +98,13 @@ cd /path/to/your/project
 opencode
 ```
 
-The OpenCode GUI will open. You're now ready to select a Swarm architect.
+The OpenCode GUI or TUI will open. You're now ready to use a Swarm architect.
 
 ---
 
-## Step 4 — Select the Architect Agent
+## Step 4 — Confirm the Architect Agent
+
+The installer reduces native-agent conflicts, but you should still confirm that the active agent is a Swarm architect before starting work.
 
 **On OpenCode desktop (GUI):**
 1. Look for an **agent/mode dropdown** in the top toolbar or sidebar (usually labeled "Agent" or "Mode")
@@ -124,7 +127,7 @@ The dropdown might look like:
 
 **Troubleshooting:**
 - **Architect dropdown not visible** — Swarm may not be loaded. Go back to Step 2.
-- **Only seeing "Build" and "Plan"** — You're not looking at the right dropdown. Look for "Agent Mode" or "Select Agent" specifically.
+- **Only seeing native OpenCode agents** — Swarm may not be loaded, or you may be looking at the wrong selector. Look for "Agent Mode" or "Select Agent" specifically, then rerun `/swarm diagnose`.
 - **Can't find any architect option** — the installer may have failed. Retry `bunx opencode-swarm install`.
 
 ---
@@ -252,7 +255,7 @@ Swarm resumes from `.swarm/plan.md` instead of redoing discovery. This is expect
 /swarm reset --confirm   # Clear swarm state and start over
 ```
 
-See [`docs/commands.md`](commands.md) for all 41 subcommands and their options.
+See [`docs/commands.md`](commands.md) for the current command reference. The live source of truth is `src/commands/registry.ts`.
 
 ### Configure Models (Optional)
 

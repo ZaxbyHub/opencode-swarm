@@ -143,6 +143,56 @@ export function addEdge(graph: RepoGraph, edge: GraphEdge): void {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Bulk-insert helpers for full-workspace construction (issue #1144).
+//
+// The exported upsertNode/addEdge above recompute graph.metadata
+// (Object.keys(graph.nodes).length — O(nodes)) on EVERY insert, and addEdge
+// scans all existing edges (O(edges)) to dedup. Calling them once per file and
+// once per edge inside the build loops makes full-workspace construction
+// O(N^2): on large repos this saturates the single-threaded event loop and
+// stalls plugin startup for tens of seconds.
+//
+// These helpers insert in O(1): nodes go straight into the map, edges are
+// deduped against a caller-owned Set, and metadata is computed ONCE after the
+// loop (both build functions already do this). Output is byte-identical to the
+// upsertNode/addEdge path — same validation, same node key + last-write-wins,
+// same (source, target, importSpecifier) dedup, same push order. The exported
+// helpers are intentionally left unchanged for incremental callers that mutate
+// a small number of files, where the per-call cost is negligible.
+
+/**
+ * Build a collision-proof dedup key for an edge. Uses a NUL (U+0000) separator:
+ * file paths and import specifiers can never contain NUL — parseFileImports
+ * skips any import whose specifier contains a control character (and
+ * path-security rejects control chars in resolved source/target paths), so
+ * distinct edges can never alias even when paths/specifiers contain spaces.
+ * `importType` is intentionally excluded, matching addEdge's
+ * `(source, target, importSpecifier)` dedup predicate.
+ */
+function buildLoopEdgeKey(edge: GraphEdge): string {
+	return `${edge.source}\u0000${edge.target}\u0000${edge.importSpecifier}`;
+}
+
+/** O(1) node insert mirroring upsertNode, minus the per-call metadata recompute. */
+function appendNodeFast(graph: RepoGraph, node: GraphNode): void {
+	validateGraphNode(node);
+	graph.nodes[normalizeGraphPath(node.filePath)] = node;
+}
+
+/** O(1) deduped edge insert mirroring addEdge, minus the per-call metadata recompute. */
+function appendEdgeFast(
+	graph: RepoGraph,
+	edge: GraphEdge,
+	seenEdgeKeys: Set<string>,
+): void {
+	validateGraphEdge(edge);
+	const key = buildLoopEdgeKey(edge);
+	if (seenEdgeKeys.has(key)) return;
+	seenEdgeKeys.add(key);
+	graph.edges.push(edge);
+}
+
 // ============ Path Resolution ============
 
 /**
@@ -346,8 +396,144 @@ interface ParsedImport {
  * @param content - File content to parse
  * @returns Array of parsed imports with specifier and type
  */
-function parseFileImports(content: string): ParsedImport[] {
+/**
+ * Characters after which a `/` begins a regex literal rather than a division
+ * operator. At these expression-start positions `/` cannot be division, so a
+ * following `/regex/` is a regex literal whose body must be treated opaquely
+ * (it may legally contain `/*`, `//`, quotes, etc.).
+ */
+const REGEX_ALLOWED_AFTER = new Set('(,=:[!&|?{};*+-~^<>%'.split(''));
+
+/**
+ * Strip line (`//…`) and block (`/* … *\/`) comments from JS/TS source while
+ * preserving string, template-literal, and regex-literal contents (DD-C010).
+ * Import specifiers live inside string literals, so strings must be kept
+ * intact; only comment spans are removed. This is a bounded single-pass scanner
+ * — not a full parser (AST parsing in the repo-graph init path would violate
+ * AGENTS.md invariant 1) — and it eliminates the most common source of false
+ * import edges: import-like text inside comments (`// import x from "y"`).
+ *
+ * It is string-aware (a `//` inside `"http://…"` is not a comment) and
+ * regex-aware (a regex literal such as `/[/*]/` must not be mistaken for the
+ * start of a block comment, which would otherwise run to EOF and delete real
+ * imports). Regex-vs-division is disambiguated by the previous significant
+ * character (REGEX_ALLOWED_AFTER).
+ */
+function stripComments(content: string): string {
+	let out = '';
+	let i = 0;
+	const n = content.length;
+	type State =
+		| 'code'
+		| 'single'
+		| 'double'
+		| 'template'
+		| 'line'
+		| 'block'
+		| 'regex';
+	let state: State = 'code';
+	// Last non-whitespace char emitted while in `code` — disambiguates a `/`
+	// that starts a regex literal from a division operator. Empty = start of
+	// input (regex allowed).
+	let prevSignificant = '';
+	// Whether the regex scanner is inside a `[...]` character class, where `/`
+	// is literal and does not close the regex.
+	let regexInClass = false;
+	while (i < n) {
+		const ch = content[i];
+		const next = i + 1 < n ? content[i + 1] : '';
+		switch (state) {
+			case 'code':
+				// `//` and `/*` always start comments — a regex literal can begin
+				// with neither (`//` is an empty regex = comment per the JS grammar;
+				// `/*` cannot start a regex since `*` is an invalid leading quantifier).
+				if (ch === '/' && next === '/') {
+					state = 'line';
+					i += 2;
+				} else if (ch === '/' && next === '*') {
+					state = 'block';
+					i += 2;
+				} else if (ch === '/' && REGEX_ALLOWED_AFTER.has(prevSignificant)) {
+					// Regex literal — consume its body opaquely.
+					state = 'regex';
+					regexInClass = false;
+					out += ch;
+					i += 1;
+				} else {
+					if (ch === "'") state = 'single';
+					else if (ch === '"') state = 'double';
+					else if (ch === '`') state = 'template';
+					out += ch;
+					if (ch.trim() !== '') prevSignificant = ch;
+					i += 1;
+				}
+				break;
+			case 'single':
+			case 'double':
+			case 'template': {
+				const quote = state === 'single' ? "'" : state === 'double' ? '"' : '`';
+				if (ch === '\\') {
+					// Preserve escape sequences verbatim.
+					out += ch + next;
+					i += 2;
+				} else {
+					if (ch === quote) {
+						state = 'code';
+						// A literal is a value: a following `/` is division.
+						prevSignificant = quote;
+					}
+					out += ch;
+					i += 1;
+				}
+				break;
+			}
+			case 'regex':
+				if (ch === '\\') {
+					out += ch + next;
+					i += 2;
+				} else if (ch === '\n') {
+					// Regex literals cannot span lines — bail defensively to code.
+					state = 'code';
+					out += ch;
+					i += 1;
+				} else {
+					if (ch === '[') regexInClass = true;
+					else if (ch === ']') regexInClass = false;
+					else if (ch === '/' && !regexInClass) {
+						state = 'code';
+						prevSignificant = '/'; // after a regex, `/` is division
+					}
+					out += ch;
+					i += 1;
+				}
+				break;
+			case 'line':
+				// Drop comment chars; preserve the newline so line structure (and
+				// downstream regex anchors) are unaffected.
+				if (ch === '\n') {
+					state = 'code';
+					out += ch;
+				}
+				i += 1;
+				break;
+			case 'block':
+				if (ch === '*' && next === '/') {
+					state = 'code';
+					i += 2;
+				} else {
+					// Preserve newlines inside block comments.
+					if (ch === '\n') out += ch;
+					i += 1;
+				}
+				break;
+		}
+	}
+	return out;
+}
+
+function parseFileImports(rawContent: string): ParsedImport[] {
 	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
 
 	// Combined regex matching:
 	// - import { x } from '...' or import { x as y } from '...'
@@ -841,7 +1027,11 @@ export function buildWorkspaceGraph(
 		);
 	}
 
-	// Process each file to extract nodes and edges
+	// Process each file to extract nodes and edges. Edge dedup is tracked in a
+	// loop-local Set (O(1)) instead of addEdge's O(edges) linear scan, and nodes
+	// go straight in via appendNodeFast — metadata is computed once below. This
+	// keeps construction O(N) on large repos (issue #1144).
+	const seenEdges = new Set<string>();
 	for (const filePath of sourceFiles) {
 		let content: string;
 		let fileStats: fsSync.Stats;
@@ -900,7 +1090,7 @@ export function buildWorkspaceGraph(
 			mtime: fileStats.mtime.toISOString(),
 		};
 
-		upsertNode(graph, node);
+		appendNodeFast(graph, node);
 
 		// Sort imports deterministically by specifier for stable edge ordering
 		const sortedImports = [...parsedImports].sort((a, b) =>
@@ -921,7 +1111,7 @@ export function buildWorkspaceGraph(
 					importSpecifier: parsed.specifier,
 					importType: parsed.importType,
 				};
-				addEdge(graph, edge);
+				appendEdgeFast(graph, edge, seenEdges);
 			}
 		}
 	}
@@ -1004,13 +1194,18 @@ export async function buildWorkspaceGraphAsync(
 		);
 	}
 
+	// Edge dedup tracked in a loop-local Set (O(1)); nodes inserted via
+	// appendNodeFast — metadata is computed once below. Keeps construction O(N)
+	// on large repos so the deferred startup scan no longer stalls the event
+	// loop for tens of seconds (issue #1144).
+	const seenEdges = new Set<string>();
 	let processedSinceYield = 0;
 	for (const filePath of sourceFiles) {
 		const result = scanFile(filePath, absoluteRoot, maxFileSize);
 		if (result.node) {
-			upsertNode(graph, result.node);
+			appendNodeFast(graph, result.node);
 			for (const edge of result.edges) {
-				addEdge(graph, edge);
+				appendEdgeFast(graph, edge, seenEdges);
 			}
 			stats.filesScanned++;
 		} else {

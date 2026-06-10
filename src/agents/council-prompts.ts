@@ -15,7 +15,7 @@
  * architect runs 1–3 web_search calls upfront, compiles a RESEARCH CONTEXT
  * block, and passes it to all three agents in their dispatch message. The
  * agents themselves have NO tools — they reason from the provided context
- * plus their training knowledge.
+ * plus stable background knowledge.
  *
  * The Round 1 / Round 2 deliberation protocol (independent analysis →
  * MAINTAIN/CONCEDE/NUANCE for disagreements) is preserved verbatim, as is
@@ -30,6 +30,8 @@ ROUND 1 — Independent Analysis and Answer
 - Use the RESEARCH CONTEXT block provided by the architect in your dispatch message as your external evidence source. The architect has already gathered the relevant web search results.
 - Cite EVERY factual claim that depends on external evidence with a source from the RESEARCH CONTEXT (use the title and URL exactly as given).
 - State your confidence (0.0–1.0) explicitly. Be honest — overconfident answers hurt the council.
+- For current, latest, today, now, or otherwise time-sensitive claims, training knowledge is NOT evidence. If the RESEARCH CONTEXT is missing, stale, or ambiguous, say the claim is not established instead of filling the gap from memory.
+- Treat the dispatch message's CURRENT DATE as authoritative for relative time. Do not append your own training cutoff year to search-oriented reasoning or recommendations.
 - Enumerate areas of uncertainty so the architect knows where you're guessing vs. where you're sure.
 - Do NOT coordinate with other members. You will not see their responses until Round 2.
 - Do NOT pad. Be concise. Substance over volume.
@@ -76,7 +78,8 @@ Notes:
 const HARD_RULES = `================================================================
 HARD RULES
 ================================================================
-- You have no tools. Reason from the provided RESEARCH CONTEXT and your training knowledge.
+- You have no tools. Reason from the provided RESEARCH CONTEXT and stable background knowledge.
+- Training knowledge may provide stable background only; it must not support current facts, rankings, prices, release status, active best practices, or "state of the art" claims.
 - Never invent sources. If the RESEARCH CONTEXT does not cover a needed claim, say so in \`areasOfUncertainty\`.
 - Never echo other members' responses verbatim. Paraphrase or quote with attribution.
 - Stay within your role and persona. The architect chose you for a specific perspective.`;

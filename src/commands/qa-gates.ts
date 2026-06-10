@@ -35,7 +35,7 @@ const ALL_GATE_NAMES: ReadonlyArray<keyof QaGates> = [
 	'hallucination_guard',
 	'sast_enabled',
 	'mutation_test',
-	'council_general_review',
+	'phase_council',
 	'drift_check',
 	'final_council',
 ];

@@ -92,8 +92,10 @@ export type {
 	PhaseCompleteConfig,
 	PipelineConfig,
 	PluginConfig,
+	SkillPropagationConfig,
 	SwarmConfig,
 	TurboConfig,
+	WorktreeIsolationConfig,
 } from './schema';
 export {
 	AgentOverrideConfigSchema,
@@ -105,8 +107,10 @@ export {
 	PhaseCompleteConfigSchema,
 	PipelineConfigSchema,
 	PluginConfigSchema,
+	SkillPropagationConfigSchema,
 	SwarmConfigSchema,
 	TurboConfigSchema,
+	WorktreeIsolationConfigSchema,
 } from './schema';
 export type {
 	DeltaSpec,

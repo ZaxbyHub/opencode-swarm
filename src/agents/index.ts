@@ -598,6 +598,15 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	// pre-search pass), and synthesis is the architect's responsibility — the
 	// dedicated council_moderator agent has been removed.
 	if (pluginConfig?.council?.general?.enabled === true) {
+		// Council agents intentionally omit the third `appendPrompt` argument that
+		// createReviewerAgent / createCriticAgent / createSMEAgent accept.
+		// Council prompts are fixed and self-contained: they must not inherit
+		// per-agent customizations (e.g. agents.reviewer.appendPrompt) because
+		// those customizations are scoped to the reviewer's normal workflow role,
+		// not to its council persona. This omission is intentional — see
+		// docs/configuration.md § "council.general — appendPrompt note".
+		let councilAgentsCreated = 0;
+
 		// Generalist council agent (broad analytical voice) — uses reviewer model.
 		if (!isAgentDisabled('reviewer', swarmAgents, swarmPrefix)) {
 			const councilGeneralist = createReviewerAgent(
@@ -608,6 +617,7 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			agents.push(
 				applyOverrides(councilGeneralist, swarmAgents, swarmPrefix, quiet),
 			);
+			councilAgentsCreated++;
 		}
 
 		// Skeptic council agent (adversarial stress-tester) — uses critic model.
@@ -620,6 +630,7 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			agents.push(
 				applyOverrides(councilSkeptic, swarmAgents, swarmPrefix, quiet),
 			);
+			councilAgentsCreated++;
 		}
 
 		// Domain expert council agent (technical depth voice) — uses SME model.
@@ -631,6 +642,27 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			councilDomainExpert.name = prefixName('council_domain_expert');
 			agents.push(
 				applyOverrides(councilDomainExpert, swarmAgents, swarmPrefix, quiet),
+			);
+			councilAgentsCreated++;
+		}
+
+		// Warn when council.general.enabled === true but fewer than 3 agents were
+		// registered because reviewer / critic / sme base agents are disabled.
+		// A user who enables the General Council expects all three council roles to
+		// participate; a silently reduced council can produce misleading results.
+		// The threshold 3 and the three isAgentDisabled checks below are intentionally
+		// hardcoded: the General Council is a fixed three-role construct by design.
+		// If a new council role is ever added, update all four values together.
+		if (councilAgentsCreated < 3) {
+			const missing: string[] = [];
+			if (isAgentDisabled('reviewer', swarmAgents, swarmPrefix))
+				missing.push('council_generalist (requires reviewer)');
+			if (isAgentDisabled('critic', swarmAgents, swarmPrefix))
+				missing.push('council_skeptic (requires critic)');
+			if (isAgentDisabled('sme', swarmAgents, swarmPrefix))
+				missing.push('council_domain_expert (requires sme)');
+			addDeferredWarning(
+				`[opencode-swarm] council.general.enabled is true but only ${councilAgentsCreated}/3 council agents could be registered because the following base agents are disabled: ${missing.join(', ')}. Re-enable those agents or accept a reduced council.`,
 			);
 		}
 

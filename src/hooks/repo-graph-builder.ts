@@ -112,8 +112,61 @@ export function createRepoGraphBuilderHook(
 
 	let initStarted = false;
 	let initPromise: Promise<void> = Promise.resolve();
-	let consecutiveFailures = 0;
+
+	// Per-session incremental-update failure tracking (AGENTS.md invariant 8:
+	// session state must be keyed by sessionID, bounded, and decay). A single
+	// shared counter (the previous implementation) mixed failures across
+	// sessions and, once it crossed the threshold, fired the advisory on every
+	// subsequent call forever — even after transient causes (disk full, a brief
+	// permission glitch) cleared. This map is keyed by sessionID, FIFO-bounded,
+	// time-decayed so an old failure streak resets, and cooldown-gated so the
+	// advisory is not spammed.
 	const FAILURE_ADVISORY_THRESHOLD = 3;
+	const FAILURE_DECAY_MS = 5 * 60 * 1000; // streak resets after 5 min idle
+	const ADVISORY_COOLDOWN_MS = 60 * 1000; // at most one advisory per minute/session
+	const MAX_TRACKED_SESSIONS = 100;
+	interface FailureState {
+		failures: number;
+		lastFailureAt: number;
+		lastAdvisoryAt: number;
+	}
+	const failuresBySession = new Map<string, FailureState>();
+
+	function recordSuccess(sessionID: string): void {
+		failuresBySession.delete(sessionID);
+	}
+
+	function recordFailure(
+		sessionID: string,
+		now: number,
+	): { count: number; advise: boolean } {
+		let state = failuresBySession.get(sessionID);
+		// Decay: a failure long after the previous one starts a fresh streak.
+		if (state && now - state.lastFailureAt > FAILURE_DECAY_MS) {
+			failuresBySession.delete(sessionID);
+			state = undefined;
+		}
+		if (!state) {
+			// FIFO eviction keeps the map bounded across many sessions.
+			if (failuresBySession.size >= MAX_TRACKED_SESSIONS) {
+				const oldest = failuresBySession.keys().next().value;
+				if (oldest !== undefined) failuresBySession.delete(oldest);
+			}
+			state = { failures: 0, lastFailureAt: 0, lastAdvisoryAt: 0 };
+			failuresBySession.set(sessionID, state);
+		}
+		state.failures += 1;
+		state.lastFailureAt = now;
+		let advise = false;
+		if (
+			state.failures >= FAILURE_ADVISORY_THRESHOLD &&
+			now - state.lastAdvisoryAt >= ADVISORY_COOLDOWN_MS
+		) {
+			advise = true;
+			state.lastAdvisoryAt = now;
+		}
+		return { count: state.failures, advise };
+	}
 
 	async function doInit(): Promise<void> {
 		// Yield once before any scan work so the caller's promise chain has
@@ -206,17 +259,17 @@ export function createRepoGraphBuilderHook(
 
 			try {
 				await _updateGraphForFiles(workspaceRoot, [absoluteFilePath]);
-				consecutiveFailures = 0;
+				recordSuccess(input.sessionID);
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				consecutiveFailures++;
+				const { count, advise } = recordFailure(input.sessionID, Date.now());
 				logger.error(`[repo-graph] Incremental update failed: ${message}`);
-				if (consecutiveFailures >= FAILURE_ADVISORY_THRESHOLD) {
+				if (advise) {
 					logger.warn(
-						`[repo-graph] ${consecutiveFailures} consecutive incremental update failures. ` +
+						`[repo-graph] ${count} consecutive incremental update failures. ` +
 							`The dependency graph may be stale. Consider reloading the workspace.`,
 					);
 				}

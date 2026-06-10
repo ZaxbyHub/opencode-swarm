@@ -388,7 +388,9 @@ LANGUAGE_REGISTRY.register({
 		detectFiles: ['Cargo.toml'],
 		frameworks: [
 			{
-				name: 'cargo test',
+				// DD-C026: framework name unified with the dispatch union name
+				// (`cargo`) so profiles and default-backend share one vocabulary.
+				name: 'cargo',
 				detect: 'Cargo.toml',
 				cmd: 'cargo test',
 				priority: 10,
@@ -461,7 +463,8 @@ LANGUAGE_REGISTRY.register({
 	test: {
 		detectFiles: ['go.mod'],
 		frameworks: [
-			{ name: 'go test', detect: 'go.mod', cmd: 'go test ./...', priority: 10 },
+			// DD-C026: name unified with the dispatch union name (`go-test`).
+			{ name: 'go-test', detect: 'go.mod', cmd: 'go test ./...', priority: 10 },
 		],
 	},
 	lint: {
@@ -537,14 +540,16 @@ LANGUAGE_REGISTRY.register({
 	test: {
 		detectFiles: ['pom.xml', 'build.gradle', 'build.gradle.kts'],
 		frameworks: [
+			// DD-C026: names unified with the dispatch union names
+			// (`maven`, `gradle`) so profiles and default-backend agree.
 			{
-				name: 'maven-test',
+				name: 'maven',
 				detect: 'pom.xml',
 				cmd: 'mvn test -q',
 				priority: 10,
 			},
 			{
-				name: 'gradle-test',
+				name: 'gradle',
 				detect: 'build.gradle',
 				cmd: 'gradle test -q',
 				priority: 9,
@@ -623,14 +628,16 @@ LANGUAGE_REGISTRY.register({
 	test: {
 		detectFiles: ['build.gradle.kts', 'build.gradle'],
 		frameworks: [
+			// DD-C026: both gradle variants use the unified union name `gradle`;
+			// they remain distinct entries via their detect file + priority.
 			{
-				name: 'gradle-test',
+				name: 'gradle',
 				detect: 'build.gradle.kts',
 				cmd: 'gradle test -q',
 				priority: 10,
 			},
 			{
-				name: 'gradle-test-groovy',
+				name: 'gradle',
 				detect: 'build.gradle',
 				cmd: 'gradle test -q',
 				priority: 9,
@@ -638,11 +645,14 @@ LANGUAGE_REGISTRY.register({
 		],
 	},
 	lint: {
-		detectFiles: ['.editorconfig', 'build.gradle.kts'],
+		// DD-C027: `.editorconfig` is a generic, cross-ecosystem file and a poor
+		// ktlint signal — any project with one would trigger detection. Use the
+		// Kotlin-specific Gradle build scripts instead.
+		detectFiles: ['build.gradle.kts', 'build.gradle'],
 		linters: [
 			{
 				name: 'ktlint',
-				detect: '.editorconfig',
+				detect: 'build.gradle.kts',
 				cmd: 'ktlint --format',
 				priority: 10,
 			},
@@ -704,7 +714,8 @@ LANGUAGE_REGISTRY.register({
 		detectFiles: ['*.csproj', '*.sln'],
 		frameworks: [
 			{
-				name: 'dotnet test',
+				// DD-C026: name unified with the dispatch union name (`dotnet-test`).
+				name: 'dotnet-test',
 				detect: '*.csproj',
 				cmd: 'dotnet test',
 				priority: 10,
@@ -859,7 +870,8 @@ LANGUAGE_REGISTRY.register({
 		detectFiles: ['Package.swift', '*.xcodeproj'],
 		frameworks: [
 			{
-				name: 'swift test',
+				// DD-C026: name unified with the dispatch union name (`swift-test`).
+				name: 'swift-test',
 				detect: 'Package.swift',
 				cmd: 'swift test',
 				priority: 10,

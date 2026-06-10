@@ -39,6 +39,7 @@ src/db/qa-gate-profile
 
 # --- src/evidence ---
 src/evidence/manager
+src/evidence/task-file
 
 # --- src/git ---
 src/git/branch
@@ -113,3 +114,6 @@ src/utils/logger
 src/utils/path-security
 src/utils/spec-hash
 src/utils
+
+# --- Third-party packages (legacy mock.module in knowledge-reader test) ---
+src/proper-lockfile

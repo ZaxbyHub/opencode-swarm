@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -49,6 +55,19 @@ describe('criteria-store round-trip', () => {
 		expect(readCriteria(tempDir, 'bad.task')).toBeNull();
 	});
 
+	test('schema-invalid criteria file returns null without crashing', () => {
+		mkdirSync(join(tempDir, '.swarm/council'), { recursive: true });
+		writeFileSync(
+			join(tempDir, '.swarm/council/bad_schema.json'),
+			JSON.stringify({
+				taskId: 'bad.schema',
+				criteria: { id: 'C1' },
+				declaredAt: new Date().toISOString(),
+			}),
+		);
+		expect(readCriteria(tempDir, 'bad.schema')).toBeNull();
+	});
+
 	test('path traversal characters in taskId are sanitized', () => {
 		// Ensure malicious taskId cannot escape the .swarm/council directory.
 		const traversalId = '../../../etc/passwd';
@@ -59,5 +78,10 @@ describe('criteria-store round-trip', () => {
 		const result = readCriteria(tempDir, traversalId);
 		expect(result).not.toBeNull();
 		expect(result?.taskId).toBe(traversalId);
+		// Verify the filename was sanitized and file exists inside .swarm/council/
+		const sanitizedFilename = '_________etc_passwd.json';
+		expect(existsSync(join(tempDir, '.swarm/council', sanitizedFilename))).toBe(
+			true,
+		);
 	});
 });

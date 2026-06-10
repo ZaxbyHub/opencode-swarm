@@ -12,6 +12,7 @@ import {
 	spyOn,
 	test,
 } from 'bun:test';
+import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 // ============================================================================
 // Date.now() mocking setup
@@ -34,20 +35,9 @@ function advanceTime(ms: number): void {
 }
 
 // ============================================================================
-// Module imports (after Date.now is mocked)
-// ============================================================================
-
-import {
-	createKnowledgeCuratorHook,
-	curateAndStoreSwarm,
-} from '../../../src/hooks/knowledge-curator.js';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
-
-// ============================================================================
 // Other mocks
 // ============================================================================
 
-const mockAppendKnowledge = mock(async () => {});
 const mockAppendRejectedLesson = mock(async () => {});
 const mockFindNearDuplicate = mock(
 	(_s: string, _a: unknown[], _n: number) => undefined,
@@ -116,7 +106,6 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 		mockResolveSwarmRejectedPath(...(args as [string])),
 	readKnowledge: (...args: unknown[]) =>
 		mockReadKnowledge(...(args as [string])),
-	appendKnowledge: (...args: unknown[]) => mockAppendKnowledge(...(args as [])),
 	appendRejectedLesson: (...args: unknown[]) =>
 		mockAppendRejectedLesson(...(args as [])),
 	findNearDuplicate: (...args: unknown[]) =>
@@ -125,8 +114,19 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 		mockRewriteKnowledge(...(args as [string, unknown[]])),
 	computeConfidence: (...args: unknown[]) =>
 		mockComputeConfidence(...(args as [number, boolean])),
+	computeOutcomeSignal: () => 0,
 	inferTags: (...args: unknown[]) => mockInferTags(...(args as [string])),
 	normalize: (...args: unknown[]) => mockNormalize(...(args as [string])),
+	transactKnowledge: mock(
+		async <T>(
+			_filePath: string,
+			mutate: (entries: T[]) => T[] | null,
+		): Promise<boolean> => {
+			const entries = (await mockReadKnowledge(_filePath)) as T[];
+			const result = mutate(entries);
+			return result !== null;
+		},
+	),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -151,6 +151,31 @@ mock.module('../../../src/hooks/utils.js', () => ({
 	validateSwarmPath: (...args: unknown[]) =>
 		mockValidateSwarmPath(...(args as [string, string])),
 }));
+
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
+	validateLesson: (...args: unknown[]) =>
+		mockValidateLesson(
+			...(args as [
+				string,
+				string[],
+				{ category: string; scope: string; confidence: number },
+			]),
+		),
+	quarantineEntry: (...args: unknown[]) =>
+		mockQuarantineEntry(
+			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
+		),
+}));
+
+// Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)
+// using dynamic import so that the mocks are active before the modules under test are loaded.
+const { createKnowledgeCuratorHook, curateAndStoreSwarm } = await import(
+	'../../../src/hooks/knowledge-curator.js'
+);
+
+const { transactKnowledge: mockTransactKnowledge } = await import(
+	'../../../src/hooks/knowledge-store.js'
+);
 
 // ============================================================================
 // Test data
@@ -200,7 +225,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 		// Reset mock time
 		mockNow = 1000000000000;
 
-		mockAppendKnowledge.mockClear();
+		mockTransactKnowledge.mockClear();
 		mockAppendRejectedLesson.mockClear();
 		mockFindNearDuplicate.mockClear();
 		mockReadKnowledge.mockClear();
@@ -225,7 +250,6 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			'/project/.swarm/rejected.jsonl',
 		);
 		mockReadKnowledge.mockResolvedValue([]);
-		mockAppendKnowledge.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockRewriteKnowledge.mockResolvedValue(undefined);
@@ -264,12 +288,12 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			};
 			await hook(input, {});
 
-			// Verify: Entry was added (appendKnowledge called once)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			// Verify: Entry was added (transactKnowledge called once per batch)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks for second call
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 23 hours (less than 24h - fresh)
 			advanceTime(23 * 60 * 60 * 1000);
@@ -281,8 +305,8 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entry should NOT be processed again (idempotency still works)
-			// appendKnowledge should NOT be called because the entry is still in the Map
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			// transactKnowledge should NOT be called because the entry is still in the Map
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -302,11 +326,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entry was added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks for second call
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 25 hours (more than 24h - stale)
 			advanceTime(25 * 60 * 60 * 1000);
@@ -318,7 +342,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entry SHOULD be processed again (because it was evicted)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -338,11 +362,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: First curation happened
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 25 hours (stale threshold)
 			advanceTime(25 * 60 * 60 * 1000);
@@ -354,11 +378,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Re-curation happened because stale entry was pruned
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks again
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 1 hour (now 26h total from first, but 1h from second)
 			advanceTime(1 * 60 * 60 * 1000);
@@ -370,7 +394,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: No re-curation (entry still fresh, within 24h)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -403,11 +427,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input2, {});
 
 			// Verify both were added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 13 more hours (25h total from start)
 			advanceTime(13 * 60 * 60 * 1000);
@@ -417,18 +441,18 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input1, {});
 
 			// Verify: Session 1 should be re-curated (was stale)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Try to re-process session 2 (fresh, should NOT re-curate)
 			mockReadSwarmFileAsync.mockResolvedValueOnce(planContent2);
 			await hook(input2, {});
 
 			// Verify: Session 2 should NOT be re-curated (still fresh, only 13h old)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('Multiple sessions with different ages — correct eviction per session', async () => {
@@ -472,11 +496,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			);
 
 			// Verify: All three were added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(3);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(3);
 
 			// Reset call counts but keep default implementations
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Set default implementation for readSwarmFileAsync (important!)
 			mockReadSwarmFileAsync.mockResolvedValue(planContent);
@@ -493,11 +517,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 				},
 				{},
 			);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset call counts
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 			mockReadSwarmFileAsync.mockResolvedValue(planContent);
 
 			// Try to re-process Session B (24h old -> at threshold, timestamp == cutoff, NOT evicted)
@@ -509,11 +533,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 				},
 				{},
 			);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 
 			// Reset call counts
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 			mockReadSwarmFileAsync.mockResolvedValue(planContent);
 
 			// Try to re-process Session C (18h old -> fresh, should NOT re-curate)
@@ -525,7 +549,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 				},
 				{},
 			);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -548,7 +572,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
 			// Verify: Lesson was processed normally
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('Prune on empty Map multiple times is safe', async () => {
@@ -572,7 +596,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			}
 
 			// Verify: All 5 lessons were processed
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(5);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(5);
 		});
 	});
 
@@ -603,12 +627,12 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			};
 			await hook(input, {});
 
-			// Verify: Entries were added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Verify: Entries were added (transactKnowledge called once per batch of 2 lessons)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 25 hours
 			advanceTime(25 * 60 * 60 * 1000);
@@ -622,11 +646,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entries should be re-curated
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 1 hour (now 26h total from first, but 1h from second)
 			advanceTime(1 * 60 * 60 * 1000);
@@ -640,7 +664,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: No re-curation (entry is fresh)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -658,11 +682,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entry was added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by exactly 24 hours + 1ms
 			// Entry timestamp = initial time
@@ -677,7 +701,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Re-curation happened
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('Entry 23h 59m old is NOT evicted (timestamp >= cutoff)', async () => {
@@ -693,11 +717,11 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: Entry was added
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 
 			// Reset mocks
 			mockReadSwarmFileAsync.mockClear();
-			mockAppendKnowledge.mockClear();
+			mockTransactKnowledge.mockClear();
 
 			// Advance time by 23 hours 59 minutes 59 seconds (just under 24h)
 			advanceTime(23 * 60 * 60 * 1000 + 59 * 60 * 1000 + 59 * 1000);
@@ -709,7 +733,7 @@ describe('knowledge-curator TTL eviction (seenRetroSections)', () => {
 			await hook(input, {});
 
 			// Verify: No re-curation
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 });

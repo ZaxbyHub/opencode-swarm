@@ -32,8 +32,7 @@ describe('architect.ts BEHAVIORAL_GUIDANCE markers', () => {
 		// v6.71.1 (#519): added a 4th BEHAVIORAL_GUIDANCE block for SCOPE DISCIPLINE rule 1a.
 		// QA gate hardening: added 3 more blocks for SPECIFY step 5b, BRAINSTORM Phase 6,
 		// and PLAN inline gate-selection paths.
-		// SPECIFY-COUNCIL-REVIEW (Phase 5): added 1 more block for the 5c council-review
-		// guidance inside MODE: SPECIFY.
+		// General Council advisory is now an early workflow option, not a SPECIFY step.
 		expect(startPositions.length).toBe(8);
 	});
 

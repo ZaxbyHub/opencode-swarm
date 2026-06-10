@@ -57,9 +57,11 @@ const writeMalformedMutationGateEvidence = (
 const makeVerdict = (
 	agent: string,
 	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT' = 'APPROVE',
+	verdictRound?: number,
 ): Record<string, unknown> => ({
 	agent,
 	verdict,
+	...(verdictRound !== undefined ? { verdictRound } : {}),
 	confidence: 0.9,
 	findings: [],
 	criteriaAssessed: [],
@@ -143,6 +145,7 @@ describe('submit_phase_council_verdicts — quorum enforcement', () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-quorum-3-'));
 		try {
 			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 1, 'pass');
 			const { submit_phase_council_verdicts } = await import(
 				'../../../src/tools/submit-phase-council-verdicts'
 			);
@@ -170,6 +173,7 @@ describe('submit_phase_council_verdicts — quorum enforcement', () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-quorum-5-'));
 		try {
 			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 1, 'pass');
 			const { submit_phase_council_verdicts } = await import(
 				'../../../src/tools/submit-phase-council-verdicts'
 			);
@@ -224,6 +228,7 @@ describe('submit_phase_council_verdicts — evidence file write', () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-evidence-'));
 		try {
 			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 2, 'pass');
 			const { submit_phase_council_verdicts } = await import(
 				'../../../src/tools/submit-phase-council-verdicts'
 			);
@@ -262,6 +267,7 @@ describe('submit_phase_council_verdicts — evidence file write', () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-path-match-'));
 		try {
 			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 1, 'pass');
 			const { submit_phase_council_verdicts } = await import(
 				'../../../src/tools/submit-phase-council-verdicts'
 			);
@@ -309,6 +315,51 @@ describe('submit_phase_council_verdicts — evidence file write', () => {
 				'phase-council.json',
 			);
 			expect(existsSync(evidencePath)).toBe(false);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('REJECT verdict: evidence file is written with verdict=REJECT', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-reject-evidence-'));
+		try {
+			writeConfig(tempDir, { enabled: true, vetoPriority: true });
+			const { submit_phase_council_verdicts } = await import(
+				'../../../src/tools/submit-phase-council-verdicts'
+			);
+			// Provide quorum (3) with one member REJECT — vetoPriority=true means REJECT wins.
+			const rejectVerdicts = [
+				makeVerdict('critic', 'REJECT'),
+				makeVerdict('reviewer'),
+				makeVerdict('sme'),
+			];
+			// Write mutation-gate evidence to prevent mutation_gap from inflating requiredFixes
+			writeMutationGateEvidence(tempDir, 7, 'pass');
+			const result = await submit_phase_council_verdicts.execute(
+				{
+					phaseNumber: 7,
+					swarmId: 'test',
+					phaseSummary: 'Phase 7 summary.',
+					verdicts: rejectVerdicts,
+					working_directory: tempDir,
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(parsed.overallVerdict).toBe('REJECT');
+
+			// Evidence file must exist and contain verdict='REJECT'
+			const evidencePath = join(
+				tempDir,
+				'.swarm',
+				'evidence',
+				'7',
+				'phase-council.json',
+			);
+			expect(existsSync(evidencePath)).toBe(true);
+			const evidence = JSON.parse(readFileSync(evidencePath, 'utf-8'));
+			expect(evidence.entries[0].verdict).toBe('REJECT');
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -361,24 +412,17 @@ describe('submit_phase_council_verdicts — mutation_gap emission', () => {
 				{ directory: tempDir },
 			);
 			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(true);
-			expect(parsed.mutationGapEmitted).toBe(true);
-			expect(parsed.requiredFixesCount).toBeGreaterThan(0);
-			expect(parsed.unifiedFeedbackMd).toContain('Mutation Coverage Gap');
-			expect(parsed.unifiedFeedbackMd).toContain('mutation_gap');
-			const phaseCouncilPath = join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				'3',
-				'phase-council.json',
-			);
-			const phaseCouncil = JSON.parse(readFileSync(phaseCouncilPath, 'utf-8'));
-			expect(phaseCouncil.entries[0].requiredFixes).toEqual(
+			// Missing mutation gate evidence → HIGH severity → blockingConcernsCount > 0 → blocked
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('blocking_concerns_unresolved');
+			expect(parsed.blockingConcernsCount).toBe(1);
+			expect(parsed.requiredFixes).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ category: 'mutation_gap' }),
 				]),
 			);
+			expect(parsed.unifiedFeedbackMd).toContain('Mutation Coverage Gap');
+			expect(parsed.unifiedFeedbackMd).toContain('mutation_gap');
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -484,9 +528,15 @@ describe('submit_phase_council_verdicts — mutation_gap emission', () => {
 				{ directory: tempDir },
 			);
 			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(true);
-			expect(parsed.mutationGapEmitted).toBe(true);
-			expect(parsed.requiredFixesCount).toBeGreaterThan(0);
+			// fail verdict → HIGH severity → blockingConcernsCount > 0 → blocked
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('blocking_concerns_unresolved');
+			expect(parsed.blockingConcernsCount).toBe(1);
+			expect(parsed.requiredFixes).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ category: 'mutation_gap' }),
+				]),
+			);
 			expect(parsed.unifiedFeedbackMd).toContain('mutation_gap');
 			expect(parsed.unifiedFeedbackMd).toContain('FAIL');
 		} finally {
@@ -556,6 +606,74 @@ describe('submit_phase_council_verdicts — mutation_gap emission', () => {
 			expect(parsed.success).toBe(true);
 			expect(parsed.mutationGapEmitted).toBe(true);
 			expect(parsed.unifiedFeedbackMd).toContain('mutation_gap');
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('submit_phase_council_verdicts — stale verdict detection', () => {
+	test('roundNumber:2 with omitted verdictRound returns stale_verdict_detected', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-stale-omitted-'));
+		try {
+			writeConfig(tempDir, { enabled: true });
+			const { submit_phase_council_verdicts } = await import(
+				'../../../src/tools/submit-phase-council-verdicts'
+			);
+			const result = await submit_phase_council_verdicts.execute(
+				{
+					phaseNumber: 1,
+					swarmId: 'test',
+					phaseSummary: 'Phase 1.',
+					roundNumber: 2,
+					verdicts: [
+						makeVerdict('critic'),
+						makeVerdict('reviewer'),
+						makeVerdict('sme'),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('stale_verdict_detected');
+			expect(parsed.staleVerdicts).toEqual([
+				{ agent: 'critic', verdictRound: undefined },
+				{ agent: 'reviewer', verdictRound: undefined },
+				{ agent: 'sme', verdictRound: undefined },
+			]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('roundNumber:2 with explicit verdictRound:1 returns stale_verdict_detected', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-stale-explicit-'));
+		try {
+			writeConfig(tempDir, { enabled: true });
+			const { submit_phase_council_verdicts } = await import(
+				'../../../src/tools/submit-phase-council-verdicts'
+			);
+			const result = await submit_phase_council_verdicts.execute(
+				{
+					phaseNumber: 1,
+					swarmId: 'test',
+					phaseSummary: 'Phase 1.',
+					roundNumber: 2,
+					verdicts: [
+						makeVerdict('critic', 'APPROVE', 2),
+						makeVerdict('reviewer', 'APPROVE', 2),
+						makeVerdict('sme', 'CONCERNS', 1),
+					],
+					working_directory: tempDir,
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('stale_verdict_detected');
+			expect(parsed.staleVerdicts).toEqual([{ agent: 'sme', verdictRound: 1 }]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Plugin } from '@opencode-ai/plugin';
 import packageJson from '../package.json' with { type: 'json' };
 import { type AgentDefinition, createAgents, getAgentConfigs } from './agents';
@@ -10,6 +11,7 @@ import {
 	PlanSyncWorker,
 	type PreflightTriggerManager,
 } from './background';
+import { createBackgroundCompletionObserver } from './background/completion-observer.js';
 import {
 	agentHasSwarmCommandTool,
 	createSwarmCommandHandler,
@@ -28,10 +30,12 @@ import {
 	KnowledgeConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
+	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
 } from './config/schema';
+import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
@@ -60,6 +64,7 @@ import {
 } from './hooks/adversarial-detector.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
+import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
@@ -124,6 +129,10 @@ import {
 } from './services/warning-buffer.js';
 
 const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
+const PACKAGE_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'..',
+);
 
 function createSwarmCommandSystemRuleHook(
 	agentDefinitions: Record<string, AgentDefinition>,
@@ -420,6 +429,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
+	const contextCapsuleInjectHook = createContextCapsuleInjectHook(
+		config,
+		ctx.directory,
+	);
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const commandHandler = createSwarmCommandHandler(
@@ -427,6 +440,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		agentDefinitionMap,
 		{
 			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
 		},
 	);
@@ -447,6 +461,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 	);
 	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
+	// Issue #1151 PR 2 (Stage A): read-only observer for the background-subagent
+	// completion signal. No-op unless hooks.background_subagents is opted in.
+	const backgroundCompletionObserver = createBackgroundCompletionObserver({
+		config: {
+			enabled:
+				(config.hooks as Record<string, unknown> | undefined)
+					?.background_subagents === true,
+		},
+		directory: ctx.directory,
+	});
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
 		directory: ctx.directory,
@@ -588,6 +612,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// v6.17 Knowledge system hooks — fire-and-forget, wrapped in safeHook
 	const knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+	const skillPropagationConfig = SkillPropagationConfigSchema.parse(
+		config.skillPropagation ?? {},
+	);
 	const knowledgeCuratorHook = knowledgeConfig.enabled
 		? createKnowledgeCuratorHook(ctx.directory, knowledgeConfig)
 		: undefined;
@@ -834,6 +861,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		// Register tools
 		tool: buildPluginToolObject(agentDefinitionMap),
 
+		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
+		// ADVISORY/observer-only — safeHook-wrapped so it can never block event delivery or
+		// plugin load. No-op unless hooks.background_subagents is opted in.
+		// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
+		event: safeHook(backgroundCompletionObserver.event) as any,
+
 		// Configure OpenCode - merge agents into config
 		config: async (opencodeConfig: Record<string, unknown>) => {
 			const isObjectRecord = (
@@ -943,7 +976,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1058,10 +1091,25 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
 				},
+				'swarm-pr-feedback': {
+					template: '/swarm pr-feedback $ARGUMENTS',
+					description:
+						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
+				},
 				'swarm-deep-dive': {
 					template: '/swarm deep-dive $ARGUMENTS',
 					description:
 						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+				},
+				'swarm-codebase-review': {
+					template: '/swarm codebase-review $ARGUMENTS',
+					description:
+						'Use /swarm codebase-review to launch codebase-review-swarm for a quote-grounded full-repo or large-subsystem audit',
+				},
+				'swarm-design-docs': {
+					template: '/swarm design-docs $ARGUMENTS',
+					description:
+						'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
 				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
@@ -1238,6 +1286,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// v2: scan for skill propagation warnings and compliance tracking
 				(input: unknown, output: unknown): Promise<void> => {
 					try {
+						if (!skillPropagationConfig.enabled) {
+							return Promise.resolve();
+						}
 						const p = input as { sessionID?: string };
 						return skillPropagationTransformScan(
 							ctx.directory,
@@ -1277,6 +1328,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					if (process.env.DEBUG_SWARM)
 						console.error(`[DIAG] systemTransform enhancer DONE`);
 				},
+				contextCapsuleInjectHook['experimental.chat.system.transform'],
 				// Heartbeat: throttled to 30s per session
 				(input: unknown, _output: unknown): Promise<void> => {
 					try {
@@ -1434,16 +1486,18 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			//    agents without a SKILLS field. Also pushes a visible warning
 			//    to pendingAdvisoryMessages for injection into the architect's
 			//    next prompt. When enforce=true, blocks the delegation entirely.
-			const skillResult = await skillPropagationGateBefore(
-				ctx.directory,
-				{
-					tool: input.tool,
-					agent: input.agent,
-					sessionID: input.sessionID,
-					args: input.args,
-				},
-				{ enabled: true },
-			);
+			const skillResult = skillPropagationConfig.enabled
+				? await skillPropagationGateBefore(
+						ctx.directory,
+						{
+							tool: input.tool,
+							agent: input.agent,
+							sessionID: input.sessionID,
+							args: input.args,
+						},
+						skillPropagationConfig,
+					)
+				: { blocked: false, reason: null, recommendedSkills: undefined };
 			if (skillResult.blocked) {
 				throw new Error(
 					skillResult.reason ?? 'Blocked by skill propagation gate',
@@ -1711,6 +1765,36 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 				// Repo graph incremental update on write tools
 				await safeHook(repoGraphHook.toolAfter)(input, output);
+
+				// Context Map: post-agent update after Task tool completes
+				if (
+					isTaskTool &&
+					config.context_map?.enabled === true &&
+					input.sessionID
+				) {
+					try {
+						const contextMapSession = swarmState.agentSessions.get(
+							input.sessionID,
+						);
+						const contextMapTaskId = contextMapSession?.currentTaskId ?? null;
+						if (contextMapTaskId) {
+							const agentOutput =
+								typeof output.output === 'string' ? output.output : '';
+							updateContextMapAfterAgent({
+								task_id: contextMapTaskId,
+								agent_role:
+									swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
+								files_touched: [],
+								implementation_summary: agentOutput.slice(0, 500),
+								task_goal: '',
+								final_status: 'completed',
+								directory: ctx.directory,
+							});
+						}
+					} catch {
+						// Post-agent update must never block the hook chain
+					}
+				}
 
 				// Tool output truncation (after summarizer to avoid double-processing)
 				const toolOutputConfig = config.tool_output;

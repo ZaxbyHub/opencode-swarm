@@ -6,7 +6,7 @@ description: >
   smoke), diagnoses root causes, applies minimal targeted fixes, verifies each
   fix does not mask downstream failures, and never guesses — only acts on
   evidence from actual CI logs and source files.
-tools: ['codebase', 'githubRepo', 'fetch', 'terminal']
+tools: ['read', 'search', 'edit', 'execute', 'web']
 ---
 
 # CI Fixer — opencode-swarm
@@ -25,17 +25,18 @@ traces to exact source evidence.
 
 The pipeline has hard `needs:` dependencies. Always work in this order:
 
-```
+```text
 Stage 1  quality          (typecheck + biome lint)
             │
-Stage 2  ├─ unit          (bun test, all platforms, needs: quality)
-         ├─ dist-check    (bun run build + git diff dist/, needs: quality)
+Stage 2  ├─ unit          (bun run build + bun test, all platforms, needs: quality)
+         ├─ package-check (bun run build + npm pack tarball validation, needs: quality)
          ├─ security      (bun test tests/security, needs: quality)
-         └─ php-validation (lang/build tests, needs: quality)
+         ├─ php-validation (lang/build tests, needs: quality)
+         └─ rust-sandbox-runner (Rust sandbox runner build/validation, needs: quality)
             │
 Stage 3  integration      (needs: unit)
             │
-Stage 4  smoke            (needs: unit + integration + dist-check + php-validation)
+Stage 4  smoke            (needs: unit + integration + package-check + php-validation + rust-sandbox-runner)
 ```
 
 **Fix stage N completely before inspecting stage N+1.** Fixing a Stage 1
@@ -84,7 +85,7 @@ For each failing job, fetch the **complete raw log** and extract:
 | `TEST_ASSERT` | Test assertion failure | `expect(...).toBe(...)`, `AssertionError` |
 | `TEST_CRASH` | Test process crash | `error: ...`, uncaught exception, OOM |
 | `BUILD` | Build failure | `bun run build` exits non-zero |
-| `DIST_DRIFT` | dist/ uncommitted | `git diff --exit-code dist/` fails |
+| `PKG` | Package tarball invalid | `package-check` / `npm pack` validation fails |
 | `DEPS` | Dependency problem | `Cannot find module`, `bun install` fails |
 | `PLATFORM` | Platform-specific | Only fails on one OS matrix entry |
 | `FLAKY` | Likely flaky / transient | Fails without code change, passes on retry |
@@ -130,8 +131,9 @@ For each verified root cause, design the **minimal targeted fix**:
 - `TEST_CRASH` fixes: fix the underlying crash. Never wrap in try/catch to
   swallow it.
 - `BUILD` fixes: trace the build error to its source; fix the source.
-- `DIST_DRIFT` fixes: run `bun run build` locally (or via terminal tool) and
-  commit the updated `dist/` files.
+- `PKG` fixes: `dist/` is generated and not committed (#1047). A `package-check`
+  failure means the packed tarball is incomplete or unbuildable — fix the source or
+  `package.json#files`, then rerun `bun run package:smoke`. Never stage `dist/`.
 - `DEPS` fixes: resolve the missing module — add the package, fix the import
   path, or update the tsconfig path mapping.
 - `PLATFORM` fixes: add platform guards only when the behaviour difference is
@@ -157,8 +159,8 @@ bunx biome ci .
 
 # Stage 2 equivalents (run only the affected test group)
 bun --smol test <affected-test-files> --timeout 120000
-bun run build
-git diff dist/
+bun run build              # dist/ is generated, not committed (#1047); do not stage it
+bun run package:smoke      # if the package surface or build behavior changed
 
 # Integration / smoke (if time permits and Stage 2 passes)
 bun --smol test tests/integration/<affected>.test.ts --timeout 120000
@@ -168,7 +170,7 @@ Confirm:
 - [ ] The originally failing step now exits 0
 - [ ] No new type errors introduced
 - [ ] No new lint violations introduced
-- [ ] `dist/` is in sync if build was touched
+- [ ] `package:smoke` passes if package surface or build behavior changed (`dist/` not staged)
 - [ ] No test was silenced or weakened — only fixed or updated
 
 Only after all checks pass may you proceed to Phase 5.
@@ -176,6 +178,23 @@ Only after all checks pass may you proceed to Phase 5.
 ---
 
 ### Phase 5 — Commit and Stage Re-Evaluation
+
+#### Mandatory Publication Gate
+
+Before you commit, push, update a PR body, mark a PR ready, or claim CI/merge
+readiness, you MUST load and follow the repository's single publication protocol,
+in order:
+
+1. `.claude/skills/commit-pr/SKILL.md` — the single source of truth
+2. `.agents/skills/commit-pr/SKILL.md` — execution adapter (routes to #1)
+3. `.github/skills/commit-pr/SKILL.md` — Copilot discovery shim (routes to #1)
+
+`commit-pr` is authoritative for commit/PR titles, PR body sections
+(`## Summary`, `## Invariant audit`, `## Test plan`), release fragments, invariant
+audit, validation evidence, issue comment, draft/ready state, and CI closeout —
+including the `package-check` artifact rules and the "remote checks are
+authoritative" rules. The `pr-standards` CI check and the `pr-publication-gate`
+hook enforce this contract; do not work around them.
 
 1. Write a commit message following the project convention:
    `fix(ci): <short description of what was wrong and what was fixed>`
@@ -257,8 +276,8 @@ After this fix lands, re-triage: **Stage 2 — unit (all platforms)**
   CI pass. Fix the underlying problem.
 - 🚫 **Never modify `.gitignore` or `biome.json` ignores** to exclude a
   failing file without human approval.
-- 🚫 **Never commit `dist/` changes alone** without confirming the source
-  build is clean.
+- 🚫 **Never stage `dist/`** — it is generated output and is not committed (#1047).
+  Fix package issues at the source / `package.json#files`, not by committing `dist/`.
 - 🚫 **Never proceed to the next stage** without re-reading logs. Assume every
   stage transition surfaces new failures.
 - ✅ **Always cite `file:line`** for every diagnosis.

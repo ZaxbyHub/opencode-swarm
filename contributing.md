@@ -25,11 +25,18 @@ git checkout -b <type>/<short-description>   # e.g. feat/add-retry-backoff
 bun install --frozen-lockfile
 ```
 
+> **`dist/` is generated, not committed** (#1047). The plugin entry (`package.json#main`
+> → `dist/index.js`) only exists after a build. `bun install` builds it automatically via
+> the `prepare` script, so a fresh clone is runnable. If you load the plugin from this
+> checkout and pull source changes **without** re-running `bun install`, refresh the bundle
+> with `bun run build` (or `bun run dev`, which builds then launches OpenCode) before the
+> plugin will load. The build is cross-platform (bun + tsc, no OS-specific steps).
+
 ### 2. Make your changes
 
 - Write code, tests, and docs
 - Follow the commit message format below for every commit
-- Follow the test rules in `.opencode/writing-tests/SKILL.md` (bun:test only, mock isolation, cross-platform paths)
+- Follow the test rules in `.opencode/skills/writing-tests/SKILL.md` (bun:test only, mock isolation, cross-platform paths)
 - If you change behavior guarded by existing tests, **update those tests in the same PR**
 
 ### 3. Write a pending release-note fragment
@@ -44,10 +51,12 @@ bun run typecheck
 bunx biome ci .
 
 # Tier 2 — unit tests (all platforms in CI; run locally on yours)
-# For directories with mock conflicts (tools, services, agents), use per-file loops:
+# For directories with mock conflicts, use per-file loops:
 for f in tests/unit/tools/*.test.ts; do bun --smol test "$f" --timeout 30000; done
-# For directories without mock conflicts (hooks, cli, commands), batch is fine:
-bun --smol test tests/unit/hooks tests/unit/cli tests/unit/commands tests/unit/config --timeout 120000
+# CI also isolates hook files per file because several hooks share mutable mocks:
+for f in src/hooks/*.test.ts tests/unit/hooks/*.test.ts; do bun --smol test "$f" --timeout 30000; done
+# For directories without known mock conflicts, batch is fine:
+bun --smol test tests/unit/cli tests/unit/commands tests/unit/config --timeout 120000
 
 # Tier 3 — integration tests
 bun test tests/integration ./test --timeout 120000
@@ -214,8 +223,12 @@ All of these must be green. They run automatically on every PR.
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
 | `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
+| `dist-check` | Committed `dist/` matches a fresh build |
+| `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |
 | `security` (Ubuntu) | Security and adversarial tests pass |
+| `php-validation` | PHP language/build fixtures and validation tests pass |
+| `rust-sandbox-runner` | Rust sandbox runner builds and validates |
 | `smoke` (Ubuntu, macOS, Windows) | Package builds successfully and smoke tests pass on all platforms |
 | `pr-standards` | PR title is a valid conventional commit |
 | `check-duplicates` | PR title does not match an already-open PR |
@@ -228,7 +241,7 @@ All of these must be green. They run automatically on every PR.
 
 ### Test framework
 
-All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `.opencode/writing-tests/SKILL.md` for the full guide including mock isolation rules and cross-platform requirements.
+All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `.opencode/skills/writing-tests/SKILL.md` for the full guide including mock isolation rules and cross-platform requirements.
 
 ### Test directory map
 
@@ -335,5 +348,5 @@ gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'
 - [ ] New tests are in the correct `tests/` subdirectory
 - [ ] Tests updated for any changed behavior (defaults, validation, error messages)
 - [ ] If adding/modifying a workflow, all `uses:` references are SHA-pinned
-- [ ] All CI checks pass locally (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `build`, `smoke`)
+- [ ] All CI checks pass locally or remotely as appropriate (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `dist-check`, `package-check`, `php-validation`, `rust-sandbox-runner`, `smoke`)
 - [ ] PR description includes a summary and test plan

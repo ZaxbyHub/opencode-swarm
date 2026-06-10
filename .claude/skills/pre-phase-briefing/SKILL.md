@@ -57,7 +57,7 @@ Format:
   REALITY CHECK: [N] references verified, [M] discrepancies found.
     ✓ src/hooks/incremental-verify.ts — exists, line 69 confirmed Bun.spawn
     ✗ src/services/status-service.ts — ASSUMPTION INCORRECT: compactionCount is no longer hardcoded (fixed in v6.29.1)
-    ✓ src/config/evidence-schema.ts:107 — confirmed phase_number min(0)
+    ✓ src/config/evidence-schema.ts — confirmed phase_number min(1)
 
 No implementation agent (coder, reviewer, test-engineer) may begin until this report is finalized.
 

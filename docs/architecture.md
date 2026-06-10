@@ -62,6 +62,22 @@ The protocol executes in the following stages:
 
 This mode is strictly **read-only**: it does NOT mutate source code, delegate to the coder, or call `declare_scope`.
 
+### Signal-Triggered Modes (On-Demand Skills)
+
+`DEEP_DIVE` is one of several **signal-triggered modes**. A `/swarm <command>` handler emits a `[MODE: X ...]` activation signal; the architect recognizes it and loads the matching `### MODE: X` section + skill on demand. This keeps the core prompt lean while supporting deep specialized workflows.
+
+Discovery is deliberate and robust:
+- The command-delivery layer detects a `[MODE: ...]` signal and instructs the architect to **enter that mode and load its skill** — it does not present the signal as output to echo.
+- A top-priority **SIGNAL-TRIGGERED MODE** rule sits at the head of the architect's MODE-detection ladder: if a `[MODE: X ...]` header is present and a matching `### MODE: X` section exists, the architect enters it immediately, overriding any other routing. Free text after the closing bracket is treated as additional instructions for that mode.
+
+Current signal-triggered modes: `DEEP_DIVE`, `PR_REVIEW`, `PR_FEEDBACK`, `DESIGN_DOCS`, `COUNCIL`, `ISSUE_INGEST` (and the spec-workflow modes `SPECIFY`, `BRAINSTORM`, `CLARIFY-SPEC`).
+
+#### PR_REVIEW Protocol
+Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction → 6 parallel explorer lanes → independent reviewer confirmation → critic challenge on HIGH/CRITICAL → synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder.
+
+#### PR_FEEDBACK Protocol
+Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / DISPROVED / PRE_EXISTING / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. GitHub review threads are resolved only on explicit user instruction.
+
 ### Explorer: The Eyes
 
 Fast codebase scanner and factual mapping agent. Explorer is **strictly observational** — it reports what is observed without judgment, verdict, or directive.
@@ -382,7 +398,7 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/drift-verifier.json (written by @critic_drift_verifier)
 │         - .swarm/evidence/{phase}/hallucination-guard.json (if hallucination_guard enabled; written by write_hallucination_evidence)
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
-│         - .swarm/evidence/{phase}/phase-council.json (if council_mode enabled; written by submit_phase_council_verdicts)
+│         - .swarm/evidence/{phase}/phase-council.json (if phase_council enabled; written by submit_phase_council_verdicts)
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         If either missing: run the missing gate first
@@ -392,7 +408,7 @@ All tasks in phase done
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
-│         - Gate 5: phase council — reads phase-council.json for approved verdict (if council_mode enabled)
+│         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Gates 1–5 bypassed when turbo mode is active; Gates 5b and 6 are never bypassed
@@ -409,7 +425,7 @@ The `phase_complete` tool enforces up to seven gates before marking a phase comp
 | `drift-verifier` | Evidence-based check that `critic_drift_verifier` approved the implementation | `DRIFT_VERIFICATION_MISSING` or `DRIFT_VERIFICATION_REJECTED` | Yes |
 | `hallucination-guard` | Evidence-based check that `critic_hallucination_verifier` approved plan/implementation claims | `HALLUCINATION_VERIFICATION_MISSING` or `HALLUCINATION_VERIFICATION_REJECTED` | Yes |
 | `mutation-test` | Evidence-based check that mutation tests achieved a passing kill rate | `MUTATION_GATE_MISSING` or `MUTATION_GATE_FAIL` | Yes |
-| `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
+| `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved (if `phase_council` enabled) | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
 

@@ -17,5 +17,16 @@ export {
 	listSupportedLanguages,
 } from './registry';
 
-// runtime has no _internals — safe to re-export
-export * from './runtime';
+// Tree-sitter runtime — explicit exports so the `_internals` DI seam is
+// re-exported under a namespaced name (matching detector/registry) instead of
+// leaking as a bare `_internals` via `export *`.
+export {
+	_internals as runtimeInternals,
+	clearParserCache,
+	getInitializedLanguages,
+	getSupportedLanguages,
+	isGrammarAvailable,
+	loadGrammar,
+	type Parser,
+	parserCache,
+} from './runtime';

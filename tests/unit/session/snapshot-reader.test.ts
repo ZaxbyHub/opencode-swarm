@@ -1333,3 +1333,206 @@ describe('deserializeAgentSession - taskWorkflowStates adversarial', () => {
 		expect(result.taskWorkflowStates.get('task-4')).toBe('idle');
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot migration — transientRetryCount (v6.86.14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('deserializeAgentSession - transientRetryCount migration (v6.86.14)', () => {
+	it('old snapshot window without transientRetryCount field defaults to 0', () => {
+		// Simulate a snapshot written before v6.86.14 where the field did not exist.
+		const serialized: SerializedAgentSession = {
+			agentName: 'coder',
+			lastToolCallTime: 123456,
+			lastAgentEventTime: 123456,
+			delegationActive: false,
+			activeInvocationId: 1,
+			lastInvocationIdByAgent: { coder: 1 },
+			windows: {
+				'coder:1': {
+					id: 1,
+					agentName: 'coder',
+					startedAtMs: 123456,
+					toolCalls: 10,
+					consecutiveErrors: 0,
+					hardLimitHit: false,
+					lastSuccessTimeMs: 123456,
+					recentToolCalls: [],
+					warningIssued: false,
+					warningReason: '',
+					// transientRetryCount intentionally absent (old snapshot)
+				} as any,
+			},
+			lastCompactionHint: 0,
+			architectWriteCount: 0,
+			lastCoderDelegationTaskId: null,
+			currentTaskId: null,
+			gateLog: {},
+			reviewerCallCount: {},
+			lastGateFailure: null,
+			partialGateWarningsIssuedForTask: [],
+			selfFixAttempted: false,
+			catastrophicPhaseWarnings: [],
+			lastPhaseCompleteTimestamp: 0,
+			lastPhaseCompletePhase: 0,
+			phaseAgentsDispatched: [],
+			qaSkipCount: 0,
+			qaSkipTaskIds: [],
+		};
+
+		const result = deserializeAgentSession(serialized);
+
+		expect(result.windows['coder:1']).toBeDefined();
+		expect(result.windows['coder:1'].transientRetryCount).toBe(0);
+	});
+
+	it('snapshot window with transientRetryCount=3 preserves the value', () => {
+		const serialized: SerializedAgentSession = {
+			agentName: 'coder',
+			lastToolCallTime: 123456,
+			lastAgentEventTime: 123456,
+			delegationActive: false,
+			activeInvocationId: 2,
+			lastInvocationIdByAgent: { coder: 2 },
+			windows: {
+				'coder:2': {
+					id: 2,
+					agentName: 'coder',
+					startedAtMs: 123456,
+					toolCalls: 5,
+					consecutiveErrors: 0,
+					hardLimitHit: false,
+					lastSuccessTimeMs: 123456,
+					recentToolCalls: [],
+					warningIssued: false,
+					warningReason: '',
+					transientRetryCount: 3,
+				},
+			},
+			lastCompactionHint: 0,
+			architectWriteCount: 0,
+			lastCoderDelegationTaskId: null,
+			currentTaskId: null,
+			gateLog: {},
+			reviewerCallCount: {},
+			lastGateFailure: null,
+			partialGateWarningsIssuedForTask: [],
+			selfFixAttempted: false,
+			catastrophicPhaseWarnings: [],
+			lastPhaseCompleteTimestamp: 0,
+			lastPhaseCompletePhase: 0,
+			phaseAgentsDispatched: [],
+			qaSkipCount: 0,
+			qaSkipTaskIds: [],
+		};
+
+		const result = deserializeAgentSession(serialized);
+
+		expect(result.windows['coder:2']).toBeDefined();
+		expect(result.windows['coder:2'].transientRetryCount).toBe(3);
+	});
+
+	it('snapshot window with transientRetryCount=0 explicitly is kept as 0', () => {
+		const serialized: SerializedAgentSession = {
+			agentName: 'explorer',
+			lastToolCallTime: 100000,
+			lastAgentEventTime: 100000,
+			delegationActive: false,
+			activeInvocationId: 1,
+			lastInvocationIdByAgent: { explorer: 1 },
+			windows: {
+				'explorer:1': {
+					id: 1,
+					agentName: 'explorer',
+					startedAtMs: 100000,
+					toolCalls: 0,
+					consecutiveErrors: 0,
+					hardLimitHit: false,
+					lastSuccessTimeMs: 100000,
+					recentToolCalls: [],
+					warningIssued: false,
+					warningReason: '',
+					transientRetryCount: 0,
+				},
+			},
+			lastCompactionHint: 0,
+			architectWriteCount: 0,
+			lastCoderDelegationTaskId: null,
+			currentTaskId: null,
+			gateLog: {},
+			reviewerCallCount: {},
+			lastGateFailure: null,
+			partialGateWarningsIssuedForTask: [],
+			selfFixAttempted: false,
+			catastrophicPhaseWarnings: [],
+			lastPhaseCompleteTimestamp: 0,
+			lastPhaseCompletePhase: 0,
+			phaseAgentsDispatched: [],
+			qaSkipCount: 0,
+			qaSkipTaskIds: [],
+		};
+
+		const result = deserializeAgentSession(serialized);
+
+		expect(result.windows['explorer:1'].transientRetryCount).toBe(0);
+	});
+
+	it('multiple windows — absent field on one, present on another — both migrate correctly', () => {
+		const serialized: SerializedAgentSession = {
+			agentName: 'coder',
+			lastToolCallTime: 200000,
+			lastAgentEventTime: 200000,
+			delegationActive: false,
+			activeInvocationId: 2,
+			lastInvocationIdByAgent: { coder: 2 },
+			windows: {
+				'coder:1': {
+					id: 1,
+					agentName: 'coder',
+					startedAtMs: 100000,
+					toolCalls: 20,
+					consecutiveErrors: 0,
+					hardLimitHit: false,
+					lastSuccessTimeMs: 100000,
+					recentToolCalls: [],
+					warningIssued: false,
+					warningReason: '',
+					// transientRetryCount absent — old snapshot
+				} as any,
+				'coder:2': {
+					id: 2,
+					agentName: 'coder',
+					startedAtMs: 200000,
+					toolCalls: 5,
+					consecutiveErrors: 0,
+					hardLimitHit: false,
+					lastSuccessTimeMs: 200000,
+					recentToolCalls: [],
+					warningIssued: false,
+					warningReason: '',
+					transientRetryCount: 2,
+				},
+			},
+			lastCompactionHint: 0,
+			architectWriteCount: 0,
+			lastCoderDelegationTaskId: null,
+			currentTaskId: null,
+			gateLog: {},
+			reviewerCallCount: {},
+			lastGateFailure: null,
+			partialGateWarningsIssuedForTask: [],
+			selfFixAttempted: false,
+			catastrophicPhaseWarnings: [],
+			lastPhaseCompleteTimestamp: 0,
+			lastPhaseCompletePhase: 0,
+			phaseAgentsDispatched: [],
+			qaSkipCount: 0,
+			qaSkipTaskIds: [],
+		};
+
+		const result = deserializeAgentSession(serialized);
+
+		expect(result.windows['coder:1'].transientRetryCount).toBe(0);
+		expect(result.windows['coder:2'].transientRetryCount).toBe(2);
+	});
+});

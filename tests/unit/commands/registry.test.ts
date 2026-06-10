@@ -108,6 +108,7 @@ describe('CommandEntry — category field', () => {
 			'pr-review',
 			'issue',
 			'deep-dive',
+			'codebase-review',
 		];
 		for (const name of agentCommands) {
 			const entry = COMMAND_REGISTRY[name as RegisteredCommand];
@@ -165,6 +166,12 @@ describe('CommandEntry — aliasOf field', () => {
 			'deep dive' as RegisteredCommand
 		] as CommandEntry;
 		expect(deepDiveAlias?.aliasOf).toBe('deep-dive');
+
+		// 'codebase review' is an alias of 'codebase-review'
+		const codebaseReviewAlias = COMMAND_REGISTRY[
+			'codebase review' as RegisteredCommand
+		] as CommandEntry;
+		expect(codebaseReviewAlias?.aliasOf).toBe('codebase-review');
 	});
 });
 
@@ -673,6 +680,7 @@ describe('COMMAND_REGISTRY alias entries — completeness', () => {
 			'check',
 			'clear',
 			'deep dive',
+			'codebase review',
 		];
 		for (const alias of knownAliases) {
 			expect(Object.hasOwn(COMMAND_REGISTRY, alias)).toBe(true);

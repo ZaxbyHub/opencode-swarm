@@ -63,6 +63,17 @@ describe('createArchitectAgent strips DESIGN_DOCS when disabled (opt-in)', () =>
 		expect(p).not.toContain('docs_design');
 	});
 
+	test('disabled: strip does NOT eat sibling modes between DESIGN_DOCS and ISSUE_INGEST (regression)', () => {
+		// Previous code used `(?=### MODE: ISSUE_INGEST)` as the strip lookahead.
+		// Because PR_REVIEW (and later PR_FEEDBACK) sit between DESIGN_DOCS and
+		// ISSUE_INGEST, the lazy match consumed them too — silently deleting the
+		// PR review/feedback modes whenever design_docs was disabled.
+		const p = buildPrompt(false);
+		expect(p).toContain('### MODE: PR_REVIEW');
+		expect(p).toContain('### MODE: PR_FEEDBACK');
+		expect(p).toContain('### MODE: ISSUE_INGEST');
+	});
+
 	test('enabled: MODE: DESIGN_DOCS present and docs_design referenced', () => {
 		const p = buildPrompt(true);
 		expect(p).toContain('### MODE: DESIGN_DOCS');

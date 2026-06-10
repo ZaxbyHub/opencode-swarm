@@ -1,6 +1,7 @@
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { warn } from '../utils/logger.js';
 import {
 	commitChanges,
@@ -11,6 +12,28 @@ import {
 } from './branch.js';
 
 const GIT_TIMEOUT_MS = 30_000;
+const EvidencePlanSchema = z
+	.object({
+		phases: z
+			.array(
+				z
+					.object({
+						tasks: z
+							.array(
+								z
+									.object({
+										id: z.string(),
+										status: z.string().optional(),
+									})
+									.passthrough(),
+							)
+							.optional(),
+					})
+					.passthrough(),
+			)
+			.optional(),
+	})
+	.passthrough();
 
 /**
  * Sanitize input string to prevent command injection
@@ -93,7 +116,9 @@ export function generateEvidenceMd(cwd: string): string {
 	try {
 		const planPath = path.join(cwd, '.swarm', 'plan.json');
 		if (fs.existsSync(planPath)) {
-			const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
+			const plan = EvidencePlanSchema.parse(
+				JSON.parse(fs.readFileSync(planPath, 'utf-8')),
+			);
 			evidence += `\n## Tasks\n\n`;
 			for (const phase of plan.phases || []) {
 				for (const task of phase.tasks || []) {

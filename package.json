@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.50.0",
+	"version": "7.61.0",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -33,6 +33,25 @@
 	"files": [
 		"dist",
 		"dist/lang/grammars",
+		".opencode/skills/brainstorm",
+		".opencode/skills/specify",
+		".opencode/skills/clarify-spec",
+		".opencode/skills/resume",
+		".opencode/skills/clarify",
+		".opencode/skills/discover",
+		".opencode/skills/consult",
+		".opencode/skills/pre-phase-briefing",
+		".opencode/skills/council",
+		".opencode/skills/deep-dive",
+		".opencode/skills/codebase-review-swarm",
+		".opencode/skills/design-docs",
+		".opencode/skills/swarm-pr-review",
+		".opencode/skills/swarm-pr-feedback",
+		".opencode/skills/issue-ingest",
+		".opencode/skills/plan",
+		".opencode/skills/critic-gate",
+		".opencode/skills/execute",
+		".opencode/skills/phase-wrap",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"
@@ -47,8 +66,9 @@
 		"check": "biome check --write .",
 		"dev": "bun run build && opencode",
 		"package:smoke": "node scripts/package-smoke.mjs",
-		"prepublishOnly": "bun run build",
-		"repro:704": "node scripts/repro-704.mjs"
+		"prepare": "bun run build",
+		"repro:704": "node scripts/repro-704.mjs",
+		"repro:1144": "bun scripts/repro-1144.mjs"
 	},
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.1.53",

@@ -296,6 +296,25 @@ describe('PR Creation - Comprehensive Tests', () => {
 			expect(result).toContain('# Evidence Summary');
 		});
 
+		it('handles schema-invalid plan.json gracefully', () => {
+			const { generateEvidenceMd } = require('../../../src/git/pr');
+
+			fs.writeFileSync(
+				path.join(tmpDir, '.swarm', 'plan.json'),
+				JSON.stringify({
+					phases: [{ tasks: [{ id: 123, status: 'in_progress' }] }],
+				}),
+			);
+
+			mockSpawnSync
+				.mockReturnValueOnce({ status: 0, stdout: 'main', stderr: '' })
+				.mockReturnValueOnce({ status: 0, stdout: 'abc123', stderr: '' })
+				.mockReturnValueOnce({ status: 0, stdout: 'origin/main', stderr: '' })
+				.mockReturnValueOnce({ status: 0, stdout: '', stderr: '' });
+
+			expect(() => generateEvidenceMd(tmpDir)).not.toThrow();
+		});
+
 		it('handles empty changed files', () => {
 			const { generateEvidenceMd } = require('../../../src/git/pr');
 

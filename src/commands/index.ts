@@ -34,6 +34,7 @@ export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
 export { handleClarifyCommand } from './clarify';
 export { handleCloseCommand } from './close';
+export { handleCodebaseReviewCommand } from './codebase-review';
 export {
 	executeSwarmCommand,
 	formatCommandNotFound,
@@ -263,6 +264,7 @@ export function createSwarmCommandHandler(
 	agents: Record<string, AgentDefinition>,
 	options: {
 		getActiveAgentName?: (sessionID: string) => string | undefined;
+		packageRoot?: string;
 		registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 	} = {},
 ): (
@@ -285,6 +287,7 @@ export function createSwarmCommandHandler(
 				sessionID: input.sessionID,
 				tokens: normalized.tokens,
 				activeAgentName: options.getActiveAgentName?.(input.sessionID),
+				packageRoot: options.packageRoot,
 				registeredAgents: options.registeredAgents,
 			}),
 		} as unknown as (typeof output.parts)[number]);
@@ -298,6 +301,7 @@ async function buildSwarmCommandPrompt(args: {
 	sessionID: string;
 	tokens: string[];
 	activeAgentName?: string;
+	packageRoot?: string;
 	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 }): Promise<string> {
 	const {
@@ -306,6 +310,7 @@ async function buildSwarmCommandPrompt(args: {
 		sessionID,
 		tokens,
 		activeAgentName,
+		packageRoot,
 		registeredAgents,
 	} = args;
 	const resolved = _internals.resolveCommand(tokens);
@@ -355,6 +360,7 @@ async function buildSwarmCommandPrompt(args: {
 		agents,
 		sessionID,
 		tokens,
+		packageRoot,
 	});
 
 	return formatCanonicalPromptFallback({
@@ -392,6 +398,27 @@ function formatCanonicalPromptFallback(args: {
 	original: string;
 	text: string;
 }): string {
+	// Mode-activation signals (e.g. `[MODE: DEEP_DIVE ...]`, `[MODE: PR_REVIEW ...]`)
+	// are NOT command output to echo — they instruct the architect to enter a mode
+	// and run that mode's skill. The verbatim-echo wrapper used for informational
+	// output actively defeats them (the architect prints the signal instead of
+	// acting on it). Detect the signal and emit an activation instruction instead.
+	// The instruction is intentionally generic (it names no specific SKILL.md path)
+	// so a signal whose mode has no `### MODE:` section/skill — e.g. ANALYZE — is
+	// not told to load a file that does not exist; the architect's SIGNAL-TRIGGERED
+	// MODE rule falls through when no matching section is found.
+	if (/^\s*\[MODE:/.test(args.text)) {
+		return [
+			`The user typed \`${args.original}\`.`,
+			'The line below is a swarm MODE-activation signal, NOT output to display.',
+			'Enter the mode named in its `[MODE: X ...]` header now: follow your',
+			'prompt’s "### MODE: X" section, load the SKILL.md it references, and',
+			'follow that protocol exactly. Treat any text after the closing bracket as',
+			'additional instructions. Do NOT echo this signal verbatim.',
+			'',
+			args.text,
+		].join('\n');
+	}
 	return [
 		`The user typed \`${args.original}\`.`,
 		'Canonical opencode-swarm command output follows.',

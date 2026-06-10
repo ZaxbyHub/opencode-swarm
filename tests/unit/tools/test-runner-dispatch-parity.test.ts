@@ -3,8 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { clearDispatchCache } from '../../../src/lang/dispatch';
+import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 import {
 	buildTestCommandViaDispatch,
+	DISPATCH_FRAMEWORK_MAP,
 	detectTestFramework,
 	detectTestFrameworkViaDispatch,
 	parseTestOutputViaDispatch,
@@ -167,6 +169,42 @@ describe('detectTestFramework legacy ↔ dispatch parity', () => {
 		// names to 'none' to preserve parity.
 		expect(legacy).toBe('none');
 		expect(viaDispatch).toBe('none');
+	});
+});
+
+describe('DD-C026: profile framework name ↔ dispatch map coverage', () => {
+	// Names whose test frameworks the legacy TestFramework union intentionally
+	// does not represent — `detectTestFrameworkViaDispatch` collapses them to
+	// 'none' on purpose (legacy could not detect them either).
+	const INTENTIONALLY_UNMAPPED = new Set(['unittest', 'Pest', 'PHPUnit']);
+
+	test('every profile test-framework name is either mapped or explicitly unmapped', () => {
+		const unmapped: string[] = [];
+		for (const profile of LANGUAGE_REGISTRY.getAll()) {
+			for (const fw of profile.test.frameworks) {
+				if (INTENTIONALLY_UNMAPPED.has(fw.name)) continue;
+				if (!(fw.name in DISPATCH_FRAMEWORK_MAP)) {
+					unmapped.push(`${profile.id}:${fw.name}`);
+				}
+			}
+		}
+		// A profile framework name absent from the map silently dispatches to
+		// 'none' — the exact latent footgun DD-C026 calls out. Lock it shut.
+		expect(unmapped).toEqual([]);
+	});
+
+	test('after unification, profile names map to themselves where a union member exists', () => {
+		// The 6 previously-divergent names now equal their union target.
+		for (const name of [
+			'cargo',
+			'go-test',
+			'maven',
+			'gradle',
+			'dotnet-test',
+			'swift-test',
+		]) {
+			expect(DISPATCH_FRAMEWORK_MAP[name]).toBe(name);
+		}
 	});
 });
 

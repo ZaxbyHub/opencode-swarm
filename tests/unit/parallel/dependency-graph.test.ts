@@ -81,6 +81,27 @@ describe('dependency-graph module tests', () => {
 			expect(graph.roots).toEqual([]);
 		});
 
+		it('returns empty graph for schema-invalid plan content', () => {
+			const planPath = path.join(tmpDir, 'invalid-schema-plan.json');
+			fs.writeFileSync(
+				planPath,
+				JSON.stringify({
+					phases: [
+						{
+							id: 1,
+							tasks: [{ id: 123, status: 'in_progress' }],
+						},
+					],
+				}),
+			);
+
+			const graph = parseDependencyGraph(planPath);
+			expect(graph.tasks.size).toBe(0);
+			expect(graph.phases.size).toBe(0);
+			expect(graph.roots).toEqual([]);
+			expect(graph.leaves).toEqual([]);
+		});
+
 		it('identifies roots (tasks with no dependencies)', () => {
 			const planPath = path.join(tmpDir, 'plan.json');
 			fs.writeFileSync(

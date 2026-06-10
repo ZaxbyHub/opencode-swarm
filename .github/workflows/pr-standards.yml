@@ -1,10 +1,21 @@
 name: PR Standards
 
+# Enforces the publication contract owned by the single source of truth at
+# .claude/skills/commit-pr/SKILL.md. Keep allowed types and required sections in
+# sync with that skill — it wins on any conflict.
+
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+  # Emit these required checks for merge-queue groups too, so the queue can merge
+  # (see issue #1046). These jobs validate PR title/body, which do not exist for a
+  # merge group, so on `merge_group` every step is skipped and the job reports
+  # success — the PR already satisfied them before being queued.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
+  contents: read
   pull-requests: read
 
 jobs:
@@ -12,17 +23,131 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # Allowed types MUST match .claude/skills/commit-pr/SKILL.md (Step 1).
           types: |
             feat
             fix
-            chore
+            perf
+            revert
             docs
+            chore
             refactor
             test
-            perf
             ci
             build
           requireScope: false
+
+  pr-standards:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR body contract
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          # Release-please and other bots do not follow the human PR body contract.
+          case "$PR_AUTHOR" in
+            *"[bot]"|"Copilot")
+              echo "Bot author ($PR_AUTHOR) — skipping PR body contract."
+              exit 0
+              ;;
+          esac
+
+          body="${PR_BODY:-}"
+          missing=0
+
+          # Required sections must be present AND in this order, per commit-pr
+          # SKILL Step 6. Match each heading on its own line and compare positions.
+          summary_ln="$(grep -n -m1 '^## Summary[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          audit_ln="$(grep -n -m1 '^## Invariant audit[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          test_ln="$(grep -n -m1 '^## Test plan[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+
+          for pair in "Summary:$summary_ln" "Invariant audit:$audit_ln" "Test plan:$test_ln"; do
+            name="${pair%%:*}"; ln="${pair##*:}"
+            if [ -z "$ln" ]; then
+              echo "::error::PR body is missing required section: ## $name"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -eq 0 ]; then
+            if [ "$summary_ln" -ge "$audit_ln" ] || [ "$audit_ln" -ge "$test_ln" ]; then
+              echo "::error::PR body sections must appear in order: ## Summary, then ## Invariant audit, then ## Test plan."
+              missing=1
+            fi
+          fi
+
+          # 'Closes #<n>' must be the FIRST body line when the PR resolves an
+          # issue. It is conditional, so a miss is a warning, not a failure.
+          if ! grep -Eq '^Closes #[0-9]+' <<< "$(head -n1 <<< "$body")"; then
+            echo "::warning::First body line is not 'Closes #<issue-number>'. This is required when the PR resolves an issue."
+          fi
+
+          # Flag hollow test plans so reviewers confirm the omission is intentional.
+          test_plan="$(awk '/## Test plan/{flag=1; next} /^## /{flag=0} flag' <<< "$body")"
+          if grep -Eiq 'not run|to be determined|^[[:space:]]*tbd[[:space:]]*$|^[[:space:]]*n/?a[[:space:]]*$' <<< "$test_plan"; then
+            echo "::warning::Test plan appears incomplete. Ensure any unvalidated items are explicitly justified under '## Test plan'."
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Fix the PR body per .claude/skills/commit-pr/SKILL.md (the single source of truth) before this check can pass."
+            exit 1
+          fi
+          echo "PR body contract satisfied."
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Require pending release fragment
+        if: github.event_name == 'pull_request'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          case "$PR_AUTHOR" in
+            *"[bot]"|"Copilot")
+              echo "Bot author ($PR_AUTHOR) — skipping release fragment requirement."
+              exit 0
+              ;;
+          esac
+
+          git fetch --no-tags --quiet origin "$BASE_REF"
+          changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+
+          # No file changes -> nothing to gate.
+          if [ -z "$changed" ]; then
+            echo "No changed files detected; release fragment not required."
+            exit 0
+          fi
+
+          # A pending release fragment that is ADDED, MODIFIED, or RENAMED-in
+          # satisfies the requirement. Deleting an existing fragment must not
+          # count as presence (--diff-filter excludes deletions).
+          added_frag="$(git diff --name-only --diff-filter=AMR "origin/${BASE_REF}...HEAD" -- docs/releases/pending/ | grep -E '\.md$' || true)"
+          if [ -n "$added_frag" ]; then
+            echo "Release fragment present:"
+            echo "$added_frag"
+            exit 0
+          fi
+
+          # Docs/workflow/meta-only changes (no source, generated output, scripts,
+          # tests, runners, examples, or dependency manifests touched) do not
+          # require a release fragment.
+          if ! grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed"; then
+            echo "Docs/workflow/meta-only change without release fragment accepted."
+            exit 0
+          fi
+
+          echo "::error::Missing docs/releases/pending/<unique-slug>.md release fragment (see .claude/skills/commit-pr/SKILL.md Step 2)."
+          exit 1

@@ -16,6 +16,7 @@ export type {
 	LaneResult,
 	LaneStatus,
 	LeanTurboPhaseResult,
+	MergeBackFailureInfo,
 } from './runner';
 export { LeanTurboRunner } from './runner';
 
@@ -107,3 +108,43 @@ export type {
 	PhaseReviewerResult,
 } from './reviewer';
 export { dispatchPhaseReviewer } from './reviewer';
+
+// ─── Worktree lifecycle (Phase 1) ────────────────────────────────────────
+
+export {
+	_internals as worktreeInternals,
+	assertCleanWorkingTree,
+	autoCommitDirty,
+	cleanUntrackedFiles,
+	isCleanWorktree,
+	provisionWorktree,
+	removeWorktree,
+} from './worktree';
+
+// ─── Merge-back operations (Phase 2) ─────────────────────────────────────
+
+export type {
+	CleanupFailure,
+	CleanupSuccess,
+	ConflictHandlingError,
+	ConflictInfo,
+	DirtyMergeFailure,
+	DirtyMergePartial,
+	DirtyMergeSuccess,
+	MergeConflict,
+	MergeFailure,
+	MergeSuccess,
+	OrphanCleanupResult,
+	StartupRecoveryResult,
+} from './merge-back';
+
+export {
+	_internals as mergeBackInternals,
+	attemptMergeBackFromDirty,
+	cleanupOrphanedBranches,
+	getMergeStrategy,
+	handleMergeConflict,
+	mergeLaneBranch,
+	postMergeCleanup,
+	startupOrphanRecovery,
+} from './merge-back';

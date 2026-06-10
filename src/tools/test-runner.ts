@@ -95,6 +95,7 @@ export interface TestRunnerArgs {
 	coverage?: boolean;
 	timeout_ms?: number;
 	allow_full_suite?: boolean;
+	bail?: boolean;
 }
 
 // ============ Response Types ============
@@ -219,6 +220,11 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 	// Validate coverage
 	if (obj.coverage !== undefined) {
 		if (typeof obj.coverage !== 'boolean') return false;
+	}
+
+	// Validate bail
+	if (obj.bail !== undefined) {
+		if (typeof obj.bail !== 'boolean') return false;
 	}
 
 	// Validate timeout
@@ -353,29 +359,31 @@ function detectMinitest(cwd: string): boolean {
  * pre-Phase-3 behavior for languages whose tests the legacy path
  * couldn't detect either.
  */
-const DISPATCH_FRAMEWORK_MAP: Record<string, TestFramework> = {
-	'bun:test': 'bun',
+export const DISPATCH_FRAMEWORK_MAP: Record<string, TestFramework> = {
+	// Identity mappings — profile framework names unified with the union
+	// (DD-C026). The remaining non-identity entries are genuine aliases where
+	// several profile names collapse to one union framework.
 	bun: 'bun',
 	vitest: 'vitest',
 	jest: 'jest',
 	mocha: 'mocha',
 	pytest: 'pytest',
-	'cargo test': 'cargo',
 	cargo: 'cargo',
 	pester: 'pester',
-	'go test': 'go-test',
-	'maven-test': 'maven',
-	'gradle-test': 'gradle',
-	'gradle-test-groovy': 'gradle',
-	'gradle-kts': 'gradle',
-	'dotnet test': 'dotnet-test',
+	'go-test': 'go-test',
+	maven: 'maven',
+	gradle: 'gradle',
+	'dotnet-test': 'dotnet-test',
 	ctest: 'ctest',
-	'swift test': 'swift-test',
+	'swift-test': 'swift-test',
+	'dart-test': 'dart-test',
+	rspec: 'rspec',
+	minitest: 'minitest',
+	// Genuine aliases (many profile names → one union framework).
+	'bun:test': 'bun',
 	'xcodebuild-test': 'swift-test',
 	'flutter test': 'dart-test',
 	'dart test': 'dart-test',
-	rspec: 'rspec',
-	minitest: 'minitest',
 };
 
 export async function detectTestFrameworkViaDispatch(
@@ -413,6 +421,7 @@ export async function buildTestCommandViaDispatch(
 	files: string[],
 	coverage: boolean,
 	baseDir: string,
+	bail: boolean,
 ): Promise<string[] | null> {
 	if (framework === 'none') return null;
 	try {
@@ -422,6 +431,7 @@ export async function buildTestCommandViaDispatch(
 			const cmd = backend.buildTestCommand(framework, files, baseDir, {
 				scope,
 				coverage,
+				bail,
 			});
 			if (cmd) return cmd;
 		}
@@ -1080,11 +1090,13 @@ function buildTestCommand(
 	files: string[],
 	coverage: boolean,
 	baseDir: string,
+	bail: boolean,
 ): string[] | null {
 	switch (framework) {
 		case 'bun': {
 			const args: string[] = ['bun', 'test'];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
@@ -1100,6 +1112,7 @@ function buildTestCommand(
 				VITEST_JSON_OUTPUT_RELATIVE_PATH,
 			];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail=1');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
@@ -1108,6 +1121,7 @@ function buildTestCommand(
 		case 'jest': {
 			const args: string[] = ['npx', 'jest', '--json'];
 			if (coverage) args.push('--coverage');
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
@@ -1116,6 +1130,7 @@ function buildTestCommand(
 		case 'mocha': {
 			const args: string[] = ['npx', 'mocha'];
 			// Mocha doesn't have built-in coverage, skip if coverage requested
+			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
@@ -1127,6 +1142,7 @@ function buildTestCommand(
 				? ['python', '-m', 'pytest']
 				: ['python3', '-m', 'pytest'];
 			if (coverage) args.push('--cov=.', '--cov-report=term-missing');
+			if (bail) args.push('-x');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
@@ -1134,6 +1150,7 @@ function buildTestCommand(
 		}
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
+			// cargo has no bail support — silently ignore
 			if (scope !== 'all' && files.length > 0) {
 				// Cargo test can accept test names
 				args.push(...files);
@@ -1141,6 +1158,7 @@ function buildTestCommand(
 			return args;
 		}
 		case 'pester': {
+			// pester has no bail support — silently ignore
 			// Use -EncodedCommand for safe file path handling
 			// This avoids command injection by passing Base64-encoded UTF-16LE command
 			// rather than string interpolation in shell context
@@ -1162,12 +1180,15 @@ function buildTestCommand(
 			return ['pwsh', '-Command', 'Invoke-Pester'];
 		}
 		case 'go-test':
+			// go-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — go test does not support arbitrary file paths;
 			// use package paths (./...) for full suite
 			return ['go', 'test', './...'];
 		case 'maven':
+			// maven has no bail support — silently ignore
 			return ['mvn', 'test'];
 		case 'gradle': {
+			// gradle has no bail support — silently ignore
 			const isWindows = process.platform === 'win32';
 			const hasGradlewBat = fs.existsSync(path.join(baseDir, 'gradlew.bat'));
 			const hasGradlew = fs.existsSync(path.join(baseDir, 'gradlew'));
@@ -1176,8 +1197,10 @@ function buildTestCommand(
 			return ['gradle', 'test'];
 		}
 		case 'dotnet-test':
+			// dotnet-test has no bail support — silently ignore
 			return ['dotnet', 'test'];
 		case 'ctest': {
+			// ctest has no bail support — silently ignore
 			// Detect actual build directory by looking for CMakeCache.txt in common locations
 			// Fall back to 'build' (CMake default); ctest will emit a clear error if not found
 			const buildDirCandidates = [
@@ -1194,9 +1217,11 @@ function buildTestCommand(
 			return ['ctest', '--test-dir', actualBuildDir];
 		}
 		case 'swift-test':
+			// swift-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — swift test does not support arbitrary file paths
 			return ['swift', 'test'];
 		case 'dart-test':
+			// dart-test has no bail support — silently ignore
 			// Prefer flutter test for Flutter projects; fall back to dart test
 			return isCommandAvailable('flutter')
 				? ['flutter', 'test', ...files]
@@ -1206,12 +1231,14 @@ function buildTestCommand(
 			const args = isCommandAvailable('bundle')
 				? ['bundle', 'exec', 'rspec']
 				: ['rspec'];
+			if (bail) args.push('--fail-fast');
 			if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}
 			return args;
 		}
 		case 'minitest':
+			// minitest has no bail support — silently ignore
 			if (scope !== 'all' && files.length > 0) {
 				// Ruby only executes the first positional file arg; use -e with
 				// require_relative to run multiple files in a single process.
@@ -1717,6 +1744,7 @@ export async function runTests(
 	coverage: boolean,
 	timeout_ms: number,
 	cwd: string,
+	bail: boolean,
 ): Promise<TestResult> {
 	if (scope !== 'all' && files.length > 0) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
@@ -1745,8 +1773,9 @@ export async function runTests(
 				files,
 				coverage,
 				cwd,
-			)) ?? buildTestCommand(framework, scope, files, coverage, cwd))
-		: buildTestCommand(framework, scope, files, coverage, cwd);
+				bail,
+			)) ?? buildTestCommand(framework, scope, files, coverage, cwd, bail))
+		: buildTestCommand(framework, scope, files, coverage, cwd, bail);
 
 	if (!command) {
 		return {
@@ -2218,6 +2247,12 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.boolean()
 			.optional()
 			.describe('Enable coverage reporting if supported'),
+		bail: z
+			.boolean()
+			.optional()
+			.describe(
+				'Stop running tests after the first failure. Default false. Note: coverage may be incomplete when bail=true with coverage=true.',
+			),
 		timeout_ms: z
 			.number()
 			.optional()
@@ -2363,6 +2398,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		const _files = args.files || [];
 		const coverage = args.coverage || false;
+		const bail = args.bail || false;
 		const timeout_ms = Math.min(
 			args.timeout_ms || DEFAULT_TIMEOUT_MS,
 			MAX_TIMEOUT_MS,
@@ -2723,6 +2759,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			coverage,
 			timeout_ms,
 			workingDir,
+			bail,
 		);
 
 		// Record results to history and analyze failures
@@ -2755,6 +2792,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		// Add graph fallback message if applicable
 		if (graphFallbackReason && result.message) {
 			result.message = `${result.message} (${graphFallbackReason})`;
+		}
+
+		// Warn when bail stopped tests early and coverage was requested
+		if (bail && coverage && result.message) {
+			result.message = `${result.message} (coverage may be incomplete: bail=true stopped early)`;
 		}
 
 		return JSON.stringify(result, null, 2);

@@ -32,6 +32,7 @@ interface MockSessionOps {
 
 let tmpDir: string;
 let mockSessionOps: MockSessionOps;
+let origAssertCleanWorkingTree: typeof LeanTurboRunner._internals.assertCleanWorkingTree;
 
 function makeRunner(options?: {
 	opencodeClient?: null;
@@ -138,9 +139,22 @@ beforeEach(() => {
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	leanState.repairStateUnreadable(tmpDir);
 	mockSessionOps = mockSuccessfulSessionOps();
+
+	// Default mock: assertCleanWorkingTree returns clean so worktree_isolation
+	// tests work without needing a real git repo. Individual tests that test
+	// dirty/throw scenarios override this mock within their own scope.
+	origAssertCleanWorkingTree =
+		LeanTurboRunner._internals.assertCleanWorkingTree;
+	LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+		Promise.resolve({ clean: true }),
+	);
 });
 
 afterEach(() => {
+	// Restore assertCleanWorkingTree before cleaning up tmpDir
+	LeanTurboRunner._internals.assertCleanWorkingTree =
+		origAssertCleanWorkingTree;
+
 	leanState.repairStateUnreadable(tmpDir);
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1424,5 +1438,2153 @@ describe('leanConfig propagation', () => {
 		expect(
 			(capturedConfig as { max_parallel_coders: number }).max_parallel_coders,
 		).toBe(4);
+	});
+});
+
+// ─── Test 17: Worktree isolation integration ──────────────────────────────────
+
+describe('worktree isolation integration', () => {
+	test('calls provisionWorktree when worktree_isolation is true', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => ({
+			worktreePath: path.join(
+				tmpDir,
+				'.swarm-worktrees',
+				'sess-runner-test',
+				'lane-1',
+			),
+			branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+		}));
+		// Wrap to capture calls
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath: path.join(
+						tmpDir,
+						'.swarm-worktrees',
+						SESSION_ID,
+						'lane-1',
+					),
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+
+		// Mock merge-back and cleanup so they don't fail
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCalls.length).toBeGreaterThan(0);
+	});
+
+	test('does NOT call provisionWorktree when worktree_isolation is false', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: false },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree to track calls
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath: path.join(
+						tmpDir,
+						'.swarm-worktrees',
+						SESSION_ID,
+						'lane-1',
+					),
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		expect(provisionCalls.length).toBe(0);
+	});
+
+	test('passes worktree path to session.create (not this._directory)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree to return a known path
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Mock merge-back and cleanup
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		// Verify session.create was called with the worktree path, NOT tmpDir
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(worktreePath);
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).not.toBe(tmpDir);
+	});
+
+	test('calls merge-back + cleanup on lane success', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Track merge and cleanup calls
+		const mergeCalls: unknown[] = [];
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(
+			(...args: Parameters<typeof origMerge>) => {
+				mergeCalls.push(args);
+				return Promise.resolve({ merged: true, strategy: 'merge' });
+			},
+		);
+
+		const cleanupCalls: unknown[] = [];
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(
+			(...args: Parameters<typeof origCleanup>) => {
+				cleanupCalls.push(args);
+				return Promise.resolve({ cleaned: true });
+			},
+		);
+
+		const removeCalls: unknown[] = [];
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(
+			(...args: Parameters<typeof origRemove>) => {
+				removeCalls.push(args);
+				return Promise.resolve({ success: true });
+			},
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		expect(mergeCalls.length).toBeGreaterThan(0);
+		expect(cleanupCalls.length).toBeGreaterThan(0);
+		expect(removeCalls.length).toBeGreaterThan(0);
+	});
+
+	test('calls attemptMergeBackFromDirty + removeWorktree sequentially for failed lane', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		// Make session fail
+		const failingOps = {
+			create: mock(() =>
+				Promise.resolve({ data: null, error: 'session create failed' }),
+			),
+			prompt: mock(() =>
+				Promise.resolve({ data: null, error: 'prompt failed' }),
+			),
+			delete: mock(() => Promise.resolve()),
+		};
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, failingOps);
+
+		// Mock provisionWorktree
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Track failure-path calls
+		const attemptMergeCalls: unknown[] = [];
+		const origAttemptMerge =
+			LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
+			(...args: Parameters<typeof origAttemptMerge>) => {
+				attemptMergeCalls.push(args);
+				return Promise.resolve({
+					merged: true,
+					strategy: 'merge',
+					autoCommitted: false,
+					cleaned: false,
+				});
+			},
+		);
+
+		const removeCalls: unknown[] = [];
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(
+			(...args: Parameters<typeof origRemove>) => {
+				removeCalls.push(args);
+				return Promise.resolve({ success: true });
+			},
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = origAttemptMerge;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		// Lane should have failed
+		const failedLanes = result.lanes.filter((l) => l.status === 'failed');
+		expect(failedLanes.length).toBeGreaterThan(0);
+		// attemptMergeBackFromDirty should have been called
+		expect(attemptMergeCalls.length).toBeGreaterThan(0);
+		// removeWorktree should have been called
+		expect(removeCalls.length).toBeGreaterThan(0);
+	});
+
+	test('calls startupOrphanRecovery at runPhase start when worktree_isolation is enabled', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Track startupOrphanRecovery calls
+		const recoveryCalls: unknown[] = [];
+		const origRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(
+			(...args: Parameters<typeof origRecovery>) => {
+				recoveryCalls.push(args);
+				return Promise.resolve({
+					prunedWorktrees: true,
+					remainingBranches: [],
+					warnings: [],
+				});
+			},
+		);
+
+		// Mock provision + merge + cleanup
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.startupOrphanRecovery = origRecovery;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(recoveryCalls.length).toBe(1);
+		// Verify it was called with the directory and session ID
+		expect(recoveryCalls[0][0]).toBe(tmpDir);
+		expect(recoveryCalls[0][1]).toEqual([SESSION_ID]);
+	});
+
+	test('does NOT call startupOrphanRecovery when worktree_isolation is disabled', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: false },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Track startupOrphanRecovery calls
+		const recoveryCalls: unknown[] = [];
+		const origRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(
+			(...args: Parameters<typeof origRecovery>) => {
+				recoveryCalls.push(args);
+				return Promise.resolve({
+					prunedWorktrees: true,
+					remainingBranches: [],
+					warnings: [],
+				});
+			},
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.startupOrphanRecovery = origRecovery;
+
+		expect(recoveryCalls.length).toBe(0);
+	});
+
+	test('worktree provision failure fails lane explicitly, does NOT degrade to shared directory', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree to FAIL with a permanent error
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				error: 'git worktree add failed: worktree already exists',
+			}),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		// Phase returns ok:true (runPhase always returns ok when there are lanes),
+		// but the lane itself should have failed
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('failed');
+		expect(result.lanes[0].error).toContain('worktree provision failed');
+		// session.create should NOT have been called — lane failed before dispatch
+		expect(mockSessionOps.create).not.toHaveBeenCalled();
+	});
+
+	test('cleanup removes worktrees for active lanes', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Mock merge + cleanup so lanes complete with worktree state
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		await runner.runPhase(1);
+
+		// Reset remove mock to track cleanup-specific calls
+		const cleanupRemoveCalls: unknown[] = [];
+		LeanTurboRunner._internals.removeWorktree = mock(
+			(...args: Parameters<typeof origRemove>) => {
+				cleanupRemoveCalls.push(args);
+				return Promise.resolve({ success: true });
+			},
+		);
+
+		await runner.cleanup();
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		// removeWorktree should have been called during cleanup for worktree lanes
+		expect(cleanupRemoveCalls.length).toBeGreaterThan(0);
+	});
+});
+
+// ─── Test 18: Sequential merge-back after all lanes complete (Finding 1 fix) ─────
+
+describe('sequential merge-back after concurrent lanes (race condition fix)', () => {
+	test('merge-back runs sequentially AFTER all lanes complete, not inside _processLane', async () => {
+		writeMinimalPlan(1);
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock the planner to return TWO separate lanes.
+		// The real planner greedily packs non-conflicting tasks into one lane,
+		// so we inject a custom plan to force 2 lanes for this test.
+		const origPlan = LeanTurboRunner._internals.planLeanTurboLanes;
+		LeanTurboRunner._internals.planLeanTurboLanes = mock(
+			(..._args: Parameters<typeof origPlan>) => ({
+				phase: 1,
+				planId: 'test-plan',
+				lanes: [
+					{
+						laneId: 'lane-1',
+						taskIds: ['1.1'],
+						files: ['src/a.ts'],
+						status: 'pending' as const,
+					},
+					{
+						laneId: 'lane-2',
+						taskIds: ['1.2'],
+						files: ['src/b.ts'],
+						status: 'pending' as const,
+					},
+				],
+				degradedTasks: [],
+				serializedTasks: [],
+				counters: {
+					lanesPlanned: 2,
+					lanesStarted: 0,
+					lanesCompleted: 0,
+					lanesFailed: 0,
+					tasksSerialized: 0,
+					tasksDegraded: 0,
+				},
+				crossLaneDependencies: {},
+			}),
+		);
+
+		// Mock startupOrphanRecovery to avoid git commands in non-git tmpDir
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Mock provisionWorktree to return distinct paths per lane
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallIndex = 0;
+		const worktreePaths = [
+			path.join(tmpDir, '.swarm-worktrees', SESSION_ID, 'lane-1'),
+			path.join(tmpDir, '.swarm-worktrees', SESSION_ID, 'lane-2'),
+		];
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			const idx = provisionCallIndex++;
+			return Promise.resolve({
+				worktreePath: worktreePaths[idx] ?? worktreePaths[0],
+				branchName: `swarm-lane/${SESSION_ID}/lane-${idx + 1}`,
+			});
+		});
+
+		// Track the order of mergeLaneBranch calls to verify sequential execution
+		const mergeCallOrder: number[] = [];
+		let mergeRunning = false;
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(
+			async (...args: Parameters<typeof origMerge>) => {
+				const callNum = mergeCallOrder.length;
+				mergeCallOrder.push(callNum);
+				// Simulate non-zero duration to expose concurrent execution
+				if (mergeRunning) {
+					// If another merge is already running, this proves they are concurrent
+					mergeCallOrder.push(-1); // sentinel for concurrent execution
+				}
+				mergeRunning = true;
+				await Bun.sleep(10);
+				mergeRunning = false;
+				return { merged: true, strategy: 'merge' as const };
+			},
+		);
+
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		let result;
+		try {
+			result = await runner.runPhase(1);
+
+			expect(result.ok).toBe(true);
+			expect(result.lanes.length).toBe(2);
+			// Both lanes should complete
+			const completedLanes = result.lanes.filter(
+				(l) => l.status === 'completed',
+			);
+			expect(completedLanes.length).toBe(2);
+			// mergeLaneBranch should have been called twice (once per completed worktree lane)
+			expect(mergeCallOrder.filter((n) => n >= 0).length).toBe(2);
+			// No concurrent sentinel (-1) should appear — merges ran sequentially
+			expect(mergeCallOrder).not.toContain(-1);
+		} finally {
+			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
+			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	});
+
+	test('failed worktree lanes are cleaned up sequentially in post-processing', async () => {
+		writeMinimalPlan(1);
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+
+		// Make session fail for BOTH lanes
+		const failingOps = {
+			create: mock(() =>
+				Promise.resolve({ data: null, error: 'session create failed' }),
+			),
+			prompt: mock(() =>
+				Promise.resolve({ data: null, error: 'prompt failed' }),
+			),
+			delete: mock(() => Promise.resolve()),
+		};
+		injectMockSessionOps(runner, failingOps);
+
+		// Mock the planner to return TWO separate lanes
+		const origPlan = LeanTurboRunner._internals.planLeanTurboLanes;
+		LeanTurboRunner._internals.planLeanTurboLanes = mock(
+			(..._args: Parameters<typeof origPlan>) => ({
+				phase: 1,
+				planId: 'test-plan',
+				lanes: [
+					{
+						laneId: 'lane-1',
+						taskIds: ['1.1'],
+						files: ['src/a.ts'],
+						status: 'pending' as const,
+					},
+					{
+						laneId: 'lane-2',
+						taskIds: ['1.2'],
+						files: ['src/b.ts'],
+						status: 'pending' as const,
+					},
+				],
+				degradedTasks: [],
+				serializedTasks: [],
+				counters: {
+					lanesPlanned: 2,
+					lanesStarted: 0,
+					lanesCompleted: 0,
+					lanesFailed: 0,
+					tasksSerialized: 0,
+					tasksDegraded: 0,
+				},
+				crossLaneDependencies: {},
+			}),
+		);
+
+		// Mock startupOrphanRecovery to avoid git commands in non-git tmpDir
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Mock provisionWorktree to return distinct paths per lane
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallIndex = 0;
+		const worktreePaths = [
+			path.join(tmpDir, '.swarm-worktrees', SESSION_ID, 'lane-1'),
+			path.join(tmpDir, '.swarm-worktrees', SESSION_ID, 'lane-2'),
+		];
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			const idx = provisionCallIndex++;
+			return Promise.resolve({
+				worktreePath: worktreePaths[idx] ?? worktreePaths[0],
+				branchName: `swarm-lane/${SESSION_ID}/lane-${idx + 1}`,
+			});
+		});
+
+		// Track the order of attemptMergeBackFromDirty calls to verify sequential execution
+		const attemptMergeCallOrder: number[] = [];
+		let attemptMergeRunning = false;
+		const origAttemptMerge =
+			LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(
+			async (...args: Parameters<typeof origAttemptMerge>) => {
+				const callNum = attemptMergeCallOrder.length;
+				attemptMergeCallOrder.push(callNum);
+				// Simulate non-zero duration to expose concurrent execution
+				if (attemptMergeRunning) {
+					// If another merge is already running, this proves they are concurrent
+					attemptMergeCallOrder.push(-1); // sentinel for concurrent execution
+				}
+				attemptMergeRunning = true;
+				await Bun.sleep(10);
+				attemptMergeRunning = false;
+				return {
+					merged: true,
+					strategy: 'merge',
+					autoCommitted: false,
+					cleaned: false,
+				};
+			},
+		);
+
+		const removeCalls: unknown[] = [];
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(
+			(...args: Parameters<typeof origRemove>) => {
+				removeCalls.push(args);
+				return Promise.resolve({ success: true });
+			},
+		);
+
+		let result;
+		try {
+			result = await runner.runPhase(1);
+
+			expect(result.ok).toBe(true);
+			expect(result.lanes.length).toBe(2);
+			// Both lanes should have failed
+			const failedLanes = result.lanes.filter((l) => l.status === 'failed');
+			expect(failedLanes.length).toBe(2);
+			// attemptMergeBackFromDirty should have been called twice (once per failed worktree lane)
+			expect(attemptMergeCallOrder.filter((n) => n >= 0).length).toBe(2);
+			// No concurrent sentinel (-1) should appear — cleanup ran sequentially
+			expect(attemptMergeCallOrder).not.toContain(-1);
+			// removeWorktree should have been called for both failed worktree lanes
+			expect(removeCalls.length).toBe(2);
+		} finally {
+			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
+			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.attemptMergeBackFromDirty = origAttemptMerge;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	});
+});
+
+// ─── Test 19: provisionWorktree throw caught gracefully (Finding 2 fix) ─────────
+
+describe('provisionWorktree throw handling', () => {
+	test('catches provisionWorktree rejection and fails lane explicitly', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree to THROW (not return an error object)
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.reject(
+				new Error('git worktree add: fatal: not a git repository'),
+			),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		// The lane should have failed — not degraded to shared directory
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('failed');
+		expect(result.lanes[0].error).toContain('worktree provision failed');
+		// session.create should NOT have been called — lane failed before dispatch
+		expect(mockSessionOps.create).not.toHaveBeenCalled();
+	});
+});
+
+// ─── Test 20: worktreePath persisted to durable state (Finding 3 fix) ────────────
+
+describe('worktreePath persisted to durable state', () => {
+	test('persists worktreePath and branchName to turbo-state.json after provisioning', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const branchName = `swarm-lane/${SESSION_ID}/lane-1`;
+
+		// Mock provisionWorktree
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({ worktreePath, branchName }),
+		);
+
+		// Mock merge + cleanup
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+
+		// Load durable state from disk and verify worktreePath/branchName are persisted
+		const durableState = leanState.loadLeanTurboRunState(tmpDir, SESSION_ID);
+		expect(durableState).not.toBeNull();
+		const persistedLane = durableState!.lanes.find(
+			(l) => l.laneId && l.laneId.startsWith('lane-'),
+		);
+		expect(persistedLane).toBeDefined();
+		expect(persistedLane!.worktreePath).toBe(worktreePath);
+		expect(persistedLane!.branchName).toBe(branchName);
+	});
+});
+
+// ─── Test 21: Transient failure retry for worktree provisioning ──────────────
+
+describe('transient worktree provision retry', () => {
+	test('transient provision error (EBUSY) retries once and succeeds on retry → lane uses worktree', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree: first call fails with EBUSY, second succeeds
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallCount = 0;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			provisionCallCount++;
+			if (provisionCallCount === 1) {
+				return Promise.resolve({ error: 'EBUSY: worktree add failed' });
+			}
+			return Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			});
+		});
+
+		// Mock merge + cleanup so lane completes fully
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCallCount).toBe(2); // initial + 1 retry
+		// session.create should have been called with the worktree path (retry succeeded)
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(worktreePath);
+	});
+
+	test('transient provision error retries once and fails again → lane fails explicitly', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallCount = 0;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			provisionCallCount++;
+			// Both calls fail with transient ETIMEDOUT
+			return Promise.resolve({
+				error: `ETIMEDOUT: git worktree add timed out (attempt ${provisionCallCount})`,
+			});
+		});
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCallCount).toBe(2); // initial + 1 retry
+		// Lane should have failed — NOT degraded
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('failed');
+		expect(result.lanes[0].error).toContain('worktree provision failed');
+		// session.create should NOT have been called — lane failed before dispatch
+		expect(mockSessionOps.create).not.toHaveBeenCalled();
+	});
+
+	test('permanent provision error (already exists) does NOT retry → lane fails immediately', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallCount = 0;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			provisionCallCount++;
+			return Promise.resolve({ error: 'worktree already exists' });
+		});
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCallCount).toBe(1); // NO retry — permanent error
+		// Lane should have failed — NOT degraded
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('failed');
+		expect(result.lanes[0].error).toContain('worktree provision failed');
+		// session.create should NOT have been called — lane failed before dispatch
+		expect(mockSessionOps.create).not.toHaveBeenCalled();
+	});
+
+	test('provisionWorktree throws with transient error message → retries once', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree: first call throws with EPERM, second succeeds
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallCount = 0;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			provisionCallCount++;
+			if (provisionCallCount === 1) {
+				return Promise.reject(
+					new Error('EPERM: resource locked by another process'),
+				);
+			}
+			return Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			});
+		});
+
+		// Mock merge + cleanup so lane completes fully
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCallCount).toBe(2); // initial throw + 1 retry
+		// session.create should have been called with the worktree path (retry succeeded)
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(worktreePath);
+	});
+
+	// ─── FR-006 / FR-011 defense-in-depth tests ──────────────────────────────────
+
+	test('file locks are still acquired when worktree_isolation is enabled (FR-006)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Track acquireLaneLocks calls to verify locks are still acquired
+		const acquireCalls: unknown[] = [];
+		const origAcquire = LeanTurboRunner._internals.acquireLaneLocks;
+		LeanTurboRunner._internals.acquireLaneLocks = mock(
+			(...args: Parameters<typeof origAcquire>) => {
+				acquireCalls.push(args);
+				return Promise.resolve({
+					acquired: true,
+					locks: [
+						{
+							filePath: 'src/a.ts',
+							laneId: 'lane-1',
+							_release: async () => {},
+						},
+					],
+				});
+			},
+		);
+
+		// Mock worktree provision + merge + cleanup
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.acquireLaneLocks = origAcquire;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		// Lock acquisition MUST still happen even in worktree mode (FR-006)
+		expect(acquireCalls.length).toBeGreaterThan(0);
+	});
+
+	test('file locks use primary root directory, not worktree path (FR-006)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Capture the exact arguments passed to acquireLaneLocks
+		const acquireCalls: unknown[] = [];
+		const origAcquire = LeanTurboRunner._internals.acquireLaneLocks;
+		LeanTurboRunner._internals.acquireLaneLocks = mock(
+			(...args: Parameters<typeof origAcquire>) => {
+				acquireCalls.push(args);
+				return Promise.resolve({
+					acquired: true,
+					locks: [
+						{
+							filePath: 'src/a.ts',
+							laneId: 'lane-1',
+							_release: async () => {},
+						},
+					],
+				});
+			},
+		);
+
+		// Mock worktree provision + merge + cleanup
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.acquireLaneLocks = origAcquire;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(acquireCalls.length).toBeGreaterThan(0);
+		// First argument to acquireLaneLocks must be the PRIMARY root directory,
+		// NOT the worktree path — locks live under primary root's .swarm/locks/
+		const firstCall = acquireCalls[0] as [string, ...unknown[]];
+		expect(firstCall[0]).toBe(tmpDir);
+		expect(firstCall[0]).not.toBe(worktreePath);
+	});
+
+	test('no package manager commands are spawned in worktree path (FR-011)', () => {
+		// Static analysis: verify runner.ts source contains no package-manager
+		// spawn calls.  The runner only delegates to _internals for worktree
+		// lifecycle (provision, merge, cleanup) which use git commands via
+		// bunSpawn.  No npm/yarn/pnpm/pip/bun install should ever appear.
+		const runnerSource = fs.readFileSync(
+			path.resolve(__dirname, '../../../../src/turbo/lean/runner.ts'),
+			'utf-8',
+		);
+
+		// Package manager patterns that must NOT appear in runner source
+		// Covers both shell-string (npm install) and array-form (['npm', 'install']) patterns
+		const forbiddenPatterns: RegExp[] = [
+			// Shell-string forms: "npm install", "bun add", etc.
+			/npm\s+install/,
+			/npm\s+ci/,
+			/yarn\s+install/,
+			/pnpm\s+install/,
+			/bun\s+install/,
+			/bun\s+add/,
+			/bun\s+remove/,
+			/pip\s+install/,
+			/pip3\s+install/,
+			// Array-form patterns: ['npm', 'install'], ("npm", "install"), etc.
+			/\[\s*['"]npm['"]\s*,/,
+			/\[\s*['"]yarn['"]\s*,/,
+			/\[\s*['"]pnpm['"]\s*,/,
+			/\[\s*['"]pip['"]\s*,/,
+			/\[\s*['"]pip3['"]\s*,/,
+			/\(\s*['"]npm['"]\s*,/,
+			/\(\s*['"]yarn['"]\s*,/,
+			/\(\s*['"]pnpm['"]\s*,/,
+			/\(\s*['"]pip['"]\s*,/,
+			/\(\s*['"]pip3['"]\s*,/,
+			// bun add/remove via array form
+			/\[\s*['"]bun['"]\s*,.*['"](?:install|add|remove)['"]/,
+			/\(\s*['"]bun['"]\s*,.*['"](?:install|add|remove)['"]/,
+		];
+
+		for (const pattern of forbiddenPatterns) {
+			expect(runnerSource).not.toMatch(pattern);
+		}
+
+		// The runner must not import child_process directly — subprocesses are
+		// delegated through the worktree / merge-back modules' _internals seam.
+		expect(runnerSource).not.toContain('child_process');
+	});
+
+	test('assertCleanWorkingTree dirty → worktree provisioning skipped, lanes run in shared directory', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to return dirty
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.resolve({
+				clean: false,
+				error:
+					'Working tree has uncommitted changes. Please commit or stash before provisioning worktrees.',
+			}),
+		);
+
+		// Track provisionWorktree calls — should be ZERO since we degraded
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath: path.join(
+						tmpDir,
+						'.swarm-worktrees',
+						SESSION_ID,
+						'lane-1',
+					),
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		// Phase should still succeed (degraded, not failed)
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBeGreaterThan(0);
+		// provisionWorktree must NOT have been called — degraded to shared directory
+		expect(provisionCalls.length).toBe(0);
+		// session.create should have been called with the PRIMARY directory (shared mode)
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(tmpDir);
+	});
+
+	test('assertCleanWorkingTree clean → worktree provisioning proceeds normally', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to return clean
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.resolve({ clean: true }),
+		);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree to succeed
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath,
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+
+		// Mock merge + cleanup so lane completes fully
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		// Phase should succeed with worktree isolation
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBeGreaterThan(0);
+		// provisionWorktree MUST have been called — clean tree means worktrees are allowed
+		expect(provisionCalls.length).toBeGreaterThan(0);
+		// session.create should have been called with the WORKTREE path
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(worktreePath);
+	});
+
+	test('assertCleanWorkingTree NOT called when worktree_isolation is false', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: false },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Track assertCleanWorkingTree calls
+		const assertCleanCalls: unknown[] = [];
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(
+			(...args: Parameters<typeof origAssertClean>) => {
+				assertCleanCalls.push(args);
+				return Promise.resolve({ clean: true });
+			},
+		);
+
+		await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+
+		// assertCleanWorkingTree must NOT have been called when worktree_isolation is off
+		expect(assertCleanCalls.length).toBe(0);
+	});
+
+	test('assertCleanWorkingTree throw → degrades to shared directory gracefully', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock assertCleanWorkingTree to throw
+		const origAssertClean = LeanTurboRunner._internals.assertCleanWorkingTree;
+		LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
+			Promise.reject(new Error('not a git repository')),
+		);
+
+		// Track provisionWorktree calls — should be ZERO since we degraded
+		const provisionCalls: unknown[] = [];
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(
+			(...args: Parameters<typeof origProvision>) => {
+				provisionCalls.push(args);
+				return Promise.resolve({
+					worktreePath: path.join(
+						tmpDir,
+						'.swarm-worktrees',
+						SESSION_ID,
+						'lane-1',
+					),
+					branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+				});
+			},
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.assertCleanWorkingTree = origAssertClean;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+
+		// Phase should still succeed (degraded, not failed)
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBeGreaterThan(0);
+		// provisionWorktree must NOT have been called — degraded to shared directory
+		expect(provisionCalls.length).toBe(0);
+	});
+
+	test('lock release after lane completion uses primary root, not worktree path (FR-006)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Capture releaseLaneLocks arguments
+		const releaseCalls: unknown[] = [];
+		const origRelease = LeanTurboRunner._internals.releaseLaneLocks;
+		LeanTurboRunner._internals.releaseLaneLocks = mock(
+			(...args: Parameters<typeof origRelease>) => {
+				releaseCalls.push(args);
+				return Promise.resolve(1);
+			},
+		);
+
+		// Mock acquireLaneLocks to succeed
+		const origAcquire = LeanTurboRunner._internals.acquireLaneLocks;
+		LeanTurboRunner._internals.acquireLaneLocks = mock(() =>
+			Promise.resolve({
+				acquired: true,
+				locks: [
+					{ filePath: 'src/a.ts', laneId: 'lane-1', _release: async () => {} },
+				],
+			}),
+		);
+
+		// Mock worktree provision + merge + cleanup
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.releaseLaneLocks = origRelease;
+		LeanTurboRunner._internals.acquireLaneLocks = origAcquire;
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		// releaseLaneLocks should have been called after lane completion
+		expect(releaseCalls.length).toBeGreaterThan(0);
+		// First argument must be the PRIMARY root directory, NOT the worktree path
+		const firstReleaseCall = releaseCalls[0] as [string, ...unknown[]];
+		expect(firstReleaseCall[0]).toBe(tmpDir);
+		expect(firstReleaseCall[0]).not.toBe(worktreePath);
+	});
+
+	// ─── New: worktree provision permanent failure → lane fails ─────────────
+
+	test('worktree provision permanent failure → lane fails explicitly, does NOT degrade to shared directory', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		// Mock provisionWorktree to always fail with a permanent error
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				error: 'ENOTDIR: not a directory',
+			}),
+		);
+
+		// Mock releaseLaneLocks to verify it was called on failure
+		const origRelease = LeanTurboRunner._internals.releaseLaneLocks;
+		const releaseCalls: unknown[] = [];
+		LeanTurboRunner._internals.releaseLaneLocks = mock(
+			(...args: Parameters<typeof origRelease>) => {
+				releaseCalls.push(args);
+				return Promise.resolve();
+			},
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.releaseLaneLocks = origRelease;
+
+		// runPhase returns ok:true but the lane failed
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBe(1);
+		const laneResult = result.lanes[0];
+		expect(laneResult.status).toBe('failed');
+		expect(laneResult.error).toContain('worktree provision failed');
+		expect(laneResult.error).toContain('ENOTDIR');
+		// session.create should NOT have been called — lane failed before dispatch
+		expect(mockSessionOps.create).not.toHaveBeenCalled();
+		// releaseLaneLocks SHOULD have been called to release the lock we acquired
+		expect(releaseCalls.length).toBeGreaterThan(0);
+
+		// Durable state should reflect the lane failure
+		const durableState = leanState.loadLeanTurboRunState(tmpDir, SESSION_ID);
+		expect(durableState).not.toBeNull();
+		const persistedLane = durableState!.lanes.find(
+			(l) => l.laneId && l.laneId.startsWith('lane-'),
+		);
+		expect(persistedLane).toBeDefined();
+		expect(persistedLane!.status).toBe('failed');
+	});
+
+	// ─── New: worktree provision transient failure then success ────────────
+
+	test('worktree provision transient failure then success → lane proceeds normally', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSessionOps);
+
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+
+		// Mock provisionWorktree: first call throws with EACCES (transient), second succeeds
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		let provisionCallCount = 0;
+		LeanTurboRunner._internals.provisionWorktree = mock(() => {
+			provisionCallCount++;
+			if (provisionCallCount === 1) {
+				return Promise.reject(new Error('EBUSY: resource busy or locked'));
+			}
+			return Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			});
+		});
+
+		// Mock merge + cleanup so lane completes fully
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() =>
+			Promise.resolve({ merged: true, strategy: 'merge' }),
+		);
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() =>
+			Promise.resolve({ cleaned: true }),
+		);
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() =>
+			Promise.resolve({ success: true }),
+		);
+
+		const result = await runner.runPhase(1);
+
+		// Restore
+		LeanTurboRunner._internals.provisionWorktree = origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+		LeanTurboRunner._internals.removeWorktree = origRemove;
+
+		expect(result.ok).toBe(true);
+		expect(provisionCallCount).toBe(2); // initial throw + 1 retry
+		// Lane should have completed (retry succeeded, dispatch proceeded)
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('completed');
+		// session.create should have been called with the worktree path (retry succeeded)
+		expect(mockSessionOps.create).toHaveBeenCalled();
+		const createCall = mockSessionOps.create.mock.calls[0];
+		expect(
+			(createCall[0] as { query: { directory: string } }).query.directory,
+		).toBe(worktreePath);
+	});
+});
+
+// ─── Test 22: Merge-back failure handling (final council HIGH finding fix) ───────
+
+describe('merge-back failure handling', () => {
+	function setupWorktreeRunnerAndMocks(opts?: {
+		mergeResult?:
+			| { merged: true; strategy: string }
+			| { conflict: true; files: string[]; message: string }
+			| { error: string };
+		sessionFail?: boolean;
+	}) {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const sessionOps = opts?.sessionFail
+			? {
+					create: mock(() =>
+						Promise.resolve({ data: null, error: 'session create failed' }),
+					),
+					prompt: mock(() =>
+						Promise.resolve({ data: null, error: 'prompt failed' }),
+					),
+					delete: mock(() => Promise.resolve()),
+				}
+			: mockSuccessfulSessionOps();
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, sessionOps);
+
+		// Mock planner to return a single lane
+		const origPlan = LeanTurboRunner._internals.planLeanTurboLanes;
+		LeanTurboRunner._internals.planLeanTurboLanes = mock(
+			(..._args: Parameters<typeof origPlan>) => ({
+				phase: 1,
+				planId: 'test-plan',
+				lanes: [
+					{
+						laneId: 'lane-1',
+						taskIds: ['1.1'],
+						files: ['src/a.ts'],
+						status: 'pending' as const,
+					},
+				],
+				degradedTasks: [],
+				serializedTasks: [],
+				counters: {
+					lanesPlanned: 1,
+					lanesStarted: 0,
+					lanesCompleted: 0,
+					lanesFailed: 0,
+					tasksSerialized: 0,
+					tasksDegraded: 0,
+				},
+				crossLaneDependencies: {},
+			}),
+		);
+
+		// Mock orphan recovery
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Mock provision
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Track merge calls
+		const mergeCalls: unknown[] = [];
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		const defaultMergeResult = opts?.mergeResult ?? {
+			merged: true,
+			strategy: 'merge' as const,
+		};
+		LeanTurboRunner._internals.mergeLaneBranch = mock(
+			(...args: Parameters<typeof origMerge>) => {
+				mergeCalls.push(args);
+				return Promise.resolve(defaultMergeResult);
+			},
+		);
+
+		// Track cleanup calls
+		const cleanupCalls: unknown[] = [];
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(
+			(...args: Parameters<typeof origCleanup>) => {
+				cleanupCalls.push(args);
+				return Promise.resolve({ cleaned: true });
+			},
+		);
+
+		// Track remove calls
+		const removeCalls: unknown[] = [];
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(
+			(...args: Parameters<typeof origRemove>) => {
+				removeCalls.push(args);
+				return Promise.resolve({ success: true });
+			},
+		);
+
+		return {
+			runner,
+			sessionOps,
+			worktreePath,
+			origPlan,
+			origOrphanRecovery,
+			origProvision,
+			origMerge,
+			origCleanup,
+			origRemove,
+			mergeCalls,
+			cleanupCalls,
+			removeCalls,
+		};
+	}
+
+	function restoreMocks(mocks: ReturnType<typeof setupWorktreeRunnerAndMocks>) {
+		LeanTurboRunner._internals.planLeanTurboLanes = mocks.origPlan;
+		LeanTurboRunner._internals.startupOrphanRecovery = mocks.origOrphanRecovery;
+		LeanTurboRunner._internals.provisionWorktree = mocks.origProvision;
+		LeanTurboRunner._internals.mergeLaneBranch = mocks.origMerge;
+		LeanTurboRunner._internals.postMergeCleanup = mocks.origCleanup;
+		LeanTurboRunner._internals.removeWorktree = mocks.origRemove;
+	}
+
+	test('merge conflict: worktree NOT removed, lane result indicates merge-back failure', async () => {
+		const mocks = setupWorktreeRunnerAndMocks({
+			mergeResult: {
+				conflict: true,
+				files: ['src/a.ts', 'src/b.ts'],
+				message: 'CONFLICT (content): Merge conflict in src/a.ts',
+			},
+		});
+
+		const result = await mocks.runner.runPhase(1);
+		restoreMocks(mocks);
+
+		// Phase should still report ok (coder completed)
+		expect(result.ok).toBe(true);
+
+		// Lane should still be completed (coder finished work)
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('completed');
+
+		// Lane result should include merge-back failure info
+		expect(result.lanes[0].mergeBackFailure).toBeDefined();
+		expect(result.lanes[0].mergeBackFailure!.laneId).toBe('lane-1');
+		expect(result.lanes[0].mergeBackFailure!.reason).toContain('CONFLICT');
+		expect(result.lanes[0].mergeBackFailure!.conflictFiles).toEqual([
+			'src/a.ts',
+			'src/b.ts',
+		]);
+
+		// removeWorktree should NOT have been called (preserved for manual recovery)
+		expect(mocks.removeCalls.length).toBe(0);
+
+		// postMergeCleanup should NOT have been called
+		expect(mocks.cleanupCalls.length).toBe(0);
+
+		// Phase result should include merge-back failures
+		expect(result.mergeBackFailures).toBeDefined();
+		expect(result.mergeBackFailures!.length).toBe(1);
+		expect(result.mergeBackFailures![0].laneId).toBe('lane-1');
+	});
+
+	test('merge error: worktree NOT removed, lane result indicates merge-back failure', async () => {
+		const mocks = setupWorktreeRunnerAndMocks({
+			mergeResult: {
+				error: 'fatal: not something we can merge',
+			},
+		});
+
+		const result = await mocks.runner.runPhase(1);
+		restoreMocks(mocks);
+
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('completed');
+
+		// Lane result should include merge-back failure info
+		expect(result.lanes[0].mergeBackFailure).toBeDefined();
+		expect(result.lanes[0].mergeBackFailure!.laneId).toBe('lane-1');
+		expect(result.lanes[0].mergeBackFailure!.reason).toContain('fatal:');
+
+		// removeWorktree should NOT have been called
+		expect(mocks.removeCalls.length).toBe(0);
+
+		// postMergeCleanup should NOT have been called
+		expect(mocks.cleanupCalls.length).toBe(0);
+
+		// Phase result should include merge-back failures
+		expect(result.mergeBackFailures).toBeDefined();
+		expect(result.mergeBackFailures!.length).toBe(1);
+	});
+
+	test('merge success: worktree IS removed, lane result shows success (no mergeBackFailure)', async () => {
+		const mocks = setupWorktreeRunnerAndMocks({
+			mergeResult: { merged: true, strategy: 'merge' },
+		});
+
+		const result = await mocks.runner.runPhase(1);
+		restoreMocks(mocks);
+
+		expect(result.ok).toBe(true);
+		expect(result.lanes.length).toBe(1);
+		expect(result.lanes[0].status).toBe('completed');
+
+		// Lane result should NOT have merge-back failure
+		expect(result.lanes[0].mergeBackFailure).toBeUndefined();
+
+		// removeWorktree SHOULD have been called
+		expect(mocks.removeCalls.length).toBeGreaterThan(0);
+
+		// postMergeCleanup SHOULD have been called
+		expect(mocks.cleanupCalls.length).toBeGreaterThan(0);
+
+		// Phase result should NOT have merge-back failures
+		expect(result.mergeBackFailures).toBeUndefined();
+	});
+
+	test('phase result includes merge-back failure information in summary', async () => {
+		const mocks = setupWorktreeRunnerAndMocks({
+			mergeResult: {
+				conflict: true,
+				files: ['src/a.ts'],
+				message: 'CONFLICT: Merge conflict in src/a.ts',
+			},
+		});
+
+		const result = await mocks.runner.runPhase(1);
+		restoreMocks(mocks);
+
+		// Phase result should have mergeBackFailures array
+		expect(result.mergeBackFailures).toBeDefined();
+		expect(result.mergeBackFailures).toHaveLength(1);
+		expect(result.mergeBackFailures![0].laneId).toBe('lane-1');
+		expect(result.mergeBackFailures![0].conflictFiles).toEqual(['src/a.ts']);
+	});
+});
+
+// ─── Test 23: postMergeCleanup call order after removeWorktree ──────────
+// Regression: git branch -D fails when the branch is still checked out in an
+// active worktree. postMergeCleanup MUST run AFTER removeWorktree.
+
+describe('postMergeCleanup runs AFTER removeWorktree (branch delete order fix)', () => {
+	test('removeWorktree is called before postMergeCleanup on successful merge', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSuccessfulSessionOps());
+
+		// Mock planner to return a single lane
+		const origPlan = LeanTurboRunner._internals.planLeanTurboLanes;
+		LeanTurboRunner._internals.planLeanTurboLanes = mock(
+			(..._args: Parameters<typeof origPlan>) => ({
+				phase: 1,
+				planId: 'test-plan',
+				lanes: [
+					{
+						laneId: 'lane-1',
+						taskIds: ['1.1'],
+						files: ['src/a.ts'],
+						status: 'pending' as const,
+					},
+				],
+				degradedTasks: [],
+				serializedTasks: [],
+				counters: {
+					lanesPlanned: 1,
+					lanesStarted: 0,
+					lanesCompleted: 0,
+					lanesFailed: 0,
+					tasksSerialized: 0,
+					tasksDegraded: 0,
+				},
+				crossLaneDependencies: {},
+			}),
+		);
+
+		// Mock orphan recovery
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Mock provision
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		// Track call order using a shared array
+		const callOrder: string[] = [];
+
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
+			callOrder.push('mergeLaneBranch');
+			return Promise.resolve({ merged: true, strategy: 'merge' });
+		});
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() => {
+			callOrder.push('postMergeCleanup');
+			return Promise.resolve({ cleaned: true });
+		});
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() => {
+			callOrder.push('removeWorktree');
+			return Promise.resolve({ success: true });
+		});
+
+		let result;
+		try {
+			result = await runner.runPhase(1);
+
+			expect(result.ok).toBe(true);
+
+			// All three operations should have been called
+			expect(callOrder).toContain('mergeLaneBranch');
+			expect(callOrder).toContain('removeWorktree');
+			expect(callOrder).toContain('postMergeCleanup');
+
+			// removeWorktree MUST appear before postMergeCleanup in the call order
+			const removeIdx = callOrder.indexOf('removeWorktree');
+			const cleanupIdx = callOrder.indexOf('postMergeCleanup');
+			expect(removeIdx).toBeGreaterThan(-1);
+			expect(cleanupIdx).toBeGreaterThan(-1);
+			expect(removeIdx).toBeLessThan(cleanupIdx);
+
+			// mergeLaneBranch must be first
+			expect(callOrder[0]).toBe('mergeLaneBranch');
+		} finally {
+			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
+			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	});
+
+	test('postMergeCleanup is NOT called on merge conflict (worktree preserved)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		const runner = makeRunner({
+			generatedAgentNames: ['mega_coder'],
+			leanConfig: { worktree_isolation: true },
+		});
+		injectMockSessionOps(runner, mockSuccessfulSessionOps());
+
+		// Mock planner
+		const origPlan = LeanTurboRunner._internals.planLeanTurboLanes;
+		LeanTurboRunner._internals.planLeanTurboLanes = mock(
+			(..._args: Parameters<typeof origPlan>) => ({
+				phase: 1,
+				planId: 'test-plan',
+				lanes: [
+					{
+						laneId: 'lane-1',
+						taskIds: ['1.1'],
+						files: ['src/a.ts'],
+						status: 'pending' as const,
+					},
+				],
+				degradedTasks: [],
+				serializedTasks: [],
+				counters: {
+					lanesPlanned: 1,
+					lanesStarted: 0,
+					lanesCompleted: 0,
+					lanesFailed: 0,
+					tasksSerialized: 0,
+					tasksDegraded: 0,
+				},
+				crossLaneDependencies: {},
+			}),
+		);
+
+		// Mock orphan recovery
+		const origOrphanRecovery = LeanTurboRunner._internals.startupOrphanRecovery;
+		LeanTurboRunner._internals.startupOrphanRecovery = mock(() =>
+			Promise.resolve({
+				prunedWorktrees: true,
+				remainingBranches: [],
+				warnings: [],
+			}),
+		);
+
+		// Mock provision
+		const worktreePath = path.join(
+			tmpDir,
+			'.swarm-worktrees',
+			SESSION_ID,
+			'lane-1',
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath,
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+
+		const callOrder: string[] = [];
+
+		const origMerge = LeanTurboRunner._internals.mergeLaneBranch;
+		LeanTurboRunner._internals.mergeLaneBranch = mock(() => {
+			callOrder.push('mergeLaneBranch');
+			return Promise.resolve({
+				conflict: true,
+				files: ['src/a.ts'],
+				message: 'CONFLICT: Merge conflict in src/a.ts',
+			});
+		});
+		const origCleanup = LeanTurboRunner._internals.postMergeCleanup;
+		LeanTurboRunner._internals.postMergeCleanup = mock(() => {
+			callOrder.push('postMergeCleanup');
+			return Promise.resolve({ cleaned: true });
+		});
+		const origRemove = LeanTurboRunner._internals.removeWorktree;
+		LeanTurboRunner._internals.removeWorktree = mock(() => {
+			callOrder.push('removeWorktree');
+			return Promise.resolve({ success: true });
+		});
+
+		let result;
+		try {
+			result = await runner.runPhase(1);
+
+			expect(result.ok).toBe(true);
+
+			// On conflict: mergeLaneBranch called, but neither removeWorktree nor postMergeCleanup
+			expect(callOrder).toContain('mergeLaneBranch');
+			expect(callOrder).not.toContain('removeWorktree');
+			expect(callOrder).not.toContain('postMergeCleanup');
+		} finally {
+			LeanTurboRunner._internals.planLeanTurboLanes = origPlan;
+			LeanTurboRunner._internals.startupOrphanRecovery = origOrphanRecovery;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
+			LeanTurboRunner._internals.mergeLaneBranch = origMerge;
+			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
+			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
 	});
 });

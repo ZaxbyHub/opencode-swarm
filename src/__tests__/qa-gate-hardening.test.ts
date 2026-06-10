@@ -2,7 +2,7 @@
  * QA gate hardening tests.
  *
  * Covers the additions from the QA gate hardening rollout:
- * 1. council_general_review as the 9th and final_council as the 11th QA gate (default OFF, ratchet-tighter, persistence)
+ * 1. phase_council and final_council as QA gates (default OFF, ratchet-tighter, persistence)
  * 2. Behavioral guidance markup is rendered into the architect prompt for SPECIFY,
  *    BRAINSTORM, and PLAN inline gate-selection paths.
  * 3. save_plan blocks with QA_GATE_SELECTION_REQUIRED when context.md has no
@@ -47,74 +47,74 @@ afterEach(() => {
 	}
 });
 
-describe('council_general_review gate', () => {
-	test('DEFAULT_QA_GATES includes council_general_review = false', () => {
-		expect(DEFAULT_QA_GATES.council_general_review).toBe(false);
+describe('phase_council gate', () => {
+	test('DEFAULT_QA_GATES includes phase_council = false', () => {
+		expect(DEFAULT_QA_GATES.phase_council).toBe(false);
 	});
 
 	test('DEFAULT_QA_GATES has exactly eleven fields', () => {
 		expect(Object.keys(DEFAULT_QA_GATES).length).toBe(11);
 	});
 
-	test('setGates persists council_general_review = true', () => {
+	test('setGates persists phase_council = true', () => {
 		const planId = 'test-plan';
 		getOrCreateProfile(tempDir, planId);
 		const updated = setGates(tempDir, planId, {
-			council_general_review: true,
+			phase_council: true,
 		});
-		expect(updated.gates.council_general_review).toBe(true);
+		expect(updated.gates.phase_council).toBe(true);
 
 		const reloaded = getProfile(tempDir, planId);
-		expect(reloaded?.gates.council_general_review).toBe(true);
+		expect(reloaded?.gates.phase_council).toBe(true);
 	});
 
-	test('setGates ratchet-tighter rejects council_general_review true→false', () => {
+	test('setGates ratchet-tighter rejects phase_council true→false', () => {
 		const planId = 'test-plan';
 		getOrCreateProfile(tempDir, planId);
-		setGates(tempDir, planId, { council_general_review: true });
-		expect(() =>
-			setGates(tempDir, planId, { council_general_review: false }),
-		).toThrow(/ratchet tighter/);
+		setGates(tempDir, planId, { phase_council: true });
+		expect(() => setGates(tempDir, planId, { phase_council: false })).toThrow(
+			/ratchet tighter/,
+		);
 	});
 
-	test('getEffectiveGates carries council_general_review through merge', () => {
+	test('getEffectiveGates carries phase_council through merge', () => {
 		const planId = 'test-plan';
 		getOrCreateProfile(tempDir, planId);
-		setGates(tempDir, planId, { council_general_review: true });
+		setGates(tempDir, planId, { phase_council: true });
 		const profile = getProfile(tempDir, planId);
 		expect(profile).not.toBeNull();
 		const effective = getEffectiveGates(profile!, {});
-		expect(effective.council_general_review).toBe(true);
+		expect(effective.phase_council).toBe(true);
 	});
 
 	test('getEffectiveGates session override can ratchet tighter', () => {
 		const planId = 'test-plan';
 		const profile = getOrCreateProfile(tempDir, planId);
 		const effective = getEffectiveGates(profile, {
-			council_general_review: true,
+			phase_council: true,
 		});
-		expect(effective.council_general_review).toBe(true);
+		expect(effective.phase_council).toBe(true);
 	});
 });
 
 describe('buildQaGateSelectionDialogue text', () => {
-	test('SPECIFY mode includes eleven gates and council_general_review', () => {
+	test('SPECIFY mode includes eleven gates and phase_council', () => {
 		const text = buildQaGateSelectionDialogue('SPECIFY');
 		expect(text).toContain('eleven gates');
-		expect(text).toContain('council_general_review');
+		expect(text).toContain('phase_council');
 		expect(text).not.toContain('Present the nine gates');
 	});
 
-	test('BRAINSTORM mode includes eleven gates and council_general_review', () => {
+	test('BRAINSTORM mode includes eleven gates and phase_council', () => {
 		const text = buildQaGateSelectionDialogue('BRAINSTORM');
 		expect(text).toContain('eleven gates');
-		expect(text).toContain('council_general_review');
+		expect(text).toContain('phase_council');
 	});
 
-	test('PLAN mode includes eleven gates and council_general_review', () => {
+	test('PLAN mode includes eleven gates and phase_council', () => {
 		const text = buildQaGateSelectionDialogue('PLAN');
 		expect(text).toContain('eleven gates');
-		expect(text).toContain('council_general_review');
+		expect(text).toContain('phase_council');
 	});
 
 	test('dialogue includes follow-up commit-frequency question and policy section', () => {
@@ -131,40 +131,32 @@ describe('Architect prompt behavioral guidance markers', () => {
 		return (agent.config as unknown as { prompt: string }).prompt;
 	})();
 
-	test('SPECIFY block has GATE SELECTION IS MANDATORY + MANDATORY PAUSE', () => {
-		expect(renderedPrompt).toContain('GATE SELECTION IS MANDATORY');
-		expect(renderedPrompt).toContain('MANDATORY PAUSE');
-		expect(renderedPrompt).toContain(
-			'BLOCKED until ALL THREE of these conditions',
-		);
+	test('SPECIFY block references QA gate dialogue from loaded skill', () => {
+		expect(renderedPrompt).toContain('QA gate dialogue');
 	});
 
 	test('PLAN inline path has INLINE GATE SELECTION marker', () => {
 		expect(renderedPrompt).toContain('INLINE GATE SELECTION');
 	});
 
-	test('Pending QA Gate Selection template includes council_general_review', () => {
-		// Both BRAINSTORM (Phase 6) and SPECIFY (5b) have a `## Pending QA Gate Selection`
-		// template block — both must list council_general_review with the placeholder.
-		const bulletMatches = renderedPrompt.match(
-			/- council_general_review: <true\|false>/g,
-		);
-		expect(bulletMatches).not.toBeNull();
-		expect(bulletMatches!.length).toBeGreaterThanOrEqual(2);
+	test('buildQaGateSelectionDialogue includes phase_council', () => {
+		const specifyDialogue = buildQaGateSelectionDialogue('SPECIFY');
+		expect(specifyDialogue).toContain('phase_council');
+		const brainstormDialogue = buildQaGateSelectionDialogue('BRAINSTORM');
+		expect(brainstormDialogue).toContain('phase_council');
 	});
 
-	test('Pending QA Gate Selection template includes final_council', () => {
-		const bulletMatches = renderedPrompt.match(
-			/- final_council: <true\|false>/g,
-		);
-		expect(bulletMatches).not.toBeNull();
-		expect(bulletMatches!.length).toBeGreaterThanOrEqual(2);
+	test('buildQaGateSelectionDialogue includes final_council', () => {
+		const specifyDialogue = buildQaGateSelectionDialogue('SPECIFY');
+		expect(specifyDialogue).toContain('final_council');
+		const brainstormDialogue = buildQaGateSelectionDialogue('BRAINSTORM');
+		expect(brainstormDialogue).toContain('final_council');
 	});
 
-	test('prompt includes task-completion commit policy instructions', () => {
-		expect(renderedPrompt).toContain('## Task Completion Commit Policy');
-		expect(renderedPrompt).toContain('OPTIONAL TASK-COMPLETION COMMIT POLICY');
-		expect(renderedPrompt).toContain('checkpoint save task-<task-id>-complete');
+	test('buildQaGateSelectionDialogue includes task-completion commit policy', () => {
+		const dialogue = buildQaGateSelectionDialogue('SPECIFY');
+		expect(dialogue).toContain('## Task Completion Commit Policy');
+		expect(dialogue).toContain('commit_after_each_completed_task: true');
 	});
 });
 
@@ -243,7 +235,7 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 	test('section with all gates explicitly false still passes (selection completed)', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'context.md'),
-			'## Pending QA Gate Selection\n- reviewer: false\n- council_general_review: false\n',
+			'## Pending QA Gate Selection\n- reviewer: false\n- phase_council: false\n',
 		);
 		const result = await executeSavePlan(
 			{ ...minimalPlan, working_directory: tempDir },
@@ -255,16 +247,14 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 	});
 });
 
-describe('qa-gates command ALL_GATE_NAMES includes council_general_review', () => {
-	test('council_general_review treated as a known gate by /swarm qa-gates', async () => {
+describe('qa-gates command ALL_GATE_NAMES includes phase_council', () => {
+	test('phase_council treated as a known gate by /swarm qa-gates', async () => {
 		const { handleQaGatesCommand } = await import('../commands/qa-gates.js');
-		// We can't call it without a plan.json; just confirm the import succeeds and
-		// the gate list contains the new gate by reading the file source via fs.
 		const src = fs.readFileSync(
 			path.join(process.cwd(), 'src/commands/qa-gates.ts'),
 			'utf8',
 		);
-		expect(src).toContain("'council_general_review',");
+		expect(src).toContain("'phase_council',");
 		expect(src).toContain("'final_council',");
 		expect(typeof handleQaGatesCommand).toBe('function');
 	});

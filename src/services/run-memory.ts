@@ -7,6 +7,7 @@
 
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import { sanitizeContextText } from '../hooks/context-sanitizer.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { validateDirectory } from '../utils/path-security';
 
@@ -202,10 +203,12 @@ function summarizeTask(
 		// There's a passing attempt after failures
 		const passAttempt = lastPass.attemptNumber;
 		const failAttempt = lastFailure.attemptNumber;
-		return `Task ${taskId}: FAILED attempt ${failAttempt} — ${lastFailure.failureReason || 'unknown'}. Passed on attempt ${passAttempt}.`;
+		const reason = sanitizeContextText(lastFailure.failureReason || 'unknown');
+		return `Task ${taskId}: FAILED attempt ${failAttempt} — ${reason}. Passed on attempt ${passAttempt}.`;
 	} else {
 		// Still failing - no pass yet
-		return `Task ${taskId}: FAILED ${failCount} times — last: ${lastFailure.failureReason || 'unknown'}. Still failing.`;
+		const reason = sanitizeContextText(lastFailure.failureReason || 'unknown');
+		return `Task ${taskId}: FAILED ${failCount} times — last: ${reason}. Still failing.`;
 	}
 }
 

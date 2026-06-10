@@ -7,7 +7,7 @@
 
 export type CouncilVerdict = 'APPROVE' | 'CONCERNS' | 'REJECT';
 
-export type CouncilFindingSeverity = 'HIGH' | 'MEDIUM' | 'LOW';
+export type CouncilFindingSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 
 export type CouncilFindingCategory =
 	| 'logic'
@@ -50,6 +50,8 @@ export interface CouncilFinding {
 export interface CouncilMemberVerdict {
 	agent: CouncilAgent;
 	verdict: CouncilVerdict;
+	/** Optional source round for freshness checks on resubmission. */
+	verdictRound?: number;
 	/** Confidence 0.0–1.0 */
 	confidence: number;
 	findings: CouncilFinding[];
@@ -80,6 +82,8 @@ export interface CouncilSynthesis {
 	allCriteriaMet: boolean;
 	/** Distinct council members that produced verdicts (deduplicated count). */
 	quorumSize: number;
+	/** Count of HIGH/CRITICAL findings from CONCERNS members promoted to requiredFixes */
+	blockingConcernsCount: number;
 	/** true when called with an empty verdicts array — the APPROVE is vacuous */
 	emptyVerdictsWarning?: boolean;
 }
@@ -113,6 +117,8 @@ export interface PhaseCouncilSynthesis {
 	allCriteriaMet: boolean;
 	/** Distinct council members that produced verdicts */
 	quorumSize: number;
+	/** Count of HIGH/CRITICAL findings from CONCERNS members promoted to requiredFixes */
+	blockingConcernsCount: number;
 	/** Path where evidence was written, e.g. .swarm/evidence/1/phase-council.json */
 	evidencePath: string;
 	/** Summary of the phase being reviewed */
@@ -146,6 +152,8 @@ export interface FinalCouncilSynthesis {
 	allCriteriaMet: boolean;
 	/** Distinct council members that produced verdicts */
 	quorumSize: number;
+	/** Count of HIGH/CRITICAL findings from CONCERNS members promoted to requiredFixes */
+	blockingConcernsCount: number;
 	/** Path where evidence was written */
 	evidencePath: '.swarm/evidence/final-council.json';
 	/** Summary of the completed project being reviewed */
@@ -187,7 +195,7 @@ export interface CouncilConfig {
 	 * options: critic_oversight agent, HTTP webhook, or configurable handler.
 	 */
 	escalateOnMaxRounds?: string;
-	/** Default true — CONCERNS verdict at phase-level council does NOT block completion (advisory). Set false to make CONCERNS block like REJECT. */
+	/** Default true — CONCERNS verdict with only MEDIUM/LOW findings does NOT block completion (advisory). Set false to make all CONCERNS block like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. */
 	phaseConcernsAllowComplete: boolean;
 }
 

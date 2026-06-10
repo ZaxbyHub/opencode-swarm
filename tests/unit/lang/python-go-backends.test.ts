@@ -196,8 +196,8 @@ import (
 	});
 });
 
-describe('backend registration: typescript + python + go', () => {
-	test('all three backends register through LANGUAGE_BACKEND_REGISTRY', async () => {
+describe('backend registration: typescript + python + go + php', () => {
+	test('all registered backends resolve through LANGUAGE_BACKEND_REGISTRY', async () => {
 		await import('../../../src/lang/backends');
 		const { LANGUAGE_BACKEND_REGISTRY } = await import(
 			'../../../src/lang/registry-backend'
@@ -205,5 +205,6 @@ describe('backend registration: typescript + python + go', () => {
 		expect(LANGUAGE_BACKEND_REGISTRY.get('typescript')).toBeDefined();
 		expect(LANGUAGE_BACKEND_REGISTRY.get('python')).toBeDefined();
 		expect(LANGUAGE_BACKEND_REGISTRY.get('go')).toBeDefined();
+		expect(LANGUAGE_BACKEND_REGISTRY.get('php')).toBeDefined();
 	});
 });

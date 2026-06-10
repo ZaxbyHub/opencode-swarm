@@ -90,7 +90,9 @@ describe('max_results resolution', () => {
 		await wrapped.execute({ query: 'test' }, '/tmp/test');
 
 		// Provider should be called with maxSourcesPerMember (7), not hard cap (10)
-		expect(mockSearch).toHaveBeenCalledWith('test', 7);
+		expect(mockSearch).toHaveBeenCalledWith('test', 7, {
+			freshness: undefined,
+		});
 	});
 
 	test('2. When max_results is provided, it overrides the config default', async () => {
@@ -108,7 +110,9 @@ describe('max_results resolution', () => {
 		await wrapped.execute({ query: 'test', max_results: 3 }, '/tmp/test');
 
 		// Provider should be called with the arg value (3), not config (5)
-		expect(mockSearch).toHaveBeenCalledWith('test', 3);
+		expect(mockSearch).toHaveBeenCalledWith('test', 3, {
+			freshness: undefined,
+		});
 	});
 
 	test('3. Values above MAX_RESULTS_HARD_CAP (10) are clamped', async () => {
@@ -126,7 +130,9 @@ describe('max_results resolution', () => {
 		await wrapped.execute({ query: 'test', max_results: 20 }, '/tmp/test');
 
 		// Should be clamped to MAX_RESULTS_HARD_CAP (10)
-		expect(mockSearch).toHaveBeenCalledWith('test', 10);
+		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
+			freshness: undefined,
+		});
 	});
 
 	test('3b. Config value above hard cap is also clamped', async () => {
@@ -144,7 +150,9 @@ describe('max_results resolution', () => {
 		await wrapped.execute({ query: 'test' }, '/tmp/test');
 
 		// Should be clamped to MAX_RESULTS_HARD_CAP (10)
-		expect(mockSearch).toHaveBeenCalledWith('test', 10);
+		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
+			freshness: undefined,
+		});
 	});
 
 	test('4. Config default of 5 is respected when council.general is enabled', async () => {
@@ -162,7 +170,9 @@ describe('max_results resolution', () => {
 		await wrapped.execute({ query: 'test' }, '/tmp/test');
 
 		// Should use config default of 5
-		expect(mockSearch).toHaveBeenCalledWith('test', 5);
+		expect(mockSearch).toHaveBeenCalledWith('test', 5, {
+			freshness: undefined,
+		});
 	});
 
 	test('Edge: max_results of 1 is respected (below hard cap)', async () => {
@@ -178,7 +188,9 @@ describe('max_results resolution', () => {
 
 		await wrapped.execute({ query: 'test', max_results: 1 }, '/tmp/test');
 
-		expect(mockSearch).toHaveBeenCalledWith('test', 1);
+		expect(mockSearch).toHaveBeenCalledWith('test', 1, {
+			freshness: undefined,
+		});
 	});
 
 	test('Edge: max_results of 10 equals hard cap (boundary)', async () => {
@@ -194,7 +206,9 @@ describe('max_results resolution', () => {
 
 		await wrapped.execute({ query: 'test', max_results: 10 }, '/tmp/test');
 
-		expect(mockSearch).toHaveBeenCalledWith('test', 10);
+		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
+			freshness: undefined,
+		});
 	});
 
 	test('Error path: missing API key returns structured failure', async () => {

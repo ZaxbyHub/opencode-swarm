@@ -28,6 +28,22 @@ causes, regression risk, or sibling changes required by a confirmed item.
 GitHub review-thread resolution is user-controlled. Do not resolve or mark review
 threads resolved unless the user explicitly instructs you to do so.
 
+## Pre-flight: Check Out the PR Branch Locally
+
+Before verifying any claim or making any fix, ensure the PR branch is the working
+tree:
+
+- If `head_ref` is a remote branch that is not checked out locally, fetch it
+  (`git fetch origin <head_ref>`).
+- Verify the working tree is clean first (`git status --porcelain`). If uncommitted
+  changes exist, stash them or abort to prevent data loss.
+- **Check out the head branch locally.** Feedback verification reads the working-tree
+  filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
+  checkout you would verify and patch the base branch's code instead. Record the
+  `base_ref..head_ref` range for diff-scoped inspection.
+- If no PR reference was provided (a pasted-feedback session on the current branch),
+  confirm the current branch is the intended PR branch before editing.
+
 ## Intake Surfaces
 
 Build a complete feedback ledger before editing. Include every available source:
@@ -120,6 +136,10 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
   treating it as current evidence.
 - For generated output or dist failures, inspect the failing log before rebuilding
   and commit regenerated files only when the PR touches the source surface.
+- When `main` has a merge queue enabled, do not rebase or force-push a PR only
+  because `main` advanced. Once required checks and review are green, queue the PR
+  and let the merge queue perform final current-base validation. Still resolve real
+  merge conflicts and SHA-dependent review threads before queuing.
 
 ## Validation
 

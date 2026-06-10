@@ -10,10 +10,35 @@ const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
+const REQUIRED_PROJECT_SKILL_SLUGS = [
+	'brainstorm',
+	'specify',
+	'clarify-spec',
+	'resume',
+	'clarify',
+	'discover',
+	'consult',
+	'pre-phase-briefing',
+	'council',
+	'deep-dive',
+	'codebase-review-swarm',
+	'design-docs',
+	'swarm-pr-review',
+	'swarm-pr-feedback',
+	'issue-ingest',
+	'plan',
+	'critic-gate',
+	'execute',
+	'phase-wrap',
+];
+
 const REQUIRED_PACKAGE_FILES = [
 	'dist/index.js',
 	'dist/index.d.ts',
 	'dist/cli/index.js',
+	...REQUIRED_PROJECT_SKILL_SLUGS.map(
+		(slug) => `.opencode/skills/${slug}/SKILL.md`,
+	),
 	'README.md',
 	'LICENSE',
 	'package.json',
@@ -90,8 +115,64 @@ export async function listExpectedGrammarFiles(root = ROOT) {
 		.map((file) => `dist/lang/grammars/${file}`);
 }
 
-export function validatePackageFiles(files, expectedGrammarFiles) {
+async function listPackageFilesRecursive(
+	sourceDir,
+	packageDir,
+	relativeDir = '',
+) {
+	const currentSource = path.join(sourceDir, relativeDir);
+	const entries = await readdir(currentSource, { withFileTypes: true });
+	const files = [];
+
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+
+		const relativeEntry = path.join(relativeDir, entry.name);
+		const packagePath = path.posix.join(
+			packageDir,
+			...relativeEntry.split(path.sep),
+		);
+		if (entry.isDirectory()) {
+			files.push(
+				...(await listPackageFilesRecursive(
+					sourceDir,
+					packageDir,
+					relativeEntry,
+				)),
+			);
+			continue;
+		}
+
+		if (entry.isFile()) files.push(packagePath);
+	}
+
+	return files;
+}
+
+export async function listExpectedProjectSkillFiles(root = ROOT) {
+	const skillsRoot = path.join(root, '.opencode', 'skills');
+	const files = [];
+
+	for (const slug of REQUIRED_PROJECT_SKILL_SLUGS) {
+		const skillDir = path.join(skillsRoot, slug);
+		files.push(
+			...(await listPackageFilesRecursive(
+				skillDir,
+				path.posix.join('.opencode/skills', slug),
+			)),
+		);
+	}
+
+	return files.sort();
+}
+
+export function validatePackageFiles(
+	files,
+	expectedGrammarFiles,
+	expectedProjectSkillFiles,
+) {
 	const paths = new Set(files.map((file) => normalizePackagePath(file.path ?? file)));
+	const expectedSkillPaths = new Set(expectedProjectSkillFiles);
 	const errors = [];
 
 	for (const required of REQUIRED_PACKAGE_FILES) {
@@ -106,11 +187,24 @@ export function validatePackageFiles(files, expectedGrammarFiles) {
 		}
 	}
 
+	for (const skillFile of expectedProjectSkillFiles) {
+		if (!paths.has(skillFile)) {
+			errors.push(`missing bundled skill package file: ${skillFile}`);
+		}
+	}
+
 	for (const packagePath of paths) {
 		for (const prefix of FORBIDDEN_PACKAGE_PREFIXES) {
 			if (packagePath.startsWith(prefix)) {
 				errors.push(`unexpected source-only package file: ${packagePath}`);
 			}
+		}
+
+		if (
+			packagePath.startsWith('.opencode/skills/') &&
+			!expectedSkillPaths.has(packagePath)
+		) {
+			errors.push(`unexpected bundled skill package file: ${packagePath}`);
 		}
 	}
 
@@ -122,9 +216,17 @@ export function validatePackageFiles(files, expectedGrammarFiles) {
 }
 
 function parsePackOutput(stdout) {
+	// `npm pack --json` may run the `prepare` lifecycle first, which builds and prints
+	// progress to stdout when lifecycle scripts are enabled, so the JSON payload can be
+	// preceded by build noise. The payload is a single JSON array and the build output
+	// contains no brackets, so slice from the first '[' to the last ']' to isolate it —
+	// robust whether or not prepare emits noise.
+	const start = stdout.indexOf('[');
+	const end = stdout.lastIndexOf(']');
+	const jsonText = start >= 0 && end > start ? stdout.slice(start, end + 1) : stdout;
 	let parsed;
 	try {
-		parsed = JSON.parse(stdout);
+		parsed = JSON.parse(jsonText);
 	} catch (error) {
 		throw new Error(
 			`Failed to parse npm pack --json output: ${
@@ -153,9 +255,11 @@ async function main() {
 		const packResult = runCommand(pack.command, pack.args);
 		const packEntry = parsePackOutput(packResult.stdout);
 		const expectedGrammarFiles = await listExpectedGrammarFiles(ROOT);
+		const expectedProjectSkillFiles = await listExpectedProjectSkillFiles(ROOT);
 		const validation = validatePackageFiles(
 			packEntry.files ?? [],
 			expectedGrammarFiles,
+			expectedProjectSkillFiles,
 		);
 
 		if (!validation.ok) {

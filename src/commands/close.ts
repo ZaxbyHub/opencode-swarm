@@ -858,7 +858,7 @@ export async function handleCloseCommand(
 		} catch (err: unknown) {
 			if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
 				warnings.push(
-					`Failed to remove ${path.basename(candidate)}: ${err instanceof Error ? err.message : String(err)}`,
+					`Failed to remove ${candidate}: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 		}

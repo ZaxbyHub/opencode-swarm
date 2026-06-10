@@ -3,7 +3,7 @@
  * Three-layer validation gate testing: structural, content safety, and semantic quality.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import type { KnowledgeCategory } from '../../../src/hooks/knowledge-types.js';
 import {
 	DANGEROUS_COMMAND_PATTERNS,
@@ -352,6 +352,36 @@ describe('knowledge-validator', () => {
 			const lesson = 'The fork bomb :(){ :|:& };: will crash any Unix system';
 			const result = validateLesson(lesson, [], {
 				category: 'security',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks "chmod -r 777" (lowercase -r, regression for case-sensitivity bug #828)', () => {
+			const lesson = 'Run chmod -r 777 /var to fix permissions quickly';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: false,
+				layer: 2,
+				reason: 'dangerous command pattern detected',
+				severity: 'error',
+			});
+		});
+
+		it('blocks "chmod -R 777" (uppercase -R, /i flag regression test)', () => {
+			const lesson = 'Run chmod -R 777 /var to fix permissions quickly';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
 				scope: 'global',
 				confidence: 0.9,
 			});

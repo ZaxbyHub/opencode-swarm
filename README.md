@@ -16,7 +16,7 @@
 
 ---
 
-OpenCode Swarm is a plugin for [OpenCode](https://opencode.ai) that turns a single AI coding session into an **architect-led team of specialized core, optional, and conditional agents** — see `/swarm agents` for the live roster. One agent writes the code. A different agent reviews it. Another writes and runs tests. Another checks security. **Nothing ships until every required gate passes.**
+OpenCode Swarm is a plugin for [OpenCode](https://opencode.ai) that turns a single AI coding session into an **architect-led team of specialized core, optional, and conditional agents**. Run `/swarm agents` for the live roster; it is generated from the current plugin configuration. One agent writes the code. A different agent reviews it. Another writes and runs tests. Another checks security. **Nothing ships until every required gate passes.**
 
 ```bash
 bunx opencode-swarm install
@@ -24,7 +24,7 @@ bunx opencode-swarm install
 
 > This single command installs the package, registers it as an OpenCode plugin, disables conflicting default agents, and creates a ready-to-edit config at `~/.config/opencode/opencode-swarm.json`. Requires [Bun](https://bun.sh) (`bun --version` to check). If you must use npm: `npm install -g opencode-swarm && opencode-swarm install`.
 
-> ⚠️ **On first run, Swarm auto-selects the architect and shows a welcome message.** The default OpenCode `Build` and `Plan` modes **bypass this plugin entirely** — none of the gates, reviewers, or test agents below run. If you ever need to switch architect manually, open the OpenCode mode/agent picker and choose the Swarm architect; it then coordinates every other agent automatically. If you ever see Swarm "do nothing," this is almost always the cause.
+> **First-run note:** the installer registers the plugin, writes the global plugin config, creates a project override when missing, and disables the native `explore` and `general` agents in `opencode.json`. If you are not using a Swarm architect, the Swarm gates, reviewers, and test agents are bypassed. Open the OpenCode agent or mode picker and choose the Swarm architect when needed.
 
 ### Why Swarm?
 
@@ -44,7 +44,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🆓 **Free tier** — works with OpenCode Zen's free model roster
 - ⚙️ **Fully configurable** — override any agent's model, disable agents, tune guardrails
 
-> **The Swarm architect is auto-selected on first run and coordinates all other agents automatically.** You never manually switch between internal roles. If you use the default OpenCode `Build` / `Plan` modes, the plugin is bypassed entirely (see the install warning above).
+> **The Swarm architect coordinates all internal agents automatically.** You never manually switch between internal roles. If the active OpenCode agent is not a Swarm architect, the plugin workflow is bypassed.
 
 ---
 
@@ -157,10 +157,10 @@ The 15-minute guide covers:
 - Running your first task
 - Troubleshooting common issues
 
-On first run, Swarm automatically:
-- Creates project config at `.opencode/opencode-swarm.json` with all agents enabled
-- Selects the Swarm architect as the default
-- Shows a welcome message with next steps
+The installer automatically:
+- Creates a project config at `.opencode/opencode-swarm.json` when missing so project-level overrides have a place to live
+- Adds `opencode-swarm` to the OpenCode plugin list
+- Disables the native `explore` and `general` agents to reduce routing conflicts
 
 ---
 
@@ -174,8 +174,7 @@ No animated GIF is shipped in the repo — instead, here is the exact terminal s
 # 1. Install the plugin (5s)
 bunx opencode-swarm install
 
-# 2. Open opencode — Swarm auto-selects architect on first run
-#    (the architect is auto-selected; manual selection is only needed to override)
+# 2. Open opencode and select a Swarm architect if it is not already active
 opencode
 
 # 3. Inside the OpenCode session, verify Swarm is live (5s)
@@ -225,12 +224,18 @@ Each row corresponds to a real gate documented further down this README — none
 **OpenCode caches plugins indefinitely.** A normal OpenCode restart does **not**
 pull newer versions from npm — once a plugin is cached, OpenCode keeps using
 that exact copy on every subsequent launch (issue #675). The cache lives in
-one of two places depending on your platform:
+several places depending on your platform and OpenCode version:
 
-- Linux / devcontainers / GitHub Codespaces:
+- Current OpenCode cache layout:
+  `~/.cache/opencode/node_modules/opencode-swarm/`
+- Legacy Linux / devcontainers / GitHub Codespaces:
   `~/.config/opencode/node_modules/opencode-swarm/`
-- Some macOS / Windows installs:
+- Package cache layout:
   `~/.cache/opencode/packages/opencode-swarm@latest/`
+- Platform-specific macOS / Windows cache roots:
+  `~/Library/Caches/opencode/...`, `%LOCALAPPDATA%\opencode\...`, or `%APPDATA%\opencode\...`
+
+The updater also clears known OpenCode lock files (`bun.lock`, `bun.lockb`, and `package-lock.json`) so the next start resolves the latest package.
 
 To upgrade to the latest published version (clears both layouts automatically):
 
@@ -250,7 +255,7 @@ in your `opencode-swarm.json`.
 
 ## Commands
 
-All 43 subcommands at a glance:
+Common subcommands at a glance:
 
 ```bash
 /swarm help [command]      # List all commands or get detailed help for a specific command
@@ -266,7 +271,7 @@ Use `/swarm help` to see all available commands categorized by function. Use `/s
 
 Nine commands display a ⚠️ warning in help output because they share names with Claude Code built-in slash commands (e.g., `/plan`, `/reset`, `/status`). The warning reminds you to always use `/swarm <command>` — the bare CC command does something different and sometimes destructive. See [docs/commands.md#claude-code-command-conflicts](docs/commands.md#claude-code-command-conflicts) for the full conflict registry.
 
-See [docs/commands.md](docs/commands.md) for the full reference (43 commands).
+See [docs/commands.md](docs/commands.md) for the full reference. The live source of truth is `src/commands/registry.ts`, which includes canonical commands, compound commands, and deprecated aliases.
 
 ## Command Aliases
 
@@ -529,13 +534,13 @@ Override via `authority.rules` in config.
 
 Built-in tools verify every task before it ships:
 
-- **syntax_check** — Tree-sitter validation (12 languages)
+- **syntax_check** — Tree-sitter validation across the configured language grammar map
 - **placeholder_scan** — Catches TODOs, stubs, incomplete code
 - **sast_scan** — 63+ security rules, 9 languages (offline)
 - **sbom_generate** — Dependency tracking (CycloneDX)
 - **quality_budget** — Complexity, duplication, test ratio limits
 
-All tools run locally. No Docker, no network calls.
+These quality gates run locally. No Docker is required. Config-gated features such as General Council web search can make external API calls only when you enable them and provide a Tavily or Brave Search key.
 
 ### Context Budget Guard
 
@@ -719,25 +724,30 @@ Swarm provides tools for managing generated skill lifecycles:
 <details>
 <summary><strong>Quality Gates (Technical Detail)</strong></summary>
 
-### Built-in Tools
+### Built-in Tools and Hooks
 
-| Tool | What It Does |
+| Surface | What It Does |
 |------|-------------|
-| syntax_check | Tree-sitter validation across 12 languages |
+| syntax_check | Tree-sitter validation across the configured language grammar map |
 | placeholder_scan | Catches TODOs, FIXMEs, stubs, placeholder text |
 | sast_scan | Offline security analysis, 63+ rules, 9 languages |
 | sbom_generate | CycloneDX dependency tracking, 8 ecosystems |
 | build_check | Runs your project's native build/typecheck |
-| incremental_verify | Post-coder typecheck for TS/JS, Go, Rust, C# (v6.29.2) |
+| incremental_verify | Post-coder hook for TS/JS, Go, Rust, Python, and C#; configured by `incremental_verify.*`, not invoked as a registered tool |
 | quality_budget | Enforces complexity, duplication, and test ratio limits |
 | pre_check_batch | Runs lint, secretscan, SAST, and quality budget in parallel (~15s vs ~60s sequential) |
 | phase_complete | Enforces phase completion, verifies required agents, requires a valid retrospective evidence bundle, logs events, and resets state; appends to `events.jsonl` with file locking |
 | mutation_test | Applies LLM-generated mutation patches to source files and runs tests to measure kill rate; verdict is pass/warn/fail based on configurable thresholds; used by the mutation_test gate (opt-in, off by default) |
 | generate_mutants | Architect-only: generates LLM-based mutation patches (5–10 per function across 6 types: off-by-one, null substitution, operator swap, guard removal, branch swap, side-effect deletion) for direct consumption by the mutation_test tool; returns SKIP verdict on LLM failure rather than throwing |
 | write_mutation_evidence | Architect-only: writes mutation gate results atomically to `.swarm/evidence/{phase}/mutation-gate.json`; accepts verdict (PASS/WARN/FAIL/SKIP), kill rate metrics, and optional survived mutant details; normalizes uppercase-to-lowercase before persisting |
+| git_blame | Per-line git blame metadata (sha, author, date, summary) via `git blame --porcelain`; supports optional line range filtering |
+| diff | Structured git diff with contract change detection; supports `summaryOnly` mode returning file list with additions/deletions counts |
+| suggest_patch | Reviewer-safe structured patch suggestion; supports `format` parameter ('json' or 'unified') where unified outputs valid unified diff with `diff --git` headers, hunks, and context |
+| test_runner | Auto-detect and run tests; supports `bail` parameter to inject framework-specific bail flags for early exit on first failure |
+| symbols | Extract exported symbols from source files; supports `workspace` (boolean) and `name` (string) parameters for multi-file symbol search |
 
 
-All tools run locally. No Docker, no network calls, no external APIs.
+Quality-gate surfaces run locally and require no Docker. Optional search-backed council features use external APIs only when explicitly enabled and configured.
 
 Optional enhancement: Semgrep (if on PATH).
 
@@ -868,19 +878,21 @@ Config file location: `~/.config/opencode/opencode-swarm.json` (global) or `.ope
   "knowledge": {
     "enabled": true,
     "swarm_max_entries": 100,
-    "hive_max_entries": 1000,
-    "auto_promote_days": 30,
+    "hive_max_entries": 200,
+    "auto_promote_days": 90,
     "max_inject_count": 5,
+    "inject_char_budget": 2000,
+    "max_lesson_display_chars": 120,
     "dedup_threshold": 0.6,
     "scope_filter": ["global"],
     "hive_enabled": true,
-    "rejected_max_entries": 200,
+    "rejected_max_entries": 20,
     "validation_enabled": true,
-    "evergreen_confidence": 0.8,
-    "evergreen_utility": 0.5,
-    "low_utility_threshold": 0.2,
+    "evergreen_confidence": 0.9,
+    "evergreen_utility": 0.8,
+    "low_utility_threshold": 0.3,
     "min_retrievals_for_utility": 3,
-    "schema_version": "v6.17"
+    "schema_version": 1
   }
 }
 ```
@@ -1019,10 +1031,18 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm preflight` | Run phase preflight checks |
 | `/swarm config doctor [--fix]` | Config validation with optional auto-fix |
 | `/swarm doctor tools` | Tool registration coherence and binary readiness check |
-| `/swarm sync-plan` | Force plan.md regeneration from plan.json |
+| `/swarm sync-plan` | Force `plan.md` regeneration from the canonical plan ledger |
 | `/swarm specify [description]` | Generate or import a feature specification |
 | `/swarm clarify [topic]` | Clarify and refine an existing feature specification |
 | `/swarm analyze` | Analyze spec.md vs plan.md for requirement coverage gaps |
+| `/swarm brainstorm [topic]` | Enter BRAINSTORM mode for structured requirement discovery before a spec |
+| `/swarm council <question> [--preset <name>] [--spec-review]` | Convene a multi-model General Council for advisory deliberation |
+| `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace]` | Ingest a GitHub issue for localization and resolution |
+| `/swarm pr-review <pr-url\|owner/repo#N\|N> [--council] [instructions...]` | Structured deep PR review with parallel lanes, reviewer confirmation, and critic challenge |
+| `/swarm pr-feedback [<pr-url\|owner/repo#N\|N>] [instructions...]` | Ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh review |
+| `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>]` | Read-only codebase audit with parallel explorers, dual reviewers, and critic challenge |
+| `/swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]` | Generate or sync language-agnostic design docs (requires `design_docs.enabled`) |
+| `/swarm dark-matter` | Detect hidden file couplings from co-change history |
 | `/swarm finalize [--prune-branches] [--skill-review]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, context.md reset, config-backup cleanup, optional branch pruning, optional skill-improver proposal |
 | `/swarm close [--prune-branches] [--skill-review]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review]` |
 | `/swarm write-retro` | Write a phase retrospective manually |
@@ -1035,9 +1055,15 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm knowledge quarantine [id]` | Move a knowledge entry to quarantine |
 | `/swarm knowledge restore [id]` | Restore a quarantined knowledge entry |
 | `/swarm memory status` | Show memory provider and JSONL migration status |
+| `/swarm memory pending` | Show pending memory proposals and recent rejection reasons |
+| `/swarm memory recall-log` | Summarize memory recall usage |
+| `/swarm memory stale` | List expired, superseded, deleted, and low-utility memory records |
+| `/swarm memory compact` | Dry-run memory cleanup; pass `--confirm` to apply |
 | `/swarm memory export` | Export memory records and proposals to JSONL |
+| `/swarm memory evaluate` | Run memory recall evaluation fixtures |
 | `/swarm memory import` | Import legacy JSONL memory into SQLite |
 | `/swarm memory migrate` | Run the one-time JSONL to SQLite migration |
+| `/swarm concurrency <set|status|reset>` | Manage session-scoped runtime concurrency override |
 | `/swarm turbo` | Enable turbo mode for the current session (bypasses QA gates) |
 | `/swarm full-auto` | Toggle Full-Auto Mode for the current session [on|off] |
 | `/swarm checkpoint` | Save a git checkpoint for the current state |
@@ -1048,8 +1074,8 @@ Control how tool outputs are summarized for LLM context.
 
 ## Supported Languages
 
-Full Tier-1 support: TypeScript, JavaScript, Python, Go, Rust  
-Tier-2 support: Java, Kotlin, C#, C/C++, Swift  
+Full Tier-1 support: TypeScript, JavaScript, Python, Go, Rust
+Tier-2 support: Java, Kotlin, C#, C/C++, Swift
 Tier-3 support: Dart, Ruby, PHP/Laravel
 
 All binaries optional. Missing tools produce soft warnings, never hard-fail.

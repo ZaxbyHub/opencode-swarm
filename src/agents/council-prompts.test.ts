@@ -92,6 +92,13 @@ describe('council-prompts: web search ownership shifted to architect', () => {
 		test(`${name} declares the agent has no tools`, () => {
 			expect(prompt).toContain('You have no tools.');
 		});
+
+		test(`${name} forbids training knowledge as current-fact evidence`, () => {
+			expect(prompt).toContain('training knowledge is NOT evidence');
+			expect(prompt).toContain('CURRENT DATE');
+			expect(prompt).toContain('stable background knowledge');
+			expect(prompt).toContain('state of the art');
+		});
 	}
 });
 

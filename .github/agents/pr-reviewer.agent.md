@@ -5,7 +5,7 @@ description: >
   Reconstructs intent, verifies implementation, and hunts for defects, security
   issues, and shipped-vs-claimed mismatches. Operates read-only. Never approves
   without positive evidence. Never invents repository facts.
-tools: ['codebase', 'githubRepo', 'fetch']
+tools: ['read', 'search', 'web']
 ---
 
 # PR Reviewer — opencode-swarm

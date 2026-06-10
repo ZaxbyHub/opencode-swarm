@@ -53,8 +53,25 @@ export async function detectProjectLanguages(
 		// Check build indicator files for each profile
 		for (const profile of LANGUAGE_REGISTRY.getAll()) {
 			for (const detectFile of profile.build.detectFiles) {
-				// Skip glob patterns (contain * or ?)
-				if (detectFile.includes('*') || detectFile.includes('?')) continue;
+				if (detectFile.includes('*') || detectFile.includes('?')) {
+					// Glob pattern (e.g. *.csproj, *.sln, *.xcodeproj). Match it
+					// against the directory listing instead of silently skipping
+					// (DD-C025) — otherwise C#/Swift projects identified only by a
+					// solution/workspace file would never be detected here. Uses
+					// the same simple glob→regex shape as default-backend's
+					// detectFileExists; detectFiles are controlled profile data.
+					const regex = new RegExp(
+						`^${detectFile
+							.replace(/\./g, '\\.')
+							.replace(/\*/g, '.*')
+							.replace(/\?/g, '.')}$`,
+					);
+					if (entries.some((name) => regex.test(name))) {
+						detected.add(profile.id);
+						break;
+					}
+					continue;
+				}
 				try {
 					await access(join(dir, detectFile));
 					detected.add(profile.id);

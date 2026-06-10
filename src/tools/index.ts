@@ -1,4 +1,8 @@
-export { applyPatch } from './apply-patch';
+import { applyPatch } from './apply-patch';
+
+export { applyPatch };
+// Alias for TOOL_NAMES compliance - apply_patch and applyPatch are the same tool
+export const apply_patch: typeof applyPatch = applyPatch;
 export { batch_symbols } from './batch-symbols';
 export { build_check } from './build-check';
 export { check_gate_status } from './check-gate-status';
@@ -20,6 +24,7 @@ export { evidence_check } from './evidence-check';
 export { extract_code_blocks } from './file-extractor';
 export { get_approved_plan } from './get-approved-plan';
 export { get_qa_gate_profile } from './get-qa-gate-profile';
+export { git_blame } from './git-blame';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
 export { knowledge_ack } from './knowledge-ack';

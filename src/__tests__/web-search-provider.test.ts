@@ -65,6 +65,17 @@ describe('TavilyProvider', () => {
 		});
 	});
 
+	test('passes freshness as Tavily time_range', async () => {
+		let body: Record<string, unknown> | undefined;
+		globalThis.fetch = (async (_url, init) => {
+			body = JSON.parse(String(init?.body));
+			return new Response(JSON.stringify({ results: [] }), { status: 200 });
+		}) as unknown as typeof fetch;
+		const p = new TavilyProvider('key');
+		await p.search('latest q', 5, { freshness: 'month' });
+		expect(body?.time_range).toBe('month');
+	});
+
 	test('HTTP 401 → WebSearchError', async () => {
 		mockFetchStatus(401);
 		const p = new TavilyProvider('key');
@@ -127,6 +138,21 @@ describe('BraveProvider', () => {
 			{ title: 'B1', url: 'https://b1', snippet: 'D1', query: 'q' },
 			{ title: 'B2', url: 'https://b2', snippet: 'D2', query: 'q' },
 		]);
+	});
+
+	test('passes freshness as Brave freshness parameter', async () => {
+		let requestedUrl: string | undefined;
+		globalThis.fetch = (async (url) => {
+			requestedUrl = String(url);
+			return new Response(JSON.stringify({ web: { results: [] } }), {
+				status: 200,
+			});
+		}) as unknown as typeof fetch;
+		const p = new BraveProvider('key');
+		await p.search('latest q', 5, { freshness: 'week' });
+		expect(new URL(requestedUrl ?? '').searchParams.get('freshness')).toBe(
+			'pw',
+		);
 	});
 
 	test('HTTP 401 → WebSearchError', async () => {
@@ -226,15 +252,10 @@ describe('AGENT_TOOL_MAP enforcement', () => {
 		expect(AGENT_TOOL_MAP.architect).toContain('web_search');
 	});
 
-	test('web_search is NOT in any non-architect agent', () => {
-		const otherAgents = Object.keys(AGENT_TOOL_MAP).filter(
-			(a) => a !== 'architect',
-		);
-		for (const agent of otherAgents) {
-			expect(
-				AGENT_TOOL_MAP[agent as keyof typeof AGENT_TOOL_MAP],
-			).not.toContain('web_search');
-		}
+	test('web_search is NOT in any council agent', () => {
+		expect(AGENT_TOOL_MAP.council_generalist).not.toContain('web_search');
+		expect(AGENT_TOOL_MAP.council_skeptic).not.toContain('web_search');
+		expect(AGENT_TOOL_MAP.council_domain_expert).not.toContain('web_search');
 	});
 
 	test('council agents have empty tool lists (synthesis only)', () => {
@@ -290,5 +311,67 @@ describe('web_search tool', () => {
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
 		expect(parsed.reason).toBe('invalid_args');
+	});
+
+	test('normalizes current-intent stale trailing year and applies freshness', async () => {
+		const { web_search } = await import('../tools/web-search.js');
+		const wrapped = web_search as unknown as {
+			execute: (args: unknown, dir: string) => Promise<string>;
+		};
+		const fs = await import('node:fs');
+		const os = await import('node:os');
+		const path = await import('node:path');
+		const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-search-test-'));
+		fs.mkdirSync(path.join(testDir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(testDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({
+				council: {
+					general: {
+						enabled: true,
+						searchProvider: 'tavily',
+						searchApiKey: 'test-key',
+					},
+				},
+			}),
+		);
+		let body: Record<string, unknown> | undefined;
+		globalThis.fetch = (async (_url, init) => {
+			body = JSON.parse(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					results: [
+						{
+							title: 'Result',
+							url: 'https://example.test',
+							content: 'Current result',
+						},
+					],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof fetch;
+		try {
+			const result = await wrapped.execute(
+				{
+					query: 'latest multi agent debate research 2025',
+					working_directory: testDir,
+				},
+				testDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(parsed.query).toBe('latest multi agent debate research');
+			expect(parsed.originalQuery).toBe(
+				'latest multi agent debate research 2025',
+			);
+			expect(parsed.temporalIntent).toBe('current');
+			expect(parsed.freshness).toBe('year');
+			expect(parsed.removedStaleYears).toEqual(['2025']);
+			expect(body?.query).toBe('latest multi agent debate research');
+			expect(body?.time_range).toBe('year');
+		} finally {
+			fs.rmSync(testDir, { recursive: true, force: true });
+		}
 	});
 });

@@ -31,11 +31,13 @@ Minimum configuration to turn it on:
 
 Place the file at one of:
 
-- `.opencode/opencode-swarm.json` — project-scoped (preferred)
-- `~/.config/opencode/opencode-swarm.json` — user-scoped
+- `~/.config/opencode/opencode-swarm.json` - global default for all projects
+- `.opencode/opencode-swarm.json` - project-scoped override
 
-With only `enabled: true` set, all other fields fall back to the defaults
-documented below.
+The loader reads the global file first, then deep-merges the project file on
+top. If a project file is absent, or does not mention a council field, the
+global council config remains active. With only `enabled: true` set, all other
+fields fall back to the defaults documented below.
 
 ## 3. Full config reference
 
@@ -237,7 +239,7 @@ keys, different evidence paths, and different runtime gates.
 |-|-|-|
 | Purpose | **Verdict-based QA gate** — blocks task completion until 5 specialist agents vote APPROVE / CONCERNS / REJECT | **Advisory deliberation** — multiple models independently search the web, deliberate on disagreements, and produce a synthesized answer for the user or for spec review |
 | Config key | `council.*` | `council.general.*` |
-| Trigger | Architect calls `submit_council_verdicts` after coder + tests are done | User runs `/swarm council <question>`, or the `council_general_review` QA gate fires during MODE: SPECIFY |
+| Trigger | Architect calls `submit_council_verdicts` after coder + tests are done | User runs `/swarm council <question>`, or the architect invokes it manually during MODE: BRAINSTORM as an early workflow option |
 | Members | Fixed: critic, reviewer, sme, test_engineer, explorer | Fixed three-agent set: `council_generalist` (uses reviewer model), `council_skeptic` (uses critic model), `council_domain_expert` (uses SME model) |
 | Verdict | APPROVE / CONCERNS / REJECT (REJECT vetoes by default) | No verdicts — produces consensus, persisting disagreements, and a structural synthesis the architect presents directly |
 | Web access | None — judges existing code/tests | The **architect** runs 1–3 `web_search` calls upfront and passes a compiled `RESEARCH CONTEXT` block to all three agents; the agents themselves have no tools |
@@ -303,30 +305,52 @@ BE CONCISE).
 /swarm council --spec-review review the auth-flow spec for clarity and missing requirements
 ```
 
-This is the same mode the `council_general_review` QA gate triggers
-automatically when enabled. Spec review uses a single advisory pass — no
-Round 2 deliberation — and feeds the council's consensus and disagreements
-back into the draft spec.
+This is the same mode available as a manual option during spec authoring.
+Spec review uses a single advisory pass — no Round 2 deliberation — and
+feeds the council's consensus and disagreements back into the draft spec.
 
-### Enabling via QA gate selection
+### General Council as an early workflow option
 
-When the user enables the `council_general_review` gate during MODE: SPECIFY
-or MODE: BRAINSTORM gate selection (one of the nine gates presented), MODE:
-SPECIFY runs `/swarm council --spec-review` automatically on the draft spec
-before the critic-gate. Consensus claims are folded directly into the spec;
-persisting disagreements are marked `[NEEDS CLARIFICATION]` or routed to an
-SME consultation.
+General Council advisory input is available as an early workflow option in
+MODE: BRAINSTORM (Phase 1b) when `council.general.enabled` is true and a
+search API key is configured. The architect offers to convene the General
+Council for advisory deliberation on the topic before approach selection.
+This is a manual option, not a QA gate — it does not appear in the gate
+selection list and does not block any workflow step.
 
 ### Workflow stages (in plain language)
+
+#### Current-fact grounding policy
+
+General Council is allowed to use model diversity for reasoning, not as a
+replacement for current evidence. For current, latest, today, now,
+state-of-the-art, pricing, release-status, legal/regulatory, financial,
+security, or otherwise time-sensitive questions, the architect must gather
+usable current sources before dispatching council members. If search fails or
+returns no usable current sources, the council stops and reports the failed
+search instead of asking members to answer from training data.
+
+The `web_search` tool applies a deterministic query policy before provider
+dispatch:
+
+- trailing stale cutoff years are removed from current-intent queries, so a
+  generated query such as `latest multi-agent debate research 2025` is searched
+  as `latest multi-agent debate research` when the current year is later;
+- Tavily receives `time_range` for inferred freshness, and Brave receives its
+  equivalent `freshness` parameter;
+- the tool response includes `originalQuery`, normalized `query`,
+  `temporalIntent`, `freshness`, and `removedStaleYears` so the architect can
+  include that audit metadata in the RESEARCH CONTEXT.
 
 1. **Pre-flight.** The architect verifies `council.general.enabled: true` and
    that a search API key is reachable. Stops with a clear user-facing message
    if either is missing.
 2. **Research Phase.** The architect formulates 1–3 targeted `web_search`
    queries and compiles the results into a `RESEARCH CONTEXT` block. If
-   search returns no results or errors, the architect notes this in the
-   dispatch message and proceeds — the council agents can still reason from
-   their training knowledge.
+   search returns no results or errors for a stable, non-current question, the
+   architect notes this in the dispatch message and proceeds with stable
+   background knowledge only. For time-sensitive questions, failed or empty
+   search stops the council before member dispatch.
 3. **Round 1 — parallel independent analysis.** The architect dispatches
    `council_generalist`, `council_skeptic`, and `council_domain_expert` in
    parallel, passing the question, round number, and the full RESEARCH
@@ -379,17 +403,31 @@ Council's evidence path so the two systems never collide.
 
 ---
 
-## Phase Council Mode (Phase-Level Holistic Review)
+## Council Mode (`council_mode`) — Per-Task Council
 
-When `council_mode` is enabled in the QA gate profile, the Work Complete Council operates at the **phase level** rather than per-task. This means:
+When `council_mode` is enabled in the QA gate profile, the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) **replaces** per-task Stage B (reviewer + test_engineer). Stage A still runs. This is intended for high-impact work where the richer council review justifies replacing the lighter Stage B gate.
 
-1. **Stage B always runs per-task.** `reviewer` and `test_engineer` are dispatched in parallel for every Tier 1-3 task, regardless of `council_mode`. Council never replaces Stage B.
+Requires `council.enabled: true` in config.
 
-2. **Council convenes at phase completion.** After all tasks in a phase have passed their individual Stage A + Stage B gates, the architect assembles a Phase Dossier (executive summary, task matrix, diff summary, retro evidence, dependency map) and dispatches the same 5 council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) with phase-scoped prompts.
+### Per-Task Council Flow
 
-3. **Evidence-file attestation.** Council verdicts are synthesized via `synthesizePhaseCouncilAdvisory()`, which writes `.swarm/evidence/{phase}/phase-council.json`. The `phase_complete` tool reads this evidence file and validates verdict, quorum (≥3), timestamp freshness, and phase number before allowing phase completion.
+```
+Coder signals done → Stage A gates run (syntax, placeholder, SAST, etc.)
+  → 5 council members dispatched in parallel (task-scoped prompts)
+  → Verdicts collected → submit_council_verdicts() called
+  → .swarm/evidence/{taskId}.json gates.council written
+  → APPROVE → task advances to completed
+```
 
-4. **Verdict enforcement.** REJECT verdict blocks phase completion with required fixes. CONCERNS blocks by default (configurable via `config.council.phaseConcernsAllowComplete` — planned feature). APPROVE allows the phase to complete.
+## Phase Council (`phase_council`) — Phase-Level Holistic Review
+
+When `phase_council` is enabled in the QA gate profile, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. This is **additive** to per-task gates — it does not replace Stage B or council_mode.
+
+1. **Council convenes at phase completion.** After all tasks in a phase have passed their individual per-task gates, the architect assembles a Phase Dossier (executive summary, task matrix, diff summary, retro evidence, dependency map) and dispatches the 5 council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) with phase-scoped prompts.
+
+2. **Evidence-file attestation.** Council verdicts are synthesized via `synthesizePhaseCouncilAdvisory()`, which writes `.swarm/evidence/{phase}/phase-council.json`. The `phase_complete` tool reads this evidence file and validates verdict, quorum (≥3), timestamp freshness, and phase number before allowing phase completion.
+
+3. **Verdict enforcement.** REJECT verdict blocks phase completion with required fixes. CONCERNS with only MEDIUM/LOW findings is advisory by default (`config.council.phaseConcernsAllowComplete: true`); set to `false` to make all CONCERNS block like REJECT. **However**, HIGH/CRITICAL findings from CONCERNS members are always promoted to `requiredFixes` and block at the tool level regardless of `phaseConcernsAllowComplete` — the tool returns `success: false` with `reason: 'blocking_concerns_unresolved'` and no evidence is written. APPROVE allows the phase to complete.
 
 ### Example Phase Council Flow
 
@@ -402,12 +440,13 @@ Phase 1 tasks all complete → Phase Dossier assembled
   → APPROVE → Phase 1 complete
 ```
 
-### Per-Task vs Phase-Level
+### Per-Task vs Phase-Level Council
 
-| Aspect | Per-Task (Legacy) | Phase-Level (Current) |
-|--------|-------------------|----------------------|
-| Stage B | Replaced by council | Always runs per-task |
+| Aspect | council_mode (Per-Task) | phase_council (Per-Phase) |
+|--------|------------------------|--------------------------|
+| Stage B | Replaced by 5-member council | Unaffected (runs per-task) |
 | Council scope | Single task | Entire phase |
-| Trigger | Every coder delegation | phase_complete only |
+| Trigger | Every task completion | phase_complete only |
 | Evidence | .swarm/evidence/{taskId}.json | .swarm/evidence/{phase}/phase-council.json |
 | Review focus | Task correctness | Cross-cutting concerns |
+| Relationship | Replaces Stage B | Additive to all per-task gates |

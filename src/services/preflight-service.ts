@@ -388,6 +388,7 @@ async function runTestsCheck(
 			false, // No coverage for preflight
 			timeoutMs,
 			_dir,
+			false, // No bail for preflight
 		);
 
 		if (!result.success) {

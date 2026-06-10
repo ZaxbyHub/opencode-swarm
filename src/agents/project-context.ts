@@ -31,6 +31,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LanguageBackend } from '../lang/backend';
 import { pickBackend, pickedProfiles } from '../lang/dispatch';
+import { getLaravelCommandOverlay } from '../lang/framework-detector';
 import {
 	bulletList,
 	emptyProjectContext,
@@ -216,6 +217,19 @@ export async function buildProjectContext(
 
 	const lintCmd = selectLintCommand(backend, directory);
 	if (lintCmd) ctx.LINT_CMD = lintCmd;
+
+	// Laravel command overlay (DD-C009): for a PHP project that is a Laravel
+	// app, prefer the artisan-driven commands over the generic Composer/PHPUnit
+	// defaults — `php artisan test` runs both Pest and PHPUnit, and Pint /
+	// PHP-CS-Fixer is the canonical formatter. Filesystem-only (no spawn), so it
+	// stays within the Invariant-1 session-init budget.
+	if (backend.id === 'php') {
+		const overlay = getLaravelCommandOverlay(directory);
+		if (overlay) {
+			ctx.TEST_CMD = overlay.testCommand;
+			if (overlay.lintCommand) ctx.LINT_CMD = overlay.lintCommand;
+		}
+	}
 
 	// selectFramework / selectEntryPoints — these are filesystem-only
 	// (read package.json / pyproject / go.mod) and run in parallel to

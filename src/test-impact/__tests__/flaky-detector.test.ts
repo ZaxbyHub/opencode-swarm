@@ -5,22 +5,7 @@ import {
 	isTestQuarantined,
 } from '../flaky-detector.js';
 import type { TestRunRecord } from '../history-store.js';
-
-function makeRecord(
-	overrides: Partial<TestRunRecord> & {
-		testFile: string;
-		testName: string;
-		result: 'pass' | 'fail' | 'skip';
-	},
-): TestRunRecord {
-	return {
-		timestamp: '2024-01-01T00:00:00.000Z',
-		taskId: '1.1',
-		durationMs: 100,
-		changedFiles: [],
-		...overrides,
-	};
-}
+import { makeRecord } from './helpers.js';
 
 describe('computeFlakyScore', () => {
 	test('returns 0 for empty history', () => {
@@ -36,7 +21,7 @@ describe('computeFlakyScore', () => {
 		expect(result).toBe(0);
 	});
 
-	test('perfect alternation (P,F,P,F) = 3/4 = 0.75', () => {
+	test('perfect alternation (P,F,P,F) combines alternation and pass-rate variance', () => {
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'fail' }),
@@ -44,7 +29,7 @@ describe('computeFlakyScore', () => {
 			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'fail' }),
 		];
 		const result = computeFlakyScore(history);
-		expect(result).toBe(0.75);
+		expect(result).toBeCloseTo(0.875, 3);
 	});
 
 	test('no alternation (P,P,P,P) = 0/4 = 0', () => {
@@ -79,9 +64,22 @@ describe('computeFlakyScore', () => {
 				}),
 			);
 		}
-		// Alternation in last 20: 19 alternations out of 20 = 0.95
+		// Alternation in last 20: 19/20=0.95, pass-rate variance=1, combined=(0.95+1)/2=0.975
 		const result = computeFlakyScore(history);
-		expect(result).toBe(0.95);
+		expect(result).toBeCloseTo(0.975, 3);
+	});
+
+	test('adds variance signal for non-alternating intermittent failures', () => {
+		const history = [
+			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
+			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
+			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'fail' }),
+			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
+			makeRecord({ testFile: 'a.test.ts', testName: 'test1', result: 'pass' }),
+		];
+		// Alternation=2/5=0.4, pass-rate variance=4*0.8*0.2=0.64,
+		// combined score=(0.4+0.64)/2=0.52.
+		expect(computeFlakyScore(history)).toBeCloseTo(0.52, 3);
 	});
 });
 
@@ -102,7 +100,7 @@ describe('detectFlakyTests', () => {
 	});
 
 	test('quarantines tests with score > 0.3 AND runs >= 5', () => {
-		// 5 runs with 4 alternations: P,F,P,F,P = 4/5 = 0.8 > 0.3
+		// Combined score: ((4/5) + 4*(3/5)*(2/5)) / 2 = 0.88 > 0.3
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'fail' }),
@@ -113,11 +111,36 @@ describe('detectFlakyTests', () => {
 		const results = detectFlakyTests(history);
 		expect(results.length).toBe(1);
 		expect(results[0].isQuarantined).toBe(true);
-		expect(results[0].flakyScore).toBe(0.8);
+		expect(results[0].flakyScore).toBeCloseTo(0.88, 3);
+	});
+
+	test('case-insensitive grouping via toLowerCase', () => {
+		const history = [
+			makeRecord({
+				testFile: 'A.test.ts',
+				testName: 'TestCase',
+				result: 'pass',
+			}),
+			makeRecord({
+				testFile: 'a.test.ts',
+				testName: 'testcase',
+				result: 'fail',
+			}),
+			makeRecord({
+				testFile: 'A.TEST.TS',
+				testName: 'TESTCASE',
+				result: 'pass',
+			}),
+		];
+		const results = detectFlakyTests(history);
+		expect(results.length).toBe(1);
+		expect(results[0].testFile).toBe('A.test.ts');
+		expect(results[0].testName).toBe('TestCase');
+		expect(results[0].totalRuns).toBe(3);
 	});
 
 	test('does NOT quarantine with < 5 runs even if score > 0.3', () => {
-		// 4 runs with 3 alternations: score = 3/4 = 0.75 > 0.3, but only 4 runs
+		// 4 runs with 3 alternations: combined score = (0.75 + 1.0)/2 = 0.875 > 0.3, but only 4 runs
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'fail' }),
@@ -178,8 +201,8 @@ describe('detectFlakyTests', () => {
 		expect(results[0].recommendation).toContain('Severely flaky');
 	});
 
-	test('recommendation for moderately flaky (score > 0.3, <= 0.5)', () => {
-		// 10 runs with 4 alternations: P,F,P,F,P,P,P,P,P,P = 4/10 = 0.4
+	test('recommendation for severely flaky (score > 0.5) via pass-rate variance', () => {
+		// Alternation=0.4, pass-rate variance=0.64, combined=0.52.
 		const history: TestRunRecord[] = [];
 		for (let i = 0; i < 10; i++) {
 			history.push(
@@ -192,12 +215,12 @@ describe('detectFlakyTests', () => {
 		}
 		const results = detectFlakyTests(history);
 		expect(results.length).toBe(1);
-		expect(results[0].flakyScore).toBe(0.4);
-		expect(results[0].recommendation).toContain('Moderately flaky');
+		expect(results[0].flakyScore).toBeCloseTo(0.52, 3);
+		expect(results[0].recommendation).toContain('Severely flaky');
 	});
 
 	test('no recommendation for non-quarantined tests', () => {
-		// 4 runs with alternation: score = 0.75 > 0.3 but only 4 runs (not quarantined)
+		// 4 runs: P,F,P,F gives combined score = (0.75 + 1.0)/2 = 0.875 > 0.3, but only 4 runs (not quarantined)
 		const history = [
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'pass' }),
 			makeRecord({ testFile: 'a.test.ts', testName: 'flaky', result: 'fail' }),

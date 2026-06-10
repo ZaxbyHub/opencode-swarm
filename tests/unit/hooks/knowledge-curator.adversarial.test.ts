@@ -4,14 +4,9 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import {
-	createKnowledgeCuratorHook,
-	curateAndStoreSwarm,
-} from '../../../src/hooks/knowledge-curator.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 // Create local mock variables for knowledge-store
-const mockAppendKnowledge = mock(async () => {});
 const mockAppendRejectedLesson = mock(async () => {});
 const mockFindNearDuplicate = mock(
 	(_s: string, _a: unknown[], _n: number) => undefined,
@@ -22,8 +17,13 @@ const mockRewriteKnowledge = mock((_s: string, _a: unknown[]) =>
 );
 const mockResolveSwarmKnowledgePath = mock((_s: string) => '');
 const mockResolveSwarmRejectedPath = mock((_s: string) => '');
+const mockResolveHiveKnowledgePath = mock(() => '');
 const mockComputeConfidence = mock((_n: number, _b: boolean) => 0);
 const mockInferTags = mock((_s: string) => [] as string[]);
+const mockReadRetractionRecords = mock((_s: string) => Promise.resolve([]));
+const mockAppendRetractionRecord = mock((_s: string, _u: unknown) =>
+	Promise.resolve(),
+);
 
 // Create local mock variables for utils
 const mockReadSwarmFileAsync = mock((_s: string, _f: string) =>
@@ -45,49 +45,16 @@ const mockValidateLesson = mock(
 		severity: null,
 	}),
 );
+const mockQuarantineEntry = mock(
+	(_s: string, _e: string, _r: string, _who: 'architect' | 'user' | 'auto') =>
+		Promise.resolve(),
+);
+const mockNormalize = mock((_s: string) => '');
 
-mock.module('../../../src/hooks/knowledge-store.js', () => ({
-	resolveSwarmKnowledgePath: (...args: unknown[]) =>
-		mockResolveSwarmKnowledgePath(...(args as [string])),
-	resolveSwarmRejectedPath: (...args: unknown[]) =>
-		mockResolveSwarmRejectedPath(...(args as [string])),
-	readKnowledge: (...args: unknown[]) =>
-		mockReadKnowledge(...(args as [string])),
-	appendKnowledge: (...args: unknown[]) => mockAppendKnowledge(...(args as [])),
-	appendRejectedLesson: (...args: unknown[]) =>
-		mockAppendRejectedLesson(...(args as [])),
-	findNearDuplicate: (...args: unknown[]) =>
-		mockFindNearDuplicate(...(args as [string, unknown[], number])),
-	rewriteKnowledge: (...args: unknown[]) =>
-		mockRewriteKnowledge(...(args as [string, unknown[]])),
-	computeConfidence: (...args: unknown[]) =>
-		mockComputeConfidence(...(args as [number, boolean])),
-	inferTags: (...args: unknown[]) => mockInferTags(...(args as [string])),
-	enforceKnowledgeCap: async () => {},
-	sweepAgedEntries: async () => {},
-	sweepStaleTodos: async () => {},
-	bumpKnowledgeConfidenceBatch: async () => {},
-	resolveHiveKnowledgePath: () => '',
-	resolveHiveRejectedPath: () => '',
-	readRetractionRecords: async () => [],
-	appendRetractionRecord: async () => {},
-	readRejectedLessons: async () => [],
-	normalize: (_s: string) => '',
-	normalizeEntry: (e: unknown) => e,
-	resolveSwarmRetractionsPath: () => '',
-	_internals: {},
-	wordBigrams: (_t: string) => new Set<string>(),
-	jaccardBigram: () => 0,
-	getPlatformConfigDir: () => '/tmp',
-}));
-
-mock.module('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: (...args: unknown[]) =>
-		mockReadSwarmFileAsync(...(args as [string, string])),
-	safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),
-	validateSwarmPath: (...args: unknown[]) =>
-		mockValidateSwarmPath(...(args as [string, string])),
-}));
+// Create local mock variable for knowledge-reader
+const mockUpdateRetrievalOutcome = mock(
+	(_s: string, _id: string, _b: boolean) => Promise.resolve(),
+);
 
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (...args: unknown[]) =>
@@ -98,7 +65,81 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 				{ category: string; scope: string; confidence: number },
 			]),
 		),
+	quarantineEntry: (...args: unknown[]) =>
+		mockQuarantineEntry(
+			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
+		),
 }));
+
+mock.module('../../../src/hooks/knowledge-reader.js', () => ({
+	updateRetrievalOutcome: (...args: unknown[]) =>
+		mockUpdateRetrievalOutcome(...(args as [string, string, boolean])),
+}));
+
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	resolveSwarmKnowledgePath: (...args: unknown[]) =>
+		mockResolveSwarmKnowledgePath(...(args as [string])),
+	resolveSwarmRejectedPath: (...args: unknown[]) =>
+		mockResolveSwarmRejectedPath(...(args as [string])),
+	resolveHiveKnowledgePath: () => mockResolveHiveKnowledgePath(),
+	readKnowledge: (...args: unknown[]) =>
+		mockReadKnowledge(...(args as [string])),
+	readRetractionRecords: (...args: unknown[]) =>
+		mockReadRetractionRecords(...(args as [string])),
+	appendRetractionRecord: (...args: unknown[]) =>
+		mockAppendRetractionRecord(...(args as [string, unknown])),
+	appendRejectedLesson: (...args: unknown[]) =>
+		mockAppendRejectedLesson(...(args as [])),
+	findNearDuplicate: (...args: unknown[]) =>
+		mockFindNearDuplicate(...(args as [string, unknown[], number])),
+	rewriteKnowledge: (...args: unknown[]) =>
+		mockRewriteKnowledge(...(args as [string, unknown[]])),
+	computeConfidence: (...args: unknown[]) =>
+		mockComputeConfidence(...(args as [number, boolean])),
+	computeOutcomeSignal: () => 0,
+	inferTags: (...args: unknown[]) => mockInferTags(...(args as [string])),
+	normalize: (...args: unknown[]) => mockNormalize(...(args as [string])),
+	transactKnowledge: mock(
+		async <T>(
+			filePath: string,
+			mutate: (entries: T[]) => T[] | null,
+		): Promise<boolean> => {
+			const entries = (await mockReadKnowledge(filePath)) as T[];
+			const result = mutate(entries);
+			return result !== null;
+		},
+	),
+	enforceKnowledgeCap: async () => {},
+	sweepAgedEntries: async () => {},
+	sweepStaleTodos: async () => {},
+	bumpKnowledgeConfidenceBatch: async () => {},
+	resolveSwarmRetractionsPath: () => '',
+	resolveHiveRejectedPath: () => '',
+	readRejectedLessons: async () => [],
+	normalizeEntry: (e: unknown) => e,
+	getPlatformConfigDir: () => '/tmp',
+	_internals: {},
+	wordBigrams: (_t: string) => new Set<string>(),
+	jaccardBigram: () => 0,
+}));
+
+mock.module('../../../src/hooks/utils.js', () => ({
+	readSwarmFileAsync: (...args: unknown[]) =>
+		mockReadSwarmFileAsync(...(args as [string, string])),
+	safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),
+	validateSwarmPath: (...args: unknown[]) =>
+		mockValidateSwarmPath(...(args as [string, string])),
+}));
+
+// Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)
+// using dynamic import so that the mocks are active before the modules under test are loaded.
+const { createKnowledgeCuratorHook, curateAndStoreSwarm } = await import(
+	'../../../src/hooks/knowledge-curator.js'
+);
+
+const { transactKnowledge } = await import(
+	'../../../src/hooks/knowledge-store.js'
+);
 
 // ============================================================================
 // Test data
@@ -145,19 +186,25 @@ ${bullets}
 
 describe('knowledge-curator (adversarial & edge cases)', () => {
 	beforeEach(() => {
-		mockAppendKnowledge.mockClear();
+		transactKnowledge.mockClear();
 		mockAppendRejectedLesson.mockClear();
 		mockFindNearDuplicate.mockClear();
 		mockReadKnowledge.mockClear();
 		mockRewriteKnowledge.mockClear();
 		mockResolveSwarmKnowledgePath.mockClear();
 		mockResolveSwarmRejectedPath.mockClear();
+		mockResolveHiveKnowledgePath.mockClear();
 		mockComputeConfidence.mockClear();
 		mockInferTags.mockClear();
+		mockReadRetractionRecords.mockClear();
+		mockAppendRetractionRecord.mockClear();
 		mockReadSwarmFileAsync.mockClear();
 		mockSafeHook.mockClear();
 		mockValidateSwarmPath.mockClear();
 		mockValidateLesson.mockClear();
+		mockQuarantineEntry.mockClear();
+		mockNormalize.mockClear();
+		mockUpdateRetrievalOutcome.mockClear();
 		// Reset mock implementations to defaults
 		mockResolveSwarmKnowledgePath.mockReturnValue(
 			'/project/.swarm/knowledge.jsonl',
@@ -165,8 +212,12 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 		mockResolveSwarmRejectedPath.mockReturnValue(
 			'/project/.swarm/rejected.jsonl',
 		);
+		mockResolveHiveKnowledgePath.mockReturnValue(
+			'/home/user/.local/share/opencode-swarm/shared-learnings.jsonl',
+		);
 		mockReadKnowledge.mockResolvedValue([]);
-		mockAppendKnowledge.mockResolvedValue(undefined);
+		mockReadRetractionRecords.mockResolvedValue([]);
+		mockAppendRetractionRecord.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockRewriteKnowledge.mockResolvedValue(undefined);
@@ -195,6 +246,11 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 			reason: null,
 			severity: null,
 		});
+		mockQuarantineEntry.mockResolvedValue(undefined);
+		mockNormalize.mockImplementation((text: string) =>
+			text.toLowerCase().trim(),
+		);
+		mockUpdateRetrievalOutcome.mockResolvedValue(undefined);
 	});
 
 	// ============================================================================
@@ -215,7 +271,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: hook does NOT fire - no .swarm/plan.md in path
 			expect(mockReadSwarmFileAsync).not.toHaveBeenCalled();
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('path .swarm/plan.md.evil WILL fire hook (substring match - LOW RISK)', async () => {
@@ -236,7 +292,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: hook fires (known low-risk behavior - includes() matches substring)
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('path foo.swarm/plan.md WILL fire hook (substring match - LOW RISK)', async () => {
@@ -257,7 +313,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: hook fires (known low-risk behavior)
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('Windows backslash .swarm\\plan.md should fire hook (normalization)', async () => {
@@ -278,7 +334,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: hook fires - backslashes are normalized to forward slashes
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('path with file field instead of path field', async () => {
@@ -299,7 +355,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: hook fires - file field is also checked
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('null/undefined input does not crash hook', async () => {
@@ -316,7 +372,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: no errors, no processing
 			expect(mockReadSwarmFileAsync).not.toHaveBeenCalled();
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -345,7 +401,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('lesson with system: prefix should be rejected', async () => {
@@ -373,7 +429,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('lesson with __proto__ should be rejected', async () => {
@@ -401,7 +457,7 @@ describe('knowledge-curator (adversarial & edge cases)', () => {
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('lesson with embedded newlines in plan content extracts bullet lines correctly', async () => {
@@ -427,8 +483,8 @@ Line two in same bullet (ignored - no bullet prefix)
 			};
 			await hook(input, {});
 
-			// Expected: stores 2 lessons (only lines with bullet prefix)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: stores 2 lessons (only lines with bullet prefix) — transact once per batch
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('very long lesson (400 chars) should be rejected', async () => {
@@ -458,7 +514,7 @@ Line two in same bullet (ignored - no bullet prefix)
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('lesson with HTML tags should be rejected (if validator configured)', async () => {
@@ -486,7 +542,7 @@ Line two in same bullet (ignored - no bullet prefix)
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('lesson with SQL injection pattern should be rejected', async () => {
@@ -514,7 +570,7 @@ Line two in same bullet (ignored - no bullet prefix)
 
 			// Expected: rejected, not stored
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 
@@ -523,7 +579,7 @@ Line two in same bullet (ignored - no bullet prefix)
 	// ============================================================================
 
 	describe('idempotency under concurrent-like conditions', () => {
-		test('same sessionID with same retro section called 3 times → appendKnowledge only once', async () => {
+		test('same sessionID with same retro section called 3 times → transactKnowledge only once', async () => {
 			// Setup: readSwarmFileAsync returns plan content
 			const planContent = makePlanContent(['Test idempotency']);
 			mockReadSwarmFileAsync.mockResolvedValue(planContent);
@@ -540,11 +596,11 @@ Line two in same bullet (ignored - no bullet prefix)
 			await hook(input, {});
 			await hook(input, {});
 
-			// Expected: appendKnowledge called only once (idempotency guard)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			// Expected: transactKnowledge called only once (idempotency guard)
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
-		test('different sessionIDs with same content → appendKnowledge called once per session', async () => {
+		test('different sessionIDs with same content → transactKnowledge called once per session', async () => {
 			// Setup: readSwarmFileAsync returns plan content
 			const planContent = makePlanContent(['Test different sessions']);
 			mockReadSwarmFileAsync.mockResolvedValue(planContent);
@@ -565,11 +621,11 @@ Line two in same bullet (ignored - no bullet prefix)
 				{},
 			);
 
-			// Expected: appendKnowledge called 3 times (once per session)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(3);
+			// Expected: transactKnowledge called 3 times (once per session)
+			expect(transactKnowledge).toHaveBeenCalledTimes(3);
 		});
 
-		test('same sessionID but different retro section → appendKnowledge called each time', async () => {
+		test('same sessionID but different retro section → transactKnowledge called each time', async () => {
 			// First call with lesson A
 			mockReadSwarmFileAsync.mockResolvedValueOnce(
 				makePlanContent(['Lesson A']),
@@ -598,8 +654,8 @@ Line two in same bullet (ignored - no bullet prefix)
 				{},
 			);
 
-			// Expected: appendKnowledge called 3 times (content changed each time)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(3);
+			// Expected: transactKnowledge called 3 times (content changed each time)
+			expect(transactKnowledge).toHaveBeenCalledTimes(3);
 		});
 	});
 
@@ -628,8 +684,8 @@ Swarm: mega
 			};
 			await hook(input, {});
 
-			// Expected: no lessons extracted, appendKnowledge NOT called
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			// Expected: no lessons extracted, transactKnowledge NOT called
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('plan with ### Lessons Learned but no bullet points → no lessons extracted', async () => {
@@ -653,8 +709,8 @@ Another line without a bullet.
 			};
 			await hook(input, {});
 
-			// Expected: no lessons extracted, appendKnowledge NOT called
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			// Expected: no lessons extracted, transactKnowledge NOT called
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('plan with ### Lessons Learned at end of file (no following heading) → still extracts bullets', async () => {
@@ -675,8 +731,8 @@ Swarm: mega
 			};
 			await hook(input, {});
 
-			// Expected: extracts bullets even at end of file
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: extracts bullets even at end of file — transact once for the batch
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('plan with empty ### Lessons Learned section → no lessons extracted', async () => {
@@ -699,7 +755,7 @@ Swarm: mega
 			await hook(input, {});
 
 			// Expected: no lessons extracted (section is empty)
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('plan with malformed bullets (missing dash) → ignored', async () => {
@@ -722,8 +778,8 @@ Second lesson missing dash
 			};
 			await hook(input, {});
 
-			// Expected: only 2 valid lessons extracted
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: only 2 valid lessons extracted — transact once per batch
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('plan with null readSwarmFileAsync result → no processing', async () => {
@@ -738,7 +794,7 @@ Second lesson missing dash
 			await hook(input, {});
 
 			// Expected: no processing, early return
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
 		test('plan with very large content (100k chars) → should not crash', async () => {
@@ -763,8 +819,8 @@ ${largeContent}
 			// Should not throw or crash
 			await expect(hook(input, {})).resolves.toBeUndefined();
 
-			// Expected: extracts 2 lessons (large text without bullet prefix is ignored)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: extracts 2 lessons (large text without bullet prefix is ignored) — transact once per batch
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -806,8 +862,8 @@ ${largeContent}
 				defaultConfig,
 			);
 
-			// Expected: 25 valid lessons stored, 25 blocked rejected
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(25);
+			// Expected: 25 valid lessons stored, 25 blocked rejected — transact once per batch (not per lesson)
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(25);
 		});
 
@@ -841,7 +897,7 @@ ${largeContent}
 			);
 
 			// Expected: only 1 stored (first one), rest skipped as duplicates
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('empty lessons array → no processing', async () => {
@@ -856,7 +912,7 @@ ${largeContent}
 			);
 
 			// Expected: no processing
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 			expect(mockAppendRejectedLesson).not.toHaveBeenCalled();
 		});
 
@@ -883,8 +939,8 @@ ${largeContent}
 				defaultConfig,
 			);
 
-			// Expected: only 2 non-empty lessons stored, 4 empty rejected
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+			// Expected: only 2 non-empty lessons stored, 4 empty rejected — transact once per batch
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 			expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(4);
 		});
 	});
@@ -911,7 +967,7 @@ ${largeContent}
 
 			// Expected: hook fires for edit tool
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('apply_patch tool with .swarm/plan.md should fire hook', async () => {
@@ -931,7 +987,7 @@ ${largeContent}
 
 			// Expected: hook fires for apply_patch tool
 			expect(mockReadSwarmFileAsync).toHaveBeenCalledTimes(1);
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('unknown tool name should NOT fire hook', async () => {
@@ -966,7 +1022,7 @@ ${largeContent}
 			);
 
 			// Should still process (projectName defaults to 'unknown')
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('curateAndStoreSwarm with undefined phaseNumber falls back to 1', async () => {
@@ -986,7 +1042,7 @@ ${largeContent}
 			);
 
 			// Should still process (phaseNumber defaults to 1)
-			expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
 		});
 
 		test('config.enabled false at runtime should skip processing', async () => {
@@ -1008,7 +1064,7 @@ ${largeContent}
 
 			// Expected: no processing (early return)
 			expect(mockReadSwarmFileAsync).not.toHaveBeenCalled();
-			expect(mockAppendKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 	});
 });

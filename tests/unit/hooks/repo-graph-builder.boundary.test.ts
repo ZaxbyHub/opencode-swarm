@@ -264,4 +264,92 @@ describe('repo-graph-builder workspace boundary validation', () => {
 
 		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
 	});
+
+	// ─────────────────────────────────────────────────────────────────
+	// SYMLINK / REALPATH / URL-DECODE EDGE CASES
+	// (consolidated here from the former duplicate block in
+	// repo-graph-builder.test.ts — DD-C013)
+	// ─────────────────────────────────────────────────────────────────
+
+	test('toolAfter skips update when safeRealpathSync returns null', async () => {
+		const hook = createRepoGraphBuilderHook(workspaceRoot, {
+			updateGraphForFiles: mockUpdateGraphForFiles,
+			buildWorkspaceGraph: mockBuildWorkspaceGraph,
+			saveGraph: mockSaveGraph,
+			safeRealpathSync: () => null, // mock returns null
+		});
+
+		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, 'export const x = 1;');
+
+		await hook.toolAfter(makeToolInput(filePath), { output: undefined });
+
+		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
+	});
+
+	test('symlink pointing outside workspace is rejected via realpathSync', async () => {
+		// Skip on platforms where symlinks are not reliably supported in tmpdir
+		if (process.platform === 'win32') return;
+
+		const hook = makeHook();
+
+		// Create a real file OUTSIDE the workspace
+		const outsideDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'outside-workspace-'),
+		);
+		const outsideFile = path.join(outsideDir, 'secret.ts');
+		fs.writeFileSync(outsideFile, 'export const secret = 42;');
+
+		// Create a symlink INSIDE the workspace that points outside
+		const symlinkInWorkspace = path.join(workspaceRoot, 'src', 'escape.ts');
+		fs.mkdirSync(path.dirname(symlinkInWorkspace), { recursive: true });
+		try {
+			fs.symlinkSync(outsideFile, symlinkInWorkspace);
+		} catch {
+			// If symlink creation fails (e.g., insufficient perms), skip test
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+			return;
+		}
+
+		try {
+			// The symlink path is inside workspace, but realpathSync should
+			// resolve it to the real (outside) path and reject it
+			await hook.toolAfter(makeToolInput(symlinkInWorkspace), {
+				output: undefined,
+			});
+
+			expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	test('URL-encoded path is decoded before boundary check', async () => {
+		const hook = makeHook();
+
+		const filePath = path.join(workspaceRoot, 'src', 'index.ts');
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, 'export const x = 1;');
+
+		// %2E = '.' so index%2Ets decodes to index.ts
+		const encodedPath = filePath.replace('index.ts', 'index%2Ets');
+
+		// Verifies that URL-encoded paths don't crash the hook and either work
+		// (if the decoded path is valid inside workspace) or are filtered.
+		await hook.toolAfter(makeToolInput(encodedPath), { output: undefined });
+
+		expect(true).toBe(true);
+	});
+
+	test('URL-encoded null byte in path is rejected', async () => {
+		const hook = makeHook();
+
+		// %00 decodes to null byte \0 which should be rejected
+		const nullBytePath = path.join(workspaceRoot, 'src%00', 'index.ts');
+
+		await hook.toolAfter(makeToolInput(nullBytePath), { output: undefined });
+
+		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
+	});
 });

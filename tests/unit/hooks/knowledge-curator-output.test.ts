@@ -44,7 +44,16 @@ import {
 // =============================================================================
 
 // Mock knowledge-store module
-const mockAppendKnowledge = mock(async () => {});
+const mockTransactKnowledge = mock(
+	async <T>(
+		_filePath: string,
+		mutate: (entries: T[]) => T[] | null,
+	): Promise<boolean> => {
+		const entries = (await mockReadKnowledge(_filePath)) as T[];
+		const result = mutate(entries);
+		return result !== null;
+	},
+);
 const mockAppendRejectedLesson = mock(async () => {});
 const mockEnforceKnowledgeCap = mock(async () => {});
 const mockFindNearDuplicate = mock(() => undefined);
@@ -66,7 +75,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: mockReadKnowledge,
 	readRetractionRecords: mockReadRetractionRecords,
 	appendRetractionRecord: mockAppendRetractionRecord,
-	appendKnowledge: mockAppendKnowledge,
+	transactKnowledge: mockTransactKnowledge,
 	appendRejectedLesson: mockAppendRejectedLesson,
 	findNearDuplicate: mockFindNearDuplicate,
 	rewriteKnowledge: mockRewriteKnowledge,
@@ -141,7 +150,7 @@ const defaultConfig: KnowledgeConfig = {
 describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 	beforeEach(() => {
 		// Reset all mock states
-		mockAppendKnowledge.mockClear();
+		mockTransactKnowledge.mockClear();
 		mockAppendRejectedLesson.mockClear();
 		mockFindNearDuplicate.mockClear();
 		mockReadKnowledge.mockClear();
@@ -158,7 +167,6 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 			'/project/.swarm/rejected.jsonl',
 		);
 		mockReadKnowledge.mockResolvedValue([]);
-		mockAppendKnowledge.mockResolvedValue(undefined);
 		mockAppendRejectedLesson.mockResolvedValue(undefined);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockRewriteKnowledge.mockResolvedValue(undefined);
@@ -189,7 +197,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result).toEqual({ stored: 0, skipped: 0, rejected: 0 });
-		expect(mockAppendKnowledge).not.toHaveBeenCalled();
+		expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		expect(mockAppendRejectedLesson).not.toHaveBeenCalled();
 	});
 
@@ -222,7 +230,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		expect(result.stored).toBe(3);
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(0);
-		expect(mockAppendKnowledge).toHaveBeenCalledTimes(3);
+		expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 	});
 
 	// =========================================================================
@@ -260,7 +268,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		expect(result.stored).toBe(2);
 		expect(result.skipped).toBe(1);
 		expect(result.rejected).toBe(0);
-		expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+		expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 	});
 
 	// =========================================================================
@@ -306,7 +314,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(1);
 		expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
-		expect(mockAppendKnowledge).toHaveBeenCalledTimes(2);
+		expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
 	});
 
 	// =========================================================================
@@ -397,7 +405,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		expect(result.stored).toBe(0);
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(3);
-		expect(mockAppendKnowledge).not.toHaveBeenCalled();
+		expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(3);
 	});
 

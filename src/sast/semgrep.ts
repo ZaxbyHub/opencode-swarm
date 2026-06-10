@@ -55,6 +55,21 @@ const DEFAULT_RULES_DIR = '.swarm/semgrep-rules';
  */
 const DEFAULT_TIMEOUT_MS = 30000;
 
+/**
+ * Per-stream cap on accumulated stdout/stderr from the Semgrep subprocess.
+ * AGENTS.md invariant 3 requires bounded stdio: a misbehaving binary must
+ * not be able to exhaust memory by streaming unbounded output. Once a
+ * stream exceeds this cap we stop accumulating and terminate the child.
+ */
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB per stream
+
+/**
+ * Grace window between SIGTERM and SIGKILL when force-terminating the child.
+ * On Windows SIGTERM is best-effort; the SIGKILL escalation guarantees the
+ * orphaned process is reaped (AGENTS.md invariant 3 — killable subprocesses).
+ */
+const KILL_GRACE_MS = 2000;
+
 export const _internals: {
 	isSemgrepAvailable: typeof isSemgrepAvailable;
 	checkSemgrepAvailable: typeof checkSemgrepAvailable;
@@ -62,6 +77,7 @@ export const _internals: {
 	runSemgrep: typeof runSemgrep;
 	getRulesDirectory: typeof getRulesDirectory;
 	hasBundledRules: typeof hasBundledRules;
+	executeWithTimeout: typeof executeWithTimeout;
 } = {
 	isSemgrepAvailable,
 	checkSemgrepAvailable,
@@ -69,6 +85,7 @@ export const _internals: {
 	runSemgrep,
 	getRulesDirectory,
 	hasBundledRules,
+	executeWithTimeout,
 } as const;
 
 /**
@@ -194,38 +211,111 @@ function mapSemgrepSeverity(
 async function executeWithTimeout(
 	command: string,
 	args: string[],
-	options: { cwd?: string; timeoutMs: number },
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	options: { cwd?: string; timeoutMs: number; maxOutputBytes?: number },
+): Promise<{
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+	truncated: boolean;
+}> {
+	const maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
 	return new Promise((resolve) => {
-		// Use spawn with args array and NO shell to prevent command injection
+		// Use spawn with args array and NO shell to prevent command injection.
+		// stdin: 'ignore' (AGENTS.md invariant 3) — a never-closed stdin pipe
+		// under Bun on Windows can block the child from exiting.
 		const child = child_process.spawn(command, args, {
 			shell: false, // SECURITY FIX: prevent shell injection
 			cwd: options.cwd,
+			stdio: ['ignore', 'pipe', 'pipe'],
 		});
 
 		let stdout = '';
 		let stderr = '';
+		let stdoutTruncated = false;
+		let stderrTruncated = false;
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
 
-		const timeout = setTimeout(() => {
-			child.kill('SIGTERM');
-			resolve({
+		/**
+		 * Resolve exactly once, always clearing the timeout and guaranteeing a
+		 * best-effort terminate of the child regardless of which event settled
+		 * the promise (AGENTS.md invariant 3: an outer timeout alone lets the
+		 * awaiter proceed but does not abort the child). If the child already
+		 * exited (close event) the kill calls are harmless no-ops.
+		 */
+		const settle = (result: {
+			stdout: string;
+			stderr: string;
+			exitCode: number;
+		}): void => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			const truncated = stdoutTruncated || stderrTruncated;
+			if (child.exitCode === null && child.signalCode === null) {
+				try {
+					child.kill('SIGTERM');
+				} catch {
+					// process may already be gone
+				}
+				const escalation = setTimeout(() => {
+					try {
+						child.kill('SIGKILL');
+					} catch {
+						// process may already be gone
+					}
+				}, KILL_GRACE_MS);
+				if (
+					typeof (escalation as { unref?: () => void }).unref === 'function'
+				) {
+					(escalation as { unref: () => void }).unref();
+				}
+			}
+			resolve({ ...result, truncated });
+		};
+
+		timeout = setTimeout(() => {
+			settle({
 				stdout,
 				stderr: 'Process timed out',
 				exitCode: 124, // Common timeout exit code
 			});
 		}, options.timeoutMs);
+		if (typeof (timeout as { unref?: () => void }).unref === 'function') {
+			(timeout as { unref: () => void }).unref();
+		}
 
 		child.stdout?.on('data', (data) => {
-			stdout += data.toString();
+			if (stdoutTruncated) return;
+			const chunk = data.toString();
+			if (stdout.length + chunk.length > maxOutputBytes) {
+				stdout += chunk.slice(0, Math.max(0, maxOutputBytes - stdout.length));
+				stdoutTruncated = true;
+				// Runaway output — terminate so we stop accumulating. The close
+				// event then settles with the truncated buffer.
+				try {
+					child.kill('SIGTERM');
+				} catch {
+					// already gone
+				}
+			} else {
+				stdout += chunk;
+			}
 		});
 
 		child.stderr?.on('data', (data) => {
-			stderr += data.toString();
+			if (stderrTruncated) return;
+			const chunk = data.toString();
+			if (stderr.length + chunk.length > maxOutputBytes) {
+				stderr += chunk.slice(0, Math.max(0, maxOutputBytes - stderr.length));
+				stderrTruncated = true;
+			} else {
+				stderr += chunk;
+			}
 		});
 
 		child.on('close', (code) => {
-			clearTimeout(timeout);
-			resolve({
+			settle({
 				stdout,
 				stderr,
 				exitCode: code ?? 0,
@@ -233,8 +323,7 @@ async function executeWithTimeout(
 		});
 
 		child.on('error', (err) => {
-			clearTimeout(timeout);
-			resolve({
+			settle({
 				stdout,
 				stderr: err.message,
 				exitCode: 1,
@@ -290,6 +379,19 @@ export async function runSemgrep(
 			timeoutMs,
 			cwd: options.cwd,
 		});
+
+		// Output was capped mid-stream: the JSON is incomplete and would parse to
+		// zero findings. Surface that as an error (engine: tier_a) rather than
+		// silently reporting a clean scan — a SAST gate must never fail open
+		// because the scanner produced too much output.
+		if (result.truncated) {
+			return {
+				available: true,
+				findings: [],
+				error: `Semgrep output exceeded ${MAX_OUTPUT_BYTES} bytes and was truncated; results incomplete`,
+				engine: 'tier_a',
+			};
+		}
 
 		if (result.exitCode !== 0) {
 			// Semgrep returned non-zero exit code

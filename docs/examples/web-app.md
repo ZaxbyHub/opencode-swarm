@@ -8,7 +8,7 @@ This tutorial walks through building a React + TypeScript web app with email/pas
 
 You need four things before you start:
 
-- **Bun >=1.0.0**
+- **Bun >=1.3.13**
   ```bash
   bun --version
   ```
@@ -459,4 +459,4 @@ The coder receives structured failure feedback from the reviewer and test engine
 /swarm history              Completed phases with status icons
 ```
 
-For all 41 subcommands and their options, see [`docs/commands.md`](../commands.md).
+For the current command reference and options, see [`docs/commands.md`](../commands.md).

@@ -77,7 +77,7 @@ const USAGE = [
 	'  --preset <name>  Use a named member preset from council.general.presets',
 	'  --spec-review    Use spec_review mode (single advisory pass on a draft spec)',
 	'',
-	'Requires council.general.enabled: true and a configured search API key in opencode-swarm.json.',
+	'Requires council.general.enabled: true and a configured search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 ].join('\n');
 
 export async function handleCouncilCommand(

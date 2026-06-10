@@ -3,11 +3,15 @@ name: CI
 on:
   pull_request:
     branches: ["**"]
+  # Required checks must also run for merge-queue merge groups, otherwise queued
+  # PRs never receive their required check runs and the queue cannot merge them
+  # (see issue #1046). Keep `pull_request` for early per-PR feedback.
+  merge_group:
+    types: [checks_requested]
 
-# Serialize CI runs for the same branch/PR to prevent double-run dist-check
-# interference. Old runs are NOT cancelled because cancelling leaves stale
-# check statuses that persist on PRs and block merging even after a new
-# successful run completes.
+# Serialize CI runs for the same branch/PR. Old runs are NOT cancelled because
+# cancelling leaves stale check statuses that persist on PRs and block merging
+# even after a new successful run completes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
@@ -71,6 +75,10 @@ jobs:
             ${{ runner.os }}-bun
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      # dist/ is generated output and no longer committed (#1047); build it so the
+      # tests under tests/unit/build/ that load the bundle have a dist/ to read.
+      - name: Build
+        run: bun run build
       - name: Unit tests (hooks - guardrails)
         shell: bash
         run: |
@@ -129,7 +137,7 @@ jobs:
         shell: bash
         run: |
           failed=0
-          for f in tests/unit/hooks/knowledge-reader*.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
+          for f in tests/unit/hooks/knowledge-reader-key-normalization.test.ts tests/unit/hooks/knowledge-migrator*.test.ts tests/unit/hooks/knowledge-application*.test.ts tests/unit/hooks/knowledge-schema-v2*.test.ts tests/unit/hooks/knowledge-contextual-retrieval*.test.ts; do
             [ -f "$f" ] || continue
             if ! bun --smol test "$f" --timeout 120000; then
               failed=1
@@ -181,7 +189,8 @@ jobs:
             tests/unit/hooks/model-limits-log-reclassification.test.ts \
             tests/unit/hooks/model-limits-adversarial.test.ts \
             tests/unit/hooks/log-level-reclassification.test.ts \
-            tests/unit/hooks/context-budget-log-reclassification.test.ts; do
+            tests/unit/hooks/context-budget-log-reclassification.test.ts \
+            tests/unit/hooks/knowledge-reader.test.ts; do
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
@@ -625,68 +634,6 @@ jobs:
           done
           exit $failed
 
-  dist-check:
-    needs: quality
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.3.13"
-      - name: Cache bun dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Build
-        run: bun run build
-      - name: Check dist/ for uncommitted drift
-        shell: bash
-        run: |
-          # Normalize .bun cache paths in COMMITTED dist for cross-platform consistency.
-          # Windows bun produces node_modules/.bun/PACKAGE@VERSION/node_modules/PACKAGE
-          # while Linux bun produces node_modules/PACKAGE.
-          # After build, dist/ has clean Linux paths. We must normalize the committed
-          # (git index) side before comparing, not the freshly built working tree.
-          #
-          # Also normalize var __dirname = "..." values: bun ESM bundles embed the
-          # build-time source path, which differs between Windows and Linux builders.
-          tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
-          dist_committed="$tmpdir/dist-committed"
-          mkdir -p "$dist_committed"
-          git archive HEAD dist/ | tar -x -C "$dist_committed"
-          find "$dist_committed/dist/" -name "*.js" -type f -exec sed -i \
-            -e 's|node_modules/\.bun/[^/]\+/node_modules/|node_modules/|g' \
-            -e 's/\r$//' \
-            -e 's|var __dirname = "[^"]*"|var __dirname = "__DIRNAME_NORMALIZED__"|g' {} +
-          # Normalize __dirname in the freshly built dist too (Linux vs Windows paths).
-          find dist/ -name "*.js" -type f -exec sed -i \
-            -e 's|var __dirname = "[^"]*"|var __dirname = "__DIRNAME_NORMALIZED__"|g' {} +
-          # Remove gitignored paths from the freshly built dist before comparing.
-          # These are intentionally excluded from commits (see .gitignore lines 29-35).
-          rm -rf dist/build/ dist/quality/ dist/sbom/
-          rm -f dist/tools/build-check.d.ts dist/tools/pre-check-batch.d.ts \
-                dist/tools/quality-budget.d.ts dist/tools/sbom-generate.d.ts
-          diff -r "$dist_committed/dist/" dist/ || {
-            echo "ERROR: dist/ has uncommitted changes after build."
-            echo ""
-            echo "Recovery (run these commands in order):"
-            echo "  1. bun install --frozen-lockfile --force  # refresh nested deps to match CI"
-            echo "  2. bun run build                         # regenerate dist/"
-            echo "  3. Verify the dist/ diff is expected: git diff -- dist/"
-            echo "  4. Commit the regenerated dist/ and push"
-            echo ""
-            echo "Common causes:"
-            echo "  - Local bun version differs from CI (CI pins bun 1.3.13)"
-            echo "  - Nested dependency versions differ between local and CI install"
-            echo "  - Stale dist/ after rebase on a newer origin/main"
-            exit 1
-          }
-          rm -rf "$dist_committed"
-
   package-check:
     needs: quality
     runs-on: ubuntu-latest
@@ -799,7 +746,7 @@ jobs:
         run: ./target/release/swarm-sandbox-runner.exe --probe
 
   smoke:
-    needs: [unit, integration, dist-check, package-check, php-validation, rust-sandbox-runner]
+    needs: [unit, integration, package-check, php-validation, rust-sandbox-runner]
     strategy:
       fail-fast: false
       matrix:

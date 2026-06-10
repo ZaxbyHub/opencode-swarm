@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { ZodError, z } from 'zod';
 
 export interface TaskNode {
 	id: string;
@@ -16,6 +17,32 @@ export interface DependencyGraph {
 	leaves: string[]; // Tasks with no dependents
 }
 
+const DependencyGraphPlanSchema = z
+	.object({
+		phases: z
+			.array(
+				z
+					.object({
+						id: z.number(),
+						tasks: z
+							.array(
+								z
+									.object({
+										id: z.string(),
+										description: z.string().optional(),
+										depends: z.array(z.string()).optional(),
+										status: z.string().optional(),
+									})
+									.passthrough(),
+							)
+							.optional(),
+					})
+					.passthrough(),
+			)
+			.optional(),
+	})
+	.passthrough();
+
 /**
  * Parse plan.json and build dependency graph
  */
@@ -27,24 +54,19 @@ export function parseDependencyGraph(planPath: string): DependencyGraph {
 		return { tasks, phases, roots: [], leaves: [] };
 	}
 
-	let plan: {
-		phases?: Array<{
-			id: number;
-			tasks?: Array<{
-				id: string;
-				description?: string;
-				depends?: string[];
-				status?: string;
-			}>;
-		}>;
-	};
+	let plan: z.infer<typeof DependencyGraphPlanSchema>;
 	try {
-		plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
-	} catch (error) {
-		console.error(
-			`[dependency-graph] Failed to parse ${planPath}:`,
-			error instanceof Error ? error.message : String(error),
+		plan = DependencyGraphPlanSchema.parse(
+			JSON.parse(fs.readFileSync(planPath, 'utf-8')),
 		);
+	} catch (error) {
+		const detail =
+			error instanceof ZodError
+				? `schema validation failed: ${error.message}`
+				: error instanceof Error
+					? error.message
+					: String(error);
+		console.error(`[dependency-graph] Failed to parse ${planPath}:`, detail);
 		return { tasks, phases, roots: [], leaves: [] };
 	}
 

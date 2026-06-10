@@ -811,3 +811,71 @@ describe('GuardrailsProfileSchema idle_timeout_minutes', () => {
 		).toThrow();
 	});
 });
+
+describe('resolveGuardrailsConfig max_transient_retries per-agent override (v6.86.14)', () => {
+	const base: GuardrailsConfig = {
+		enabled: true,
+		max_tool_calls: 100,
+		max_duration_minutes: 30,
+		max_repetitions: 10,
+		max_consecutive_errors: 5,
+		warning_threshold: 0.75,
+		idle_timeout_minutes: 60,
+		max_transient_retries: 5,
+	};
+
+	it('base config max_transient_retries flows through when no profile override', () => {
+		const result = resolveGuardrailsConfig(base, 'coder');
+		expect(result.max_transient_retries).toBe(5);
+	});
+
+	it('per-agent profile max_transient_retries overrides base config', () => {
+		const config: GuardrailsConfig = {
+			...base,
+			profiles: {
+				coder: { max_transient_retries: 10 },
+			},
+		};
+		const result = resolveGuardrailsConfig(config, 'coder');
+		expect(result.max_transient_retries).toBe(10);
+	});
+
+	it('per-agent profile max_transient_retries=0 disables transient bypass', () => {
+		const config: GuardrailsConfig = {
+			...base,
+			profiles: {
+				explorer: { max_transient_retries: 0 },
+			},
+		};
+		const result = resolveGuardrailsConfig(config, 'explorer');
+		expect(result.max_transient_retries).toBe(0);
+	});
+
+	it('unknown agent without profile inherits base max_transient_retries', () => {
+		const result = resolveGuardrailsConfig(base, 'custom-agent');
+		expect(result.max_transient_retries).toBe(5);
+	});
+
+	it('unknown agent with profile override uses profile max_transient_retries', () => {
+		const config: GuardrailsConfig = {
+			...base,
+			profiles: {
+				'custom-agent': { max_transient_retries: 8 },
+			},
+		};
+		const result = resolveGuardrailsConfig(config, 'custom-agent');
+		expect(result.max_transient_retries).toBe(8);
+	});
+
+	it('prefixed agent name resolves profile max_transient_retries via canonical name', () => {
+		const config: GuardrailsConfig = {
+			...base,
+			profiles: {
+				coder: { max_transient_retries: 3 },
+			},
+		};
+		// 'local_coder' strips 'local_' prefix → canonical 'coder' → hits profile
+		const result = resolveGuardrailsConfig(config, 'local_coder');
+		expect(result.max_transient_retries).toBe(3);
+	});
+});

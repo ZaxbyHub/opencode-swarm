@@ -16,6 +16,7 @@ import type {
 	GeneralCouncilConfig,
 	WebSearchResult,
 } from './general-council-types.js';
+import type { SearchFreshness } from './search-query-policy.js';
 
 export class WebSearchError extends Error {
 	constructor(
@@ -35,7 +36,15 @@ export class WebSearchConfigError extends Error {
 }
 
 export interface WebSearchProvider {
-	search(query: string, maxResults: number): Promise<WebSearchResult[]>;
+	search(
+		query: string,
+		maxResults: number,
+		options?: WebSearchOptions,
+	): Promise<WebSearchResult[]>;
+}
+
+export interface WebSearchOptions {
+	freshness?: SearchFreshness;
 }
 
 interface TavilyResponse {
@@ -59,18 +68,27 @@ interface BraveResponse {
 export class TavilyProvider implements WebSearchProvider {
 	constructor(private readonly apiKey: string) {}
 
-	async search(query: string, maxResults: number): Promise<WebSearchResult[]> {
+	async search(
+		query: string,
+		maxResults: number,
+		options: WebSearchOptions = {},
+	): Promise<WebSearchResult[]> {
+		const requestBody: Record<string, unknown> = {
+			api_key: this.apiKey,
+			query,
+			max_results: maxResults,
+			search_depth: 'advanced',
+		};
+		if (options.freshness) {
+			requestBody.time_range = options.freshness;
+		}
+
 		let response: Response;
 		try {
 			response = await fetch('https://api.tavily.com/search', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					api_key: this.apiKey,
-					query,
-					max_results: maxResults,
-					search_depth: 'advanced',
-				}),
+				body: JSON.stringify(requestBody),
 			});
 		} catch (err) {
 			throw new WebSearchError(
@@ -117,10 +135,18 @@ export class TavilyProvider implements WebSearchProvider {
 export class BraveProvider implements WebSearchProvider {
 	constructor(private readonly apiKey: string) {}
 
-	async search(query: string, maxResults: number): Promise<WebSearchResult[]> {
+	async search(
+		query: string,
+		maxResults: number,
+		options: WebSearchOptions = {},
+	): Promise<WebSearchResult[]> {
 		const url = new URL('https://api.search.brave.com/res/v1/web/search');
 		url.searchParams.set('q', query);
 		url.searchParams.set('count', String(maxResults));
+		const freshness = toBraveFreshness(options.freshness);
+		if (freshness) {
+			url.searchParams.set('freshness', freshness);
+		}
 
 		let response: Response;
 		try {
@@ -169,6 +195,21 @@ export class BraveProvider implements WebSearchProvider {
 	}
 }
 
+function toBraveFreshness(freshness?: SearchFreshness): string | undefined {
+	switch (freshness) {
+		case 'day':
+			return 'pd';
+		case 'week':
+			return 'pw';
+		case 'month':
+			return 'pm';
+		case 'year':
+			return 'py';
+		default:
+			return undefined;
+	}
+}
+
 /**
  * Resolve the API key from config first, then env var fallback. Returns
  * undefined if neither is set so callers can decide how to surface that.
@@ -197,7 +238,7 @@ export function createWebSearchProvider(
 				: 'BRAVE_SEARCH_API_KEY';
 		throw new WebSearchConfigError(
 			`No API key for search provider "${config.searchProvider}". Set ` +
-				`council.general.searchApiKey in opencode-swarm.json or export ${envName}.`,
+				`council.general.searchApiKey in the resolved config (global ~/.config/opencode/opencode-swarm.json, project .opencode/opencode-swarm.json override) or export ${envName}.`,
 		);
 	}
 	switch (config.searchProvider) {

@@ -204,6 +204,41 @@ describe('getEvidenceTaskId plan.json fallback', () => {
 		expect(evidence2).toBeNull();
 	});
 
+	it('returns null when plan.json has in_progress task with non-string id', async () => {
+		const planContent = {
+			phases: [
+				{
+					id: 1,
+					tasks: [{ id: 123, status: 'in_progress' }],
+				},
+			],
+		};
+		writeFileSync(
+			path.join(tmpDir, '.swarm', 'plan.json'),
+			JSON.stringify(planContent),
+		);
+
+		startAgentSession('sess-invalid-id-type', 'architect');
+		const session = ensureAgentSession('sess-invalid-id-type');
+		session.currentTaskId = null;
+		session.lastCoderDelegationTaskId = null;
+		session.taskWorkflowStates = new Map();
+
+		const hook = createDelegationGateHook(testConfig, tmpDir);
+		await hook.toolAfter(
+			{
+				tool: 'Task',
+				sessionID: 'sess-invalid-id-type',
+				callID: 'call-1',
+				args: { subagent_type: 'reviewer' },
+			},
+			{},
+		);
+
+		const { readTaskEvidence } = await import('../gate-evidence');
+		expect(await readTaskEvidence(tmpDir, '123')).toBeNull();
+	});
+
 	it('finds in_progress task in later phase when earlier phases have none', async () => {
 		const planContent = {
 			phases: [

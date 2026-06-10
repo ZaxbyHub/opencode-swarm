@@ -30,7 +30,7 @@ export interface SetQaGatesArgs {
 	hallucination_guard?: boolean;
 	sast_enabled?: boolean;
 	mutation_test?: boolean;
-	council_general_review?: boolean;
+	phase_council?: boolean;
 	drift_check?: boolean;
 	final_council?: boolean;
 	project_type?: string;
@@ -79,7 +79,7 @@ export async function executeSetQaGates(
 		'hallucination_guard',
 		'sast_enabled',
 		'mutation_test',
-		'council_general_review',
+		'phase_council',
 		'drift_check',
 		'final_council',
 	] as Array<keyof QaGates>) {
@@ -137,7 +137,7 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 			.boolean()
 			.optional()
 			.describe(
-				'Enable council mode (multi-SME consensus on high-risk phases).',
+				'Enable council mode — replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer) per task.',
 			),
 		sme_enabled: z.boolean().optional().describe('Enable SME consultation.'),
 		critic_pre_plan: z
@@ -162,14 +162,14 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 					'tests to achieve a passing kill rate before phase completion; ' +
 					'WARN verdict allows advancement, FAIL blocks.',
 			),
-		council_general_review: z
+		phase_council: z
 			.boolean()
 			.optional()
 			.describe(
-				'Enable the council_general_review gate (default: off). When on, ' +
-					'MODE: SPECIFY runs convene_general_council on the draft spec ' +
-					'before the critic-gate, folding multi-model deliberation into ' +
-					'the spec. Requires council.general.enabled and a search API key.',
+				'Enable the phase_council gate (default: off). When on, a full ' +
+					'5-member council (critic, reviewer, sme, test_engineer, explorer) ' +
+					'reviews all work completed in a phase holistically at phase_complete ' +
+					'time. Requires council.enabled: true in config.',
 			),
 		drift_check: z
 			.boolean()

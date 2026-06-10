@@ -45,6 +45,7 @@ import { extract_code_blocks } from './file-extractor';
 import { generate_mutants } from './generate-mutants';
 import { get_approved_plan } from './get-approved-plan';
 import { get_qa_gate_profile } from './get-qa-gate-profile';
+import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
 import { knowledge_ack } from './knowledge-ack';
@@ -151,6 +152,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	mutation_test: () => mutation_test,
 	generate_mutants: () => generate_mutants,
 	detect_domains: () => detect_domains,
+	git_blame: () => git_blame,
 	gitingest: () => gitingest,
 	retrieve_summary: () => retrieve_summary,
 	extract_code_blocks: () => extract_code_blocks,

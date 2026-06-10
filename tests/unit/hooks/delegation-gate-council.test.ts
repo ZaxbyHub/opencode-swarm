@@ -1,12 +1,14 @@
 /**
  * Tests for the submit_council_verdicts branch in delegation-gate.ts toolAfter.
- * Council mode is additive at phase level — it never suppresses per-task Stage B gates.
+ * Council mode replaces per-task Stage B — when active, reviewer/test_engineer
+ * delegations do NOT advance task state through the Stage B path.
  *
  * Covers:
  *   - council disabled (default): reviewer/test_engineer Stage B advancement works.
  *   - council active (config.enabled=true AND QaGates.council_mode=true):
- *     Stage B advancement still runs unconditionally — council does NOT replace it.
- *     reviewer/test_engineer Task delegations advance task state regardless.
+ *     Stage B advancement is SKIPPED — council replaces it per-task.
+ *     reviewer/test_engineer may still be dispatched as council members but
+ *     do not advance state via the Stage B barrier.
  *   - submit_council_verdicts APPROVE + allCriteriaMet + zero required fixes from
  *     pre_check_passed → state advances to 'complete'.
  *   - submit_council_verdicts REJECT → no advancement; verdict still recorded.
@@ -163,11 +165,13 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 			);
 
 			expect(getTaskState(session, '1.1')).toBe('tests_run');
+			// Council is disabled — no verdict should be recorded.
+			expect(session.taskCouncilApproved?.get('1.1')).toBeUndefined();
 		});
 	});
 
-	describe('council active (config + profile both true): Stage B still runs per-task', () => {
-		it('reviewer Task delegation still advances state when council is active', async () => {
+	describe('council active (config + profile both true): Stage B is SKIPPED', () => {
+		it('reviewer Task delegation does NOT advance state when council replaces Stage B', async () => {
 			writePlan();
 			enableCouncilGate();
 
@@ -189,11 +193,11 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 				{},
 			);
 
-			// State MUST advance — council is additive at phase level, never suppresses Stage B.
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+			// State must NOT advance — council replaces Stage B per-task.
+			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 		});
 
-		it('test_engineer Task delegation still advances state when council is active', async () => {
+		it('test_engineer Task delegation does NOT advance state when council replaces Stage B', async () => {
 			writePlan();
 			enableCouncilGate();
 
@@ -215,8 +219,8 @@ describe('delegation-gate council wiring (Stage B suppression + APPROVE fast-pat
 				{},
 			);
 
-			// State MUST advance — Stage B always runs per-task regardless of council mode.
-			expect(getTaskState(session, '1.1')).toBe('tests_run');
+			// State must NOT advance — council replaces Stage B per-task.
+			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 		});
 	});
 

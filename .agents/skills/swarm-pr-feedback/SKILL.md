@@ -14,6 +14,9 @@ canonical workflow.
 
 ## Codex Execution Notes
 
+- Check out the PR branch locally before verifying or fixing anything: fetch the
+  head ref if absent, confirm the working tree is clean (`git status --porcelain`),
+  then check it out. Verification and fixes must run against the PR branch.
 - Use GitHub connector tools when available, or `gh`, to inspect PR metadata,
   review threads, comments, requested changes, checks, conflicts, and head SHA.
 - Treat every feedback item as a claim until verified against source, tests,

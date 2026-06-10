@@ -2,7 +2,7 @@
 
 Swarm memory stores scoped, source-backed facts that can be recalled by agents without giving agents direct write access to durable memory.
 
-The first memory slice ships the local JSONL memory substrate and two tools:
+Swarm memory is an optional, project-scoped recall system. The current default provider is SQLite under `.swarm/memory/memory.db`; the legacy local JSONL provider remains available for migration and debug workflows. Enabling memory exposes two agent tools:
 
 - `swarm_memory_recall`: read-only scoped recall.
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.

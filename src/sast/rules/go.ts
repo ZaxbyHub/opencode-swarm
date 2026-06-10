@@ -31,17 +31,6 @@ export const goRules: SastRule[] = [
 		pattern: /InsecureSkipVerify\s*:\s*true/,
 	},
 	{
-		id: 'sast/go-hardcoded-secret',
-		name: 'Hardcoded secret detected',
-		severity: 'critical',
-		languages: ['go'],
-		description: 'Potential hardcoded API key, password, or token detected',
-		remediation:
-			'Move secrets to environment variables using os.Getenv() or a secrets manager.',
-		pattern:
-			/(?:api_key|password|secret|token|auth)[_-]?\w*\s*[:=]\s*["'][a-zA-Z0-9_-]{20,}["']/i,
-	},
-	{
 		id: 'sast/go-shell-injection',
 		name: 'Shell injection via os/exec',
 		severity: 'critical',

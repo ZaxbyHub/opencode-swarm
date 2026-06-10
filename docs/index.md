@@ -1,21 +1,21 @@
 # OpenCode Swarm Documentation
 
-OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCode that orchestrates 11 specialized agents for planning, code generation, review, testing, and documentation. This documentation covers installation, configuration, usage, and architecture.
+OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coordinates specialized, configurable agents for planning, code generation, review, testing, documentation, security checks, memory, and recovery. This documentation covers installation, configuration, usage, architecture, and contributor workflows.
 
 ---
 
 ## Getting Started — Choose Your Path
 
-**I am a new user** — I want to get Swarm running on my first project  
+**I am a new user** — I want to get Swarm running on my first project
 → Start with [Getting Started](getting-started.md) — a 15-minute first-run walkthrough
 
-**I am an operator** — I want to install Swarm in CI/container or a specific environment  
+**I am an operator** — I want to install Swarm in CI/container or a specific environment
 → Choose your platform:
 - [Installation Guide](installation.md) — comprehensive reference for all platforms
 - [Installation: Linux + Docker](installation-linux-docker.md) — native Linux, Windows, Docker Desktop specifics
 - [Installation: LLM Operator](installation-llm-operator.md) — machine-executable runbook for LLM-driven setup
 
-**I am a contributor** — I want to understand the architecture or contribute to the project  
+**I am a contributor** — I want to understand the architecture or contribute to the project
 → Read [Architecture Deep Dive](architecture.md) and [Design Rationale](design-rationale.md), then [CONTRIBUTING.md](../contributing.md)
 
 ---
@@ -27,7 +27,7 @@ OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCo
 | Document | Covers |
 |----------|--------|
 | [Configuration Reference](configuration.md) | Config file locations, minimal example, all configuration keys |
-| [Commands Reference](commands.md) | All 43 `/swarm` subcommands, flags, and examples |
+| [Commands Reference](commands.md) | `/swarm` subcommands, flags, deprecated aliases, and examples |
 | [Modes: Swarm vs Turbo vs Full-Auto](modes.md) | Execution modes, safety gates, when to use each |
 | [Pre-Swarm Planning Guide](planning.md) | How to plan tasks before running, task field reference, multi-model planning, spec pipeline |
 | [Swarm Briefing for LLMs](swarm-briefing.md) | Pipeline steps, task format, state machine — written for LLM plan authors |
@@ -44,7 +44,7 @@ OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCo
 | Document | Covers |
 |----------|--------|
 | [Knowledge System](knowledge.md) | Hive vs swarm knowledge, TTL decay, migration, quarantine workflows |
-| [Swarm Memory](memory.md) | Local JSONL memory, scoped recall, proposal-only writes, redaction policy |
+| [Swarm Memory](memory.md) | SQLite-default memory, legacy JSONL migration, scoped recall, proposal-only writes, redaction policy |
 | [Evidence and Telemetry](evidence-and-telemetry.md) | Evidence bundle schema, JSONL event stream, how to analyze results |
 | [Work Complete Council](council/README.md) | Optional consensus gate for verifying phase completion |
 | [Troubleshooting](troubleshooting/recovery-guide.md) | Session recovery, common error scenarios |
@@ -53,7 +53,7 @@ OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCo
 
 | Document | Covers |
 |----------|--------|
-| [Architecture Deep Dive](architecture.md) | Control model, 11 agent roles, full execution pipeline, tools, evidence schema, modes, guardrails |
+| [Architecture Deep Dive](architecture.md) | Control model, agent roles, full execution pipeline, tools, evidence schema, modes, guardrails |
 | [Adding a Language](adding-a-language.md) | Extending the language registry with a new profile and (optionally) a custom backend; backend invariants and tests |
 | [Design Rationale](design-rationale.md) | Core design decisions: serial execution, phased planning, persistent memory, gated QA |
 | [Plan Durability](plan-durability.md) | How `.swarm/plan-ledger.jsonl` provides crash-safe plan persistence |
@@ -62,36 +62,26 @@ OpenCode Swarm (v6.81.0) is an architect-centric agentic swarm plugin for OpenCo
 
 ## Release History
 
-**Latest version: v6.81.0** (released 2026-04-22)
+**Current package metadata:** see [`package.json`](../package.json) and [`CHANGELOG.md`](../CHANGELOG.md). In this checkout, `package.json` reports `7.46.1`, and the top changelog entry is `7.46.1` from 2026-05-29.
 
-The full release history is documented in [CHANGELOG.md](../CHANGELOG.md) (v6.15.0 through v6.81.0).
+The full release history is documented in [CHANGELOG.md](../CHANGELOG.md). The per-version files under `docs/releases/` are supporting release-note artifacts and may not cover every changelog entry.
 
 Recent highlights:
 
 | Version | Highlights |
 |---------|-----------|
-| [v6.81.0](releases/v6.81.0.md) | Current version — documentation refresh |
-| [v6.80.2](releases/v6.80.2.md) | Latest stable release with notes |
-| [v6.80.1](releases/v6.80.1.md) | Patch release |
-| [v6.78.0](releases/v6.78.0.md) | Stability improvements |
-| [v6.77.0](releases/v6.77.0.md) | Feature releases and hardening |
-| [v6.76.0](releases/v6.76.0.md) | Major feature additions |
-| [v6.74.0](releases/v6.74.0.md) | Quality gate enhancements |
-| [v6.73.0](releases/v6.73.0.md) | Critic hallucination verifier, phase_complete gate enforcement |
-| [v6.72.0](releases/v6.72.0.md) | Knowledge N-phase TTL decay, stale-entry sweep |
-| [v6.71.0](releases/v6.71.0.md) | Scope persistence, interpreter gating, audit logging |
-| [v6.70.0](releases/v6.70.0.md) | Transparent write authority, symlink guards, universal deny prefixes |
-| [v6.68.0](releases/v6.68.0.md) | SQLite constraint store, QA gate profiles, BRAINSTORM mode |
-| [v6.67.0](releases/v6.67.0.md) | Council tools, round-history auditing |
-| [v6.66.0](releases/v6.66.0.md) | Work Complete Council verification gate |
-| [v6.65.0](releases/v6.65.0.md) | Workspace dependency graph |
-| [v6.64.0](releases/v6.64.0.md) | Repo map and code graph |
-| [v6.63.0](releases/v6.63.0.md) | Crash-safe ledger, typed concurrency errors |
-| [v6.59.0](releases/v6.59.0.md) | State-of-the-art PR review agent, explorer hardening |
-| [v6.58.0](releases/v6.58.0.md) | Structured spec format with RFC 2119 keywords |
-| [v6.45.0](releases/v6.45.0.md) | Structured workspace search, patch suggestions, symbol extraction |
+| [v7.22.0](releases/v7.22.0.md) | Latest checked-in per-version release note |
+| [v7.21.4](releases/v7.21.4.md) | Patch release notes |
+| [v7.21.3](releases/v7.21.3.md) | Patch release notes |
+| [v7.21.1](releases/v7.21.1.md) | Patch release notes |
+| [v7.21.0](releases/v7.21.0.md) | Feature release notes |
+| [v7.20.2](releases/v7.20.2.md) | Patch release notes |
+| [v7.20.1](releases/v7.20.1.md) | Patch release notes |
+| [v7.20.0](releases/v7.20.0.md) | Feature release notes |
+| [v7.19.3](releases/v7.19.3.md) | Patch release notes |
+| [v7.19.2](releases/v7.19.2.md) | Patch release notes |
 
-All versions from v6.15.0 onward have release notes in `/docs/releases/`.
+Versioned release-note files are retained in `/docs/releases/`. Pending user-visible changes live in `/docs/releases/pending/` until release aggregation.
 
 ---
 
@@ -124,4 +114,4 @@ See [Archive](archive/ARCHIVE.md) for:
 
 ---
 
-*Last updated: 2026-04-22. Covers opencode-swarm v6.81.0.*
+*Last updated: 2026-06-06. Current package metadata was verified from `package.json` and `CHANGELOG.md`.*
