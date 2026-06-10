@@ -108,11 +108,14 @@ export async function executeWriteDriftEvidence(
 	const normalizedVerdict = normalizeVerdict(args.verdict);
 
 	// Build provenance if provided
-	const provenance = (args.provenanceAgentName || args.provenanceSessionId) ? {
-		agent_name: args.provenanceAgentName,
-		session_id: args.provenanceSessionId,
-		verified_at: new Date().toISOString(),
-	} : undefined;
+	const provenance =
+		args.provenanceAgentName || args.provenanceSessionId
+			? {
+					agent_name: args.provenanceAgentName,
+					session_id: args.provenanceSessionId,
+					verified_at: new Date().toISOString(),
+				}
+			: undefined;
 
 	// Build the evidence entry
 	const evidenceEntry = {
@@ -299,7 +302,9 @@ export const write_drift_evidence: ToolDefinition = createSwarmTool({
 			.string()
 			.min(1)
 			.optional()
-			.describe('Session ID of the agent that produced this evidence (optional provenance)'),
+			.describe(
+				'Session ID of the agent that produced this evidence (optional provenance)',
+			),
 	},
 	execute: async (args, directory) => {
 		const rawPhase = args.phase !== undefined ? Number(args.phase) : 0;

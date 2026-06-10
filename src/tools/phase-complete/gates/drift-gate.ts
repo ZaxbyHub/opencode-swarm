@@ -108,16 +108,19 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 					typeof entry.verdict === 'string'
 				) {
 					driftVerdictFound = true;
-				
+
 					// Provenance verification (issue #893 follow-up, F-001)
 					// Advisory warning when provenance is missing
-					if (!entry.provenance || (!entry.provenance.agent_name && !entry.provenance.session_id)) {
+					if (
+						!entry.provenance ||
+						(!entry.provenance.agent_name && !entry.provenance.session_id)
+					) {
 						safeWarn(
 							`[phase_complete] Drift verification evidence lacks provenance for phase ${phase}. Evidence should include agent_name or session_id for verification.`,
 							undefined,
 						);
 					}
-				
+
 					if (entry.verdict === 'approved') {
 						driftVerdictApproved = true;
 					}
