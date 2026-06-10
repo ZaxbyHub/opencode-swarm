@@ -48,8 +48,9 @@ export const myFeatureTool = createSwarmTool({
   parameters: { ... },
   execute: async (args, ctx) => {
     // 1. Load config — MUST come first
-    const config = loadFeatureConfig(ctx);
-    if (!config.enabled) {
+    //    (example: replace with actual config loading for your feature)
+    const config = resolveConfig(ctx.directory).my_feature;
+    if (!config?.enabled) {
       return {
         content: [{ type: "text", text: "My feature is not enabled. ..." }],
       };

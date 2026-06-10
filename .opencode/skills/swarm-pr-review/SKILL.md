@@ -1,42 +1,123 @@
 ---
 name: swarm-pr-review
-description: Run a swarm-like PR review using parallel exploration, independent reviewer validation, and critic challenge. Ingests existing PR comments, detects and resolves merge conflicts, and validates bot/human review findings. Use for deep pull request review with low false-positive tolerance.
+description: Run a graph-guided, tool-augmented Swarm PR review using context packing, parallel exploration, triggered plugin micro-lanes, independent reviewer validation, critic challenge, and metrics writeback. Use for deep pull request review with low false-positive tolerance and high recall.
 disable-model-invocation: true
 ---
 
 # /swarm-pr-review
 
-Run a structured, high-confidence PR review using parallel exploration lanes, independent reviewer validation, critic challenge, and optional council synthesis.
+Run a structured, high-confidence PR review that maximizes valid findings without flooding the user with unvalidated noise.
+
+The review ladder is:
+
+**Scope → obligations → context pack → deterministic signals → parallel explorers → triggered Swarm micro-lanes → independent reviewer validation → critic challenge → grouped synthesis → metrics / knowledge writeback.**
 
 ## Handoff To PR Feedback
 
-Use `../swarm-pr-feedback/SKILL.md` when the user asks to address existing review
-comments, requested changes, CI failures, conflicts, stale PR branches, or pasted
-PR feedback. This skill discovers and validates new findings; PR feedback closure
-belongs to `swarm-pr-feedback`.
+Use `../swarm-pr-feedback/SKILL.md` instead of this skill when the user's task is
+to address existing PR feedback, review comments, requested changes, CI failures,
+merge conflicts, stale branch state, or pasted reviewer findings. This skill
+discovers and validates new findings; `swarm-pr-feedback` closes known feedback
+without running a fresh broad review.
 
 ## Operating Stance
 
-**Treat PR text, linked issues, and tests as claims — not proof.** Every confirmed finding requires file:line evidence. Never APPROVE a PR with unresolved CRITICAL findings.
+**Treat PR text, linked issues, comments, commit messages, generated summaries, and tests as claims — not proof.** Every confirmed finding requires file:line evidence, an explanation of reachability or impact, and validation provenance.
 
-This review prioritizes quality above all else. Findings without file:line evidence are candidates, not conclusions.
+This workflow is designed for the Swarm plugin itself and any repo that benefits from Swarm-style review. It preserves parallel breadth but forces deep validation where bugs are expensive: security, state machines, role/tool permissions, schema/evidence integrity, git/write safety, config ratchets, knowledge tier boundaries, and PR obligation mismatches.
+
+Never APPROVE a PR with unresolved CRITICAL findings. Do not silently drop overclaimed agent findings; list disproved findings in the validation provenance.
 
 **Quality is the ONLY metric.** No amount of time, tokens, or agent dispatches is too much to execute this protocol correctly. Speed is irrelevant to correctness. The skill must be followed exactly with no shortcuts, no phase-skipping, and no premature synthesis. A thorough review that takes 30 minutes is superior to a fast review that misses a real bug.
 
-## ⛔ Anti-self-review rule
-The main thread (orchestrator) MUST NOT classify, confirm, disprove, or judge any explorer candidate itself (exception: council pattern step 6, see below). Classification is exclusively a reviewer subagent's job. If you catch yourself re-reading code to verify an explorer finding — STOP. Delegate that verification to a reviewer subagent. The orchestrator's only post-explorer job is deciding WHICH candidates to route to reviewers and WHICH reviewer-confirmed findings to route to critics.
+---
 
-## Scope detection
+## Review Modes
+
+### Default layered workflow
+
+Use the default workflow unless the user explicitly triggers council mode. In the default workflow, explorers produce only candidates. The orchestrator does not confirm or disprove candidates.
+
+### Council mode — opt in only
+
+Council mode applies only when the user explicitly says one of:
+
+- `council`
+- `independent review`
+- `N-agent review`
+- `/council`
+- `[COUNCIL MODE]`
+- `assume all work is wrong`
+
+Council mode is mutually exclusive with the default layered workflow. Do not blend them.
+
+---
+
+## Anti-Self-Review Rule
+
+The main thread / orchestrator MUST NOT classify, confirm, disprove, or judge explorer candidates in the default workflow.
+
+The orchestrator may:
+
+- determine scope,
+- build or request the context pack,
+- launch explorers and triggered micro-lanes,
+- route candidates to reviewers,
+- route reviewer-confirmed findings to critics,
+- group validated findings,
+- prepare the final report.
+
+The orchestrator MUST NOT:
+
+- re-read a candidate's target code to decide if it is valid,
+- silently downgrade or discard an explorer candidate,
+- treat tool output as a confirmed finding,
+- report a finding that no reviewer validated.
+
+If the orchestrator catches itself validating code, it must stop and delegate validation to a reviewer subagent.
+
+Exception: in explicit Council mode only, the main thread may act as the independent reviewer as described in the Council Mode section. Prefer a reviewer subagent when available.
+
+---
+
+## Scope Detection
+
 Determine review scope using this priority:
-1. explicit user-provided PR URL / PR number / commit / file scope
-2. current feature branch diff vs main/master
-3. staged changes
-4. latest commit
+
+1. explicit user-provided PR URL, PR number, commit, branch, or file scope,
+2. current feature branch diff vs `origin/main`, `main`, `origin/master`, or `master`,
+3. staged changes,
+4. latest commit,
+5. user-specified files or directories.
+
+Record:
+
+- base ref,
+- head ref,
+- commit range,
+- changed files,
+- deleted files,
+- generated files,
+- lockfiles,
+- test files,
+- docs/config/schema files,
+- whether the working tree is dirty.
+
+If scope cannot be determined, review the narrowest safe scope available and state the limitation.
+
+### Pre-flight git ref availability
+
+Before launching explorers (Phase 3), confirm the PR branch refs are available:
+- If `head_ref` is a remote branch that is not checked out locally, fetch it via `git fetch origin <head_ref>`
+- **Check out the head branch locally.** Explorer agents read files from the working tree, not from git history — passing the commit range in the delegation prompt is not sufficient because `Read` / `Glob` / `Grep` tools operate on the filesystem. Without a checkout, explorers silently read the base branch's version of changed files and produce invalid candidates. **Before checking out, verify the working tree is clean (`git status --porcelain`). If uncommitted changes exist, stash them or abort the checkout to prevent data loss.**
+- Explicitly pass the commit range (`base_ref..head_ref`) in every explorer delegation so explorers have the revision context for `git show` commands if they need to inspect specific versions.
+
+If refs cannot be fetched or checked out, state the limitation in the context pack.
 
 ## Phase 0A: Existing PR Comment Ingestion
 
 When reviewing a PR that already has comments, reviews, or bot findings,
-ingest and triage them BEFORE starting Phase 1. These are pre-existing signals
+ingest and triage them BEFORE starting Phase 0. These are pre-existing signals
 that must be validated, not ignored.
 
 ### Step 1 — Fetch all PR feedback surfaces
@@ -52,7 +133,13 @@ gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
 gh pr view <PR_NUMBER> --json reviews
 
 # Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
-gh pr view <PR_NUMBER> --json comments --jq '.comments[] | select(.authorAssociation == "CONTRIBUTOR" or .authorAssociation == "NONE" or .author.login | test("bot|copilot|coderabbit|codex"; "i"))'
+# Inline review comments — use REST API for reliable bot detection via user.type
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+For general PR comments (not inline), use the issue comments endpoint:
+```bash
+gh api repos/{owner}/{repo}/issues/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
 ```
 
 ### Step 2 — Classify each comment
@@ -68,7 +155,7 @@ gh pr view <PR_NUMBER> --json comments --jq '.comments[] | select(.authorAssocia
 ### Step 3 — Merge into review pipeline
 
 All ingested comments become candidate findings or obligations. They follow the
-same Phase 2-5 pipeline as freshly discovered findings. Ingested findings are
+same Phase 3-8 pipeline as freshly discovered findings. Ingested findings are
 NOT pre-confirmed — they still require independent reviewer validation per the
 Anti-Self-Review Rule.
 
@@ -93,15 +180,24 @@ conflicted PR cannot merge regardless of review quality.
 gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
 ```
 
-| State | Action |
+The response has two independent fields. Handle each:
+
+**`mergeable` field** — whether GitHub can compute mergeability:
+| Value | Meaning | Action |
+|-------|---------|--------|
+| `MERGEABLE` | No conflicts detected | Proceed — check `mergeStateStatus` below |
+| `CONFLICTING` | Merge conflicts exist | Resolve before reviewing |
+| `UNKNOWN` | GitHub still computing | Wait 30s, re-check |
+
+**`mergeStateStatus` field** — overall branch state:
+| Value | Action |
 |-------|--------|
-| `MERGEABLE` + `CLEAN` | Proceed to Phase 1 |
-| `MERGEABLE` + `BEHIND` | Note in report; non-blocking (merge queue handles it) |
-| `UNKNOWN` | Wait 30s, re-check. GitHub is still computing |
-| `DIRTY` | Conflicts exist — resolve before reviewing |
+| `CLEAN` | All checks pass, no conflicts — proceed to Phase 0 |
+| `BEHIND` | Branch behind base — note in report; non-blocking if merge queue handles it |
+| `DIRTY` | Merge conflicts exist — resolve before reviewing |
 | `BLOCKED` | External blocker (branch protection, failing required check) — investigate |
 
-### Step 2 — Resolve conflicts (when DIRTY)
+### Step 2 — Resolve conflicts (when CONFLICTING or DIRTY)
 
 When the PR has merge conflicts:
 
@@ -144,51 +240,107 @@ When the PR has merge conflicts:
 
 ---
 
-## 6-Phase Review Workflow
+# Default Review Workflow
 
-## Council pattern (OPT-IN — requires explicit user trigger)
-> **⚠️ This section applies ONLY when the user explicitly says "council", "independent review", "N-agent review", uses explicit syntax like `/council` or `[COUNCIL MODE]`, or uses phrases like "assume all work is wrong". If no trigger phrase was used, you are in the DEFAULT layered workflow above. Do NOT merge the default workflow with this council pattern. They are mutually exclusive.**
+## Phase 0: Context Pack and Review Signal Collection
 
-When the user asks for a "council", "independent review", "N-agent review", or uses phrases like "assume all work is wrong", run the explorer lanes as a parallel **adversarial council**:
+Before launching explorers, build a compact `swarm-pr-review-context` in scratch or as a local artifact if file writes are allowed.
 
-1. Launch all council agents in a **single message with multiple Agent tool calls** so they run in parallel, in the background (`run_in_background: true`), using the `Explore` subagent type.
-2. Each agent is told to **assume all work is WRONG until code evidence proves otherwise** and to hunt for bugs in its lane only.
-3. Default lane set for a 5-agent council:
-   - correctness and edge cases
-   - security and trust boundaries
-   - dependency and deployment safety
-   - docs and intent-vs-actual
-   - tests and falsifiability
-   A 6th `performance and architecture` lane may be added when risk justifies it.
-4. Each agent's prompt must include: branch name, commit list (`git log origin/main..HEAD`), scope of files owned by that lane, explicit bug-hunting checklist, and a "return EVIDENCE_FOUND / SUSPICIOUS / CLEAN with file:line evidence, cap N words" instruction. Agents must not return CONFIRMED, DISPROVED, or final severity.
-5. Agents are launched in parallel so the orchestrator must NOT duplicate their work. The main thread only collates, validates, and synthesizes.
-6. When all agents return, the main thread acts as the **independent reviewer**: re-read the flagged file:line evidence directly and classify each candidate CONFIRMED / DISPROVED / UNVERIFIED / PRE_EXISTING before reporting. DISPROVED findings must be called out — agents overclaim regularly.
-> Note: Step 6 (main-thread-as-reviewer) is specific to the council pattern. In the default workflow, reviewer validation MUST be delegated to a reviewer subagent per the anti-self-review rule above.
-7. Apply the **critic challenge** to every remaining CONFIRMED finding: challenge severity inflation, weak evidence, missing mitigating context (e.g., "is the architect single-threaded? is this exercised?"), and non-actionable fixes.
-8. The final synthesis must distinguish: real ship blockers, low-severity real issues, pre-existing accepted caveats, disproved agent claims, and follow-up quality work. Do not copy agent severities verbatim.
+The context pack must include, when available:
+
+```json
+{
+  "scope": {
+    "base_ref": "...",
+    "head_ref": "...",
+    "commit_range": "...",
+    "changed_files": [],
+    "changed_hunks": [],
+    "public_api_changes": [],
+    "deleted_or_renamed_files": [],
+    "generated_files": []
+  },
+  "pr_metadata": {
+    "title": "...",
+    "body_claims": [],
+    "checkboxes": [],
+    "linked_issues": [],
+    "review_comments": [],
+    "commit_messages": []
+  },
+  "obligations": [],
+  "repo_graph": {
+    "source": ".swarm/repo-graph.json or fallback search",
+    "changed_symbols": [],
+    "callers": [],
+    "callees": [],
+    "imports": [],
+    "exports": [],
+    "sibling_implementations": []
+  },
+  "deterministic_signals": {
+    "ci": [],
+    "tests": [],
+    "coverage_delta": [],
+    "lint_typecheck_build": [],
+    "security_scanners": [],
+    "dependency_audit": [],
+    "secrets_scan": [],
+    "mutation_testing": []
+  },
+  "swarm_artifacts": {
+    "evidence_bundles": [],
+    "knowledge_hits": [],
+    "phase_state": [],
+    "metrics": []
+  },
+  "risk_triggers": []
+}
+```
+
+### Context pack rules
+
+- Diff-only review is allowed for quick orientation, but not enough to confirm nontrivial findings.
+- For every changed production file, identify at least one caller, consumer, import path, route entrypoint, or reason none exists.
+- If `.swarm/repo-graph.json` exists, use it to seed impact cones.
+- If no repo graph exists, build a shallow impact cone using imports, exports, symbol search, route registration, CLI registration, or test references.
+- Pull in relevant `.swarm/evidence/`, `.swarm/state`, `.swarm/knowledge`, or hive/project knowledge entries when present.
+- Historical knowledge may guide candidate generation but cannot confirm a finding by itself.
+- Mark stale, quarantined, or cross-project knowledge as advisory until independently verified in this repo.
 
 ---
 
-## Default 6-Phase Review Workflow
-
-### Phase 1: Intent Reconstruction (Obligation Extraction Cascade)
+## Phase 1: Intent Reconstruction / Obligation Extraction
 
 Reconstruct what the PR is obligated to deliver before looking for bugs.
 
-**Deterministic precedence (highest to lowest):**
-1. Checkbox items in PR description
-2. Linked issues / tickets
-3. Commit scopes (what the commit says it does)
-4. Test names (what tests claim to verify)
-5. Interface diff (API/function signatures changed)
-6. LLM synthesis (only when no higher-precedence source exists)
+Use deterministic precedence, highest to lowest:
 
-**Output: Obligation List (O-001, O-002, ...)**
+1. PR checkboxes and acceptance criteria,
+2. linked issues / tickets,
+3. explicit user request in the current conversation,
+4. commit scopes and commit messages,
+5. test names and test assertions,
+6. interface diff / exported API changes,
+7. changelog, README, migration, or docs edits,
+8. LLM synthesis only when no higher-precedence source exists.
+
+Output an obligation list:
+
+```text
+O-001 | source | claim | affected files/symbols | status: UNVERIFIED | evidence refs: []
+```
 
 For each obligation, record:
-- Source (checkbox, issue, commit, test name, interface diff, LLM synthesis)
-- Verification status (UNVERIFIED → IN_PROGRESS → MET / NOT MET / UNVERIFIABLE)
-- Link to corresponding finding if non-met
+
+- source,
+- exact claim,
+- affected files or symbols,
+- verification status: `UNVERIFIED → IN_PROGRESS → MET / PARTIALLY_MET / NOT_MET / UNVERIFIABLE`,
+- linked finding ID when unmet,
+- reason if unverifiable.
+
+Tests are claims. A passing or added test does not prove the obligation unless the reviewer inspects the assertion strength and relevant code path.
 
 ### Quantitative claim verification
 
@@ -206,51 +358,152 @@ Common patterns to verify:
 
 ---
 
-### Phase 2: Parallel Explorer Lanes (6 lanes, launch in single message)
+## Phase 2: Deterministic Signal Ingestion
 
-Launch all 6 lanes in parallel in a **single message with multiple Agent tool calls** (`run_in_background: true`). Each lane produces candidate findings with exact file:line evidence — not final verdicts.
+Ingest deterministic signals as candidate generators. They are never final findings.
 
-| Lane | Focus | Lane-Specific Checklist |
-|------|-------|----------------------|
-| **Lane 1: Correctness** | Logic errors, null/undefined handling, race conditions, edge cases, off-by-one errors, incorrect operators | `null` checks, error path coverage, async/await correctness, loop termination, type coercion |
-| **Lane 2: Security** | Injection, auth bypass, secret exposure, privilege escalation, SSRF, path traversal, unsafe deserialization | Input sanitization, authnz enforcement points, credential handling, permission boundaries |
-| **Lane 3: Dependencies** | Import changes, version bumps, breaking API changes, new transitive deps, license issues | `package.json`/`requirements.txt`/Cargo.toml changes, lockfile drift, breaking API replacements |
-| **Lane 4: Docs vs Intent** | PR claims vs actual code changes, undocumented behavior, misleading variable names, absent changelog entries | Claims made in PR text vs what diff actually does, side effects not mentioned |
-| **Lane 5: Tests** | Coverage gaps, flaky patterns, weak assertions, test isolation violations, missing edge case tests | Assertion quality, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks, `assertDoesNotThrow` wrapping trivial code), mock isolation, happy-path-only coverage, missing error-path tests |
-| **Lane 6: Performance/Architecture** | Complexity changes, memory leaks, algorithmic regressions, coupling between modules, architectural debt | Cyclomatic complexity deltas, GC pressure, connection pool usage, shared mutable state |
+Use available local artifacts first. Run safe read-only or standard project validation commands only when appropriate for the environment.
 
-**Explorer output format per finding:**
+Candidate signal sources include:
+
+- CI failures and logs,
+- test failures,
+- coverage delta,
+- lint/typecheck/build output,
+- `git diff --check`,
+- dependency audit output,
+- lockfile diff,
+- CodeQL alerts,
+- Semgrep or SAST findings,
+- secrets scan findings,
+- license scan findings,
+- mutation testing output,
+- package manager warnings,
+- generated schema diffs.
+
+Record each signal as:
+
+```text
+[TOOL_CANDIDATE] | tool | severity | file:line | claim | raw_signal_summary | confidence
 ```
-[CANDIDATE] | severity | category | file:line | evidence_summary | confidence: LOW/MEDIUM/HIGH
-```
 
-Explorers optimize for **recall** — over-reporting is expected. Do not interpret explorer output as final findings.
+Tool candidate rules:
 
-Determine the affected test suite using the `test_impact` tool (maps changed files to
-consumers) or `test_runner` with `scope: 'impact'` (auto-detects impacted tests from the
-diff). Avoid `scope: 'all'` or broad `scope: 'graph'` — these can trigger `scope_exceeded`
-and stall the review.
-
-Run the affected test suite:
-```bash
-bun test tests/unit/path/to/affected.test.ts --timeout 30000
-```
-This confirms candidate regressions are real (not static-analysis noise) and surfaces
-behavioral issues that code review alone cannot detect. Example: PR #959 had 15 regressions
-that only test execution revealed.
-
-**If tests fail:** classify each failure as REGRESSION (introduced by the PR) or PRE_EXISTING
-(on the base branch). Route regression failures to the coder for investigation alongside
-other confirmed findings.
-
-**Blocking gate:** If regression count > 0 after investigation, BLOCK approval.
-The review must not proceed to final output until all PR-introduced regressions are resolved.
+- Confirm reachability before reporting.
+- Confirm PR-introducedness before reporting as a PR blocker.
+- Confirm that a framework, schema, middleware, caller guard, or test isolation rule does not already mitigate it.
+- Do not report scanner output verbatim without reviewer validation.
+- Redact secrets; never paste raw credentials into the final output.
 
 ---
 
-### Phase 3: Independent Reviewer Confirmation
+## Phase 3: Parallel Base Explorer Lanes
 
-Re-read each candidate's file:line evidence directly.
+Launch all base lanes in parallel in a single message with multiple Agent tool calls when the environment supports it (`run_in_background: true`). Use `Explore` subagents for exploration.
+
+If the Agent tool is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane.
+
+**task_id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, apply these rules:
+- For Agent tools that require caller-supplied `task_id` values, every parallel explorer lane invocation and retry MUST use a unique ID across the review session, including lane and attempt suffix (e.g. `pr_review_explore_lane1_attempt2`). Never reuse a prior `task_id` unless intentionally resuming that exact lane.
+- If the runtime auto-generates `task_id` values (resume mode), omit the `task_id` parameter rather than fabricating one.
+- Do not use the same `task_id` across concurrent lane dispatches — schema validation rejects duplicate `task_id` values.
+
+Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
+
+| Lane | Focus | Required checks |
+|---|---|---|
+| Lane 1: Correctness and edge cases | Logic errors, null/undefined handling, incorrect operators, async ordering, races, off-by-one, error paths | input domain, nullability, async/await, loop termination, exception behavior, backward compatibility |
+| Lane 2: Security and trust boundaries | Injection, authz/authn bypass, SSRF, path traversal, secret exposure, unsafe deserialization, prompt injection | untrusted input sources, sanitization, credential handling, permission boundary, private network access, output escaping |
+| Lane 3: Dependencies and deployment safety | Import changes, version bumps, lockfile drift, breaking APIs, package scripts, runtime assumptions | lockfile consistency, new transitive deps, Node/Bun/runtime compatibility, platform assumptions, license red flags |
+| Lane 4: Docs, intent, and drift | PR claims vs implementation, docs mismatch, migration/changelog gaps, stale examples | obligation mapping, changed behavior not documented, docs promising behavior not implemented |
+| Lane 5: Tests and falsifiability | Weak assertions, missing edge tests, flaky patterns, mock leakage, fixture drift | assertion strength, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks, `assertDoesNotThrow` wrapping trivial code), negative paths, isolation, deterministic timing, cross-platform path coverage |
+| Lane 6: Performance and architecture | Complexity regressions, memory leaks, over-coupling, inefficient graph scans, global mutable state | algorithmic deltas, caching, resource lifecycle, state ownership, architectural boundary violations |
+
+### Explorer context contract
+
+Every explorer must inspect or explicitly mark unavailable:
+
+1. the changed hunk,
+2. at least one caller, consumer, or downstream impact-cone node,
+3. at least one callee, dependency, or upstream assumption,
+4. at least one sibling implementation or prior pattern,
+5. the nearest relevant test or missing-test location,
+6. deterministic signal entries mapped to its files/symbols,
+7. relevant Swarm knowledge/evidence entries, if present.
+8. the commit range to analyze (`base_ref..head_ref`),
+
+Explorer output format:
+
+```text
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence: LOW/MEDIUM/HIGH
+```
+
+Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
+
+---
+
+## Phase 4: Triggered Swarm Plugin Micro-Lanes
+
+After base lanes start, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only. Do not launch irrelevant micro-lanes.
+
+Each micro-lane receives:
+
+- exact files and hunks in scope,
+- related obligations,
+- impact cone entries,
+- relevant deterministic signals,
+- related historical knowledge with quarantine/staleness status,
+- expected invariants,
+- output format as `[CANDIDATE]` only.
+
+### Swarm plugin risk trigger map
+
+| Trigger in diff or context pack | Launch micro-lane | Invariants to check |
+|---|---|---|
+| `agents`, `prompts`, `templates`, prompt interpolation, role text | Architect prompt integrity | no scope escape, no system prompt leakage, safe `{{variable}}` interpolation, untrusted text isolated from instructions |
+| `council`, `verdict`, `quorum`, `veto`, synthesis | Council orchestration | quorum math correct, veto enforced, evidence not lost, dissent preserved, no explorer result treated as final |
+| `guardrail`, `gate`, `delegation`, `rate limit`, approval checks | Guardrail bypass paths | gates cannot be skipped, delegation cannot bypass policy, rate limits cannot be reset by user-controlled state |
+| `schema`, `evidence`, JSONL, migrations, serializers | Evidence schema drift | backward compatibility, required fields preserved, version migration safe, malformed evidence rejected |
+| `knowledge`, `curator`, `hive`, `quarantine`, memory | Knowledge base contract | project vs hive tiers not confused, quarantine honored, CRUD semantics stable, stale knowledge not injected as fact |
+| `phase`, `state`, `plan`, `.swarm/state`, completion markers | Phase transition validation | ordering enforced, retro requirements handled, no premature completion, rollback safe |
+| `model`, `role`, `prefix`, `tool`, agent config | Model-to-role mapping | role prefix enforced, tool permissions least-privilege, unauthorized tools impossible, model fallback safe |
+| `config`, defaults, ratchet, locks, policy flags | Config ratchet semantics | once-enabled gates cannot silently disable, downgrade attempts detected, lock-state integrity preserved |
+| `url`, `fetch`, `http`, GitHub PR/issue parsing, package fetch | URL sanitization and external fetch | scheme allowlist, credential stripping, private IP / localhost / metadata IP blocking, redirect handling, timeout safe |
+| `git`, branch, checkout, reset, worktree, `.git` | Git safety | branch detection reliable, no unsafe `reset --hard`, .git protected, path normalization cross-platform, worktree state preserved |
+| `shell`, `exec`, command parser, file writes, delete/move/copy | Shell/write authority and path containment | destructive commands gated, dry-run preferred, symlink/path escape blocked, writes scoped, command injection impossible |
+| `test`, `bun`, mocks, fixtures, CI matrix | Test infrastructure | `bun:test` API correct, mock isolation, cross-platform paths, no hidden dependency on test order, fixtures reset |
+| `metrics`, telemetry, logs, serialized traces | Metrics and evidence privacy | no secrets in logs, evidence reproducible, privacy preserved, counts cannot be gamed, metrics schema stable |
+
+Micro-lane output format:
+
+```text
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+```
+
+---
+
+## Phase 5: Swarm-Native Verifier Routing
+
+Use Swarm-native agents and artifacts when available. If exact agent names are unavailable, route the same task to the closest equivalent reviewer/critic role.
+
+| Swarm verifier / artifact | When to use | Purpose |
+|---|---|---|
+| `critic_drift_verifier` | obligation-vs-code, docs-vs-code, phase/gate changes, schema/config changes | detect drift between stated behavior and actual implementation |
+| `critic_hallucination_verifier` | external APIs, package claims, URLs, CLI flags, GitHub behavior, model/tool names | verify claims against source or mark as unverified |
+| `curator_phase` | before exploration and after synthesis | retrieve relevant lessons; write back confirmed true positives / false positives |
+| `test_engineer` | confirmed/borderline correctness, security, state, schema, or config findings | propose or run falsification probes and regression tests |
+| `prm_scorer` | long or contentious reviews | score whether review trajectory is drifting toward unsupported speculation |
+| `.swarm/repo-graph.json` | all nontrivial code changes | build impact cones and sibling-pattern checks |
+| `.swarm/evidence/` | schema, phase, state, council, and guardrail changes | verify evidence compatibility and serialized provenance |
+| `/swarm metrics` or stored metrics | after synthesis | record review quality and recurring false positives |
+
+Verifier output is advisory until incorporated by the independent reviewer or critic.
+
+---
+
+## Phase 6: Independent Reviewer Confirmation
+
+Route candidates to reviewer subagents. The reviewer must re-read the candidate's file:line evidence and relevant context pack entries directly.
 
 ### Noise budget and universal validation
 
@@ -261,85 +514,181 @@ Before reviewer dispatch, the orchestrator may suppress candidates that are ALL 
 
 Every suppressed candidate must appear in the final report under "Suppressed Candidates" with the reason. Suppression without disclosure is a hard rule violation.
 
-**All remaining candidates — regardless of severity — must be validated.** Severity alone does not determine validation eligibility; it determines routing priority. A LOW-severity candidate with file:line evidence and a specific code path gets the same reviewer attention as a HIGH-severity candidate.
+**All remaining candidates — regardless of severity — must be routed to independent reviewer validation.** Severity alone does not determine validation eligibility; it determines routing priority. A LOW-severity candidate with file:line evidence and a specific code path gets the same reviewer attention as a HIGH-severity candidate.
 
-Candidates not validated must be listed as UNVERIFIED with reason in the validation provenance. Do not silently drop them.
+Candidates not routed to reviewers must be listed as UNVERIFIED with reason in the validation provenance. Do not silently drop them.
 
-**Reviewer classifications:**
+### Reviewer required checks
+
+For each candidate, the reviewer must determine:
+
+- exact file:line evidence,
+- whether the issue is introduced by this PR or pre-existing,
+- reachability from realistic execution paths,
+- whether caller guards, schema validation, middleware, framework defaults, feature flags, or state-machine constraints mitigate it,
+- whether tests cover the negative path,
+- whether sibling files or docs must change together,
+- whether the severity is justified,
+- the smallest falsification probe that would prove or disprove it.
+
+### Reviewer classifications
 
 | Classification | Meaning |
-|----------------|---------|
-| **CONFIRMED** | Evidence is real and the finding is valid |
-| **DISPROVED** | The candidate claim is incorrect or does not apply |
-| **UNVERIFIED** | Cannot determine validity from available evidence |
-| **PRE_EXISTING** | Issue exists on the base branch, not introduced by this PR |
+|---|---|
+| `CONFIRMED` | Evidence is real, reachable or structurally proven, and introduced or exposed by this PR |
+| `DISPROVED` | Candidate claim is incorrect, unreachable, mitigated, or based on a misunderstanding |
+| `UNVERIFIED` | Available evidence is insufficient to determine validity |
+| `PRE_EXISTING` | Issue exists on the base branch and is not materially worsened by this PR |
 
-**Evidence classification:**
+### Evidence classifications
 
 | Type | Definition |
-|------|------------|
-| **STRUCTURALLY_PROVEN** | file:line evidence directly demonstrates the bug (e.g., missing null check, incorrect operator) |
-| **PLAUSIBLE_BUT_UNVERIFIED** | Code pattern suggests risk, but reachability or mitigating context unconfirmed |
+|---|---|
+| `STRUCTURALLY_PROVEN` | File:line evidence directly demonstrates the bug or violated invariant |
+| `EXECUTION_PROVEN` | A test, trace, reproduction, or command demonstrates failure |
+| `STATIC_TRACE_PROVEN` | Static analysis plus reviewed path/context demonstrates reachability |
+| `PLAUSIBLE_BUT_UNVERIFIED` | Pattern suggests risk, but reachability or mitigation is unresolved |
 
-**DISPROVED findings must be called out explicitly** — agents regularly overclaim.
+Reviewer output format:
 
-**Base-branch verification (mandatory):** If a finding claims behavior is "new" or "introduced by the PR", the reviewer MUST read the equivalent code on the base branch (`git show <base_ref>:<file>`) to verify it was not present before. `<base_ref>` is the merge-base SHA or base branch name — resolve it from the PR context (e.g. `git merge-base HEAD origin/main`) or the reviewer delegation prompt. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
+```text
+[REVIEWED] | candidate_id | classification | evidence_type | final_severity | introduced_by_pr: YES/NO/UNKNOWN | file:line | rationale | falsification_probe | reviewer_id
+```
 
----
-
-### Phase 4: Critic Challenge
-
-For every remaining CONFIRMED HIGH or CRITICAL finding, and any borderline MEDIUM finding involving security, state machines, write authority, evidence integrity, model/tool permissions, git safety, or config ratchets, apply adversarial challenge:
-
-- **Severity inflation:** Is this truly HIGH/CRITICAL, or is it MEDIUM/LOW in practice?
-- **Weak evidence:** Does the file:line actually prove the finding, or just suggest it?
-- **Missing mitigating context:** Is there a schema validation check, middleware, framework default, or caller guard that prevents exploitation?
-- **Non-actionable fixes:** Is the suggested fix vague or impossible to implement correctly?
-- **Sibling-file gaps:** Did the review scope miss related files that must change together?
-
-Refuted findings are downgraded to **ADVISORY**.
-
-Run the **Runtime-Aware False-Positive Guard Checklist** (below) before confirming any finding.
+`DISPROVED` findings must include the reason. `PRE_EXISTING` findings must include the base-branch evidence if available.
 
 ---
 
-### Phase 5: Synthesis
+## Phase 7: Falsification Probe Requirement
 
-**Obligation Assessment:**
+Each confirmed nontrivial finding must include at least one falsification artifact:
 
-| Status | Meaning |
-|--------|---------|
-| **MET** | All obligations from this source are fulfilled by the PR |
-| **PARTIALLY MET** | Some obligations fulfilled, some not |
-| **NOT MET** | Obligations unfulfilled or actively violated |
-| **UNVERIFIABLE** | No evidence available to assess (commented-out code, feature-flagged) |
+- runnable failing command,
+- proposed regression test,
+- mutation that current tests fail to kill,
+- static-analysis trace,
+- minimal execution path,
+- exact reason no runtime probe is available.
 
-**Findings Table:**
+Nontrivial means any finding that affects correctness, security, state transitions, write authority, git safety, config, schema/evidence integrity, model/tool permissions, external fetches, persistence, or user-visible behavior.
 
-| ID | Severity | Category | File:Line | Classification | Status |
-|----|----------|----------|-----------|----------------|--------|
-| F-001 | CRITICAL | Security | `src/auth.ts:47` | STRUCTURALLY_PROVEN | CONFIRMED |
-| F-002 | HIGH | Correctness | `src/parser.ts:112` | PLAUSIBLE_BUT_UNVERIFIED | CONFIRMED → ADVISORY (refuted by critic) |
-
-**Merge Recommendation:** See Merge Recommendation Table below.
+A finding may still be reported without a runnable command if it is structurally proven, but the report must state why a runtime probe was not available.
 
 ---
 
-### Phase 6: Council Variant (when `--council` flag)
+## Phase 8: Critic Challenge
 
-When user requests council review or uses phrases like "independent review", "5-agent review", "assume all work is wrong":
+Route every reviewer-confirmed HIGH or CRITICAL finding to a critic. Also route borderline MEDIUM findings when they involve security, state machines, write authority, evidence integrity, model/tool permissions, git safety, or config ratchets.
 
-1. Launch all 6 explorer lanes as **adversarial council agents** in parallel (`run_in_background: true`)
-2. Each agent assumes **all work is WRONG until code evidence proves otherwise**
-3. Each agent returns: `EVIDENCE_FOUND / SUSPICIOUS / CLEAN` with file:line evidence, capped at N words. Agents must not return CONFIRMED, DISPROVED, or final severity.
-4. Main thread acts as **independent reviewer** — re-reads file:line evidence directly and classifies candidates
-5. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings
-6. **Council findings are supplementary, not authoritative overrides.** Council may miss context the main thread has. Do not adopt council severities verbatim without independent validation.
-7. Final synthesis merges validated council findings with main-thread-only findings, clearly labeled by source
+The critic must challenge:
+
+- severity inflation,
+- weak or incomplete evidence,
+- missing mitigating context,
+- false reachability assumptions,
+- framework or middleware defaults,
+- schema validation gates,
+- state-machine constraints,
+- feature flags or dead code,
+- pre-existing status,
+- non-actionable or unsafe fix recommendations,
+- sibling-file gaps,
+- whether multiple comments should be grouped into one root cause.
+
+Critic output format:
+
+```text
+[CRITIC] | finding_id | UPHELD / DOWNGRADED / DISPROVED / NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+```
+
+Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.
 
 ---
 
-## Post-Fix Re-verification
+## Runtime-Aware False-Positive Guard Checklist
+
+Before confirming any finding, the reviewer and critic must check all that apply:
+
+- [ ] Schema validation gate: does schema validation reject malformed input before the flagged line?
+- [ ] Middleware interception: does middleware handle the request or command before the flagged path?
+- [ ] Framework default mitigation: does the framework inherently prevent this class of issue?
+- [ ] Caller context correctness: who invokes this code, and can untrusted input reach it?
+- [ ] Execution reachability: is the path reachable, or behind a feature flag, dead branch, build-only path, or commented-out code?
+- [ ] State-machine constraints: do ordering rules, locks, mutexes, phase gates, or transition guards prevent the state?
+- [ ] Permission boundary: does role/tool mapping prevent the operation?
+- [ ] Data lifetime: is the flagged state persisted, serialized, logged, or only transient?
+- [ ] Cross-platform behavior: does Windows/macOS/Linux path or shell behavior change the result?
+- [ ] Test environment mismatch: is the finding only true under a mock or fixture that cannot occur in production?
+
+If a mitigation applies and was not accounted for, downgrade to `ADVISORY`, `UNVERIFIED`, or `DISPROVED`.
+
+---
+
+## Phase 9: Synthesis, Grouping, and Noise Budget
+
+Before final output:
+
+- group duplicate candidates by root cause,
+- report one finding per root cause,
+- attach all affected file:line references under that finding,
+- separate ship blockers from advisory notes,
+- suppress pure style/nit findings unless they indicate correctness, security, test, maintainability, or user-impact risk,
+- distinguish PR-introduced from pre-existing,
+- distinguish confirmed from plausible-but-unverified,
+- include disproved agent/tool claims,
+- keep final comments actionable.
+
+### Finding ID format
+
+```text
+F-001 | severity | category | root cause | affected file:line refs | reviewer | critic status
+```
+
+### Suggested final grouping
+
+1. Ship blockers,
+2. Important non-blockers,
+3. Test / coverage gaps,
+4. Pre-existing issues,
+5. Unverified plausible risks,
+6. Disproved candidates / false positives,
+7. Clean lane summary.
+
+---
+
+## Phase 10: Metrics and Knowledge Writeback
+
+At the end of the review, record review quality metrics when Swarm metrics or local evidence storage is available.
+
+Record:
+
+- raw candidates by base lane,
+- raw candidates by micro-lane,
+- deterministic tool candidates,
+- reviewer-confirmed findings,
+- reviewer-disproved findings,
+- reviewer-unverified findings,
+- critic-upheld findings,
+- critic-downgraded findings,
+- critic-disproved findings,
+- final reported findings,
+- suppressed non-actionable candidates,
+- recurring false-positive patterns,
+- commands or probes used,
+- token/time cost if available,
+- accepted/fixed findings when known.
+
+Knowledge writeback rules:
+
+- Write back only validated true positives or validated false-positive patterns.
+- Include file patterns, invariant, evidence, and why it was confirmed/disproved.
+- Mark repo-specific lessons as project-tier unless there is strong evidence they generalize.
+- Never promote quarantined or unvalidated knowledge to hive-tier.
+- Never store secrets, private tokens, or raw sensitive logs.
+
+---
+
+## Phase 11: Post-Fix Re-verification
 
 When the PR author pushes fixes after a review, perform a targeted re-verification before updating the verdict.
 
@@ -371,116 +720,289 @@ Update the verdict only after re-verifying all previously blocking findings.
 
 ---
 
-## 11 Plugin-Specific Review Categories
+# Council Mode Workflow
 
-When reviewing the opencode-swarm plugin codebase, apply domain expertise across these categories:
+Council mode is opt-in only and adversarial.
 
-1. **Architect prompt integrity** — prompt injection, scope escape, system prompt leakage, unchecked `{{variable}}` interpolation
-2. **Council orchestration** — veto logic correctness, quorum enforcement, evidence integrity in verdict synthesis
-3. **Guardrail bypass paths** — scope guard evasion, delegation gate circumvention, rate limiter defeat
-4. **Evidence schema drift** — JSON schema evolution, missing required fields in evidence bundles, type mismatches
-5. **Knowledge base contract** — CRUD semantics violations, quarantine entry inconsistency, tier confusion (swarm vs hive)
-6. **Phase transition validation** — gate ordering correctness, retro requirement enforcement, premature phase completion
-7. **Model-to-role mapping** — agent prefix enforcement, tool restriction violations, unauthorized tool access
-8. **Config ratchet semantics** — once-enabled gates cannot be disabled, configuration drift, lock-state integrity
-9. **URL sanitization** — scheme allowlist enforcement, private IP blocking, credential stripping from user-supplied URLs
-10. **Git safety** — branch detection reliability, `reset --hard` safety checks, Windows path retry logic, .git directory protection
-11. **Test infrastructure** — bun:test usage, mock isolation correctness, cross-platform CI paths, `bun:test` vs `vitest` API compliance
+When triggered:
+
+1. Build the same context pack as default mode.
+2. Launch all council agents in a single message with multiple Agent tool calls when supported (`run_in_background: true`).
+3. Each council agent assumes all work is wrong until code evidence proves otherwise.
+4. Each agent hunts within its lane only.
+5. Agents return evidence states only: `EVIDENCE_FOUND`, `SUSPICIOUS`, or `CLEAN`.
+6. Agents must not return `CONFIRMED`, `DISPROVED`, or final severity.
+7. The independent reviewer then classifies every council candidate as `CONFIRMED`, `DISPROVED`, `UNVERIFIED`, or `PRE_EXISTING`.
+8. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings.
+9. Final synthesis distinguishes real blockers, real low-severity issues, accepted caveats, disproved council claims, and follow-up quality work.
+
+Default council lanes:
+
+- correctness and edge cases,
+- security and trust boundaries,
+- dependency and deployment safety,
+- docs and intent-vs-actual,
+- tests and falsifiability,
+- performance and architecture when risk justifies it.
+
+Council prompt requirements:
+
+- branch and commit range,
+- context pack summary,
+- files owned by that lane,
+- relevant impact cone,
+- explicit checklist,
+- strict output cap,
+- `EVIDENCE_FOUND / SUSPICIOUS / CLEAN` only,
+- file:line evidence required for `EVIDENCE_FOUND`.
+
+Council findings are supplementary, not authoritative overrides. Do not adopt council severities or claims without independent validation.
 
 ---
 
-## Runtime-Aware False-Positive Guard Checklist
-
-Before confirming **any** finding, verify all that apply:
-
-- [ ] **Schema validation gate:** Is the flagged code path behind a JSON schema validation check that would reject malformed input before it reaches the flagged line?
-- [ ] **Middleware interception:** Does middleware intercept and handle the request before the flagged code path executes?
-- [ ] **Framework default mitigation:** Does the framework's default behavior (e.g., Express JSON parsing, Django ORM parameterization) inherently prevent the vulnerability?
-- [ ] **Caller context correctness:** Is the caller context correct? Who actually invokes this code — only internal calls or also external/untrusted callers?
-- [ ] **Execution reachability:** Is the flagged path actually reachable in normal execution, or is it behind a feature flag, commented-out code, or dead branch?
-- [ ] **State-machine constraints:** Do state-machine transition rules prevent reaching the flagged state (e.g., ordering guarantees, mutex protection)?
-- [ ] **Permission boundary:** Does role/tool mapping prevent the operation?
-- [ ] **Data lifetime:** Is the flagged state persisted, serialized, logged, or only transient?
-- [ ] **Cross-platform behavior:** Does Windows/macOS/Linux path or shell behavior change the result?
-- [ ] **Test environment mismatch:** Is the finding only true under a mock or fixture that cannot occur in production?
-
-If **any** answer is yes and unaccounted for in the finding, the finding is downgraded to **ADVISORY** or **DISPROVED**.
-
----
-
-## Merge Recommendation Table
+# Merge Recommendation Table
 
 | Verdict | Condition |
-|---------|-----------|
-| **APPROVE** | Zero CRITICAL findings, zero unresolved HIGH findings, all obligations MET |
-| **APPROVE_WITH_NOTES** | Zero CRITICAL findings, HIGH findings are confirmed ADVISORY only (not ship blockers) |
-| **REQUEST_CHANGES** | Any unresolved HIGH finding; or multiple MEDIUM findings in the same functional area |
-| **BLOCK** | Any unresolved CRITICAL finding |
+|---|---|
+| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed |
+| `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking |
+| `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk |
+| `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections |
 
 ---
 
-## Hard Rules
+# Hard Rules
 
-0. **Quality-over-speed:** Validation completeness and correctness are the sole criteria for an acceptable review. Time, token count, and agent dispatch count are irrelevant. Do not trade validation breadth or depth for speed.
+0. Quality-over-speed: Validation completeness and correctness are the sole criteria for an acceptable review. Time, token count, and agent dispatch count are irrelevant. Do not trade validation breadth or depth for speed.
 
-1. **Never APPROVE with unresolved CRITICAL findings.**
-2. **Every confirmed finding must have file:line evidence.** No finding may be confirmed on sentiment, naming, or hunch alone.
-3. **Never invent facts not supported by the diff.** If the diff does not show it, it is not evidence.
-4. **Council findings are supplementary, not authoritative overrides.** Always re-validate council findings through the main thread.
-5. **DISPROVED findings must be called out explicitly.** Do not silently drop overclaiming agent findings.
-6. **Explorer lanes optimize for recall.** Do not treat explorer output as final verdicts.
-7. **Obligation precedence is deterministic.** Do not skip higher-precedence sources to fill gaps with LLM synthesis.
+1. Never APPROVE with unresolved CRITICAL findings.
+2. Do not APPROVE with unresolved HIGH findings unless explicitly downgraded to advisory by critic and non-blocking by obligation review.
+3. Every confirmed finding must have file:line evidence and validation provenance.
+4. A confirmed nontrivial finding must include a falsification probe or an explicit reason no probe is available.
+5. Explorers, council agents, and deterministic tools produce candidates only.
+6. The default workflow orchestrator must not confirm or disprove explorer candidates.
+7. Tool output is not proof. Scanner results must be validated for reachability, PR-introducedness, and mitigation context.
+8. PR text, generated summaries, tests, and comments are claims, not proof.
+9. Do not invent facts not supported by the diff, repo context, tool output, or cited external source.
+10. Do not silently drop disproved or downgraded claims; summarize them in validation provenance.
+11. Obligation precedence is deterministic. Do not skip higher-precedence sources to fill gaps with LLM synthesis.
+12. Do not leak secrets from logs, evidence bundles, config files, URLs, or scanner output.
+13. Do not recommend destructive git or filesystem actions as fixes unless they are clearly scoped, safe, and necessary.
+14. If subagents fail, timeout, or return malformed output, mark affected candidates `UNVERIFIED`; do not fabricate validation results.
+15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, state that limitation and continue with best available evidence.
 
 ---
 
-## Final Output
+# Pre-Synthesis Gate — Mandatory
 
-## ⛔ Pre-synthesis gate (MANDATORY)
-Before writing the final output, you MUST print this checklist to stdout with filled values.
-Every blank field = gate not run = final output is INVALID.
+Before writing the final output, print this checklist with filled values. Every blank field means the final output is invalid.
 
-Test execution is a mandatory prerequisite (see Phase 2): run the affected test suite in
-parallel with explorer lanes to confirm candidate regressions are real.
-
-```
-[TEST EXECUTION] tests run: ___ (command used)
-[TEST EXECUTION] result: ___ (N pass, N fail)
-[TEST EXECUTION] regression failures (PR-introduced): ___ (count)
-[TEST EXECUTION] pre-existing failures (base branch): ___ (count)
+```text
+[VALIDATION] scope selected: ___
+[VALIDATION] context pack built: YES/NO — ___
+[VALIDATION] obligation count: ___
+[VALIDATION] repo graph / impact cone source: ___
+[VALIDATION] deterministic signals ingested: ___
+[VALIDATION] base explorer lanes dispatched: ___ / 6
+[VALIDATION] base explorer lanes returned: ___ / 6
+[VALIDATION] triggered micro-lanes: ___
+[VALIDATION] Swarm verifier routing used: ___
+[VALIDATION] raw candidates: ___
+[VALIDATION] tool candidates: ___
 [VALIDATION] reviewer dispatched: ___ (agent type, task description)
 [VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
-[VALIDATION] critic dispatched: ___ (agent type, task description) OR "SKIPPED — no reviewer-confirmed HIGH or borderline-confidence findings"
-[VALIDATION] critic returned: ___ (APPROVED / CONCERNS) OR "N/A"
+[VALIDATION] findings confirmed by reviewer: ___
+[VALIDATION] findings rejected by reviewer as false positive: ___
+[VALIDATION] findings marked PRE_EXISTING: ___
+[VALIDATION] findings left UNVERIFIED: ___
+[VALIDATION] findings escalated to critic: ___
+[VALIDATION] critic dispatched: ___ OR "SKIPPED — no reviewer-confirmed HIGH/CRITICAL or borderline findings"
+[VALIDATION] critic returned: ___ OR "N/A"
+[VALIDATION] findings upheld by critic: ___
+[VALIDATION] findings downgraded by critic: ___
+[VALIDATION] findings disproved by critic: ___
+[VALIDATION] falsification probes included: ___
+[VALIDATION] grouped root-cause findings: ___
+[VALIDATION] metrics / knowledge writeback: ___
+[VALIDATION] all explorers verified to diff against PR branch, not HEAD: YES/NO
 [VALIDATION] noise-filter suppressed candidates: ___ (count, each with reason in final report)
 [VALIDATION] all non-suppressed candidates routed to reviewer: YES/NO
-[VALIDATION] findings confirmed by reviewer: ___ (count)
-[VALIDATION] findings rejected by reviewer as false positive: ___ (count)
-[VALIDATION] findings escalated by reviewer to critic: ___ (count)
-[VALIDATION] findings confirmed by critic after challenge: ___ (count)
 ```
 
-If the reviewer returned REJECTED for any candidate: you MUST route that rejection back to the coder (if implementation-related) or mark the explorer candidate as invalid (if evidence was insufficient). Do NOT silently downgrade a rejection.
+If the reviewer returned `REJECTED` or `CONCERNS`, route the issue back to implementation context or mark the candidate invalid with reason. Do not silently downgrade a rejection.
 
-You MUST NOT write the final output section until this checklist has been printed with all fields filled.
+---
 
-### Subagent failure handling
-If a reviewer or critic subagent fails, times out, or returns malformed output: mark all affected findings as UNVERIFIED, note the failure reason in the validation provenance, and proceed to final output. Do NOT silently drop findings or fabricate validation results.
+# Final Output Format
 
-## Final output
-Produce:
-- PR intent
-- implementation summary
-- intended vs actual mapping
-- Validation provenance (REQUIRED — cannot be omitted):
-  - For each finding: which reviewer confirmed it and whether critic challenged it
-  - List any findings that were DISPROVED by reviewer (with reason)
-  - List any findings that were DOWNGRADED by critic (with reason)
-  - If zero findings: explicitly state "No findings — all lanes CLEAN" with a lane-by-lane summary
-- confirmed findings
-- pre-existing findings
-- unverified but plausible risks
-- test / coverage gaps
-- verdict
-- merge recommendation
+Produce the final review in this order:
+
+## PR intent
+
+Summarize the obligations and user-visible intent.
+
+## Implementation summary
+
+Summarize what changed, including major files, public APIs, schemas, configs, tests, and Swarm artifacts.
+
+## Intended vs actual mapping
+
+| Obligation | Source | Actual evidence | Status | Linked finding |
+|---|---|---|---|---|
+
+Use `MET`, `PARTIALLY_MET`, `NOT_MET`, or `UNVERIFIABLE`.
+
+## Validation provenance
+
+Include:
+
+- context pack limitations,
+- explorer lanes launched and returned,
+- micro-lanes triggered,
+- deterministic signals ingested,
+- reviewer identity / role for each finding,
+- critic result for each escalated finding,
+- findings DISPROVED by reviewer with reason,
+- findings DOWNGRADED by critic with reason,
+- findings left UNVERIFIED with reason.
+
+If zero findings, explicitly state:
+
+```text
+No confirmed findings — all validated lanes CLEAN.
+```
+
+Then provide a lane-by-lane clean summary.
+
+## Confirmed findings
+
+For each finding:
+
+```text
+F-001 — Severity — Category — Root cause
+Files: path:line, path:line
+Status: CONFIRMED / critic status
+Evidence type: STRUCTURALLY_PROVEN / EXECUTION_PROVEN / STATIC_TRACE_PROVEN
+Why it matters:
+Validation:
+Falsification probe:
+Suggested fix:
+```
+
+## Pre-existing findings
+
+List separately from PR-introduced findings.
+
+## Unverified but plausible risks
+
+Only include if useful and clearly labeled as unverified.
+
+## Test / coverage gaps
+
+Focus on missing tests that would catch real risks, not generic coverage requests.
+
+## Disproved candidates and false positives
+
+List concise reasons for notable false positives from explorers, tools, council agents, or reviewers.
+
+## Verdict
+
+Use one of:
+
+- `APPROVE`
+- `APPROVE_WITH_NOTES`
+- `REQUEST_CHANGES`
+- `BLOCK`
+
+## Merge recommendation
+
+Explain the recommendation in one short paragraph and list required actions before merge if applicable.
+
+---
+
+# Reviewer Prompt Template
+
+Use this template when dispatching reviewer subagents:
+
+```text
+You are the independent reviewer. Validate only the candidates assigned below.
+Do not search for new issues except where needed to validate reachability or mitigation.
+Do not trust explorer severity.
+
+Context pack summary:
+- scope: ...
+- obligations: ...
+- impact cone: ...
+- deterministic signals: ...
+- relevant Swarm artifacts / knowledge: ...
+- base_ref: <commit SHA of base branch>
+- head_ref: <commit SHA of PR head branch>
+
+Candidates:
+- ...
+
+For each candidate, return:
+[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
+
+You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
+
+IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you MUST read the equivalent code on the base branch (git show <base_ref>:<file>) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
+```
+
+---
+
+# Critic Prompt Template
+
+Use this template when dispatching critic subagents:
+
+```text
+You are the adversarial critic. Challenge only reviewer-confirmed findings assigned below.
+Your goal is to reduce false positives, severity inflation, and non-actionable reports.
+
+For each finding, challenge:
+- whether evidence proves the claim,
+- whether the path is reachable,
+- whether mitigations apply,
+- whether severity is inflated,
+- whether it is PR-introduced,
+- whether suggested fixes are safe/actionable,
+- whether related files were missed,
+- whether multiple findings should be grouped.
+
+Return:
+[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+```
+
+---
+
+# Explorer Prompt Template
+
+Use this template when dispatching base explorer or micro-lane agents:
+
+```text
+You are an explorer. Optimize for recall, not final judgment.
+Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+
+Lane:
+Scope:
+Obligations:
+Changed files/hunks:
+Impact cone:
+Relevant deterministic signals:
+Relevant Swarm artifacts / knowledge:
+Checklist:
+
+You must inspect or mark unavailable:
+1. changed hunk,
+2. caller/consumer,
+3. callee/dependency,
+4. sibling implementation or prior pattern,
+5. nearest test or missing-test location,
+6. deterministic signals,
+7. Swarm artifacts/knowledge.
+
+Return:
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+```
 
 Do not let speed degrade validation quality.

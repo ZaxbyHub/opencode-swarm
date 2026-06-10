@@ -52,7 +52,13 @@ gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
 gh pr view <PR_NUMBER> --json reviews
 
 # Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
-gh pr view <PR_NUMBER> --json comments --jq '.comments[] | select(.authorAssociation == "CONTRIBUTOR" or .authorAssociation == "NONE" or .author.login | test("bot|copilot|coderabbit|codex"; "i"))'
+# Inline review comments — use REST API for reliable bot detection via user.type
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+For general PR comments (not inline), use the issue comments endpoint:
+```bash
+gh api repos/{owner}/{repo}/issues/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
 ```
 
 ### Step 2 — Classify each comment
@@ -93,15 +99,24 @@ conflicted PR cannot merge regardless of review quality.
 gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
 ```
 
-| State | Action |
+The response has two independent fields. Handle each:
+
+**`mergeable` field** — whether GitHub can compute mergeability:
+| Value | Meaning | Action |
+|-------|---------|--------|
+| `MERGEABLE` | No conflicts detected | Proceed — check `mergeStateStatus` below |
+| `CONFLICTING` | Merge conflicts exist | Resolve before reviewing |
+| `UNKNOWN` | GitHub still computing | Wait 30s, re-check |
+
+**`mergeStateStatus` field** — overall branch state:
+| Value | Action |
 |-------|--------|
-| `MERGEABLE` + `CLEAN` | Proceed to Phase 1 |
-| `MERGEABLE` + `BEHIND` | Note in report; non-blocking (merge queue handles it) |
-| `UNKNOWN` | Wait 30s, re-check. GitHub is still computing |
-| `DIRTY` | Conflicts exist — resolve before reviewing |
+| `CLEAN` | All checks pass, no conflicts — proceed to Phase 1 |
+| `BEHIND` | Branch behind base — note in report; non-blocking if merge queue handles it |
+| `DIRTY` | Merge conflicts exist — resolve before reviewing |
 | `BLOCKED` | External blocker (branch protection, failing required check) — investigate |
 
-### Step 2 — Resolve conflicts (when DIRTY)
+### Step 2 — Resolve conflicts (when CONFLICTING or DIRTY)
 
 When the PR has merge conflicts:
 
