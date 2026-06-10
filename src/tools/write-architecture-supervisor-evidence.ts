@@ -132,7 +132,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 					? {
 							agent_name: args.provenance_agent_name,
 							session_id: args.provenance_session_id,
-							verified_at: new Date().toISOString(),
+							captured_at: new Date().toISOString(),
 						}
 					: undefined;
 

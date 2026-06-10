@@ -100,7 +100,7 @@ function writeSupervisorSidecar(opts: {
 	provenance?: {
 		agent_name?: string;
 		session_id?: string;
-		verified_at?: string;
+		captured_at?: string;
 	};
 }) {
 	const dirPhase = opts.dirPhase ?? 1;
@@ -156,7 +156,7 @@ describe('architecture supervision gate - provenance verification', () => {
 			provenance: {
 				agent_name: 'critic_architecture_supervisor',
 				session_id: 'test-session-123',
-				verified_at: new Date().toISOString(),
+				captured_at: new Date().toISOString(),
 			},
 		});
 		const parsed = await complete();
@@ -241,7 +241,7 @@ describe('architecture supervision gate - provenance verification', () => {
 			provenance: {
 				agent_name: 'critic_architecture_supervisor',
 				session_id: 'test-session-123',
-				verified_at: new Date().toISOString(),
+				captured_at: new Date().toISOString(),
 			},
 		});
 		const parsed = await complete();

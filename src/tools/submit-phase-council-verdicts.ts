@@ -278,7 +278,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 					? {
 							agent_name: input.provenanceAgentName,
 							session_id: input.provenanceSessionId,
-							verified_at: new Date().toISOString(),
+							captured_at: new Date().toISOString(),
 						}
 					: undefined;
 

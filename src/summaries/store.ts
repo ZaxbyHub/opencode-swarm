@@ -212,7 +212,7 @@ export interface RawSupervisorEntry {
 	provenance?: {
 		agent_name?: string;
 		session_id?: string;
-		verified_at?: string;
+		captured_at?: string;
 	};
 }
 

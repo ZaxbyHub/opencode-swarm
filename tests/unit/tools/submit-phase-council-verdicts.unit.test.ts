@@ -713,7 +713,7 @@ describe('submit_phase_council_verdicts — provenance write-through', () => {
 			expect(entry.provenance).toBeDefined();
 			expect(entry.provenance.agent_name).toBe('architect');
 			expect(entry.provenance.session_id).toBe('sess-provenance-test');
-			expect(entry.provenance.verified_at).toBeDefined();
+			expect(entry.provenance.captured_at).toBeDefined();
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

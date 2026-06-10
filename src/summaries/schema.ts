@@ -197,13 +197,13 @@ export type KnowledgeRecommendation = z.infer<
 >;
 
 /**
- * Provenance metadata for evidence: agent identity, session binding, and verification timestamp.
+ * Provenance metadata for evidence: agent identity, session binding, and capture timestamp.
  * Optional for backwards compatibility; when present and in gate mode, gates verify these fields.
  */
 export const EvidenceProvenanceSchema = z.object({
 	agent_name: z.string().min(1).optional(),
 	session_id: z.string().min(1).optional(),
-	verified_at: z.string().datetime().optional(),
+	captured_at: z.string().datetime().optional(),
 });
 export type EvidenceProvenance = z.infer<typeof EvidenceProvenanceSchema>;
 

@@ -280,7 +280,7 @@ describe('write_architecture_supervisor_evidence provenance write-through', () =
 		expect(raw?.provenance).toBeDefined();
 		expect(raw!.provenance!.agent_name).toBe('critic_architecture_supervisor');
 		expect(raw!.provenance!.session_id).toBe('sess-abc-123');
-		expect(raw!.provenance!.verified_at).toBeDefined();
+		expect(raw!.provenance!.captured_at).toBeDefined();
 	});
 
 	test('omits provenance when not provided', async () => {

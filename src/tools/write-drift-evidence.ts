@@ -113,7 +113,7 @@ export async function executeWriteDriftEvidence(
 			? {
 					agent_name: args.provenanceAgentName,
 					session_id: args.provenanceSessionId,
-					verified_at: new Date().toISOString(),
+					captured_at: new Date().toISOString(),
 				}
 			: undefined;
 

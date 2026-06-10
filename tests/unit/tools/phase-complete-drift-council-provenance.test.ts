@@ -99,7 +99,7 @@ function writeDriftEvidence(opts: {
 	provenance?: {
 		agent_name?: string;
 		session_id?: string;
-		verified_at?: string;
+		captured_at?: string;
 	};
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence', '1');
@@ -132,7 +132,7 @@ function writeCouncilEvidence(opts: {
 	provenance?: {
 		agent_name?: string;
 		session_id?: string;
-		verified_at?: string;
+		captured_at?: string;
 	};
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence', '1');
