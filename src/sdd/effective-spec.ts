@@ -367,12 +367,9 @@ export function buildOpenSpecProjectionSync(
 	];
 
 	if (currentRequirements.length === 0) {
-		lines.push(
-			'- FR-001 SHOULD define at least one current OpenSpec requirement before planning.',
-		);
-		usedIds.add('FR-001');
+		lines.push('- No current OpenSpec requirements found in source artifacts.');
 		warnings.push(
-			'No current requirements found; projection includes a warning requirement.',
+			'No current requirements found; projection includes an advisory note only.',
 		);
 	} else {
 		for (const req of currentRequirements) {
