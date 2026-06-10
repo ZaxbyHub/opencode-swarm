@@ -1163,6 +1163,8 @@ export const ArchitecturalSupervisionConfigSchema = z.object({
 	allow_concerns_to_complete: z.boolean().default(true),
 	/** Propose supervisor knowledge recommendations as candidate knowledge. Default: false. [Chunk E: consumed by the feedback path] */
 	persist_knowledge_recommendations: z.boolean().default(false),
+	/** Reject evidence lacking provenance (agent_name or session_id) when in gate mode. Default: false (advisory only). */
+	provenance_verify: z.boolean().default(false),
 });
 
 export type ArchitecturalSupervisionConfig = z.infer<
