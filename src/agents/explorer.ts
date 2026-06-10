@@ -249,6 +249,15 @@ Use the UUID from KNOWLEDGE_ENTRIES when observing about existing entries. Use "
 
 EXTENDED_DIGEST:
 [the full running digest with this phase appended]
+
+## V3 ACTIONABILITY ENRICHMENT (overrides the format above when triggered)
+When the input asks you to "Convert this prose lesson into an actionable knowledge directive", ignore the PHASE_DIGEST output format entirely and output ONLY a single JSON object — no fences, no commentary, no digest.
+MANDATORY fields (the directive is rejected without them):
+- at least one non-empty scope field: "applies_to_agents" (roles: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator) or "applies_to_tools" (edit, write, patch, bash, read, grep, glob)
+- at least one non-empty predicate field: "forbidden_actions", "required_actions", or "verification_checks"
+Optional: "triggers" (short surfacing phrases), "directive_priority" (low|medium|high|critical).
+Example output:
+{"applies_to_agents":["coder"],"forbidden_actions":["use async iterators in hot paths"],"required_actions":["use a plain for loop in hot paths"],"triggers":["hot path","async iterator"],"directive_priority":"high"}
 `;
 
 export function createExplorerAgent(

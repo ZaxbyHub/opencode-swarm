@@ -41,6 +41,13 @@ import { diff_summary } from './diff-summary';
 import { doc_extract, doc_scan } from './doc-scan';
 import { detect_domains } from './domain-detector';
 import { evidence_check } from './evidence-check';
+import { external_skill_delete } from './external-skill-delete';
+import { external_skill_discover } from './external-skill-discover';
+import { external_skill_inspect } from './external-skill-inspect';
+import { external_skill_list } from './external-skill-list';
+import { external_skill_promote } from './external-skill-promote';
+import { external_skill_reject } from './external-skill-reject';
+import { external_skill_revoke } from './external-skill-revoke';
 import { extract_code_blocks } from './file-extractor';
 import { generate_mutants } from './generate-mutants';
 import { get_approved_plan } from './get-approved-plan';
@@ -208,4 +215,11 @@ export const TOOL_MANIFEST = defineHandlers({
 	lean_turbo_run_phase: () => lean_turbo_run_phase,
 	lean_turbo_status: () => lean_turbo_status,
 	apply_patch: () => applyPatch,
+	external_skill_discover: () => external_skill_discover,
+	external_skill_list: () => external_skill_list,
+	external_skill_inspect: () => external_skill_inspect,
+	external_skill_promote: () => external_skill_promote,
+	external_skill_reject: () => external_skill_reject,
+	external_skill_delete: () => external_skill_delete,
+	external_skill_revoke: () => external_skill_revoke,
 });

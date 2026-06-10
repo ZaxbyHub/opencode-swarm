@@ -42,7 +42,7 @@ export interface QaGates {
 	hallucination_guard: boolean;
 	sast_enabled: boolean;
 	mutation_test: boolean;
-	council_general_review: boolean;
+	phase_council: boolean;
 	drift_check: boolean;
 	final_council: boolean;
 }
@@ -59,7 +59,7 @@ export const DEFAULT_QA_GATES: QaGates = {
 	hallucination_guard: false,
 	sast_enabled: true,
 	mutation_test: false,
-	council_general_review: false,
+	phase_council: false,
 	drift_check: true,
 	final_council: false,
 };
@@ -90,11 +90,36 @@ interface QaGateProfileRow {
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 	let parsed: Partial<QaGates> = {};
 	try {
-		parsed = JSON.parse(row.gates) as Partial<QaGates>;
+		const maybeGates = JSON.parse(row.gates);
+		if (
+			maybeGates &&
+			typeof maybeGates === 'object' &&
+			!Array.isArray(maybeGates)
+		) {
+			parsed = maybeGates as Partial<QaGates>;
+		}
 	} catch {
 		parsed = {};
 	}
-	const gates: QaGates = { ...DEFAULT_QA_GATES, ...parsed };
+	// Backward compat: council_mode used to trigger phase-level council too.
+	// Old profiles with council_mode: true but no phase_council field are migrated
+	// to phase_council: true (preserving phase-level review) and council_mode: false
+	// (avoiding the new per-task Stage B replacement semantics for legacy users).
+	const raw = parsed as Record<string, unknown>;
+	if (raw.council_mode === true && raw.phase_council === undefined) {
+		parsed.phase_council = true;
+		parsed.council_mode = false;
+	}
+	// Filter to known gate keys only — prevents legacy/removed gate fields
+	// (e.g. council_general_review) from leaking into the live gates object.
+	const knownKeys = new Set(Object.keys(DEFAULT_QA_GATES));
+	const filteredParsed: Partial<QaGates> = {};
+	for (const key of Object.keys(parsed) as Array<keyof QaGates>) {
+		if (knownKeys.has(key)) {
+			filteredParsed[key] = parsed[key];
+		}
+	}
+	const gates: QaGates = { ...DEFAULT_QA_GATES, ...filteredParsed };
 	return {
 		id: row.id,
 		plan_id: row.plan_id,
@@ -281,7 +306,7 @@ export function computeProfileHash(profile: QaGateProfile): string {
  *   machine; blocks coder→next-coder advancement until reviewer + test_engineer
  *   delegations observed).
  * - council_mode — src/state.ts isCouncilGateActive + src/hooks/delegation-gate.ts
- *   (Stage B replaced by submit_council_verdicts verdict).
+ *   (replaces per-task Stage B with full 5-member council via submit_council_verdicts).
  * - sme_enabled — consumed during MODE: BRAINSTORM/SPECIFY architect dialogue.
  * - critic_pre_plan — consumed by MODE: PLAN critic delegation before save_plan.
  * - sast_enabled — consumed inside pre_check_batch tool.
@@ -289,11 +314,14 @@ export function computeProfileHash(profile: QaGateProfile): string {
  *   until .swarm/evidence/{phase}/hallucination-guard.json has APPROVED verdict).
  * - mutation_test — src/tools/phase-complete.ts Gate 4 (blocks phase_complete
  *   until .swarm/evidence/{phase}/mutation-gate.json has pass verdict; warn does not block)
- * - council_general_review — src/agents/architect.ts SPECIFY-COUNCIL-REVIEW
- *   (fires when gate is true; runs convene_general_council on draft spec before
- *   critic-gate to fold multi-model deliberation into the spec).
+ * - phase_council — src/tools/phase-complete/gates/phase-council-gate.ts Gate 5
+ *   (blocks phase_complete until .swarm/evidence/{phase}/phase-council.json has
+ *   approved verdict from 5-member holistic phase review).
  * - drift_check — src/tools/phase-complete.ts Gate 2 (blocks phase_complete when
  *   drift-verifier.json missing or rejected)
+ * - final_council — src/tools/write-final-council-evidence.ts (blocks project
+ *   completion until .swarm/evidence/final-council.json has approved verdict
+ *   from 5-member project-scope review).
  *
  * Session overrides are intentionally ephemeral — they live only in
  * in-memory `AgentSessionState.qaGateSessionOverrides` and are NOT

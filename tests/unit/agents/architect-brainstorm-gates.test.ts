@@ -42,9 +42,9 @@ describe('architect prompt - MODE: BRAINSTORM Phase 6 QA gate selection', () => 
 		expect(block).toContain('hallucination_guard');
 	});
 
-	test('Phase 6 says "One question, one message, defaults pre-stated"', () => {
+	test('Phase 6 presents all three items as one unified exchange', () => {
 		const block = getPhase6Section();
-		expect(block).toContain('One question, one message, defaults pre-stated');
+		expect(block).toContain('one unified exchange');
 	});
 
 	test('Phase 6 does NOT instruct calling set_qa_gates directly (defers to MODE: PLAN)', () => {

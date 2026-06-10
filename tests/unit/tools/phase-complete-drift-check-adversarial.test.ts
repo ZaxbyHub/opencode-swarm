@@ -75,7 +75,7 @@ mock.module('../../../src/db/qa-gate-profile.js', () => ({
 		hallucination_guard: false,
 		sast_enabled: true,
 		mutation_test: false,
-		council_general_review: false,
+		phase_council: false,
 		drift_check: true,
 	},
 }));
@@ -95,7 +95,7 @@ function createMockProfile(driftCheckValue: boolean): QaGateProfile {
 			hallucination_guard: false,
 			sast_enabled: true,
 			mutation_test: false,
-			council_general_review: false,
+			phase_council: false,
 			drift_check: driftCheckValue,
 		},
 		locked_at: null,

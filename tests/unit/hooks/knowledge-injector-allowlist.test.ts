@@ -1,22 +1,20 @@
 /**
- * Tests for the isOrchestratorAgent allowlist fix in src/hooks/knowledge-injector.ts
+ * Tests for agent-scoped knowledge injection in src/hooks/knowledge-injector.ts.
  *
- * Bug fixed: the original implementation used a denylist, allowing knowledge
- * injection into non-architect agents like 'sme', 'critic_sounding_board', and
- * 'critic_drift_verifier'. The fix replaced the denylist with an explicit
- * allowlist that only permits injection into the 'architect' agent.
+ * History: the original code used a denylist that leaked the architect's
+ * knowledge block into non-architect agents. That was replaced by an explicit
+ * architect allowlist.
  *
- * Covers:
- * 1. 'architect' agent → injection occurs
- * 2. 'sme' agent → injection blocked
- * 3. 'critic_sounding_board' agent → injection blocked
- * 4. 'critic_drift_verifier' agent → injection blocked
- * 5. 'coder' agent → injection blocked
- * 6. 'reviewer' agent → injection blocked
- * 7. 'mega_architect' (prefixed) → injection occurs (allowlist applies after strip)
- * 8. 'mega_sme' (prefixed non-architect) → injection blocked
- * 9. Case: 'Architect' (capitalized) → injection occurs (lowercase compare)
- * 10. Empty agent name → injection blocked
+ * REALIGNED for Swarm Learning System / Change 1 (Task 1.1): the injector is no
+ * longer architect-only. There are now TWO injection paths:
+ *   - architect → the orchestrator block (📚 Lessons / <swarm_knowledge_directives>)
+ *   - delegated subagents (coder, reviewer, test_engineer, sme, docs, designer,
+ *     critic, curator) → the <delegate_knowledge_directives> block
+ * All OTHER agents (critic_sounding_board, critic_drift_verifier, unknown,
+ * empty) still receive nothing.
+ *
+ * The architect must NOT receive a delegate block, and delegates must NOT
+ * receive the orchestrator block — the two paths are mutually exclusive.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -168,6 +166,7 @@ function makeConfig(): KnowledgeConfig {
 	};
 }
 
+/** Detects the architect/orchestrator-tier injection block. */
 function hasKnowledgeInjection(output: {
 	messages: MessageWithParts[];
 }): boolean {
@@ -175,17 +174,30 @@ function hasKnowledgeInjection(output: {
 		m.parts?.some(
 			(p) =>
 				p.text?.includes('📚 Lessons:') ||
+				p.text?.includes('<swarm_knowledge_directives>') ||
 				p.text?.includes('<drift_report>') ||
 				p.text?.includes('<curator_briefing>'),
 		),
 	);
 }
 
+/** Detects the per-delegate directive block (Change 1). */
+function hasDelegateBlock(output: { messages: MessageWithParts[] }): boolean {
+	return output.messages.some((m) =>
+		m.parts?.some((p) => p.text?.includes('<delegate_knowledge_directives>')),
+	);
+}
+
+/** Detects any knowledge injection at all (either path). */
+function hasAnyInjection(output: { messages: MessageWithParts[] }): boolean {
+	return hasKnowledgeInjection(output) || hasDelegateBlock(output);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
 
-describe('Knowledge injection allowlist — architect only', () => {
+describe('Knowledge injection — architect vs delegate vs none', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -200,77 +212,68 @@ describe('Knowledge injection allowlist — architect only', () => {
 		);
 	});
 
-	it('injects into architect', async () => {
+	// --- Architect → orchestrator block, never a delegate block ---
+
+	it('injects the orchestrator block into architect (not a delegate block)', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('architect');
 		await hook({} as never, output);
 		expect(hasKnowledgeInjection(output)).toBe(true);
+		expect(hasDelegateBlock(output)).toBe(false);
 	});
 
-	it('blocks injection into sme', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('sme');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('blocks injection into critic_sounding_board', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('critic_sounding_board');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('blocks injection into critic_drift_verifier', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('critic_drift_verifier');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('blocks injection into coder', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('coder');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('blocks injection into reviewer', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('reviewer');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('injects into mega_architect (prefix stripped to architect)', async () => {
+	it('injects the orchestrator block into mega_architect (prefix stripped)', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('mega_architect');
 		await hook({} as never, output);
 		expect(hasKnowledgeInjection(output)).toBe(true);
+		expect(hasDelegateBlock(output)).toBe(false);
 	});
 
-	it('blocks injection into mega_sme (prefix stripped to sme)', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('mega_sme');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('blocks injection into mega_critic_drift_verifier', async () => {
-		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		const output = makeOutput('mega_critic_drift_verifier');
-		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
-	});
-
-	it('injects into "Architect" (case-insensitive allowlist)', async () => {
+	it('injects the orchestrator block into "Architect" (case-insensitive)', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output = makeOutput('Architect');
 		await hook({} as never, output);
 		expect(hasKnowledgeInjection(output)).toBe(true);
+		expect(hasDelegateBlock(output)).toBe(false);
 	});
 
-	it('blocks injection when agent name is empty string', async () => {
+	// --- Delegated subagents → delegate block, never the orchestrator block ---
+
+	for (const agent of ['coder', 'reviewer', 'sme', 'critic'] as const) {
+		it(`injects a delegate block into ${agent} (not the orchestrator block)`, async () => {
+			const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+			const output = makeOutput(agent);
+			await hook({} as never, output);
+			expect(hasDelegateBlock(output)).toBe(true);
+			expect(hasKnowledgeInjection(output)).toBe(false);
+		});
+	}
+
+	it('injects a delegate block into mega_sme (prefix stripped to sme)', async () => {
+		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+		const output = makeOutput('mega_sme');
+		await hook({} as never, output);
+		expect(hasDelegateBlock(output)).toBe(true);
+		expect(hasKnowledgeInjection(output)).toBe(false);
+	});
+
+	// --- Non-architect, non-delegate agents → nothing at all ---
+
+	for (const agent of [
+		'critic_sounding_board',
+		'critic_drift_verifier',
+		'mega_critic_drift_verifier',
+	] as const) {
+		it(`injects nothing into ${agent}`, async () => {
+			const hook = createKnowledgeInjectorHook('/proj', makeConfig());
+			const output = makeOutput(agent);
+			await hook({} as never, output);
+			expect(hasAnyInjection(output)).toBe(false);
+		});
+	}
+
+	it('injects nothing when agent name is empty string', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output: { messages: MessageWithParts[] } = {
 			messages: [
@@ -282,10 +285,10 @@ describe('Knowledge injection allowlist — architect only', () => {
 			],
 		};
 		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
+		expect(hasAnyInjection(output)).toBe(false);
 	});
 
-	it('blocks injection when system message has no agent field', async () => {
+	it('injects nothing when system message has no agent field', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
 		const output: { messages: MessageWithParts[] } = {
 			messages: [
@@ -294,6 +297,6 @@ describe('Knowledge injection allowlist — architect only', () => {
 			],
 		};
 		await hook({} as never, output);
-		expect(hasKnowledgeInjection(output)).toBe(false);
+		expect(hasAnyInjection(output)).toBe(false);
 	});
 });

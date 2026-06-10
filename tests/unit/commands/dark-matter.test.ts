@@ -56,6 +56,16 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	sweepStaleTodos: mock(async () => ({ swept: 0, remaining: 0 })),
 	sweepAgedEntries: mock(async () => ({ swept: 0, remaining: 0 })),
 	bumpKnowledgeConfidenceBatch: async () => {},
+	transactKnowledge: async () => false,
+	transactFile: async () => false,
+	readRetractionRecords: async () => [],
+	appendRetractionRecord: async () => {},
+	resolveSwarmRetractionsPath: () =>
+		'/test/dir/.swarm/knowledge-retractions.jsonl',
+	normalizeEntry: (e: unknown) => e,
+	computeOutcomeSignal: () => 0,
+	OUTCOME_SIGNAL_SMOOTHING: 1,
+	_internals: {},
 }));
 
 // Import AFTER mock setup

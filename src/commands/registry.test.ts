@@ -91,6 +91,26 @@ describe('All commands have valid categories', () => {
 		}
 	});
 
+	test('SDD commands are registered as utility commands with compound subcommands', () => {
+		expect((COMMAND_REGISTRY.sdd as CommandEntry).category).toBe('utility');
+		expect((COMMAND_REGISTRY['sdd status'] as CommandEntry).subcommandOf).toBe(
+			'sdd',
+		);
+		expect(
+			(COMMAND_REGISTRY['sdd validate'] as CommandEntry).subcommandOf,
+		).toBe('sdd');
+		expect((COMMAND_REGISTRY['sdd project'] as CommandEntry).subcommandOf).toBe(
+			'sdd',
+		);
+		expect(resolveCommand(['sdd', 'status'])?.key).toBe('sdd status');
+		expect(resolveCommand(['sdd', 'validate', '--json'])?.key).toBe(
+			'sdd validate',
+		);
+		expect(resolveCommand(['sdd', 'project', '--dry-run'])?.key).toBe(
+			'sdd project',
+		);
+	});
+
 	test('Deprecated alias entries may skip category (they redirect to aliased command)', () => {
 		// These are deprecated aliases - they don't need their own category since they redirect
 		const aliasEntries = ['config-doctor', 'diagnosis', 'evidence-summary'];

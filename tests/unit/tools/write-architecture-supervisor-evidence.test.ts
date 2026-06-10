@@ -118,20 +118,34 @@ describe('write_architecture_supervisor_evidence knowledge feedback (Chunk E)', 
 		],
 	};
 
-	test('proposes candidate knowledge when persist flag is enabled', async () => {
+	test('routes recommendations through the actionability gate when persist flag is enabled', async () => {
+		// Realigned (Change 4): prose recommendations must pass the Layer-5
+		// actionability gate before reaching the active store. In this offline
+		// test environment no curator LLM is available to enrich them, so the
+		// recommendation is QUARANTINED to the unactionable queue (recoverable by
+		// the hardening loop) rather than stored as an active candidate.
 		writeConfig(true);
 		const out = await run(recArgs);
-		expect(JSON.parse(out).knowledge_proposed).toBe(1);
+		const parsed = JSON.parse(out);
+		expect(parsed.knowledge_proposed).toBe(0);
+		expect(parsed.knowledge_quarantined).toBe(1);
 
-		// Confirm the lesson actually landed on disk as a candidate.
+		// Nothing landed in the active store…
 		const knowledgePath = resolveSwarmKnowledgePath(tempDir);
 		const entries =
 			(await readKnowledge<{ status: string; lesson: string }>(
 				knowledgePath,
 			)) ?? [];
-		expect(entries).toHaveLength(1);
-		expect(entries[0].status).toBe('candidate');
-		expect(entries[0].lesson).toContain('single storage backend');
+		expect(entries).toHaveLength(0);
+
+		// …but the recommendation is preserved in the unactionable queue.
+		const queued =
+			(await readKnowledge<{ status: string; lesson: string }>(
+				path.join(tempDir, '.swarm', 'knowledge-unactionable.jsonl'),
+			)) ?? [];
+		expect(queued).toHaveLength(1);
+		expect(queued[0].status).toBe('quarantined_unactionable');
+		expect(queued[0].lesson).toContain('single storage backend');
 	});
 
 	test('does not propose knowledge when persist flag is disabled', async () => {
@@ -247,5 +261,49 @@ describe('write_architecture_supervisor_evidence skill-draft feedback (Chunk E)'
 		await seedMatureKnowledge();
 		const out = await run(failureLoopArgs);
 		expect(JSON.parse(out).skills_proposed).toBe(0);
+	});
+});
+
+describe('write_architecture_supervisor_evidence provenance write-through', () => {
+	test('persists provenance fields when provided', async () => {
+		const out = await run({
+			phase: 1,
+			verdict: 'APPROVE',
+			provenance_agent_name: 'critic_architecture_supervisor',
+			provenance_session_id: 'sess-abc-123',
+		});
+		const parsed = JSON.parse(out);
+		expect(parsed.success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw).not.toBeNull();
+		expect(raw?.provenance).toBeDefined();
+		expect(raw!.provenance!.agent_name).toBe('critic_architecture_supervisor');
+		expect(raw!.provenance!.session_id).toBe('sess-abc-123');
+		expect(raw!.provenance!.verified_at).toBeDefined();
+	});
+
+	test('omits provenance when not provided', async () => {
+		const out = await run({ phase: 1, verdict: 'APPROVE' });
+		const parsed = JSON.parse(out);
+		expect(parsed.success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw).not.toBeNull();
+		expect(raw?.provenance).toBeUndefined();
+	});
+
+	test('persists provenance with only agent_name', async () => {
+		const out = await run({
+			phase: 1,
+			verdict: 'APPROVE',
+			provenance_agent_name: 'critic_architecture_supervisor',
+		});
+		expect(JSON.parse(out).success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw?.provenance).toBeDefined();
+		expect(raw!.provenance!.agent_name).toBe('critic_architecture_supervisor');
+		expect(raw!.provenance!.session_id).toBeUndefined();
 	});
 });

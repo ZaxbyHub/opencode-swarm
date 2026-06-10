@@ -4,7 +4,8 @@
  * Tests cover:
  * - Argument validation (query required, tier enum validation)
  * - Tier filtering (swarm, hive, all)
- * - Status boost scoring (established +0.1, promoted +0.05, candidate +0)
+ * - Status boost scoring (established +0.1, promoted +0.05, candidate +0;
+ *   candidate is retrievable, quarantined/archived are excluded — PR #828)
  * - Archived filtering (always excluded regardless of tier)
  * - Output shape (results[], total fields)
  * - Malicious getter defense (safe object property access)
@@ -416,43 +417,63 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 
 	// ========== GROUP 3: Status Boost Scoring ==========
 	describe('Group 3: Status boost scoring', () => {
-		it('candidate status is excluded from normal recall', async () => {
+		// Policy (PR #828, knowledge-reader.ts deny-list): normal recall surfaces
+		// every entry EXCEPT `quarantined` (filtered by the reader) and `archived`
+		// (filtered by the search core). `candidate` entries are intentionally
+		// retrievable — they were previously dropped by a `['established',
+		// 'promoted']` allow-list, which was replaced with a quarantine-only
+		// deny-list so undefined/migrated/candidate statuses are not silently lost.
+		// Maturity is expressed through the additive status BOOST (established +0.1,
+		// promoted +0.05, candidate +0), which affects ranking — not visibility.
+		it('candidate status is retrievable and ranks below an established entry via the maturity boost', async () => {
+			// Lessons share the query vocabulary but carry distinct unique tokens so
+			// their bigram similarity stays below the reader's 0.6 near-duplicate
+			// dedup threshold — otherwise one entry would be collapsed and the
+			// boost-ordering comparison would be moot.
 			writeSwarmKnowledge([
 				makeSwarmEntry({
 					id: 'candidate',
-					lesson: 'Test candidate lesson',
+					lesson: 'Test status lesson alpha bravo charlie',
 					status: 'candidate',
 				}),
 				makeSwarmEntry({
 					id: 'established',
-					lesson: 'Test established lesson',
+					lesson: 'Test status lesson delta echo foxtrot',
 					status: 'established',
 				}),
 			]);
 
 			const result = await knowledge_recall.execute(
-				{ query: 'test lesson', tier: 'swarm' } as Record<string, unknown>,
+				{ query: 'test status lesson', tier: 'swarm' } as Record<
+					string,
+					unknown
+				>,
 				tmpDir,
 			);
 			const parsed = JSON.parse(result);
 
 			const established = parsed.results.find(
-				(r: { id: string }) => r.id === 'established',
+				(r: { id: string; score: number }) => r.id === 'established',
 			);
 			const candidate = parsed.results.find(
-				(r: { id: string }) => r.id === 'candidate',
+				(r: { id: string; score: number }) => r.id === 'candidate',
 			);
 
+			// Both surface — candidate is NOT excluded from normal recall.
 			expect(established).toBeDefined();
-			expect(candidate).toBeUndefined();
+			expect(candidate).toBeDefined();
+			// Symmetric unique-token padding keeps text similarity equal, so the
+			// +0.1 established boost vs +0 candidate boost makes established rank
+			// strictly higher.
+			expect(established.score).toBeGreaterThan(candidate.score);
 		});
 
-		it('promoted status remains retrievable', async () => {
+		it('quarantined status is excluded while promoted remains retrievable', async () => {
 			writeSwarmKnowledge([
 				makeSwarmEntry({
-					id: 'candidate',
-					lesson: 'Test candidate lesson',
-					status: 'candidate',
+					id: 'quarantined',
+					lesson: 'Test quarantined lesson',
+					status: 'quarantined',
 				}),
 				makeSwarmEntry({
 					id: 'promoted',
@@ -470,11 +491,12 @@ describe('knowledge_recall tool verification tests (FR-A1)', () => {
 			const promoted = parsed.results.find(
 				(r: { id: string }) => r.id === 'promoted',
 			);
-			const candidate = parsed.results.find(
-				(r: { id: string }) => r.id === 'candidate',
+			const quarantined = parsed.results.find(
+				(r: { id: string }) => r.id === 'quarantined',
 			);
+			// Promoted is retrievable; quarantined is the hard-excluded status.
 			expect(promoted).toBeDefined();
-			expect(candidate).toBeUndefined();
+			expect(quarantined).toBeUndefined();
 		});
 
 		it('Boost is additive to text similarity score', async () => {

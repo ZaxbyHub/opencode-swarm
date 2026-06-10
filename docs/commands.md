@@ -91,6 +91,21 @@ Refine an existing `spec.md` by clarifying ambiguous requirements.
 
 Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful before running a phase — identifies requirements not covered by any task.
 
+### `/swarm sdd ...`
+
+Inspect and project OpenSpec-compatible spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files.
+
+```text
+/swarm sdd status             # show .swarm/spec.md plus openspec/ artifact status
+/swarm sdd status --json      # machine-readable status
+/swarm sdd validate           # validate the OpenSpec projection
+/swarm sdd validate --change add-login
+/swarm sdd project --dry-run  # preview .swarm/spec.md materialization
+/swarm sdd project            # write .swarm/spec.md from OpenSpec artifacts
+```
+
+`openspec/changes/*/tasks.md` is proposal input only. Execution state still lives in `.swarm/plan-ledger.jsonl`; never hand-edit `.swarm/plan.json` or `.swarm/plan.md`.
+
 ### `/swarm brainstorm [topic]`
 
 Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN → DIALOGUE → APPROACHES → DESIGN → SPEC → SELF-REVIEW → GATE SELECTION → TRANSITION.
@@ -101,7 +116,7 @@ Enter architect MODE: COUNCIL — convene a fixed three-agent General Council (`
 
 | Flag | Effect |
 |------|--------|
-| `--spec-review` | Switch to single-pass advisory mode. Used by the `council_general_review` QA gate during MODE: SPECIFY to fold council input into a draft spec — no Round 2 deliberation. |
+| `--spec-review` | Switch to single-pass advisory mode. Can be invoked manually to fold council input into a draft spec — no Round 2 deliberation. |
 
 **Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. The deprecated `members`, `presets`, `moderator`, and `moderatorModel` fields are accepted for compatibility but ignored at runtime. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
 
@@ -383,14 +398,15 @@ View or modify QA gate profile for the current plan.
 - `enable`: persist gate(s) into the locked profile. Architect-only. Rejected after critic approval lock.
 - `override`: session-only ratchet-tighter enable.
 
-Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `council_general_review`, `final_council`.
+Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic_pre_plan`, `hallucination_guard`, `sast_enabled`, `mutation_test`, `drift_check`, `phase_council`, `final_council`.
 
 **Gate descriptions:**
 
-- `council_mode` — Multi-member phase-level council gate. When enabled, council runs at phase completion for holistic review of the full phase body of work. Stage B (reviewer + test_engineer in parallel) always runs per-task regardless. Council is additive — never replaces Stage B.
+- `council_mode` — Per-task council gate. When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config.
 
+- `phase_council` — Phase-level council gate. When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates.
 
-- `final_council` - Multi-member project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the same five phase-council members (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) rerun at project scope. This is not General Council mode and does not use `convene_general_council`.
+- `final_council` — Project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) — NOT the General Council — rerun at project scope. Does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry
@@ -537,6 +553,7 @@ Idempotent 4-stage project finalization:
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
 Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
+Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
 cycles — cumulative project knowledge survives and is not deleted. Deleted files

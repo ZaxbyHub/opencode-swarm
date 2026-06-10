@@ -95,6 +95,7 @@ export type {
 	SkillPropagationConfig,
 	SwarmConfig,
 	TurboConfig,
+	WorktreeIsolationConfig,
 } from './schema';
 export {
 	AgentOverrideConfigSchema,
@@ -109,6 +110,7 @@ export {
 	SkillPropagationConfigSchema,
 	SwarmConfigSchema,
 	TurboConfigSchema,
+	WorktreeIsolationConfigSchema,
 } from './schema';
 export type {
 	DeltaSpec,

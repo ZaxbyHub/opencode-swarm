@@ -30,7 +30,7 @@ import { resolveWorkingDirectory } from './resolve-working-directory';
 // z declares the public args surface for the plugin host.
 // We additionally validate with zod for strict runtime safety and clear errors.
 const FindingSchema = z.object({
-	severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+	severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 	category: z.string().min(1),
 	location: z.string(),
 	detail: z.string(),
@@ -105,7 +105,7 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 						confidence: z.number().min(0).max(1),
 						findings: z.array(
 							z.object({
-								severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+								severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 								category: z.string().min(1),
 								location: z.string(),
 								detail: z.string(),
@@ -300,6 +300,26 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 						new Set(dissenters),
 					);
 				}
+			}
+
+			// ── Blocking concerns gate ────────────────────────────────────────
+			if (
+				synthesis.overallVerdict === 'CONCERNS' &&
+				synthesis.blockingConcernsCount > 0
+			) {
+				return JSON.stringify(
+					{
+						success: false,
+						reason: 'blocking_concerns_unresolved',
+						overallVerdict: synthesis.overallVerdict,
+						blockingConcernsCount: synthesis.blockingConcernsCount,
+						requiredFixes: synthesis.requiredFixes,
+						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						message: `Council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the task can advance. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
+					},
+					null,
+					2,
+				);
 			}
 
 			// ── Evidence write ────────────────────────────────────────────────

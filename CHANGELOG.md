@@ -1,5 +1,59 @@
 # Changelog
 
+## [7.63.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.62.1...v7.63.0) (2026-06-10)
+
+
+### Features
+
+* **knowledge:** swarm learning system — directives, enforcement, reflection, retrieval (Changes 1–6) ([#1209](https://github.com/zaxbysauce/opencode-swarm/issues/1209)) ([00216d3](https://github.com/zaxbysauce/opencode-swarm/commit/00216d33e8c5aa8dd884663721d61e12ce176403))
+
+## [7.62.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.62.0...v7.62.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **cli:** resolve 20 advisory findings from final council review (issue [#1167](https://github.com/zaxbysauce/opencode-swarm/issues/1167)) ([#1205](https://github.com/zaxbysauce/opencode-swarm/issues/1205)) ([6240ba7](https://github.com/zaxbysauce/opencode-swarm/commit/6240ba71accbc059c304168b2af027d8892ce326))
+
+## [7.62.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.61.0...v7.62.0) (2026-06-10)
+
+
+### Features
+
+* **sdd:** add openspec-compatible spec projection ([61bd9e2](https://github.com/zaxbysauce/opencode-swarm/commit/61bd9e2f602392b2bc8c5701fd198f3436a02599))
+
+
+### Bug Fixes
+
+* **sdd:** address review feedback ([2b26cca](https://github.com/zaxbysauce/opencode-swarm/commit/2b26ccab47f7961ca4a88dfbbb6b80f6fb9c8d7f))
+
+## [7.61.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.60.0...v7.61.0) (2026-06-09)
+
+
+### Features
+
+* **council:** make HIGH/CRITICAL concerns blocking at tool level ([110d400](https://github.com/zaxbysauce/opencode-swarm/commit/110d4008628d096e39ee3531ebdfbe2e09403c0a))
+
+
+### Bug Fixes
+
+* **council:** address Copilot PR review findings ([1c307bf](https://github.com/zaxbysauce/opencode-swarm/commit/1c307bfabacba5a73ef17639021a7b0ff8a9c19e))
+* **council:** address swarm-pr-review findings F-001 through F-006 ([d9bede0](https://github.com/zaxbysauce/opencode-swarm/commit/d9bede084ab790a388f49fcc0894f4fab154fd6e))
+* **council:** biome formatting in promoteBlockingConcerns ([78c258f](https://github.com/zaxbysauce/opencode-swarm/commit/78c258f1a51656bf7a5511f4cb8a1b164ae4150c))
+* **council:** mutation gap HIGH/CRITICAL findings now increment blockingConcernsCount ([6ee5f6d](https://github.com/zaxbysauce/opencode-swarm/commit/6ee5f6d42901fc4d7bc0047e2e7289a188398fe7))
+* **test:** add blockingConcernsCount to council test helpers ([7ca2320](https://github.com/zaxbysauce/opencode-swarm/commit/7ca2320952a0a756f9ffd6df9e8692d920d10672))
+
+## [7.60.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.59.1...v7.60.0) (2026-06-09)
+
+
+### Features
+
+* **worktree:** isolate standard parallel coder lanes ([a72c2e0](https://github.com/zaxbysauce/opencode-swarm/commit/a72c2e0cdc48c28e797a4f1cf097f7d038f13add))
+
+
+### Bug Fixes
+
+* **worktree:** preserve standard isolation tracking ([3ed48cc](https://github.com/zaxbysauce/opencode-swarm/commit/3ed48cc6fef26147f46d59a03883c38cca03508b))
+
 ## [7.59.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.59.0...v7.59.1) (2026-06-09)
 
 

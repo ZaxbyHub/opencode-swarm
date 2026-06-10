@@ -56,6 +56,12 @@ import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
 import { handleRollbackCommand } from './rollback.js';
+import {
+	handleSddCommand,
+	handleSddProjectCommand,
+	handleSddStatusCommand,
+	handleSddValidateCommand,
+} from './sdd.js';
 import { handleSimulateCommand } from './simulate.js';
 import { handleSpecifyCommand } from './specify.js';
 import { handleStatusCommand } from './status.js';
@@ -541,6 +547,39 @@ export const COMMAND_REGISTRY = {
 		args: '--threshold <number>, --min-commits <number>',
 		category: 'diagnostics',
 	},
+	sdd: {
+		handler: (ctx) => handleSddCommand(ctx.directory, ctx.args),
+		description:
+			'Manage OpenSpec-compatible SDD artifacts and effective spec projection',
+		args: 'status|validate|project [--json] [--change <id>] [--dry-run]',
+		details:
+			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning.',
+		category: 'utility',
+	},
+	'sdd status': {
+		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
+		description:
+			'Show OpenSpec-compatible SDD status and effective spec source',
+		subcommandOf: 'sdd',
+		args: '[--json]',
+		category: 'utility',
+	},
+	'sdd validate': {
+		handler: (ctx) => handleSddValidateCommand(ctx.directory, ctx.args),
+		description:
+			'Validate OpenSpec-compatible artifacts and effective spec projection',
+		subcommandOf: 'sdd',
+		args: '[--json] [--change <id>]',
+		category: 'utility',
+	},
+	'sdd project': {
+		handler: (ctx) => handleSddProjectCommand(ctx.directory, ctx.args),
+		description:
+			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
+		subcommandOf: 'sdd',
+		args: '[--dry-run] [--json] [--change <id>]',
+		category: 'utility',
+	},
 	analyze: {
 		handler: (ctx) => handleAnalyzeCommand(ctx.directory, ctx.args),
 		description: 'Analyze spec.md vs plan.md for requirement coverage gaps',
@@ -682,7 +721,7 @@ export const COMMAND_REGISTRY = {
 			'View or modify QA gate profile for the current plan [enable|override <gate>...]',
 		args: '[show|enable|override] <gate>...',
 		details:
-			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, council_general_review, drift_check.',
+			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, phase_council, drift_check, final_council.',
 		category: 'config',
 	},
 	promote: {

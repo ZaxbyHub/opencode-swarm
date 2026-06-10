@@ -990,15 +990,18 @@ describe('cleanupOrphanedBranches', () => {
 	});
 
 	test('records errors when branch -D fails', async () => {
-		let callCount = 0;
 		_internals.bunSpawn = (args: string[]) => {
-			callCount++;
-			if (callCount === 1) {
-				// git branch --list
+			if (
+				args.includes('branch') &&
+				args.includes('--list') &&
+				args.includes('swarm-lane/*')
+			) {
 				return mockProc(0, 'swarm-lane/session-orphan/lane-fail', '');
 			}
-			if (callCount === 2) {
-				// git branch -D fails
+			if (args.includes('branch') && args.includes('--list')) {
+				return mockProc(0, '', '');
+			}
+			if (args.includes('branch') && args.includes('-D')) {
 				return mockProc(1, '', 'error: branch not found');
 			}
 			// git worktree prune
@@ -1028,8 +1031,8 @@ describe('cleanupOrphanedBranches', () => {
 		expect(result.removed).toEqual([]);
 		expect(result.skipped).toEqual([]);
 		expect(result.errors).toEqual([]);
-		// Should have called list + worktree prune
-		expect(callCount).toBe(2);
+		// Should have called both branch namespace lists + worktree prune
+		expect(callCount).toBe(3);
 	});
 
 	test('handles `* ` prefix when current branch is a swarm-lane branch (simulated git branch --list output)', async () => {

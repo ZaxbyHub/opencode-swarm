@@ -12,7 +12,11 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
-import { KnowledgeConfigSchema } from '../config/schema';
+import {
+	KnowledgeConfigSchema,
+	SkillImproverConfigSchema,
+} from '../config/schema';
+import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import { generateSkills } from '../services/skill-generator';
 import {
@@ -89,7 +93,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 				.optional()
 				.describe('Session ID of the agent that produced this evidence (optional provenance).'),
 		},
-		execute: async (rawArgs: unknown, directory: string, ctx): Promise<string> => {
+		execute: async (rawArgs: unknown, directory: string): Promise<string> => {
 			const parsed = ArgsSchema.safeParse(rawArgs);
 			if (!parsed.success) {
 				return JSON.stringify(
@@ -142,6 +146,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 			// candidates — WITHOUT auto-promotion, so this never promotes unrelated
 			// pre-existing candidates as a side effect.
 			let knowledgeProposed = 0;
+			let knowledgeQuarantined = 0;
 			try {
 				const config = loadPluginConfig(dirResult.directory);
 				if (
@@ -152,15 +157,33 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 						config.knowledge ?? {},
 					);
 					const lessons = args.knowledge_recommendations.map((r) => r.lesson);
+					// Change 4 (Task 4.2): proposals must pass the Layer-5 actionability
+					// gate. Provide the curator LLM delegate to enrich prose lessons with
+					// v3 fields; lessons that cannot be enriched are quarantined to the
+					// unactionable queue (recoverable by the hardening loop), not stored.
+					const skillImproverCfg = SkillImproverConfigSchema.parse(
+						config.skill_improver ?? {},
+					);
 					const result = await curateAndStoreSwarm(
 						lessons,
 						path.basename(dirResult.directory),
 						{ phase_number: args.phase },
 						dirResult.directory,
 						knowledgeConfig,
-						{ skipAutoPromotion: true },
+						{
+							skipAutoPromotion: true,
+							llmDelegate: createCuratorLLMDelegate(
+								dirResult.directory,
+								'phase',
+							),
+							enrichmentQuota: {
+								maxCalls: skillImproverCfg.max_calls_per_day,
+								window: skillImproverCfg.quota_window,
+							},
+						},
 					);
 					knowledgeProposed = result.stored;
+					knowledgeQuarantined = result.quarantined;
 				}
 			} catch {
 				// knowledge feedback is best-effort; never fail the evidence write
@@ -201,6 +224,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 					verdict: args.verdict,
 					findings_count: args.findings.length,
 					knowledge_proposed: knowledgeProposed,
+					knowledge_quarantined: knowledgeQuarantined,
 					skills_proposed: skillsProposed,
 					evidence_path: evidencePath,
 				},

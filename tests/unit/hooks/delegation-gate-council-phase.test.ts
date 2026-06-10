@@ -1,10 +1,9 @@
 /**
  * Focused tests for Stage B state advancement when council mode is active.
  *
- * Council mode is additive at phase level — it must never suppress per-task
- * Stage B gate recording. These tests verify the fix for F5/F6: after removing
- * the `if (!councilActive)` guards in delegation-gate.ts, reviewer and
- * test_engineer Task delegations advance task state unconditionally.
+ * Council mode replaces per-task Stage B — when active, reviewer/test_engineer
+ * Task delegations do NOT advance task state through the Stage B barrier.
+ * The council verdict path (submit_council_verdicts) handles advancement instead.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -102,8 +101,8 @@ afterEach(() => {
 	}
 });
 
-describe('Stage B runs per-task when council mode is active', () => {
-	it('reviewer Task delegation advances state from coder_delegated → reviewer_run', async () => {
+describe('Stage B is SKIPPED per-task when council mode is active', () => {
+	it('reviewer Task delegation does NOT advance state when council replaces Stage B', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -125,10 +124,10 @@ describe('Stage B runs per-task when council mode is active', () => {
 			{},
 		);
 
-		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 
-	it('test_engineer Task delegation advances state from reviewer_run → tests_run', async () => {
+	it('test_engineer Task delegation does NOT advance state when council replaces Stage B', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -150,10 +149,10 @@ describe('Stage B runs per-task when council mode is active', () => {
 			{},
 		);
 
-		expect(getTaskState(session, '1.1')).toBe('tests_run');
+		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 	});
 
-	it('both reviewer and test_engineer delegations produce correct final state', async () => {
+	it('both reviewer and test_engineer delegations leave state unchanged', async () => {
 		writePlan();
 		enableCouncilGate();
 
@@ -174,7 +173,7 @@ describe('Stage B runs per-task when council mode is active', () => {
 			},
 			{},
 		);
-		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 
 		await hook.toolAfter(
 			{
@@ -185,6 +184,6 @@ describe('Stage B runs per-task when council mode is active', () => {
 			},
 			{},
 		);
-		expect(getTaskState(session, '1.1')).toBe('tests_run');
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 });

@@ -759,7 +759,7 @@ export const GuardrailsConfigSchema = z.object({
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
 
-// ─── Watchdog configuration ───────────────────────────────────────────────
+// ─── Watchdog configuration ───────────────────────────────────────────────────────
 export const WatchdogConfigSchema = z.object({
 	/** Enable scope-guard hook. Blocks non-architect agents writing outside declared scope. Default: true */
 	scope_guard: z.boolean().default(true),
@@ -771,7 +771,7 @@ export const WatchdogConfigSchema = z.object({
 
 export type WatchdogConfig = z.infer<typeof WatchdogConfigSchema>;
 
-// ─── Self-review configuration ────────────────────────────────────────────
+// ─── Self-review configuration ──────────────────────────────────────────────
 export const SelfReviewConfigSchema = z.object({
 	/** Enable self-review advisory after task marked in_progress. Default: true */
 	enabled: z.boolean().default(true),
@@ -966,6 +966,8 @@ export const KnowledgeConfigSchema = z.object({
 	auto_promote_days: z.number().min(1).max(3650).default(90),
 	/** Maximum number of knowledge entries to inject into context per phase */
 	max_inject_count: z.number().min(0).max(50).default(5),
+	/** Maximum number of knowledge directives injected into a delegated subagent's prompt. Default: 8 */
+	delegate_max_inject_count: z.number().min(0).max(50).default(8),
 	/** Maximum total chars for the entire injection block (preamble + lessons + run memory + rejected warnings). Default: 2000 */
 	inject_char_budget: z.number().min(200).max(10_000).default(2_000),
 	context_budget_threshold: z.number().int().positive().optional(),
@@ -1011,6 +1013,21 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** Change 5: retrieval-upgrade tuning (MMR diversity, cold-start, synonyms). */
+	retrieval: z
+		.object({
+			/** MMR diversity trade-off: 1 = pure relevance, 0 = pure diversity. */
+			mmr_lambda: z.number().min(0).max(1).default(0.5),
+			/** Additive exploration bonus for brand-new, never-applied entries. */
+			cold_start_bonus: z.number().min(0).max(0.5).default(0.08),
+			/** Max age (in phases) for an entry to still earn the cold-start bonus. */
+			cold_start_max_age_phases: z.number().int().min(0).max(100).default(3),
+			/** Tag co-occurrence count at/above which a pair is treated as synonyms. */
+			synonym_min_cooccurrence: z.number().int().min(1).max(100).default(3),
+			/** Hard cap on retained synonym pairs (LRU-evicted by recency). */
+			synonym_map_max_pairs: z.number().int().min(1).max(10000).default(500),
+		})
+		.optional(),
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
@@ -1146,6 +1163,8 @@ export const ArchitecturalSupervisionConfigSchema = z.object({
 	allow_concerns_to_complete: z.boolean().default(true),
 	/** Propose supervisor knowledge recommendations as candidate knowledge. Default: false. [Chunk E: consumed by the feedback path] */
 	persist_knowledge_recommendations: z.boolean().default(false),
+	/** Reject evidence lacking provenance (agent_name or session_id) when in gate mode. Default: false (advisory only). */
+	provenance_verify: z.boolean().default(false),
 });
 
 export type ArchitecturalSupervisionConfig = z.infer<
@@ -1431,7 +1450,7 @@ export const CouncilConfigSchema = z
 			.boolean()
 			.default(true)
 			.describe(
-				'When true, a phase-level council CONCERNS verdict does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Default: true (CONCERNS is advisory).',
+				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -1459,6 +1478,26 @@ export const ParallelizationConfigSchema = z.object({
 });
 
 export type ParallelizationConfig = z.infer<typeof ParallelizationConfigSchema>;
+
+export const WorktreeIsolationConfigSchema = z.object({
+	/**
+	 * auto: use isolated worktrees for eligible parallel coder dispatches; if
+	 * isolation cannot be prepared, block additional parallel coder dispatches so
+	 * execution serializes in the primary tree.
+	 *
+	 * required: block the coder dispatch if isolation cannot be prepared.
+	 *
+	 * disabled: preserve current shared-tree behavior.
+	 */
+	policy: z.enum(['auto', 'required', 'disabled']).default('auto'),
+	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
+	worktree_dir: z.string().optional(),
+	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+});
+
+export type WorktreeIsolationConfig = z.infer<
+	typeof WorktreeIsolationConfigSchema
+>;
 
 // Turbo configuration schema (Phase 1 Task 1.1)
 export const LeanTurboConfigSchema = z.object({
@@ -1511,6 +1550,208 @@ export const TurboConfigSchema = z.discriminatedUnion('strategy', [
 ]);
 
 export type TurboConfig = z.infer<typeof TurboConfigSchema>;
+
+// ---------------------------------------------------------------------------
+// External skills — candidate model, discovery sources, and quarantine config
+// (FR-001, FR-002, FR-009, FR-011 — disabled by default)
+// ---------------------------------------------------------------------------
+
+/** Where an external skill candidate was discovered. */
+export const ExternalSkillCandidateSourceTypeSchema = z.enum([
+	'github',
+	'url',
+	'collection',
+	'manual_import',
+]);
+
+export type ExternalSkillCandidateSourceType = z.infer<
+	typeof ExternalSkillCandidateSourceTypeSchema
+>;
+
+/** Evaluation verdict for an external skill candidate. */
+export const ExternalSkillCandidateEvaluationVerdictSchema = z.enum([
+	'pending',
+	'in_review',
+	'quarantined',
+	'passed',
+	'rejected',
+	'promoted',
+	'revoked',
+]);
+
+export type ExternalSkillCandidateEvaluationVerdict = z.infer<
+	typeof ExternalSkillCandidateEvaluationVerdictSchema
+>;
+
+/** A single discovery source that feeds candidates into the quarantine store. */
+export const DiscoverySourceSchema = z.object({
+	type: ExternalSkillCandidateSourceTypeSchema,
+	location: z.string().min(1),
+	enabled: z.boolean().default(true),
+	trust_level: z.enum(['low', 'medium', 'high']).default('low').optional(),
+});
+
+export type DiscoverySource = z.infer<typeof DiscoverySourceSchema>;
+
+/**
+ * A quarantined or evaluated external skill candidate awaiting promotion.
+ * Stored in `.swarm/external-skills/` with content-addressable naming.
+ */
+export const ExternalSkillCandidateSchema = z.object({
+	id: z.string().uuid(),
+	source_url: z.string().url(),
+	source_type: ExternalSkillCandidateSourceTypeSchema,
+	publisher: z.string().min(1),
+	sha256: z.string().regex(/^[a-f0-9]{64}$/),
+	fetched_at: z.string().datetime(),
+	skill_name: z.string().optional(),
+	skill_description: z.string().optional(),
+	skill_body: z.string(),
+	risk_flags: z.array(z.string()).default([]),
+	evaluation_verdict:
+		ExternalSkillCandidateEvaluationVerdictSchema.default('pending'),
+	evaluation_history: z
+		.array(
+			z.object({
+				verdict: ExternalSkillCandidateEvaluationVerdictSchema,
+				timestamp: z.string().datetime(),
+				actor: z.string(),
+				reason: z.string().optional(),
+				candidate_id: z.string().optional(),
+				original_verdict:
+					ExternalSkillCandidateEvaluationVerdictSchema.optional(),
+				gate_results: z
+					.array(
+						z.object({
+							gate: z.string(),
+							verdict: z.string(),
+						}),
+					)
+					.optional(),
+				risk_assessment: z
+					.object({
+						total_flags: z.number().int().nonnegative(),
+						findings: z.array(
+							z.object({
+								severity: z.enum(['error', 'warning']),
+								category: z.string(),
+							}),
+						),
+					})
+					.optional(),
+				risk_flags_count: z.number().int().nonnegative().optional(),
+				provenance_snapshot: z
+					.object({
+						sha256: z.string(),
+						source_url: z.string(),
+						publisher: z.string(),
+						fetched_at: z.string().datetime().optional(),
+					})
+					.optional(),
+				target_path: z.string().optional(),
+				promoted_content_hash: z
+					.string()
+					.regex(/^[a-f0-9]{64}$/)
+					.optional(),
+				original_evaluation: z.record(z.string(), z.unknown()).optional(),
+			}),
+		)
+		.default([]),
+});
+
+export type ExternalSkillCandidate = z.infer<
+	typeof ExternalSkillCandidateSchema
+>;
+
+/** Top-level configuration block for the external skills subsystem. */
+export const ExternalSkillsConfigSchema = z.object({
+	curation_enabled: z.boolean().default(false),
+	max_candidates: z.number().int().min(1).max(10000).default(500),
+	max_bytes_per_candidate: z
+		.number()
+		.int()
+		.min(1024)
+		.max(10485760)
+		.default(1048576),
+	eviction_policy: z.enum(['fifo']).default('fifo'),
+	ttl_days: z.number().int().min(1).max(3650).default(90),
+	evaluation_enabled: z.boolean().default(false),
+	sources: z.array(DiscoverySourceSchema).default([]),
+	max_candidates_per_discovery: z.number().int().min(1).max(1000).default(50),
+	max_concurrent_fetches: z.number().int().min(1).max(20).default(5),
+	fetch_timeout_ms: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export type ExternalSkillsConfig = z.infer<typeof ExternalSkillsConfigSchema>;
+
+/** Default external skills configuration (all subsystems disabled). */
+export const DEFAULT_EXTERNAL_SKILLS_CONFIG: ExternalSkillsConfig = {
+	curation_enabled: false,
+	max_candidates: 500,
+	max_bytes_per_candidate: 1048576,
+	eviction_policy: 'fifo',
+	ttl_days: 90,
+	evaluation_enabled: false,
+	sources: [],
+	max_candidates_per_discovery: 50,
+	max_concurrent_fetches: 5,
+	fetch_timeout_ms: 30000,
+};
+
+/**
+ * Resolve the external_skills config section, merging user-provided values
+ * over defaults.  Returns the default (all-disabled) config when
+ * `external_skills` is absent or undefined, ensuring callers never need
+ * null checks.
+ *
+ * Invalid source configs produce warnings via the logger but do NOT block
+ * plugin load (AGENTS.md #1 — fail-open, bounded init).
+ */
+export function resolveExternalSkillsConfig(
+	input: unknown,
+): ExternalSkillsConfig {
+	// Fail-open: return safe defaults for any non-object or null input (AGENTS.md #1).
+	if (
+		input === undefined ||
+		input === null ||
+		typeof input !== 'object' ||
+		Array.isArray(input)
+	) {
+		return { ...DEFAULT_EXTERNAL_SKILLS_CONFIG };
+	}
+
+	const config = input as Partial<ExternalSkillsConfig>;
+
+	// Deep merge: sources come from user config only (no default sources).
+	const merged: ExternalSkillsConfig = {
+		curation_enabled:
+			config.curation_enabled ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.curation_enabled,
+		max_candidates:
+			config.max_candidates ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.max_candidates,
+		max_bytes_per_candidate:
+			config.max_bytes_per_candidate ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_bytes_per_candidate,
+		eviction_policy:
+			config.eviction_policy ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.eviction_policy,
+		ttl_days: config.ttl_days ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.ttl_days,
+		evaluation_enabled:
+			config.evaluation_enabled ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.evaluation_enabled,
+		sources: Array.isArray(config.sources) ? config.sources : [],
+		max_candidates_per_discovery:
+			config.max_candidates_per_discovery ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_candidates_per_discovery,
+		max_concurrent_fetches:
+			config.max_concurrent_fetches ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_concurrent_fetches,
+		fetch_timeout_ms:
+			config.fetch_timeout_ms ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.fetch_timeout_ms,
+	};
+
+	return merged;
+}
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
@@ -1746,6 +1987,11 @@ export const PluginConfigSchema = z.object({
 	// Exists structurally; no production code path branches on enabled===true yet.
 	parallelization: ParallelizationConfigSchema.optional(),
 
+	// Worktree isolation policy for standard execution-profile parallel coder
+	// dispatches. Lean Turbo keeps its legacy per-mode fields for backward
+	// compatibility; this top-level block is the general lane-isolation surface.
+	worktree: WorktreeIsolationConfigSchema.optional(),
+
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
 	// Backward compatible: no turbo key means current behavior unchanged.
 	turbo: TurboConfigSchema.optional(),
@@ -1925,6 +2171,10 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 			},
 		})),
+
+	// External skills — candidate model, discovery, and quarantine store (FR-001)
+	// Disabled by default; all subsystems are opt-in.
+	external_skills: ExternalSkillsConfigSchema.optional(),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

@@ -27,6 +27,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory import')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory migrate')).toBe(true);
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory compact')).toBe(true);
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('sdd project')).toBe(true);
 	});
 
 	describe('classifySwarmCommandToolUse — chat-tool path', () => {
@@ -160,6 +161,39 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 				expect(compactResult.message).toContain('human-only');
 			}
 		});
+
+		test('sdd read-only diagnostics are allowed, but project is human-only', () => {
+			expect(classifySwarmCommandToolUse(resolve(['sdd'])).allowed).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['sdd', 'status'])).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['sdd', 'status', '--json']))
+					.allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['sdd', 'validate'])).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(resolve(['sdd', 'validate', '--json']))
+					.allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['sdd', 'validate', '--change', 'add-login']),
+				).allowed,
+			).toBe(true);
+			expect(
+				classifySwarmCommandToolUse(
+					resolve(['sdd', 'validate', '--change', '../escape']),
+				).allowed,
+			).toBe(false);
+			const project = classifySwarmCommandToolUse(resolve(['sdd', 'project']));
+			expect(project.allowed).toBe(false);
+			if (project.allowed === false) {
+				expect(project.message).toContain('human-only');
+			}
+		});
 	});
 
 	describe('classifySwarmCommandChatFallbackUse — user-typed slash path', () => {
@@ -197,6 +231,13 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		test('memory compact stays blocked because it mutates .swarm state', () => {
 			const result = classifySwarmCommandChatFallbackUse(
 				resolve(['memory', 'compact']),
+			);
+			expect(result.allowed).toBe(false);
+		});
+
+		test('sdd project stays blocked because it mutates .swarm spec state', () => {
+			const result = classifySwarmCommandChatFallbackUse(
+				resolve(['sdd', 'project']),
 			);
 			expect(result.allowed).toBe(false);
 		});

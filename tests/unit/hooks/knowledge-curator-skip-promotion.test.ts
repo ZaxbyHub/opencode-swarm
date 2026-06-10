@@ -21,6 +21,16 @@ const config = KnowledgeConfigSchema.parse({});
 const LESSON =
 	'Run the full test suite before declaring a phase complete to catch cross-task regressions that per-task checks miss.';
 
+// Realigned (Change 4): prose lessons must pass the Layer-5 actionability gate
+// to reach the active store. This suite tests skipAutoPromotion, not the gate
+// (which has dedicated suites), so provide an enrichment delegate that returns
+// valid v3 fields and lets the entry store through the real pipeline.
+const v3Delegate = async (): Promise<string> =>
+	JSON.stringify({
+		applies_to_agents: ['architect'],
+		required_actions: ['run the full test suite before phase completion'],
+	});
+
 beforeEach(() => {
 	tempDir = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'swarm-skip-promo-')),
@@ -44,7 +54,7 @@ describe('curateAndStoreSwarm skipAutoPromotion', () => {
 			{ phase_number: 1 },
 			tempDir,
 			config,
-			{ skipAutoPromotion: true },
+			{ skipAutoPromotion: true, llmDelegate: v3Delegate },
 		);
 
 		expect(result.stored).toBe(1);
@@ -61,6 +71,7 @@ describe('curateAndStoreSwarm skipAutoPromotion', () => {
 			{ phase_number: 1 },
 			tempDir,
 			config,
+			{ llmDelegate: v3Delegate },
 		);
 
 		expect(spy).toHaveBeenCalledTimes(1);

@@ -35,6 +35,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
 - 🔒 **Gated pipeline** — code never ships without reviewer + test engineer approval
 - 🔍 **DEEP_DIVE Protocol** — High-rigor, on-demand read-only codebase audit via specialized skills
+- 🔬 **External Skill Curation Pipeline** — Opt-in discovery, quarantine, evaluation, and promotion of external skill candidates from configured sources (disabled by default; enable via `external_skills.curation_enabled: true` in config). Includes 7 tools: `external_skill_discover`, `external_skill_list`, `external_skill_inspect`, `external_skill_promote`, `external_skill_reject`, `external_skill_delete`, `external_skill_revoke`. Candidates pass through a 3-gate validation pipeline before evaluation: **prompt injection scan** (12 regex patterns), **unsafe instruction scan** (25 patterns), and **provenance integrity check** (SHA-256, timestamp, URL, publisher, and hash verification).
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
 - 🌐 **20 languages** — TypeScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP, JavaScript, CSS, Bash, PowerShell, INI, Regex (extending: see [docs/adding-a-language.md](docs/adding-a-language.md))
@@ -624,6 +625,62 @@ Swarm provides tools for managing generated skill lifecycles:
 
 - **Proposal cleanup** — When a draft skill proposal is activated via `skill_apply`, the source proposal file is deleted as part of the activation process (best-effort; permission errors are logged but do not block activation).
 
+### External Skill Curation
+
+Swarm provides an opt-in, quarantine-first pipeline for discovering, validating, and promoting external skills. Disabled by default — no network calls are made until explicitly enabled.
+
+#### Enabling
+
+```yaml
+external_skills:
+  curation_enabled: true
+  sources:
+    - type: url
+      location: https://example.com/skills/
+      trust_level: medium
+```
+
+#### Validation Pipeline
+
+Every candidate passes a 3-gate pipeline before entering quarantine:
+
+| Gate | Name | Description |
+|------|------|-------------|
+| 1 | Prompt Injection Scan | 12 regex patterns plus oversized field, invisible character, and suspicious formatting checks detect system instruction injection, role hijacking, and instruction override attempts |
+| 2 | Unsafe Instruction Scan | 25 patterns detect shell commands, file system attacks, network exfiltration, and privilege escalation |
+| 3 | Provenance Integrity | SHA-256 content hash, timestamp validation, URL format checks, and publisher presence validation |
+
+**Trust level modulation**: `low` trust promotes warning-severity findings to errors (stricter); `medium` and `high` trust levels keep warnings advisory. Error-severity findings always block regardless of trust level.
+
+#### Tool Reference
+
+| Tool | Description |
+|------|-------------|
+| `external_skill_discover` | Fetch and validate a skill from a configured source |
+| `external_skill_list` | List candidates with status filters |
+| `external_skill_inspect` | View full candidate details |
+| `external_skill_promote` | Promote validated candidate to active skill (user approval required) |
+| `external_skill_reject` | Reject candidate with reason |
+| `external_skill_delete` | Remove candidate from quarantine store |
+| `external_skill_revoke` | Retire a previously promoted skill |
+
+#### Security Guarantees
+
+- Disabled by default — no network calls until explicitly enabled
+- All candidates quarantined until human review and promotion
+- TOCTOU re-validation at promotion time
+- Content hash verification prevents tampering
+- Bounded concurrent fetches (5 simultaneous) and discovery limits (50 candidates per invocation)
+- Max candidate size and count bounds
+- Source origin validation (URLs must match configured sources)
+
+#### Limitations
+
+- Static regex patterns only (no LLM-based detection)
+- No cryptographic signing (deferred)
+- No batch import (deferred)
+- No auto-promotion (human approval always required)
+
 ### Configuration Reference
 
 | Key | Type | Default | Description |
@@ -1035,6 +1092,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm specify [description]` | Generate or import a feature specification |
 | `/swarm clarify [topic]` | Clarify and refine an existing feature specification |
 | `/swarm analyze` | Analyze spec.md vs plan.md for requirement coverage gaps |
+| `/swarm sdd ...` | Inspect, validate, or project OpenSpec-compatible SDD artifacts into `.swarm/spec.md` |
 | `/swarm brainstorm [topic]` | Enter BRAINSTORM mode for structured requirement discovery before a spec |
 | `/swarm council <question> [--preset <name>] [--spec-review]` | Convene a multi-model General Council for advisory deliberation |
 | `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace]` | Ingest a GitHub issue for localization and resolution |

@@ -3,7 +3,6 @@
  * Allows the Architect agent to save structured plans to .swarm/plan.json and .swarm/plan.md.
  */
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
@@ -30,6 +29,7 @@ import {
 	savePlan,
 } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
 
@@ -326,26 +326,27 @@ export async function executeSavePlan(
 		// Trust explicit working_directory (fallback doesn't exist, or not a subdirectory)
 	}
 
-	// Step 2.x: SPEC GATE - verify .swarm/spec.md exists and capture its hash/mtime
+	// Step 2.x: SPEC GATE - verify an effective spec exists and capture its hash/mtime.
+	// .swarm/spec.md remains preferred. If absent, an OpenSpec-compatible
+	// projection may satisfy the same canonical plan gate.
 	let specMtime: string | undefined;
 	let specHash: string | undefined;
 	if (process.env.SWARM_SKIP_SPEC_GATE !== '1') {
-		const specPath = path.join(targetWorkspace as string, '.swarm', 'spec.md');
-		try {
-			const stat = await fs.promises.stat(specPath);
-			specMtime = stat.mtime.toISOString();
-			const content = await fs.promises.readFile(specPath, 'utf8');
-			specHash = crypto.createHash('sha256').update(content).digest('hex');
-		} catch {
+		const spec = readEffectiveSpecSync(targetWorkspace as string);
+		if (!spec) {
 			return {
 				success: false,
 				message:
-					'SPEC_REQUIRED: .swarm/spec.md must exist before saving a plan. Run /swarm specify first.',
-				errors: ['Missing .swarm/spec.md in workspace'],
+					'SPEC_REQUIRED: an effective spec must exist before saving a plan. Run /swarm specify first, or add OpenSpec-compatible openspec/specs or openspec/changes artifacts and run /swarm sdd validate.',
+				errors: [
+					'Missing .swarm/spec.md and no valid OpenSpec-compatible projection found',
+				],
 				recovery_guidance:
-					'Create or restore .swarm/spec.md before saving a plan. Never write .swarm/plan.json or .swarm/plan.md directly.',
+					'Create or restore .swarm/spec.md, or generate a projection with /swarm sdd project before saving a plan. Never write .swarm/plan.json or .swarm/plan.md directly.',
 			};
 		}
+		specMtime = spec.mtime ?? undefined;
+		specHash = spec.hash;
 	}
 
 	// Step 2.y: QA GATE SELECTION CHECK

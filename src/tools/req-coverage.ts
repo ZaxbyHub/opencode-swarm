@@ -8,10 +8,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
-const SPEC_FILE = '.swarm/spec.md';
 const EVIDENCE_DIR = '.swarm/evidence';
 const OBLIGATION_KEYWORDS = ['MUST', 'SHOULD', 'SHALL'] as const;
 const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1MB per file
@@ -464,13 +464,8 @@ export const req_coverage: ReturnType<typeof tool> = createSwarmTool({
 		// Use input directory if provided, otherwise use directory
 		const cwd = inputDirectory || directory;
 
-		// Read spec.md
-		const specPath = path.join(cwd, SPEC_FILE);
-		let specContent: string;
-
-		try {
-			specContent = fs.readFileSync(specPath, 'utf-8');
-		} catch (readError) {
+		const spec = readEffectiveSpecSync(cwd);
+		if (!spec) {
 			return JSON.stringify(
 				{
 					success: false,
@@ -479,12 +474,14 @@ export const req_coverage: ReturnType<typeof tool> = createSwarmTool({
 					coveredCount: 0,
 					missingCount: 0,
 					requirements: [],
-					error: `Failed to read spec.md: ${readError instanceof Error ? readError.message : String(readError)}`,
+					error:
+						'Failed to read effective spec: .swarm/spec.md is missing and no OpenSpec-compatible projection is available',
 				},
 				null,
 				2,
 			);
 		}
+		const specContent = spec.content;
 
 		// Extract requirements
 		const requirements = extractRequirements(specContent);

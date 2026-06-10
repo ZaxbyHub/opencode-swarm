@@ -43,6 +43,8 @@ import {
 	releaseQuota,
 	reserveQuota,
 } from './skill-improver-quota.js';
+import { writeMotifProposals } from './trajectory-cluster.js';
+import { hardenUnactionableEntries } from './unactionable-hardening.js';
 
 export interface SkillImproverConfigInput {
 	enabled: boolean;
@@ -94,6 +96,17 @@ export interface SkillImproveResult {
 		sourceKnowledgeIds: string[];
 	}>;
 	model?: string;
+	/** Change 4 (Task 4.3): outcome of the unactionable-knowledge hardening pass. */
+	unactionableHardening?: {
+		hardened: number;
+		retired: number;
+		remaining: number;
+	};
+	/** Change 6 (Task 5.3): macro trajectory-motif proposals written this run. */
+	macroMotifs?: {
+		motifs: number;
+		proposalsWritten: number;
+	};
 }
 
 function timestampSlug(d: Date): string {
@@ -569,6 +582,29 @@ export async function runSkillImprover(
 	sideEffectsStarted = true;
 	await atomicWrite(proposalFile, finalBody);
 
+	// Change 4 (Task 4.3): hardening pass over the unactionable queue. Each LLM
+	// attempt is individually quota-gated inside enrichLessonToV3 (shared
+	// skill-improver budget), and the batch limit bounds per-run cost. Skipped
+	// without a delegate — auto-retiring entries without an attempt would be
+	// wrong. Fail-open: a hardening failure never fails the improver run.
+	let unactionableHardening: SkillImproveResult['unactionableHardening'];
+	if (delegate) {
+		unactionableHardening = await hardenUnactionableEntries({
+			directory: req.directory,
+			llmDelegate: delegate,
+			quota: { maxCalls: cfg.max_calls_per_day, window: cfg.quota_window },
+		});
+	}
+
+	// Macro reflector (Change 6, Task 5.3): cluster recurring failure motifs from
+	// the recent trajectory window and emit skill PROPOSALS (never active skills).
+	// Deterministic + read-only over the store; no LLM call, no quota draw.
+	const motifResult = await writeMotifProposals(req.directory);
+	const macroMotifs = {
+		motifs: motifResult.motifs,
+		proposalsWritten: motifResult.proposalsWritten.length,
+	};
+
 	return {
 		ran: true,
 		proposalPath: proposalFile,
@@ -580,6 +616,8 @@ export async function runSkillImprover(
 		},
 		draftSkillsWritten,
 		model: cfg.model ?? undefined,
+		unactionableHardening,
+		macroMotifs,
 	};
 }
 

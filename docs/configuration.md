@@ -437,7 +437,7 @@ Distinct from the Work Complete Council above. Where the Work Complete Council i
 
 The three council agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — for General Council dispatch, the architect runs `web_search` 1–3 times before dispatch and passes the results in. Separately, SME agents may call `web_search` directly for external skill/source research when `council.general.enabled=true` and a Tavily or Brave API key is configured.
 
-Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or by enabling the `council_general_review` QA gate (which runs the council on a draft spec during MODE: SPECIFY).
+Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or offered as an early workflow option in MODE: BRAINSTORM (Phase 1b) when enabled.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -483,6 +483,90 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 > **appendPrompt note.** Council agents (`council_generalist`, `council_skeptic`, `council_domain_expert`) do **not** inherit `appendPrompt` from the underlying agent config entries (`agents.reviewer.appendPrompt`, etc.). Council prompts are fixed and self-contained — they define a specific council persona and must not be contaminated by workflow-role customizations. This omission is intentional. If you need consistent context across all agents including council roles, add it to the council prompts via a custom build rather than via `appendPrompt`.
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
+
+## External Skills Curation Pipeline
+
+Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.
+
+**Requires `curation_enabled: true`** to activate. When disabled, all 7 external skill tools return a disabled message.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `curation_enabled` | boolean | `false` | Master switch for the external skill curation pipeline |
+| `max_candidates` | number | `500` | Maximum candidates in the quarantine store (1–10000) |
+| `max_bytes_per_candidate` | number | `1048576` | Max file size per candidate in bytes (1024–10485760) |
+| `eviction_policy` | `"fifo"` | `"fifo"` | Eviction strategy when `max_candidates` is reached |
+| `ttl_days` | number | `90` | Candidate TTL in days before automatic eviction (1–3650) |
+| `evaluation_enabled` | boolean | `false` | Enable SME evaluation workflow for candidates |
+| `sources` | array | `[]` | Discovery source configurations (see DiscoverySource schema) |
+| `max_candidates_per_discovery` | number | `50` | Max candidates per discovery run (1–1000) |
+| `max_concurrent_fetches` | number | `5` | Max concurrent source fetches (1–20) |
+| `fetch_timeout_ms` | number | `30000` | Per-fetch timeout in milliseconds (1000–300000) |
+
+### Discovery sources
+
+Each source in `sources` must match `DiscoverySourceSchema`:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | `"github" \| "url" \| "collection" \| "manual_import"` | Yes | — | Source type |
+| `location` | string | Yes | — | Source URL, file path, or identifier |
+| `enabled` | boolean | No | `true` | Whether this source is active |
+| `trust_level` | `"low" \| "medium" \| "high"` | No | `"low"` | Trust level for gate modulation |
+
+### Available tools
+
+When `curation_enabled: true`, the architect agent gains access to 7 tools:
+
+| Tool | Description |
+|------|-------------|
+| `external_skill_discover` | Discover external skill candidates from configured sources |
+| `external_skill_list` | List candidates in the quarantine store |
+| `external_skill_inspect` | Inspect a specific candidate by ID |
+| `external_skill_promote` | Promote a validated candidate to an active generated skill |
+| `external_skill_reject` | Reject a candidate after evaluation |
+| `external_skill_delete` | Delete a candidate from the quarantine store |
+| `external_skill_revoke` | Revoke a previously promoted skill |
+
+**Example** — Enable external skill curation with a URL source:
+
+```json
+{
+  "external_skills": {
+    "curation_enabled": true,
+    "max_candidates": 500,
+    "ttl_days": 90,
+    "sources": [
+      {
+        "type": "url",
+        "location": "https://example.com/skills/",
+        "enabled": true,
+        "trust_level": "medium"
+      }
+    ]
+  }
+}
+```
+
+### Troubleshooting
+
+**"All tools return disabled message"**
+→ Check `external_skills.curation_enabled: true` is set in your config. The pipeline is disabled by default.
+
+**"Discover says source not in configured sources"**
+→ The `location` field in your source config must match the URL passed to discover. URLs are validated against configured sources before fetching.
+
+**"Candidate fails validation but content looks safe"**
+→ Check the `trust_level` setting. With `low` trust, warning-level findings are promoted to errors. Try `medium` or `high` trust for less strict gating.
+
+**"Promote fails with 'file already exists'"**
+→ A skill with the same slug already exists in the target directory. Revoke the existing skill first, or choose a different candidate.
+
+**"Promote fails with 'content hash mismatch'"**
+→ The candidate was modified after discovery (TOCTOU detection). Re-discover the candidate to get a fresh evaluation.
+
+**"Revoke fails with 'cannot extract skill slug from history'"**
+→ The candidate's promotion history may be corrupted or missing. The revoke tool needs the slug from the original promotion record to locate the SKILL.md file. If the history was tampered with, delete the candidate and manually remove the SKILL.md file.
 
 ## Turbo Configuration
 
@@ -547,7 +631,9 @@ All gates are **ratchet-tighter** — once enabled they cannot be disabled until
 | `sme_enabled` | ON | SME consultation during planning / clarification |
 | `critic_pre_plan` | ON | Critic review before plan finalization |
 | `sast_enabled` | ON | Static security scanning |
-| `council_mode` | OFF | Multi-member Work Complete Council gate (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code) |
+| `council_mode` | OFF | Replaces per-task Stage B (reviewer + test_engineer) with full 5-member council per task (recommended for high-impact architecture, public APIs, schema/data mutation, security-sensitive code) |
 | `hallucination_guard` | OFF | Mandatory per-phase API/signature/claim/citation verification at PHASE-WRAP; blocks `phase_complete` until evidence is APPROVED |
 | `mutation_test` | OFF | Runs mutation testing on source files touched this phase at PHASE-WRAP; FAIL blocks `phase_complete`, WARN is non-blocking |
-| `council_general_review` | OFF | When enabled, MODE: SPECIFY runs `convene_general_council` on the draft spec before the critic-gate; multi-model deliberation folded into the spec. Requires `council.general.enabled: true` and a search API key. |
+| `drift_check` | ON | Mandatory per-phase drift verification at PHASE-WRAP; compares implemented changes against spec.md intent; hard-blocks `phase_complete` when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists |
+| `phase_council` | OFF | Full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates. |
+| `final_council` | OFF | Full 5-member council (NOT General Council) reviews the entire project at the last phase. Requires approved `.swarm/evidence/final-council.json`. |

@@ -91,6 +91,12 @@ export { handleResetCommand } from './reset';
 export { handleResetSessionCommand } from './reset-session';
 export { handleRetrieveCommand } from './retrieve';
 export { handleRollbackCommand } from './rollback';
+export {
+	handleSddCommand,
+	handleSddProjectCommand,
+	handleSddStatusCommand,
+	handleSddValidateCommand,
+} from './sdd';
 export { handleSimulateCommand } from './simulate';
 export { handleSpecifyCommand } from './specify';
 export { handleStatusCommand } from './status';

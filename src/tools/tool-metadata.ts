@@ -438,12 +438,12 @@ export const TOOL_METADATA = {
 	},
 	get_qa_gate_profile: {
 		description:
-			'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council), lock state, and profile hash. Read-only.',
+			'retrieve the QA gate profile for the current plan: gates (reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council), lock state, and profile hash. Read-only.',
 		agents: ['architect'],
 	},
 	set_qa_gates: {
 		description:
-			'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, council_general_review, drift_check, final_council.',
+			'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council.',
 		agents: ['architect'],
 	},
 	web_search: {
@@ -587,6 +587,41 @@ export const TOOL_METADATA = {
 		description:
 			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation',
 		agents: ['coder'],
+	},
+	external_skill_discover: {
+		description:
+			'Discover external skill candidates from configured sources. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_list: {
+		description:
+			'List external skill candidates in the quarantine store. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_inspect: {
+		description:
+			'Inspect a specific external skill candidate by ID. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_promote: {
+		description:
+			'Promote a validated external skill candidate to an active generated skill. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_reject: {
+		description:
+			'Reject an external skill candidate after evaluation. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_delete: {
+		description:
+			'Delete an external skill candidate from the quarantine store. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_revoke: {
+		description:
+			'Revoke a previously promoted external skill. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
 	},
 } satisfies Record<string, ToolMeta>;
 

@@ -1,7 +1,7 @@
 /**
  * Gate 2 – Drift Verifier.
  * Conditional on drift_check QA gate.  Blocks when drift evidence is missing
- * (when spec.md exists) or when the verdict is rejected.
+ * (when an effective spec exists) or when the verdict is rejected.
  */
 
 import * as fs from 'node:fs';
@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { getEffectiveGates, getProfile } from '../../../db/qa-gate-profile.js';
 import { loadPlan } from '../../../plan/manager';
 import { derivePlanId } from '../../../plan/utils';
+import { readEffectiveSpecSync } from '../../../sdd/effective-spec';
 import { swarmState } from '../../../state';
 import type { GateContext, GateResult } from './types';
 
@@ -17,11 +18,10 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 
 	// Load QA gate profile to check drift_check flag
 	let driftCheckEnabled = true; // Default: preserve current mandatory behaviour
-	let driftHasSpecMd = false;
+	let driftHasEffectiveSpec = false;
 
 	try {
-		const specMdPath = path.join(dir, '.swarm', 'spec.md');
-		driftHasSpecMd = fs.existsSync(specMdPath);
+		driftHasEffectiveSpec = readEffectiveSpecSync(dir) !== null;
 
 		const gatePlan = await loadPlan(dir);
 		if (gatePlan) {
@@ -151,8 +151,8 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 		}
 
 		if (!driftVerdictFound) {
-			if (!driftHasSpecMd) {
-				// No spec.md — drift verification is advisory-only
+			if (!driftHasEffectiveSpec) {
+				// No effective spec — drift verification is advisory-only
 				// Check task completion status for advisory message quality
 				let incompleteTaskCount = 0;
 				let planParseable = false;
@@ -182,7 +182,7 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 						agentsDispatched,
 						agentsMissing: [],
 						warnings: [
-							`No spec.md found and drift verification evidence missing — consider running critic_drift_verifier before phase completion.`,
+							`No effective spec found and drift verification evidence missing — consider running critic_drift_verifier before phase completion.`,
 						],
 					};
 				} else if (incompleteTaskCount > 0) {
@@ -191,7 +191,7 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 						agentsDispatched,
 						agentsMissing: [],
 						warnings: [
-							`No spec.md found and drift verification evidence missing. Phase ${phase} has ${incompleteTaskCount} incomplete task(s) in plan.json — consider running critic_drift_verifier before phase completion.`,
+							`No effective spec found and drift verification evidence missing. Phase ${phase} has ${incompleteTaskCount} incomplete task(s) in plan.json — consider running critic_drift_verifier before phase completion.`,
 						],
 					};
 				} else {
@@ -200,12 +200,12 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 						agentsDispatched,
 						agentsMissing: [],
 						warnings: [
-							`No spec.md found. Phase ${phase} tasks are all completed in plan.json. Drift verification was skipped.`,
+							`No effective spec found. Phase ${phase} tasks are all completed in plan.json. Drift verification was skipped.`,
 						],
 					};
 				}
 			} else {
-				// spec.md exists AND drift evidence missing — hard block
+				// Effective spec exists AND drift evidence missing — hard block
 				return {
 					blocked: true,
 					reason: 'DRIFT_VERIFICATION_MISSING',
