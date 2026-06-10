@@ -5,6 +5,10 @@ import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
 } from '../hooks/extractors';
+import {
+	type RecentEscalation,
+	readRecentEscalations,
+} from '../hooks/knowledge-escalator';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {
@@ -71,6 +75,8 @@ export interface StatusData {
 	specStaleStoredHash?: string;
 	/** Current spec.md hash on disk (null when spec.md is missing) */
 	specStaleCurrentHash?: string | null;
+	/** Directives auto-escalated in the last 7 days (Change 3). */
+	recentEscalations?: RecentEscalation[];
 }
 
 /**
@@ -204,6 +210,9 @@ export async function getStatusData(
 			plan as { _specStaleReason?: string }
 		)._specStaleReason;
 	}
+
+	// Surface recently-escalated directives (Change 3).
+	status.recentEscalations = await readRecentEscalations(directory);
 
 	// Enrich with Lean Turbo data if active
 	return enrichWithLeanTurbo(status, directory);
@@ -368,6 +377,14 @@ export function formatStatusMarkdown(status: StatusData): string {
 		}
 		if (status.lastSnapshotAt) {
 			lines.push(`**Last snapshot**: ${status.lastSnapshotAt}`);
+		}
+	}
+
+	// Recently-escalated directives (Change 3).
+	if (status.recentEscalations && status.recentEscalations.length > 0) {
+		lines.push('', '**Recently Escalated (last 7 days)**:');
+		for (const e of status.recentEscalations) {
+			lines.push(`  - ${e.entry_id} (${e.from}→${e.to}) reason=${e.reason}`);
 		}
 	}
 

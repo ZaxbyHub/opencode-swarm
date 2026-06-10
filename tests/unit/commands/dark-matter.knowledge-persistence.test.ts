@@ -26,6 +26,16 @@ mock.module('../../../src/tools/co-change-analyzer.js', () => ({
 	detectDarkMatter: mockDetectDarkMatter,
 	formatDarkMatterOutput: mockFormatDarkMatterOutput,
 	darkMatterToKnowledgeEntries: mockDarkMatterToKnowledgeEntries,
+	// The dark-matter command invokes `detectDarkMatter` through the
+	// `_internals` DI seam (`coChangeAnalyzer.detectDarkMatter`), so the mock
+	// must expose it there too. `formatDarkMatterOutput` and
+	// `darkMatterToKnowledgeEntries` are consumed via the top-level named
+	// exports above, but are mirrored here for completeness of the seam.
+	_internals: {
+		detectDarkMatter: mockDetectDarkMatter,
+		formatDarkMatterOutput: mockFormatDarkMatterOutput,
+		darkMatterToKnowledgeEntries: mockDarkMatterToKnowledgeEntries,
+	},
 }));
 
 mock.module('../../../src/hooks/knowledge-store.js', () => ({

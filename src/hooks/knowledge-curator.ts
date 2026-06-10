@@ -1,5 +1,12 @@
 /** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
 
+import { existsSync } from 'node:fs';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import * as path from 'node:path';
+import { reserveQuota } from '../services/skill-improver-quota.js';
+import { rebuildSynonymMap } from '../services/synonym-map.js';
+import { warn } from '../utils/logger.js';
+import type { CuratorLLMDelegate } from './curator.js';
 import {
 	effectiveRetrievalOutcomes,
 	readKnowledgeCounterRollups,
@@ -18,16 +25,28 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
+	transactFile,
 	transactKnowledge,
 } from './knowledge-store.js';
 import type {
+	ActionableDirectiveFields,
 	HiveKnowledgeEntry,
 	KnowledgeCategory,
 	KnowledgeConfig,
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
-import { quarantineEntry, validateLesson } from './knowledge-validator.js';
+import {
+	appendUnactionable,
+	quarantineEntry,
+	validateActionability,
+	validateActionableFields,
+	validateLesson,
+} from './knowledge-validator.js';
+import {
+	type InsightCandidate,
+	resolveInsightCandidatesPath,
+} from './micro-reflector.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
 
 // ============================================================================
@@ -289,6 +308,323 @@ async function processRetractions(
 // Exported functions
 // ============================================================================
 
+// ============================================================================
+// v3 Actionability Enrichment (Change 4, Task 4.2)
+// ============================================================================
+
+/** Fields the enrichment LLM may emit. verification_predicate is intentionally
+ *  NOT accepted from auto-enrichment: predicates execute subprocesses, and
+ *  LLM-authored executables from an automated loop are not trusted. Predicates
+ *  enter via curated/skill-improver paths instead. */
+const ENRICHMENT_ALLOWED_FIELDS = [
+	'triggers',
+	'required_actions',
+	'forbidden_actions',
+	'verification_checks',
+	'applies_to_agents',
+	'applies_to_tools',
+	'directive_priority',
+] as const;
+
+/** Build the v3-schema enrichment prompt for a single prose lesson. */
+export function buildV3EnrichmentPrompt(
+	lesson: string,
+	category: string,
+	tags: string[],
+): string {
+	return [
+		'Convert this prose lesson into an actionable knowledge directive.',
+		'Output ONLY a single JSON object — no code fences, no commentary.',
+		'',
+		'MANDATORY fields (the directive is rejected without them):',
+		'- At least ONE scope field non-empty:',
+		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
+		'- At least ONE predicate field non-empty:',
+		'  "forbidden_actions": string[] — concrete actions to never take',
+		'  "required_actions": string[] — concrete actions to always take',
+		'  "verification_checks": string[] — checks a reviewer can run',
+		'',
+		'OPTIONAL fields:',
+		'  "triggers": string[] — short phrases that should surface this lesson',
+		'  "directive_priority": "low" | "medium" | "high" | "critical"',
+		'',
+		'Example output:',
+		'{"applies_to_agents":["coder"],"forbidden_actions":["use async iterators in hot paths"],"required_actions":["use a plain for loop in hot paths"],"triggers":["hot path","async iterator"],"directive_priority":"high"}',
+		'',
+		`LESSON: ${lesson}`,
+		`CATEGORY: ${category}`,
+		`TAGS: ${tags.join(', ')}`,
+	].join('\n');
+}
+
+/**
+ * Parse + validate an enrichment response. Returns the sanitized fields when
+ * the output is shape-valid AND actionable, otherwise the list of missing
+ * requirements (for the RETRY follow-up). Untrusted-input hardened: only
+ * allowlisted fields are copied, then shape-validated by
+ * validateActionableFields (length caps, name patterns, injection checks).
+ */
+export function parseV3EnrichmentResponse(
+	text: string,
+): { fields: ActionableDirectiveFields } | { missing: string[] } {
+	if (!text || typeof text !== 'string') {
+		return { missing: ['valid JSON object'] };
+	}
+	// Extract the first {...} block (the model may wrap it in prose or fences).
+	const start = text.indexOf('{');
+	const end = text.lastIndexOf('}');
+	if (start < 0 || end <= start) return { missing: ['valid JSON object'] };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text.slice(start, end + 1));
+	} catch {
+		return { missing: ['valid JSON object'] };
+	}
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return { missing: ['valid JSON object'] };
+	}
+	const raw = parsed as Record<string, unknown>;
+	const fields: ActionableDirectiveFields = {};
+	for (const key of ENRICHMENT_ALLOWED_FIELDS) {
+		if (raw[key] !== undefined) {
+			(fields as Record<string, unknown>)[key] = raw[key];
+		}
+	}
+	const shape = validateActionableFields(fields);
+	if (!shape.valid) return { missing: shape.errors };
+	const actionability = validateActionability(fields);
+	if (!actionability.actionable) {
+		const missing: string[] = [];
+		if (
+			actionability.reason === 'missing_predicate' ||
+			actionability.reason === 'missing_predicate_and_scope'
+		) {
+			missing.push(
+				'a non-empty predicate field (forbidden_actions, required_actions, or verification_checks)',
+			);
+		}
+		if (
+			actionability.reason === 'missing_scope' ||
+			actionability.reason === 'missing_predicate_and_scope'
+		) {
+			missing.push(
+				'a non-empty scope field (applies_to_agents or applies_to_tools)',
+			);
+		}
+		return { missing };
+	}
+	return { fields };
+}
+
+/** Per-call timeout for enrichment LLM calls (small, targeted prompts). */
+const ENRICHMENT_LLM_TIMEOUT_MS = 60_000;
+
+export interface EnrichmentQuotaOptions {
+	maxCalls: number;
+	window: 'utc' | 'local';
+}
+
+/**
+ * Enrich one prose lesson with v3 actionability fields via the curator LLM.
+ * One retry on schema failure (with a RETRY message naming the missing
+ * fields). Quota-gated per call via skill-improver-quota. Returns null when
+ * enrichment is unavailable (quota exhausted) or fails twice — the caller
+ * quarantines the entry. Never throws.
+ */
+export async function enrichLessonToV3(params: {
+	directory: string;
+	llmDelegate: CuratorLLMDelegate;
+	lesson: string;
+	category: string;
+	tags: string[];
+	quota?: EnrichmentQuotaOptions;
+}): Promise<ActionableDirectiveFields | null> {
+	const quota = params.quota ?? { maxCalls: 10, window: 'utc' as const };
+	const prompt = buildV3EnrichmentPrompt(
+		params.lesson,
+		params.category,
+		params.tags,
+	);
+	let userInput = prompt;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const reservation = await reserveQuota(params.directory, {
+				nCalls: 1,
+				maxCalls: quota.maxCalls,
+				window: quota.window,
+			});
+			if (!reservation.allowed) return null;
+			const response = await params.llmDelegate(
+				'',
+				userInput,
+				AbortSignal.timeout(ENRICHMENT_LLM_TIMEOUT_MS),
+			);
+			const result = parseV3EnrichmentResponse(response);
+			if ('fields' in result) return result.fields;
+			userInput = `${prompt}\n\nRETRY: your last output was missing ${result.missing.join(
+				'; ',
+			)}; produce valid JSON with all required fields.`;
+		} catch (err) {
+			warn(
+				`[knowledge-curator] v3 enrichment attempt ${attempt + 1} failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+			// LLM/transport error: do not retry on a second transport failure path —
+			// the loop's second iteration is the single retry budget either way.
+		}
+	}
+	return null;
+}
+
+/** Append a curator_skipped audit line to `.swarm/events.jsonl` (best-effort). */
+async function appendCuratorSkippedEvent(
+	directory: string,
+	record: { entry_id: string; lesson: string; reason: string },
+): Promise<void> {
+	try {
+		const filePath = path.join(directory, '.swarm', 'events.jsonl');
+		await mkdir(path.dirname(filePath), { recursive: true });
+		await appendFile(
+			filePath,
+			`${JSON.stringify({
+				timestamp: new Date().toISOString(),
+				event: 'curator_skipped',
+				entry_id: record.entry_id,
+				lesson: record.lesson.slice(0, 200),
+				reason: record.reason,
+			})}\n`,
+			'utf-8',
+		);
+	} catch {
+		// audit log is best-effort; never break curation
+	}
+}
+
+// ============================================================================
+// Meso reflector — micro-reflection insight consumption (Change 6, Task 5.2)
+// ============================================================================
+
+/** Max insight candidates folded into the store per phase boundary. */
+export const MESO_INSIGHT_BATCH_LIMIT = 20;
+
+const KNOWLEDGE_CATEGORIES: ReadonlySet<string> = new Set<KnowledgeCategory>([
+	'process',
+	'architecture',
+	'tooling',
+	'security',
+	'testing',
+	'debugging',
+	'performance',
+	'integration',
+	'todo',
+	'other',
+]);
+
+function readInsightJsonl(content: string): InsightCandidate[] {
+	const out: InsightCandidate[] = [];
+	for (const line of content.split('\n')) {
+		const t = line.trim();
+		if (!t) continue;
+		try {
+			out.push(JSON.parse(t) as InsightCandidate);
+		} catch {
+			// skip corrupt line
+		}
+	}
+	return out;
+}
+
+/**
+ * Atomically consume up to `batchLimit` insight candidates from
+ * `.swarm/insight-candidates.jsonl`, writing back the unconsumed tail under the
+ * same lock so concurrent micro-reflection appends are never lost. Fail-open.
+ */
+export async function consumeInsightCandidates(
+	directory: string,
+	batchLimit = MESO_INSIGHT_BATCH_LIMIT,
+): Promise<InsightCandidate[]> {
+	try {
+		const filePath = resolveInsightCandidatesPath(directory);
+		if (!existsSync(filePath)) return [];
+		const consumed: InsightCandidate[] = [];
+		await transactFile<InsightCandidate[]>(
+			filePath,
+			async (p) => readInsightJsonl(await readFile(p, 'utf-8').catch(() => '')),
+			async (p, data) => {
+				// transactFile already mkdir'd the directory under the lock.
+				const body =
+					data.length === 0
+						? ''
+						: `${data.map((c) => JSON.stringify(c)).join('\n')}\n`;
+				await writeFile(p, body, 'utf-8');
+			},
+			(all) => {
+				if (all.length === 0) return null;
+				const batch = all.slice(0, batchLimit);
+				consumed.push(...batch);
+				return all.slice(batch.length); // unconsumed tail (possibly empty)
+			},
+		);
+		return consumed;
+	} catch {
+		return [];
+	}
+}
+
+/** Build a SwarmKnowledgeEntry from an already-v3-actionable insight candidate. */
+export function insightCandidateToEntry(
+	cand: InsightCandidate,
+	projectName: string,
+	phaseNumber: number,
+	config: KnowledgeConfig,
+): SwarmKnowledgeEntry {
+	const now = new Date().toISOString();
+	const category = (
+		typeof cand.category === 'string' && KNOWLEDGE_CATEGORIES.has(cand.category)
+			? cand.category
+			: 'process'
+	) as KnowledgeCategory;
+	return {
+		id: crypto.randomUUID(),
+		tier: 'swarm',
+		lesson: cand.lesson.slice(0, 280),
+		category,
+		tags: Array.isArray(cand.tags) ? cand.tags.slice(0, 20) : [],
+		scope: 'global',
+		confidence: computeConfidence(1, true),
+		status: 'candidate',
+		confirmed_by: [
+			{
+				phase_number: phaseNumber,
+				confirmed_at: now,
+				project_name: projectName,
+			},
+		],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: config.schema_version,
+		created_at: now,
+		updated_at: now,
+		project_name: projectName,
+		auto_generated: true,
+		applies_to_agents: cand.applies_to_agents,
+		applies_to_tools: cand.applies_to_tools,
+		required_actions: cand.required_actions,
+		forbidden_actions: cand.forbidden_actions,
+		verification_checks: cand.verification_checks,
+		triggers: cand.triggers,
+		directive_priority: cand.directive_priority,
+		source_knowledge_ids: cand.source?.task_id
+			? [`task:${cand.source.task_id}`]
+			: undefined,
+	};
+}
+
 /**
  * Curate and store swarm knowledge entries from lessons.
  * @returns Promise resolving to an object with counts of stored, skipped, and rejected lessons.
@@ -299,8 +635,23 @@ export async function curateAndStoreSwarm(
 	phaseInfo: { phase_number: number },
 	directory: string,
 	config: KnowledgeConfig,
-	options?: { skipAutoPromotion?: boolean },
-): Promise<{ stored: number; skipped: number; rejected: number }> {
+	options?: {
+		skipAutoPromotion?: boolean;
+		/**
+		 * Change 4 (Task 4.2): LLM delegate used to enrich plain-prose lessons
+		 * with v3 actionability fields before the Layer-5 gate. When absent,
+		 * non-actionable lessons go straight to the unactionable queue.
+		 */
+		llmDelegate?: CuratorLLMDelegate;
+		/** Quota knobs for enrichment calls (defaults: 10/day, utc window). */
+		enrichmentQuota?: EnrichmentQuotaOptions;
+	},
+): Promise<{
+	stored: number;
+	skipped: number;
+	rejected: number;
+	quarantined: number;
+}> {
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 
 	// Unlocked snapshot read for validation purposes only.
@@ -311,6 +662,7 @@ export async function curateAndStoreSwarm(
 
 	let skipped = 0;
 	let rejected = 0;
+	let quarantined = 0;
 
 	// Tag-to-category mapping (static, hoisted outside loop)
 	const categoryByTag = new Map<string, KnowledgeCategory>([
@@ -410,9 +762,101 @@ export async function curateAndStoreSwarm(
 			auto_generated: true,
 		};
 
+		// Layer 5 — Mandatory v3 actionability (Change 4). No new entry reaches the
+		// active store without >=1 machine-checkable predicate AND >=1 scope tag.
+		// Plain-prose lessons are enriched via the curator LLM (one retry); entries
+		// that still fail are quarantined to the unactionable queue (recoverable by
+		// the skill-improver hardening loop), never activated.
+		let actionability = validateActionability(entry);
+		if (!actionability.actionable && options?.llmDelegate) {
+			const enriched = await enrichLessonToV3({
+				directory,
+				llmDelegate: options.llmDelegate,
+				lesson,
+				category,
+				tags,
+				quota: options.enrichmentQuota,
+			});
+			if (enriched) {
+				Object.assign(entry, enriched);
+				actionability = validateActionability(entry);
+			}
+		}
+		if (!actionability.actionable) {
+			quarantined++;
+			try {
+				await appendUnactionable(
+					directory,
+					entry,
+					actionability.reason ?? 'unactionable',
+				);
+			} catch {
+				// queue write is best-effort; the entry is still withheld from active
+			}
+			await appendCuratorSkippedEvent(directory, {
+				entry_id: entry.id,
+				lesson,
+				reason: actionability.reason ?? 'unactionable',
+			});
+			continue;
+		}
+
 		toAdd.push(entry);
 		// Track in accumulator so subsequent lessons in this batch see it for dedup.
 		snapshotPlusNew.push(entry);
+	}
+
+	// Meso reflector (Change 6, Task 5.2): fold in micro-reflection insight
+	// candidates. They are already v3-actionable, so they skip enrichment and go
+	// straight through the actionability gate + dedup against the retro lessons
+	// and the existing store. This EXPANDS the curator's inputs without lowering
+	// its output floor. Consumed atomically so concurrent micro-appends survive.
+	try {
+		const insights = await consumeInsightCandidates(directory);
+		for (const cand of insights) {
+			const entry = insightCandidateToEntry(
+				cand,
+				projectName,
+				phaseInfo.phase_number,
+				config,
+			);
+			// Defense-in-depth (Phase 5 review): the insight-candidates queue is an
+			// on-disk file that could be tampered between the micro-reflector's write
+			// and this read, so re-apply BOTH gates the micro-reflector applied at
+			// write time — shape (validateActionableFields: length caps, name
+			// patterns, injection/control-char checks) AND presence
+			// (validateActionability). insightCandidateToEntry already copies only an
+			// explicit field allowlist (verification_predicate is never carried), so
+			// these two checks fully reconstruct the original gate.
+			const shape = validateActionableFields({
+				applies_to_agents: entry.applies_to_agents,
+				applies_to_tools: entry.applies_to_tools,
+				required_actions: entry.required_actions,
+				forbidden_actions: entry.forbidden_actions,
+				verification_checks: entry.verification_checks,
+				triggers: entry.triggers,
+				directive_priority: entry.directive_priority,
+			});
+			if (!shape.valid || !validateActionability(entry).actionable) {
+				quarantined++;
+				try {
+					await appendUnactionable(directory, entry, 'insight_unactionable');
+				} catch {
+					// best-effort
+				}
+				continue;
+			}
+			if (
+				findNearDuplicate(entry.lesson, snapshotPlusNew, config.dedup_threshold)
+			) {
+				skipped++;
+				continue;
+			}
+			toAdd.push(entry);
+			snapshotPlusNew.push(entry);
+		}
+	} catch {
+		// insight consumption is best-effort; never break curation
 	}
 
 	// Atomically append new entries under lock (CF-2: dedup at commit time against
@@ -435,6 +879,31 @@ export async function curateAndStoreSwarm(
 	// Enforce swarm_max_entries cap (FIFO: drop oldest when exceeded)
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
 
+	// Change 5 / Task 6.2: refresh the tag co-occurrence synonym map from the
+	// post-write corpus so retrieval can expand queries along learned synonyms.
+	// Only when the corpus actually changed (something stored) — a no-op curation
+	// run leaves the tag distribution untouched. Best-effort: a failure here must
+	// never break curation, and the retrieval read path degrades to no-expansion
+	// when the map is absent. The map is bounded by synonym_map_max_pairs.
+	if (stored > 0) {
+		try {
+			const corpus =
+				(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
+			await rebuildSynonymMap(
+				directory,
+				corpus.map((e) => ({
+					triggers: e.triggers,
+					tags: e.tags,
+					applies_to_tools: e.applies_to_tools,
+					applies_to_agents: e.applies_to_agents,
+				})),
+				config.retrieval?.synonym_map_max_pairs,
+			);
+		} catch {
+			// synonym map refresh is best-effort; never break curation
+		}
+	}
+
 	// Run auto-promotion after processing all lessons. Callers that only want to PROPOSE
 	// candidate knowledge (e.g. the architecture supervisor's recommendations) pass
 	// skipAutoPromotion to avoid promoting unrelated pre-existing candidates as a side
@@ -443,7 +912,7 @@ export async function curateAndStoreSwarm(
 		await _internals.runAutoPromotion(directory, config);
 	}
 
-	return { stored, skipped, rejected };
+	return { stored, skipped, rejected, quarantined };
 }
 
 // A track-record signal at or below this (negatives clearly outweighing positives,

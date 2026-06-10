@@ -23,6 +23,11 @@
 
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
+	buildSynonymIndex,
+	expandTokens,
+	readSynonymMap,
+} from '../services/synonym-map.js';
+import {
 	effectiveRetrievalOutcomes,
 	newTraceId,
 	type RetrievalEventMode,
@@ -48,6 +53,30 @@ import type {
 const TEXT_WEIGHT = 0.6;
 const META_WEIGHT = 0.4;
 const DIRECTIVE_BOOST_MIN_CONFIDENCE = 0.75;
+// Change 5 / Task 6.2 — retrieval recall upgrades.
+// A single, bounded boost when a learned synonym of a query term appears in an
+// entry's text. Kept below the directive/trigger signals so synonym recall
+// nudges ranking without overriding an exact match.
+const SYNONYM_TEXT_BOOST = 0.15;
+// Boost for an entry whose declared trigger phrase appears in the composite
+// query (free-text query + context signals). This is the "trigger-recall union":
+// a trigger-matching entry surfaces even when its lesson text shares little
+// vocabulary with the query. Triggers are matched as case-insensitive literal
+// substrings — consistent with the existing `anyMatch` directive matcher — so a
+// (possibly auto-enriched, attacker-influenceable) trigger cannot smuggle a
+// regex engine / ReDoS into the hot retrieval path.
+const TRIGGER_RECALL_BOOST = 0.3;
+// Minimum normalized trigger length for trigger recall. Triggers are
+// attacker-influenceable (auto-enrichment / hive import); a 1–2 char trigger
+// substring-matches almost any query and would force-surface a poisoned entry,
+// so anything shorter than this is ignored for recall purposes.
+const TRIGGER_RECALL_MIN_LEN = 3;
+// Defaults mirror KnowledgeConfigSchema.retrieval. The retrieval block is
+// `.optional()` purely as a zod-v4 typing workaround, NOT to disable the
+// feature, so an omitted block still applies the documented defaults (parity
+// with MMR, which already defaults to λ=0.5 via clampLambda).
+const DEFAULT_COLD_START_BONUS = 0.08;
+const DEFAULT_COLD_START_MAX_AGE_PHASES = 3;
 // Max absolute ranking adjustment from an entry's event-sourced track record.
 // Bounded and small so outcomes nudge relevance ordering without overriding text/
 // directive matches — entries that get applied/succeed rise, ones that get
@@ -105,6 +134,107 @@ function entryText(e: {
 	return `${e.lesson} ${e.tags.join(' ')} ${e.category}`;
 }
 
+/**
+ * Age of an entry measured in distinct confirming phases (Change 5 / Task 6.2).
+ * A brand-new candidate (no confirmations) is age 0; an entry confirmed across
+ * many phases is "established" and no longer eligible for the cold-start
+ * exploration bonus. Falls back to the raw confirmation count when phase numbers
+ * are absent.
+ */
+function entryAgePhases(e: {
+	confirmed_by?: Array<{ phase_number?: number }>;
+}): number {
+	const cb = e.confirmed_by;
+	if (!Array.isArray(cb) || cb.length === 0) return 0;
+	const phases = new Set<number>();
+	for (const c of cb) {
+		if (typeof c?.phase_number === 'number') phases.add(c.phase_number);
+	}
+	return phases.size > 0 ? phases.size : cb.length;
+}
+
+/** Clamp the MMR lambda to [0,1], default 0.5. */
+function clampLambda(v: number | undefined): number {
+	if (typeof v !== 'number' || Number.isNaN(v)) return 0.5;
+	return Math.min(1, Math.max(0, v));
+}
+
+/**
+ * Maximal Marginal Relevance rerank (Change 5, Task 6.1). Greedily selects from
+ * `pool` to fill up to `max` total (counting the already-selected `pinned`),
+ * trading relevance against diversity:
+ *   mmr(c) = λ·relevance(c) − (1−λ)·max_{s∈selected} bigram_jaccard(lesson_c, lesson_s)
+ * Reuses `jaccardBigram` (no second similarity function). Deterministic: ties
+ * break by finalScore, then recency, then id, so a query with uniform paraphrase
+ * distance yields a stable order.
+ */
+function mmrRerank<
+	T extends {
+		id: string;
+		finalScore: number;
+		lesson: string;
+		created_at: string;
+	},
+>(pool: T[], pinned: T[], max: number, lambda: number): T[] {
+	if (pool.length === 0) return [];
+	const bigrams = new Map<string, Set<string>>();
+	const bg = (e: T): Set<string> => {
+		let s = bigrams.get(e.id);
+		if (!s) {
+			s = wordBigrams(normalize(e.lesson ?? ''));
+			bigrams.set(e.id, s);
+		}
+		return s;
+	};
+	const selected: T[] = [...pinned];
+	const candidates = [...pool];
+	const out: T[] = [];
+	// `selected` = pinned ++ picked, so gating on its length counts both toward
+	// the max (each pick is pushed to both `out` and `selected`).
+	while (selected.length < max && candidates.length > 0) {
+		let bestIdx = -1;
+		let bestScore = Number.NEGATIVE_INFINITY;
+		let best: T | null = null;
+		for (let i = 0; i < candidates.length; i++) {
+			const c = candidates[i];
+			let maxSim = 0;
+			for (const s of selected) {
+				const sim = jaccardBigram(bg(c), bg(s));
+				if (sim > maxSim) maxSim = sim;
+			}
+			const score = lambda * c.finalScore - (1 - lambda) * maxSim;
+			if (
+				score > bestScore + 1e-9 ||
+				(Math.abs(score - bestScore) <= 1e-9 &&
+					best !== null &&
+					tieBreak(c, best) < 0)
+			) {
+				bestScore = score;
+				bestIdx = i;
+				best = c;
+			}
+		}
+		if (bestIdx < 0 || best === null) break;
+		out.push(best);
+		selected.push(best);
+		candidates.splice(bestIdx, 1);
+	}
+	return out;
+}
+
+/** Deterministic tiebreak: higher score, then newer, then lexically smaller id. */
+function tieBreak(
+	a: { finalScore: number; created_at: string; id: string },
+	b: { finalScore: number; created_at: string; id: string },
+): number {
+	if (Math.abs(a.finalScore - b.finalScore) > 1e-9)
+		return b.finalScore - a.finalScore;
+	const at = new Date(a.created_at).getTime();
+	const bt = new Date(b.created_at).getTime();
+	if (at !== bt) return bt - at;
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /** Status boost mirrors the legacy manual-recall boost. */
 function statusBoost(status: string): number {
 	if (status === 'established') return 0.1;
@@ -139,6 +269,10 @@ export async function searchKnowledge(
 	const max = params.maxResults ?? config.max_inject_count ?? 5;
 
 	let results: RankedEntry[] = [];
+	// Synonym-expansion trace (Change 5 / Task 6.2). Declared at function scope so
+	// the post-scoring event emit (outside the try) can record it.
+	let synonymTokens: string[] = [];
+	const synonymTrace: Record<string, string[]> = {};
 	try {
 		// Step 1-4: load + merge + dedup (hive wins) + scope-filter + archived-filter
 		// + metadata score, via the shared merge layer. Pull a wide window so the
@@ -208,6 +342,47 @@ export async function searchKnowledge(
 		const hasQuery = queryBigrams !== null;
 		const textWeight = hasQuery ? TEXT_WEIGHT : 0;
 		const metaWeight = hasQuery ? META_WEIGHT : 1;
+
+		// Composite recall string (Change 5 / Task 6.2): the free-text query plus
+		// the salient context signals. Both trigger recall and synonym expansion
+		// run against this, so a context-only injection call benefits from the same
+		// recall as an explicit query (the directive scorer only sees context, not
+		// the query text — this closes that gap).
+		const compositeRaw = [
+			queryText,
+			context?.taskTitle,
+			context?.taskDescription,
+			context?.lastUserMessage,
+			context?.currentAction,
+			...(context?.recentReviewerFailures ?? []),
+			...(context?.recentTestFailures ?? []),
+			...(context?.recentToolErrors ?? []),
+		]
+			.filter((s): s is string => typeof s === 'string' && s.length > 0)
+			.join(' ');
+		const compositeNorm = normalize(compositeRaw);
+		const hasComposite = compositeNorm.length > 0;
+
+		// Synonym expansion (Change 5 / Task 6.2): pull the learned tag-co-occurrence
+		// synonyms of the composite query terms. Best-effort — a missing/corrupt map
+		// degrades to no expansion. coerceSynonymMap re-sanitises every token, so the
+		// returned synonyms are control-char-free and length-bounded.
+		try {
+			if (hasComposite) {
+				const synMap = await readSynonymMap(
+					directory,
+					config.retrieval?.synonym_map_max_pairs,
+				);
+				const synIndex = buildSynonymIndex(
+					synMap,
+					config.retrieval?.synonym_min_cooccurrence,
+				);
+				const baseTokens = compositeNorm.split(' ').filter(Boolean);
+				synonymTokens = expandTokens(synIndex, baseTokens);
+			}
+		} catch {
+			synonymTokens = [];
+		}
 		const minConf =
 			typeof (config as { directive_min_confidence?: number })
 				.directive_min_confidence === 'number'
@@ -247,6 +422,53 @@ export async function searchKnowledge(
 			const outcomeBoost =
 				computeOutcomeSignal(retrievalOutcomes) * OUTCOME_RANK_WEIGHT;
 
+			// Cold-start exploration bonus (Change 5 / Task 6.2): a small, bounded
+			// lift for never-applied, still-young entries so fresh directives get a
+			// chance to surface and prove (or disprove) themselves instead of being
+			// permanently out-ranked by entrenched lessons.
+			const coldStartBonus =
+				retrievalOutcomes.applied_count === 0 &&
+				entryAgePhases(entry) <
+					(config.retrieval?.cold_start_max_age_phases ??
+						DEFAULT_COLD_START_MAX_AGE_PHASES)
+					? (config.retrieval?.cold_start_bonus ?? DEFAULT_COLD_START_BONUS)
+					: 0;
+
+			// Synonym recall (Change 5 / Task 6.2): a single bounded boost if any
+			// expanded synonym of a query term appears in the entry's text. Multi-word
+			// synonyms (e.g. "module mocks") are matched by substring containment.
+			let synonymBoost = 0;
+			if (synonymTokens.length > 0) {
+				const entryHay = normalize(entryText(entry));
+				const matched: string[] = [];
+				for (const t of synonymTokens) {
+					if (t.length > 0 && entryHay.includes(t)) matched.push(t);
+				}
+				if (matched.length > 0) {
+					synonymBoost = SYNONYM_TEXT_BOOST;
+					synonymTrace[entry.id] = matched;
+				}
+			}
+
+			// Trigger-recall union (Change 5 / Task 6.2): surface an entry whose
+			// declared trigger phrase appears in the composite query, even if its
+			// lesson text shares little vocabulary with the query. This closes the
+			// gap on the query-only path where the directive scorer (which only sees
+			// context, not the free-text query) never credits a query-side trigger.
+			// Suppressed when `ds.triggerHit` already fired so the same trigger is not
+			// double-counted with the (larger, priority-weighted) directive term.
+			const triggerRecallHit =
+				!ds.triggerHit &&
+				hasComposite &&
+				Array.isArray(entry.triggers) &&
+				entry.triggers.some((tr) => {
+					const n = normalize(tr);
+					return (
+						n.length >= TRIGGER_RECALL_MIN_LEN && compositeNorm.includes(n)
+					);
+				});
+			const triggerRecallBoost = triggerRecallHit ? TRIGGER_RECALL_BOOST : 0;
+
 			const finalScore = Math.min(
 				1,
 				Math.max(
@@ -257,6 +479,9 @@ export async function searchKnowledge(
 						confBoost +
 						generatedSkillBoost +
 						outcomeBoost +
+						coldStartBonus +
+						synonymBoost +
+						triggerRecallBoost +
 						(hasQuery ? statusBoost(entry.status) : 0),
 				),
 			);
@@ -273,8 +498,9 @@ export async function searchKnowledge(
 			};
 		});
 
-		// Step 7: rerank — critical+matching first (force-include), then by score
-		// with recency tiebreak.
+		// Step 7: rerank. Critical+matching directives are force-included first
+		// (in score order). The remaining slots are filled by MMR (Change 5,
+		// Task 6.1) so near-paraphrases of the same lesson don't crowd the top-K.
 		scored.sort((a, b) => {
 			const diff = b.finalScore - a.finalScore;
 			if (Math.abs(diff) > 0.001) return diff;
@@ -291,7 +517,11 @@ export async function searchKnowledge(
 				seen.add(e.id);
 			}
 		}
-		for (const e of scored) {
+		// MMR fill for the non-critical remainder.
+		const lambda = clampLambda(config.retrieval?.mmr_lambda);
+		const remaining = scored.filter((e) => !seen.has(e.id));
+		const selected = mmrRerank(remaining, top, max, lambda);
+		for (const e of selected) {
 			if (top.length >= max) break;
 			if (!seen.has(e.id)) {
 				top.push(e);
@@ -312,6 +542,19 @@ export async function searchKnowledge(
 			ranks[e.id] = idx + 1;
 			scores[e.id] = e.finalScore;
 		});
+		// Trace visibility (Change 5 / Task 6.2): record which expanded synonyms, if
+		// any, contributed to each surfaced entry so retrieval ranking is auditable.
+		const synonymBreakdown: Record<string, string[]> = {};
+		for (const e of results) {
+			if (synonymTrace[e.id]) synonymBreakdown[e.id] = synonymTrace[e.id];
+		}
+		const scoreBreakdown =
+			synonymTokens.length > 0
+				? {
+						synonyms_expanded: synonymTokens,
+						synonym_matches: synonymBreakdown,
+					}
+				: undefined;
 		await recordKnowledgeEvent(directory, {
 			type: 'retrieved',
 			trace_id: traceId,
@@ -324,12 +567,21 @@ export async function searchKnowledge(
 			result_ids: results.map((e) => e.id),
 			ranks,
 			scores,
+			...(scoreBreakdown ? { score_breakdown: scoreBreakdown } : {}),
 		});
 	}
 
 	return { trace_id: traceId, results };
 }
 
-export const _internals: { searchKnowledge: typeof searchKnowledge } = {
+export const _internals: {
+	searchKnowledge: typeof searchKnowledge;
+	mmrRerank: typeof mmrRerank;
+	clampLambda: typeof clampLambda;
+	entryAgePhases: typeof entryAgePhases;
+} = {
 	searchKnowledge,
+	mmrRerank,
+	clampLambda,
+	entryAgePhases,
 };

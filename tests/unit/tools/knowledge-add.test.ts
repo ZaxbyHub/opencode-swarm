@@ -52,6 +52,14 @@ describe('knowledge_add tool verification tests', () => {
 		}
 	}
 
+	// Change 4 (Layer-5 actionability gate): a lesson only becomes ACTIVE when it
+	// carries >=1 predicate field AND >=1 scope field. Success-path tests supply
+	// these via the spread below; the quarantine path has its own describe block.
+	const V3_FIELDS = {
+		applies_to_agents: ['coder'],
+		required_actions: ['apply this lesson when relevant'],
+	};
+
 	// ========== Test 1: Valid lesson is created ==========
 	describe('Valid lesson is created', () => {
 		it('Returns success=true and includes an id for valid lesson', async () => {
@@ -59,6 +67,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'This is a valid lesson with more than fifteen characters',
 					category: 'process',
+					...V3_FIELDS,
 					tags: ['testing', 'validation'],
 				},
 				tmpDir,
@@ -80,6 +89,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: lessonText,
 					category: 'security',
+					...V3_FIELDS,
 					tags: ['auth', 'security'],
 				},
 				tmpDir,
@@ -100,6 +110,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'A properly formed lesson entry with sufficient length',
 					category: 'tooling',
+					...V3_FIELDS,
 					tags: ['eslint', 'linting'],
 					scope: 'global',
 				},
@@ -134,6 +145,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'too short',
 					category: 'process',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -150,6 +162,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: '',
 					category: 'process',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -164,6 +177,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: '12345678901234', // 14 chars
 					category: 'process',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -178,6 +192,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: '123456789012345', // 15 chars
 					category: 'process',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -269,6 +284,7 @@ describe('knowledge_add tool verification tests', () => {
 					{
 						lesson,
 						category,
+						...V3_FIELDS,
 					},
 					tmpDir,
 				);
@@ -292,6 +308,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Always validate user input before processing',
 					category: 'security',
+					...V3_FIELDS,
 					tags: ['validation', 'security'],
 				},
 				tmpDir,
@@ -306,6 +323,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Always validate user input before processing in the system',
 					category: 'security',
+					...V3_FIELDS,
 					tags: ['validation'],
 				},
 				tmpDir,
@@ -324,6 +342,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Use TypeScript for better type safety',
 					category: 'tooling',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -336,6 +355,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Write unit tests to catch regressions early',
 					category: 'testing',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -351,6 +371,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Always validate user inputs before processing them',
 					category: 'security',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -360,6 +381,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Always validate user inputs before processing them',
 					category: 'security',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -376,6 +398,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Manual knowledge entries should have auto_generated false',
 					category: 'process',
+					...V3_FIELDS,
 					tags: ['manual', 'test'],
 				},
 				tmpDir,
@@ -391,6 +414,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Explicitly false auto_generated should be stored correctly',
 					category: 'architecture',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -407,6 +431,7 @@ describe('knowledge_add tool verification tests', () => {
 				{
 					lesson: 'Both auto_generated and hive_eligible should be false',
 					category: 'tooling',
+					...V3_FIELDS,
 				},
 				tmpDir,
 			);
@@ -415,6 +440,76 @@ describe('knowledge_add tool verification tests', () => {
 			expect(entries).toHaveLength(1);
 			expect(entries[0].auto_generated).toBe(false);
 			expect(entries[0].hive_eligible).toBe(false);
+		});
+	});
+
+	// ========== Change 4: Layer-5 actionability gate ==========
+	describe('Layer-5 actionability gate (Change 4)', () => {
+		function readUnactionable(): Array<Record<string, unknown>> {
+			const p = path.join(tmpDir, '.swarm', 'knowledge-unactionable.jsonl');
+			try {
+				const content = readFileSync(p, 'utf-8');
+				return content
+					.trim()
+					.split('\n')
+					.filter((line) => line.length > 0)
+					.map((line) => JSON.parse(line));
+			} catch {
+				return [];
+			}
+		}
+
+		it('quarantines a lesson without predicate+scope fields (not stored, queued, hint returned)', async () => {
+			const result = await knowledge_add.execute(
+				{
+					lesson: 'A prose lesson without any actionability fields at all',
+					category: 'process',
+				},
+				tmpDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.quarantined).toBe(true);
+			expect(parsed.hint).toContain('applies_to_agents');
+
+			// Not in the active store; preserved in the unactionable queue.
+			expect(readKnowledgeEntries()).toHaveLength(0);
+			const queued = readUnactionable();
+			expect(queued).toHaveLength(1);
+			expect(queued[0].status).toBe('quarantined_unactionable');
+		});
+
+		it('does NOT quarantine when predicate + scope are provided (control)', async () => {
+			const result = await knowledge_add.execute(
+				{
+					lesson: 'A lesson that carries full actionability metadata fields',
+					category: 'process',
+					applies_to_tools: ['edit'],
+					forbidden_actions: ['edit generated files directly'],
+				},
+				tmpDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(readKnowledgeEntries()).toHaveLength(1);
+			expect(readUnactionable()).toHaveLength(0);
+		});
+
+		it('rejects malformed actionability fields (shape validation)', async () => {
+			const result = await knowledge_add.execute(
+				{
+					lesson:
+						'A lesson with a malformed agents field that must be rejected',
+					category: 'process',
+					applies_to_agents: ['not a valid agent name!!!'],
+					required_actions: ['do the thing'],
+				},
+				tmpDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(String(parsed.error)).toContain('actionability');
+			expect(readKnowledgeEntries()).toHaveLength(0);
 		});
 	});
 });

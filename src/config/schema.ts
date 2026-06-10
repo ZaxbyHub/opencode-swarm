@@ -759,7 +759,7 @@ export const GuardrailsConfigSchema = z.object({
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
 
-// ─── Watchdog configuration ───────────────────────────────────────────────
+// ─── Watchdog configuration ───────────────────────────────────────────────────────
 export const WatchdogConfigSchema = z.object({
 	/** Enable scope-guard hook. Blocks non-architect agents writing outside declared scope. Default: true */
 	scope_guard: z.boolean().default(true),
@@ -771,7 +771,7 @@ export const WatchdogConfigSchema = z.object({
 
 export type WatchdogConfig = z.infer<typeof WatchdogConfigSchema>;
 
-// ─── Self-review configuration ────────────────────────────────────────────
+// ─── Self-review configuration ──────────────────────────────────────────────
 export const SelfReviewConfigSchema = z.object({
 	/** Enable self-review advisory after task marked in_progress. Default: true */
 	enabled: z.boolean().default(true),
@@ -966,6 +966,8 @@ export const KnowledgeConfigSchema = z.object({
 	auto_promote_days: z.number().min(1).max(3650).default(90),
 	/** Maximum number of knowledge entries to inject into context per phase */
 	max_inject_count: z.number().min(0).max(50).default(5),
+	/** Maximum number of knowledge directives injected into a delegated subagent's prompt. Default: 8 */
+	delegate_max_inject_count: z.number().min(0).max(50).default(8),
 	/** Maximum total chars for the entire injection block (preamble + lessons + run memory + rejected warnings). Default: 2000 */
 	inject_char_budget: z.number().min(200).max(10_000).default(2_000),
 	context_budget_threshold: z.number().int().positive().optional(),
@@ -1011,6 +1013,21 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** Change 5: retrieval-upgrade tuning (MMR diversity, cold-start, synonyms). */
+	retrieval: z
+		.object({
+			/** MMR diversity trade-off: 1 = pure relevance, 0 = pure diversity. */
+			mmr_lambda: z.number().min(0).max(1).default(0.5),
+			/** Additive exploration bonus for brand-new, never-applied entries. */
+			cold_start_bonus: z.number().min(0).max(0.5).default(0.08),
+			/** Max age (in phases) for an entry to still earn the cold-start bonus. */
+			cold_start_max_age_phases: z.number().int().min(0).max(100).default(3),
+			/** Tag co-occurrence count at/above which a pair is treated as synonyms. */
+			synonym_min_cooccurrence: z.number().int().min(1).max(100).default(3),
+			/** Hard cap on retained synonym pairs (LRU-evicted by recency). */
+			synonym_map_max_pairs: z.number().int().min(1).max(10000).default(500),
+		})
+		.optional(),
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;

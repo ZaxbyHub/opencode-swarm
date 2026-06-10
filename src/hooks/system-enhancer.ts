@@ -143,6 +143,7 @@ import {
 	rewriteKnowledge,
 } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
+import { validateActionability } from './knowledge-validator.js';
 import {
 	buildCoderLocalizationBlock,
 	buildReviewerBlastRadiusBlock,
@@ -647,8 +648,14 @@ export function createSystemEnhancerHook(
 									const existingLessons = new Set(
 										existingEntries.map((e) => e.lesson),
 									);
+									// Layer-5 actionability gate (Change 4): dark-matter entries are
+									// generated actionable at the source, but the gate contract is
+									// structural — enforce it here so a future change to the
+									// generator cannot silently bypass it.
 									const newEntries = knowledgeEntries.filter(
-										(e) => !existingLessons.has(e.lesson),
+										(e) =>
+											!existingLessons.has(e.lesson) &&
+											validateActionability(e).actionable,
 									);
 									if (newEntries.length === 0) {
 										warn(

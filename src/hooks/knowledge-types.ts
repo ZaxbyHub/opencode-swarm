@@ -57,10 +57,21 @@ export interface RetrievalOutcome {
 	succeeded_after_shown_count?: number;
 	/** v2: phase-failure count after a "shown" (replaces failed_after_count). */
 	failed_after_shown_count?: number;
+	/** v3: recent violation timestamps (newest-first, capped) folded from the
+	 *  event-derived rollup. Surfaced for the repeat-mistake escalator. */
+	violation_timestamps?: string[];
 }
 
 /** v2: priority used by retrieval ranking and enforcement. */
 export type DirectivePriority = 'low' | 'medium' | 'high' | 'critical';
+
+/** One automatic escalation applied to a directive (Change 3). */
+export interface DirectiveEscalationRecord {
+	from: DirectivePriority;
+	to: DirectivePriority;
+	reason: 'repeat_violation' | string;
+	at: string; // ISO 8601
+}
 
 /** v2: optional actionable-directive metadata attached to a knowledge entry. */
 export interface ActionableDirectiveFields {
@@ -76,6 +87,15 @@ export interface ActionableDirectiveFields {
 	applies_to_tools?: string[];
 	/** Reviewer/test-engineer/runtime checks the directive expects. */
 	verification_checks?: string[];
+	/**
+	 * A single machine-checkable verification predicate (Change 2). DSL:
+	 *   grep:<regex>:<path-glob>      pass when ripgrep finds zero matches
+	 *   tool:<argv>                   pass when the (allowlisted, shell-free) command exits 0
+	 *   file_not_modified:<path>      pass when the path is unchanged in the working tree
+	 *   file_modified:<path>          pass when the path is changed in the working tree
+	 * Runs fail-closed (parse error → error) with a hard 15s timeout, no shell.
+	 */
+	verification_predicate?: string;
 	/** Source pointers (file:line, plan section, etc.). Sanitized. */
 	source_refs?: string[];
 	/** UUIDs of source knowledge entries (for derived/clustered entries). */
@@ -86,6 +106,14 @@ export interface ActionableDirectiveFields {
 	generated_skill_path?: string;
 	/** Directive priority for ranking/enforcement. */
 	directive_priority?: DirectivePriority;
+	/**
+	 * Enforcement posture (Change 3). `'enforce'` makes the directive block at the
+	 * point of violation; `'warn'` only records. Auto-set to `'enforce'` by the
+	 * repeat-mistake escalator.
+	 */
+	enforcement_mode?: 'warn' | 'enforce';
+	/** Audit trail of automatic escalations applied to this directive (Change 3). */
+	escalation_history?: DirectiveEscalationRecord[];
 	/** ISO 8601 timestamp of last explicit application. */
 	last_applied_at?: string;
 	/** ISO 8601 timestamp of last explicit acknowledgment. */
@@ -100,7 +128,15 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	tags: string[];
 	scope: string; // 'global' or 'stack:<name>'
 	confidence: number; // 0.0–1.0
-	status: 'candidate' | 'established' | 'promoted' | 'archived' | 'quarantined';
+	status:
+		| 'candidate'
+		| 'established'
+		| 'promoted'
+		| 'archived'
+		| 'quarantined'
+		/** Change 4: failed the actionability layer (no predicate or no scope tag).
+		 *  Held out of the active store pending hardening by the skill-improver. */
+		| 'quarantined_unactionable';
 	confirmed_by: PhaseConfirmationRecord[] | ProjectConfirmationRecord[];
 	retrieval_outcomes: RetrievalOutcome;
 	schema_version: number; // current: 2 (v1 still readable; normalized on read)
@@ -150,6 +186,8 @@ export interface KnowledgeConfig {
 	auto_promote_days: number;
 	/** Maximum knowledge entries to inject per architect message. Default: 5 */
 	max_inject_count: number;
+	/** Maximum knowledge directives injected into a delegated subagent's prompt. Default: 8 */
+	delegate_max_inject_count?: number;
 	/** Maximum total chars for the entire injection block. Default: 2000 */
 	inject_char_budget?: number;
 	/** Minimum headroom chars required before knowledge injection activates. Default: 300 */
@@ -194,6 +232,14 @@ export interface KnowledgeConfig {
 	todo_max_phases: number;
 	/** Enable age-based sweep of knowledge entries. Default: true */
 	sweep_enabled: boolean;
+	/** Change 5: retrieval-upgrade tuning (MMR / cold-start / synonyms). */
+	retrieval?: {
+		mmr_lambda?: number;
+		cold_start_bonus?: number;
+		cold_start_max_age_phases?: number;
+		synonym_min_cooccurrence?: number;
+		synonym_map_max_pairs?: number;
+	};
 }
 
 export interface MessageInfo {

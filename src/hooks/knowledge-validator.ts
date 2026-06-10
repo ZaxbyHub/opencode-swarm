@@ -509,6 +509,123 @@ export function validateActionableFields(
 export type { ActionableDirectiveFields, DirectivePriority };
 
 // ============================================================================
+// Layer 5 — Actionability (Change 4)
+// ============================================================================
+
+export interface ActionabilityResult {
+	actionable: boolean;
+	/** Present only when not actionable. */
+	reason?:
+		| 'missing_predicate'
+		| 'missing_scope'
+		| 'missing_predicate_and_scope';
+}
+
+function hasNonEmptyList(v: unknown): boolean {
+	return Array.isArray(v) && v.length > 0;
+}
+
+/**
+ * Layer 5: an entry is actionable only when it carries at least one
+ * machine-checkable predicate AND at least one scope tag.
+ *
+ *   predicate := forbidden_actions | required_actions | verification_checks
+ *                | verification_predicate
+ *   scope     := applies_to_tools | applies_to_agents
+ *
+ * Plain-prose lessons (no predicate, no scope) are NOT actionable and must be
+ * quarantined rather than activated.
+ */
+export function validateActionability(
+	entry: Pick<
+		KnowledgeEntryBase,
+		| 'forbidden_actions'
+		| 'required_actions'
+		| 'verification_checks'
+		| 'verification_predicate'
+		| 'applies_to_tools'
+		| 'applies_to_agents'
+	>,
+): ActionabilityResult {
+	const hasPredicate =
+		hasNonEmptyList(entry.forbidden_actions) ||
+		hasNonEmptyList(entry.required_actions) ||
+		hasNonEmptyList(entry.verification_checks) ||
+		(typeof entry.verification_predicate === 'string' &&
+			entry.verification_predicate.trim().length > 0);
+	const hasScope =
+		hasNonEmptyList(entry.applies_to_tools) ||
+		hasNonEmptyList(entry.applies_to_agents);
+
+	if (hasPredicate && hasScope) return { actionable: true };
+	const reason: ActionabilityResult['reason'] =
+		!hasPredicate && !hasScope
+			? 'missing_predicate_and_scope'
+			: !hasPredicate
+				? 'missing_predicate'
+				: 'missing_scope';
+	return { actionable: false, reason };
+}
+
+/** Returns `.swarm/knowledge-unactionable.jsonl` for the given directory. */
+export function resolveUnactionablePath(directory: string): string {
+	return path.join(directory, '.swarm', 'knowledge-unactionable.jsonl');
+}
+
+/** One quarantined-unactionable record. */
+export interface UnactionableRecord extends KnowledgeEntryBase {
+	status: 'quarantined_unactionable';
+	unactionable_reason: string;
+	quarantined_at: string;
+}
+
+/**
+ * Persist an entry that failed the actionability layer to the unactionable
+ * queue (held out of the active store, pending hardening by the skill-improver).
+ * FIFO-capped at 200. Best-effort: throws only on lock failure for tests.
+ *
+ * Flooding tradeoff (Phase 4 review): duplicate prose lessons are NOT deduped
+ * at queue time, so a looping producer can fill the queue with duplicates and
+ * FIFO-evict older legitimate records. Accepted because (a) the cap bounds the
+ * damage at 200 records of plain text, (b) the hardening loop's promotion path
+ * dedups at commit time against the active store, and (c) queue producers are
+ * themselves quota- or phase-bounded. Revisit if telemetry shows real evictions.
+ */
+export async function appendUnactionable(
+	directory: string,
+	entry: KnowledgeEntryBase,
+	reason: string,
+): Promise<void> {
+	const filePath = resolveUnactionablePath(directory);
+	const dirPath = path.dirname(filePath);
+	await mkdir(dirPath, { recursive: true });
+	let release: (() => Promise<void>) | null = null;
+	try {
+		release = await lockfile.lock(dirPath, {
+			retries: { retries: 50, minTimeout: 10, maxTimeout: 100 },
+			stale: 5000,
+		});
+		const record: UnactionableRecord = {
+			...entry,
+			status: 'quarantined_unactionable',
+			unactionable_reason: reason,
+			quarantined_at: new Date().toISOString(),
+		};
+		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		const existing = await readKnowledge<UnactionableRecord>(filePath);
+		if (existing.length > 200) {
+			const trimmed = existing.slice(-200);
+			await atomicWriteFile(
+				filePath,
+				`${trimmed.map((e) => JSON.stringify(e)).join('\n')}\n`,
+			);
+		}
+	} finally {
+		if (release) await release().catch(() => {});
+	}
+}
+
+// ============================================================================
 // Quarantine Types
 // ============================================================================
 

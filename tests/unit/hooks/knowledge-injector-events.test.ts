@@ -63,7 +63,7 @@ afterEach(() => {
 });
 
 describe('knowledge injector retrieved events', () => {
-	test('emits retrieved telemetry only for final displayed high-confidence IDs', async () => {
+	test('emits retrieved telemetry for the final displayed IDs (no confidence pre-filter, Task 6.1)', async () => {
 		let searchParams: Record<string, unknown> | undefined;
 		let emittedEvent: KnowledgeEventInput | undefined;
 		let shownIds: string[] | undefined;
@@ -117,19 +117,23 @@ describe('knowledge injector retrieved events', () => {
 		await hook({}, output);
 
 		expect(searchParams?.emitEvent).toBe(false);
+		// Task 6.1 removed the injector's >=0.8 hard confidence pre-filter: a
+		// low-confidence in-scope entry now participates via the hybrid score, so it
+		// is displayed AND its ID appears in the telemetry alongside the high-conf
+		// one. The event still reflects exactly the FINAL displayed set.
 		expect(emittedEvent).toMatchObject({
 			type: 'retrieved',
 			trace_id: 'trace-final',
 			session_id: 'session-1',
 			retrieval_mode: 'auto_injection',
-			result_ids: ['shown'],
+			result_ids: ['shown', 'low-confidence'],
 		});
-		expect(shownIds).toEqual(['shown']);
+		expect(shownIds).toEqual(['shown', 'low-confidence']);
 		const injectedText = output.messages
 			?.flatMap((m) => m.parts ?? [])
 			.map((p) => p.text ?? '')
 			.join('\n');
 		expect(injectedText).toContain('knowledge lesson shown');
-		expect(injectedText).not.toContain('knowledge lesson low-confidence');
+		expect(injectedText).toContain('knowledge lesson low-confidence');
 	});
 });

@@ -245,6 +245,11 @@ REUSE_RE_VERIFICATION: [VERIFIED | DUPLICATION_DETECTED | SKIPPED] — DUPLICATI
 RISK: LOW | MEDIUM | HIGH | CRITICAL
 ISSUES: list with line numbers, grouped by CHECK dimension
 SKILL_COMPLIANCE: COMPLIANT | PARTIAL | VIOLATED — [list of violations or "all rules followed"]
+DIRECTIVE_COMPLIANCE: one line per knowledge directive shown during this phase (IDs listed in the DIRECTIVES TO VERIFY block of your prompt, when present). Use exactly one of:
+  VERIFIED:<id> evidence=<file:line | predicate_passed>
+  VIOLATED:<id> evidence=<file:line | failing_predicate>
+  N/A:<id> reason=<why it does not apply>
+Every listed directive ID MUST appear exactly once. If a directive carries a verification_predicate, RUN it and report predicate_passed / failing_predicate as evidence. Omitting a listed directive ID counts as VIOLATED. If no DIRECTIVES TO VERIFY block was provided, output "DIRECTIVE_COMPLIANCE: none".
 FIXES: required changes if rejected
 Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.
 

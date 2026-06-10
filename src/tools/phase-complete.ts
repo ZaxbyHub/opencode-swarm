@@ -14,6 +14,7 @@ import {
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
+	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
@@ -24,6 +25,7 @@ import {
 	runCuratorPhase,
 } from '../hooks/curator';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
+import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator.js';
 import { updateRetrievalOutcome } from '../hooks/knowledge-reader.js';
 import {
@@ -36,6 +38,11 @@ import type {
 	KnowledgeConfig,
 	KnowledgeEntryBase,
 } from '../hooks/knowledge-types.js';
+import {
+	evaluatePhaseCriticalDirectives,
+	formatDirectiveBlockMessage,
+	recordDirectiveOverrides,
+} from '../hooks/phase-complete-directive-gate.js';
 import {
 	buildApprovedReceipt,
 	buildRejectedReceipt,
@@ -91,6 +98,16 @@ export interface PhaseCompleteArgs {
 	summary?: string;
 	/** Session ID to track state (optional, defaults to current session context) */
 	sessionID?: string;
+	/**
+	 * Architect-only (Change 2, Task 2.4): explicitly accept these unresolved
+	 * critical directive IDs. Requires acceptViolationsJustification. Each
+	 * accepted id is logged as an `override` knowledge event.
+	 */
+	acceptViolations?: string[];
+	/** Written justification required to use acceptViolations. */
+	acceptViolationsJustification?: string;
+	/** Calling agent identity (from tool ctx) — gates the override to the architect. */
+	callerAgent?: string;
 }
 
 /**
@@ -476,6 +493,89 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Critical knowledge-directive gate (Change 2, Task 2.4).
+	// A phase cannot complete while a CRITICAL directive shown during the phase
+	// lacks a terminal outcome or carries an unremediated violation. The architect
+	// may override specific IDs with a written justification; each override is
+	// logged as an `override` knowledge event. Fail-closed.
+	const knowledgeEnabled =
+		(config.knowledge as { enabled?: boolean } | undefined)?.enabled !== false;
+	if (knowledgeEnabled) {
+		const plan = await loadPlan(dir).catch(() => null);
+		const phaseLabel = plan
+			? (extractCurrentPhaseFromPlan(plan) ??
+				`Phase ${plan.current_phase ?? phase}`)
+			: `Phase ${phase}`;
+		const requestedAccept = Array.isArray(args.acceptViolations)
+			? args.acceptViolations.filter(
+					(s) => typeof s === 'string' && s.length > 0,
+				)
+			: [];
+		const justification =
+			typeof args.acceptViolationsJustification === 'string'
+				? args.acceptViolationsJustification.trim()
+				: '';
+		// Override is architect-only. Identity comes from the tool ctx (callerAgent),
+		// falling back to the session's active agent; default architect since
+		// phase_complete is an architect-only tool by the AGENT_TOOL_MAP.
+		const callerAgent =
+			args.callerAgent ?? swarmState.activeAgent.get(sessionID) ?? 'architect';
+		const isArchitect =
+			stripKnownSwarmPrefix(callerAgent).toLowerCase() === 'architect';
+
+		if (requestedAccept.length > 0 && !isArchitect) {
+			return blockedResult(phase, {
+				reason: 'override_denied_non_architect',
+				message:
+					'accept_violations is architect-only — this caller may not override critical directive violations.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+			});
+		}
+		if (requestedAccept.length > 0 && justification.length === 0) {
+			return blockedResult(phase, {
+				reason: 'override_requires_justification',
+				message:
+					'accept_violations requires accept_violations_justification (a written reason).',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+			});
+		}
+		const effectiveAccept =
+			requestedAccept.length > 0 && isArchitect && justification.length > 0
+				? requestedAccept
+				: [];
+		const directiveGate = await evaluatePhaseCriticalDirectives({
+			directory: dir,
+			phaseLabel,
+			acceptViolations: effectiveAccept,
+		});
+		if (directiveGate.overridden.length > 0) {
+			await recordDirectiveOverrides(
+				dir,
+				directiveGate.overridden,
+				justification,
+				sessionID,
+			);
+		}
+		if (directiveGate.blocked) {
+			return blockedResult(phase, {
+				reason: directiveGate.failedClosed
+					? 'directive_gate_failed_closed'
+					: 'unresolved_critical_directives',
+				message: directiveGate.failedClosed
+					? 'Critical-directive gate could not read knowledge events; failing closed.'
+					: formatDirectiveBlockMessage(directiveGate.unresolved),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				unresolved_directives: directiveGate.unresolved,
+			});
+		}
+	}
+
 	// Retrospective gate: require a valid retro bundle for this phase
 	const retroResult = await loadEvidence(dir, `retro-${phase}`);
 	let retroFound = false;
@@ -758,19 +858,32 @@ export async function executePhaseComplete(
 			// Infer project name from directory
 			const projectName = path.basename(dir);
 
+			// Change 4 (Task 4.2): provide the curator LLM delegate so plain-prose
+			// lessons are enriched with v3 actionability fields before the Layer-5
+			// gate; quota knobs come from the shared skill_improver budget.
+			const skillImproverCfg = SkillImproverConfigSchema.parse(
+				config.skill_improver ?? {},
+			);
 			const curationResult = await curateAndStoreSwarm(
 				retroEntry.lessons_learned,
 				projectName,
 				{ phase_number: phase },
 				dir,
 				knowledgeConfig,
+				{
+					llmDelegate: createCuratorLLMDelegate(dir, 'phase', sessionID),
+					enrichmentQuota: {
+						maxCalls: skillImproverCfg.max_calls_per_day,
+						window: skillImproverCfg.quota_window,
+					},
+				},
 			);
 			if (curationResult) {
 				const sessionState = swarmState.agentSessions.get(sessionID);
 				if (sessionState) {
 					sessionState.pendingAdvisoryMessages ??= [];
 					sessionState.pendingAdvisoryMessages.push(
-						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected.`,
+						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
 			}
@@ -1498,6 +1611,18 @@ export const phase_complete: ToolDefinition = createSwarmTool({
 			.describe(
 				'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
 			),
+		accept_violations: z
+			.array(z.string())
+			.optional()
+			.describe(
+				'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
+			),
+		accept_violations_justification: z
+			.string()
+			.optional()
+			.describe(
+				'Written justification required when accept_violations is provided.',
+			),
 	},
 	execute: async (args, directory, ctx) => {
 		// Parse and validate arguments
@@ -1511,6 +1636,15 @@ export const phase_complete: ToolDefinition = createSwarmTool({
 				sessionID:
 					ctx?.sessionID ??
 					(args.sessionID !== undefined ? String(args.sessionID) : undefined),
+				acceptViolations: Array.isArray(args.accept_violations)
+					? (args.accept_violations as unknown[]).map((s) => String(s))
+					: undefined,
+				acceptViolationsJustification:
+					args.accept_violations_justification !== undefined
+						? String(args.accept_violations_justification)
+						: undefined,
+				// Caller identity for the architect-only override gate.
+				callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
 			};
 			workingDirInput =
 				args.working_directory !== undefined

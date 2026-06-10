@@ -13,6 +13,7 @@ import {
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 } from '../git/branch';
+import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { isHiveEligible, promoteToHive } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import {
@@ -56,6 +57,7 @@ interface CurationCounts {
 	stored: number;
 	skipped: number;
 	rejected: number;
+	quarantined: number;
 }
 
 interface CloseKnowledgeEntry {
@@ -517,12 +519,28 @@ export async function handleCloseCommand(
 	let curationSucceeded = false;
 	let curationResult: CurationCounts | undefined;
 	try {
+		// Change 4 (Task 4.2): close-time lessons also pass the Layer-5
+		// actionability gate — enrich via the curator LLM when available.
+		const skillImproverCfg = SkillImproverConfigSchema.parse(
+			loadedConfig.skill_improver ?? {},
+		);
 		curationResult = await curateAndStoreSwarm(
 			allLessons,
 			projectName,
 			{ phase_number: 0 },
 			directory,
 			config,
+			{
+				llmDelegate: createCuratorLLMDelegate(
+					directory,
+					'phase',
+					options.sessionID,
+				),
+				enrichmentQuota: {
+					maxCalls: skillImproverCfg.max_calls_per_day,
+					window: skillImproverCfg.quota_window,
+				},
+			},
 		);
 		curationSucceeded = true;
 	} catch (error) {

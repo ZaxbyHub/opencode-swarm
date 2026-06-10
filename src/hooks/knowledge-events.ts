@@ -51,7 +51,11 @@ export type RetrievalEventMode =
 	| 'auto_injection'
 	| 'coder_context'
 	| 'review_context'
-	| 'curator';
+	| 'curator'
+	/** Per-delegate directive injection (Change 1): a delegated subagent
+	 *  (coder/reviewer/test_engineer/sme/docs/designer/critic/curator) was shown
+	 *  the subset of directives scoped to its role + expected tools. */
+	| 'delegate_inject';
 
 /** A retrieval: a query returned a ranked set of knowledge entries. */
 export interface RetrievedEvent {
@@ -76,7 +80,18 @@ export interface RetrievedEvent {
 
 /** A receipt: an agent explicitly considered a specific knowledge entry. */
 export interface ReceiptEvent {
-	type: 'acknowledged' | 'applied' | 'ignored' | 'contradicted' | 'violated';
+	type:
+		| 'acknowledged'
+		| 'applied'
+		| 'ignored'
+		| 'contradicted'
+		| 'violated'
+		/** Delegate decided a shown directive did not apply to its task (Change 1).
+		 *  Recorded for auditability; never penalizes the entry's outcome signal. */
+		| 'n_a'
+		/** Architect explicitly accepted an unresolved critical violation at
+		 *  phase_complete (Change 2, Task 2.4). Audit-only; never affects rollups. */
+		| 'override';
 	schema_version?: number;
 	event_id: string;
 	trace_id: string;
@@ -87,6 +102,19 @@ export interface ReceiptEvent {
 	task_id?: string;
 	agent: string;
 	reason?: string;
+	/**
+	 * Origin discriminator (Change 2). Distinguishes reviewer-issued verdicts
+	 * (`'reviewer'`) from delegate self-acks (`'delegate'`) without changing the
+	 * `type`, so existing counter rollups (which switch on `type`) stay intact.
+	 * A reviewer VERIFIED maps to type:'applied' with source:'reviewer'.
+	 */
+	source?: 'delegate' | 'reviewer' | string;
+	/** Result of executing a directive's verification_predicate (Change 2). */
+	predicate_check?: {
+		predicate: string;
+		result: 'pass' | 'fail' | 'error';
+		detail: string;
+	};
 	evidence?: {
 		files?: string[];
 		commands?: string[];
@@ -123,11 +151,25 @@ export interface ArchivedEvent {
 	previous_status?: string;
 }
 
+/** An escalation: a directive was auto-promoted by the repeat-mistake escalator. */
+export interface EscalationEvent {
+	type: 'escalation';
+	schema_version?: number;
+	event_id: string;
+	timestamp: string;
+	entry_id: string;
+	from: string;
+	to: string;
+	reason: string;
+	enforcement_mode?: string;
+}
+
 export type KnowledgeEvent =
 	| RetrievedEvent
 	| ReceiptEvent
 	| OutcomeEvent
-	| ArchivedEvent;
+	| ArchivedEvent
+	| EscalationEvent;
 
 export type KnowledgeEventType = KnowledgeEvent['type'];
 
@@ -153,6 +195,8 @@ export const RECEIPT_EVENT_TYPES: ReadonlySet<string> = new Set([
 	'ignored',
 	'contradicted',
 	'violated',
+	'n_a',
+	'override',
 ]);
 
 // ============================================================================
@@ -340,6 +384,9 @@ export interface CounterRollup {
 	ignored_count: number;
 	violated_count: number;
 	contradicted_count: number;
+	/** Count of explicit not-applicable decisions (Change 1). Auditable, neutral:
+	 *  never contributes to the outcome ranking signal. */
+	n_a_count: number;
 	succeeded_after_shown_count: number;
 	failed_after_shown_count: number;
 	/**
@@ -350,7 +397,16 @@ export interface CounterRollup {
 	partial_after_shown_count: number;
 	last_applied_at?: string;
 	last_acknowledged_at?: string;
+	/**
+	 * The most recent violation timestamps for this entry (ISO 8601, newest
+	 * first, capped at the last {@link MAX_VIOLATION_TIMESTAMPS}). Feeds the
+	 * repeat-mistake escalator (Change 3).
+	 */
+	violation_timestamps: string[];
 }
+
+/** Cap on retained per-entry violation timestamps. */
+export const MAX_VIOLATION_TIMESTAMPS = 10;
 
 function emptyRollup(): CounterRollup {
 	return {
@@ -360,9 +416,11 @@ function emptyRollup(): CounterRollup {
 		ignored_count: 0,
 		violated_count: 0,
 		contradicted_count: 0,
+		n_a_count: 0,
 		succeeded_after_shown_count: 0,
 		failed_after_shown_count: 0,
 		partial_after_shown_count: 0,
+		violation_timestamps: [],
 	};
 }
 
@@ -435,11 +493,18 @@ export function recomputeCounters(
 			case 'ignored':
 				get(map, e.knowledge_id).ignored_count += 1;
 				break;
-			case 'violated':
-				get(map, e.knowledge_id).violated_count += 1;
+			case 'violated': {
+				const r = get(map, e.knowledge_id);
+				r.violated_count += 1;
+				r.violation_timestamps.push(e.timestamp);
 				break;
+			}
 			case 'contradicted':
 				get(map, e.knowledge_id).contradicted_count += 1;
+				break;
+			case 'n_a':
+				// Recorded for auditability; intentionally neutral (no penalty).
+				get(map, e.knowledge_id).n_a_count += 1;
 				break;
 			case 'outcome': {
 				if (!e.knowledge_id) break;
@@ -475,11 +540,83 @@ export function recomputeCounters(
 				break;
 			case 'violated':
 				r.violated_count += 1;
+				r.violation_timestamps.push(rec.timestamp);
 				break;
 		}
 	}
 
+	// Normalize violation timestamps: newest first, capped at the retention limit.
+	for (const r of map.values()) {
+		if (r.violation_timestamps.length > 1) {
+			r.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+		}
+		if (r.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
+			r.violation_timestamps = r.violation_timestamps.slice(
+				0,
+				MAX_VIOLATION_TIMESTAMPS,
+			);
+		}
+	}
+
 	return map;
+}
+
+/**
+ * Count how many of the given violation timestamps fall within `windowDays` of
+ * `now` (inclusive). Pure helper — deterministic given its inputs. Malformed
+ * timestamps are ignored.
+ */
+export function countViolationsInWindow(
+	timestamps: string[],
+	windowDays: number,
+	now: Date = new Date(),
+): number {
+	const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+	let count = 0;
+	for (const ts of timestamps) {
+		const t = Date.parse(ts);
+		if (!Number.isNaN(t) && t >= cutoff) count += 1;
+	}
+	return count;
+}
+
+/**
+ * Async convenience: count an entry's violations within a day-window. Counts
+ * directly from the event log + legacy application records so the result is
+ * INDEPENDENT of the {@link MAX_VIOLATION_TIMESTAMPS} display cap (the rollup's
+ * `violation_timestamps` keeps only the newest 10 and would undercount an entry
+ * with more in-window violations). Fail-open: returns 0 on error.
+ */
+export async function countEntryViolationsInWindow(
+	directory: string,
+	entryId: string,
+	windowDays: number,
+	now: Date = new Date(),
+): Promise<number> {
+	try {
+		const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+		const [events, legacyRecords] = await Promise.all([
+			readKnowledgeEvents(directory),
+			readLegacyApplicationRecords(directory),
+		]);
+		let count = 0;
+		for (const e of events) {
+			if (e.type !== 'violated' || e.knowledge_id !== entryId) continue;
+			const t = Date.parse(e.timestamp);
+			if (!Number.isNaN(t) && t >= cutoff) count += 1;
+		}
+		// Legacy `violated` records originate from the old knowledge_ack tool and
+		// have no event-log counterpart, so they are folded unconditionally (same
+		// rule recomputeCounters uses) — no double counting.
+		for (const rec of legacyRecords) {
+			if (rec.result !== 'violated' || rec.knowledgeId !== entryId) continue;
+			const t = Date.parse(rec.timestamp);
+			if (!Number.isNaN(t) && t >= cutoff) count += 1;
+		}
+		return count;
+	} catch {
+		return 0;
+	}
 }
 
 /**
