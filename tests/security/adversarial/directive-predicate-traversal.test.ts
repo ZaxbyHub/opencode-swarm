@@ -129,8 +129,17 @@ describe('directive predicate runner — adversarial', () => {
 
 	it('grep regex beginning with a dash is treated as a pattern, not a flag', async () => {
 		// Without the `--` separator a leading-dash regex would be parsed by
-		// ripgrep as an unknown flag (error). With it, this is a normal search.
+		// ripgrep as an unknown flag (a "ripgrep error (exit 2)" outcome). With it,
+		// this is a normal search → pass/fail.
 		const out = await runDirectivePredicate('grep:-x:src/**/*.ts', dir);
-		expect(out.result === 'pass' || out.result === 'fail').toBe(true);
+		// On hosts where ripgrep is installed, the `--` separator must make `-x` a
+		// pattern, so the predicate completes as pass or fail — never a flag-parse
+		// error. On CI runners without ripgrep on PATH, the predicate degrades
+		// gracefully to a "ripgrep (rg) not found" error; accept that environment
+		// skip but still reject any other (e.g. flag-parse) error.
+		const ranAsPattern = out.result === 'pass' || out.result === 'fail';
+		const rgUnavailable =
+			out.result === 'error' && /not found/i.test(out.detail ?? '');
+		expect(ranAsPattern || rgUnavailable).toBe(true);
 	});
 });
