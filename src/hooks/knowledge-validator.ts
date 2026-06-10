@@ -366,6 +366,7 @@ const SOURCE_REF_FORBIDDEN = /(\.\.\/|\.\.\\|\0|[\x00-\x1f\x7f])/;
 export const ALLOWED_SKILL_PATH_PREFIXES = [
 	'.opencode/skills/generated/',
 	'.swarm/skills/proposals/',
+	'.swarm/skills/candidates/',
 ];
 
 const VALID_DIRECTIVE_PRIORITIES = new Set<string>([
@@ -397,6 +398,25 @@ export function validateSkillPath(p: unknown): boolean {
 	if (p.includes('..')) return false;
 	const norm = p.replace(/\\/g, '/');
 	return ALLOWED_SKILL_PATH_PREFIXES.some((prefix) => norm.startsWith(prefix));
+}
+
+/**
+ * Validate that a path is a valid candidate storage path under `.swarm/skills/candidates/`.
+ * The filename must be a UUID v4 (canonical, no braces) with `.json` extension.
+ */
+export function validateSkillCandidatePath(p: unknown): boolean {
+	if (typeof p !== 'string') return false;
+	if (p.length === 0 || p.length > 256) return false;
+	if (p.includes('\0')) return false;
+	if (path.isAbsolute(p)) return false;
+	if (p.includes('..')) return false;
+	const norm = p.replace(/\\/g, '/');
+	if (!norm.startsWith('.swarm/skills/candidates/')) return false;
+	// Filename must be <uuid-v4>.json
+	const filename = norm.slice('.swarm/skills/candidates/'.length);
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i.test(
+		filename,
+	);
 }
 
 /** Validate the optional ActionableDirectiveFields block on a knowledge entry. */

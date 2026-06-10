@@ -2,7 +2,12 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { type PluginConfig, PluginConfigSchema } from './schema';
+import {
+	ExternalSkillsConfigSchema,
+	type PluginConfig,
+	PluginConfigSchema,
+	resolveExternalSkillsConfig,
+} from './schema';
 
 const CONFIG_FILENAME = 'opencode-swarm.json';
 const PROMPTS_DIR_NAME = 'opencode-swarm';
@@ -138,6 +143,34 @@ function migratePresetsConfig(
 }
 
 /**
+ * Preprocess the external_skills section of raw config.
+ * If the section is present but invalid, warn and strip it so the rest
+ * of the config loads cleanly (AGENTS.md #1 fail-open).
+ */
+function sanitizeExternalSkillsConfig(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!('external_skills' in raw) || raw.external_skills === undefined) {
+		return raw;
+	}
+	const esResult = ExternalSkillsConfigSchema.safeParse(raw.external_skills);
+	if (esResult.success) {
+		return {
+			...raw,
+			external_skills: resolveExternalSkillsConfig(esResult.data),
+		};
+	}
+	console.warn('[opencode-swarm] external_skills config validation failed:');
+	console.warn(esResult.error.format());
+	console.warn(
+		'[opencode-swarm] External skills curation disabled due to invalid config. Fix the external_skills section to enable it.',
+	);
+	const cleaned = { ...raw };
+	delete cleaned.external_skills;
+	return cleaned;
+}
+
+/**
  * Load plugin configuration from user and project config files.
  *
  * Config locations:
@@ -182,6 +215,9 @@ export function loadPluginConfig(directory: string): PluginConfig {
 	// Migrate v6.12 presets format to v6.13+ agents format
 	mergedRaw = migratePresetsConfig(mergedRaw);
 
+	// Pre-validate external_skills so invalid config doesn't block plugin load
+	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
+
 	// Validate merged config with Zod (applies defaults ONCE).
 	// Nested optional schemas (e.g. council.general) surface automatically
 	// here because the parser recursively resolves the full schema tree;
@@ -191,7 +227,9 @@ export function loadPluginConfig(directory: string): PluginConfig {
 		// If merged config fails validation, try user config alone
 		// (project config may have invalid values that should be ignored)
 		if (rawUserConfig) {
-			const userParseResult = PluginConfigSchema.safeParse(rawUserConfig);
+			const userParseResult = PluginConfigSchema.safeParse(
+				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+			);
 			if (userParseResult.success) {
 				console.warn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
@@ -328,10 +366,13 @@ function reduceParsedConfig(
 		>;
 	}
 	mergedRaw = migratePresetsConfig(mergedRaw);
+	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
 	const result = PluginConfigSchema.safeParse(mergedRaw);
 	if (!result.success) {
 		if (rawUserConfig) {
-			const userParseResult = PluginConfigSchema.safeParse(rawUserConfig);
+			const userParseResult = PluginConfigSchema.safeParse(
+				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+			);
 			if (userParseResult.success) {
 				console.warn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',

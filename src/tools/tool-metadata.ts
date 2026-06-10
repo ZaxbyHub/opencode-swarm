@@ -588,6 +588,41 @@ export const TOOL_METADATA = {
 			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation',
 		agents: ['coder'],
 	},
+	external_skill_discover: {
+		description:
+			'Discover external skill candidates from configured sources. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_list: {
+		description:
+			'List external skill candidates in the quarantine store. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_inspect: {
+		description:
+			'Inspect a specific external skill candidate by ID. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_promote: {
+		description:
+			'Promote a validated external skill candidate to an active generated skill. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_reject: {
+		description:
+			'Reject an external skill candidate after evaluation. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_delete: {
+		description:
+			'Delete an external skill candidate from the quarantine store. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
+	external_skill_revoke: {
+		description:
+			'Revoke a previously promoted external skill. Returns a disabled message when external_skills.curation_enabled is false.',
+		agents: [],
+	},
 } satisfies Record<string, ToolMeta>;
 
 /** Union type of all valid tool names (the metadata keys). */
