@@ -21765,6 +21765,23 @@ function resetSwarmState() {
   clearPendingCoderScope();
   _councilDisagreementWarned.clear();
 }
+function resetSwarmStatePreservingSingletons() {
+  const preservedOpencodeClient = swarmState.opencodeClient;
+  const preservedFullAutoEnabledInConfig = swarmState.fullAutoEnabledInConfig;
+  const preservedCuratorInitAgentNames = swarmState.curatorInitAgentNames;
+  const preservedCuratorPhaseAgentNames = swarmState.curatorPhaseAgentNames;
+  const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
+  const preservedSpecWriterAgentNames = swarmState.specWriterAgentNames;
+  const preservedGeneratedAgentNames = swarmState.generatedAgentNames;
+  resetSwarmState();
+  swarmState.opencodeClient = preservedOpencodeClient;
+  swarmState.fullAutoEnabledInConfig = preservedFullAutoEnabledInConfig;
+  swarmState.curatorInitAgentNames = preservedCuratorInitAgentNames;
+  swarmState.curatorPhaseAgentNames = preservedCuratorPhaseAgentNames;
+  swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
+  swarmState.specWriterAgentNames = preservedSpecWriterAgentNames;
+  swarmState.generatedAgentNames = preservedGeneratedAgentNames;
+}
 function getAgentSession(sessionId) {
   return swarmState.agentSessions.get(sessionId);
 }
@@ -38904,6 +38921,7 @@ var init_write_retro = __esm(() => {
 });
 
 // src/commands/close.ts
+import * as fsSync2 from "fs";
 import { promises as fs8 } from "fs";
 import path19 from "path";
 async function runAbortableSkillReview(req, timeoutMs) {
@@ -38939,6 +38957,28 @@ function countSessionKnowledgeEntries(entries, sessionStart, fallbackCount) {
     return Number.isFinite(createdAtMs) && createdAtMs >= sessionStartMs;
   }).length;
 }
+async function copyDirRecursive(src, dest) {
+  let count = 0;
+  const entries = await fs8.readdir(src);
+  await fs8.mkdir(dest, { recursive: true });
+  for (const entry of entries) {
+    const srcEntry = path19.join(src, entry);
+    const destEntry = path19.join(dest, entry);
+    try {
+      const stat2 = await fs8.stat(srcEntry);
+      if (stat2.isDirectory()) {
+        const subCount = await copyDirRecursive(srcEntry, destEntry).catch(() => 0);
+        count += subCount;
+      } else {
+        try {
+          await fs8.copyFile(srcEntry, destEntry);
+          count++;
+        } catch {}
+      }
+    } catch {}
+  }
+  return count;
+}
 function guaranteeAllPlansComplete(planData) {
   const closedPhaseIds = [];
   const closedTaskIds = [];
@@ -38960,8 +39000,17 @@ function guaranteeAllPlansComplete(planData) {
   return { closedPhaseIds, closedTaskIds };
 }
 async function handleCloseCommand(directory, args, options = {}) {
-  const planPath = validateSwarmPath(directory, "plan.json");
   const swarmDir = path19.join(directory, ".swarm");
+  try {
+    if (fsSync2.lstatSync(swarmDir).isSymbolicLink()) {
+      return `\u274C Refused: .swarm/ is a symlink or junction. Refusing to operate on a redirected directory for safety.`;
+    }
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+  const planPath = validateSwarmPath(directory, "plan.json");
   let planExists = false;
   let planData = {
     title: path19.basename(directory) || "Ad-hoc session",
@@ -39243,31 +39292,12 @@ async function handleCloseCommand(directory, args, options = {}) {
       const srcDir = path19.join(swarmDir, dirName);
       const destDir = path19.join(archiveDir, dirName);
       try {
-        const entries = await fs8.readdir(srcDir);
-        if (entries.length > 0) {
-          await fs8.mkdir(destDir, { recursive: true });
-          for (const entry of entries) {
-            const srcEntry = path19.join(srcDir, entry);
-            const destEntry = path19.join(destDir, entry);
-            try {
-              const stat2 = await fs8.stat(srcEntry);
-              if (stat2.isDirectory()) {
-                await fs8.mkdir(destEntry, { recursive: true });
-                const subEntries = await fs8.readdir(srcEntry);
-                for (const sub of subEntries) {
-                  await fs8.copyFile(path19.join(srcEntry, sub), path19.join(destEntry, sub)).catch(() => {});
-                }
-              } else {
-                await fs8.copyFile(srcEntry, destEntry);
-              }
-              archivedFileCount++;
-            } catch {}
-          }
-        }
+        const copied = await copyDirRecursive(srcDir, destDir);
+        archivedFileCount += copied;
         archivedActiveStateDirs.add(dirName);
       } catch {}
     }
-    archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}/`;
+    archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}-${suffix}/`;
   } catch (archiveError) {
     warnings.push(`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`);
     archiveResult = "Archive creation failed (see warnings)";
@@ -39338,6 +39368,20 @@ async function handleCloseCommand(directory, args, options = {}) {
         warnings.push(`Failed to remove ${path19.basename(candidate)}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
+  let tmpFilesRemoved = 0;
+  try {
+    const swarmFiles = await fs8.readdir(swarmDir);
+    const tmpFiles = swarmFiles.filter((f) => f.startsWith(".tmp."));
+    for (const tmp of tmpFiles) {
+      try {
+        await fs8.unlink(path19.join(swarmDir, tmp));
+        tmpFilesRemoved++;
+      } catch {}
+    }
+  } catch {}
+  if (tmpFilesRemoved > 0) {
+    cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
   }
   clearAllScopes(directory);
   const contextPath = path19.join(swarmDir, "context.md");
@@ -39445,17 +39489,7 @@ async function handleCloseCommand(directory, args, options = {}) {
     warnings.push(`Failed to write close-summary.md: ${msg}`);
     console.warn("[close-command] Failed to write close-summary.md:", error93);
   }
-  const preservedClient = swarmState.opencodeClient;
-  const preservedFullAutoFlag = swarmState.fullAutoEnabledInConfig;
-  const preservedCuratorInitNames = swarmState.curatorInitAgentNames;
-  const preservedCuratorPhaseNames = swarmState.curatorPhaseAgentNames;
-  const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
-  resetSwarmState();
-  swarmState.opencodeClient = preservedClient;
-  swarmState.fullAutoEnabledInConfig = preservedFullAutoFlag;
-  swarmState.curatorInitAgentNames = preservedCuratorInitNames;
-  swarmState.curatorPhaseAgentNames = preservedCuratorPhaseNames;
-  swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
+  resetSwarmStatePreservingSingletons();
   const retroWarnings = warnings.filter((w) => w.includes("Retrospective write") || w.includes("retrospective write") || w.includes("Session retrospective"));
   const otherWarnings = warnings.filter((w) => !w.includes("Retrospective write") && !w.includes("retrospective write") && !w.includes("Session retrospective"));
   let warningMsg = "";
@@ -57036,14 +57070,14 @@ var init_context_budget_service = __esm(() => {
 });
 
 // src/services/status-service.ts
-import * as fsSync2 from "fs";
+import * as fsSync3 from "fs";
 import * as path52 from "path";
 function readSpecStalenessSnapshot(directory) {
   try {
     const p = path52.join(directory, ".swarm", "spec-staleness.json");
-    if (!fsSync2.existsSync(p))
+    if (!fsSync3.existsSync(p))
       return { stale: false };
-    const raw = fsSync2.readFileSync(p, "utf-8");
+    const raw = fsSync3.readFileSync(p, "utf-8");
     const parsed = JSON.parse(raw);
     return {
       stale: true,

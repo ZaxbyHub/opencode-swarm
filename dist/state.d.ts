@@ -329,6 +329,23 @@ export declare const swarmState: {
  */
 export declare function resetSwarmState(): void;
 /**
+ * Reset swarm state while preserving the 7 module-scoped singletons that are
+ * populated once at plugin init and must survive a /swarm close + re-init
+ * within the same process lifetime.
+ *
+ * The preserved fields are:
+ * - opencodeClient (SDK client for curator/full-auto delegation)
+ * - fullAutoEnabledInConfig (config flag read at init)
+ * - curatorInitAgentNames, curatorPhaseAgentNames (curator registry)
+ * - skillImproverAgentNames, specWriterAgentNames (skill/spec registry)
+ * - generatedAgentNames (full-auto delegation guard registry)
+ *
+ * Implementation: save all 7 to locals, call resetSwarmState(), restore all 7.
+ * Synchronous (matches resetSwarmState contract). Errors from resetSwarmState
+ * propagate to caller (no try/catch wrapper).
+ */
+export declare function resetSwarmStatePreservingSingletons(): void;
+/**
  * Start a new agent session with initialized guardrail state.
  * Also removes any stale sessions older than staleDurationMs.
  * @param sessionId - The session identifier

@@ -449,6 +449,7 @@ Idempotent 4-stage project finalization:
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
 Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
+Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
 cycles — cumulative project knowledge survives and is not deleted. Deleted files

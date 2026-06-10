@@ -213,6 +213,7 @@ export async function runDesignDocDriftCheck(
 		const filePath = validateSwarmPath(directory, filename);
 		await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.promises.writeFile(
+			// drift-test:exempt — DOC_DRIFT_REPORT_PREFIX is in PRESERVED_SWARM_PATHS, context window misses the variable definition
 			filePath,
 			JSON.stringify(report, null, 2),
 			'utf-8',
