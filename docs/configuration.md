@@ -484,6 +484,90 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
 
+## External Skills Curation Pipeline
+
+Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.
+
+**Requires `curation_enabled: true`** to activate. When disabled, all 7 external skill tools return a disabled message.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `curation_enabled` | boolean | `false` | Master switch for the external skill curation pipeline |
+| `max_candidates` | number | `500` | Maximum candidates in the quarantine store (1–10000) |
+| `max_bytes_per_candidate` | number | `1048576` | Max file size per candidate in bytes (1024–10485760) |
+| `eviction_policy` | `"fifo"` | `"fifo"` | Eviction strategy when `max_candidates` is reached |
+| `ttl_days` | number | `90` | Candidate TTL in days before automatic eviction (1–3650) |
+| `evaluation_enabled` | boolean | `false` | Enable SME evaluation workflow for candidates |
+| `sources` | array | `[]` | Discovery source configurations (see DiscoverySource schema) |
+| `max_candidates_per_discovery` | number | `50` | Max candidates per discovery run (1–1000) |
+| `max_concurrent_fetches` | number | `5` | Max concurrent source fetches (1–20) |
+| `fetch_timeout_ms` | number | `30000` | Per-fetch timeout in milliseconds (1000–300000) |
+
+### Discovery sources
+
+Each source in `sources` must match `DiscoverySourceSchema`:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | `"github" \| "url" \| "collection" \| "manual_import"` | Yes | — | Source type |
+| `location` | string | Yes | — | Source URL, file path, or identifier |
+| `enabled` | boolean | No | `true` | Whether this source is active |
+| `trust_level` | `"low" \| "medium" \| "high"` | No | `"low"` | Trust level for gate modulation |
+
+### Available tools
+
+When `curation_enabled: true`, the architect agent gains access to 7 tools:
+
+| Tool | Description |
+|------|-------------|
+| `external_skill_discover` | Discover external skill candidates from configured sources |
+| `external_skill_list` | List candidates in the quarantine store |
+| `external_skill_inspect` | Inspect a specific candidate by ID |
+| `external_skill_promote` | Promote a validated candidate to an active generated skill |
+| `external_skill_reject` | Reject a candidate after evaluation |
+| `external_skill_delete` | Delete a candidate from the quarantine store |
+| `external_skill_revoke` | Revoke a previously promoted skill |
+
+**Example** — Enable external skill curation with a URL source:
+
+```json
+{
+  "external_skills": {
+    "curation_enabled": true,
+    "max_candidates": 500,
+    "ttl_days": 90,
+    "sources": [
+      {
+        "type": "url",
+        "location": "https://example.com/skills/",
+        "enabled": true,
+        "trust_level": "medium"
+      }
+    ]
+  }
+}
+```
+
+### Troubleshooting
+
+**"All tools return disabled message"**
+→ Check `external_skills.curation_enabled: true` is set in your config. The pipeline is disabled by default.
+
+**"Discover says source not in configured sources"**
+→ The `location` field in your source config must match the URL passed to discover. URLs are validated against configured sources before fetching.
+
+**"Candidate fails validation but content looks safe"**
+→ Check the `trust_level` setting. With `low` trust, warning-level findings are promoted to errors. Try `medium` or `high` trust for less strict gating.
+
+**"Promote fails with 'file already exists'"**
+→ A skill with the same slug already exists in the target directory. Revoke the existing skill first, or choose a different candidate.
+
+**"Promote fails with 'content hash mismatch'"**
+→ The candidate was modified after discovery (TOCTOU detection). Re-discover the candidate to get a fresh evaluation.
+
+**"Revoke fails with 'cannot extract skill slug from history'"**
+→ The candidate's promotion history may be corrupted or missing. The revoke tool needs the slug from the original promotion record to locate the SKILL.md file. If the history was tampered with, delete the candidate and manually remove the SKILL.md file.
+
 ## Turbo Configuration
 
 Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced).

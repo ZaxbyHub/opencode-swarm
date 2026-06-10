@@ -223,6 +223,26 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	spec_writer: ['swarm_memory_recall', 'swarm_memory_propose'],
 };
 
+// ---------------------------------------------------------------------------
+// External skill curation tools — opt-in, gated by external_skills.curation_enabled
+// ---------------------------------------------------------------------------
+
+export const EXTERNAL_SKILL_TOOL_NAMES = [
+	'external_skill_discover',
+	'external_skill_list',
+	'external_skill_inspect',
+	'external_skill_promote',
+	'external_skill_reject',
+	'external_skill_delete',
+	'external_skill_revoke',
+] as const satisfies readonly ToolName[];
+
+export const EXTERNAL_SKILL_AGENT_TOOL_MAP: Partial<
+	Record<AgentName, ToolName[]>
+> = {
+	architect: [...EXTERNAL_SKILL_TOOL_NAMES],
+};
+
 /**
  * Human-readable descriptions for tools shown in the architect Available Tools block.
  * Used to generate the Available Tools section of the architect prompt at construction time.

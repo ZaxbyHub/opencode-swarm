@@ -9,6 +9,7 @@ import {
 } from '../commands/registry.js';
 import {
 	AGENT_TOOL_MAP,
+	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 	TOOL_DESCRIPTIONS,
 } from '../config/constants';
@@ -1250,10 +1251,14 @@ sending it to the coder — the coder never sees contradictory instructions.`;
 function buildYourToolsList(
 	council?: CouncilWorkflowConfig,
 	memoryEnabled = false,
+	externalSkillsEnabled = false,
 ): string {
 	const tools = [
 		...(AGENT_TOOL_MAP.architect ?? []),
 		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(externalSkillsEnabled
+			? (EXTERNAL_SKILL_AGENT_TOOL_MAP.architect ?? [])
+			: []),
 	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
@@ -1355,10 +1360,14 @@ If the user keeps the default phase-level behavior, do not write this section.`;
 function buildAvailableToolsList(
 	council?: CouncilWorkflowConfig,
 	memoryEnabled = false,
+	externalSkillsEnabled = false,
 ): string {
 	const tools = [
 		...(AGENT_TOOL_MAP.architect ?? []),
 		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(externalSkillsEnabled
+			? (EXTERNAL_SKILL_AGENT_TOOL_MAP.architect ?? [])
+			: []),
 	];
 	const sorted = [...tools].sort();
 	const qaCouncilEnabled = council?.enabled === true;
@@ -1576,6 +1585,7 @@ export function createArchitectAgent(
 	memoryEnabled = false,
 	architecturalSupervision?: ArchitectureSupervisionWorkflowConfig,
 	designDocsEnabled = false,
+	externalSkillsEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -1591,10 +1601,13 @@ export function createArchitectAgent(
 	// are omitted when the feature is disabled — keeping the rendered tool list in sync with
 	// the runtime gate in src/tools/convene-council.ts.
 	prompt = prompt
-		?.replace('{{YOUR_TOOLS}}', buildYourToolsList(council, memoryEnabled))
+		?.replace(
+			'{{YOUR_TOOLS}}',
+			buildYourToolsList(council, memoryEnabled, externalSkillsEnabled),
+		)
 		?.replace(
 			'{{AVAILABLE_TOOLS}}',
-			buildAvailableToolsList(council, memoryEnabled),
+			buildAvailableToolsList(council, memoryEnabled, externalSkillsEnabled),
 		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());
 
