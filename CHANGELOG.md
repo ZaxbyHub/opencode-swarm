@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.62.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.61.0...v7.62.0) (2026-06-10)
+
+
+### Features
+
+* **sdd:** add openspec-compatible spec projection ([61bd9e2](https://github.com/zaxbysauce/opencode-swarm/commit/61bd9e2f602392b2bc8c5701fd198f3436a02599))
+
+
+### Bug Fixes
+
+* **sdd:** address review feedback ([2b26cca](https://github.com/zaxbysauce/opencode-swarm/commit/2b26ccab47f7961ca4a88dfbbb6b80f6fb9c8d7f))
+
 ## [7.61.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.60.0...v7.61.0) (2026-06-09)
 
 
