@@ -263,3 +263,47 @@ describe('write_architecture_supervisor_evidence skill-draft feedback (Chunk E)'
 		expect(JSON.parse(out).skills_proposed).toBe(0);
 	});
 });
+
+describe('write_architecture_supervisor_evidence provenance write-through', () => {
+	test('persists provenance fields when provided', async () => {
+		const out = await run({
+			phase: 1,
+			verdict: 'APPROVE',
+			provenance_agent_name: 'critic_architecture_supervisor',
+			provenance_session_id: 'sess-abc-123',
+		});
+		const parsed = JSON.parse(out);
+		expect(parsed.success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw).not.toBeNull();
+		expect(raw?.provenance).toBeDefined();
+		expect(raw!.provenance!.agent_name).toBe('critic_architecture_supervisor');
+		expect(raw!.provenance!.session_id).toBe('sess-abc-123');
+		expect(raw!.provenance!.verified_at).toBeDefined();
+	});
+
+	test('omits provenance when not provided', async () => {
+		const out = await run({ phase: 1, verdict: 'APPROVE' });
+		const parsed = JSON.parse(out);
+		expect(parsed.success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw).not.toBeNull();
+		expect(raw?.provenance).toBeUndefined();
+	});
+
+	test('persists provenance with only agent_name', async () => {
+		const out = await run({
+			phase: 1,
+			verdict: 'APPROVE',
+			provenance_agent_name: 'critic_architecture_supervisor',
+		});
+		expect(JSON.parse(out).success).toBe(true);
+
+		const raw = readSupervisorReportRaw(tempDir, 1);
+		expect(raw?.provenance).toBeDefined();
+		expect(raw!.provenance!.agent_name).toBe('critic_architecture_supervisor');
+		expect(raw!.provenance!.session_id).toBeUndefined();
+	});
+});

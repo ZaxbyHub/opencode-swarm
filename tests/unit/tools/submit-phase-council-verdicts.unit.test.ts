@@ -679,3 +679,76 @@ describe('submit_phase_council_verdicts — stale verdict detection', () => {
 		}
 	});
 });
+
+describe('submit_phase_council_verdicts — provenance write-through', () => {
+	test('persists provenance fields to evidence file when provided', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-prov-write-'));
+		try {
+			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 1, 'pass');
+			const { submit_phase_council_verdicts } = await import(
+				'../../../src/tools/submit-phase-council-verdicts'
+			);
+			const result = await submit_phase_council_verdicts.execute(
+				{
+					phaseNumber: 1,
+					swarmId: 'test',
+					phaseSummary: 'Phase 1 complete.',
+					verdicts: ALL_5_VERDICTS,
+					working_directory: tempDir,
+					provenanceAgentName: 'architect',
+					provenanceSessionId: 'sess-provenance-test',
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+
+			const evidenceRaw = readFileSync(
+				join(tempDir, '.swarm', 'evidence', '1', 'phase-council.json'),
+				'utf-8',
+			);
+			const evidence = JSON.parse(evidenceRaw);
+			const entry = evidence.entries[0];
+			expect(entry.provenance).toBeDefined();
+			expect(entry.provenance.agent_name).toBe('architect');
+			expect(entry.provenance.session_id).toBe('sess-provenance-test');
+			expect(entry.provenance.verified_at).toBeDefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('omits provenance from evidence file when not provided', async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), 'spcv-prov-omit-'));
+		try {
+			writeConfig(tempDir, { enabled: true });
+			writeMutationGateEvidence(tempDir, 1, 'pass');
+			const { submit_phase_council_verdicts } = await import(
+				'../../../src/tools/submit-phase-council-verdicts'
+			);
+			const result = await submit_phase_council_verdicts.execute(
+				{
+					phaseNumber: 1,
+					swarmId: 'test',
+					phaseSummary: 'Phase 1 complete.',
+					verdicts: ALL_5_VERDICTS,
+					working_directory: tempDir,
+				},
+				{ directory: tempDir },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+
+			const evidenceRaw = readFileSync(
+				join(tempDir, '.swarm', 'evidence', '1', 'phase-council.json'),
+				'utf-8',
+			);
+			const evidence = JSON.parse(evidenceRaw);
+			const entry = evidence.entries[0];
+			expect(entry.provenance).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
