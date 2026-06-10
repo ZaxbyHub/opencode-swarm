@@ -86,12 +86,16 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 				.string()
 				.min(1)
 				.optional()
-				.describe('Agent name that produced this evidence (optional provenance).'),
+				.describe(
+					'Agent name that produced this evidence (optional provenance).',
+				),
 			provenance_session_id: z
 				.string()
 				.min(1)
 				.optional()
-				.describe('Session ID of the agent that produced this evidence (optional provenance).'),
+				.describe(
+					'Session ID of the agent that produced this evidence (optional provenance).',
+				),
 		},
 		execute: async (rawArgs: unknown, directory: string): Promise<string> => {
 			const parsed = ArgsSchema.safeParse(rawArgs);
@@ -123,11 +127,14 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 			}
 
 			// Capture provenance from args or context
-			const provenance = (args.provenance_agent_name || args.provenance_session_id) ? {
-				agent_name: args.provenance_agent_name,
-				session_id: args.provenance_session_id,
-				verified_at: new Date().toISOString(),
-			} : undefined;
+			const provenance =
+				args.provenance_agent_name || args.provenance_session_id
+					? {
+							agent_name: args.provenance_agent_name,
+							session_id: args.provenance_session_id,
+							verified_at: new Date().toISOString(),
+						}
+					: undefined;
 
 			const report: ArchitectureSupervisorReport = {
 				schema_version: SUMMARY_SCHEMA_VERSION,

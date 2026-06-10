@@ -114,12 +114,16 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				.string()
 				.min(1)
 				.optional()
-				.describe('Agent name that produced this evidence (optional provenance)'),
+				.describe(
+					'Agent name that produced this evidence (optional provenance)',
+				),
 			provenanceSessionId: z
 				.string()
 				.min(1)
 				.optional()
-				.describe('Session ID of the agent that produced this evidence (optional provenance)'),
+				.describe(
+					'Session ID of the agent that produced this evidence (optional provenance)',
+				),
 		},
 		async execute(args: unknown, directory: string): Promise<string> {
 			const parsed = ArgsSchema.safeParse(args);
@@ -269,11 +273,14 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 			}
 
 			// Capture provenance from args
-			const provenance = (input.provenanceAgentName || input.provenanceSessionId) ? {
-				agent_name: input.provenanceAgentName,
-				session_id: input.provenanceSessionId,
-				verified_at: new Date().toISOString(),
-			} : undefined;
+			const provenance =
+				input.provenanceAgentName || input.provenanceSessionId
+					? {
+							agent_name: input.provenanceAgentName,
+							session_id: input.provenanceSessionId,
+							verified_at: new Date().toISOString(),
+						}
+					: undefined;
 
 			writePhaseCouncilEvidence(workingDir, synthesis, provenance);
 

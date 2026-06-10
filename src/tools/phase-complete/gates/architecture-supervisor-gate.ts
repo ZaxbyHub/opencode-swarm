@@ -103,7 +103,10 @@ export async function runArchitectureSupervisorGate(
 				`Phase ${phase} cannot be completed: architecture supervisor evidence lacks provenance (agent_name or session_id). Evidence provenance verification is enabled.`,
 			);
 		}
-	} else if (!asEntry.provenance || (!asEntry.provenance.agent_name && !asEntry.provenance.session_id)) {
+	} else if (
+		!asEntry.provenance ||
+		(!asEntry.provenance.agent_name && !asEntry.provenance.session_id)
+	) {
 		const msg = `Architecture supervisor evidence lacks provenance for phase ${phase}. Enable 'provenance_verify' in architectural_supervision config to enforce provenance verification.`;
 		gateWarnings.push(msg);
 		safeWarn(`[phase_complete] ${msg}`, undefined);
@@ -135,5 +138,10 @@ export async function runArchitectureSupervisorGate(
 		);
 	}
 
-	return { blocked: false, agentsDispatched, agentsMissing: [], warnings: gateWarnings };
+	return {
+		blocked: false,
+		agentsDispatched,
+		agentsMissing: [],
+		warnings: gateWarnings,
+	};
 }
