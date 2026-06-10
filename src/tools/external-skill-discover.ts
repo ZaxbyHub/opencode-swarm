@@ -30,6 +30,10 @@ export const _internals = {
 		_url: string,
 		_timeoutMs: number,
 	): Promise<{ content: string; finalUrl: string }> => {
+		const parsed = new URL(_url);
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+			throw new Error('Only http: and https: protocols are allowed');
+		}
 		const response = await fetch(_url, {
 			signal: AbortSignal.timeout(_timeoutMs),
 		});
@@ -76,7 +80,7 @@ function isSubpathUrl(requestUrl: string, configuredLocation: string): boolean {
 		const normalizedConfigPath = configUrl.pathname.replace(/\/$/, '');
 		const normalizedRequestPath = request.pathname.replace(/\/$/, '');
 		if (normalizedRequestPath === normalizedConfigPath) return true;
-		if (normalizedRequestPath.startsWith(normalizedConfigPath + '/'))
+		if (normalizedRequestPath.startsWith(`${normalizedConfigPath}/`))
 			return true;
 		return false;
 	} catch {

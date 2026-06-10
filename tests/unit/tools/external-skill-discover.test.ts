@@ -751,4 +751,25 @@ describe('external_skill_discover', () => {
 		expect(result.error).toContain('evil.example.com');
 		expect(result.error).toContain('not within configured source');
 	});
+
+	// -------------------------------------------------------------------------
+	// Test 20: fetchContent rejects non-HTTP protocols
+	// -------------------------------------------------------------------------
+	test('fetchContent rejects file:// protocol', async () => {
+		await expect(
+			_internals.fetchContent('file:///etc/passwd', 5000),
+		).rejects.toThrow('Only http: and https: protocols are allowed');
+	});
+
+	test('fetchContent rejects data: protocol', async () => {
+		await expect(
+			_internals.fetchContent('data:text/html,<script>alert(1)</script>', 5000),
+		).rejects.toThrow('Only http: and https: protocols are allowed');
+	});
+
+	test('fetchContent rejects ftp: protocol', async () => {
+		await expect(
+			_internals.fetchContent('ftp://example.com/file', 5000),
+		).rejects.toThrow('Only http: and https: protocols are allowed');
+	});
 });

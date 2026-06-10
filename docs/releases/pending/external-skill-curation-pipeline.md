@@ -56,7 +56,7 @@ See `docs/configuration.md` for full config options including sources, TTL, and 
 
 ## Files changed
 
-- `src/services/external-skill-store.ts` — Candidate store (JSONL-based quarantine)
+- `src/services/external-skill-store.ts` — Candidate store (file-based quarantine, individual JSON per candidate)
 - `src/services/external-skill-validator.ts` — 3-gate validation pipeline
 - `src/tools/external-skill-*.ts` — 7 curation tools
 - `src/config/schema.ts` — Config schema with DiscoverySourceSchema
