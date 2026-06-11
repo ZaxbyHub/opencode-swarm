@@ -31,6 +31,20 @@ function ts(daysAgo: number): string {
 	return d.toISOString();
 }
 
+function makeRecentPassHistory(
+	testFile: string,
+	testName: string,
+): TestRunRecord[] {
+	return [1, 2, 3].map((daysAgo) =>
+		makeRecord({
+			testFile,
+			testName,
+			result: 'pass',
+			timestamp: ts(daysAgo),
+		}),
+	);
+}
+
 describe('classifyFailure', () => {
 	// Behavior 1: new_regression
 	test('classifies as new_regression when last 3 runs passed, current fails, and testFile in changedFiles', () => {
@@ -236,6 +250,148 @@ describe('classifyFailure', () => {
 
 		const result = classifyFailure(current, []);
 		expect(result.classification).toBe('unknown');
+	});
+
+	test('classifies infrastructure failures from common stderr patterns', () => {
+		const patterns = [
+			'java.lang.OutOfMemoryError: Java heap space',
+			'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+			'Cannot allocate memory',
+			'Out of memory: Killed process 123 (node) total-vm:1024kB',
+			'oom-kill:constraint=CONSTRAINT_NONE',
+			'Killed',
+			'ETIMEDOUT',
+			'ECONNREFUSED',
+			'ENOTFOUND',
+			'ECONNRESET',
+			'EPIPE',
+			'Broken pipe',
+			'Command failed: exited with code 137',
+			'SIGSEGV',
+			'Segmentation fault',
+			'Segmentation fault (core dumped)',
+			'SIGABRT',
+			'SIGBUS',
+		];
+
+		for (const [index, errorMessage] of patterns.entries()) {
+			const testName = `infra stderr ${index}`;
+			const current = makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName,
+				result: 'fail',
+				errorMessage,
+				changedFiles: ['src/foo.test.ts'],
+			});
+
+			const result = classifyFailure(
+				current,
+				makeRecentPassHistory('src/foo.test.ts', testName),
+			);
+			expect(result.classification).toBe('infrastructure_failure');
+		}
+	});
+
+	test('classifies infrastructure failures from contextual network stderr messages', () => {
+		const patterns = [
+			'connect ETIMEDOUT 10.0.0.1:443',
+			'Error: connect ECONNREFUSED 127.0.0.1:5432',
+			'getaddrinfo ENOTFOUND registry.npmjs.org',
+			'read ECONNRESET',
+			'write EPIPE',
+		];
+
+		for (const [index, errorMessage] of patterns.entries()) {
+			const testName = `infra context ${index}`;
+			const current = makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName,
+				result: 'fail',
+				errorMessage,
+				changedFiles: ['src/foo.test.ts'],
+			});
+
+			const result = classifyFailure(
+				current,
+				makeRecentPassHistory('src/foo.test.ts', testName),
+			);
+			expect(result.classification).toBe('infrastructure_failure');
+		}
+	});
+
+	test('classifies infrastructure failures with empty history at minimum confidence', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'first-time oom',
+			result: 'fail',
+			errorMessage:
+				'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(current, []);
+		expect(result.classification).toBe('infrastructure_failure');
+		expect(result.confidence).toBe(0.1);
+	});
+
+	test('classifies infrastructure failures when only stackPrefix matches', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'stack-only sigsegv',
+			result: 'fail',
+			errorMessage: 'Error: generic worker failure',
+			stackPrefix: 'SIGSEGV at worker teardown',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(current, []);
+		expect(result.classification).toBe('infrastructure_failure');
+	});
+
+	test('regression: assertion text containing killed preserves regression classification', () => {
+		const testName = 'domain kill behavior';
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName,
+			result: 'fail',
+			errorMessage: 'AssertionError: expected process to be killed',
+			stackPrefix: 'at killed (src/foo.ts:1)',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(
+			current,
+			makeRecentPassHistory('src/foo.test.ts', testName),
+		);
+		expect(result.classification).toBe('new_regression');
+	});
+
+	test('regression: assertion text containing network tokens preserves regression classification', () => {
+		const assertions = [
+			'AssertionError: expected token ETIMEDOUT in rendered output',
+			'AssertionError: expected token ECONNREFUSED in rendered output',
+			'AssertionError: expected token ENOTFOUND in rendered output',
+			'AssertionError: expected token ECONNRESET in rendered output',
+			'AssertionError: expected token EPIPE in rendered output',
+		];
+
+		for (const [index, errorMessage] of assertions.entries()) {
+			const testName = `domain assertion ${index}`;
+			const current = makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName,
+				result: 'fail',
+				errorMessage,
+				stackPrefix: 'at expect (src/foo.ts:1)',
+				changedFiles: ['src/foo.test.ts'],
+			});
+
+			const result = classifyFailure(
+				current,
+				makeRecentPassHistory('src/foo.test.ts', testName),
+			);
+			expect(result.classification).toBe('new_regression');
+		}
 	});
 
 	// Behavior 6: confidence scores
@@ -739,6 +895,32 @@ describe('classifyAndCluster', () => {
 		expect(classified).toHaveLength(1);
 		expect(clusters).toHaveLength(1);
 		expect(classified[0].classification).toBe('pre_existing');
+	});
+
+	test('produces infrastructure-dominant clusters for shared infra failures', () => {
+		const testResults: TestRunRecord[] = [
+			makeRecord({
+				testFile: 'src/foo.test.ts',
+				testName: 'worker one',
+				result: 'fail',
+				errorMessage: 'connect ECONNRESET 10.0.0.1:443',
+				stackPrefix: 'at shared-worker',
+				timestamp: ts(0),
+			}),
+			makeRecord({
+				testFile: 'src/bar.test.ts',
+				testName: 'worker two',
+				result: 'fail',
+				errorMessage: 'connect ECONNRESET 10.0.0.1:443',
+				stackPrefix: 'at shared-worker',
+				timestamp: ts(0),
+			}),
+		];
+
+		const { classified, clusters } = classifyAndCluster(testResults, []);
+		expect(classified).toHaveLength(2);
+		expect(clusters).toHaveLength(1);
+		expect(clusters[0].classification).toBe('infrastructure_failure');
 	});
 
 	// Behavior 12: only processes 'fail' results, skips 'pass'/'skip'

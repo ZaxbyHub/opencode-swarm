@@ -4,6 +4,7 @@ export type FailureClassification =
 	| 'new_regression'
 	| 'pre_existing'
 	| 'flaky'
+	| 'infrastructure_failure'
 	| 'unknown';
 
 export interface ClassifiedFailure {
@@ -67,6 +68,69 @@ function stringHash(str: string): string {
 	return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
 
+const MAX_INFRA_CONTEXT_CHARS = 80;
+
+function buildErrnoPatternPair(
+	errno: string,
+	contextPattern: string,
+): RegExp[] {
+	// Infra stderr often appears either as a bare line (`ETIMEDOUT`) or with a
+	// short context window (`connect ETIMEDOUT ...`). Keep both patterns so we
+	// catch terse process output without matching arbitrary assertion prose.
+	return [
+		new RegExp(`(?:^|\\n)\\s*${errno}\\b`, 'i'),
+		new RegExp(
+			`\\b(?:${contextPattern})\\b[^\\n]{0,${MAX_INFRA_CONTEXT_CHARS}}\\b${errno}\\b`,
+			'i',
+		),
+	];
+}
+
+const INFRASTRUCTURE_FAILURE_PATTERNS = [
+	/\boutofmemoryerror\b/i,
+	/\ballocation failed - javascript heap out of memory\b/i,
+	/\bcannot allocate memory\b/i,
+	/\bout of memory:\s*killed process\b/i,
+	/\boom-kill\b/i,
+	/(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:out of memory|oom|by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
+	...buildErrnoPatternPair(
+		'ETIMEDOUT',
+		'connect|connection|request|socket|network',
+	),
+	...buildErrnoPatternPair('ECONNREFUSED', 'connect|connection|socket'),
+	...buildErrnoPatternPair('ENOTFOUND', 'getaddrinfo|dns|lookup'),
+	...buildErrnoPatternPair(
+		'ECONNRESET',
+		'connect|connection|request|socket|network|stream|read',
+	),
+	...buildErrnoPatternPair(
+		'EPIPE',
+		'pipe|stream|write|socket|stdout|stderr',
+	),
+	/\bbroken pipe\b/i,
+	/\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*137\b/i,
+	/\bsig(?:segv|abrt|bus)\b/i,
+	/\bsegmentation fault(?:\s*\(core dumped\))?\b/i,
+];
+
+function isInfrastructureFailure(currentResult: TestRunRecord): boolean {
+	const errorMessage = currentResult.errorMessage || '';
+	const stackPrefix = currentResult.stackPrefix || '';
+
+	// Keep the assertion guard scoped to errorMessage only: that field carries
+	// the human-readable assertion prose (`AssertionError: expected ...`) that
+	// commonly embeds infra tokens as fixture text. We still scan stackPrefix for
+	// positive matches so stack-only runtime signals remain classifiable.
+	if (/\bassertionerror\b/i.test(errorMessage)) {
+		return false;
+	}
+
+	const combinedText = `${errorMessage}\n${stackPrefix}`;
+	return INFRASTRUCTURE_FAILURE_PATTERNS.some((pattern) =>
+		pattern.test(combinedText),
+	);
+}
+
 export function classifyFailure(
 	currentResult: TestRunRecord,
 	history: TestRunRecord[],
@@ -83,6 +147,18 @@ export function classifyFailure(
 			(a, b) =>
 				new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
 		);
+
+	if (isInfrastructureFailure(currentResult)) {
+		return {
+			testFile: currentResult.testFile,
+			testName: currentResult.testName,
+			classification: 'infrastructure_failure',
+			errorMessage: currentResult.errorMessage,
+			stackPrefix: currentResult.stackPrefix,
+			durationMs: currentResult.durationMs,
+			confidence: computeConfidence(testHistory.length),
+		};
+	}
 
 	const lastThree = testHistory.slice(0, 3);
 	const lastTen = testHistory.slice(0, 10);
