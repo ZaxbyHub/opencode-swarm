@@ -187,7 +187,11 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 				expect.objectContaining({
 					status: 'closed',
 					tasks: expect.arrayContaining([
-						expect.objectContaining({ id: '1.1', status: 'closed' }),
+						expect.objectContaining({
+							id: '1.1',
+							status: 'closed',
+							close_reason: 'session_terminated',
+						}),
 					]),
 				}),
 			]),

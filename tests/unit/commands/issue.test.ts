@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { execSync } from 'node:child_process';
+import { _internals } from '../../../src/commands/_shared/url-security';
+import { handleIssueCommand } from '../../../src/commands/issue';
 
-// Mock execSync before importing the module under test
+const realExecSync = _internals.execSync;
 const execSyncMock = mock((cmd: string) => {
 	if (cmd === 'git remote get-url origin') {
 		return 'https://github.com/test-owner/test-repo.git';
@@ -9,16 +10,14 @@ const execSyncMock = mock((cmd: string) => {
 	throw new Error('No remote');
 });
 
-mock.module('node:child_process', () => ({
-	execSync: execSyncMock,
-}));
-
-// Import after setting up mock
-import { handleIssueCommand } from '../../../src/commands/issue';
-
 describe('handleIssueCommand', () => {
 	beforeEach(() => {
 		execSyncMock.mockClear();
+		_internals.execSync = execSyncMock as typeof _internals.execSync;
+	});
+
+	afterEach(() => {
+		_internals.execSync = realExecSync;
 	});
 
 	// =============================================================================
@@ -273,6 +272,12 @@ describe('handleIssueCommand', () => {
 		test('Invalid input returns error message', () => {
 			const result = handleIssueCommand('/test', ['not-a-valid-issue']);
 			expect(result).toContain('Error: Could not parse issue reference');
+		});
+
+		test('Control characters in shorthand owner or repo are rejected', () => {
+			const result = handleIssueCommand('/test', ['owner/repo\tname#42']);
+			expect(result).toContain('Error: Could not parse issue reference');
+			expect(result).not.toContain('\t');
 		});
 
 		test('URL exceeding 2048 chars is truncated', () => {

@@ -277,6 +277,12 @@ describe('handlePrReviewCommand', () => {
 				'pr="https://github.com/my-org/my-awesome-repo/pull/123"',
 			);
 		});
+
+		test('control characters in shorthand owner or repo are rejected', () => {
+			const result = handlePrReviewCommand(tempDir, ['owner/repo\tbad#42']);
+			expect(result).toContain('Error: Could not parse PR reference');
+			expect(result).not.toContain('\t');
+		});
 	});
 
 	describe('bare number parsing', () => {

