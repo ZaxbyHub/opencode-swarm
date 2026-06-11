@@ -160,6 +160,23 @@ export const AgentOverrideConfigSchema = z.object({
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
 	fallback_models: z.array(z.string()).max(3).optional(),
+	// Extended reasoning configuration for OpenAI-compatible models
+	// (e.g. gpt-5.x-codex).  Maps to the `reasoning` field in OpenCode's
+	// agent definition.
+	reasoning: z
+		.object({
+			effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+		})
+		.optional(),
+	// Extended thinking configuration for Anthropic models that support
+	// extended thinking (e.g. claude-opus-4).  Maps to the `thinking` field
+	// in OpenCode's agent definition.
+	thinking: z
+		.object({
+			type: z.enum(['enabled', 'disabled']).optional(),
+			budget_tokens: z.number().int().positive().optional(),
+		})
+		.optional(),
 });
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;

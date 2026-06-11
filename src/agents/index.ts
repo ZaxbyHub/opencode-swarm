@@ -269,7 +269,15 @@ function getVariantOverride(
  */
 function applyOverrides(
 	agent: AgentDefinition,
-	swarmAgents?: Record<string, { temperature?: number; variant?: string }>,
+	swarmAgents?: Record<
+		string,
+		{
+			temperature?: number;
+			variant?: string;
+			reasoning?: { effort?: string };
+			thinking?: { type?: string; budget_tokens?: number };
+		}
+	>,
 	swarmPrefix?: string,
 	quiet?: boolean,
 ): AgentDefinition {
@@ -322,6 +330,26 @@ function applyOverrides(
 		// the cast just satisfies the strict known-keys check.
 		(agent.config as { variant?: string }).variant = variantOverride;
 	}
+
+	// Apply reasoning/thinking overrides.
+	// Both fields are passed through to the OpenCode runtime via the AgentConfig
+	// index signature.  They are not declared on the SDK's AgentConfig type but
+	// the runtime Agent struct accepts them as unknown extra fields.
+	const baseAgentName = stripSwarmPrefix(agent.name, swarmPrefix);
+	const reasoningOverride = swarmAgents?.[baseAgentName]?.reasoning;
+	if (reasoningOverride !== undefined) {
+		(agent.config as { reasoning?: { effort?: string } }).reasoning =
+			reasoningOverride;
+	}
+	const thinkingOverride = swarmAgents?.[baseAgentName]?.thinking;
+	if (thinkingOverride !== undefined) {
+		(
+			agent.config as {
+				thinking?: { type?: string; budget_tokens?: number };
+			}
+		).thinking = thinkingOverride;
+	}
+
 	return agent;
 }
 

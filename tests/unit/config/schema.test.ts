@@ -250,6 +250,131 @@ describe('AgentOverrideConfigSchema', () => {
 		});
 		expect(result.success).toBe(false);
 	});
+
+	// reasoning field tests
+	it('accepts reasoning with effort', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'openai/gpt-5.3-codex',
+			reasoning: { effort: 'high' },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.reasoning?.effort).toBe('high');
+		}
+	});
+
+	it('accepts reasoning without effort (partial object)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			reasoning: {},
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.reasoning).toEqual({});
+		}
+	});
+
+	it('accepts all valid reasoning effort values', () => {
+		for (const effort of ['low', 'medium', 'high', 'max'] as const) {
+			const result = AgentOverrideConfigSchema.safeParse({
+				reasoning: { effort },
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.reasoning?.effort).toBe(effort);
+			}
+		}
+	});
+
+	it('rejects unknown reasoning effort value', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			reasoning: { effort: 'ultra' },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('omits reasoning when not set', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ model: 'm' });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.reasoning).toBeUndefined();
+		}
+	});
+
+	// thinking field tests
+	it('accepts thinking with type and budget_tokens', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'anthropic/claude-opus-4-6',
+			thinking: { type: 'enabled', budget_tokens: 10000 },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.thinking?.type).toBe('enabled');
+			expect(result.data.thinking?.budget_tokens).toBe(10000);
+		}
+	});
+
+	it('accepts thinking without fields (partial object)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: {},
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.thinking).toEqual({});
+		}
+	});
+
+	it('accepts thinking type disabled', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { type: 'disabled' },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.thinking?.type).toBe('disabled');
+		}
+	});
+
+	it('rejects unknown thinking type value', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { type: 'auto' },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects non-integer budget_tokens', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { budget_tokens: 1000.5 },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects non-positive budget_tokens', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { budget_tokens: 0 },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('omits thinking when not set', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ model: 'm' });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.thinking).toBeUndefined();
+		}
+	});
+
+	it('accepts reasoning and thinking together', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'some/model',
+			reasoning: { effort: 'max' },
+			thinking: { type: 'enabled', budget_tokens: 5000 },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.reasoning?.effort).toBe('max');
+			expect(result.data.thinking?.type).toBe('enabled');
+			expect(result.data.thinking?.budget_tokens).toBe(5000);
+		}
+	});
 });
 
 describe('SwarmConfigSchema', () => {
