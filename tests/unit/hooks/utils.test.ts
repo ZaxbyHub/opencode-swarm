@@ -15,7 +15,7 @@ mock.module('../../../src/utils/logger', () => ({
 	error: (...args: any[]) => console.error(...args),
 }));
 
-import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -406,6 +406,61 @@ describe('Hook Utilities', () => {
 			// Test with a path that needs normalization but doesn't contain traversal
 			const result = validateSwarmPath(tempDir, 'subdir/./test.txt');
 			expect(result).toBe(testFile);
+		});
+
+		it('rejects symlinks pointing outside .swarm', async () => {
+			const swarmDir = join(tempDir, '.swarm');
+			await mkdir(swarmDir, { recursive: true });
+
+			// Create a file outside .swarm
+			const outsideFile = join(tempDir, 'outside.txt');
+			await writeFile(outsideFile, 'outside content');
+
+			// Create a symlink inside .swarm pointing to the outside file
+			const symlinkPath = join(swarmDir, 'evil-link.txt');
+			try {
+				await symlink(outsideFile, symlinkPath);
+
+				// Attempt to validate should throw because realpath resolves to outside
+				expect(() =>
+					validateSwarmPath(tempDir, 'evidence/evil-link.txt'),
+				).toThrow(
+					/path escapes .swarm directory|symlink detected/,
+				);
+			} catch (error) {
+				// Skip test if symlink creation fails (e.g., on Windows without admin)
+				if ((error as NodeJS.ErrnoException).code === 'ENOSYS') {
+					// Symlinks not supported on this system
+					return;
+				}
+				throw error;
+			}
+		});
+
+		it('allows symlinks pointing inside .swarm', async () => {
+			const swarmDir = join(tempDir, '.swarm');
+			const evidenceDir = join(swarmDir, 'evidence');
+			await mkdir(evidenceDir, { recursive: true });
+
+			// Create a real file inside .swarm
+			const realFile = join(evidenceDir, 'real.txt');
+			await writeFile(realFile, 'real content');
+
+			// Create a symlink also inside .swarm pointing to it
+			const symlinkPath = join(evidenceDir, 'link.txt');
+			try {
+				await symlink(realFile, symlinkPath);
+
+				// This should succeed because both symlink and target are inside .swarm
+				const result = validateSwarmPath(tempDir, 'evidence/link.txt');
+				expect(result).toBe(symlinkPath);
+			} catch (error) {
+				// Skip test if symlink creation fails
+				if ((error as NodeJS.ErrnoException).code === 'ENOSYS') {
+					return;
+				}
+				throw error;
+			}
 		});
 	});
 

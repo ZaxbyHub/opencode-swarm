@@ -77,7 +77,36 @@ export async function runFinalCouncilGate(
 								fcVerdictFound = true;
 								_fcVerdict = entry.verdict;
 
-								// Plan ID binding: prevent stale evidence from prior project
+							// Timestamp freshness check: warn if evidence is stale
+							// (from a prior execution of the same plan)
+							if (
+								typeof entry.timestamp === 'string' &&
+								entry.timestamp.length > 0
+							) {
+								try {
+									const evidenceTime = new Date(entry.timestamp);
+									const now = new Date();
+									const ageHours =
+										(now.getTime() - evidenceTime.getTime()) / (1000 * 60 * 60);
+
+									// Warn if evidence is more than 24 hours old
+									if (ageHours > 24) {
+										gateWarnings.push(
+											`Final council evidence is ${Math.floor(ageHours)} hours old. ` +
+												'If this is a stale evidence file from a prior plan execution, ' +
+												're-run the final council to ensure current project context.',
+										);
+										safeWarn(
+											`[phase_complete] Final council evidence age: ${Math.floor(ageHours)} hours`,
+											undefined,
+										);
+									}
+								} catch {
+									// If timestamp parsing fails, continue without the age check
+								}
+							}
+
+							// Plan ID binding: prevent stale evidence from prior project
 								if (plan) {
 									if (entry.plan_id && entry.plan_id !== planId) {
 										return {

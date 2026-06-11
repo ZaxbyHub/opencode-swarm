@@ -569,14 +569,64 @@ describe('final_council gate (Gate 6)', () => {
 	});
 
 	describe('turbo mode skips final_council gate', () => {
-		test('turbo mode skips final_council gate even when enabled', async () => {
-			// This test verifies the turbo mode skip message includes 'final-council'
-			// We can't easily test turbo mode directly without more setup, but we can
-			// verify the console.warn message contains the right gates listed
-			// This is more of a code verification - the message at line ~495 includes 'final-council'
-			const turboModeMessage =
-				'[phase_complete] Turbo mode active — skipping completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase';
-			expect(turboModeMessage).toContain('final-council');
+		test('turbo mode skips final_council gate even when enabled and evidence is missing', async () => {
+			// Setup: Enable final_council, set up 2-phase plan, complete first phase, don't write evidence
+			enableFinalCouncil();
+
+			writePlan([
+				{
+					id: 1,
+					name: 'Phase 1',
+					tasks: [
+						{
+							id: 'phase-1-task-1',
+							phase: 1,
+							status: 'completed',
+							description: 'Phase 1 task',
+						},
+					],
+				},
+				{
+					id: 2,
+					name: 'Phase 2',
+					tasks: [
+						{
+							id: 'phase-2-task-1',
+							phase: 2,
+							status: 'completed',
+							description: 'Phase 2 task',
+						},
+					],
+				},
+			]);
+
+			writePluginConfig();
+			writeRetro(1);
+			writeRetro(2);
+
+			// Attempt phase_complete on phase 2 (last phase) with turbo mode
+			// WITHOUT writing final council evidence
+			// In turbo mode, the final_council gate should be SKIPPED even though evidence is missing
+			// If turbo mode is NOT respected, this would block with FINAL_COUNCIL_REQUIRED
+
+			const result = await executePhaseComplete({
+				phase: 2,
+				turbo: true, // Activate turbo mode to bypass the final_council gate
+			});
+
+			const parsed = JSON.parse(result);
+
+			// Turbo mode should skip the gate, so completion succeeds
+			expect(parsed.outcome).toBe('COMPLETE');
+			expect(parsed.blocked).toBeUndefined(); // No block when gate is skipped
+
+			// Verify the turbo bypass message is present
+			expect(parsed.warnings).toBeDefined();
+			const turboWarning = parsed.warnings.find((w: string) =>
+				w.includes('Turbo mode active'),
+			);
+			expect(turboWarning).toBeDefined();
+			expect(turboWarning).toContain('final-council');
 		});
 	});
 });
