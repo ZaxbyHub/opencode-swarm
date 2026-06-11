@@ -56,9 +56,8 @@ export interface RankedEntry extends KnowledgeEntryBase {
 /** Jaccard bigram similarity threshold for near-duplicate detection. */
 const JACCARD_THRESHOLD = 0.6;
 
-/** Confidence boost for hive entries - now sourced from config. */
-// Default hive tier boost (used when config is not available): 0.05
-const DEFAULT_HIVE_TIER_BOOST = 0.05;
+/** Confidence boost for hive entries. */
+const HIVE_TIER_BOOST = 0.05;
 
 /** Confidence penalty for same-project hive entries - now sourced from config. */
 // Default same project penalty (used when config is not available): -0.05
@@ -463,14 +462,12 @@ export async function readMergedKnowledge(
 		let tierBoost = 0;
 		let isSameProject = false;
 		if (entry.tier === 'hive' && 'source_project' in entry) {
-			const hiveEntry = entry as unknown as HiveKnowledgeEntry;
-			isSameProject =
-				!!(context?.projectName && hiveEntry.source_project === context.projectName);
-			// Use configured weights to compute tier boost
-			// same_project_weight boosts same-project entries, cross_project_weight for others
-			// Map weights (1.0=full, 0.5=half) to tier boost range
-			const weight = isSameProject ? config.same_project_weight : config.cross_project_weight;
-			tierBoost = (weight - 1.0) * DEFAULT_HIVE_TIER_BOOST;
+			const sourceProject = (entry as { source_project?: string })
+				.source_project;
+			isSameProject = !!(
+				context?.projectName && sourceProject === context.projectName
+			);
+			tierBoost = HIVE_TIER_BOOST;
 		}
 
 		// Same project penalty: slightly reduce score for same-project hive entries

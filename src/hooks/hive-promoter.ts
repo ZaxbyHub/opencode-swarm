@@ -21,6 +21,33 @@ import type {
 	RejectedLesson,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+
+/** Carry a swarm entry's actionable-directive metadata onto a promoted hive
+ *  entry (Phase 4 review, MEDIUM finding). Dropping these fields on promotion
+ *  would strip predicates/scope from cross-project knowledge, so hive copies
+ *  of post-Change-4 entries would no longer be machine-checkable. */
+function carryActionableFields(
+	source: SwarmKnowledgeEntry,
+): Partial<HiveKnowledgeEntry> {
+	const out: Partial<HiveKnowledgeEntry> = {};
+	if (source.triggers?.length) out.triggers = [...source.triggers];
+	if (source.required_actions?.length)
+		out.required_actions = [...source.required_actions];
+	if (source.forbidden_actions?.length)
+		out.forbidden_actions = [...source.forbidden_actions];
+	if (source.verification_checks?.length)
+		out.verification_checks = [...source.verification_checks];
+	if (source.verification_predicate)
+		out.verification_predicate = source.verification_predicate;
+	if (source.applies_to_agents?.length)
+		out.applies_to_agents = [...source.applies_to_agents];
+	if (source.applies_to_tools?.length)
+		out.applies_to_tools = [...source.applies_to_tools];
+	if (source.directive_priority)
+		out.directive_priority = source.directive_priority;
+	return out;
+}
+
 import { validateLesson } from './knowledge-validator.js';
 import { safeHook } from './utils.js';
 
@@ -233,6 +260,7 @@ export async function checkHivePromotions(
 			updated_at: new Date().toISOString(),
 			source_project: swarmEntry.project_name,
 			encounter_score: config.initial_encounter_score, // starts at configured initial value (default 1.0)
+			...carryActionableFields(swarmEntry),
 		};
 
 		// Append to hive
@@ -518,6 +546,7 @@ export async function promoteFromSwarm(
 		updated_at: new Date().toISOString(),
 		source_project: swarmEntry.project_name,
 		encounter_score: 1.0, // promotions from swarm start at 1.0
+		...carryActionableFields(swarmEntry),
 	};
 
 	// Append to hive

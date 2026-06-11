@@ -16,6 +16,13 @@ vi.mock('../../../src/tools/co-change-analyzer.js', () => ({
 	detectDarkMatter: mockDetectDarkMatter,
 	formatDarkMatterOutput: mockFormatDarkMatterOutput,
 	darkMatterToKnowledgeEntries: mockDarkMatterToKnowledgeEntries,
+	// The command invokes detectDarkMatter through the `_internals` DI seam
+	// (`coChangeAnalyzer.detectDarkMatter`), so the mock must expose it there too.
+	_internals: {
+		detectDarkMatter: mockDetectDarkMatter,
+		formatDarkMatterOutput: mockFormatDarkMatterOutput,
+		darkMatterToKnowledgeEntries: mockDarkMatterToKnowledgeEntries,
+	},
 }));
 
 vi.mock('../../../src/hooks/knowledge-store.js', () => ({
@@ -181,12 +188,15 @@ describe('handleDarkMatterCommand (adversarial)', () => {
 	});
 
 	describe('12. detectDarkMatter throws', () => {
-		it('should propagate error from detectDarkMatter', async () => {
+		it('surfaces the error gracefully instead of crashing the command', async () => {
 			mockDetectDarkMatter.mockRejectedValue(new Error('git not found'));
 
-			await expect(handleDarkMatterCommand('/dir', [])).rejects.toThrow(
-				'git not found',
-			);
+			// The command catches analysis failures and returns a formatted failure
+			// message (defensive degradation) rather than propagating the throw — the
+			// error text must still reach the user, not be silently swallowed.
+			const result = await handleDarkMatterCommand('/dir', []);
+			expect(result).toContain('Dark Matter Analysis Failed');
+			expect(result).toContain('git not found');
 		});
 	});
 

@@ -56,6 +56,12 @@ import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
 import { handleRollbackCommand } from './rollback.js';
+import {
+	handleSddCommand,
+	handleSddProjectCommand,
+	handleSddStatusCommand,
+	handleSddValidateCommand,
+} from './sdd.js';
 import { handleSimulateCommand } from './simulate.js';
 import { handleSpecifyCommand } from './specify.js';
 import { handleStatusCommand } from './status.js';
@@ -540,6 +546,39 @@ export const COMMAND_REGISTRY = {
 			'Dry-run hidden coupling analysis with configurable thresholds',
 		args: '--threshold <number>, --min-commits <number>',
 		category: 'diagnostics',
+	},
+	sdd: {
+		handler: (ctx) => handleSddCommand(ctx.directory, ctx.args),
+		description:
+			'Manage OpenSpec-compatible SDD artifacts and effective spec projection',
+		args: 'status|validate|project [--json] [--change <id>] [--dry-run]',
+		details:
+			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning.',
+		category: 'utility',
+	},
+	'sdd status': {
+		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
+		description:
+			'Show OpenSpec-compatible SDD status and effective spec source',
+		subcommandOf: 'sdd',
+		args: '[--json]',
+		category: 'utility',
+	},
+	'sdd validate': {
+		handler: (ctx) => handleSddValidateCommand(ctx.directory, ctx.args),
+		description:
+			'Validate OpenSpec-compatible artifacts and effective spec projection',
+		subcommandOf: 'sdd',
+		args: '[--json] [--change <id>]',
+		category: 'utility',
+	},
+	'sdd project': {
+		handler: (ctx) => handleSddProjectCommand(ctx.directory, ctx.args),
+		description:
+			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
+		subcommandOf: 'sdd',
+		args: '[--dry-run] [--json] [--change <id>]',
+		category: 'utility',
 	},
 	analyze: {
 		handler: (ctx) => handleAnalyzeCommand(ctx.directory, ctx.args),

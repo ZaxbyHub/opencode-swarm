@@ -114,6 +114,130 @@ Before launching explorers (Phase 3), confirm the PR branch refs are available:
 
 If refs cannot be fetched or checked out, state the limitation in the context pack.
 
+## Phase 0A: Existing PR Comment Ingestion
+
+When reviewing a PR that already has comments, reviews, or bot findings,
+ingest and triage them BEFORE starting Phase 0. These are pre-existing signals
+that must be validated, not ignored.
+
+### Step 1 — Fetch all PR feedback surfaces
+
+```bash
+# Issue comments (general PR thread)
+gh pr view <PR_NUMBER> --json comments
+
+# Review comments (inline code comments)
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
+
+# Review summaries (approve/request-changes/comment events)
+gh pr view <PR_NUMBER> --json reviews
+
+# Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
+# Inline review comments — use REST API for reliable bot detection via user.type
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+For general PR comments (not inline), use the issue comments endpoint:
+```bash
+gh api repos/{owner}/{repo}/issues/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+### Step 2 — Classify each comment
+
+| Category | Action |
+|----------|--------|
+| **Human review with file:line evidence** | Add as candidate finding with `source: existing-review` — still needs reviewer validation |
+| **Bot/automated finding with specific code reference** | Add as candidate finding with `source: bot-review` — high false-positive rate, treat as unverified |
+| **General feedback / style preference** | Add as advisory obligation |
+| **Resolved/outdated comment** | Skip — note in report under "Ingested Resolved Comments" |
+| **Requested changes not yet addressed** | Add as HIGH-priority obligation |
+
+### Step 3 — Merge into review pipeline
+
+All ingested comments become candidate findings or obligations. They follow the
+same Phase 3-8 pipeline as freshly discovered findings. Ingested findings are
+NOT pre-confirmed — they still require independent reviewer validation per the
+Anti-Self-Review Rule.
+
+**Comment-ledger output:**
+```
+[INGESTED] | source | category | file:line (if applicable) | original_author | status: PENDING_VALIDATION / SKIPPED_OUTDATED / ADVISORY
+```
+
+### Anti-patterns
+- ✗ Ignoring bot reviews because "bots produce false positives" — they also catch real issues
+- ✗ Pre-confirming human review comments without independent validation — even senior reviewers make mistakes
+- ✗ Skipping inline review comments and only reading the summary — inline comments contain the evidence
+
+## Phase 0B: Merge Conflict Detection and Resolution
+
+Before investing effort in review lanes, verify the PR is mergeable. A
+conflicted PR cannot merge regardless of review quality.
+
+### Step 1 — Check merge state
+
+```bash
+gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
+```
+
+The response has two independent fields. Handle each:
+
+**`mergeable` field** — whether GitHub can compute mergeability:
+| Value | Meaning | Action |
+|-------|---------|--------|
+| `MERGEABLE` | No conflicts detected | Proceed — check `mergeStateStatus` below |
+| `CONFLICTING` | Merge conflicts exist | Resolve before reviewing |
+| `UNKNOWN` | GitHub still computing | Wait 30s, re-check |
+
+**`mergeStateStatus` field** — overall branch state:
+| Value | Action |
+|-------|--------|
+| `CLEAN` | All checks pass, no conflicts — proceed to Phase 0 |
+| `BEHIND` | Branch behind base — note in report; non-blocking if merge queue handles it |
+| `DIRTY` | Merge conflicts exist — resolve before reviewing |
+| `BLOCKED` | External blocker (branch protection, failing required check) — investigate |
+
+### Step 2 — Resolve conflicts (when CONFLICTING or DIRTY)
+
+When the PR has merge conflicts:
+
+1. **Determine the PR's base branch and fetch:**
+   ```bash
+   BASE_REF=$(gh pr view <PR_NUMBER> --json baseRefName --jq '.baseRefName')
+   git fetch origin $BASE_REF
+   git checkout <pr-branch>
+   git merge origin/$BASE_REF --no-commit --no-ff
+   git diff --name-only --diff-filter=U  # list conflicted files
+   ```
+
+2. **Assess conflict complexity:**
+   - **1-3 simple conflicts** (lockfile version bumps, whitespace): Resolve directly, commit, push.
+   - **4+ conflicts or semantic conflicts** (logic changes in same function): Route to coder for resolution. Do NOT guess at semantic merge resolutions.
+
+3. **Resolve and push:**
+   ```bash
+   # For simple conflicts (after resolving markers):
+   git add -A
+   git commit -m "merge: resolve conflicts with main"
+   git push origin <pr-branch>
+   ```
+
+4. **Post-resolution verification:**
+   ```bash
+   # Verify clean state
+   gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
+   # Run affected tests
+   bun test tests/unit/path/to/conflicted.test.ts --timeout 30000
+   ```
+
+5. **Document in report:** List all conflicted files, resolution approach, and whether semantic judgment was required.
+
+### Conflict resolution anti-patterns
+- ✗ Accepting "ours" or "theirs" for all conflicts without reading them
+- ✗ Resolving semantic conflicts without understanding both sides
+- ✗ Pushing resolution without running tests on the merged result
+- ✗ Reviewing a conflicted PR without resolving first — review effort is wasted if the merge changes the code
+
 ---
 
 # Default Review Workflow

@@ -25,11 +25,20 @@ import type {
 	HiveKnowledgeEntry,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
+import { resolveUnactionablePath } from '../hooks/knowledge-validator.js';
+import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
+import { readSynonymMap } from './synonym-map.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 
 const { version } = packageJson;
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Backlog thresholds above which a curation queue is flagged as not draining.
+// Set high enough that normal per-phase churn (a handful of entries) never trips
+// the warning — only a genuine, accumulating stall does.
+const UNACTIONABLE_BACKLOG_WARN = 100;
+const INSIGHT_BACKLOG_WARN = 50;
 
 export interface KnowledgeDebugMeta {
 	plugin_version: string;
@@ -51,6 +60,25 @@ export interface KnowledgeDebugMeta {
 	event_count: number;
 	retrieval_events_7d: number;
 	cache_status: 'fresh' | 'stale' | 'unknown';
+	/**
+	 * Learning-loop telemetry (Changes 1–6). Surfaces the health of the
+	 * self-improvement pipeline: directives awaiting curation, reflection
+	 * candidates not yet folded in, learned synonyms, and enforcement posture.
+	 */
+	learning: {
+		/** Lessons withheld from the active store pending actionability (Change 4). */
+		unactionable_queue_depth: number;
+		/** Micro-reflection insight candidates not yet consumed by the curator (Change 6). */
+		insight_candidates_pending: number;
+		/** Learned tag co-occurrence synonym pairs on disk (Change 5). */
+		synonym_pairs: number;
+		/** Active directives in `enforce` posture (Change 3). */
+		enforced_directives: number;
+		/** Active directives that have been auto-escalated at least once (Change 3). */
+		escalated_directives: number;
+		/** Knowledge-event volume bucketed by type (applied/ignored/violated/...). */
+		events_by_type: Record<string, number>;
+	};
 }
 
 /** Parse JSONL lines without normalization. Returns parsed objects + corrupt count. */
@@ -121,6 +149,8 @@ export async function computeKnowledgeDebug(
 	let active = 0;
 	let archived = 0;
 	let quarantined = 0;
+	let enforcedDirectives = 0;
+	let escalatedDirectives = 0;
 	try {
 		const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
@@ -129,6 +159,16 @@ export async function computeKnowledgeDebug(
 			if (e.status === 'archived') archived++;
 			else if (e.status === 'quarantined') quarantined++;
 			else active++;
+			// Enforcement posture only counts for non-archived/quarantined directives
+			// (an archived directive enforces nothing).
+			if (e.status !== 'archived' && e.status !== 'quarantined') {
+				if (e.enforcement_mode === 'enforce') enforcedDirectives++;
+				if (
+					Array.isArray(e.escalation_history) &&
+					e.escalation_history.length > 0
+				)
+					escalatedDirectives++;
+			}
 		}
 	} catch {
 		// leave counts at best-effort values
@@ -143,17 +183,34 @@ export async function computeKnowledgeDebug(
 
 	let eventCount = 0;
 	let retrieval7d = 0;
+	const eventsByType: Record<string, number> = {};
 	try {
 		const events = await readKnowledgeEvents(directory);
 		eventCount = events.length;
 		const cutoff = Date.now() - SEVEN_DAYS_MS;
 		for (const ev of events) {
+			eventsByType[ev.type] = (eventsByType[ev.type] ?? 0) + 1;
 			if (ev.type !== 'retrieved') continue;
 			const t = Date.parse(ev.timestamp);
 			if (!Number.isNaN(t) && t >= cutoff) retrieval7d++;
 		}
 	} catch {
 		// ignore
+	}
+
+	// Learning-loop queue depths (Changes 4–6). Each is best-effort and degrades
+	// to 0 when the file is absent, malformed, or out of bounds.
+	const unactionableQueueDepth = await safeJsonlCount(
+		resolveUnactionablePathSafe(directory),
+	);
+	const insightCandidatesPending = await safeJsonlCount(
+		resolveInsightCandidatesPathSafe(directory),
+	);
+	let synonymPairs = 0;
+	try {
+		synonymPairs = Object.keys((await readSynonymMap(directory)).pairs).length;
+	} catch {
+		// ignore — no/!corrupt synonym map
 	}
 
 	return {
@@ -171,7 +228,46 @@ export async function computeKnowledgeDebug(
 		event_count: eventCount,
 		retrieval_events_7d: retrieval7d,
 		cache_status: cacheStatus(),
+		learning: {
+			unactionable_queue_depth: unactionableQueueDepth,
+			insight_candidates_pending: insightCandidatesPending,
+			synonym_pairs: synonymPairs,
+			enforced_directives: enforcedDirectives,
+			escalated_directives: escalatedDirectives,
+			events_by_type: eventsByType,
+		},
 	};
+}
+
+/** Count non-blank JSONL lines in a file. Returns 0 on any error or null path. */
+async function safeJsonlCount(filePath: string | null): Promise<number> {
+	if (!filePath || !existsSync(filePath)) return 0;
+	try {
+		const content = await readFile(filePath, 'utf-8');
+		let n = 0;
+		for (const line of content.split('\n')) {
+			if (line.trim()) n++;
+		}
+		return n;
+	} catch {
+		return 0;
+	}
+}
+
+function resolveUnactionablePathSafe(directory: string): string | null {
+	try {
+		return resolveUnactionablePath(directory);
+	} catch {
+		return null;
+	}
+}
+
+function resolveInsightCandidatesPathSafe(directory: string): string | null {
+	try {
+		return resolveInsightCandidatesPath(directory);
+	} catch {
+		return null;
+	}
 }
 
 export interface KnowledgeHealth {
@@ -200,12 +296,29 @@ export async function checkKnowledgeHealth(
 	}
 
 	const sb = debug.status_breakdown;
+	const lr = debug.learning;
 	const summary =
 		`active=${sb.active} archived=${sb.archived} quarantined=${sb.quarantined} ` +
 		`rejected=${sb.rejected} | events=${debug.event_count} (retrieved/7d=${debug.retrieval_events_7d}) | ` +
+		`learning[enforce=${lr.enforced_directives} escalated=${lr.escalated_directives} ` +
+		`synonyms=${lr.synonym_pairs} unactionable=${lr.unactionable_queue_depth} ` +
+		`insights_pending=${lr.insight_candidates_pending}] | ` +
 		`schema=${JSON.stringify(debug.schema_versions)}`;
 
 	const warnings: string[] = [];
+	// A persistent backlog in either curation queue means the curator is not
+	// draining them (not running, erroring, or the gate is mis-tuned) — surface it
+	// so the learning loop's stall is visible, not silent.
+	if (lr.unactionable_queue_depth > UNACTIONABLE_BACKLOG_WARN) {
+		warnings.push(
+			`${lr.unactionable_queue_depth} lessons stuck in the unactionable queue (curator may not be draining)`,
+		);
+	}
+	if (lr.insight_candidates_pending > INSIGHT_BACKLOG_WARN) {
+		warnings.push(
+			`${lr.insight_candidates_pending} micro-reflection insight candidates pending (curator may not be folding them in)`,
+		);
+	}
 	if (debug.corrupt_line_count > 0) {
 		warnings.push(
 			`${debug.corrupt_line_count} corrupt JSONL line(s) (raw=${debug.raw_entry_count} vs normalized=${debug.normalized_entry_count})`,

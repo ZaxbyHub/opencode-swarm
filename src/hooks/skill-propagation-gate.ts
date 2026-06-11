@@ -797,9 +797,9 @@ export async function skillPropagationGateBefore(
 				// Ensure .swarm/ directory exists
 				const swarmDir = path.dirname(contextPath);
 				if (!_internals.existsSync(swarmDir)) {
-					_internals.mkdirSync(swarmDir, { recursive: true });
+					_internals.mkdirSync(swarmDir, { recursive: true }); // drift-test:exempt — context.md is in PRESERVED_SWARM_PATHS, variable resolution prevents static match
 				}
-				_internals.writeFileSync(contextPath, updatedContent, 'utf-8');
+				_internals.writeFileSync(contextPath, updatedContent, 'utf-8'); // drift-test:exempt
 			}
 		} catch (err) {
 			warn(

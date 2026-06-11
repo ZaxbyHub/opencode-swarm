@@ -118,20 +118,34 @@ describe('write_architecture_supervisor_evidence knowledge feedback (Chunk E)', 
 		],
 	};
 
-	test('proposes candidate knowledge when persist flag is enabled', async () => {
+	test('routes recommendations through the actionability gate when persist flag is enabled', async () => {
+		// Realigned (Change 4): prose recommendations must pass the Layer-5
+		// actionability gate before reaching the active store. In this offline
+		// test environment no curator LLM is available to enrich them, so the
+		// recommendation is QUARANTINED to the unactionable queue (recoverable by
+		// the hardening loop) rather than stored as an active candidate.
 		writeConfig(true);
 		const out = await run(recArgs);
-		expect(JSON.parse(out).knowledge_proposed).toBe(1);
+		const parsed = JSON.parse(out);
+		expect(parsed.knowledge_proposed).toBe(0);
+		expect(parsed.knowledge_quarantined).toBe(1);
 
-		// Confirm the lesson actually landed on disk as a candidate.
+		// Nothing landed in the active store…
 		const knowledgePath = resolveSwarmKnowledgePath(tempDir);
 		const entries =
 			(await readKnowledge<{ status: string; lesson: string }>(
 				knowledgePath,
 			)) ?? [];
-		expect(entries).toHaveLength(1);
-		expect(entries[0].status).toBe('candidate');
-		expect(entries[0].lesson).toContain('single storage backend');
+		expect(entries).toHaveLength(0);
+
+		// …but the recommendation is preserved in the unactionable queue.
+		const queued =
+			(await readKnowledge<{ status: string; lesson: string }>(
+				path.join(tempDir, '.swarm', 'knowledge-unactionable.jsonl'),
+			)) ?? [];
+		expect(queued).toHaveLength(1);
+		expect(queued[0].status).toBe('quarantined_unactionable');
+		expect(queued[0].lesson).toContain('single storage backend');
 	});
 
 	test('does not propose knowledge when persist flag is disabled', async () => {

@@ -71,7 +71,8 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 			if (isPromoted) {
 				return JSON.stringify({
 					success: false,
-					message: 'cannot delete promoted entry — this entry has been promoted to cross-project consensus',
+					message:
+						'cannot delete promoted entry — this entry has been promoted to cross-project consensus',
 				});
 			}
 

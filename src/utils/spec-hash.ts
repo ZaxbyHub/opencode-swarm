@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { Plan } from '../config/plan-schema';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 
 /**
  * Computes SHA-256 hex hash of `.swarm/spec.md` content in the given directory.
@@ -10,17 +9,9 @@ import type { Plan } from '../config/plan-schema';
 export async function computeSpecHash(
 	directory: string,
 ): Promise<string | null> {
-	const specPath = join(directory, '.swarm', 'spec.md');
-	let hash: string | null = null;
-	try {
-		const content = await readFile(specPath, 'utf-8');
-		hash = createHash('sha256').update(content, 'utf-8').digest('hex');
-	} catch (error: unknown) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-			throw error; // Re-throw unexpected errors; ENOENT means file missing -> hash stays null
-		}
-	}
-	return hash;
+	const spec = _internals.readEffectiveSpecSync(directory);
+	if (!spec) return null;
+	return createHash('sha256').update(spec.content, 'utf-8').digest('hex');
 }
 
 /**
@@ -42,7 +33,7 @@ export async function isSpecStale(
 	if (currentHash === null) {
 		return {
 			stale: true,
-			reason: 'spec.md has been deleted',
+			reason: 'effective spec has been deleted',
 			currentHash: null,
 		};
 	}
@@ -51,7 +42,7 @@ export async function isSpecStale(
 	if (currentHash !== plan.specHash) {
 		return {
 			stale: true,
-			reason: 'spec.md has been modified since plan was saved',
+			reason: 'effective spec has been modified since plan was saved',
 			currentHash,
 		};
 	}
@@ -66,7 +57,9 @@ export async function isSpecStale(
 export const _internals: {
 	computeSpecHash: typeof computeSpecHash;
 	isSpecStale: typeof isSpecStale;
+	readEffectiveSpecSync: typeof readEffectiveSpecSync;
 } = {
 	computeSpecHash,
 	isSpecStale,
+	readEffectiveSpecSync,
 } as const;

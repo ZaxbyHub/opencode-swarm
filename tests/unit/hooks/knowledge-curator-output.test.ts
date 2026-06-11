@@ -82,6 +82,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	computeConfidence: mockComputeConfidence,
 	inferTags: mockInferTags,
 	normalize: mockNormalize,
+	transactFile: async () => false,
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -104,6 +105,11 @@ const mockUpdateRetrievalOutcome = mock(async () => {});
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: mockValidateLesson,
 	quarantineEntry: mockQuarantineEntry,
+	// Layer-5 stubs (Change 4): suite tests output counts of layers 1-3, not the
+	// actionability gate (dedicated suites exist). Keep the gate open.
+	validateActionability: () => ({ actionable: true }),
+	validateActionableFields: () => ({ valid: true, errors: [] }),
+	appendUnactionable: async () => {},
 }));
 
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
@@ -187,7 +193,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 	// =========================================================================
 	// Test 1: Empty lessons array → returns { 0, 0, 0 }
 	// =========================================================================
-	test('empty lessons array returns { stored: 0, skipped: 0, rejected: 0 }', async () => {
+	test('empty lessons array returns { stored: 0, skipped: 0, rejected: 0, quarantined: 0 }', async () => {
 		const result = await curateAndStoreSwarm(
 			[],
 			'test-project',
@@ -196,7 +202,13 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 			defaultConfig,
 		);
 
-		expect(result).toEqual({ stored: 0, skipped: 0, rejected: 0 });
+		// Realigned (Change 4): the result gained a `quarantined` count.
+		expect(result).toEqual({
+			stored: 0,
+			skipped: 0,
+			rejected: 0,
+			quarantined: 0,
+		});
 		expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		expect(mockAppendRejectedLesson).not.toHaveBeenCalled();
 	});
@@ -464,8 +476,9 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		expect(typeof result.skipped).toBe('number');
 		expect(typeof result.rejected).toBe('number');
 
-		// Verify no extra properties
+		// Verify no extra properties (Change 4 added `quarantined`)
+		expect(typeof result.quarantined).toBe('number');
 		const keys = Object.keys(result);
-		expect(keys).toEqual(['stored', 'skipped', 'rejected']);
+		expect(keys).toEqual(['stored', 'skipped', 'rejected', 'quarantined']);
 	});
 });

@@ -69,6 +69,7 @@ mock.module('../../../src/state.js', () => ({
 	},
 	endAgentSession: () => {},
 	resetSwarmState: () => {},
+	resetSwarmStatePreservingSingletons: () => {},
 }));
 
 mock.module('../../../src/git/branch.js', () => ({
@@ -114,6 +115,7 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 	const plan = {
 		title: 'Cleanup Test Project',
 		schema_version: '1.0.0',
+		swarm: 'lowtier',
 		current_phase: 1,
 		phases: [
 			{
@@ -121,8 +123,8 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				name: 'Phase 1',
 				status: 'in_progress',
 				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A' },
-					{ id: '1.2', status: 'complete', description: 'Task B' },
+					{ id: '1.1', phase: 1, status: 'in_progress', description: 'Task A' },
+					{ id: '1.2', phase: 1, status: 'in_progress', description: 'Task B' },
 				],
 			},
 		],
@@ -903,6 +905,36 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'archive'))).toBe(true);
 			// And context.md was rewritten
 			expect(existsSync(path.join(swarmDir(), 'context.md'))).toBe(true);
+		});
+	});
+
+	// ── Test 11: .tmp.* temp file sweep (FR-013) ──────────────────────
+
+	describe('.tmp.* temp file sweep', () => {
+		it('removes .tmp.* files from .swarm/ after close but leaves non-.tmp.* files untouched', async () => {
+			writePlan();
+
+			// Create .tmp.xxx temp artifact (should be swept by close cleanup)
+			writeFileSync(path.join(swarmDir(), '.tmp.xxx'), 'stale temp data');
+
+			// Create a non-.tmp.* file that must NOT be swept
+			writeFileSync(
+				path.join(swarmDir(), 'normal-artifact.json'),
+				'{"keep":true}',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			// .tmp.* file must be removed (stale temp sweep, not archived)
+			expect(existsSync(path.join(swarmDir(), '.tmp.xxx'))).toBe(false);
+
+			// non-.tmp.* file must survive the sweep
+			expect(existsSync(path.join(swarmDir(), 'normal-artifact.json'))).toBe(
+				true,
+			);
+			expect(
+				readFileSync(path.join(swarmDir(), 'normal-artifact.json'), 'utf-8'),
+			).toBe('{"keep":true}');
 		});
 	});
 });
