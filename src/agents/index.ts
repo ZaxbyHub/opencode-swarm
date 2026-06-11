@@ -43,13 +43,12 @@ export type { AgentDefinition } from './architect';
 // Track agents for which we've already warned about missing config
 const warnedAgents = new Set<string>();
 
-// Module-level reference to swarm agents config for runtime fallback resolution by guardrails
-let _swarmAgents:
-	| Record<
-			string,
-			{ model?: string; fallback_models?: string[]; disabled?: boolean }
-	  >
-	| undefined;
+// Module-level map of swarm agents config for runtime fallback resolution by guardrails
+// Keyed by swarmId: "default" for the default swarm, "local", "fast", "precise", etc. for named swarms
+const _swarmAgentsMap = new Map<
+	string,
+	Record<string, { model?: string; fallback_models?: string[]; disabled?: boolean }>
+>();
 
 /**
  * Strip the user-defined swarm prefix from an agent name to get the base
@@ -74,6 +73,22 @@ export function stripSwarmPrefix(
 		return agentName.substring(prefixWithUnderscore.length);
 	}
 	return agentName;
+}
+
+/**
+ * Extract the swarm ID from a prefixed agent name.
+ * For multi-swarm configurations, agent names are prefixed: "swarmId_agentName"
+ * For the default swarm, agent names have no prefix.
+ *
+ * Example: "local_coder" -> "local", "coder" -> undefined (default swarm)
+ * The regex matches everything before the first underscore.
+ */
+export function extractSwarmIdFromAgentName(
+	agentName: string,
+): string | undefined {
+	if (!agentName) return undefined;
+	const match = agentName.match(/^([^_]+)_/);
+	return match ? match[1] : undefined;
 }
 
 /**
@@ -103,7 +118,7 @@ function getModelForAgent(
 
 	// NOTE: fallback_models resolution happens at runtime in guardrails (toolAfter),
 	// not here. getModelForAgent runs once at agent creation. The guardrails hook
-	// modifies _swarmAgents[name].model directly when session.model_fallback_index > 0.
+	// modifies the swarmAgents config in _swarmAgentsMap directly when session.model_fallback_index > 0.
 	// The config's fallback_models array is read by guardrails to select the fallback.
 
 	// 2. Default from constants — warn once per agent if not in config
@@ -167,14 +182,19 @@ export function resolveFallbackModel(
 
 /**
  * Get the swarm agents config (for runtime fallback resolution by guardrails).
+ * 
+ * @param swarmId - The swarm ID to retrieve config for. Defaults to 'default' for the default swarm.
+ *                  For multi-swarm configs, use the swarm's ID (e.g., 'local', 'fast', 'precise').
+ *                  Can also be extracted from a prefixed agent name using extractSwarmIdFromAgentName().
  */
-export function getSwarmAgents():
+export function getSwarmAgents(swarmId?: string):
 	| Record<
 			string,
 			{ model?: string; fallback_models?: string[]; disabled?: boolean }
 	  >
 	| undefined {
-	return _swarmAgents;
+	const id = swarmId ?? 'default';
+	return _swarmAgentsMap.get(id);
 }
 
 /**
@@ -312,7 +332,7 @@ function createSwarmAgents(
 ): AgentDefinition[] {
 	const agents: AgentDefinition[] = [];
 	const swarmAgents = swarmConfig.agents;
-	_swarmAgents = swarmAgents;
+	_swarmAgentsMap.set(swarmId, swarmAgents ?? {});
 
 	// Prefix for non-default swarms (e.g., "local" for swarmId "local")
 	// We pass swarmId as the prefix identifier, but only prepend to names if not default

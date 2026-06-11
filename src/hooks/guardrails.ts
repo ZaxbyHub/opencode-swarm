@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import picomatch from 'picomatch';
 import QuickLRU from 'quick-lru';
 
-import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
+import { extractSwarmIdFromAgentName, getSwarmAgents, resolveFallbackModel } from '../agents/index';
 import {
 	isLowCapabilityModel,
 	OPENCODE_NATIVE_AGENTS,
@@ -109,6 +109,7 @@ import { extractModelInfo } from './model-limits';
 import { normalizeToolName } from './normalize-tool-name';
 
 export const _internals = {
+	extractSwarmIdFromAgentName,
 	getSwarmAgents,
 	getMostRecentAssistantText,
 	getProviderFailureFingerprint,
@@ -3668,10 +3669,13 @@ export function createGuardrailsHooks(
 						session.model_fallback_index++;
 
 						// Track modelFallbackExhausted for degraded errors (mirrors transient branch pattern)
+						// Extract swarmId from agent name (e.g., "local_coder" -> "local", "coder" -> undefined)
+						const swarmId = _internals.extractSwarmIdFromAgentName(session.agentName);
+						// Extract base agent name by removing swarmId prefix
 						const baseAgentName = session.agentName
 							? session.agentName.replace(/^[^_]+[_]/, '')
 							: '';
-						const swarmAgents = _internals.getSwarmAgents();
+						const swarmAgents = _internals.getSwarmAgents(swarmId);
 						const fallbackModels =
 							swarmAgents?.[baseAgentName]?.fallback_models;
 						session.modelFallbackExhausted =
@@ -3722,10 +3726,13 @@ export function createGuardrailsHooks(
 					session.model_fallback_index++;
 
 					// Resolve the fallback model from config
+					// Extract swarmId from agent name (e.g., "local_coder" -> "local", "coder" -> undefined)
+					const swarmId = _internals.extractSwarmIdFromAgentName(session.agentName);
+					// Extract base agent name by removing swarmId prefix
 					const baseAgentName = session.agentName
 						? session.agentName.replace(/^[^_]+[_]/, '')
 						: '';
-					const swarmAgents = _internals.getSwarmAgents();
+					const swarmAgents = _internals.getSwarmAgents(swarmId);
 					const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
 					// Mark exhausted only when all fallback models have been tried
 					session.modelFallbackExhausted =
