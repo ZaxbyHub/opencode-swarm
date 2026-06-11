@@ -29,6 +29,18 @@ export interface LeanTurboPhaseReadyConfig {
 	integrated_diff_required?: boolean;
 }
 
+/**
+ * Default configuration for phase readiness checks.
+ *
+ * NOTE (Issue #7 - integrated_diff_required Default Safety Gap):
+ * Currently defaults to `false` for backward compatibility with existing projects.
+ * For NEW projects and safety-critical lanes, it is recommended to:
+ * - Set integrated_diff_required: true explicitly in caller configurations, or
+ * - Implement project-level default configuration to enforce this safety check
+ *
+ * Integrated diff validation ensures that parallel lane changes integrate cleanly
+ * back to the primary branch. Setting to true requires diff evidence before phase advance.
+ */
 const DEFAULT_CONFIG: Required<LeanTurboPhaseReadyConfig> = {
 	phase_reviewer: true,
 	phase_critic: true,
