@@ -125,7 +125,23 @@ describe('resolveWorkingDirectory', () => {
 		const result = resolveWorkingDirectory(undefined, undefined);
 		expect(result.success).toBe(false);
 		if (!result.success) {
-			expect(result.message).toContain('fallbackDirectory is undefined');
+			expect(result.message).toContain('fallbackDirectory is missing or not a string');
+		}
+	});
+
+	test('rejects missing working_directory when fallbackDirectory is null', () => {
+		const result = resolveWorkingDirectory(undefined, null);
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			expect(result.message).toContain('fallbackDirectory is missing or not a string');
+		}
+	});
+
+	test('uses working_directory when fallbackDirectory is null', () => {
+		const result = resolveWorkingDirectory(testDir, null);
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.directory).toContain('resolve-wd-test-');
 		}
 	});
 

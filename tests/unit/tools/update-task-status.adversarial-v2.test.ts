@@ -211,6 +211,7 @@ describe('ADVERSARIAL: type confusion on working_directory', () => {
 		});
 
 		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
 	it('rejects Infinity working_directory without crashing', async () => {
