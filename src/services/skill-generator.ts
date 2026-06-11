@@ -22,6 +22,7 @@ import {
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
 } from '../hooks/knowledge-store.js';
+import { appendSkillChangelog } from './skill-changelog.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeEntryBase,
@@ -235,16 +236,24 @@ function uniqueStrings(arr: string[]): string[] {
 // SKILL.md content emission
 // ============================================================================
 
+export interface SkillFrontmatterOverrides {
+	version?: number;
+	skillOrigin?: 'generated' | 'promoted_external';
+}
+
 export function renderSkillMarkdown(
 	cluster: KnowledgeCluster,
 	mode: GenerateMode = 'active',
 	generatedAt = new Date().toISOString(),
+	overrides?: SkillFrontmatterOverrides,
 ): string {
 	const description =
 		cluster.title.length > 200
 			? `${cluster.title.slice(0, 197)}…`
 			: cluster.title;
 	const ids = cluster.entries.map((e) => `  - ${e.id}`).join('\n');
+	const version = overrides?.version ?? 1;
+	const skillOrigin = overrides?.skillOrigin ?? 'generated';
 	const lines: string[] = [];
 	lines.push('---');
 	lines.push(`name: ${cluster.slug}`);
@@ -256,6 +265,8 @@ export function renderSkillMarkdown(
 	lines.push(`generated_at: ${generatedAt}`);
 	lines.push(`confidence: ${cluster.avgConfidence.toFixed(2)}`);
 	lines.push(`status: ${mode === 'active' ? 'active' : 'draft'}`);
+	lines.push(`version: ${version}`);
+	lines.push(`skill_origin: ${skillOrigin}`);
 	lines.push('---');
 	lines.push('');
 	lines.push(
@@ -538,6 +549,8 @@ export function parseDraftFrontmatter(content: string): {
 	status?: string;
 	generatedAt?: string;
 	sourceKnowledgeIds: string[];
+	version?: number;
+	skillOrigin?: string;
 } | null {
 	// Strip optional UTF-8 BOM that some editors prepend on Windows.
 	const stripped =
@@ -561,6 +574,8 @@ export function parseDraftFrontmatter(content: string): {
 		status?: string;
 		generatedAt?: string;
 		sourceKnowledgeIds: string[];
+		version?: number;
+		skillOrigin?: string;
 	} = {
 		sourceKnowledgeIds: [],
 	};
@@ -593,6 +608,16 @@ export function parseDraftFrontmatter(content: string): {
 		const ga = line.match(/^generated_at:\s*(\S+)\s*$/);
 		if (ga) {
 			out.generatedAt = ga[1];
+			continue;
+		}
+		const vm = line.match(/^version:\s*(\d+)\s*$/);
+		if (vm) {
+			out.version = parseInt(vm[1], 10);
+			continue;
+		}
+		const so = line.match(/^skill_origin:\s*(\S+)\s*$/);
+		if (so) {
+			out.skillOrigin = so[1];
 			continue;
 		}
 		if (/^generated_from_knowledge:\s*$/.test(line)) {
@@ -1045,7 +1070,16 @@ export async function regenerateSkill(
 		avgConfidence: avgConf,
 	};
 
-	const content = renderSkillMarkdown(cluster, 'active');
+	const priorVersion = fm?.version ?? 1;
+	const newVersion = priorVersion + 1;
+	const origin = fm?.skillOrigin;
+	const content = renderSkillMarkdown(cluster, 'active', undefined, {
+		version: newVersion,
+		skillOrigin:
+			origin === 'generated' || origin === 'promoted_external'
+				? origin
+				: 'generated',
+	});
 	try {
 		await atomicWrite(skillPath, content);
 		// Re-stamp source entries
@@ -1061,6 +1095,17 @@ export async function regenerateSkill(
 			entryCount: 0,
 			reason: `write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
 		};
+	}
+
+	try {
+		await appendSkillChangelog(directory, cleanSlug, {
+			version: newVersion,
+			timestamp: new Date().toISOString(),
+			action: 'regenerated',
+			reason: `Regenerated from ${matchedEntries.length} source entries`,
+		});
+	} catch {
+		/* changelog is best-effort */
 	}
 
 	return {

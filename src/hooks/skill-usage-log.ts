@@ -33,6 +33,8 @@ export interface SkillUsageEntry {
 	reviewerNotes?: string;
 	/** Session identifier. */
 	sessionID: string;
+	/** Skill version at the time of this usage event (omitted for pre-versioning entries). */
+	skillVersion?: number;
 }
 
 /** Filter options for reading skill-usage entries. */
@@ -93,6 +95,7 @@ export const _internals = {
 	resolveSourceKnowledgeIds,
 	applySkillUsageFeedback,
 	parseGeneratedFromKnowledge,
+	computeComplianceByVersion,
 };
 
 // ============================================================================
@@ -117,6 +120,7 @@ export function appendSkillUsageEntry(
 		complianceVerdict,
 		sessionID,
 		reviewerNotes,
+		skillVersion,
 	} = entry;
 
 	// Validate required string fields
@@ -160,6 +164,7 @@ export function appendSkillUsageEntry(
 		complianceVerdict,
 		sessionID,
 		...(reviewerNotes !== undefined && { reviewerNotes }),
+		...(skillVersion !== undefined && { skillVersion }),
 	};
 
 	_internals.appendFileSync(
@@ -313,6 +318,54 @@ export function readSkillUsageEntriesTail(
 	} catch {
 		return [];
 	}
+}
+
+// ============================================================================
+// Per-version compliance
+// ============================================================================
+
+export interface VersionComplianceStats {
+	compliant: number;
+	violation: number;
+	total: number;
+	rate: number;
+}
+
+export function computeComplianceByVersion(
+	entries: SkillUsageEntry[],
+	skillPath: string,
+): Map<number | undefined, VersionComplianceStats> {
+	const map = new Map<number | undefined, VersionComplianceStats>();
+	const normalizedTarget = skillPath.replace(/\\/g, '/');
+
+	for (const e of entries) {
+		let p = e.skillPath;
+		if (p.startsWith('file:')) p = p.slice(5);
+		const normalized = p.replace(/\\/g, '/');
+		if (
+			normalized !== normalizedTarget &&
+			!normalizedTarget.endsWith(`/${normalized}`) &&
+			!normalized.endsWith(`/${normalizedTarget}`)
+		) {
+			continue;
+		}
+
+		const version = e.skillVersion;
+		let stats = map.get(version);
+		if (!stats) {
+			stats = { compliant: 0, violation: 0, total: 0, rate: 0 };
+			map.set(version, stats);
+		}
+		stats.total += 1;
+		if (e.complianceVerdict === 'compliant') stats.compliant += 1;
+		if (e.complianceVerdict === 'violation') stats.violation += 1;
+	}
+
+	for (const stats of map.values()) {
+		stats.rate = stats.total === 0 ? 0 : stats.compliant / stats.total;
+	}
+
+	return map;
 }
 
 // ============================================================================

@@ -29,6 +29,7 @@ import { handleFullAutoCommand } from './full-auto.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
 import { handleIssueCommand } from './issue.js';
+import { handleLearningCommand } from './learning.js';
 import {
 	handleKnowledgeListCommand,
 	handleKnowledgeMigrateCommand,
@@ -388,6 +389,14 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleBenchmarkCommand(ctx.directory, ctx.args),
 		description: 'Show performance metrics [--cumulative] [--ci-gate]',
 		args: '--cumulative, --ci-gate',
+		category: 'diagnostics',
+	},
+	learning: {
+		handler: (ctx) => handleLearningCommand(ctx.directory, ctx.args),
+		description: 'Show learning metrics and violation trends',
+		args: '--json, --phase <N>',
+		details:
+			'Computes aggregate learning metrics from knowledge events: violation-rate trends, directive application rates, escalation frequency, per-entry ROI, and never-applied entries. Surfaces a learning summary for the curator digest.',
 		category: 'diagnostics',
 	},
 	export: {
