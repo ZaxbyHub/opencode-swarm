@@ -48,6 +48,24 @@ Tasks: 3/5 complete
 Agents: 11 registered
 ```
 
+### `/swarm learning [--json] [--phase N]`
+
+Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:
+
+- **Violation trends** — per-directive violation rates over 7-day and 30-day windows with trend direction (improving/worsening/stable)
+- **Application rates by priority** — how often directives are applied when shown, grouped by priority level
+- **Escalation activity** — auto-escalation frequency over recent windows
+- **Entry ROI** — per-entry applied/shown/succeeded/failed counts with ROI classification (high/medium/low/unused)
+- **Never-applied entries** — directives that have never been applied despite being alive for multiple phases
+- **Time to first application** — median/min/max days from directive creation to first application
+
+A 3-line learning summary is automatically injected into the curator phase digest after each phase.
+
+| Flag | Effect |
+|------|--------|
+| `--json` | Output metrics as structured JSON in a `[LEARNING_JSON]...[/LEARNING_JSON]` envelope |
+| `--phase N` | Set the current phase number for never-applied threshold calculations |
+
 ### `/swarm diagnose`
 
 Run a health check on `.swarm/` files, plan structure, and evidence completeness. Reports missing files, schema mismatches, and recovery steps.
