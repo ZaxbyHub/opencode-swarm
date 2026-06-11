@@ -88,16 +88,18 @@ export function resolveWorkingDirectory(
 		}
 	}
 
-	// Normalize and check for traversal
-	const normalizedDir = path.normalize(workingDirectory);
-	const pathParts = normalizedDir.split(path.sep);
-	if (pathParts.includes('..')) {
+	// Check for traversal in raw input before normalizing (normalize resolves .. before we can detect it)
+	const rawPathParts = workingDirectory.split(path.sep);
+	if (rawPathParts.includes('..')) {
 		return {
 			success: false,
 			message:
 				'Invalid working_directory: path traversal sequences (..) are not allowed',
 		};
 	}
+
+	// Normalize and continue
+	const normalizedDir = path.normalize(workingDirectory);
 
 	// Resolve and verify existence
 	const resolvedDir = path.resolve(normalizedDir);

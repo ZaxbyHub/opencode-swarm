@@ -33,6 +33,17 @@ import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
 /**
+ * Internal seams for test injection.
+ * Tests should save/restore these in beforeEach/afterEach rather than using
+ * module-scope vi.mock, which leaks across files in Bun's shared test runner.
+ */
+export const _internals = {
+	tryAcquireLock,
+	updateTaskStatus,
+	resolveWorkingDirectory,
+} as const;
+
+/**
  * Arguments for the update_task_status tool
  */
 export interface UpdateTaskStatusArgs {
@@ -236,7 +247,7 @@ export function checkReviewerGate(
 		// === evidence-first check (durable, survives restarts) ===
 		let resolvedDir: string | undefined;
 		if (fallbackDir) {
-			const resolveResult = resolveWorkingDirectory(
+			const resolveResult = _internals.resolveWorkingDirectory(
 				workingDirectory,
 				fallbackDir,
 			);
@@ -916,16 +927,7 @@ export async function executeUpdateTaskStatus(
 	// existence, and subdirectory checks. (FR-006, DD-012)
 	let directory: string;
 
-	// When neither is available, return early with original error message
-	if (!args.working_directory && !fallbackDir) {
-		return {
-			success: false,
-			message: 'No working_directory provided and fallbackDir is undefined',
-			errors: ['Cannot resolve directory for task status update'],
-		};
-	}
-
-	const resolveResult = resolveWorkingDirectory(
+	const resolveResult = _internals.resolveWorkingDirectory(
 		args.working_directory,
 		fallbackDir,
 	);
@@ -1096,7 +1098,7 @@ export async function executeUpdateTaskStatus(
 	}
 	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
+		lockResult = await _internals.tryAcquireLock(
 			directory,
 			planFilePath,
 			agentName,
@@ -1121,7 +1123,7 @@ export async function executeUpdateTaskStatus(
 		};
 	}
 	try {
-		const updatedPlan = await updateTaskStatus(
+		const updatedPlan = await _internals.updateTaskStatus(
 			directory,
 			args.task_id,
 			args.status as TaskStatus,
