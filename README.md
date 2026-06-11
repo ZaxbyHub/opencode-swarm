@@ -134,6 +134,8 @@ Swarm has two independent mode systems:
 | **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
 
+**Auto-proceed** — a session toggle (`/swarm auto-proceed [on|off]`) that skips the "Ready for Phase N+1?" prompt at phase boundaries. Defaults to `false`; set as a plan default via `execution_profile.auto_proceed` during QA GATE SELECTION. Session override always wins. Independent of Full-Auto.
+
 Full-Auto reduces approval friction by deterministically allowing safe operations (read-only tools, in-scope writes, safe shell) and routing every ambiguous or high-risk action (writes to plugin/build/guardrail paths, network, dependency changes, plan/phase mutations, subagent delegation) through the read-only `critic_oversight` agent before it executes. Denials are returned to the agent as structured signals so it can choose a safer path; repeated denials pause the run; phase completion requires an APPROVED oversight record. See [docs/modes.md](docs/modes.md#full-auto) for `mode`, `permission_policy`, `denials`, and `oversight` config keys, fail-closed semantics, and recovery from a paused run.
 
 **Project mode** — persistent via `execution_mode` config key:
@@ -144,7 +146,7 @@ Full-Auto reduces approval friction by deterministically allowing safe operation
 | `balanced` (default) | Standard hooks |
 | `fast` | Skips compaction service — for short sessions under context pressure |
 
-Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
+Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Control phase-boundary auto-proceed with `/swarm auto-proceed [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
 
 ---
 

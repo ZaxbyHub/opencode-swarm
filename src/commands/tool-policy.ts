@@ -36,6 +36,7 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'sdd project',
 	'sync-plan',
 	'export',
+	'auto-proceed',
 ] as const;
 
 export type SwarmCommandToolInputCommand =
@@ -69,6 +70,7 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'sdd validate',
 	'sync-plan',
 	'export',
+	'auto-proceed',
 ]);
 
 /**

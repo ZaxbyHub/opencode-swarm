@@ -37,6 +37,8 @@ export const TRANSIENT_SESSION_FIELDS: ReadonlyArray<{
 	{ name: 'modelFallbackExhausted', resetValue: false },
 	{ name: 'scopeViolationDetected', resetValue: false },
 	{ name: 'delegationActive', resetValue: false },
+	{ name: 'autoProceedOverride', resetValue: undefined },
+	{ name: 'autoProceedNudgeDone', resetValue: undefined },
 ] as const;
 
 const VALID_TASK_WORKFLOW_STATES: TaskWorkflowState[] = [
@@ -182,6 +184,8 @@ export function deserializeAgentSession(
 			typeof s.maxConcurrencyOverride === 'number'
 				? Math.min(64, Math.max(1, s.maxConcurrencyOverride))
 				: undefined,
+		autoProceedOverride: s.autoProceedOverride,
+		autoProceedNudgeDone: s.autoProceedNudgeDone,
 		prmPatternCounts: new Map(),
 		prmEscalationLevel: 0,
 		prmLastPatternDetected: null,

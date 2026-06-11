@@ -267,6 +267,14 @@ export interface AgentSessionState {
 	 *  for delegation-gate guidance. Cleared on session reset. */
 	maxConcurrencyOverride?: number;
 
+	// Auto-proceed session overrides (Phase 1)
+	/** Session-scoped override for execution_profile.auto_proceed.
+	 *  When set, overrides the plan's auto_proceed for this session.
+	 *  true = auto-advance, false = do not auto-advance. Cleared on session reset. */
+	autoProceedOverride?: boolean;
+	/** Tracks whether the FR-004 nudge ("would you like to auto-advance?") has already been shown this session. */
+	autoProceedNudgeDone?: boolean;
+
 	// QA Gate Profile session overrides (ratchet-tighter only)
 	/** Session-level QA gate overrides layered on top of the spec-level profile.
 	 *  Overrides can only enable gates (true); false values are ignored by
@@ -1724,6 +1732,17 @@ export function hasActiveLeanTurbo(sessionID?: string): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * Resolves the effective auto_proceed value for a session.
+ * Session override (autoProceedOverride) takes precedence over the plan default.
+ */
+export function getResolvedAutoProceed(
+	session: AgentSessionState,
+	planAutoProceed: boolean,
+): boolean {
+	return session.autoProceedOverride ?? planAutoProceed;
 }
 
 // ============================================================================

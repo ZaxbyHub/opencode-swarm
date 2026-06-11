@@ -78,6 +78,10 @@ export interface SerializedAgentSession {
 	stageBCompletion?: Record<string, string[]>;
 	/** Session-scoped concurrency override for max_concurrent_tasks (Issue #761) */
 	maxConcurrencyOverride?: number;
+	/** Session-level auto-proceed override (Phase 1) */
+	autoProceedOverride?: boolean;
+	/** Flag tracking whether the auto-proceed nudge has been shown (Phase 1) */
+	autoProceedNudgeDone?: boolean;
 }
 
 /**
@@ -220,6 +224,12 @@ export function serializeAgentSession(
 		...(Object.keys(stageBCompletion).length > 0 && { stageBCompletion }),
 		...(s.maxConcurrencyOverride !== undefined && {
 			maxConcurrencyOverride: s.maxConcurrencyOverride,
+		}),
+		...(s.autoProceedOverride !== undefined && {
+			autoProceedOverride: s.autoProceedOverride,
+		}),
+		...(s.autoProceedNudgeDone !== undefined && {
+			autoProceedNudgeDone: s.autoProceedNudgeDone,
 		}),
 	};
 }

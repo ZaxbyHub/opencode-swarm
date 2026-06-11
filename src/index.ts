@@ -1203,6 +1203,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
 				},
+				'swarm-auto-proceed': {
+					template: '/swarm auto-proceed $ARGUMENTS',
+					description:
+						'Toggle auto-proceed mode for automatic phase advancement',
+				},
 				'swarm-write-retro': {
 					template: '/swarm write-retro $ARGUMENTS',
 					description:

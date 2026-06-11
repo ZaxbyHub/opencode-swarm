@@ -530,8 +530,22 @@ Behavioral changes:
 - Do NOT ask "Ready for Phase N+1?" — call phase_complete directly. The critic reviews automatically.
 `;
 
+export const AUTO_PROCEED_BANNER = `## ⏭️ AUTO-PROCEED STATUS
+
+Auto-proceed controls whether the architect advances to the next phase automatically (skipping the "Ready for Phase N+1?" confirmation).
+
+Behavioral rules:
+- Session override (set via /swarm auto-proceed on|off) wins over the plan default.
+- If neither is set, auto-proceed defaults to OFF and the architect asks before advancing.
+- Full-auto mode (critic oversight) is independent — it has its own auto-advance mechanism.
+- autoProceedNudgeDone prevents the FR-004 first-boundary nudge from re-firing in this session.
+
+To toggle at runtime: call swarm_command({ command: "auto-proceed", args: ["on"|"off"] }) from the architect.
+`;
+
 /**
  * Canonical default Lean Turbo configuration.
+
  *
  * This is the single source of truth for all LeanTurboConfig fields.
  * Consumers MUST reference this constant instead of hardcoding their own

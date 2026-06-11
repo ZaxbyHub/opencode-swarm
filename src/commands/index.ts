@@ -29,6 +29,7 @@ export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
 export { handleArchiveCommand } from './archive';
+export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';

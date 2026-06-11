@@ -892,6 +892,9 @@ INLINE GATE SELECTION -- no pending section found in context.md. You MUST ask no
 
 MANDATORY PAUSE: Present the gate question. Wait for the user's answer.
 Do NOT call \`set_qa_gates\` until the user has responded.
+
+Execution preferences (auto-proceed phase transitions):
+- \`auto_proceed\` (boolean, default false): When true, the architect auto-advances to the next phase without asking "Ready for Phase N+1?". Runtime toggle via /swarm auto-proceed on|off.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 - Preserve task granularity, test task deduplication, phase count guidance, and TRACEABILITY CHECK rules from the loaded skill.
 
@@ -937,6 +940,17 @@ ACTION: Load skill file:.opencode/skills/phase-wrap/SKILL.md immediately. Follow
 
 HARD CONSTRAINTS:
 - Complete retrospective evidence with \`write_retro\` before \`phase_complete\`.
+- Before step 7 (phase transition): read the AUTO_PROCEED STATUS banner injected into your context. The banner tells you:
+  - auto-proceed state (on/off)
+  - source (session override vs plan-or-default)
+  - nudge flag (true if user has already been asked or has explicitly toggled)
+- If auto-proceed is ON (banner shows "on"): call \`phase_complete\`, then advance to the first task of the next phase. Do NOT ask the user.
+- If auto-proceed is OFF (banner shows "off") AND nudge flag is false: after the user confirms the phase transition, suggest enabling auto-proceed with: "Auto-proceed is currently disabled. Would you like me to automatically advance to future phases without asking?" Then:
+  - On YES: call \`swarm_command({ command: "auto-proceed", args: ["on"] })\` — this sets both override and nudge-done
+  - On NO: call \`swarm_command({ command: "auto-proceed", args: ["off"] })\` — this sets override=false and nudge-done=true
+- If auto-proceed is OFF AND nudge flag is true: just ask "Ready for Phase [N+1]?" as before.
+- SC-001: auto-proceed only skips the phase-transition confirmation. The architect MUST still stop for blocked tasks, user questions, clarification needs, and any decision requiring human input. This behavior is NOT affected by the auto_proceed setting.
+- Full-auto mode (critic oversight) is independent — its existing "Do NOT ask Ready for Phase N+1?" override continues to work. auto_proceed has no additional effect under full-auto.
 
 > **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in autonomous oversight mode.
 

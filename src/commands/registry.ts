@@ -4,6 +4,7 @@ import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
 import { handleArchiveCommand } from './archive.js';
+import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
@@ -807,6 +808,15 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Toggles Full-Auto Mode which enables autonomous execution without confirmation prompts. When enabled, the architect proceeds through implementation steps automatically. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
 		category: 'utility',
+	},
+	'auto-proceed': {
+		handler: (ctx: CommandContext) =>
+			handleAutoProceedCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description: 'Toggle or set auto-proceed override for the active session',
+		args: '[on|off]',
+		category: 'config',
+		details:
+			'Without argument, toggles auto-proceed mode. With "on" or "off", sets the state explicitly.',
 	},
 	'write-retro': {
 		handler: (ctx) => handleWriteRetroCommand(ctx.directory, ctx.args),

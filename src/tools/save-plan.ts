@@ -103,6 +103,7 @@ export interface SavePlanArgs {
 		max_concurrent_tasks?: number;
 		council_parallel?: boolean;
 		locked?: boolean;
+		auto_proceed?: boolean;
 	};
 }
 
@@ -124,6 +125,7 @@ export interface SavePlanResult {
 		max_concurrent_tasks: number;
 		council_parallel: boolean;
 		locked: boolean;
+		auto_proceed?: boolean;
 	};
 }
 
@@ -135,7 +137,8 @@ function executionProfilesEqual(
 		a.parallelization_enabled === b.parallelization_enabled &&
 		a.max_concurrent_tasks === b.max_concurrent_tasks &&
 		a.council_parallel === b.council_parallel &&
-		a.locked === b.locked
+		a.locked === b.locked &&
+		a.auto_proceed === b.auto_proceed
 	);
 }
 
@@ -485,7 +488,7 @@ export async function executeSavePlan(
 							),
 							recovery_guidance:
 								'Check execution_profile fields: parallelization_enabled (boolean), ' +
-								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean).',
+								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean).',
 						};
 					}
 
@@ -1011,6 +1014,12 @@ export const save_plan: ToolDefinition = createSwarmTool({
 						'When true, locks the profile — future save_plan calls that include ' +
 							'execution_profile will be rejected (fail-closed). ' +
 							'Unlock by resetting the plan (reset_statuses: true).',
+					),
+				auto_proceed: z
+					.boolean()
+					.optional()
+					.describe(
+						'When true, the architect advances to the next phase automatically without asking for confirmation. Default false.',
 					),
 			})
 			.optional()

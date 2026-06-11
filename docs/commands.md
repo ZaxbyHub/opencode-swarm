@@ -371,6 +371,23 @@ See [Modes Guide](modes.md) for tradeoffs.
 
 Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
 
+### `/swarm auto-proceed [on|off]`
+
+Toggle auto-proceed for phase transitions. When enabled, the swarm skips the "Ready for Phase N+1?" confirmation prompt and advances automatically. Session-scoped — resets to the plan's `execution_profile.auto_proceed` default on new sessions.
+
+The effective value is shown to the architect via an injected `AUTO PROCEED STATUS` banner at every phase boundary.
+
+```text
+/swarm auto-proceed on    # enable auto-proceed for this session
+/swarm auto-proceed off   # disable auto-proceed for this session
+```
+
+**Resolution order:** Session override always wins over the plan default. If no session override is set, the plan's `execution_profile.auto_proceed` (default `false`) is used.
+
+**First-boundary nudge:** When auto-proceed is `false` and no session override is set, the architect offers to enable it once per session at the first phase boundary.
+
+**Architect-only:** Only the architect session can call this command. Subagents receive an error.
+
 ---
 
 ## Configuration

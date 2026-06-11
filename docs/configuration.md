@@ -618,6 +618,19 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
 
 See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Turbo lane planning algorithm and conflict resolution rules.
 
+## Execution Profile
+
+The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`) controls phase-level execution preferences. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `parallelization_enabled` | boolean | `false` | Enable parallel task execution within phases (composes with Lean Turbo) |
+| `max_concurrent_tasks` | number | `1` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–6) |
+| `council_parallel` | boolean | `false` | Allow council review phases to run council members in parallel |
+| `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
+
+**Auto-proceed:** When `true`, the swarm advances from one phase to the next without asking for confirmation. The session override (`/swarm auto-proceed on|off`) always takes precedence over the plan default. The architect sees the effective value via an injected `AUTO PROCEED STATUS` banner. The first-boundary nudge offers to enable it once per session when the plan default is `false` and no session override is set.
+
 ## QA gates reference
 
 The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path. Programmatic configuration via `set_qa_gates` (architect-only) or `/swarm qa-gates enable <gate>...`.

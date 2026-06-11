@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import {
+	AUTO_PROCEED_BANNER,
 	DEFAULT_SCORING_CONFIG,
 	FULL_AUTO_BANNER,
 	LEAN_TURBO_BANNER,
@@ -22,6 +23,14 @@ import { stripKnownSwarmPrefix } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
+import {
+	getAgentSession,
+	getResolvedAutoProceed,
+	hasActiveFullAuto,
+	hasActiveLeanTurbo,
+	hasActiveTurboMode,
+	swarmState,
+} from '../state';
 
 /**
  * Build the [spec-drift] advisory injected into the model's system prompt
@@ -110,12 +119,6 @@ import {
 	formatDriftForContext,
 	getContextBudgetReport,
 } from '../services';
-import {
-	hasActiveFullAuto,
-	hasActiveLeanTurbo,
-	hasActiveTurboMode,
-	swarmState,
-} from '../state';
 import { telemetry } from '../telemetry';
 import { warn } from '../utils';
 import {
@@ -1200,6 +1203,29 @@ ${handoffContent}`;
 								}
 								if (hasActiveLeanTurbo(sessionIdBanner)) {
 									tryInject(LEAN_TURBO_BANNER);
+								}
+							}
+
+							// v6.x: Auto-proceed banner injection for architect
+							const sessionIdAutoProceed = _input.sessionID;
+							if (sessionIdAutoProceed) {
+								const sessionAutoProceed =
+									getAgentSession(sessionIdAutoProceed);
+								if (sessionAutoProceed) {
+									const resolvedAutoProceed = getResolvedAutoProceed(
+										sessionAutoProceed,
+										plan?.execution_profile?.auto_proceed ?? false,
+									);
+									const source =
+										sessionAutoProceed.autoProceedOverride !== undefined
+											? 'session'
+											: 'plan-or-default';
+									const banner = `${AUTO_PROCEED_BANNER}\nAUTO_PROCEED STATUS: ${
+										resolvedAutoProceed ? 'on' : 'off'
+									} (source: ${source}); nudge: ${
+										sessionAutoProceed.autoProceedNudgeDone ? 'true' : 'false'
+									}`;
+									tryInject(banner);
 								}
 							}
 
