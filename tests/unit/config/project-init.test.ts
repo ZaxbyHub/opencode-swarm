@@ -224,9 +224,7 @@ describe('writeProjectConfigIfNew', () => {
 
 		// Guard must NOT fire — .opencode is real, no redirection.
 		expect(
-			fs.existsSync(
-				path.join(realProject, '.opencode', 'opencode-swarm.json'),
-			),
+			fs.existsSync(path.join(realProject, '.opencode', 'opencode-swarm.json')),
 		).toBe(true);
 	});
 
