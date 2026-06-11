@@ -423,4 +423,159 @@ describe('buildParallelExecutionGuidance', () => {
 		// because effectiveMaxConcurrent <= 1 returns null
 		expect(result).toBeNull();
 	});
+
+	// ── Adaptive backoff on task failures ─────────────────────────────────────
+	it('Adaptive backoff: reduces concurrency when >20% of tasks are blocked', async () => {
+		const planWithBlockedTasks: Plan = {
+			schema_version: '1.0.0',
+			title: 'Test Project',
+			swarm: 'mega',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							description: 'Task 1.1',
+							status: 'pending',
+							depends: [],
+						},
+						{
+							id: '1.2',
+							description: 'Task 1.2',
+							status: 'blocked',
+							blocked_reason: 'Failed during execution',
+							depends: [],
+						},
+						{
+							id: '1.3',
+							description: 'Task 1.3',
+							status: 'blocked',
+							blocked_reason: 'Failed during execution',
+							depends: [],
+						},
+						{
+							id: '1.4',
+							description: 'Task 1.4',
+							status: 'pending',
+							depends: [],
+						},
+						{
+							id: '1.5',
+							description: 'Task 1.5',
+							status: 'pending',
+							depends: [],
+						},
+					],
+				},
+			],
+			execution_profile: {
+				max_concurrent_tasks: 10,
+				parallelization_enabled: true,
+				locked: false,
+			},
+		} as Plan;
+
+		mockLoadPlanJsonOnly.mockImplementation(() =>
+			Promise.resolve(planWithBlockedTasks),
+		);
+
+		const sessionId = 'test-adaptive-backoff';
+		createTestSession(sessionId);
+		const session = swarmState.agentSessions.get(sessionId)!;
+
+		// Initial state: no override
+		expect(session.maxConcurrencyOverride).toBeUndefined();
+
+		const result = await buildParallelExecutionGuidance(
+			testDirectory,
+			sessionId,
+			session,
+		);
+
+		// After backoff: concurrency should be reduced to 5 (50% of 10)
+		// 2 blocked out of 5 tasks = 40% failure rate > 20% threshold
+		expect(session.maxConcurrencyOverride).toBe(5);
+		expect(result).toContain('blocked task(s) detected');
+		expect(result).toContain('max_concurrent_tasks=5');
+	});
+
+	it('Adaptive backoff: does not reduce when failure rate is below threshold', async () => {
+		const planWithMinorFailures: Plan = {
+			schema_version: '1.0.0',
+			title: 'Test Project',
+			swarm: 'mega',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							description: 'Task 1.1',
+							status: 'pending',
+							depends: [],
+						},
+						{
+							id: '1.2',
+							description: 'Task 1.2',
+							status: 'completed',
+							depends: [],
+						},
+						{
+							id: '1.3',
+							description: 'Task 1.3',
+							status: 'completed',
+							depends: [],
+						},
+						{
+							id: '1.4',
+							description: 'Task 1.4',
+							status: 'blocked',
+							blocked_reason: 'Failed',
+							depends: [],
+						},
+						{
+							id: '1.5',
+							description: 'Task 1.5',
+							status: 'pending',
+							depends: [],
+						},
+					],
+				},
+			],
+			execution_profile: {
+				max_concurrent_tasks: 10,
+				parallelization_enabled: true,
+				locked: false,
+			},
+		} as Plan;
+
+		mockLoadPlanJsonOnly.mockImplementation(() =>
+			Promise.resolve(planWithMinorFailures),
+		);
+
+		const sessionId = 'test-no-backoff';
+		createTestSession(sessionId);
+		const session = swarmState.agentSessions.get(sessionId)!;
+
+		const result = await buildParallelExecutionGuidance(
+			testDirectory,
+			sessionId,
+			session,
+		);
+
+		// 1 blocked out of 5 = 20% exactly, which is not > 20%, so no reduction
+		// The override should remain undefined (no automatic reduction)
+		expect(session.maxConcurrencyOverride).toBeUndefined();
+		// Result should not mention backoff when threshold is not exceeded
+		if (result) {
+			expect(result).not.toContain('blocked task(s) detected — concurrency auto-reduced');
+		}
+	});
 });
