@@ -15,7 +15,7 @@ Updated `createAgents()` in `src/agents/index.ts` to merge top-level `agents` in
 ### Key Changes
 1. When processing swarms in multi-swarms mode, merge top-level `agents` into each swarm's `agents` config
 2. Use object spread to ensure swarm-specific configs override top-level configs
-3. This applies to all swarms (including non-default swarms like "fast", "precise", "local")
+3. This applies to every swarm regardless of name — default, custom, or otherwise (e.g. "fast", "precise", "local", "mega", "paid")
 4. Added defensive null-coalescing for `swarmConfig.agents ?? {}`
 5. Added regression tests to prevent recurrence
 
