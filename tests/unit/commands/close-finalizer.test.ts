@@ -34,6 +34,29 @@ const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 const mockCurateAndStoreSwarm = mock(async () => {});
 const mockArchiveEvidence = mock(async () => {});
 const mockFlushPendingSnapshot = mock(async () => {});
+const mockGetGitRepositoryStatus = mock(() => ({
+	isRepo: false as const,
+	reason: 'not_git_repo' as const,
+	message: 'fatal: not a git repository',
+}));
+const mockResetToRemoteBranch = mock(() => ({
+	success: true,
+	targetBranch: 'main',
+	localBranch: 'main',
+	message: 'Already aligned with remote',
+	alreadyAligned: true,
+	prunedBranches: [] as string[],
+	warnings: [] as string[],
+}));
+const mockResetToMainAfterMerge = mock(() => ({
+	success: true,
+	targetBranch: 'origin/main',
+	previousBranch: 'main',
+	message: 'Already on main',
+	branchDeleted: false,
+	changesDiscarded: false,
+	warnings: [] as string[],
+}));
 
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
@@ -66,46 +89,24 @@ mock.module('../../../src/state.js', () => ({
 	resetSwarmState: () => {},
 }));
 
-mock.module('../../../src/git/branch.js', () => ({
-	isGitRepo: () => false,
-	getCurrentBranch: () => 'main',
-	getDefaultBaseBranch: () => 'origin/main',
-	hasUncommittedChanges: () => false,
-	resetToRemoteBranch: () => ({
-		success: true,
-		targetBranch: 'main',
-		localBranch: 'main',
-		message: 'Already aligned with remote',
-		alreadyAligned: true,
-		prunedBranches: [],
-		warnings: [],
-	}),
-	resetToMainAfterMerge: () => ({
-		success: true,
-		targetBranch: 'origin/main',
-		previousBranch: 'main',
-		message: 'Already on main',
-		branchDeleted: false,
-		warnings: [],
-	}),
-}));
-
 mock.module('../../../src/plan/checkpoint.js', () => ({
 	writeCheckpoint: async () => {},
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const { handleCloseCommand, _internals: closeInternals } = await import(
+	'../../../src/commands/close.js'
+);
+const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
+const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
+const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 
 // ── DI Conversion Summary ────────────────────────────────────────────
 //
-// WITHIN-MODULE MOCKS: NONE POSSIBLE
-// close.ts imports all functions directly (flushPendingSnapshot, swarmState,
-// resetSwarmState, archiveEvidence, executeWriteRetro, curateAndStoreSwarm) and
-// does NOT route any through _internals. The _internals DI seam only works when
-// the consuming module uses _internals (e.g., full-auto-intercept.ts imports
-// state._internals directly). Since close.ts has no _internals usage, none of
-// its imports can be intercepted via _internals.
+// WITHIN-MODULE MOCKS:
+// close.ts routes Git alignment dependencies through close._internals so this
+// file can test finalize alignment without a process-global mock of git/branch.
+// Other direct imports remain cross-module mocks.
 //
 // CROSS-MODULE MOCKS: All mocks remain as mock.module
 // - executeWriteRetro (tools/write-retro.ts)
@@ -113,7 +114,6 @@ const { handleCloseCommand } = await import('../../../src/commands/close.js');
 // - archiveEvidence (evidence/manager.ts) — not in manager._internals
 // - flushPendingSnapshot (session/snapshot-writer.ts) — close.ts imports directly
 // - swarmState + resetSwarmState (state.ts) — close.ts imports directly
-// - isGitRepo + resetToRemoteBranch (git/branch.ts)
 // - writeCheckpoint (plan/checkpoint.ts)
 //
 // All mock.module calls require afterEach(mock.restore()) cleanup.
@@ -156,6 +156,35 @@ describe('handleCloseCommand — finalizer stages', () => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
+		mockGetGitRepositoryStatus.mockClear();
+		mockGetGitRepositoryStatus.mockImplementation(() => ({
+			isRepo: false as const,
+			reason: 'not_git_repo' as const,
+			message: 'fatal: not a git repository',
+		}));
+		mockResetToRemoteBranch.mockClear();
+		mockResetToRemoteBranch.mockImplementation(() => ({
+			success: true,
+			targetBranch: 'main',
+			localBranch: 'main',
+			message: 'Already aligned with remote',
+			alreadyAligned: true,
+			prunedBranches: [] as string[],
+			warnings: [] as string[],
+		}));
+		mockResetToMainAfterMerge.mockClear();
+		mockResetToMainAfterMerge.mockImplementation(() => ({
+			success: true,
+			targetBranch: 'origin/main',
+			previousBranch: 'main',
+			message: 'Already on main',
+			branchDeleted: false,
+			changesDiscarded: false,
+			warnings: [] as string[],
+		}));
+		closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
+		closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
+		closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-finalizer-test-'));
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 	});
@@ -166,6 +195,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 		} catch {
 			// Ignore cleanup errors
 		}
+		closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
+		closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
+		closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
 		// Restore all mock.module mocks to prevent cross-test pollution
 		mock.restore();
 	});
@@ -655,6 +687,57 @@ describe('handleCloseCommand — finalizer stages', () => {
 	});
 
 	// ── Plan-already-done path ───────────────────────────────────────
+
+	describe('Align stage', () => {
+		it('regression: detects a git repo and runs aggressive reset during finalize', async () => {
+			// Previous coverage pinned the git mock to non-repo, so finalize could
+			// skip alignment without any command-level test proving the reset path.
+			mockGetGitRepositoryStatus.mockImplementation(() => ({ isRepo: true }));
+			mockResetToMainAfterMerge.mockImplementation(() => ({
+				success: true,
+				targetBranch: 'origin/main',
+				previousBranch: 'feature/finalize',
+				message: 'Reset to origin/main',
+				branchDeleted: false,
+				changesDiscarded: false,
+				warnings: [],
+			}));
+			writePlan();
+
+			const result = await handleCloseCommand(testDir, []);
+
+			expect(mockGetGitRepositoryStatus).toHaveBeenCalledWith(testDir);
+			expect(mockResetToMainAfterMerge).toHaveBeenCalledWith(testDir, {
+				pruneBranches: false,
+			});
+			expect(mockResetToRemoteBranch).not.toHaveBeenCalled();
+			expect(result).toContain('**Git:** Reset to origin/main');
+			expect(result).not.toContain('Not a git repository');
+
+			const summary = readFileSync(
+				path.join(swarmDir(), 'close-summary.md'),
+				'utf-8',
+			);
+			expect(summary).toContain('- **Git:** Reset to origin/main');
+		});
+
+		it('reports git execution failures without misclassifying them as non-git repos', async () => {
+			mockGetGitRepositoryStatus.mockImplementation(() => ({
+				isRepo: false,
+				reason: 'git_unavailable',
+				message: 'git executable is not available on PATH',
+			}));
+			writePlan();
+
+			const result = await handleCloseCommand(testDir, []);
+
+			expect(result).toContain('Git executable unavailable');
+			expect(result).toContain('git executable is not available on PATH');
+			expect(result).not.toContain('Not a git repository');
+			expect(mockResetToMainAfterMerge).not.toHaveBeenCalled();
+			expect(mockResetToRemoteBranch).not.toHaveBeenCalled();
+		});
+	});
 
 	describe('Plan already terminal', () => {
 		it('skips retro writing but still archives and cleans', async () => {

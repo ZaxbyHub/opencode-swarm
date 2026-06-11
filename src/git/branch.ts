@@ -1,34 +1,123 @@
 import * as child_process from 'node:child_process';
+import path from 'node:path';
 import { warn } from '../utils/logger.js';
+import { GitBinaryMissingError } from '../utils/git-binary-missing-error.js';
 
 const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
+
+export type GitRepositoryStatus =
+	| { isRepo: true }
+	| {
+			isRepo: false;
+			reason: 'not_git_repo' | 'git_unavailable' | 'git_error';
+			message: string;
+	  };
+
+function unique(values: string[]): string[] {
+	return [...new Set(values.filter(Boolean))];
+}
+
+function windowsGitCandidates(): string[] {
+	if (process.platform !== 'win32') return ['git'];
+
+	const roots = unique([
+		process.env.ProgramFiles ?? '',
+		process.env['ProgramFiles(x86)'] ?? '',
+		process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : '',
+	]);
+	const installed = roots.flatMap((root) => [
+		path.join(root, 'Git', 'cmd', 'git.exe'),
+		path.join(root, 'Git', 'bin', 'git.exe'),
+	]);
+	return unique(['git', ...installed]);
+}
+
+function isSpawnMissingGit(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as NodeJS.ErrnoException).code === 'ENOENT'
+	);
+}
+
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function isNotGitRepositoryMessage(message: string): boolean {
+	const lower = message.toLowerCase();
+	return (
+		lower.includes('not a git repository') ||
+		lower.includes('not a git repo')
+	);
+}
 
 /**
  * Execute git command safely
  */
 function gitExec(args: string[], cwd: string): string {
-	const result = child_process.spawnSync('git', args, {
-		cwd,
-		encoding: 'utf-8',
-		timeout: GIT_TIMEOUT_MS,
-		stdio: ['pipe', 'pipe', 'pipe'],
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || `git exited with ${result.status}`);
+	let missingGitError: unknown;
+
+	for (const command of windowsGitCandidates()) {
+		const result = child_process.spawnSync(command, args, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: GIT_MAX_BUFFER_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+		if (result.error) {
+			if (isSpawnMissingGit(result.error)) {
+				missingGitError ??= result.error;
+				continue;
+			}
+			throw new Error(errorMessage(result.error));
+		}
+		if (result.status !== 0) {
+			throw new Error(
+				result.stderr || result.stdout || `git exited with ${result.status}`,
+			);
+		}
+		return result.stdout;
 	}
-	return result.stdout;
+
+	throw new GitBinaryMissingError(
+		process.platform === 'win32'
+			? 'git executable is not available on PATH or common Windows install locations'
+			: 'git executable is not available on PATH',
+		{ cause: missingGitError },
+	);
+}
+
+export function getGitRepositoryStatus(cwd: string): GitRepositoryStatus {
+	try {
+		gitExec(['rev-parse', '--git-dir'], cwd);
+		return { isRepo: true };
+	} catch (err) {
+		if (err instanceof GitBinaryMissingError) {
+			return {
+				isRepo: false,
+				reason: 'git_unavailable',
+				message: err.message,
+			};
+		}
+		const message = errorMessage(err);
+		return {
+			isRepo: false,
+			reason: isNotGitRepositoryMessage(message) ? 'not_git_repo' : 'git_error',
+			message,
+		};
+	}
 }
 
 /**
  * Check if we're in a git repository
  */
 export function isGitRepo(cwd: string): boolean {
-	try {
-		gitExec(['rev-parse', '--git-dir'], cwd);
-		return true;
-	} catch {
-		return false;
-	}
+	return getGitRepositoryStatus(cwd).isRepo;
 }
 
 /**
