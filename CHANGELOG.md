@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.64.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.63.0...v7.64.0) (2026-06-10)
+
+
+### Features
+
+* **curation:** add external skill curation pipeline with 3-gate validation ([#1211](https://github.com/zaxbysauce/opencode-swarm/issues/1211)) ([0163acb](https://github.com/zaxbysauce/opencode-swarm/commit/0163acb151d5baaf200c55c775f8304e3fae6fc8))
+
 ## [7.63.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.62.1...v7.63.0) (2026-06-10)
 
 
