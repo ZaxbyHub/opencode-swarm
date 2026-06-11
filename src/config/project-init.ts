@@ -19,22 +19,25 @@ export function writeProjectConfigIfNew(
 	try {
 		const opencodeDir = path.join(directory, '.opencode');
 		const dest = path.join(opencodeDir, 'opencode-swarm.json');
-		const normalizePathForCompare = (p: string) => {
-			const normalized = path.resolve(p);
-			return process.platform === 'win32'
-				? normalized.toLowerCase()
-				: normalized;
-		};
+		const normalizePathForCompare = (p: string) =>
+			process.platform === 'win32' ? p.toLowerCase() : p;
 
 		// Defense in depth: refuse to write through a symlinked .opencode directory.
-		// Matches the guard pattern in graph-store.ts.
+		// Extends the guard pattern in graph-store.ts with realpathSync to also catch
+		// Windows junctions where lstatSync().isSymbolicLink() returns false.
 		try {
 			const stat = fs.lstatSync(opencodeDir);
 			if (stat.isSymbolicLink()) return;
 			const resolvedDir = fs.realpathSync(opencodeDir);
+			// Canonicalize the expected path via the project root to avoid false-positives
+			// on platforms where `directory` itself traverses a symlink (e.g. macOS /tmp).
+			const canonicalOpencode = path.join(
+				fs.realpathSync(directory),
+				'.opencode',
+			);
 			if (
 				normalizePathForCompare(resolvedDir) !==
-				normalizePathForCompare(opencodeDir)
+				normalizePathForCompare(canonicalOpencode)
 			) {
 				return;
 			}

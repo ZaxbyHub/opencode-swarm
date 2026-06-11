@@ -94,16 +94,20 @@ describe('constants.ts', () => {
 	});
 
 	describe('isSubagent()', () => {
-		it('returns true for all 19 subagent names', () => {
+		it('returns true for all 21 subagent names', () => {
 			expect(isSubagent('sme')).toBe(true);
 			expect(isSubagent('docs')).toBe(true);
+			expect(isSubagent('docs_design')).toBe(true);
 			expect(isSubagent('designer')).toBe(true);
 			expect(isSubagent('critic_sounding_board')).toBe(true);
 			expect(isSubagent('critic_drift_verifier')).toBe(true);
+			expect(isSubagent('critic_hallucination_verifier')).toBe(true);
+			expect(isSubagent('critic_architecture_supervisor')).toBe(true);
 			expect(isSubagent('curator_init')).toBe(true);
 			expect(isSubagent('curator_phase')).toBe(true);
 			expect(isSubagent('reviewer')).toBe(true);
 			expect(isSubagent('critic')).toBe(true);
+			expect(isSubagent('critic_oversight')).toBe(true);
 			expect(isSubagent('explorer')).toBe(true);
 			expect(isSubagent('coder')).toBe(true);
 			expect(isSubagent('test_engineer')).toBe(true);

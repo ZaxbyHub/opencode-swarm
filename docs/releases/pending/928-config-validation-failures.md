@@ -12,6 +12,10 @@
 - Hardened `writeProjectConfigIfNew` to refuse writes when `.opencode` resolves
   through a symlink/junction path, and extended `project-init` coverage for that
   path.
+- Fixed a false-positive in the symlink guard: when the project root directory
+  itself traverses a symlink (e.g. macOS `/tmp` → `/private/tmp`), the guard
+  now correctly compares against the canonicalized parent path instead of the
+  unresolved string, preventing silent write failures in those environments.
 
 ## Why
 

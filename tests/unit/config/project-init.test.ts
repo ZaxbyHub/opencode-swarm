@@ -204,6 +204,32 @@ describe('writeProjectConfigIfNew', () => {
 		expect(fs.existsSync(path.join(target, 'opencode-swarm.json'))).toBe(false);
 	});
 
+	// 9b. No false-positive when the project directory itself traverses a symlink
+	// (e.g. macOS /tmp → /private/tmp). Exercises the realpathSync branch when
+	// .opencode is a real directory but opencodeDir's string path is unresolved.
+	test('9b. writes config when project root is a symlink (parent-path guard does not fire)', () => {
+		const realProject = path.join(dir, 'real-project');
+		const linkProject = path.join(dir, 'link-project');
+		fs.mkdirSync(realProject, { recursive: true });
+		fs.symlinkSync(
+			realProject,
+			linkProject,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+
+		// Pre-create .opencode as a real directory so the realpathSync branch runs.
+		fs.mkdirSync(path.join(linkProject, '.opencode'), { recursive: true });
+
+		writeProjectConfigIfNew(linkProject);
+
+		// Guard must NOT fire — .opencode is real, no redirection.
+		expect(
+			fs.existsSync(
+				path.join(realProject, '.opencode', 'opencode-swarm.json'),
+			),
+		).toBe(true);
+	});
+
 	// 9. Emits console.warn when quiet=false (default)
 	test('9. emits console.warn when quiet=false', () => {
 		writeProjectConfigIfNew(dir, false);
