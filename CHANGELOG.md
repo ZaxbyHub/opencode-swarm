@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.66.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.0...v7.66.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* address PR [#1203](https://github.com/zaxbysauce/opencode-swarm/issues/1203) review findings F-001 and F-002 ([aea9212](https://github.com/zaxbysauce/opencode-swarm/commit/aea92127e3c67c51bb1e2da253f36644853a8bc3))
+* **lint:** apply biome 2.3.14 formatting to post-431263d test edits ([63d1874](https://github.com/zaxbysauce/opencode-swarm/commit/63d18747c39d3f8e2560489ade5293d8e85c1056))
+* **lint:** apply biome 2.3.14 formatting to resolve-working-directory edits ([e1233a5](https://github.com/zaxbysauce/opencode-swarm/commit/e1233a5dddaa59a595164019e3e1e764637e3b46))
+* path traversal detection and test infrastructure hardening ([a450508](https://github.com/zaxbysauce/opencode-swarm/commit/a450508df2ae1fe14e44993ec71fb9f7bdc32a7a))
+* **release:** rename fragment 1184 → 1196 to match PR number ([2d8e50e](https://github.com/zaxbysauce/opencode-swarm/commit/2d8e50e3179793fa023fb89ae060b8bd79dec1a2))
+* **resolve-working-directory:** address PR review findings and CI format failure ([d66872d](https://github.com/zaxbysauce/opencode-swarm/commit/d66872d16e0806361c7606f627b4cf14dc758001))
+* **tools:** harden working directory resolution ([e0c050e](https://github.com/zaxbysauce/opencode-swarm/commit/e0c050e16a05346983a57aa15c3defd52b1401ff))
+
 ## [7.66.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.65.3...v7.66.0) (2026-06-11)
 
 
