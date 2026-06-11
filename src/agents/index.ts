@@ -754,8 +754,22 @@ export function createAgents(
 		// Only a swarm explicitly named "default" gets unprefixed agents
 		// All other swarms get prefixed (cloud_*, local_*, etc.)
 		for (const swarmId of Object.keys(swarms)) {
-			const swarmConfig = swarms[swarmId];
+			let swarmConfig = swarms[swarmId];
 			const isDefault = swarmId === 'default';
+
+			// When processing the default swarm, merge in top-level agents config.
+			// This ensures that top-level agents are respected even when swarms are configured.
+			// Swarm-specific agents take precedence over top-level agents (more specific wins).
+			if (isDefault && config?.agents) {
+				swarmConfig = {
+					...swarmConfig,
+					agents: {
+						...config.agents,
+						...swarmConfig.agents,
+					},
+				};
+			}
+
 			const swarmAgents = createSwarmAgents(
 				swarmId,
 				swarmConfig,

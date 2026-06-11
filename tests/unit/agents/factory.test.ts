@@ -435,6 +435,78 @@ describe('createAgents', () => {
 				"the active swarm's coder agent = @{{AGENT_PREFIX}}coder",
 			);
 		});
+
+		it('merges top-level agents with default swarm agents config (swarm-specific takes precedence)', () => {
+			// Regression test for issue: models configured for agents aren't respected when both
+			// top-level agents and swarms are configured. The fix ensures that:
+			// 1. Top-level agents are merged into the default swarm
+			// 2. Swarm-specific agents take precedence over top-level agents
+			const config = {
+				agents: {
+					coder: {
+						model: 'top-level/model',
+					},
+					explorer: {
+						model: 'top-level/explorer',
+						temperature: 0.3,
+					},
+				},
+				swarms: {
+					default: {
+						agents: {
+							coder: {
+								// This swarm-specific config overrides top-level
+								model: 'swarm-specific/model',
+								temperature: 0.8,
+							},
+						},
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			const explorer = agents.find((a) => a.name === 'explorer');
+
+			// Swarm-specific coder model takes precedence
+			expect(coder?.config.model).toBe('swarm-specific/model');
+			expect(coder?.config.temperature).toBe(0.8);
+
+			// Top-level explorer is still respected
+			expect(explorer?.config.model).toBe('top-level/explorer');
+			expect(explorer?.config.temperature).toBe(0.3);
+		});
+
+		it('top-level agents are respected when swarms config exists with default swarm', () => {
+			// Another regression test: users expect top-level agents to work even when
+			// swarms are configured, as long as the default swarm exists
+			const config = {
+				agents: {
+					coder: {
+						model: 'custom/coder-model',
+					},
+					reviewer: {
+						model: 'custom/reviewer-model',
+						temperature: 0.5,
+					},
+				},
+				swarms: {
+					default: {
+						name: 'Default',
+						// No agents specified in the swarm itself
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+
+			// Top-level agent configs should be respected
+			expect(coder?.config.model).toBe('custom/coder-model');
+			expect(reviewer?.config.model).toBe('custom/reviewer-model');
+			expect(reviewer?.config.temperature).toBe(0.5);
+		});
 	});
 
 	describe('architect template replacement', () => {
