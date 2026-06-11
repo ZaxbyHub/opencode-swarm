@@ -50,10 +50,7 @@ describe('resolveWorkingDirectory', () => {
 	});
 
 	test('rejects null bytes in working_directory', () => {
-		const result = resolveWorkingDirectory(
-			testDir + '\0extra',
-			'/fallback',
-		);
+		const result = resolveWorkingDirectory(testDir + '\0extra', '/fallback');
 		expect(result.success).toBe(false);
 		if (!result.success) {
 			expect(result.message).toContain('null bytes');
@@ -61,7 +58,8 @@ describe('resolveWorkingDirectory', () => {
 	});
 
 	test('rejects path traversal sequences when not fully resolved by normalize', () => {
-		const traversalPath = testDir + (process.platform === 'win32' ? '\\..\\..\\etc' : '/../../etc');
+		const traversalPath =
+			testDir + (process.platform === 'win32' ? '\\..\\..\\etc' : '/../../etc');
 		const result = resolveWorkingDirectory(traversalPath, '/fallback');
 		expect(result.success).toBe(false);
 		if (!result.success) {
@@ -95,7 +93,10 @@ describe('resolveWorkingDirectory', () => {
 	});
 
 	test('rejects non-string working_directory values', () => {
-		const result = resolveWorkingDirectory(123 as unknown as string, '/fallback');
+		const result = resolveWorkingDirectory(
+			123 as unknown as string,
+			'/fallback',
+		);
 		expect(result.success).toBe(false);
 		if (!result.success) {
 			expect(result.message).toContain('must be a string');

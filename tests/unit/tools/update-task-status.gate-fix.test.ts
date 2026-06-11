@@ -96,24 +96,24 @@ describe('readTaskEvidenceRaw', () => {
 	process.platform === 'win32'
 		? test.skip('5. throws on permission error (re-throws, does not return null) [SKIPPED: permission test requires non-admin Windows — chmod 0o000 ineffective as Administrator]', () => {})
 		: test('5. throws on permission error (re-throws, does not return null)', () => {
-			const evidencePath = path.join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				'1.1.json',
-			);
-			const evidence: TaskEvidence = {
-				taskId: '1.1',
-				required_gates: ['reviewer'],
-				gates: {},
-			};
-			fs.writeFileSync(evidencePath, JSON.stringify(evidence));
+				const evidencePath = path.join(
+					tempDir,
+					'.swarm',
+					'evidence',
+					'1.1.json',
+				);
+				const evidence: TaskEvidence = {
+					taskId: '1.1',
+					required_gates: ['reviewer'],
+					gates: {},
+				};
+				fs.writeFileSync(evidencePath, JSON.stringify(evidence));
 
-			// For non-Windows, verify the function correctly parses valid JSON
-			// and throws on permission errors.
-			const validResult = readTaskEvidenceRaw(tempDir, '1.1');
-			expect(validResult).not.toBeNull();
-		});
+				// For non-Windows, verify the function correctly parses valid JSON
+				// and throws on permission errors.
+				const validResult = readTaskEvidenceRaw(tempDir, '1.1');
+				expect(validResult).not.toBeNull();
+			});
 
 	test('6. throws on invalid taskId format (assertValidTaskId)', () => {
 		expect(() => readTaskEvidenceRaw(tempDir, 'invalid')).toThrow(
