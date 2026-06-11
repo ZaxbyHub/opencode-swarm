@@ -497,18 +497,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// TUI corruption. Users can enable debug mode to see the full warning.
 	if (loadedFromFile && guardrailsConfig.enabled === false) {
 		warn('');
-		warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		warn(
-			'[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED',
-		);
-		warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		warn(
-			'Guardrails have been explicitly disabled in user configuration.',
-		);
+		warn('══════════════════════════════════════════════════════════════');
+		warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('Guardrails have been explicitly disabled in user configuration.');
 		warn('This disables safety measures including:');
 		warn('  - Tool call limits');
 		warn('  - Duration limits');
@@ -522,9 +514,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		warn(
 			'To re-enable guardrails, set "guardrails.enabled" to true in your config.',
 		);
-		warn(
-			'══════════════════════════════════════════════════════════════',
-		);
+		warn('══════════════════════════════════════════════════════════════');
 		warn('');
 	}
 
