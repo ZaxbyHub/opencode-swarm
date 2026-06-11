@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.66.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.1...v7.66.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* **guardrails:** suppress warning output to prevent TUI corruption ([403300d](https://github.com/zaxbysauce/opencode-swarm/commit/403300d4dd2efadd4c36b9b1955eba5731ccdf23))
+* **lint:** apply biome formatting to guardrails warn() calls ([bee1dbf](https://github.com/zaxbysauce/opencode-swarm/commit/bee1dbf0753c0e3e535d108e91ade880ddcaf2bc))
+* **review:** address F-002 and F-003 from PR review ([15bb8ee](https://github.com/zaxbysauce/opencode-swarm/commit/15bb8eef7c7ce613e0cb9e1baace2076aa935b4a))
+
 ## [7.66.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.0...v7.66.1) (2026-06-11)
 
 
