@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { AgentConfig as SDKAgentConfig } from '@opencode-ai/sdk';
 import {
 	loadAgentPrompt,
+	type AgentOverrideConfig,
 	type PluginConfig,
 	type SwarmConfig,
 } from '../config';
@@ -271,12 +272,10 @@ function applyOverrides(
 	agent: AgentDefinition,
 	swarmAgents?: Record<
 		string,
-		{
-			temperature?: number;
-			variant?: string;
-			reasoning?: { effort?: string };
-			thinking?: { type?: string; budget_tokens?: number };
-		}
+		Pick<
+			AgentOverrideConfig,
+			'temperature' | 'variant' | 'reasoning' | 'thinking'
+		>
 	>,
 	swarmPrefix?: string,
 	quiet?: boolean,
