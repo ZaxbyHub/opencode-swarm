@@ -14,6 +14,7 @@ describe('AGENT_TOOL_MAP', () => {
 		'designer',
 		'docs',
 		'explorer',
+		'researcher',
 		'reviewer',
 		'sme',
 		'test_engineer',
@@ -67,6 +68,16 @@ describe('AGENT_TOOL_MAP', () => {
 		expect(smeTools).toContain('web_search');
 		expect(smeTools).not.toContain('knowledge_add');
 		expect(smeTools).not.toContain('apply_patch');
+	});
+
+	it('researcher has web_search and remains read-only', () => {
+		const researcherTools = AGENT_TOOL_MAP.researcher;
+		expect(researcherTools).toContain('web_search');
+		expect(researcherTools).toContain('swarm_command');
+		expect(researcherTools).toContain('summarize_work');
+		// researcher must not have write tools
+		expect(researcherTools).not.toContain('apply_patch');
+		expect(researcherTools).not.toContain('knowledge_add');
 	});
 
 	it('architect has all critical tools', () => {
