@@ -759,7 +759,9 @@ export function createAgents(
 
 			// Merge in top-level agents config for all swarms.
 			// This ensures that top-level agents are respected even when swarms are configured.
-			// Swarm-specific agents take precedence over top-level agents (more specific wins).
+			// Precedence is object-level (not field-level): if both top-level and the swarm
+			// define the same agent (e.g. "coder"), the swarm's entire agent entry wins and
+			// top-level fields for that agent are not inherited individually.
 			if (config?.agents) {
 				swarmConfig = {
 					...swarmConfig,
