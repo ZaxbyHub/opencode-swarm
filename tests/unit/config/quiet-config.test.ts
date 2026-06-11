@@ -190,25 +190,43 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 		process.env = originalEnv;
 	});
 
-	it('3.1 guardrails disabled security warning appears even with quiet:true', async () => {
-		// The security warning is emitted directly via console.warn
-		// and does NOT check the quiet config
+	it('3.1 guardrails disabled security warning is emitted via logger.warn in debug mode, not suppressed by quiet:true', async () => {
+		// Security warning now uses logger.warn() (debug-gated via OPENCODE_SWARM_DEBUG=1),
+		// not console.warn() directly. quiet:true does NOT suppress it.
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		try {
+			const { loadPluginConfigWithMeta } = await import('../../../src/config');
+			const { config, loadedFromFile } = loadPluginConfigWithMeta(tempDir);
+
+			// Use the actual logger path used by index.ts in production
+			const { warn } = await import('../../../src/utils/logger');
+			if (loadedFromFile && config.guardrails?.enabled === false) {
+				warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
+			}
+
+			const warningCalls = warnSpy.mock.calls;
+			const securityWarnings = warningCalls.filter(
+				(call) =>
+					typeof call[0] === 'string' &&
+					call[0].includes('SECURITY WARNING') &&
+					call[0].includes('GUARDRAILS ARE DISABLED'),
+			);
+			expect(securityWarnings.length).toBeGreaterThan(0);
+		} finally {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		}
+	});
+
+	it('3.1b guardrails disabled security warning is NOT emitted in normal operation (OPENCODE_SWARM_DEBUG unset)', async () => {
+		// When OPENCODE_SWARM_DEBUG is not set, warn() is a no-op — no TUI corruption
+		delete process.env.OPENCODE_SWARM_DEBUG;
+
 		const { loadPluginConfigWithMeta } = await import('../../../src/config');
 		const { config, loadedFromFile } = loadPluginConfigWithMeta(tempDir);
 
-		// Simulate the security warning logic from index.ts
-		// This warning is NOT suppressed by quiet:true
+		const { warn } = await import('../../../src/utils/logger');
 		if (loadedFromFile && config.guardrails?.enabled === false) {
-			console.warn('');
-			console.warn(
-				'══════════════════════════════════════════════════════════════',
-			);
-			console.warn(
-				'[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED',
-			);
-			console.warn(
-				'══════════════════════════════════════════════════════════════',
-			);
+			warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
 		}
 
 		const warningCalls = warnSpy.mock.calls;
@@ -218,13 +236,13 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 				call[0].includes('SECURITY WARNING') &&
 				call[0].includes('GUARDRAILS ARE DISABLED'),
 		);
-		expect(securityWarnings.length).toBeGreaterThan(0);
+		expect(securityWarnings.length).toBe(0);
 	});
 
 	it('3.2 security warning is NOT gated on quiet config in the source code', async () => {
-		// This test verifies the SOURCE CODE implementation
-		// The security warning in index.ts (lines 268-301) uses console.warn directly
-		// without checking config.quiet
+		// This test verifies the SOURCE CODE implementation.
+		// The security warning in index.ts uses logger.warn() (debug-gated via OPENCODE_SWARM_DEBUG=1)
+		// without checking config.quiet.
 		const fs = await import('fs');
 		const indexContent = await fs.promises.readFile(
 			path.join(process.cwd(), 'src', 'index.ts'),
@@ -237,8 +255,6 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 		expect(indexContent).toContain('SECURITY WARNING');
 		expect(indexContent).toContain('GUARDRAILS ARE DISABLED');
 
-		// Extract the security warning block using a simpler approach
-		// Find the section between "SECURITY AUDIT" and the closing brace after "GUARDRAILS ARE DISABLED"
 		const auditIndex = indexContent.indexOf('SECURITY AUDIT');
 		const disabledWarningIndex = indexContent.indexOf(
 			'GUARDRAILS ARE DISABLED',
@@ -249,7 +265,6 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 		expect(disabledWarningIndex).toBeGreaterThan(auditIndex);
 
 		// Extract a window around the security warning block
-		// Take from "SECURITY AUDIT" to 500 chars after "GUARDRAILS ARE DISABLED"
 		const blockStart = auditIndex;
 		const blockEnd = disabledWarningIndex + 500;
 		const securityBlock = indexContent.slice(
@@ -257,10 +272,11 @@ describe('security-critical warnings are NOT suppressed by quiet:true', () => {
 			Math.min(blockEnd, indexContent.length),
 		);
 
-		// The security warning block should NOT contain an `if (config.quiet` gate
-		// This proves the security warning is not conditionally suppressed by quiet config
-		// (The comment mentioning "config.quiet" is fine — that's the explanation, not a gate)
+		// The security warning block must NOT use a config.quiet gate
 		expect(securityBlock).not.toContain('if (config.quiet');
+		// The security warning block must use logger.warn() (debug-gated), not bare console.warn()
+		expect(securityBlock).not.toContain('console.warn(');
+		expect(securityBlock).toContain('warn(');
 	});
 });
 

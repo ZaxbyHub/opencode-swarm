@@ -10,8 +10,8 @@ When guardrails are disabled via configuration, a security warning is emitted at
 
 ## Migration
 
-No migration required. Users who have disabled guardrails can still see the warning by setting the `OPENCODE_SWARM_DEBUG=1` environment variable. The warning is no longer printed in normal operation, preventing TUI corruption.
+Users who have disabled guardrails and previously relied on the always-visible startup warning must set `OPENCODE_SWARM_DEBUG=1` to continue receiving it. The warning is no longer printed in normal operation; this is intentional to prevent TUI corruption caused by the plugin host capturing all console output.
 
 ## Known caveats
 
-None.
+The security warning is now opt-in via `OPENCODE_SWARM_DEBUG=1`. Users with `guardrails.enabled: false` in their config will not see the warning in standard operation.
