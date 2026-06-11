@@ -292,6 +292,86 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 
 Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
 
+### PR Monitor
+
+GitHub PR subscription and background polling infrastructure (FR-001). When enabled, the architect can subscribe to GitHub PRs and receive real-time status updates via the AutomationEventBus. Uses the `gh` CLI for all GitHub API calls; requires `gh` to be authenticated (`gh auth login`).
+
+**Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately.
+
+**Durable store**: subscription state is persisted to `.swarm/pr-monitor/subscriptions.jsonl` (append-only JSONL), folded by `correlationId` (sessionID + repoFullName + prNumber). Multiple sessions may independently subscribe to the same PR using a composite key.
+
+**Event types**: all PR events flow through the AutomationEventBus with types:
+- `pr.subscribed`, `pr.unsubscribed`, `pr.status.updated`
+- `pr.ci.failed`, `pr.ci.passed`
+- `pr.new.comment`, `pr.merge.conflict`, `pr.merge.conflict_resolved`
+- `pr.merged`, `pr.closed`
+- `pr.review.approved`, `pr.review.changes_requested`
+- `pr.subscription.expired`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master feature flag — enables PR monitoring |
+| `poll_interval_seconds` | number | `60` | Seconds between poll cycles (30–300) |
+| `max_subscriptions` | number | `20` | Maximum concurrent PR subscriptions (1–100) |
+| `max_prs_per_cycle` | number | `5` | Maximum PRs polled per cycle (1–20) |
+| `max_concurrent_gh_processes` | number | `3` | Maximum concurrent `gh` CLI processes (1–10) |
+| `poll_timeout_ms` | number | `30000` | Per-poll timeout in milliseconds (5000–120000) |
+| `failure_threshold` | number | `5` | Consecutive failures before circuit breaker trips (1–20) |
+| `cooldown_seconds` | number | `30` | Circuit breaker cooldown in seconds (5–600) |
+| `max_cooldown_seconds` | number | `300` | Maximum cooldown with exponential backoff in seconds (30–3600) |
+| `cleanup_ttl_days` | number | `7` | TTL in days for stale subscription cleanup (1–90) |
+| `auto_unsubscribe_on_merge` | boolean | `true` | Automatically unsubscribe when PR is merged |
+| `auto_unsubscribe_on_close` | boolean | `true` | Automatically unsubscribe when PR is closed (without merge) |
+| `notify_ci_failure` | boolean | `true` | Emit notification on CI failure |
+| `notify_new_comments` | boolean | `true` | Emit notification on new comments |
+| `notify_merge_conflict` | boolean | `true` | Emit notification on merge conflict detection |
+
+**Example** — enable PR Monitor with defaults:
+
+```json
+{
+  "pr_monitor": {
+    "enabled": true
+  }
+}
+```
+
+**Example** — customize polling parameters:
+
+```json
+{
+  "pr_monitor": {
+    "enabled": true,
+    "poll_interval_seconds": 30,
+    "max_subscriptions": 50,
+    "max_concurrent_gh_processes": 5,
+    "failure_threshold": 3,
+    "auto_unsubscribe_on_merge": true
+  }
+}
+```
+
+**GH CLI wrappers** (`src/git/pr.ts`): the PR monitor infrastructure uses five `gh`-based wrapper functions exported for use by the polling engine:
+- `getPRStatus(prNumber, repoFullName, cwd)` — fetches PR state, mergeability, and status check rollup via `gh pr view --json`
+- `getPRChecks(prNumber, repoFullName, cwd)` — fetches CI check results via `gh pr checks --json`
+- `getPRComments(prNumber, repoFullName, cwd, since?)` — fetches issue and review comments via `gh api` (merged, deduplicated)
+- `getMergeState(prNumber, repoFullName, cwd)` — fetches mergeable state and mergeStateStatus via `gh pr view --json`
+- `getPRReviewState(prNumber, repoFullName, cwd)` — fetches review decision and pending reviewer count via `gh pr view --json`; returns `ReviewStateResult` (`reviewDecision`, `reviewRequestCount`)
+
+All synchronous wrappers use `_internals.ghExec`; the async wrappers (`getPRStatus`, `getPRComments`, `getMergeState`, `getPRReviewState`) use `_internals.ghExecAsync` — both share the same DI seam pattern (see `gitignore-warning.ts:_internals`).
+
+**Polling worker** (`src/background/pr-monitor-worker.ts`): `PrMonitorWorker` is a standalone background class with start/stop/dispose lifecycle. It implements **two-phase change detection**:
+1. `computeChanges()` — fetches current PR state (status, comments, merge, review) via async gh wrappers, then diffs against the last stored snapshot to produce a list of events and snapshot updates
+2. `applyChanges()` — atomically emits events and persists snapshot updates
+
+The worker is **lazily started** on first subscription (gated by `pr_monitor.enabled` + `gh` availability check). It is **cooperative** — each poll cycle is interruptible at 6 guard points via a `CancellationToken`. Plugin wiring in `src/index.ts` registers signal handlers (SIGTERM/SIGINT) and ensures the worker is stopped on shutdown. Stale subscriptions are removed via `sweepStale()` on each cycle.
+
+**Event subscribers** (`src/background/pr-event-subscribers.ts`): four subscribers attach to the AutomationEventBus and deliver PR advisories to subscribed sessions:
+- CI failure/passed notifications
+- New comment alerts
+- Merge conflict detection
+- Review state transitions (approved/changes requested)
+
 ### todo_gate
 
 Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK comments introduced during a phase.

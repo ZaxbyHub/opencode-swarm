@@ -286,6 +286,16 @@ $prBodyPath = Join-Path ([System.IO.Path]::GetTempPath()) "pr_body.txt"
 gh pr create --title "<type>(<scope>): <description>" --body-file $prBodyPath --base main
 ```
 
+## Step 6a - PR auto-subscribe reminder
+
+After PR creation, if the project uses PR monitoring (`pr_monitor.enabled: true`
+in resolved opencode-swarm config), the publisher should subscribe to the new PR
+for background monitoring via `/swarm pr subscribe <pr-url>`.
+
+This step is advisory — it reminds the publisher to subscribe but does not
+auto-subscribe. The actual subscription requires the `/swarm pr subscribe` command
+which triggers the subscription store and lazy-starts the polling worker.
+
 ## Step 6.5 - Issue comment
 
 If the PR closes an issue, post a comment on the issue. This is mandatory.

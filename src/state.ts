@@ -98,6 +98,20 @@ export type DelegationReason =
 	| 'stale_recovery';
 
 /**
+ * Per-session PR subscription state for the background PR poller.
+ * Keyed by `${repoFullName}::${prNumber}` within the session's prSubscriptions Map.
+ */
+export interface PrSubscriptionState {
+	prNumber: number;
+	repoFullName: string;
+	prUrl: string;
+	lastKnownStatus: string;
+	lastPollTime: number;
+	errorCount: number;
+	isWatching: boolean;
+}
+
+/**
  * Per-task workflow state for gate progression tracking.
  * Transitions must be forward-only: idle → coder_delegated → pre_check_passed → reviewer_run → tests_run → complete
  */
@@ -322,6 +336,10 @@ export interface AgentSessionState {
 	prmHardStopPending: boolean;
 	/** Per-session escalation tracker instance (set lazily by PRM hook) */
 	prmEscalationTracker?: EscalationTracker;
+
+	// PR Monitor subscriptions (Phase 1)
+	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
+	prSubscriptions: Map<string, PrSubscriptionState>;
 }
 
 /**
@@ -631,6 +649,8 @@ export function startAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// PR Monitor subscriptions
+		prSubscriptions: new Map<string, PrSubscriptionState>(),
 	};
 
 	swarmState.agentSessions.set(sessionId, sessionState);
@@ -651,6 +671,20 @@ export function startAgentSession(
 		let rehydrationPromise: Promise<void>;
 		rehydrationPromise = _internals
 			.rehydrateSessionFromDisk(directory, sessionState)
+			.then(async () => {
+				// Rehydrate PR subscriptions for this session (fail-open).
+				try {
+					sessionState.prSubscriptions = await rehydratePrSubscriptions(
+						sessionId,
+						directory,
+					);
+				} catch (err) {
+					logger.warn(
+						'[state] PR subscription rehydration failed, starting with empty subscriptions:',
+						err instanceof Error ? err.message : String(err),
+					);
+				}
+			})
 			.catch((err) => {
 				logger.warn(
 					'[state] Rehydration failed:',
@@ -870,6 +904,10 @@ export function ensureAgentSession(
 		}
 		if (session.prmHardStopPending === undefined) {
 			session.prmHardStopPending = false;
+		}
+		// PR Monitor subscriptions migration safety
+		if (!session.prSubscriptions) {
+			session.prSubscriptions = new Map<string, PrSubscriptionState>();
 		}
 
 		session.lastToolCallTime = now;
@@ -1833,6 +1871,48 @@ export function addKnowledgeAckDedup(key: string): void {
 		const oldest = set.values().next().value;
 		if (oldest !== undefined) set.delete(oldest);
 	}
+}
+
+/**
+ * Rehydrate PR subscriptions for a given session from durable storage.
+ * Reads active subscriptions from the JSONL store and filters to those
+ * belonging to the specified sessionID, converting each to a PrSubscriptionState.
+ *
+ * @param sessionID - The session identifier to filter subscriptions by
+ * @param directory - Project root containing .swarm/ subdirectory
+ * @returns Map of PrSubscriptionState keyed by `${repoFullName}::${prNumber}`
+ */
+export async function rehydratePrSubscriptions(
+	sessionID: string,
+	directory: string,
+): Promise<Map<string, PrSubscriptionState>> {
+	const map = new Map<string, PrSubscriptionState>();
+
+	try {
+		const { listActive } = await import('./background/pr-subscriptions.js');
+		const records = await listActive(directory);
+
+		for (const record of records) {
+			if (record.sessionID !== sessionID) continue;
+
+			const key = `${record.repoFullName}::${record.prNumber}`;
+			map.set(key, {
+				prNumber: record.prNumber,
+				repoFullName: record.repoFullName,
+				prUrl: record.prUrl,
+				lastKnownStatus: record.mergeableState ?? 'unknown',
+				lastPollTime: record.lastCheckedAt,
+				errorCount: record.errorCount,
+				isWatching: record.isWatching,
+			});
+		}
+	} catch (err) {
+		logger.warn(
+			`[state] rehydratePrSubscriptions failed for session ${sessionID}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return map;
 }
 
 /**

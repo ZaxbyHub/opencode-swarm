@@ -40,7 +40,21 @@ export type AutomationEventType =
 	| 'curator.phase.llm_fallback'
 	| 'curator.drift.completed'
 	| 'curator.docdrift.completed'
-	| 'curator.error';
+	| 'curator.error'
+	| 'pr.subscribed'
+	| 'pr.unsubscribed'
+	| 'pr.status.updated'
+	| 'pr.ci.failed'
+	| 'pr.ci.passed'
+	| 'pr.new.comment'
+	| 'pr.merge.conflict'
+	| 'pr.merge.conflict_resolved'
+	| 'pr.merged'
+	| 'pr.closed'
+	| 'pr.review.approved'
+	| 'pr.review.changes_requested'
+	| 'pr.subscription.expired'
+	| 'pr.error';
 
 /** Base automation event */
 export interface AutomationEvent<T = unknown> {

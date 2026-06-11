@@ -193,6 +193,7 @@ export function deserializeAgentSession(
 		prmHardStopPending: false,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
+		prSubscriptions: new Map(),
 	};
 }
 

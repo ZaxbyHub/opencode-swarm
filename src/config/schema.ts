@@ -1461,6 +1461,49 @@ export const CouncilConfigSchema = z
 
 export type CouncilConfig = z.infer<typeof CouncilConfigSchema>;
 
+// PR Monitor configuration (FR-001 — GitHub PR subscription and polling)
+// Off by default. When enabled, the architect can subscribe to PRs and
+// receive real-time status updates (CI, reviews, merge conflicts, comments)
+// via background gh CLI polling.
+export const PrMonitorConfigSchema = z
+	.object({
+		/** Master feature flag. Defaults to false — no PR polling when omitted. */
+		enabled: z.boolean().default(false),
+		/** Seconds between poll cycles. Clamped to 30–300. */
+		poll_interval_seconds: z.number().int().min(30).max(300).default(60),
+		/** Maximum concurrent PR subscriptions. Clamped to 1–100. */
+		max_subscriptions: z.number().int().min(1).max(100).default(20),
+		/** Maximum PRs polled per cycle. Clamped to 1–20. */
+		max_prs_per_cycle: z.number().int().min(1).max(20).default(5),
+		/** Maximum concurrent PR polls per cycle. Clamped to 1–10. */
+		max_concurrent_pr_polls: z.number().int().min(1).max(10).default(3),
+		/** Per-poll timeout in milliseconds. Clamped to 5 000–120 000. */
+		poll_timeout_ms: z.number().int().min(5_000).max(120_000).default(30_000),
+		/** Consecutive failures before circuit breaker trips. Clamped to 1–20. */
+		failure_threshold: z.number().int().min(1).max(20).default(5),
+		/** Circuit breaker cooldown in seconds. Clamped to 5–600. */
+		cooldown_seconds: z.number().int().min(5).max(600).default(30),
+		/** Maximum cooldown with exponential backoff in seconds. Clamped to 30–3600. */
+		max_cooldown_seconds: z.number().int().min(30).max(3_600).default(300),
+		/** TTL in days for stale subscription cleanup. Clamped to 1–90. */
+		cleanup_ttl_days: z.number().int().min(1).max(90).default(7),
+		/** Automatically unsubscribe when PR is merged. */
+		auto_unsubscribe_on_merge: z.boolean().default(true),
+		/** Automatically unsubscribe when PR is closed (without merge). */
+		auto_unsubscribe_on_close: z.boolean().default(true),
+		/** Emit notification on CI failure. */
+		notify_ci_failure: z.boolean().default(true),
+		/** Emit notification on new comments. */
+		notify_new_comments: z.boolean().default(true),
+		/** Emit notification on merge conflict detection. */
+		notify_merge_conflict: z.boolean().default(true),
+		/** Automatically trigger PR_FEEDBACK mode on CI failure or merge conflict. */
+		auto_pr_feedback: z.boolean().default(false),
+	})
+	.strict();
+
+export type PrMonitorConfig = z.infer<typeof PrMonitorConfigSchema>;
+
 // Parallelization configuration (PR 1 — dark foundation, disabled by default)
 // All fields default to single-run-equivalent values so no production path
 // activates parallel execution while this config exists.
@@ -2176,6 +2219,10 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 			},
 		})),
+
+	// PR Monitor — GitHub PR subscription and polling (FR-001)
+	// Disabled by default; opt-in for real-time PR status updates.
+	pr_monitor: PrMonitorConfigSchema.optional(),
 
 	// External skills — candidate model, discovery, and quarantine store (FR-001)
 	// Disabled by default; all subsystems are opt-in.

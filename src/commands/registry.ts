@@ -49,7 +49,10 @@ import {
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
+import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
+import { handlePrSubscribeCommand } from './pr-subscribe.js';
+import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
@@ -648,6 +651,35 @@ export const COMMAND_REGISTRY = {
 		args: '[url|owner/repo#N|N] [instructions...]',
 		details:
 			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+		category: 'agent',
+	},
+	'pr subscribe': {
+		handler: (ctx) =>
+			handlePrSubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Subscribe the current session to PR state-change notifications',
+		args: '<pr-url|owner/repo#N|N>',
+		details:
+			'Subscribes the current session to receive advisory notifications for the specified PR. When pr_monitor.enabled is true, the background polling worker will detect CI failures, new comments, merge conflicts, review state changes, and merge/close events. Notifications are delivered as session-scoped advisories with dedup tokens. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin). Requires pr_monitor.enabled: true in config.',
+		category: 'agent',
+	},
+	'pr unsubscribe': {
+		handler: (ctx) =>
+			handlePrUnsubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Unsubscribe the current session from PR state-change notifications',
+		args: '<pr-url|owner/repo#N|N>',
+		details:
+			'Unsubscribes the current session from receiving advisory notifications for the specified PR. Removes the active subscription record. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+		category: 'agent',
+	},
+	'pr status': {
+		handler: (ctx) =>
+			handlePrMonitorStatusCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description: 'Show PR monitor subscription status for the current session',
+		args: '',
+		details:
+			'Displays all active PR subscriptions for the current session. Shows PR URL, last checked time, watching status, and error count per subscription. Also shows total active subscriptions across all sessions.',
 		category: 'agent',
 	},
 	'deep-dive': {

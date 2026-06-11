@@ -10,8 +10,10 @@ import {
 	createAutomationManager,
 	PlanSyncWorker,
 	type PreflightTriggerManager,
+	PrMonitorWorker,
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
+import { setOnSubscriptionCreated } from './background/pr-subscriptions';
 import {
 	agentHasSwarmCommandTool,
 	createSwarmCommandHandler,
@@ -28,6 +30,7 @@ import {
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
 	SkillImproverConfigSchema,
@@ -38,6 +41,7 @@ import {
 } from './config/schema';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
+import { isGhAvailable } from './git';
 import {
 	composeHandlers,
 	consolidateSystemMessages,
@@ -705,6 +709,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	let automationManager: BackgroundAutomationManager | undefined;
 	let preflightTriggerManager: PreflightTriggerManager | undefined;
 	let statusArtifact: AutomationStatusArtifact | undefined;
+	let prMonitorWorker: PrMonitorWorker | null = null;
 
 	if (automationConfig.mode !== 'manual') {
 		automationManager = createAutomationManager(automationConfig);
@@ -779,14 +784,6 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 		}
 
-		// Cleanup: stop automation manager and workers on process exit
-		const cleanupAutomation = () => {
-			automationManager?.stop();
-		};
-		process.on('exit', cleanupAutomation);
-		process.on('SIGINT', cleanupAutomation);
-		process.on('SIGTERM', cleanupAutomation);
-
 		log('Automation framework initialized', {
 			mode: automationConfig.mode,
 			enabled: automationManager?.isEnabled(),
@@ -794,6 +791,77 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			preflightEnabled: preflightTriggerManager?.isEnabled(),
 		});
 	}
+
+	// PR Monitor Worker — lazy start
+	// Worker is NOT started at plugin init — it starts lazily when the
+	// first subscription is created via the onSubscriptionCreated callback.
+	// This runs regardless of automation mode — gated only by pr_monitor.enabled.
+	const prMonitorConfig = PrMonitorConfigSchema.parse(config.pr_monitor ?? {});
+
+	// Wire the lazy-start callback into the subscription store so the
+	// worker starts automatically when the first PR is subscribed.
+	setOnSubscriptionCreated((directory: string, _record) => {
+		try {
+			// Only start if pr_monitor is enabled and gh CLI is available
+			if (!prMonitorConfig.enabled) return;
+			if (!isGhAvailable(directory)) {
+				log('[pr-monitor] gh CLI not available — skipping worker start');
+				return;
+			}
+			// Create worker on first trigger, reuse on subsequent
+			if (!prMonitorWorker) {
+				prMonitorWorker = new PrMonitorWorker({
+					directory,
+					config: prMonitorConfig,
+					// sessionId removed: worker polls ALL active subscriptions,
+					// not just the one from the triggering session. Session-scoped
+					// delivery is handled at the event layer (task 2.4).
+				});
+			}
+			if (!prMonitorWorker.isRunning()) {
+				prMonitorWorker.start();
+				log('PR Monitor Worker lazy-started', { directory });
+			}
+		} catch (err) {
+			log('PR Monitor Worker failed to lazy-start (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	});
+
+	// Register PR event subscribers for advisory delivery to active sessions
+	let prEventCleanup: (() => void) | null = null;
+	if (prMonitorConfig.enabled) {
+		try {
+			const { registerPrEventSubscribers } = await import(
+				'./background/pr-event-subscribers'
+			);
+			prEventCleanup = registerPrEventSubscribers({
+				directory: ctx.directory,
+				config: prMonitorConfig,
+			});
+		} catch (err) {
+			log('[pr-monitor] Failed to register PR event subscribers (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	// Cleanup: stop automation manager and workers on process exit
+	const cleanupAutomation = () => {
+		automationManager?.stop();
+		prMonitorWorker?.stop();
+		prEventCleanup?.();
+	};
+	process.on('exit', cleanupAutomation);
+	process.once('SIGINT', () => {
+		cleanupAutomation();
+		process.exit(130);
+	});
+	process.once('SIGTERM', () => {
+		cleanupAutomation();
+		process.exit(143);
+	});
 
 	// v6.7 Task 5.7: Config Doctor - run on startup if automation flags permit
 	// Runs in background-safe way (non-blocking, no errors propagate)
