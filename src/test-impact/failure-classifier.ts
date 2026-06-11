@@ -92,7 +92,7 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
 	/\bcannot allocate memory\b/i,
 	/\bout of memory:\s*killed process\b/i,
 	/\boom-kill\b/i,
-	/(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:out of memory|oom|by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
+	/(?:^|\n|\bcommand failed:\s*)\s*killed(?:\s*(?:[-:]\s*)?(?:by signal|signal|sigkill).*)?\s*(?:\n|$)/i,
 	...buildErrnoPatternPair(
 		'ETIMEDOUT',
 		'connect|connection|request|socket|network',
@@ -103,10 +103,7 @@ const INFRASTRUCTURE_FAILURE_PATTERNS = [
 		'ECONNRESET',
 		'connect|connection|request|socket|network|stream|read',
 	),
-	...buildErrnoPatternPair(
-		'EPIPE',
-		'pipe|stream|write|socket|stdout|stderr',
-	),
+	...buildErrnoPatternPair('EPIPE', 'pipe|stream|write|socket|stdout|stderr'),
 	/\bbroken pipe\b/i,
 	/\bexit(?:ed)?(?:\s+with)?(?:\s+code)?\s*[:=]?\s*137\b/i,
 	/\bsig(?:segv|abrt|bus)\b/i,
