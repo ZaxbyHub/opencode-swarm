@@ -7,7 +7,7 @@ Added a new top-level config option `auto_select_architect` that controls whethe
 | Value | Effect |
 |-------|--------|
 | `false` (default) | No auto-select — user picks the architect manually |
-| `true` | Disable `build` and `plan` so the swarm architect is the only selectable primary agent |
+| `true` | Disable `build` and `plan` so the swarm architect is the primary selectable agent (build and plan are disabled) |
 | `"<architect_name>"` | Same as `true`, but targets a specific architect by name (e.g. `"mega_architect"`) — all other architects are demoted to subagent |
 
 Multi-swarm integration tests added per AGENTS.md invariant 11 (primary/subagent selection changes must include a multi-swarm `swarms: { local: ..., mega: ... }` test asserting at least one prefixed agent is `mode: 'primary'`).
@@ -18,7 +18,7 @@ Without this option, OpenCode's built-in `Build` agent is auto-selected on launc
 
 ## Migration steps
 
-None required. The default value is `false` and existing configurations are unaffected. To opt in, add to your `opencode.json` or `opencode.jsonc` config:
+None required. The default value is `false` and existing configurations are unaffected. To opt in, add to your `.opencode/opencode-swarm.json` config (or `~/.config/opencode/opencode-swarm.json` for a global default):
 
 ```json
 {

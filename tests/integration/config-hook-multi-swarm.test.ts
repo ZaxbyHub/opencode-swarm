@@ -186,10 +186,22 @@ describe('plugin config hook — multi-swarm primary architect injection', () =>
 		expect(injected).toBeDefined();
 
 		// Both prefixed architects must still be primary.
-		expect(injected!['local_architect'], 'local_architect should exist').toBeDefined();
-		expect(injected!['local_architect'].mode, 'local_architect must be primary').toBe('primary');
-		expect(injected!['mega_architect'], 'mega_architect should exist').toBeDefined();
-		expect(injected!['mega_architect'].mode, 'mega_architect must be primary').toBe('primary');
+		expect(
+			injected!['local_architect'],
+			'local_architect should exist',
+		).toBeDefined();
+		expect(
+			injected!['local_architect'].mode,
+			'local_architect must be primary',
+		).toBe('primary');
+		expect(
+			injected!['mega_architect'],
+			'mega_architect should exist',
+		).toBeDefined();
+		expect(
+			injected!['mega_architect'].mode,
+			'mega_architect must be primary',
+		).toBe('primary');
 
 		// OpenCode built-in agents must be disabled.
 		expect(injected!['build'], 'build agent must be disabled').toBeDefined();
@@ -201,7 +213,10 @@ describe('plugin config hook — multi-swarm primary architect injection', () =>
 		const primaries = Object.values(injected!).filter(
 			(a) => a.mode === 'primary' && a.disable !== true,
 		);
-		expect(primaries.length, 'at least one non-disabled primary must exist').toBeGreaterThan(0);
+		expect(
+			primaries.length,
+			'at least one non-disabled primary must exist',
+		).toBeGreaterThan(0);
 	});
 
 	test('auto_select_architect: "mega_architect" - disables build/plan, promotes target, demotes others', async () => {
@@ -224,12 +239,24 @@ describe('plugin config hook — multi-swarm primary architect injection', () =>
 		expect(injected).toBeDefined();
 
 		// Target architect must be primary.
-		expect(injected!['mega_architect'], 'mega_architect should exist').toBeDefined();
-		expect(injected!['mega_architect'].mode, 'mega_architect must be primary').toBe('primary');
+		expect(
+			injected!['mega_architect'],
+			'mega_architect should exist',
+		).toBeDefined();
+		expect(
+			injected!['mega_architect'].mode,
+			'mega_architect must be primary',
+		).toBe('primary');
 
 		// Non-target architect must be demoted.
-		expect(injected!['local_architect'], 'local_architect should exist').toBeDefined();
-		expect(injected!['local_architect'].mode, 'local_architect must be subagent').toBe('subagent');
+		expect(
+			injected!['local_architect'],
+			'local_architect should exist',
+		).toBeDefined();
+		expect(
+			injected!['local_architect'].mode,
+			'local_architect must be subagent',
+		).toBe('subagent');
 
 		// OpenCode built-in agents must be disabled.
 		expect(injected!['build'], 'build agent must be disabled').toBeDefined();
@@ -239,10 +266,15 @@ describe('plugin config hook — multi-swarm primary architect injection', () =>
 
 		// Exactly one primary architect (invariant 11: at least one prefixed agent is primary).
 		const primaryArchitects = Object.entries(injected!).filter(
-			([name, cfg]) =>
-				/architect$/i.test(name) && cfg.mode === 'primary',
+			([name, cfg]) => /architect$/i.test(name) && cfg.mode === 'primary',
 		);
-		expect(primaryArchitects.length, 'exactly one architect must be primary').toBe(1);
-		expect(primaryArchitects[0][0], 'the primary architect must be mega_architect').toBe('mega_architect');
+		expect(
+			primaryArchitects.length,
+			'exactly one architect must be primary',
+		).toBe(1);
+		expect(
+			primaryArchitects[0][0],
+			'the primary architect must be mega_architect',
+		).toBe('mega_architect');
 	});
 });
