@@ -1231,7 +1231,7 @@ ${handoffContent}`;
 										sessionAutoProceed.autoProceedOverride !== undefined
 											? 'session'
 											: 'plan-or-default';
-									const banner = `${AUTO_PROCEED_BANNER}\nAUTO_PROCEED STATUS:
+									const banner = `${AUTO_PROCEED_BANNER}\n## ⏭️ AUTO_PROCEED STATUS:
 - auto-proceed: ${resolvedAutoProceed ? 'on' : 'off'}
 - source: ${source}
 - nudge: ${sessionAutoProceed.autoProceedNudgeDone ? 'true' : 'false'}`;
