@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.65.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.65.0...v7.65.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* **agents:** respect top-level agent config in swarms mode ([#1216](https://github.com/zaxbysauce/opencode-swarm/issues/1216)) ([1922b7f](https://github.com/zaxbysauce/opencode-swarm/commit/1922b7f276433d3070f5638e44c8cd61abcdfc34))
+
 ## [7.65.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.64.0...v7.65.0) (2026-06-11)
 
 
