@@ -507,6 +507,52 @@ describe('createAgents', () => {
 			expect(reviewer?.config.model).toBe('custom/reviewer-model');
 			expect(reviewer?.config.temperature).toBe(0.5);
 		});
+
+		it('merges top-level agents with non-default swarms (e.g., custom swarm names)', () => {
+			// Regression test: users with non-default swarm names like "fast", "precise", "local"
+			// should also get top-level agents merged. Previously, the merge only worked
+			// for swarms named "default".
+			const config = {
+				agents: {
+					coder: {
+						model: 'top-level/coder',
+						temperature: 0.3,
+					},
+					reviewer: {
+						model: 'top-level/reviewer',
+					},
+				},
+				swarms: {
+					fast: {
+						agents: {
+							coder: {
+								// Swarm-specific override for coder
+								model: 'fast-swarm/coder',
+							},
+						},
+					},
+					precise: {
+						// No agents specified - should inherit from top-level
+						agents: undefined,
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+
+			// For the "fast" swarm: coder should use fast-swarm override, reviewer from top-level
+			const fastCoder = agents.find((a) => a.name === 'fast_coder');
+			const fastReviewer = agents.find((a) => a.name === 'fast_reviewer');
+			expect(fastCoder?.config.model).toBe('fast-swarm/coder');
+			expect(fastReviewer?.config.model).toBe('top-level/reviewer');
+
+			// For the "precise" swarm: both should use top-level configs
+			const preciseCoder = agents.find((a) => a.name === 'precise_coder');
+			const preciseReviewer = agents.find((a) => a.name === 'precise_reviewer');
+			expect(preciseCoder?.config.model).toBe('top-level/coder');
+			expect(preciseCoder?.config.temperature).toBe(0.3);
+			expect(preciseReviewer?.config.model).toBe('top-level/reviewer');
+		});
 	});
 
 	describe('architect template replacement', () => {

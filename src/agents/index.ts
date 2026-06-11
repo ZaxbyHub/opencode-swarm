@@ -757,15 +757,15 @@ export function createAgents(
 			let swarmConfig = swarms[swarmId];
 			const isDefault = swarmId === 'default';
 
-			// When processing the default swarm, merge in top-level agents config.
+			// Merge in top-level agents config for all swarms.
 			// This ensures that top-level agents are respected even when swarms are configured.
 			// Swarm-specific agents take precedence over top-level agents (more specific wins).
-			if (isDefault && config?.agents) {
+			if (config?.agents) {
 				swarmConfig = {
 					...swarmConfig,
 					agents: {
 						...config.agents,
-						...swarmConfig.agents,
+						...(swarmConfig.agents ?? {}),
 					},
 				};
 			}
