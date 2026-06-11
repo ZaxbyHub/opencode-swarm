@@ -585,9 +585,7 @@ describe('skillPropagationGateBefore — recommendedSkills field', () => {
 					'.claude/skills/engineering-conventions/SKILL.md',
 				],
 				readSkillUsageEntriesTail: () => [],
-				computeSkillRelevanceScore: (
-					skillPath: string,
-				) => {
+				computeSkillRelevanceScore: (skillPath: string) => {
 					// Simulate writing-tests being more relevant to the task
 					return skillPath.includes('writing-tests') ? 0.7 : 0.3;
 				},

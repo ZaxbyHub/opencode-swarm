@@ -657,10 +657,7 @@ export async function skillPropagationGateBefore(
 	let scoringSkipped = false;
 	let scored: Array<{ skillPath: string; score: number; usageCount: number }> =
 		[];
-	if (
-		skillsValue.toLowerCase() !== 'none' &&
-		availableSkills.length > 0
-	) {
+	if (skillsValue.toLowerCase() !== 'none' && availableSkills.length > 0) {
 		try {
 			const sessionEntries = _internals.readSkillUsageEntriesTail(directory, {
 				sessionID,
