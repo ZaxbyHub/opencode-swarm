@@ -578,6 +578,7 @@ async function buildParallelExecutionGuidance(
 	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
 	const blockedTasks = allTasks.filter((task) => task.status === 'blocked');
 	const totalTasks = allTasks.length;
+	let backoffTriggered = false;
 
 	if (totalTasks > 0 && blockedTasks.length > 0) {
 		const failureRate = blockedTasks.length / totalTasks;
@@ -594,6 +595,7 @@ async function buildParallelExecutionGuidance(
 				// Auto-reduce the effective concurrency due to high failure rate
 				effectiveMaxConcurrent = newConcurrency;
 				session.maxConcurrencyOverride = newConcurrency;
+				backoffTriggered = true;
 			}
 		}
 	}
@@ -650,10 +652,9 @@ async function buildParallelExecutionGuidance(
 		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
 	}
 
-	const failureWarning =
-		blockedTasks.length > 0
-			? ` (${blockedTasks.length} blocked task(s) detected — concurrency auto-reduced due to failures)`
-			: '';
+	const failureWarning = backoffTriggered
+		? ` (${blockedTasks.length} blocked task(s) detected — concurrency auto-reduced due to failures)`
+		: '';
 
 	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.${failureWarning}`;
 }
@@ -1091,7 +1092,7 @@ export function createDelegationGateHook(
 		if (!plan) return;
 		const profile = plan.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
-		const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =
 			session.maxConcurrencyOverride ?? maxConcurrent;
 		if (!parallelEnabled || effectiveMaxConcurrent <= 1) return;
