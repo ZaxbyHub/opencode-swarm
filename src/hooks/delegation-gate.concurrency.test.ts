@@ -575,7 +575,9 @@ describe('buildParallelExecutionGuidance', () => {
 		expect(session.maxConcurrencyOverride).toBeUndefined();
 		// Result should not mention backoff when threshold is not exceeded
 		if (result) {
-			expect(result).not.toContain('blocked task(s) detected — concurrency auto-reduced');
+			expect(result).not.toContain(
+				'blocked task(s) detected — concurrency auto-reduced',
+			);
 		}
 	});
 });

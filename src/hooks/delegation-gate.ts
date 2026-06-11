@@ -571,8 +571,7 @@ async function buildParallelExecutionGuidance(
 	const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 	// Check for session-scoped concurrency override (Issue #761)
 	// Override only applies in standard mode — Lean Turbo short-circuits above.
-	let effectiveMaxConcurrent =
-		session?.maxConcurrencyOverride ?? maxConcurrent;
+	let effectiveMaxConcurrent = session?.maxConcurrencyOverride ?? maxConcurrent;
 
 	// Adaptive backoff on errors: detect failures and reduce concurrency
 	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
