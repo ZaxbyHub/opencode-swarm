@@ -141,6 +141,27 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+// Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
+// `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
+// This is distinct from the swarm-plugin's own `variant` field: `variant` is
+// passed through to the SDK as `variant` (a generic OpenCode hook), while
+// `reasoning` is passed through as-is and consumed by provider-native APIs.
+// Both may be set on the same agent; users control how their provider
+// interprets each.
+export const AgentReasoningConfigSchema = z.object({
+	effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+});
+export type AgentReasoningConfig = z.infer<typeof AgentReasoningConfigSchema>;
+
+// Per-agent extended-thinking block. Mirrors the OpenCode SDK's `thinking`
+// field on AgentConfig (e.g. Anthropic Claude extended thinking with
+// `type: "enabled"` and `budget_tokens`). Passed through as-is to the SDK.
+export const AgentThinkingConfigSchema = z.object({
+	type: z.enum(['enabled', 'disabled']).optional(),
+	budget_tokens: z.number().int().positive().optional(),
+});
+export type AgentThinkingConfig = z.infer<typeof AgentThinkingConfigSchema>;
+
 // Agent override configuration
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
@@ -160,6 +181,12 @@ export const AgentOverrideConfigSchema = z.object({
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
 	fallback_models: z.array(z.string()).max(3).optional(),
+	// Provider-native extended-reasoning / extended-thinking blocks. These
+	// were previously silently stripped by Zod's default strip behavior;
+	// they are now first-class fields. See AgentReasoningConfigSchema /
+	// AgentThinkingConfigSchema above for shape. Issue #1220.
+	reasoning: AgentReasoningConfigSchema.optional(),
+	thinking: AgentThinkingConfigSchema.optional(),
 });
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;

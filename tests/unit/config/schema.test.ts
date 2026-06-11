@@ -99,6 +99,76 @@ describe('AgentOverrideConfigSchema', () => {
 		expect(result.success).toBe(false);
 	});
 
+	// Issue #1220 — `reasoning` and `thinking` provider-native blocks
+	it('accepts reasoning with valid effort enum (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			reasoning: { effort: 'high' },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data).toEqual({ reasoning: { effort: 'high' } });
+		}
+	});
+
+	it('accepts reasoning with no effort set (optional inner field) (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({ reasoning: {} });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data).toEqual({ reasoning: {} });
+		}
+	});
+
+	it('rejects reasoning with invalid effort value (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			reasoning: { effort: 'extreme' },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts thinking with type enabled and positive budget_tokens (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { type: 'enabled', budget_tokens: 10000 },
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data).toEqual({
+				thinking: { type: 'enabled', budget_tokens: 10000 },
+			});
+		}
+	});
+
+	it('rejects thinking with non-positive budget_tokens (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { type: 'enabled', budget_tokens: 0 },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects thinking with invalid type value (issue #1220)', () => {
+		const result = AgentOverrideConfigSchema.safeParse({
+			thinking: { type: 'maybe' },
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it('still strips unknown keys (regression: preserve zod default strip behavior) (issue #1220)', () => {
+		// Critical contract: we add `reasoning` and `thinking` as first-class
+		// fields, but we do NOT switch to `.passthrough()`. Truly unknown
+		// keys (typos, future fields) must still be stripped to avoid leaking
+		// garbage into the agent factory. This test guards that contract.
+		const result = AgentOverrideConfigSchema.safeParse({
+			model: 'gpt-4',
+			typo_field: 'should be stripped',
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data).toEqual({ model: 'gpt-4' });
+			expect(
+				(result.data as Record<string, unknown>).typo_field,
+			).toBeUndefined();
+		}
+	});
+
 	// Fallback models validation tests
 	it('parses without side effects when model is set without fallback_models', () => {
 		// The schema no longer emits console.warn itself; the advisory is collected

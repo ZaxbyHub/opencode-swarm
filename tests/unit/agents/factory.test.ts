@@ -147,6 +147,59 @@ describe('createAgents', () => {
 			).toBeUndefined();
 		});
 
+		it('reasoning override is preserved through parsing and applied to agent config (issue #1220)', () => {
+			const config = {
+				agents: {
+					critic: {
+						model: 'anthropic/claude-opus-4-6',
+						reasoning: { effort: 'high' },
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const critic = agents.find((a) => a.name === 'critic');
+			expect(critic?.config.model).toBe('anthropic/claude-opus-4-6');
+			expect(
+				(critic?.config as { reasoning?: unknown } | undefined)?.reasoning,
+			).toEqual({ effort: 'high' });
+		});
+
+		it('thinking override is preserved through parsing and applied to agent config (issue #1220)', () => {
+			const config = {
+				agents: {
+					reviewer: {
+						model: 'anthropic/claude-sonnet-4-6',
+						thinking: { type: 'enabled', budget_tokens: 10000 },
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			expect(reviewer?.config.model).toBe('anthropic/claude-sonnet-4-6');
+			expect(
+				(reviewer?.config as { thinking?: unknown } | undefined)?.thinking,
+			).toEqual({ type: 'enabled', budget_tokens: 10000 });
+		});
+
+		it('reasoning and thinking are omitted when not configured (issue #1220)', () => {
+			const config = {
+				agents: {
+					coder: { model: 'custom/model' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(
+				(coder?.config as { reasoning?: unknown } | undefined)?.reasoning,
+			).toBeUndefined();
+			expect(
+				(coder?.config as { thinking?: unknown } | undefined)?.thinking,
+			).toBeUndefined();
+		});
+
 		it('auto-splits variant from 3-segment model string', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const config = {

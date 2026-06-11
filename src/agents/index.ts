@@ -269,7 +269,15 @@ function getVariantOverride(
  */
 function applyOverrides(
 	agent: AgentDefinition,
-	swarmAgents?: Record<string, { temperature?: number; variant?: string }>,
+	swarmAgents?: Record<
+		string,
+		{
+			temperature?: number;
+			variant?: string;
+			reasoning?: { effort?: 'low' | 'medium' | 'high' | 'max' };
+			thinking?: { type?: 'enabled' | 'disabled'; budget_tokens?: number };
+		}
+	>,
 	swarmPrefix?: string,
 	quiet?: boolean,
 ): AgentDefinition {
@@ -322,6 +330,28 @@ function applyOverrides(
 		// the cast just satisfies the strict known-keys check.
 		(agent.config as { variant?: string }).variant = variantOverride;
 	}
+
+	// Plumb provider-native extended-reasoning / extended-thinking overrides
+	// (issue #1220). These were previously silently dropped at config parse
+	// time because `AgentOverrideConfigSchema` did not declare them. Now that
+	// the schema accepts them, we forward them to the SDK as-is. Like
+	// `variant` above, the cast satisfies the strict known-keys check on
+	// @opencode-ai/sdk's AgentConfig type; the SDK's open-ended index
+	// signature makes this structurally valid.
+	const baseAgentName = stripSwarmPrefix(agent.name, swarmPrefix);
+	const reasoningOverride = swarmAgents?.[baseAgentName]?.reasoning;
+	if (reasoningOverride !== undefined) {
+		(
+			agent.config as { reasoning?: typeof reasoningOverride }
+		).reasoning = reasoningOverride;
+	}
+	const thinkingOverride = swarmAgents?.[baseAgentName]?.thinking;
+	if (thinkingOverride !== undefined) {
+		(
+			agent.config as { thinking?: typeof thinkingOverride }
+		).thinking = thinkingOverride;
+	}
+
 	return agent;
 }
 
