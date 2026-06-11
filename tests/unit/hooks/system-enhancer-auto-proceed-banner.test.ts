@@ -152,6 +152,25 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		expect(bannerLine).toContain('- nudge: true');
 	});
 
+	it('banner reflects override=true, nudge=false independently (mismatched state)', async () => {
+		// Edge case: user has set override=true but nudge is still false.
+		// The banner must report the override as on and the nudge as false,
+		// matching the live session state without combining them.
+		await createSwarmFiles();
+		const session = _internals.swarmState.agentSessions.get(SESSION_ID)!;
+		session.autoProceedOverride = true;
+		session.autoProceedNudgeDone = false;
+
+		const systemOutput = await invokeHook();
+		const bannerLine = systemOutput.find((s) =>
+			s.startsWith(AUTO_PROCEED_BANNER),
+		);
+		expect(bannerLine).toBeDefined();
+		expect(bannerLine).toContain('- auto-proceed: on');
+		expect(bannerLine).toContain('- source: session');
+		expect(bannerLine).toContain('- nudge: false');
+	});
+
 	it('does NOT inject the banner for non-architect sessions', async () => {
 		await createSwarmFiles();
 		// End the architect session and start a reviewer session instead.
