@@ -762,11 +762,15 @@ export function createAgents(
 			// Precedence is object-level (not field-level): if both top-level and the swarm
 			// define the same agent (e.g. "coder"), the swarm's entire agent entry wins and
 			// top-level fields for that agent are not inherited individually.
+			// Each agent entry is shallow-copied to prevent guardrails' runtime `.model` mutation
+			// from corrupting the shared top-level config object across swarms.
 			if (config?.agents) {
 				swarmConfig = {
 					...swarmConfig,
 					agents: {
-						...config.agents,
+						...Object.fromEntries(
+							Object.entries(config.agents).map(([k, v]) => [k, { ...v }]),
+						),
 						...(swarmConfig.agents ?? {}),
 					},
 				};
