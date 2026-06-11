@@ -83,6 +83,27 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		expect(bannerLine).toContain('AUTO_PROCEED STATUS:');
 	});
 
+	it('banner uses the documented key-value format (auto-proceed / source / nudge)', async () => {
+		await createSwarmFiles();
+		// The phase-wrap skill documents the banner format as:
+		//   - `auto-proceed: <on|off>`
+		//   - `source: <session|plan-or-default>`
+		//   - `nudge: <true|false>`
+		// Verify all three keys are present in the injected line.
+		const session = _internals.swarmState.agentSessions.get(SESSION_ID)!;
+		session.autoProceedOverride = true;
+		session.autoProceedNudgeDone = true;
+
+		const systemOutput = await invokeHook();
+		const bannerLine = systemOutput.find((s) =>
+			s.startsWith(AUTO_PROCEED_BANNER),
+		);
+		expect(bannerLine).toBeDefined();
+		expect(bannerLine).toMatch(/- auto-proceed: (on|off)/);
+		expect(bannerLine).toMatch(/- source: (session|plan-or-default)/);
+		expect(bannerLine).toMatch(/- nudge: (true|false)/);
+	});
+
 	it('banner resolves to "off" with "plan-or-default" source when nothing is set', async () => {
 		await createSwarmFiles();
 		const session = _internals.swarmState.agentSessions.get(SESSION_ID)!;
@@ -94,10 +115,9 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 			s.startsWith(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
-		expect(bannerLine).toContain(
-			'AUTO_PROCEED STATUS: off (source: plan-or-default)',
-		);
-		expect(bannerLine).toContain('nudge: false');
+		expect(bannerLine).toContain('- auto-proceed: off');
+		expect(bannerLine).toContain('- source: plan-or-default');
+		expect(bannerLine).toContain('- nudge: false');
 	});
 
 	it('banner resolves to "on" with "session" source when autoProceedOverride=true', async () => {
@@ -111,8 +131,9 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 			s.startsWith(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
-		expect(bannerLine).toContain('AUTO_PROCEED STATUS: on (source: session)');
-		expect(bannerLine).toContain('nudge: true');
+		expect(bannerLine).toContain('- auto-proceed: on');
+		expect(bannerLine).toContain('- source: session');
+		expect(bannerLine).toContain('- nudge: true');
 	});
 
 	it('banner resolves to "off" with "session" source when autoProceedOverride=false', async () => {
@@ -126,8 +147,9 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 			s.startsWith(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
-		expect(bannerLine).toContain('AUTO_PROCEED STATUS: off (source: session)');
-		expect(bannerLine).toContain('nudge: true');
+		expect(bannerLine).toContain('- auto-proceed: off');
+		expect(bannerLine).toContain('- source: session');
+		expect(bannerLine).toContain('- nudge: true');
 	});
 
 	it('does NOT inject the banner for non-architect sessions', async () => {
@@ -135,6 +157,25 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		// End the architect session and start a reviewer session instead.
 		swarmState.agentSessions.delete(SESSION_ID);
 		startAgentSession(SESSION_ID, 'reviewer');
+
+		const systemOutput = await invokeHook();
+		const bannerLine = systemOutput.find((s) =>
+			s.startsWith(AUTO_PROCEED_BANNER),
+		);
+		expect(bannerLine).toBeUndefined();
+	});
+
+	it('does NOT inject the banner when a non-architect session has autoProceedOverride set (security boundary)', async () => {
+		await createSwarmFiles();
+		// Even if a non-architect session happens to have autoProceedOverride set,
+		// the banner must NOT be injected. The architect role check at the block
+		// level (line 1190 of system-enhancer.ts) is the gate, not the absence
+		// of the field.
+		swarmState.agentSessions.delete(SESSION_ID);
+		startAgentSession(SESSION_ID, 'reviewer');
+		const session = _internals.swarmState.agentSessions.get(SESSION_ID)!;
+		session.autoProceedOverride = true;
+		session.autoProceedNudgeDone = true;
 
 		const systemOutput = await invokeHook();
 		const bannerLine = systemOutput.find((s) =>
