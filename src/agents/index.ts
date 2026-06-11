@@ -10,6 +10,7 @@ import {
 	AGENT_TOOL_MAP,
 	ALL_AGENT_NAMES,
 	DEFAULT_MODELS,
+	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
@@ -347,6 +348,7 @@ function createSwarmAgents(
 			pluginConfig?.memory?.enabled === true,
 			pluginConfig?.architectural_supervision,
 			pluginConfig?.design_docs?.enabled === true,
+			pluginConfig?.external_skills?.curation_enabled === true,
 		);
 		architect.name = prefixName('architect');
 
@@ -999,6 +1001,20 @@ export function getAgentConfigs(
 				if (memoryTools.length > 0) {
 					allowedTools = Array.from(
 						new Set([...(allowedTools ?? []), ...memoryTools]),
+					);
+				}
+			}
+
+			// Feature-gate: external skill curation tools are only available
+			// when external_skills.curation_enabled is true in the resolved config.
+			if (config?.external_skills?.curation_enabled === true) {
+				const externalSkillTools =
+					EXTERNAL_SKILL_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof EXTERNAL_SKILL_AGENT_TOOL_MAP
+					] ?? [];
+				if (externalSkillTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...externalSkillTools]),
 					);
 				}
 			}

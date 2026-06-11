@@ -1,5 +1,38 @@
 # Changelog
 
+## [7.64.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.63.0...v7.64.0) (2026-06-10)
+
+
+### Features
+
+* **curation:** add external skill curation pipeline with 3-gate validation ([#1211](https://github.com/zaxbysauce/opencode-swarm/issues/1211)) ([0163acb](https://github.com/zaxbysauce/opencode-swarm/commit/0163acb151d5baaf200c55c775f8304e3fae6fc8))
+
+## [7.63.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.62.1...v7.63.0) (2026-06-10)
+
+
+### Features
+
+* **knowledge:** swarm learning system — directives, enforcement, reflection, retrieval (Changes 1–6) ([#1209](https://github.com/zaxbysauce/opencode-swarm/issues/1209)) ([00216d3](https://github.com/zaxbysauce/opencode-swarm/commit/00216d33e8c5aa8dd884663721d61e12ce176403))
+
+## [7.62.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.62.0...v7.62.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **cli:** resolve 20 advisory findings from final council review (issue [#1167](https://github.com/zaxbysauce/opencode-swarm/issues/1167)) ([#1205](https://github.com/zaxbysauce/opencode-swarm/issues/1205)) ([6240ba7](https://github.com/zaxbysauce/opencode-swarm/commit/6240ba71accbc059c304168b2af027d8892ce326))
+
+## [7.62.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.61.0...v7.62.0) (2026-06-10)
+
+
+### Features
+
+* **sdd:** add openspec-compatible spec projection ([61bd9e2](https://github.com/zaxbysauce/opencode-swarm/commit/61bd9e2f602392b2bc8c5701fd198f3436a02599))
+
+
+### Bug Fixes
+
+* **sdd:** address review feedback ([2b26cca](https://github.com/zaxbysauce/opencode-swarm/commit/2b26ccab47f7961ca4a88dfbbb6b80f6fb9c8d7f))
+
 ## [7.61.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.60.0...v7.61.0) (2026-06-09)
 
 

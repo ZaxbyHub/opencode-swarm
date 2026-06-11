@@ -64,7 +64,11 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
-import { validateLesson } from './knowledge-validator.js';
+import {
+	appendUnactionable,
+	validateActionability,
+	validateLesson,
+} from './knowledge-validator.js';
 import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
@@ -1472,6 +1476,23 @@ export async function applyCuratorKnowledgeUpdates(
 			auto_generated: true,
 			project_name: path.basename(directory),
 		};
+		// Layer-5 actionability gate (Change 4): prose "new candidate"
+		// recommendations carry no predicate/scope fields, so they are routed to
+		// the unactionable queue (recoverable by the hardening loop) instead of
+		// the active store. No LLM delegate is available in this path.
+		if (!validateActionability(newEntry).actionable) {
+			try {
+				await appendUnactionable(
+					directory,
+					newEntry,
+					'curator_recommendation_unactionable',
+				);
+			} catch {
+				// queue write is best-effort; the entry is still withheld
+			}
+			skipped++;
+			continue;
+		}
 		await appendKnowledge(knowledgePath, newEntry);
 		applied++;
 		currentLessons.push(lesson);

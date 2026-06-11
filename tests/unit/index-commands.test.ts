@@ -35,7 +35,7 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries.
-		expect(commandKeys.length).toBe(53);
+		expect(commandKeys.length).toBe(57);
 
 		// Verify catch-all exists
 		expect(commands.swarm).toBeDefined();
@@ -54,7 +54,7 @@ describe('Swarm subcommand registration', () => {
 		expect(commands.swarm).toBeDefined();
 		expect(commands.swarm.template).toBe('/swarm $ARGUMENTS');
 		expect(commands.swarm.description).toBe(
-			'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+			'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 		);
 	});
 
@@ -90,6 +90,10 @@ describe('Swarm subcommand registration', () => {
 			'swarm-clarify',
 			'swarm-analyze',
 			'swarm-specify',
+			'swarm-sdd',
+			'swarm-sdd-status',
+			'swarm-sdd-validate',
+			'swarm-sdd-project',
 			'swarm-brainstorm',
 			'swarm-council',
 			'swarm-pr-review',

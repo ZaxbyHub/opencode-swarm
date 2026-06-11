@@ -185,6 +185,57 @@ describe('hive-promoter', () => {
 		expect(hiveEntry.source_project).toBe('projectA');
 	});
 
+	it('promotion carries actionable-directive fields onto the hive entry (regression: Phase 4 review)', async () => {
+		// Previous code rebuilt the hive entry from a fixed field list and DROPPED
+		// the v3 actionability metadata, stripping predicates/scope from
+		// cross-project knowledge. Promotion must carry them.
+		const swarmEntries: SwarmKnowledgeEntry[] = [
+			{
+				...baseSwarmEntry,
+				id: 'swarm-actionable',
+				hive_eligible: true,
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00Z',
+						project_name: 'projectA',
+					},
+					{
+						phase_number: 2,
+						confirmed_at: '2026-01-02T00:00:00Z',
+						project_name: 'projectA',
+					},
+					{
+						phase_number: 3,
+						confirmed_at: '2026-01-03T00:00:00Z',
+						project_name: 'projectA',
+					},
+				],
+				applies_to_agents: ['coder'],
+				forbidden_actions: ['use async iterators in hot paths'],
+				verification_checks: ['grep for "for await" in hot paths'],
+				triggers: ['hot path'],
+				directive_priority: 'high',
+			},
+		];
+		mockReadKnowledge.mockResolvedValue([]);
+
+		await checkHivePromotions(swarmEntries, mockConfig);
+
+		expect(mockAppendKnowledge).toHaveBeenCalledTimes(1);
+		const hiveEntry = mockAppendKnowledge.mock
+			.calls[0][1] as HiveKnowledgeEntry;
+		expect(hiveEntry.applies_to_agents).toEqual(['coder']);
+		expect(hiveEntry.forbidden_actions).toEqual([
+			'use async iterators in hot paths',
+		]);
+		expect(hiveEntry.verification_checks).toEqual([
+			'grep for "for await" in hot paths',
+		]);
+		expect(hiveEntry.triggers).toEqual(['hot path']);
+		expect(hiveEntry.directive_priority).toBe('high');
+	});
+
 	it('Route 1: hive_eligible but only 2 distinct phases does NOT promote', async () => {
 		// Arrange
 		const swarmEntries: SwarmKnowledgeEntry[] = [
@@ -1547,7 +1598,6 @@ describe('Task 3.3: weighted advancement behavior', () => {
 
 		mockReadKnowledge.mockResolvedValue([existingHiveEntry]);
 		mockFindNearDuplicate.mockReturnValue(swarmEntries[0]);
-
 		// Act
 		const result = await checkHivePromotions(swarmEntries, mockConfig);
 

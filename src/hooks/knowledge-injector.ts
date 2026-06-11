@@ -18,14 +18,16 @@ import {
 	readPriorDriftReports,
 } from './curator-drift.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
+import { recordKnowledgeShown } from './knowledge-application.js';
 import {
-	filterHighConfidenceKnowledge,
-	recordKnowledgeShown,
-} from './knowledge-application.js';
+	buildEscalationBriefing,
+	readRecentEscalations,
+} from './knowledge-escalator.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import type { ProjectContext, RankedEntry } from './knowledge-reader.js';
 import { readRejectedLessons } from './knowledge-store.js';
 import type {
+	DirectivePriority,
 	KnowledgeConfig,
 	KnowledgeRetrievalContext,
 	MessageWithParts,
@@ -43,7 +45,7 @@ import { readSwarmFileAsync, safeHook } from './utils.js';
  * appear in natural text or knowledge lessons. Replaces the prior BOOK emoji
  * (📖, U+1F4DA) which was fragile across system encodings.
  */
-const INJECTION_SENTINEL = '\u200c[[KNOWLEDGE-INJECTED]]';
+const INJECTION_SENTINEL = `${String.fromCharCode(0x200c)}[[KNOWLEDGE-INJECTED]]`;
 const defaultSearchKnowledge = searchKnowledge;
 
 /**
@@ -70,12 +72,11 @@ function buildKnowledgeBlock(
 	const lines: string[] = entries.map((entry) => {
 		const tier = entry.tier === 'hive' ? '[H]' : '[S]';
 		const confirmedBy = entry.confirmed_by?.length ?? 0;
-		const confirm =
-			confirmedBy >= 3 ? ' \u2713\u2713' : confirmedBy >= 1 ? ' \u2713' : '';
+		const confirm = confirmedBy >= 3 ? ' ✓✓' : confirmedBy >= 1 ? ' ✓' : '';
 
 		let lessonText = sanitizeLessonForContext(entry.lesson);
 		if (lessonText.length > maxDisplayChars) {
-			lessonText = `${lessonText.slice(0, maxDisplayChars)}\u2026`;
+			lessonText = `${lessonText.slice(0, maxDisplayChars)}…`;
 		}
 
 		// source_project only for hive entries when it differs from current project
@@ -91,7 +92,7 @@ function buildKnowledgeBlock(
 		return `${tier} ${lessonText}${source}${confirm}`;
 	});
 
-	const header = '\ud83d\udcda Lessons:\n';
+	const header = '📚 Lessons:\n';
 
 	// Trim whole entries from end if block exceeds charBudget
 	let block = `${header}\n${lines.join('\n')}`;
@@ -176,12 +177,361 @@ function buildDirectiveBlock(
 /** Sanitizes lesson text to prevent prompt injection into LLM context. */
 const sanitizeLessonForContext = sanitizeContextText;
 
-/** Returns true if this agent is the architect (the sole intended recipient of knowledge injection). */
-function isOrchestratorAgent(agentName: string): boolean {
+/** Marker that uniquely identifies the delegate directive block in a transcript. */
+export const DELEGATE_DIRECTIVE_BLOCK_TAG = '<delegate_knowledge_directives>';
+
+/**
+ * Render a sanitized, deterministic `<delegate_knowledge_directives>` block for
+ * a delegated subagent (Change 1, Task 1.3). Entries are sorted by priority
+ * (critical first) then ID so the block is stable across runs and prompt caches
+ * remain warm. Returns null when there are no entries (no empty wrapper).
+ */
+export function buildDelegateDirectiveBlock(
+	entries: RankedEntry[],
+	cfg: KnowledgeConfig,
+): string | null {
+	if (entries.length === 0) return null;
+	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
+	const FIELD_CAP = 240;
+	const renderList = (items: string[] | undefined): string | null => {
+		if (!items || items.length === 0) return null;
+		const joined = items
+			.map((s) => sanitizeLessonForContext(s))
+			.filter((s) => s.length > 0)
+			.join('; ');
+		if (!joined) return null;
+		return joined.length > FIELD_CAP
+			? `${joined.slice(0, FIELD_CAP)}…`
+			: joined;
+	};
+
+	const sorted = [...entries].sort((a, b) => {
+		const pr =
+			directivePriorityRank(a.directive_priority) -
+			directivePriorityRank(b.directive_priority);
+		if (pr !== 0) return pr;
+		return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+	});
+
+	const lines: string[] = [];
+	lines.push(DELEGATE_DIRECTIVE_BLOCK_TAG);
+	lines.push(
+		'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
+	);
+	lines.push(
+		'ACK CONTRACT: end your FINAL message with one line per CRITICAL directive in this block:',
+	);
+	lines.push('  KNOWLEDGE_APPLIED:<id> — you applied it');
+	lines.push(
+		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you intentionally did not apply it',
+	);
+	lines.push(
+		'  KNOWLEDGE_N_A:<id> reason=<why> — it did not apply to your task',
+	);
+	lines.push('Omitting a critical id is a contract violation.');
+	for (const e of sorted) {
+		const priority = e.directive_priority ?? 'medium';
+		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
+		lines.push(`- id: ${e.id}`);
+		lines.push(`  priority: ${priority}`);
+		lines.push(`  lesson: ${lesson}`);
+		const forbidden = renderList(e.forbidden_actions);
+		if (forbidden) lines.push(`  forbidden: ${forbidden}`);
+		const required = renderList(e.required_actions);
+		if (required) lines.push(`  required: ${required}`);
+		const verification = renderList(e.verification_checks);
+		if (verification) lines.push(`  verification: ${verification}`);
+	}
+	lines.push('</delegate_knowledge_directives>');
+	return lines.join('\n');
+}
+
+/** A directive that was rendered into a delegate block, recovered by parsing. */
+export interface ShownDelegateDirective {
+	id: string;
+	priority: DirectivePriority;
+}
+
+/**
+ * Recover the directive IDs (and priorities) that were rendered into a
+ * `<delegate_knowledge_directives>` block. Used by the ack-collector
+ * (Task 1.5) to reconcile a delegate's ack markers against what was actually
+ * shown — only IDs present here are honored, so a delegate cannot fabricate an
+ * ack for a directive it never received. Returns [] when no block is present.
+ */
+export function parseDelegateDirectiveBlock(
+	text: string,
+): ShownDelegateDirective[] {
+	if (!text || !text.includes(DELEGATE_DIRECTIVE_BLOCK_TAG)) return [];
+	const start = text.indexOf(DELEGATE_DIRECTIVE_BLOCK_TAG);
+	const endTag = '</delegate_knowledge_directives>';
+	const endIdx = text.indexOf(endTag, start);
+	const body = endIdx >= 0 ? text.slice(start, endIdx) : text.slice(start);
+	const out: ShownDelegateDirective[] = [];
+	for (const line of body.split('\n')) {
+		const idM = /^- id:\s*(\S+)\s*$/.exec(line);
+		if (idM) {
+			out.push({ id: idM[1], priority: 'medium' });
+			continue;
+		}
+		const prM = /^\s+priority:\s*(low|medium|high|critical)\s*$/.exec(line);
+		if (prM && out.length > 0) {
+			out[out.length - 1].priority = prM[1] as DirectivePriority;
+		}
+	}
+	return out;
+}
+
+export interface InjectForDelegateParams {
+	directory: string;
+	agent: string;
+	expectedTools?: string[];
+	taskTitle?: string;
+	sessionId?: string;
+	config: KnowledgeConfig;
+	/**
+	 * Phase label recorded on the emitted `delegate_inject` event. Threading the
+	 * real plan phase (rather than the task title) lets the reviewer verdict loop
+	 * and the phase-complete gate window directives by phase (Change 2).
+	 */
+	phase?: string;
+	/** Test seam: override the search function. Defaults to the live one. */
+	searchFn?: typeof searchKnowledge;
+}
+
+export interface InjectForDelegateResult {
+	entries: RankedEntry[];
+	trace_id: string;
+}
+
+/**
+ * Retrieve the subset of active knowledge directives scoped to a delegated
+ * subagent's role + expected tools (Change 1, Task 1.2). Emits a single
+ * `retrieved` event tagged `mode:'delegate_inject'` with the capped, in-scope
+ * entry IDs. Fail-open: any error yields an empty result.
+ */
+export async function injectForDelegate(
+	params: InjectForDelegateParams,
+): Promise<InjectForDelegateResult> {
+	const { directory, agent, taskTitle, sessionId, config } = params;
+	const cap = config.delegate_max_inject_count ?? 8;
+	const expectedTools =
+		params.expectedTools && params.expectedTools.length > 0
+			? params.expectedTools
+			: defaultExpectedToolsForAgent(agent);
+	if (cap <= 0) return { entries: [], trace_id: '' };
+	const role = stripKnownSwarmPrefix(agent).toLowerCase();
+	const firstTool = expectedTools.length > 0 ? expectedTools[0] : undefined;
+	const context: KnowledgeRetrievalContext = {
+		currentPhase: taskTitle ?? '',
+		taskTitle,
+		lastUserMessage: taskTitle,
+		targetAgent: agent,
+		currentTool: firstTool,
+		mode: 'delegation',
+	};
+	// Mirror the architect-path DI seam: prefer an explicit searchFn, else use the
+	// live `searchKnowledge` import binding (which test mocks replace) unless
+	// `_internals.searchKnowledge` was manually overridden.
+	const searchFn =
+		params.searchFn ??
+		(_internals.searchKnowledge === defaultSearchKnowledge
+			? searchKnowledge
+			: _internals.searchKnowledge);
+	try {
+		const search = await searchFn({
+			directory,
+			config,
+			context,
+			mode: 'delegate_inject',
+			agent,
+			sessionId,
+			tier: 'all',
+			applyScopeFilter: true,
+			// We apply the per-delegate OR scope (agent OR tool OR untargeted)
+			// ourselves below, so disable searchKnowledge's agent-only role gate.
+			applyRoleScope: false,
+			maxResults: Math.max(40, cap * 4),
+			emitEvent: false,
+		});
+		const scoped = search.results.filter((e) =>
+			matchesDelegateScope(e, role, expectedTools),
+		);
+		const capped = scoped.slice(0, cap);
+
+		// Emit a single delegate_inject retrieval event with the IDs actually shown.
+		if (capped.length > 0) {
+			const ranks: Record<string, number> = {};
+			const scores: Record<string, number> = {};
+			capped.forEach((e, idx) => {
+				ranks[e.id] = idx + 1;
+				scores[e.id] = e.finalScore;
+			});
+			await _internals.recordKnowledgeEvent(directory, {
+				type: 'retrieved',
+				trace_id: search.trace_id,
+				session_id: sessionId ?? 'unknown',
+				phase: params.phase ?? taskTitle,
+				agent,
+				query: taskTitle ?? '',
+				retrieval_mode: 'delegate_inject',
+				result_ids: capped.map((e) => e.id),
+				ranks,
+				scores,
+			});
+		}
+		return { entries: capped, trace_id: search.trace_id };
+	} catch {
+		return { entries: [], trace_id: '' };
+	}
+}
+
+/**
+ * Delegate-side injection path used by the chat.messages.transform hook when it
+ * fires inside a delegated subagent's session (Change 1, Task 1.1). Builds the
+ * `<delegate_knowledge_directives>` block from the delegation prompt + role and
+ * injects it as a system message. Idempotent with the architect-side prompt
+ * prepend (Task 1.4): if a delegate block already exists in the transcript, this
+ * is a no-op, so the two paths never double-inject. Compaction-resilient: when
+ * the original prompt-borne block was dropped, this re-delivers it. Fail-open.
+ */
+async function injectForDelegateIntoMessages(
+	directory: string,
+	config: KnowledgeConfig,
+	output: { messages?: MessageWithParts[] },
+	agentName: string,
+	sessionId: string | undefined,
+): Promise<void> {
+	if (!output.messages || output.messages.length === 0) return;
+	// Idempotency: if a delegate directive block is already present (delivered by
+	// the architect-side prompt prepend), do not inject a second copy.
+	const alreadyPresent = output.messages.some((m) =>
+		m.parts?.some((p) => p.text?.includes(DELEGATE_DIRECTIVE_BLOCK_TAG)),
+	);
+	if (alreadyPresent) return;
+
+	// The delegation prompt is the most recent user message in the subagent's
+	// session — use it as the retrieval query / task title.
+	let taskTitle: string | undefined;
+	for (let i = output.messages.length - 1; i >= 0; i--) {
+		const m = output.messages[i];
+		if (m.info?.role === 'user') {
+			const t = m.parts
+				?.map((p) => p.text ?? '')
+				.join(' ')
+				.trim();
+			if (t) {
+				taskTitle = t.slice(0, 800);
+				break;
+			}
+		}
+	}
+
+	const { entries } = await injectForDelegate({
+		directory,
+		agent: agentName,
+		expectedTools: defaultExpectedToolsForAgent(agentName),
+		taskTitle,
+		sessionId,
+		config,
+	});
+	const block = buildDelegateDirectiveBlock(entries, config);
+	if (!block) return;
+	injectKnowledgeMessage(output, block);
+}
+
+/** Returns true if this agent is the architect (the sole intended recipient of orchestrator-tier knowledge injection). */
+export function isOrchestratorAgent(agentName: string): boolean {
 	const stripped = stripKnownSwarmPrefix(agentName);
 	// Only the architect receives knowledge injection.
 	// Using an explicit allowlist prevents unintentional injection into future agents.
 	return stripped.toLowerCase() === 'architect';
+}
+
+/**
+ * Delegated subagent roles that receive per-agent directive injection (Change 1).
+ * The architect is intentionally excluded — it goes through the richer
+ * orchestrator injection path (`<swarm_knowledge_directives>`), not the
+ * delegate path (`<delegate_knowledge_directives>`).
+ */
+const DELEGATED_AGENTS: ReadonlySet<string> = new Set([
+	'coder',
+	'reviewer',
+	'test_engineer',
+	'sme',
+	'docs',
+	'designer',
+	'critic',
+	'curator',
+]);
+
+/**
+ * Returns true if this agent is a delegated subagent that should receive the
+ * per-agent directive block. Swarm prefixes (e.g. `mega_coder`) are stripped so
+ * prefixed agent names still match their canonical role.
+ */
+export function isDelegatedAgent(agentName: string): boolean {
+	const stripped = stripKnownSwarmPrefix(agentName).toLowerCase();
+	return DELEGATED_AGENTS.has(stripped);
+}
+
+/**
+ * Best-known tool whitelist per delegated role, used to scope which directives
+ * (by `applies_to_tools`) a delegate should see when the caller does not supply
+ * an explicit expected-tools list. Lower-cased canonical tool names.
+ */
+const DELEGATE_DEFAULT_TOOLS: Readonly<Record<string, readonly string[]>> = {
+	coder: ['edit', 'write', 'patch', 'bash'],
+	reviewer: ['read', 'grep', 'glob'],
+	test_engineer: ['edit', 'write', 'bash', 'read'],
+	sme: ['read', 'grep', 'glob', 'webfetch'],
+	docs: ['read', 'edit', 'write', 'grep'],
+	designer: ['read', 'write', 'edit'],
+	critic: ['read', 'grep', 'glob'],
+	curator: ['read', 'grep', 'glob'],
+};
+
+/** Returns the default expected-tools list for a delegated agent role. */
+export function defaultExpectedToolsForAgent(agentName: string): string[] {
+	const role = stripKnownSwarmPrefix(agentName).toLowerCase();
+	return [...(DELEGATE_DEFAULT_TOOLS[role] ?? [])];
+}
+
+/** Deterministic priority ordering (critical first) for delegate directive blocks. */
+const DIRECTIVE_PRIORITY_RANK: Record<DirectivePriority, number> = {
+	critical: 0,
+	high: 1,
+	medium: 2,
+	low: 3,
+};
+
+function directivePriorityRank(p: DirectivePriority | undefined): number {
+	return DIRECTIVE_PRIORITY_RANK[p ?? 'medium'] ?? 2;
+}
+
+/**
+ * Per-delegate scope match implementing the Change-1 OR semantics: an entry is
+ * in scope for a delegate when it is untargeted (no agent and no tool scope),
+ * OR its `applies_to_agents` includes the delegate's role, OR its
+ * `applies_to_tools` intersects the delegate's expected tools. Swarm prefixes
+ * are stripped on both sides so `mega_coder` matches a bare `coder`.
+ */
+export function matchesDelegateScope(
+	entry: Pick<RankedEntry, 'applies_to_agents' | 'applies_to_tools'>,
+	role: string,
+	expectedTools: readonly string[],
+): boolean {
+	const agents = (entry.applies_to_agents ?? []).map((a) =>
+		stripKnownSwarmPrefix(a).toLowerCase(),
+	);
+	const tools = (entry.applies_to_tools ?? []).map((t) => t.toLowerCase());
+	const untargeted = agents.length === 0 && tools.length === 0;
+	if (untargeted) return true;
+	const normRole = stripKnownSwarmPrefix(role).toLowerCase();
+	if (agents.includes(normRole)) return true;
+	const expected = expectedTools.map((t) => t.toLowerCase());
+	if (tools.some((t) => expected.includes(t))) return true;
+	return false;
 }
 
 /** Inserts the knowledge block just before the last user message (recency position). */
@@ -294,10 +644,23 @@ export function createKnowledgeInjectorHook(
 						? Math.floor(maxInjectChars * 0.5) // moderate: 20–60% — half budget
 						: Math.floor(maxInjectChars * 0.25); // low: 5–20% — quarter budget
 
-			// Agent check — only inject for architect/orchestrator agents
+			// Agent check — architects go through the orchestrator path below;
+			// delegated subagents go through the per-agent directive path; all
+			// other (unrecognized) agents return early.
 			const systemMsg = output.messages.find((m) => m.info?.role === 'system');
 			const agentName = systemMsg?.info?.agent;
-			if (!agentName || !isOrchestratorAgent(agentName)) return;
+			if (!agentName) return;
+			if (isDelegatedAgent(agentName)) {
+				await injectForDelegateIntoMessages(
+					directory,
+					config,
+					output,
+					agentName,
+					systemMsg?.info?.sessionID,
+				);
+				return;
+			}
+			if (!isOrchestratorAgent(agentName)) return;
 
 			// Build retrieval context: extend ProjectContext with v2 task/action signals.
 			const phaseDescription = plan
@@ -358,9 +721,13 @@ export function createKnowledgeInjectorHook(
 				sessionId: systemMsg?.info?.sessionID,
 				emitEvent: false,
 			});
-			const entries = search.results;
-			// Filter to high-confidence entries only (confidence >= 0.8)
-			const filteredEntries = filterHighConfidenceKnowledge(entries);
+			// Change 5 (Task 6.1): the ≥0.8 hard confidence pre-filter is REMOVED.
+			// Confidence already participates in the hybrid score (the metadata
+			// signal in search-knowledge.ts), so a hard pre-filter on top of it
+			// double-counted confidence and was the cold-start killer — a fresh,
+			// in-scope, low-confidence directive could never surface. Ranking +
+			// MMR + the cold-start bonus now govern which entries appear.
+			const filteredEntries = search.results;
 			// Track which IDs we showed so application-tracking can split shown from applied.
 			cachedShownIds = filteredEntries.map((e) => e.id);
 
@@ -451,6 +818,19 @@ export function createKnowledgeInjectorHook(
 			const parts: string[] = [];
 			let remaining = effectiveBudget;
 
+			// 1. Recently-escalated directives (Change 3) — prepended above the
+			// directive block so the architect sees auto-escalations first.
+			try {
+				const escalations = await readRecentEscalations(directory);
+				const escalationBriefing = buildEscalationBriefing(escalations);
+				if (escalationBriefing && escalationBriefing.length <= remaining) {
+					parts.push(escalationBriefing);
+					remaining -= escalationBriefing.length;
+				}
+			} catch {
+				// escalation briefing failures must never break injection
+			}
+
 			// 1a. Actionable directives (highest priority — architect must acknowledge).
 			if (directiveBlock) {
 				parts.push(directiveBlock);
@@ -495,10 +875,10 @@ export function createKnowledgeInjectorHook(
 				const recentRejected = rejected.slice(-3);
 				const rejectedLines = recentRejected.map(
 					(r) =>
-						`  \u26a0\ufe0f REJECTED PATTERN: "${sanitizeLessonForContext(r.lesson).slice(0, 80)}" \u2014 ${sanitizeLessonForContext(r.rejection_reason)}`,
+						`  ⚠️ REJECTED PATTERN: "${sanitizeLessonForContext(r.lesson).slice(0, 80)}" — ${sanitizeLessonForContext(r.rejection_reason)}`,
 				);
 				const rejectedBlock =
-					'\u26a0\ufe0f Previously rejected patterns (do not re-learn):\n' +
+					'⚠️ Previously rejected patterns (do not re-learn):\n' +
 					rejectedLines.join('\n');
 				if (rejectedBlock.length <= remaining) {
 					parts.push(rejectedBlock);
@@ -535,7 +915,9 @@ export function createKnowledgeInjectorHook(
 			// This is fire-and-forget; failures must never propagate.
 			if (cachedShownIds.length > 0) {
 				const phaseLabel = `Phase ${currentPhase}`;
-				const scoreById = new Map(entries.map((e) => [e.id, e.finalScore]));
+				const scoreById = new Map(
+					filteredEntries.map((e) => [e.id, e.finalScore]),
+				);
 				const ranks: Record<string, number> = {};
 				const scores: Record<string, number> = {};
 				cachedShownIds.forEach((id, idx) => {

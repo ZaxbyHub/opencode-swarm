@@ -17,6 +17,9 @@ vi.mock('../../../src/hooks/utils.js', () => ({
 vi.mock('../../../src/config/loader.js', () => ({
 	loadPluginConfig: vi.fn(),
 }));
+vi.mock('../../../src/sdd/effective-spec.js', () => ({
+	readEffectiveSpecSync: vi.fn(),
+}));
 vi.mock('node:fs', () => ({
 	readdirSync: vi.fn(),
 	existsSync: vi.fn(),
@@ -33,12 +36,16 @@ import { listEvidenceTaskIds } from '../../../src/evidence/manager.js';
 import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 // Import mocked modules
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
+import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec.js';
 
 // Type assertions for mocks
 const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof vi.fn>;
 const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
 const mockReadSwarmFileAsync = readSwarmFileAsync as ReturnType<typeof vi.fn>;
 const mockLoadPluginConfig = loadPluginConfig as ReturnType<typeof vi.fn>;
+const mockReadEffectiveSpecSync = readEffectiveSpecSync as ReturnType<
+	typeof vi.fn
+>;
 const mockReaddirSync = readdirSync as ReturnType<typeof vi.fn>;
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockStatSync = statSync as ReturnType<typeof vi.fn>;
@@ -79,12 +86,24 @@ function findCheck(checks: any[], name: string) {
 	return checks.find((c) => c.name === name);
 }
 
+function effectiveSpec(content: string) {
+	return {
+		source: 'swarm',
+		content,
+		hash: 'test-hash',
+		mtime: null,
+		sourcePaths: ['.swarm/spec.md'],
+		warnings: [],
+	};
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
 	mockListEvidenceTaskIds.mockResolvedValue([]);
 	mockReadSwarmFileAsync.mockResolvedValue(null);
 	mockLoadPluginConfig.mockReturnValue(null);
+	mockReadEffectiveSpecSync.mockReturnValue(null);
 	mockReaddirSync.mockReturnValue([]);
 	mockExistsSync.mockReturnValue(true);
 	mockStatSync.mockReturnValue({ isDirectory: () => true });
@@ -598,16 +617,13 @@ describe('checkSpecStaleness', () => {
 
 		expect(check).toBeDefined();
 		expect(check.status).toBe('✅');
-		expect(check.detail).toBe('No spec file present');
+		expect(check.detail).toBe('No effective spec present');
 	});
 
 	it('should pass with spec but no plan', async () => {
-		mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-			if (file === 'spec.md') {
-				return '# My Spec\n\nSome content';
-			}
-			return null;
-		});
+		mockReadEffectiveSpecSync.mockReturnValue(
+			effectiveSpec('# My Spec\n\nSome content'),
+		);
 
 		const result = await getDiagnoseData('/test/dir');
 		const check = findCheck(result.checks, 'Spec Staleness');
@@ -620,12 +636,9 @@ describe('checkSpecStaleness', () => {
 	it('should pass when spec title matches plan title (case-insensitive)', async () => {
 		const plan = makePlan({ title: 'Test Project' });
 		mockLoadPlanJsonOnly.mockResolvedValue(plan);
-		mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-			if (file === 'spec.md') {
-				return '# test project\n\nSome content';
-			}
-			return null;
-		});
+		mockReadEffectiveSpecSync.mockReturnValue(
+			effectiveSpec('# test project\n\nSome content'),
+		);
 
 		const result = await getDiagnoseData('/test/dir');
 		const check = findCheck(result.checks, 'Spec Staleness');
@@ -638,12 +651,9 @@ describe('checkSpecStaleness', () => {
 	it('should fail when spec title mismatches plan title', async () => {
 		const plan = makePlan({ title: 'Test Project' });
 		mockLoadPlanJsonOnly.mockResolvedValue(plan);
-		mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-			if (file === 'spec.md') {
-				return '# Different Title\n\nSome content';
-			}
-			return null;
-		});
+		mockReadEffectiveSpecSync.mockReturnValue(
+			effectiveSpec('# Different Title\n\nSome content'),
+		);
 
 		const result = await getDiagnoseData('/test/dir');
 		const check = findCheck(result.checks, 'Spec Staleness');
@@ -656,12 +666,9 @@ describe('checkSpecStaleness', () => {
 	it('should pass when spec has no H1 title', async () => {
 		const plan = makePlan({ title: 'Test Project' });
 		mockLoadPlanJsonOnly.mockResolvedValue(plan);
-		mockReadSwarmFileAsync.mockImplementation(async (_dir, file) => {
-			if (file === 'spec.md') {
-				return '## Subheading\n\nSome content without H1';
-			}
-			return null;
-		});
+		mockReadEffectiveSpecSync.mockReturnValue(
+			effectiveSpec('## Subheading\n\nSome content without H1'),
+		);
 
 		const result = await getDiagnoseData('/test/dir');
 		const check = findCheck(result.checks, 'Spec Staleness');

@@ -3,7 +3,8 @@ name: pr-readiness
 description: >
   Complete pre-merge checklist for opencode-swarm PRs. Covers lint, build,
   tests, security scans, CI verification, release fragments, invariant audit,
-  placeholder cleanup, review state, and merge conflict detection.
+PR body claim verification, placeholder cleanup, review state, and merge
+conflict detection.
 ---
 
 # PR Readiness Skill
@@ -108,7 +109,38 @@ For each invariant the PR touches, evidence must be a concrete artifact:
 a command output, a passing test, a grep result, or a spec citation.
 "Looks fine" is not evidence.
 
-### 8. No TODOs or placeholder code
+### 8. PR body claim verification
+
+Verify that all quantitative claims in the PR description match the actual
+source code. Bot reviews (Codex, Copilot) and human reviewers trust PR body
+text — inaccurate claims waste review cycles and erode trust.
+
+Check these claim types against source:
+
+- **Test count**: Count actual test cases from test runner output or grep for
+  test declarations only (not `describe` blocks):
+  `grep -rE "^\s*(it|test)\(" --include="*.test.ts" | wc -l`
+  Compare to PR body count.
+- **Pattern/validation count**: If PR claims "12 regex patterns" or "3 validation
+  gates", count the actual constants/patterns in the source file.
+- **Storage format**: If PR claims "individual JSON files" or "JSONL", verify
+  the actual store implementation reads/writes that format.
+- **Tool count**: If PR claims "7 new tools", verify 7 tool files exist with
+  `src/tools/` entries.
+- **Config field names**: If PR shows config examples, verify field names match
+  the Zod schema in `src/config/schema.ts`.
+
+```bash
+# Quick verification commands
+grep -rE "^\s*(it|test)\(" tests/unit/tools/my-feature*.test.ts | wc -l   # actual test count
+grep -c "PATTERN = " src/services/my-validator.ts                          # actual pattern count
+ls src/tools/my-feature-*.ts | wc -l                                       # actual tool count
+```
+
+If any claim is inaccurate, fix the PR body before proceeding. Do not merge
+with incorrect claims.
+
+### 9. No TODOs or placeholder code
 
 Run `placeholder_scan` or `todo_extract` on changed files.
 
@@ -124,7 +156,7 @@ Tool: todo_extract  |  paths: <changed files or directory>
 Expected: no stale TODOs/FIXMEs/HACKs
 ```
 
-### 9. Secret scan clean
+### 10. Secret scan clean
 
 Run `secretscan` to verify no leaked credentials.
 
@@ -135,7 +167,7 @@ Expected: 0 findings
 
 If findings appear, verify they are false positives before suppressing.
 
-### 10. SAST scan clean
+### 11. SAST scan clean
 
 Run `sast_scan` to verify no security vulnerabilities.
 
@@ -144,7 +176,7 @@ Tool: sast_scan  |  directory: <project root>
 Expected: no medium+ severity findings
 ```
 
-### 11. Review state
+### 12. Review state
 
 All required reviews must be approved.
 
@@ -158,7 +190,7 @@ do not block merge — only an unresolved `"CHANGES_REQUESTED"` in
 `latestReviews` will block. If `reviewDecision` is `"CHANGES_REQUESTED"`
 or `"REVIEW_REQUIRED"`, address the outstanding feedback before merging.
 
-### 12. No merge conflicts
+### 13. No merge conflicts
 
 ```bash
 gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
@@ -278,3 +310,13 @@ Symptom: `gh pr view --json mergeable,mergeStateStatus` returns `false` or
 `"DIRTY"` after rebasing.
 Fix: Resolve conflicts locally, commit, push. Re-run this checklist from
 step 1.
+
+### PR body claims inaccurate
+
+Symptom: Bot reviews (Codex/Copilot) flag test count, pattern count, or storage
+format mismatches between PR body and source.
+Fix: Count from actual source files, update PR body to match. Common
+mismatches: test count inflation (counting `describe` blocks instead of `test`
+calls), JSONL vs file-based store confusion, pattern count including auxiliary
+checks that are not regex patterns.
+Prevention: Run step 8 (claim verification) before opening the PR.

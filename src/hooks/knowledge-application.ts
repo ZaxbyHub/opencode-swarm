@@ -37,20 +37,21 @@ export function resolveApplicationLogPath(directory: string): string {
 // ============================================================================
 
 /**
- * Parse explicit knowledge-acknowledgment markers from architect text.
+ * Parse explicit knowledge-acknowledgment markers from architect/delegate text.
  * Recognised forms (case-insensitive, line-anchored or inline):
  *   KNOWLEDGE_APPLIED: <id>
  *   KNOWLEDGE_IGNORED: <id> reason=<reason>
  *   KNOWLEDGE_VIOLATED: <id> reason=<reason>
+ *   KNOWLEDGE_N_A: <id> reason=<reason>   (delegate contract, Change 1)
  */
 export interface ParsedAcknowledgment {
 	id: string;
-	result: 'applied' | 'ignored' | 'violated';
+	result: 'applied' | 'ignored' | 'violated' | 'n_a';
 	reason?: string;
 }
 
 const ACK_PATTERN =
-	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+KNOWLEDGE_)/g;
+	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+KNOWLEDGE_)/g;
 
 export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 	if (!text || typeof text !== 'string') return [];
@@ -64,7 +65,9 @@ export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 				? 'applied'
 				: verb === 'ignored'
 					? 'ignored'
-					: 'violated';
+					: verb === 'n_a'
+						? 'n_a'
+						: 'violated';
 		out.push({ id, result, reason });
 	}
 	return out;
@@ -227,7 +230,13 @@ export async function recordAcknowledgment(
 	ctx: RecordContext,
 ): Promise<void> {
 	try {
-		const result: KnowledgeApplicationResult = ack.result;
+		// `n_a` (not-applicable) is a valid terminal delegate decision: it must be
+		// recorded as an explicit acknowledgment but MUST NOT be penalized as a
+		// violation. The legacy audit log has no 'n_a' result value, so it is
+		// stored as 'acknowledged' there; the authoritative `n_a` distinction
+		// lives in the event log (knowledge-events.jsonl).
+		const result: KnowledgeApplicationResult =
+			ack.result === 'n_a' ? 'acknowledged' : ack.result;
 		await appendAudit(directory, {
 			timestamp: new Date().toISOString(),
 			phase: ctx.phase,
@@ -240,18 +249,17 @@ export async function recordAcknowledgment(
 			result,
 			reason: ack.reason,
 		});
-		const field: CounterField =
-			result === 'applied'
-				? 'applied_explicit_count'
-				: result === 'ignored'
-					? 'ignored_count'
-					: 'violated_count';
-		// Coalesce the result-field bump and the acknowledged_count bump into
-		// a single read+write per file (F-008).
-		await bumpCountersBatch(directory, [
-			{ ids: [ack.id], field },
-			{ ids: [ack.id], field: 'acknowledged_count' },
-		]);
+		// Always bump acknowledged_count. For applied/ignored/violated also bump
+		// the matching outcome counter; `n_a` bumps acknowledged_count only.
+		const bumps: FieldBump[] = [{ ids: [ack.id], field: 'acknowledged_count' }];
+		if (ack.result === 'applied')
+			bumps.push({ ids: [ack.id], field: 'applied_explicit_count' });
+		else if (ack.result === 'ignored')
+			bumps.push({ ids: [ack.id], field: 'ignored_count' });
+		else if (ack.result === 'violated')
+			bumps.push({ ids: [ack.id], field: 'violated_count' });
+		// Coalesce into a single read+write per file (F-008).
+		await bumpCountersBatch(directory, bumps);
 	} catch (err) {
 		warn(
 			`[knowledge-application] recordAcknowledgment failed: ${
@@ -271,7 +279,7 @@ function utcDayKey(d: Date = new Date()): string {
 export function buildAckDedupKey(
 	sessionId: string,
 	id: string,
-	result: KnowledgeApplicationResult,
+	result: KnowledgeApplicationResult | 'n_a',
 	now: Date = new Date(),
 ): string {
 	return `${sessionId}|${id}|${result}|${utcDayKey(now)}`;

@@ -212,6 +212,7 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 | `/swarm specify [description]` | You have a feature idea but no spec yet | Generates `.swarm/spec.md` with FR-### requirements, SC-### success criteria, and user scenarios |
 | `/swarm clarify [topic]` | Your spec has `[NEEDS CLARIFICATION]` markers or vague language | Asks targeted questions one at a time, updates spec.md after each accepted answer |
 | `/swarm analyze` | You have both a spec and a plan and want a coverage check | Maps FR-### requirements to plan tasks, flags gaps (untasked requirements) and gold-plating (untasked work) |
+| `/swarm sdd status|validate|project` | You keep requirements in OpenSpec-compatible files | Inspects `openspec/`, validates the projected effective spec, or materializes `.swarm/spec.md` |
 
 ### The Workflow
 
@@ -223,6 +224,9 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 
 **Importing an existing plan:**
 If you already have a plan (e.g. from a prior tool or another session), you can use `/swarm specify` with the plan pasted in — the architect will reverse-engineer a spec from it, validate the plan's format, and surface any gaps.
+
+**Using OpenSpec-compatible artifacts:**
+Keep current requirements in `openspec/specs/**/spec.md` and pending deltas in `openspec/changes/*/specs/**/spec.md`. When `.swarm/spec.md` is absent, planning, spec hashing, drift checks, linting, and requirement coverage use an effective Swarm spec projected from those artifacts. Run `/swarm sdd validate` before planning and `/swarm sdd project` when you want to materialize the projection into `.swarm/spec.md`.
 
 **Without a spec:**
 Planning works fine without a spec. When you enter PLAN mode without a spec.md, the architect offers to create one first or skip straight to planning. If you skip, planning behavior is identical to prior versions — no behavioral change.

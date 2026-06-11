@@ -30,6 +30,10 @@ export const SWARM_COMMAND_TOOL_COMMANDS = [
 	'memory evaluate',
 	'memory import',
 	'memory migrate',
+	'sdd',
+	'sdd status',
+	'sdd validate',
+	'sdd project',
 	'sync-plan',
 	'export',
 ] as const;
@@ -60,6 +64,9 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
 	'memory stale',
 	'memory export',
 	'memory evaluate',
+	'sdd',
+	'sdd status',
+	'sdd validate',
 	'sync-plan',
 	'export',
 ]);
@@ -81,6 +88,7 @@ export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
 	'memory import',
 	'memory migrate',
 	'memory compact',
+	'sdd project',
 ]);
 
 const NO_ARGS = new Set([
@@ -177,6 +185,33 @@ export function classifySwarmCommandToolUse(
 		};
 	}
 
+	if (canonicalKey === 'sdd status') {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		return {
+			allowed: false,
+			message:
+				'Usage through swarm_command: `/swarm sdd status` or `/swarm sdd status --json`.',
+		};
+	}
+
+	if (canonicalKey === 'sdd validate') {
+		if (args.length === 0) return { allowed: true };
+		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		if (
+			args.length === 2 &&
+			args[0] === '--change' &&
+			/^[A-Za-z0-9_.-]{1,128}$/.test(args[1])
+		) {
+			return { allowed: true };
+		}
+		return {
+			allowed: false,
+			message:
+				'Usage through swarm_command: `/swarm sdd validate`, `/swarm sdd validate --json`, or `/swarm sdd validate --change <id>`.',
+		};
+	}
+
 	if (
 		canonicalKey === 'memory pending' ||
 		canonicalKey === 'memory recall-log' ||
@@ -270,7 +305,8 @@ export function classifySwarmCommandChatFallbackUse(
 		canonicalKey === 'knowledge restore' ||
 		canonicalKey === 'memory import' ||
 		canonicalKey === 'memory migrate' ||
-		canonicalKey === 'memory compact'
+		canonicalKey === 'memory compact' ||
+		canonicalKey === 'sdd project'
 	) {
 		return {
 			allowed: false,

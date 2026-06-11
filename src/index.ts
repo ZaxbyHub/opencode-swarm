@@ -30,6 +30,7 @@ import {
 	KnowledgeConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
+	SkillImproverConfigSchema,
 	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
@@ -66,6 +67,8 @@ import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
+import { collectDelegateAcksAfter } from './hooks/delegate-ack-collector.js';
+import { injectDelegateDirectivesBefore } from './hooks/delegate-directive-injection.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
@@ -79,7 +82,9 @@ import {
 } from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
+import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
+import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
 import {
@@ -612,6 +617,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// v6.17 Knowledge system hooks — fire-and-forget, wrapped in safeHook
 	const knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+	// Shared skill-improver budget — also bounds the micro-reflector's LLM calls.
+	const skillImproverConfig = SkillImproverConfigSchema.parse(
+		config.skill_improver ?? {},
+	);
 	const skillPropagationConfig = SkillPropagationConfigSchema.parse(
 		config.skillPropagation ?? {},
 	);
@@ -976,7 +985,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1110,6 +1119,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm design-docs $ARGUMENTS',
 					description:
 						'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
+				},
+				'swarm-sdd': {
+					template: '/swarm sdd $ARGUMENTS',
+					description:
+						'Use /swarm sdd to inspect OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-status': {
+					template: '/swarm sdd status',
+					description:
+						'Use /swarm sdd status to show effective spec and OpenSpec artifact status',
+				},
+				'swarm-sdd-validate': {
+					template: '/swarm sdd validate $ARGUMENTS',
+					description:
+						'Use /swarm sdd validate to validate OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-project': {
+					template: '/swarm sdd project $ARGUMENTS',
+					description:
+						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
 				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
@@ -1606,6 +1635,23 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 			// ---------------------------------------------------------------
 
+			// 9. Per-delegate knowledge directive injection (Change 1, Task 1.4).
+			//    ADVISORY: prepends the role-scoped <delegate_knowledge_directives>
+			//    block to a Task delegation's prompt so the subagent sees the
+			//    directives + ack contract. Internally fail-open; never blocks.
+			if (knowledgeConfig.enabled) {
+				await injectDelegateDirectivesBefore(
+					ctx.directory,
+					{
+						tool: input.tool,
+						agent: input.agent,
+						sessionID: input.sessionID,
+						args: input.args,
+					},
+					knowledgeConfig,
+				);
+			}
+
 			// v6.29: One-time 50% context pressure warning
 			if (swarmState.lastBudgetPct >= 50) {
 				const pressureSession = ensureAgentSession(
@@ -1651,6 +1697,34 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					console.error(
 						`[DIAG] toolAfter trajectoryLogger done tool=${_toolName}`,
 					);
+				// Per-delegate ack collection (Change 1, Task 1.5): reconcile the
+				// directives shown to a returning subagent against its ack markers.
+				// Fail-open; never blocks. Only acts on Task tool calls.
+				if (knowledgeConfig.enabled) {
+					await safeHook(() =>
+						collectDelegateAcksAfter(ctx.directory, input, output),
+					)(input, output);
+					// Reviewer DIRECTIVE_COMPLIANCE reconciliation (Change 2, Task 2.3):
+					// parse a returning reviewer's per-ID verdicts into knowledge events.
+					await safeHook(() =>
+						collectReviewerVerdictsAfter(ctx.directory, input, output),
+					)(input, output);
+					// Micro-reflector (Change 6, Task 5.1): on a delegate failure/partial
+					// return, emit 0-2 v3 insight candidates from the trajectory +
+					// transcript. Quota-gated; classification-only without an LLM client.
+					await safeHook(() =>
+						microReflectorAfter(
+							ctx.directory,
+							input,
+							output,
+							createCuratorLLMDelegate(ctx.directory, 'phase', input.sessionID),
+							{
+								maxCalls: skillImproverConfig.max_calls_per_day,
+								window: skillImproverConfig.quota_window,
+							},
+						),
+					)(input, output);
+				}
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)

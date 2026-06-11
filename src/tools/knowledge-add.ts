@@ -12,7 +12,12 @@ import type {
 	KnowledgeCategory,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
-import { validateLesson } from '../hooks/knowledge-validator.js';
+import {
+	appendUnactionable,
+	validateActionability,
+	validateActionableFields,
+	validateLesson,
+} from '../hooks/knowledge-validator.js';
 import { loadPlan } from '../plan/manager.js';
 import { warn } from '../utils';
 import { createSwarmTool } from './create-tool.js';
@@ -51,6 +56,32 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				.string()
 				.optional()
 				.describe('Scope of the lesson (global or stack:<name>)'),
+			applies_to_agents: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'Agent roles this lesson applies to (e.g. ["coder"]). REQUIRED (or applies_to_tools) for the lesson to become active.',
+				),
+			applies_to_tools: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'Tool names this lesson applies to (e.g. ["edit","bash"]). REQUIRED (or applies_to_agents) for the lesson to become active.',
+				),
+			required_actions: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'Concrete actions to always take. At least one predicate field (required_actions / forbidden_actions / verification_checks) is REQUIRED for the lesson to become active.',
+				),
+			forbidden_actions: z
+				.array(z.string())
+				.optional()
+				.describe('Concrete actions to never take.'),
+			verification_checks: z
+				.array(z.string())
+				.optional()
+				.describe('Checks a reviewer can run to verify compliance.'),
 		},
 		execute: async (args: unknown, directory: string): Promise<string> => {
 			// Safe args extraction
@@ -117,6 +148,31 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 					? scopeInput
 					: 'global';
 
+			// Parse optional v3 actionability fields (Change 4). Untrusted input:
+			// shape-validated below via validateActionableFields.
+			const strArray = (v: unknown): string[] | undefined =>
+				Array.isArray(v)
+					? v.filter((x): x is string => typeof x === 'string').slice(0, 20)
+					: undefined;
+			const obj =
+				args && typeof args === 'object'
+					? (args as Record<string, unknown>)
+					: {};
+			const actionable = {
+				applies_to_agents: strArray(obj.applies_to_agents),
+				applies_to_tools: strArray(obj.applies_to_tools),
+				required_actions: strArray(obj.required_actions),
+				forbidden_actions: strArray(obj.forbidden_actions),
+				verification_checks: strArray(obj.verification_checks),
+			};
+			const shape = validateActionableFields(actionable);
+			if (!shape.valid) {
+				return JSON.stringify({
+					success: false,
+					error: `invalid actionability fields: ${shape.errors.join('; ')}`,
+				});
+			}
+
 			// Derive project_name from plan title
 			let project_name = '';
 			try {
@@ -148,6 +204,7 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				updated_at: new Date().toISOString(),
 				auto_generated: false,
 				hive_eligible: false,
+				...actionable,
 			};
 
 			// Load config for validation and dedup threshold
@@ -200,6 +257,30 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 					'knowledge_add: dedup check failed — skipping near-duplicate detection',
 					err,
 				);
+			}
+
+			// Layer-5 actionability gate (Change 4): a lesson without >=1 predicate
+			// AND >=1 scope tag is quarantined to the unactionable queue (recoverable
+			// by the hardening loop) rather than activated. The caller gets a hint
+			// so it can immediately retry with the missing fields.
+			const actionability = validateActionability(entry);
+			if (!actionability.actionable) {
+				try {
+					await appendUnactionable(
+						directory,
+						entry,
+						actionability.reason ?? 'unactionable',
+					);
+				} catch {
+					// queue write is best-effort; the entry is still withheld
+				}
+				return JSON.stringify({
+					success: false,
+					quarantined: true,
+					id: entry.id,
+					reason: actionability.reason,
+					hint: 'Provide at least one of required_actions/forbidden_actions/verification_checks AND at least one of applies_to_agents/applies_to_tools, then retry.',
+				});
 			}
 
 			// Append to knowledge store with atomic cap enforcement
