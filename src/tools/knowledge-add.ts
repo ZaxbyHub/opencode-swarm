@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import type { PluginConfig } from '../config/schema.js';
 import {
-	appendKnowledge,
+	appendKnowledgeWithCapEnforcement,
 	findNearDuplicate,
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -206,9 +207,15 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				...actionable,
 			};
 
-			// Validate lesson if validation_enabled is set in config
+			// Load config for validation and dedup threshold
+			let config: PluginConfig | undefined;
+			let dedupThreshold = 0.6; // default
 			try {
-				const { config } = loadPluginConfigWithMeta(directory);
+				const loaded = loadPluginConfigWithMeta(directory);
+				config = loaded.config;
+				dedupThreshold = config.knowledge?.dedup_threshold ?? 0.6;
+
+				// Validate lesson if validation_enabled is set in config
 				if (config.knowledge?.validation_enabled !== false) {
 					const validation = validateLesson(lesson, [], {
 						category,
@@ -226,12 +233,16 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				// Config load failure should not block knowledge storage
 			}
 
-			// Near-duplicate detection
+			// Near-duplicate detection using configured threshold
 			try {
 				const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
 					resolveSwarmKnowledgePath(directory),
 				);
-				const duplicate = findNearDuplicate(lesson, existingEntries, 0.6);
+				const duplicate = findNearDuplicate(
+					lesson,
+					existingEntries,
+					dedupThreshold,
+				);
 				if (duplicate) {
 					return JSON.stringify({
 						success: false,
@@ -272,9 +283,14 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			// Append to knowledge store
+			// Append to knowledge store with atomic cap enforcement
 			try {
-				await appendKnowledge(resolveSwarmKnowledgePath(directory), entry);
+				const maxEntries = config?.knowledge?.swarm_max_entries ?? 100;
+				await appendKnowledgeWithCapEnforcement(
+					resolveSwarmKnowledgePath(directory),
+					entry,
+					maxEntries,
+				);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : 'Unknown error';
 				return JSON.stringify({

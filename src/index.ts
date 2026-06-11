@@ -867,8 +867,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		// Register all agents
 		agent: agents,
 
-		// Register tools
-		tool: buildPluginToolObject(agentDefinitionMap),
+		// Register tools, respecting knowledge.enabled config
+		tool: buildPluginToolObject(agentDefinitionMap, config),
 
 		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
 		// ADVISORY/observer-only — safeHook-wrapped so it can never block event delivery or

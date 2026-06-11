@@ -41,6 +41,8 @@ export const ArgsSchema = z.object({
 	roundNumber: z.number().int().min(1).max(10).optional(),
 	verdicts: z.array(VerdictSchema).min(1).max(5),
 	working_directory: z.string().optional(),
+	provenanceAgentName: z.string().min(1).optional(),
+	provenanceSessionId: z.string().min(1).optional(),
 });
 
 export const submit_phase_council_verdicts: ReturnType<typeof tool> =
@@ -108,6 +110,20 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				.string()
 				.optional()
 				.describe('Working directory where the plan is located'),
+			provenanceAgentName: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(
+					'Agent name that produced this evidence (optional provenance)',
+				),
+			provenanceSessionId: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(
+					'Session ID of the agent that produced this evidence (optional provenance)',
+				),
 		},
 		async execute(args: unknown, directory: string): Promise<string> {
 			const parsed = ArgsSchema.safeParse(args);
@@ -236,7 +252,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				}
 			}
 
-			// ── Blocking concerns gate ────────────────────────────────────────
+			// ── Blocking concerns gate ────────────────────────────────────────────────────────────
 			// Block whenever blockingConcernsCount > 0 regardless of overall verdict:
 			// HIGH/CRITICAL mutation gap findings are injected above and can exist
 			// even on an APPROVE verdict — evidence must not be written in that case.
@@ -256,7 +272,17 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				);
 			}
 
-			writePhaseCouncilEvidence(workingDir, synthesis);
+			// Capture provenance from args
+			const provenance =
+				input.provenanceAgentName || input.provenanceSessionId
+					? {
+							agent_name: input.provenanceAgentName,
+							session_id: input.provenanceSessionId,
+							captured_at: new Date().toISOString(),
+						}
+					: undefined;
+
+			writePhaseCouncilEvidence(workingDir, synthesis, provenance);
 
 			return JSON.stringify(
 				{
@@ -387,6 +413,11 @@ function writePhaseCouncilEvidence(
 		roundNumber: number;
 		allCriteriaMet: boolean;
 	},
+	provenance?: {
+		agent_name?: string;
+		session_id?: string;
+		captured_at?: string;
+	},
 ): void {
 	const evidenceDir = path.join(
 		workingDir,
@@ -423,6 +454,7 @@ function writePhaseCouncilEvidence(
 				})),
 				roundNumber: synthesis.roundNumber,
 				allCriteriaMet: synthesis.allCriteriaMet,
+				...(provenance ? { provenance } : {}),
 			},
 		],
 	};

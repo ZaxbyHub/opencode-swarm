@@ -16,6 +16,8 @@ import type { GateContext, GateResult } from './types';
 export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 	const { phase, dir, sessionID, agentsDispatched, safeWarn } = ctx;
 
+	const gateWarnings: string[] = [];
+
 	// Load QA gate profile to check drift_check flag
 	let driftCheckEnabled = true; // Default: preserve current mandatory behaviour
 	let driftHasEffectiveSpec = false;
@@ -108,6 +110,18 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 					typeof entry.verdict === 'string'
 				) {
 					driftVerdictFound = true;
+
+					// Provenance verification (issue #893 follow-up, F-001)
+					// Advisory warning when provenance is missing
+					if (
+						!entry.provenance ||
+						(!entry.provenance.agent_name && !entry.provenance.session_id)
+					) {
+						const msg = `Drift verification evidence lacks provenance for phase ${phase}. Evidence should include agent_name or session_id for verification.`;
+						gateWarnings.push(msg);
+						safeWarn(`[phase_complete] ${msg}`, undefined);
+					}
+
 					if (entry.verdict === 'approved') {
 						driftVerdictApproved = true;
 					}
@@ -222,7 +236,7 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 			blocked: false,
 			agentsDispatched,
 			agentsMissing: [],
-			warnings: [],
+			warnings: gateWarnings,
 		};
 	} catch (driftError) {
 		// Hard block — drift verification errors prevent phase completion

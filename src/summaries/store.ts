@@ -193,6 +193,7 @@ export function writeSupervisorReport(
 				verdict: report.verdict,
 				findings: report.findings,
 				knowledge_recommendations: report.knowledge_recommendations,
+				...(report.provenance ? { provenance: report.provenance } : {}),
 			},
 		],
 	};
@@ -208,6 +209,11 @@ export interface RawSupervisorEntry {
 	verdict?: string;
 	findings?: unknown[];
 	knowledge_recommendations?: unknown[];
+	provenance?: {
+		agent_name?: string;
+		session_id?: string;
+		captured_at?: string;
+	};
 }
 
 /**

@@ -736,25 +736,31 @@ export async function curateAndStoreSwarm(
 			confidence: computeConfidence(0, true),
 		};
 
-		// Validate the lesson
-		const result = validateLesson(
-			lesson,
-			snapshotPlusNew.map((e) => e.lesson),
-			meta,
-		);
-
-		// If validation failed (severity is 'error'), reject the lesson
-		if (result.valid === false || result.severity === 'error') {
-			const rejectedLesson: RejectedLesson = {
-				id: crypto.randomUUID(),
+		// Validate the lesson if validation_enabled is set in config
+		if (config.validation_enabled !== false) {
+			const result = validateLesson(
 				lesson,
-				rejection_reason: result.reason ?? 'unknown',
-				rejected_at: new Date().toISOString(),
-				rejection_layer: result.layer ?? 1,
-			};
-			await appendRejectedLesson(directory, rejectedLesson);
-			rejected++;
-			continue;
+				snapshotPlusNew.map((e) => e.lesson),
+				meta,
+			);
+
+			// If validation failed (severity is 'error'), reject the lesson
+			if (result.valid === false || result.severity === 'error') {
+				const rejectedLesson: RejectedLesson = {
+					id: crypto.randomUUID(),
+					lesson,
+					rejection_reason: result.reason ?? 'unknown',
+					rejected_at: new Date().toISOString(),
+					rejection_layer: result.layer ?? 1,
+				};
+				await appendRejectedLesson(
+					directory,
+					rejectedLesson,
+					config.rejected_max_entries,
+				);
+				rejected++;
+				continue;
+			}
 		}
 
 		// Check for near-duplicates against snapshot + already-planned new entries

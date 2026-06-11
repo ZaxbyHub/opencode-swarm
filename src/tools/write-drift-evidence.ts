@@ -27,6 +27,10 @@ export interface WriteDriftEvidenceArgs {
 	summary: string;
 	/** Requirement coverage report from req_coverage tool */
 	requirementCoverage?: string;
+	/** Agent name that produced this evidence (optional provenance) */
+	provenanceAgentName?: string;
+	/** Session ID of the agent that produced this evidence (optional provenance) */
+	provenanceSessionId?: string;
 }
 
 /**
@@ -103,6 +107,16 @@ export async function executeWriteDriftEvidence(
 	// Normalize verdict
 	const normalizedVerdict = normalizeVerdict(args.verdict);
 
+	// Build provenance if provided
+	const provenance =
+		args.provenanceAgentName || args.provenanceSessionId
+			? {
+					agent_name: args.provenanceAgentName,
+					session_id: args.provenanceSessionId,
+					captured_at: new Date().toISOString(),
+				}
+			: undefined;
+
 	// Build the evidence entry
 	const evidenceEntry = {
 		type: 'drift-verification',
@@ -110,6 +124,7 @@ export async function executeWriteDriftEvidence(
 		summary: summary.trim(),
 		timestamp: new Date().toISOString(),
 		requirementCoverage: args.requirementCoverage,
+		...(provenance ? { provenance } : {}),
 	};
 
 	// Build the gate-contract format
@@ -278,6 +293,18 @@ export const write_drift_evidence: ToolDefinition = createSwarmTool({
 			.describe(
 				'Requirement coverage report from req_coverage tool (JSON string)',
 			),
+		provenanceAgentName: z
+			.string()
+			.min(1)
+			.optional()
+			.describe('Agent name that produced this evidence (optional provenance)'),
+		provenanceSessionId: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(
+				'Session ID of the agent that produced this evidence (optional provenance)',
+			),
 	},
 	execute: async (args, directory) => {
 		const rawPhase = args.phase !== undefined ? Number(args.phase) : 0;
@@ -289,6 +316,14 @@ export const write_drift_evidence: ToolDefinition = createSwarmTool({
 				requirementCoverage:
 					args.requirementCoverage !== undefined
 						? String(args.requirementCoverage)
+						: undefined,
+				provenanceAgentName:
+					args.provenanceAgentName !== undefined
+						? String(args.provenanceAgentName)
+						: undefined,
+				provenanceSessionId:
+					args.provenanceSessionId !== undefined
+						? String(args.provenanceSessionId)
 						: undefined,
 			};
 			return await executeWriteDriftEvidence(writeDriftEvidenceArgs, directory);

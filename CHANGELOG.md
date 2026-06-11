@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.65.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.64.0...v7.65.0) (2026-06-11)
+
+
+### Features
+
+* **security:** harden architect-relayed evidence tools with provenance verification ([#1199](https://github.com/zaxbysauce/opencode-swarm/issues/1199)) ([2023521](https://github.com/zaxbysauce/opencode-swarm/commit/20235219be420f5cea13568ed63ae399412df223))
+
+
+### Bug Fixes
+
+* **knowledge:** align write-path validation, config semantics, ranking weights, and removal guards ([#1207](https://github.com/zaxbysauce/opencode-swarm/issues/1207)) ([1597485](https://github.com/zaxbysauce/opencode-swarm/commit/15974855ab669cca00438b8e802aa50334e6bda4))
+
 ## [7.64.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.63.0...v7.64.0) (2026-06-10)
 
 

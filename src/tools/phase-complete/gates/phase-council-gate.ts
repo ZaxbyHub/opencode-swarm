@@ -17,6 +17,8 @@ export async function runPhaseCouncilGate(
 	const { phase, dir, sessionID, pluginConfig, agentsDispatched, safeWarn } =
 		ctx;
 
+	const gateWarnings: string[] = [];
+
 	let councilModeEnabled = false;
 
 	try {
@@ -108,6 +110,17 @@ export async function runPhaseCouncilGate(
 										agentsMissing: [],
 										warnings: [],
 									};
+								}
+
+								// Provenance verification (issue #893 follow-up, F-001)
+								// Advisory warning when provenance is missing
+								if (
+									!entry.provenance ||
+									(!entry.provenance.agent_name && !entry.provenance.session_id)
+								) {
+									const msg = `Phase council evidence lacks provenance for phase ${phase}. Evidence should include agent_name or session_id for verification.`;
+									gateWarnings.push(msg);
+									safeWarn(`[phase_complete] ${msg}`, undefined);
 								}
 
 								if (entry.verdict === 'REJECT' || entry.verdict === 'reject') {
@@ -269,5 +282,10 @@ export async function runPhaseCouncilGate(
 		}
 	}
 
-	return { blocked: false, agentsDispatched, agentsMissing: [], warnings: [] };
+	return {
+		blocked: false,
+		agentsDispatched,
+		agentsMissing: [],
+		warnings: gateWarnings,
+	};
 }
