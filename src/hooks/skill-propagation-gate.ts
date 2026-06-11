@@ -556,8 +556,9 @@ export function extractTaskIdFromPrompt(prompt: string): string {
  * SKILLS field.
  *
  * @returns { blocked: boolean; reason: string | null; recommendedSkills?: Array<{ skillPath: string; score: number; usageCount: number }> }
- *          When scoring has computed results, includes `recommendedSkills` with ranked skill recommendations.
- *          When scoring was skipped or errored, `recommendedSkills` is undefined.
+ *          `recommendedSkills` is populated (possibly `[]`) on both the happy path (SKILLS present)
+ *          and the warn path (SKILLS missing or 'none'). It is `undefined` only on early-exit returns
+ *          (unsupported tool/agent/target, no available skills in project, or enforce-blocked).
  */
 export async function skillPropagationGateBefore(
 	directory: string,
@@ -886,7 +887,7 @@ export async function skillPropagationGateBefore(
 
 /** Compliance verdict pattern: SKILL_COMPLIANCE: COMPLIANT|PARTIAL|VIOLATED [— notes] */
 const COMPLIANCE_PATTERN =
-	/SKILL_COMPLIANCE\s*:\s*(COMPLIANT|PARTIAL|VIOLATED)(?:\s*(?:—|-)\s*(.*))?\s*$/i;
+	/SKILL_COMPLIANCE\s*:\s*(COMPLIANT|PARTIAL|VIOLATED)(?:\s*(?:—|-)\s*(.*))? \s*$/i;
 
 /** Skill path pattern: SKILLS_USED_BY_CODER: <path> */
 const CODER_SKILLS_PATTERN = /SKILLS_USED_BY_CODER\s*:\s*(.+)/i;

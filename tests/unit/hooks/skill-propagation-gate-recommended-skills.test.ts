@@ -615,7 +615,6 @@ describe('skillPropagationGateBefore — recommendedSkills field', () => {
 			expect(result.reason).toContain('Skill propagation warning');
 
 			// recommendedSkills must be populated so index.ts can auto-inject
-			expect(result.recommendedSkills).toBeDefined();
 			expect(Array.isArray(result.recommendedSkills)).toBe(true);
 			expect(result.recommendedSkills!.length).toBe(2);
 
