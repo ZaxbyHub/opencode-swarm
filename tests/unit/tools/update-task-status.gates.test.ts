@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { recordAgentDispatch, recordGateEvidence } from '../../../src/gate-evidence';
+import {
+	recordAgentDispatch,
+	recordGateEvidence,
+} from '../../../src/gate-evidence';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import {
 	checkReviewerGate,
