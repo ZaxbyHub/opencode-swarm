@@ -1214,7 +1214,7 @@ ${handoffContent}`;
 								if (sessionAutoProceed) {
 									const resolvedAutoProceed = getResolvedAutoProceed(
 										sessionAutoProceed,
-										plan?.execution_profile?.auto_proceed ?? false,
+										plan?.execution_profile?.auto_proceed,
 									);
 									const source =
 										sessionAutoProceed.autoProceedOverride !== undefined
