@@ -1737,12 +1737,14 @@ export function hasActiveLeanTurbo(sessionID?: string): boolean {
 /**
  * Resolves the effective auto_proceed value for a session.
  * Session override (autoProceedOverride) takes precedence over the plan default.
+ * Accepts `boolean | undefined` for the plan default so callers can pass
+ * `plan?.execution_profile?.auto_proceed` directly without a falsy fallback.
  */
 export function getResolvedAutoProceed(
 	session: AgentSessionState,
-	planAutoProceed: boolean,
+	planAutoProceed: boolean | undefined,
 ): boolean {
-	return session.autoProceedOverride ?? planAutoProceed;
+	return session.autoProceedOverride ?? planAutoProceed ?? false;
 }
 
 // ============================================================================
