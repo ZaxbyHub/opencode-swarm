@@ -219,6 +219,7 @@ export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	designer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	curator_init: ['swarm_memory_recall'],
 	curator_phase: ['swarm_memory_recall'],
+	curator_postmortem: ['swarm_memory_recall'],
 	skill_improver: ['swarm_memory_recall', 'swarm_memory_propose'],
 	spec_writer: ['swarm_memory_recall', 'swarm_memory_propose'],
 };
@@ -296,6 +297,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 	// Curator agents — lightweight read-only analysis (same model family as explorer)
 	curator_init: 'opencode/gpt-5-nano',
 	curator_phase: 'opencode/gpt-5-nano',
+	curator_postmortem: 'opencode/gpt-5-nano',
 
 	// v2: Skill improver — defaults to a strong reasoning model, but is gated
 	// behind skill_improver.enabled and a daily quota (issue #629).
@@ -378,6 +380,10 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 		fallback_models: ['opencode/big-pickle'],
 	},
 	curator_phase: {
+		model: 'opencode/gpt-5-nano',
+		fallback_models: ['opencode/big-pickle'],
+	},
+	curator_postmortem: {
 		model: 'opencode/gpt-5-nano',
 		fallback_models: ['opencode/big-pickle'],
 	},

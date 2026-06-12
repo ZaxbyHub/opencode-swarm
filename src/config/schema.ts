@@ -1139,6 +1139,8 @@ export const CuratorConfigSchema = z.object({
 	init_enabled: z.boolean().default(true),
 	/** Run CURATOR_PHASE at phase boundaries. Default: true (when curator enabled) */
 	phase_enabled: z.boolean().default(true),
+	/** Run CURATOR_POSTMORTEM at project end / finalize. Default: true (when curator enabled) */
+	postmortem_enabled: z.boolean().default(true),
 	/** Maximum tokens for curator summary. Default: 2000 */
 	max_summary_tokens: z.number().min(500).max(8000).default(2000),
 	/** Minimum confidence for knowledge entries to include in curator context. Default: 0.7 */

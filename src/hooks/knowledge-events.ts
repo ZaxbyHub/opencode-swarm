@@ -661,6 +661,96 @@ export function effectiveRetrievalOutcomes(
 }
 
 // ============================================================================
+// Feedback bridge — Knowledge verdict → confidence bumps
+// ============================================================================
+
+const VERDICT_CONFIDENCE_BOOST = 0.03;
+const VERDICT_CONFIDENCE_DECAY = 0.05;
+
+/**
+ * Read receipt events (applied/violated/ignored), aggregate per knowledge entry,
+ * and apply bounded confidence deltas via `bumpKnowledgeConfidenceBatch`.
+ *
+ * Complements `applySkillUsageFeedback` (skill-usage-log.ts) which bridges
+ * skill compliance → confidence. This function bridges raw knowledge verdict
+ * events → confidence, closing the loop where `entry.confidence` was static
+ * after creation regardless of how often the entry was applied or violated.
+ *
+ * Fail-open: errors are logged but never thrown.
+ */
+export async function applyKnowledgeVerdictFeedback(
+	directory: string,
+	options?: { sinceTimestamp?: string },
+): Promise<{ processed: number; bumps: number }> {
+	try {
+		const events = await readKnowledgeEvents(directory);
+
+		const actionable = events.filter((e): e is ReceiptEvent => {
+			if (
+				e.type !== 'applied' &&
+				e.type !== 'violated' &&
+				e.type !== 'ignored'
+			) {
+				return false;
+			}
+			if (
+				options?.sinceTimestamp &&
+				(e as ReceiptEvent).timestamp <= options.sinceTimestamp
+			) {
+				return false;
+			}
+			return true;
+		});
+
+		if (actionable.length === 0) {
+			return { processed: 0, bumps: 0 };
+		}
+
+		const groups = new Map<
+			string,
+			{ applied: number; violated: number; ignored: number }
+		>();
+		for (const event of actionable) {
+			const kid = event.knowledge_id;
+			if (!kid) continue;
+			const g = groups.get(kid) ?? { applied: 0, violated: 0, ignored: 0 };
+			if (event.type === 'applied') g.applied++;
+			else if (event.type === 'violated') g.violated++;
+			else if (event.type === 'ignored') g.ignored++;
+			groups.set(kid, g);
+		}
+
+		const deltas: Array<{ id: string; delta: number }> = [];
+		for (const [id, counts] of groups) {
+			const positives = counts.applied;
+			const negatives = counts.violated + counts.ignored;
+			if (positives === 0 && negatives === 0) continue;
+			const delta =
+				positives > negatives
+					? VERDICT_CONFIDENCE_BOOST
+					: -VERDICT_CONFIDENCE_DECAY;
+			deltas.push({ id, delta });
+		}
+
+		if (deltas.length > 0) {
+			const { bumpKnowledgeConfidenceBatch } = await import(
+				'./knowledge-store.js'
+			);
+			await bumpKnowledgeConfidenceBatch(directory, deltas);
+		}
+
+		return { processed: groups.size, bumps: deltas.length };
+	} catch (err) {
+		warn(
+			`[knowledge-events] applyKnowledgeVerdictFeedback failed (fail-open): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return { processed: 0, bumps: 0 };
+	}
+}
+
+// ============================================================================
 // DI seam
 // ============================================================================
 
@@ -673,6 +763,7 @@ export const _internals: {
 	readKnowledgeCounterRollups: typeof readKnowledgeCounterRollups;
 	effectiveRetrievalOutcomes: typeof effectiveRetrievalOutcomes;
 	recomputeCounters: typeof recomputeCounters;
+	applyKnowledgeVerdictFeedback: typeof applyKnowledgeVerdictFeedback;
 	newTraceId: typeof newTraceId;
 	newEventId: typeof newEventId;
 } = {
@@ -684,6 +775,7 @@ export const _internals: {
 	readKnowledgeCounterRollups,
 	effectiveRetrievalOutcomes,
 	recomputeCounters,
+	applyKnowledgeVerdictFeedback,
 	newTraceId,
 	newEventId,
 };
