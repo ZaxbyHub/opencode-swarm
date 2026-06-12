@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.70.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.69.1...v7.70.0) (2026-06-12)
+
+
+### Features
+
+* **config:** support reasoning and thinking fields in AgentOverrideConfigSchema ([037b9c5](https://github.com/zaxbysauce/opencode-swarm/commit/037b9c5c9b79e846f82ce173aa2645bb8c67632c)), closes [#1220](https://github.com/zaxbysauce/opencode-swarm/issues/1220)
+
+
+### Bug Fixes
+
+* **config:** address PR [#1252](https://github.com/zaxbysauce/opencode-swarm/issues/1252) review findings ([af9a9d6](https://github.com/zaxbysauce/opencode-swarm/commit/af9a9d68d190ea633af4d276601c12231ff41618)), closes [#1220](https://github.com/zaxbysauce/opencode-swarm/issues/1220)
+
 ## [7.69.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.69.0...v7.69.1) (2026-06-12)
 
 
