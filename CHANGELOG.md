@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.67.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.3...v7.67.0) (2026-06-12)
+
+
+### Features
+
+* **pr-monitor:** add background PR monitoring with subscribe/unsubscribe commands ([f5688d4](https://github.com/zaxbysauce/opencode-swarm/commit/f5688d483ed3e17ec9e405392d8632aa1388f959))
+
+
+### Bug Fixes
+
+* **pr-monitor:** address Cubic AI review — docs accuracy, enabled guard, sweep flags, dedup test, hasUnaddressedEvents ([6a4042e](https://github.com/zaxbysauce/opencode-swarm/commit/6a4042e8ae54ea85dc840f2f07896a5a32fd73e3))
+* **pr-monitor:** address PR review feedback — mock.module isolation, dedup, escaping, docs, schema validation ([f5944e3](https://github.com/zaxbysauce/opencode-swarm/commit/f5944e329b628d5f6fa249173c0828223bea4b07))
+* **pr-monitor:** clean up reviewStateMap/circuitBreakerMap on auto-unsubscribe and add JSONL corruption tests ([a0499bf](https://github.com/zaxbysauce/opencode-swarm/commit/a0499bf929c2be0c8f0816eacfba1a1af1a041f0))
+* **pr-monitor:** fix biome format in pr-subscribe.test.ts enabled guard test ([9dc5fc3](https://github.com/zaxbysauce/opencode-swarm/commit/9dc5fc3f427eb79659b7f1f1f13a9a071d693167))
+* **pr-monitor:** validate subscription records at write time in appendRecord() (reviewer fix) ([c674c78](https://github.com/zaxbysauce/opencode-swarm/commit/c674c7860904b73ac9c244ed92395c911fdc584a))
+
 ## [7.66.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.2...v7.66.3) (2026-06-12)
 
 
