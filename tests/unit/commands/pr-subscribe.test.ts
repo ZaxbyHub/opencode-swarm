@@ -248,8 +248,9 @@ describe('handlePrSubscribeCommand', () => {
 		test('returns error when pr_monitor.enabled is explicitly false', async () => {
 			mockSubscribe.mockImplementation(() => Promise.resolve({}));
 
-			prSubscribeInternals.loadPluginConfig =
-				(() => ({ pr_monitor: { enabled: false } })) as typeof prSubscribeInternals.loadPluginConfig;
+			prSubscribeInternals.loadPluginConfig = (() => ({
+				pr_monitor: { enabled: false },
+			})) as typeof prSubscribeInternals.loadPluginConfig;
 
 			const result = await handlePrSubscribeCommand(
 				tempDir,
