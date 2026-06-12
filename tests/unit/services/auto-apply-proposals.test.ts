@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { autoApplyProposals } from '../../../src/services/skill-generator.js';
+import {
+	_internals,
+	autoApplyProposals,
+} from '../../../src/services/skill-generator.js';
 
 function writeProposal(dir: string, slug: string, content: string): void {
 	const proposalsDir = path.join(dir, '.swarm', 'skills', 'proposals');
@@ -141,6 +144,24 @@ describe('autoApplyProposals', () => {
 		expect(result.skipped).toContain('unreadable');
 		expect(result.approved).not.toContain('unreadable');
 		expect(result.rejected).not.toContain('unreadable');
+	});
+
+	it('reports a REJECT as skipped (not rejected) when deletion fails', async () => {
+		// If the proposal file cannot be removed it is still on disk and will be
+		// re-evaluated next cadence, so it must NOT be reported as rejected.
+		writeProposal(dir, 'undeletable', PROPOSAL_CONTENT);
+		const originalUnlink = _internals.unlinkSync;
+		_internals.unlinkSync = () => {
+			throw new Error('EPERM: operation not permitted');
+		};
+		try {
+			const delegate = async () => 'REJECT';
+			const result = await autoApplyProposals(dir, delegate);
+			expect(result.skipped).toContain('undeletable');
+			expect(result.rejected).not.toContain('undeletable');
+		} finally {
+			_internals.unlinkSync = originalUnlink;
+		}
 	});
 
 	it('respects batch limit', async () => {

@@ -854,21 +854,21 @@ export async function autoApplyProposals(
 					result.skipped.push(proposal.slug);
 				}
 			} else if (verdict === 'REJECT') {
-				// Only an explicit REJECT deletes the proposal. Log first so the
-				// deletion is auditable (proposals are regenerable, but silent
-				// loss on LLM misbehavior should still leave a trace).
-				warn(
-					`[skill-generator] auto-apply rejected proposal "${proposal.slug}"; deleting ${proposal.path}`,
-				);
-				result.rejected.push(proposal.slug);
+				// Only an explicit REJECT deletes the proposal. Report `rejected`
+				// ONLY when the file is actually gone; if unlink fails the proposal
+				// is still on disk (and will be re-evaluated next cadence), so it is
+				// reported as `skipped` to keep the result faithful to disk state.
 				try {
 					_internals.unlinkSync(proposal.path);
-				} catch (delErr) {
-					// Surface the failure: the file remains on disk, so a silent
-					// catch would contradict the "deleting …" log above.
 					warn(
-						`[skill-generator] failed to delete rejected proposal ${proposal.path}: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
+						`[skill-generator] auto-apply rejected proposal "${proposal.slug}"; deleted ${proposal.path}`,
 					);
+					result.rejected.push(proposal.slug);
+				} catch (delErr) {
+					warn(
+						`[skill-generator] failed to delete rejected proposal ${proposal.path}; left in place: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
+					);
+					result.skipped.push(proposal.slug);
 				}
 			} else {
 				// Ambiguous or malformed verdict: neither activate nor delete.
