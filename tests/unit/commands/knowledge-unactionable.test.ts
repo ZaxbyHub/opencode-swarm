@@ -9,14 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
-	handleKnowledgeUnactionableCommand,
 	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from '../../../src/commands/knowledge.js';
 
-function makeUnactionable(
-	id: string,
-	overrides: Record<string, unknown> = {},
-) {
+function makeUnactionable(id: string, overrides: Record<string, unknown> = {}) {
 	return {
 		id,
 		tier: 'swarm',

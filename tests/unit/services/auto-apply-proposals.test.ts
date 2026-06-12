@@ -15,13 +15,7 @@ function writeProposal(dir: string, slug: string, content: string): void {
 }
 
 function writeActiveSkill(dir: string, slug: string): void {
-	const activeDir = path.join(
-		dir,
-		'.opencode',
-		'skills',
-		'generated',
-		slug,
-	);
+	const activeDir = path.join(dir, '.opencode', 'skills', 'generated', slug);
 	fs.mkdirSync(activeDir, { recursive: true });
 	fs.writeFileSync(
 		path.join(activeDir, 'SKILL.md'),

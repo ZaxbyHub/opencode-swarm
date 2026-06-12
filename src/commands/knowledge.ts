@@ -276,8 +276,8 @@ export async function handleKnowledgeUnactionableCommand(
 			lines.push(
 				'### Pending hardening',
 				'',
-				'| ID (prefix) | Reason | Quarantined |',
-				'|-------------|--------|-------------|',
+				'| ID (prefix) | Lesson | Reason | Quarantined |',
+				'|-------------|--------|--------|-------------|',
 			);
 			for (const entry of active) {
 				const lesson =
@@ -285,7 +285,7 @@ export async function handleKnowledgeUnactionableCommand(
 						? `${entry.lesson.slice(0, 47)}...`
 						: entry.lesson;
 				lines.push(
-					`| ${entry.id.slice(0, 12)}… | ${entry.unactionable_reason} | ${entry.quarantined_at?.slice(0, 10) ?? 'unknown'} |`,
+					`| ${entry.id.slice(0, 12)}… | ${lesson} | ${entry.unactionable_reason} | ${entry.quarantined_at?.slice(0, 10) ?? 'unknown'} |`,
 				);
 			}
 			lines.push('');

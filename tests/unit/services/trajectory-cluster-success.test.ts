@@ -10,9 +10,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	SUCCESS_SEQUENCE_MIN_STEPS,
 	buildWorkflowProposal,
 	gatherSuccessMotifs,
+	SUCCESS_SEQUENCE_MIN_STEPS,
 	writeSuccessMotifProposals,
 } from '../../../src/services/trajectory-cluster.js';
 

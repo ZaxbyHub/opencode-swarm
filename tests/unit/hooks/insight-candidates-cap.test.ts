@@ -170,9 +170,7 @@ describe('insight candidates FIFO cap', () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(
 			filePath,
-			'not valid json\n{broken\n' +
-				JSON.stringify(makeCandidate(999)) +
-				'\n',
+			'not valid json\n{broken\n' + JSON.stringify(makeCandidate(999)) + '\n',
 			'utf-8',
 		);
 
