@@ -130,6 +130,19 @@ describe('autoApplyProposals', () => {
 		expect(fs.existsSync(proposalPath)).toBe(true);
 	});
 
+	it('skips a proposal whose file cannot be read', async () => {
+		// listSkills lists `<slug>.md` by directory entry name; creating it as a
+		// directory means the entry is listed but readFile throws (EISDIR),
+		// exercising the read-failure → skip path without mocking fs.
+		const proposalsDir = path.join(dir, '.swarm', 'skills', 'proposals');
+		fs.mkdirSync(path.join(proposalsDir, 'unreadable.md'), { recursive: true });
+		const delegate = async () => 'APPROVE';
+		const result = await autoApplyProposals(dir, delegate);
+		expect(result.skipped).toContain('unreadable');
+		expect(result.approved).not.toContain('unreadable');
+		expect(result.rejected).not.toContain('unreadable');
+	});
+
 	it('respects batch limit', async () => {
 		for (let i = 0; i < 8; i++) {
 			writeProposal(dir, `batch-${i}`, PROPOSAL_CONTENT);
