@@ -415,7 +415,7 @@ describe('handlePrEvent', () => {
 
 	test('deduplicates repeated events for same PR+type', async () => {
 		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
+		mockState.listActive.mockReturnValue([
 			makeSubscription({ sessionID: 'sess1' }),
 		]);
 		mockState.getAgentSession.mockReturnValue(session as any);

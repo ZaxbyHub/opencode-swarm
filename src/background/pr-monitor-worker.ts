@@ -609,6 +609,10 @@ export class PrMonitorWorker {
 			snapshotUpdates.isWatching = false;
 		}
 
+		// Set hasUnaddressedEvents flag so the sweep logic protects
+		// subscriptions that have pending events from being swept.
+		snapshotUpdates.hasUnaddressedEvents = events.length > 0;
+
 		return { events, snapshotUpdates, isMerged, isClosed, newReviewDecision };
 	}
 
@@ -708,7 +712,12 @@ export class PrMonitorWorker {
 		}
 
 		// Track merged/closed keys for sweep (idempotent Set.add)
-		if (changes.isMerged || changes.isClosed) {
+		// Only add to sweep set when the corresponding auto-unsubscribe flag is enabled,
+		// so merged/closed PRs are not swept if the user has not opted into auto-unsubscribe.
+		if (
+			(changes.isMerged && this.config.auto_unsubscribe_on_merge) ||
+			(changes.isClosed && this.config.auto_unsubscribe_on_close)
+		) {
 			this.mergedOrClosedKeys.add(`${sub.repoFullName}::${sub.prNumber}`);
 		}
 

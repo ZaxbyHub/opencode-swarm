@@ -29,11 +29,10 @@ Emits `pr.review.approved` and `pr.review.changes_requested` events on transitio
 
 ### Event Subscribers (`src/background/pr-event-subscribers.ts`)
 
-Four subscribers attach to the AutomationEventBus and forward PR events to subscribed sessions:
+Three subscribers attach to the AutomationEventBus and forward PR events to subscribed sessions:
 - `notifyCiFailure` — fires on `pr.ci.failed`
 - `notifyNewComment` — fires on `pr.new.comment`
 - `notifyMergeConflict` — fires on `pr.merge.conflict`
-- `notifyReviewStateChange` — fires on `pr.review.approved` / `pr.review.changes_requested`
 
 All subscribers use a **deduplication token** (event type + PR number) to suppress repeat notifications within a cooldown window.
 

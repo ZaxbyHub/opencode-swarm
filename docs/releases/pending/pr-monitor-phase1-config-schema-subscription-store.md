@@ -5,7 +5,7 @@
 Phase 1 foundation for the GitHub PR Monitor (FR-001). Three infrastructure pieces landed:
 
 ### Config Schema (`src/config/schema.ts`)
-Added `PrMonitorConfigSchema` with 15 fields (lines 1464–1503):
+Added `PrMonitorConfigSchema` with 16 fields (lines 1464–1503):
 - `enabled` (master flag, default false), `poll_interval_seconds`, `max_subscriptions`, `max_prs_per_cycle`, `max_concurrent_pr_polls`, `poll_timeout_ms`, `failure_threshold`, `cooldown_seconds`, `max_cooldown_seconds`, `cleanup_ttl_days`, `auto_unsubscribe_on_merge`, `auto_unsubscribe_on_close`, `notify_ci_failure`, `notify_new_comments`, `notify_merge_conflict`, `auto_pr_feedback`
 - All fields strictly validated with Zod; added to `PluginConfigSchema` as `pr_monitor: PrMonitorConfigSchema.optional()`
 - **Auto-subscribe**: when `pr_monitor.enabled: true`, PR monitoring is available without an additional feature flag
