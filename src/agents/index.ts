@@ -341,15 +341,13 @@ function applyOverrides(
 	const baseAgentName = stripSwarmPrefix(agent.name, swarmPrefix);
 	const reasoningOverride = swarmAgents?.[baseAgentName]?.reasoning;
 	if (reasoningOverride !== undefined) {
-		(
-			agent.config as { reasoning?: typeof reasoningOverride }
-		).reasoning = reasoningOverride;
+		(agent.config as { reasoning?: typeof reasoningOverride }).reasoning =
+			reasoningOverride;
 	}
 	const thinkingOverride = swarmAgents?.[baseAgentName]?.thinking;
 	if (thinkingOverride !== undefined) {
-		(
-			agent.config as { thinking?: typeof thinkingOverride }
-		).thinking = thinkingOverride;
+		(agent.config as { thinking?: typeof thinkingOverride }).thinking =
+			thinkingOverride;
 	}
 
 	return agent;
