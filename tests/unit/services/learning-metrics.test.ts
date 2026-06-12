@@ -608,7 +608,7 @@ describe('learning-metrics', () => {
 			expect(md).toContain('## Escalation Activity');
 			expect(md).toContain('## Entry ROI');
 			expect(md).toContain('## Never Applied');
-			expect(md).toContain('## Time to First Application');
+			expect(md).toContain('## Time to Latest Application');
 		});
 
 		it('formatLearningJSON returns the metrics object unchanged', async () => {

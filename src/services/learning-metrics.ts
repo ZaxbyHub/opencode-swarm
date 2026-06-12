@@ -512,8 +512,7 @@ export function formatLearningMarkdown(metrics: LearningMetrics): string {
 		lines.push('');
 	}
 
-	// Time to First Application
-	lines.push('## Time to First Application', '');
+	lines.push('## Time to Latest Application', '');
 	const applied = metrics.timeToLatestApplication
 		.filter((t) => t.daysToApply !== null)
 		.map((t) => t.daysToApply as number);
