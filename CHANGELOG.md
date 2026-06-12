@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.66.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.2...v7.66.3) (2026-06-12)
+
+
+### Bug Fixes
+
+* **agents:** replace single-slot _swarmAgents with multi-swarm config map ([bf39980](https://github.com/zaxbysauce/opencode-swarm/commit/bf399807ace33a934ed1524592ca6ecf8f67e8a4))
+* resolve PR [#1237](https://github.com/zaxbysauce/opencode-swarm/issues/1237) review findings ([3ced522](https://github.com/zaxbysauce/opencode-swarm/commit/3ced52290bb339ef5ee1b09d5084b6a16ae24414))
+
 ## [7.66.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.1...v7.66.2) (2026-06-11)
 
 
