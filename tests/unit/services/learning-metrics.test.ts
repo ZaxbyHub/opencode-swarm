@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
-import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
 	computeLearningMetrics,
-	formatLearningMarkdown,
 	formatLearningJSON,
+	formatLearningMarkdown,
 	formatLearningSummary,
 } from '../../../src/services/learning-metrics';
 

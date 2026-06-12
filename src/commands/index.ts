@@ -59,13 +59,13 @@ export { handleExportCommand } from './export';
 export { handleFullAutoCommand } from './full-auto';
 export { handleHandoffCommand } from './handoff';
 export { handleHistoryCommand } from './history';
-export { handleLearningCommand } from './learning';
 export {
 	handleKnowledgeListCommand,
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
 } from './knowledge';
+export { handleLearningCommand } from './learning';
 export {
 	handleMemoryCommand,
 	handleMemoryExportCommand,

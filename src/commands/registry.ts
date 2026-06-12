@@ -29,13 +29,13 @@ import { handleFullAutoCommand } from './full-auto.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
 import { handleIssueCommand } from './issue.js';
-import { handleLearningCommand } from './learning.js';
 import {
 	handleKnowledgeListCommand,
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
 } from './knowledge.js';
+import { handleLearningCommand } from './learning.js';
 import {
 	handleMemoryCommand,
 	handleMemoryCompactCommand,

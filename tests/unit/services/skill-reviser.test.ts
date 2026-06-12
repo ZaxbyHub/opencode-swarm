@@ -5,7 +5,7 @@
  * and LLM paths), quota gating, promoted-skill detection, and exported constants.
  */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -21,11 +21,11 @@ import type {
 	ViolationContext,
 } from '../../../src/services/skill-reviser';
 import {
-	MAX_REVISION_CALLS_PER_PHASE,
-	REVISION_VIOLATION_THRESHOLD,
 	_internals,
 	buildDeterministicRevision,
 	getSkillVersion,
+	MAX_REVISION_CALLS_PER_PHASE,
+	REVISION_VIOLATION_THRESHOLD,
 	reviseSkill,
 } from '../../../src/services/skill-reviser';
 
