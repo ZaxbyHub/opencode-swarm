@@ -135,10 +135,7 @@ export async function handleKnowledgeMigrateCommand(
 
 	try {
 		// Run context.md → knowledge.jsonl migration
-		const contextResult = await migrateContextToKnowledge(
-			targetDir,
-			config,
-		);
+		const contextResult = await migrateContextToKnowledge(targetDir, config);
 
 		// Run legacy hive-knowledge.jsonl → shared-learnings.jsonl migration
 		const hiveResult = await migrateHiveKnowledgeLegacy(config);
@@ -175,7 +172,9 @@ export async function handleKnowledgeMigrateCommand(
 					);
 					break;
 				case 'no-context-file':
-					messages.push('ℹ️ No legacy hive-knowledge.jsonl found — nothing to migrate.');
+					messages.push(
+						'ℹ️ No legacy hive-knowledge.jsonl found — nothing to migrate.',
+					);
 					break;
 			}
 		} else if (hiveResult.migrated) {
