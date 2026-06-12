@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.68.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.68.1...v7.68.2) (2026-06-12)
+
+
+### Bug Fixes
+
+* **issue:** use shared parseGitRemoteUrl so /swarm issue resolves proxy and GitHub Enterprise remotes ([b43ed3a](https://github.com/zaxbysauce/opencode-swarm/commit/b43ed3ada062b31b0b400eac9353124a846f5c66))
+
 ## [7.68.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.68.0...v7.68.1) (2026-06-12)
 
 
