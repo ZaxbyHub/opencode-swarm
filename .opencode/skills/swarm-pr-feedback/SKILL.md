@@ -82,6 +82,14 @@ tree:
 
 - If `head_ref` is a remote branch that is not checked out locally, fetch it
   (`git fetch origin <head_ref>`).
+- **Check for parallel work first.** Before checkout, run the
+  [`parallel-work-check`](../generated/parallel-work-check/SKILL.md) protocol to
+  detect concurrent pushes from other agents (e.g., `hermes-pr-review` bot
+  following up, maintainer pushing fixes, parallel swarm work). If remote has new
+  commits: read `git log local..remote`, evaluate whether the parallel work
+  supersedes your planned fixes, and prefer the parallel work if it's more
+  comprehensive (more tests, better edge coverage, clearer error handling).
+  Abort your rebase, take the remote state, then add minor improvements on top.
 - Verify the working tree is clean first (`git status --porcelain`). If uncommitted
   changes exist, stash them or abort to prevent data loss.
 - **Check out the head branch locally.** Feedback verification reads the working-tree

@@ -238,6 +238,73 @@ When the PR has merge conflicts:
 - ✗ Pushing resolution without running tests on the merged result
 - ✗ Reviewing a conflicted PR without resolving first — review effort is wasted if the merge changes the code
 
+## Phase 0B-bis: Pre-Fix Parallel Work Check
+
+When the review surfaces findings that need fixes, and before dispatching
+coder for fix work, re-check for **parallel work** since the last fetch. The PR
+author, the bot reviewer, or another swarm may have pushed commits while you
+were reviewing.
+
+### Step 1 — Refetch and compare
+
+```bash
+git fetch origin <pr-branch>
+git log local..origin/<pr-branch> --oneline
+```
+
+### Step 2 — Evaluate new commits
+
+For each new commit on the remote:
+
+1. **Read the commit message and diff.** Use `git show <commit> --stat` to see
+   file scope, then `git show <commit> -- <file>` to see the actual changes.
+2. **Compare against your planned fixes:**
+   - Does the remote commit touch the same files your coder delegation is about to
+     modify?
+   - Does the remote commit apply a different approach to the same finding?
+   - Does the remote commit include more comprehensive fixes (more tests, better
+     edge coverage, cleaner error handling)?
+3. **Default stance: prefer the parallel work if it supersedes your plan.** Run
+   the [`parallel-work-check`](../generated/parallel-work-check/SKILL.md)
+   protocol for the formal decision template.
+
+### Step 3 — Three outcomes
+
+- **Parallel work supersedes:** Abort your rebase, `git reset --hard
+  origin/<pr-branch>` to take the remote state, then re-verify that all your
+  findings are addressed. If the remote missed any, add minor improvements on
+  top. Do NOT waste effort redoing work the parallel agent already did better.
+- **Parallel work complements:** Cherry-pick or merge the remote commits into
+  your local branch, then continue with your fix.
+- **Parallel work unrelated:** Continue with your planned fix.
+
+### Anti-patterns
+
+- ✗ Pushing your fix without checking if the remote already fixed it — causes
+  duplicate work and may even fail the push if the commits conflict
+- ✗ Force-pushing over parallel work because "I started this first" — the
+  parallel agent may have access to context you don't (different swarm
+  configuration, different model, different time budget)
+- ✗ Blindly taking remote work without verifying it's actually better — the
+  parallel work may be incomplete or take a different approach that doesn't
+  match the original finding's intent
+
+### Example: parallel swarm superseded local fix work
+
+```
+PARALLEL WORK CHECK (pre-fix):
+- Branch: copilot/fix-legacy-hive-data-migration
+- Local HEAD: 3c04997c fix: resolve PR #1238 review findings
+- Remote HEAD: 79d7ec64 fix(knowledge-migrator): harden legacy migration loop
+- Diverged: yes (remote is 2 commits ahead with more comprehensive fix)
+- New commits on remote: 2
+- Parallel swarm work detected: yes (different author)
+- Decision: abandon-use-remote
+- Rationale: Remote added 17 unit tests + try/catch error handling that
+  surpassed my planned batch-rewrite. Verified by re-running the test suite:
+  remote has 25/25 passing, my local plan would have produced 9/9.
+```
+
 ---
 
 # Default Review Workflow
