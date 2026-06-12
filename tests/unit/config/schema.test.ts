@@ -169,6 +169,39 @@ describe('AgentOverrideConfigSchema', () => {
 		}
 	});
 
+	it('strips unknown inner fields from reasoning/thinking objects (issue #1220)', () => {
+		// Zod's default strip behavior is recursive: it strips unknown keys at
+		// every level of a nested object. The top-level "still strips unknown
+		// keys" test above covers the outer AgentOverrideConfigSchema level;
+		// this test covers the nested AgentReasoningConfigSchema /
+		// AgentThinkingConfigSchema levels. Without this guard, a future
+		// refactor that swaps in `.passthrough()` (or a custom transformer)
+		// on the inner schemas would silently leak typos such as
+		// `effort: 'hgh'`-style misspellings or future provider-specific
+		// options into the agent factory.
+		const result = AgentOverrideConfigSchema.safeParse({
+			reasoning: { effort: 'high', custom_inner: 'should be stripped' },
+			thinking: {
+				type: 'enabled',
+				budget_tokens: 10000,
+				extra_inner: 'should be stripped',
+			},
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data).toEqual({
+				reasoning: { effort: 'high' },
+				thinking: { type: 'enabled', budget_tokens: 10000 },
+			});
+			expect(
+				(result.data?.reasoning as Record<string, unknown>)?.custom_inner,
+			).toBeUndefined();
+			expect(
+				(result.data?.thinking as Record<string, unknown>)?.extra_inner,
+			).toBeUndefined();
+		}
+	});
+
 	// Fallback models validation tests
 	it('parses without side effects when model is set without fallback_models', () => {
 		// The schema no longer emits console.warn itself; the advisory is collected

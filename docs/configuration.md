@@ -60,6 +60,8 @@ Each entry under `agents` accepts the following optional fields:
 | `temperature` | `0–2` | Sampling temperature override. |
 | `disabled` | `boolean` | Skip this agent entirely (it will not be registered). |
 | `fallback_models` | `string[]` (max 3) | Models to retry on transient errors (429/503/timeout). |
+| `reasoning` | `{ effort?: "low" \| "medium" \| "high" \| "max" }` | Provider-native extended-reasoning block. Forwarded to the OpenCode SDK's `AgentConfig` as-is. See [Why `reasoning` is separate from `variant`](#why-reasoning-and-thinking-are-separate-from-variant) below. |
+| `thinking` | `{ type?: "enabled" \| "disabled"; budget_tokens?: number (positive int) }` | Provider-native extended-thinking block. Forwarded to the OpenCode SDK's `AgentConfig` as-is. See [Why `reasoning` is separate from `variant`](#why-reasoning-and-thinking-are-separate-from-variant) below. |
 
 ### Why `variant` is its own field
 
@@ -108,6 +110,25 @@ If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medi
   }
 }
 ```
+
+### Why `reasoning` and `thinking` are separate from `variant`
+
+`variant` is the swarm plugin's own reasoning-effort field. It is forwarded to the OpenCode SDK as `variant` (a generic OpenCode hook) and is interpreted by OpenCode's agent loader. `reasoning` and `thinking` are **provider-native** extended-reasoning / extended-thinking blocks (e.g. Anthropic Claude's `reasoning.effort` and `thinking.budget_tokens`). They are passed through to the OpenCode SDK's `AgentConfig` and consumed by the provider's native API. The two mechanisms are independent and can be set on the same agent — users control how their provider interprets each:
+
+```json
+{
+  "agents": {
+    "critic": {
+      "model": "anthropic/claude-opus-4-6",
+      "variant": "high",
+      "reasoning": { "effort": "high" },
+      "thinking": { "type": "enabled", "budget_tokens": 10000 }
+    }
+  }
+}
+```
+
+Invalid `reasoning.effort` values (anything outside `low | medium | high | max`) and non-positive `thinking.budget_tokens` values will produce a Zod parse error at config load. Unknown fields (typos, future provider-specific options) are stripped by Zod's default behavior — they will not reach the agent factory.
 
 ## `default_agent` — selecting which agents are exposed as primary
 
