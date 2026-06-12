@@ -2298,8 +2298,8 @@ describe('worktreePath persisted to durable state', () => {
 		// Load durable state from disk and verify worktreePath/branchName are persisted
 		const durableState = leanState.loadLeanTurboRunState(tmpDir, SESSION_ID);
 		expect(durableState).not.toBeNull();
-		const persistedLane = durableState!.lanes.find(
-			(l) => l.laneId && l.laneId.startsWith('lane-'),
+		const persistedLane = durableState!.lanes.find((l) =>
+			l.laneId?.startsWith('lane-'),
 		);
 		expect(persistedLane).toBeDefined();
 		expect(persistedLane!.worktreePath).toBe(worktreePath);
@@ -3032,8 +3032,8 @@ describe('transient worktree provision retry', () => {
 		// Durable state should reflect the lane failure
 		const durableState = leanState.loadLeanTurboRunState(tmpDir, SESSION_ID);
 		expect(durableState).not.toBeNull();
-		const persistedLane = durableState!.lanes.find(
-			(l) => l.laneId && l.laneId.startsWith('lane-'),
+		const persistedLane = durableState!.lanes.find((l) =>
+			l.laneId?.startsWith('lane-'),
 		);
 		expect(persistedLane).toBeDefined();
 		expect(persistedLane!.status).toBe('failed');
