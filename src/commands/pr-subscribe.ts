@@ -79,6 +79,14 @@ export async function handlePrSubscribeCommand(
 		const config = _internals.loadPluginConfig(directory);
 		const prMonitorConfig = config.pr_monitor;
 
+		if (!prMonitorConfig?.enabled) {
+			return [
+				'Error: PR Monitor is not enabled.',
+				'',
+				'Set `pr_monitor.enabled: true` in your opencode config to enable.',
+			].join('\n');
+		}
+
 		await _internals.subscribe(directory, {
 			sessionID,
 			prNumber: prInfo.number,

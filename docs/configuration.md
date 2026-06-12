@@ -359,7 +359,7 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 - `getMergeState(prNumber, repoFullName, cwd)` — fetches mergeable state and mergeStateStatus via `gh pr view --json`
 - `getPRReviewState(prNumber, repoFullName, cwd)` — fetches review decision and pending reviewer count via `gh pr view --json`; returns `ReviewStateResult` (`reviewDecision`, `reviewRequestCount`)
 
-All synchronous wrappers use `_internals.ghExec`; the async wrappers (`getPRStatus`, `getPRComments`, `getMergeState`, `getPRReviewState`) use `_internals.ghExecAsync` — both share the same DI seam pattern (see `gitignore-warning.ts:_internals`).
+All five wrappers (`getPRStatus`, `getPRChecks`, `getPRComments`, `getMergeState`, `getPRReviewState`) use `_internals.ghExecAsync` — they share the same DI seam pattern (see `gitignore-warning.ts:_internals`). No synchronous `ghExec`-based wrappers are currently exposed for PR monitoring.
 
 **Polling worker** (`src/background/pr-monitor-worker.ts`): `PrMonitorWorker` is a standalone background class with start/stop/dispose lifecycle. It implements **two-phase change detection**:
 1. `computeChanges()` — fetches current PR state (status, comments, merge, review) via async gh wrappers, then diffs against the last stored snapshot to produce a list of events and snapshot updates
@@ -367,11 +367,10 @@ All synchronous wrappers use `_internals.ghExec`; the async wrappers (`getPRStat
 
 The worker is **lazily started** on first subscription (gated by `pr_monitor.enabled` + `gh` availability check). It is **cooperative** — each poll cycle is interruptible at 6 guard points via a `CancellationToken`. Plugin wiring in `src/index.ts` registers signal handlers (SIGTERM/SIGINT) and ensures the worker is stopped on shutdown. Stale subscriptions are removed via `sweepStale()` on each cycle.
 
-**Event subscribers** (`src/background/pr-event-subscribers.ts`): four subscribers attach to the AutomationEventBus and deliver PR advisories to subscribed sessions:
+**Event subscribers** (`src/background/pr-event-subscribers.ts`): three subscribers attach to the AutomationEventBus and deliver PR advisories to subscribed sessions:
 - CI failure/passed notifications
 - New comment alerts
 - Merge conflict detection
-- Review state transitions (approved/changes requested)
 
 ### todo_gate
 

@@ -229,26 +229,36 @@ describe('handlePrSubscribeCommand', () => {
 			});
 		});
 
-		test('maxSubscriptions is undefined when pr_monitor config is absent', async () => {
+		test('returns error when pr_monitor config is absent', async () => {
 			mockSubscribe.mockImplementation(() => Promise.resolve({}));
 
 			// Override mock to return config without pr_monitor
 			prSubscribeInternals.loadPluginConfig =
 				(() => ({})) as typeof prSubscribeInternals.loadPluginConfig;
 
-			await handlePrSubscribeCommand(
+			const result = await handlePrSubscribeCommand(
 				tempDir,
 				['owner/repo#10'],
 				'session-no-config',
 			);
 
-			expect(mockSubscribe).toHaveBeenCalledWith(tempDir, {
-				sessionID: 'session-no-config',
-				prNumber: 10,
-				repoFullName: 'owner/repo',
-				prUrl: 'https://github.com/owner/repo/pull/10',
-				maxSubscriptions: undefined,
-			});
+			expect(result).toContain('PR Monitor is not enabled');
+			expect(mockSubscribe).not.toHaveBeenCalled();
+		});
+		test('returns error when pr_monitor.enabled is explicitly false', async () => {
+			mockSubscribe.mockImplementation(() => Promise.resolve({}));
+
+			prSubscribeInternals.loadPluginConfig =
+				(() => ({ pr_monitor: { enabled: false } })) as typeof prSubscribeInternals.loadPluginConfig;
+
+			const result = await handlePrSubscribeCommand(
+				tempDir,
+				['owner/repo#11'],
+				'session-disabled',
+			);
+
+			expect(result).toContain('PR Monitor is not enabled');
+			expect(mockSubscribe).not.toHaveBeenCalled();
 		});
 	});
 
