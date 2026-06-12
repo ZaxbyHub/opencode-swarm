@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.68.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.67.0...v7.68.0) (2026-06-12)
+
+
+### Features
+
+* **learning+skills:** add /swarm learning metrics and violation-informed skill revision ([3e1d4d5](https://github.com/zaxbysauce/opencode-swarm/commit/3e1d4d5358f8820c9a30224d61e96707823072f4))
+
+
+### Bug Fixes
+
+* **lint:** apply biome formatting and fix noControlCharactersInRegex ([a072d24](https://github.com/zaxbysauce/opencode-swarm/commit/a072d2481418e997484a36518a27fd0b112d13c1))
+* **lint:** fix biome organizeImports in all PR files ([de9a2ac](https://github.com/zaxbysauce/opencode-swarm/commit/de9a2ac7230719835884488ccfb7c77d27a42fd6))
+* **metrics:** rename Time to First Application heading to match field ([72d581b](https://github.com/zaxbysauce/opencode-swarm/commit/72d581bfe1d69a67769e3a8c802cfb059a28ea87))
+* **mutation-gate:** address code review feedback — flag filtering and schema docs ([bbc3083](https://github.com/zaxbysauce/opencode-swarm/commit/bbc308300c3d8f2c75923e0d6c9d8741e8fa39cf))
+* **mutation-gate:** close F-001 through F-004 from PR review ([2f9bbef](https://github.com/zaxbysauce/opencode-swarm/commit/2f9bbefd116f51b213b755269b24942b06595076))
+* **mutation-gate:** security hardening, testFiles bug fix, schema unification, and test coverage ([7f94c08](https://github.com/zaxbysauce/opencode-swarm/commit/7f94c085c76ce5ad2179f83e017d88993a9a3cc8))
+* **review:** address PR [#1266](https://github.com/zaxbysauce/opencode-swarm/issues/1266) review feedback and biome lint ([06791bb](https://github.com/zaxbysauce/opencode-swarm/commit/06791bbe47e22dbd43793b629ef830ce788f35f3))
+
 ## [7.67.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.66.3...v7.67.0) (2026-06-12)
 
 
