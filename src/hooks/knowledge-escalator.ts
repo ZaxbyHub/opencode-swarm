@@ -19,15 +19,20 @@ import {
 	recordKnowledgeEvent,
 } from './knowledge-events.js';
 import {
+	jaccardBigram,
+	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
+	wordBigrams,
 } from './knowledge-store.js';
 import type {
 	DirectiveEscalationRecord,
 	DirectivePriority,
 	KnowledgeEntryBase,
 } from './knowledge-types.js';
+
+const NEAR_DUPLICATE_THRESHOLD = 0.6;
 
 export const ESCALATION_WINDOW_DAYS = 30;
 export const ESCALATION_THRESHOLD = 2;
@@ -63,12 +68,55 @@ export async function maybeEscalateOnViolation(
 	now: Date = new Date(),
 ): Promise<EscalationResult> {
 	try {
-		const count = await countEntryViolationsInWindow(
+		let count = await countEntryViolationsInWindow(
 			directory,
 			entryId,
 			ESCALATION_WINDOW_DAYS,
 			now,
 		);
+
+		// Co-count violations on semantically near-duplicate entries so
+		// equivalent lessons under different IDs accumulate toward escalation.
+		if (count < ESCALATION_THRESHOLD) {
+			try {
+				const allEntries: KnowledgeEntryBase[] = [];
+				allEntries.push(
+					...(await readKnowledge<KnowledgeEntryBase>(
+						resolveSwarmKnowledgePath(directory),
+					)),
+				);
+				const hivePath = resolveHiveKnowledgePath();
+				if (existsSync(hivePath)) {
+					allEntries.push(
+						...(await readKnowledge<KnowledgeEntryBase>(hivePath)),
+					);
+				}
+				const target = allEntries.find((e) => e.id === entryId);
+				if (target) {
+					const seen = new Set<string>([entryId]);
+					const targetBigrams = wordBigrams(target.lesson);
+					for (const e of allEntries) {
+						if (seen.has(e.id)) continue;
+						seen.add(e.id);
+						if (
+							jaccardBigram(targetBigrams, wordBigrams(e.lesson)) >=
+							NEAR_DUPLICATE_THRESHOLD
+						) {
+							count += await countEntryViolationsInWindow(
+								directory,
+								e.id,
+								ESCALATION_WINDOW_DAYS,
+								now,
+							);
+							if (count >= ESCALATION_THRESHOLD) break;
+						}
+					}
+				}
+			} catch {
+				// fail-open: near-dup co-counting is best-effort
+			}
+		}
+
 		if (count < ESCALATION_THRESHOLD) {
 			return { escalated: false, entryId, violationsInWindow: count };
 		}

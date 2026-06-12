@@ -51,6 +51,7 @@ import {
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
+import { handlePostMortemCommand } from './post-mortem.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
@@ -534,6 +535,18 @@ export const COMMAND_REGISTRY = {
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,
+	},
+	'post-mortem': {
+		handler: (ctx) =>
+			handlePostMortemCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run the post-mortem agent: project-end synthesis, queue triage, and final curation pass',
+		details:
+			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed.',
+		args: '--force',
+		category: 'core',
 	},
 	concurrency: {
 		handler: (ctx) =>

@@ -173,7 +173,9 @@ export function resolveFallbackModel(
 	// Only inherit if the curator agent does NOT have fallback_models key at all
 	if (
 		fallbackModels === undefined &&
-		(agentBaseName === 'curator_init' || agentBaseName === 'curator_phase')
+		(agentBaseName === 'curator_init' ||
+			agentBaseName === 'curator_phase' ||
+			agentBaseName === 'curator_postmortem')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
@@ -605,6 +607,21 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		curatorPhase.name = prefixName('curator_phase');
 		agents.push(applyOverrides(curatorPhase, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5e. Create Curator Post-mortem agent
+	if (!isAgentDisabled('curator_postmortem', swarmAgents, swarmPrefix)) {
+		const curatorPostmortemPrompts = getPrompts('curator_postmortem');
+		const curatorPostmortem = createCuratorAgent(
+			swarmAgents?.curator_postmortem?.model ?? getModel('explorer'),
+			curatorPostmortemPrompts.prompt,
+			curatorPostmortemPrompts.appendPrompt,
+			'curator_postmortem' as CuratorRole,
+		);
+		curatorPostmortem.name = prefixName('curator_postmortem');
+		agents.push(
+			applyOverrides(curatorPostmortem, swarmAgents, swarmPrefix, quiet),
+		);
 	}
 
 	// 5f. v2: skill_improver — issue #629. Registered when enabled in config.

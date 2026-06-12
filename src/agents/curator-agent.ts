@@ -1,7 +1,14 @@
 import type { AgentDefinition } from './architect';
-import { CURATOR_INIT_PROMPT, CURATOR_PHASE_PROMPT } from './explorer.js';
+import {
+	CURATOR_INIT_PROMPT,
+	CURATOR_PHASE_PROMPT,
+	CURATOR_POSTMORTEM_PROMPT,
+} from './explorer.js';
 
-export type CuratorRole = 'curator_init' | 'curator_phase';
+export type CuratorRole =
+	| 'curator_init'
+	| 'curator_phase'
+	| 'curator_postmortem';
 
 const ROLE_CONFIG: Record<
 	CuratorRole,
@@ -18,6 +25,12 @@ const ROLE_CONFIG: Record<
 		description:
 			'Curator (Phase). Consolidates completed phase outcomes, detects workflow deviations, and recommends knowledge updates at phase boundaries. Read-only.',
 		prompt: CURATOR_PHASE_PROMPT,
+	},
+	curator_postmortem: {
+		name: 'curator_postmortem',
+		description:
+			'Curator (Post-mortem). Synthesizes project-end evidence into an improvement agenda, consolidates knowledge, and triages pending proposals. Read-only.',
+		prompt: CURATOR_POSTMORTEM_PROMPT,
 	},
 };
 
