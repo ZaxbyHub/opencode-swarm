@@ -25,6 +25,7 @@ export type MutationOutcome =
  */
 export const ALLOWED_TEST_RUNNERS = new Set([
 	'bun',
+	'bunx',
 	'node',
 	'npx',
 	'npm',

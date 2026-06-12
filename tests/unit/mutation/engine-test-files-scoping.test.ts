@@ -9,29 +9,24 @@
  *   - testCommand allowlist validation via executeMutationSuite
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as realChildProcess from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
-const mockSpawnSync = mock(() => ({
-	status: 0,
-	stderr: Buffer.from(''),
-	stdout: Buffer.from('Tests passed'),
-}));
-
-mock.module('node:child_process', () => ({
-	...realChildProcess,
-	spawnSync: mockSpawnSync,
-}));
-
 import {
+	_internals,
 	executeMutation,
 	executeMutationSuite,
 	type MutationPatch,
 	ALLOWED_TEST_RUNNERS,
 	validateTestCommand,
 } from '../../../src/mutation/engine.js';
+
+const mockSpawnSync = mock((_cmd: string, _args: string[]) => ({
+	status: 0,
+	stderr: Buffer.from(''),
+	stdout: Buffer.from('Tests passed'),
+}));
 
 function makePatch(id = 'mut-001'): MutationPatch {
 	return {
@@ -45,15 +40,16 @@ function makePatch(id = 'mut-001'): MutationPatch {
 
 describe('executeMutation — testFiles scoping (bug fix)', () => {
 	let tempDir: string;
+	let savedSpawnSync: typeof _internals.spawnSync;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-scoping-')),
 		);
+		savedSpawnSync = _internals.spawnSync;
 		mockSpawnSync.mockClear();
-		// Default: git apply succeeds, test succeeds (mutant survived)
 		mockSpawnSync.mockImplementation(
-			(cmd: string, args: string[]) => {
+			(cmd: string, _args: string[]) => {
 				if (cmd === 'git') {
 					return { status: 0, stderr: Buffer.from(''), stdout: Buffer.from('') };
 				}
@@ -64,10 +60,11 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 				};
 			},
 		);
+		_internals.spawnSync = mockSpawnSync as unknown as typeof _internals.spawnSync;
 	});
 
 	afterEach(() => {
-		mock.restore();
+		_internals.spawnSync = savedSpawnSync;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -134,6 +131,8 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 		// Flag-like entries starting with '-' should be filtered out
 		expect(args).toEqual(['test', 'src/foo.test.ts']);
 	});
+
+	test('testCommand with existing flags: files appended after flags', async () => {
 		// e.g. ["bun", "test", "--bail"] + ["foo.test.ts"] = ["test", "--bail", "foo.test.ts"]
 		await executeMutation(
 			makePatch(),
@@ -153,14 +152,16 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 
 describe('executeMutationSuite — testFiles scoping integration', () => {
 	let tempDir: string;
+	let savedSpawnSync: typeof _internals.spawnSync;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-suite-scoping-')),
 		);
+		savedSpawnSync = _internals.spawnSync;
 		mockSpawnSync.mockClear();
 		mockSpawnSync.mockImplementation(
-			(cmd: string, args: string[]) => {
+			(cmd: string, _args: string[]) => {
 				if (cmd === 'git') {
 					return { status: 0, stderr: Buffer.from(''), stdout: Buffer.from('') };
 				}
@@ -171,10 +172,11 @@ describe('executeMutationSuite — testFiles scoping integration', () => {
 				};
 			},
 		);
+		_internals.spawnSync = mockSpawnSync as unknown as typeof _internals.spawnSync;
 	});
 
 	afterEach(() => {
-		mock.restore();
+		_internals.spawnSync = savedSpawnSync;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {

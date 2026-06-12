@@ -13,8 +13,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { executeWriteMutationEvidence } from '../../../src/tools/write-mutation-evidence.js';
-import { validateSwarmPath } from '../../../src/hooks/utils.js';
+import { executeWriteMutationEvidence } from './write-mutation-evidence.js';
+import { validateSwarmPath } from '../hooks/utils.js';
 
 describe('write_mutation_evidence — real path validation (no mocks)', () => {
 	let tempDir: string;
