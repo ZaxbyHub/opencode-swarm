@@ -149,6 +149,7 @@ export interface ArchivedEvent {
 	mode: 'archive' | 'quarantine' | 'purge';
 	evidence?: string;
 	previous_status?: string;
+	tier?: 'swarm' | 'hive';
 }
 
 /** An escalation: a directive was auto-promoted by the repeat-mistake escalator. */
