@@ -36,7 +36,10 @@ describe('parseSkillFrontmatter: skill_type', () => {
 			'# Body',
 		].join('\n');
 
-		const meta = parseSkillFrontmatter(content, 'skills/edit-test-lint/SKILL.md');
+		const meta = parseSkillFrontmatter(
+			content,
+			'skills/edit-test-lint/SKILL.md',
+		);
 		expect(meta.skillType).toBe('workflow');
 		expect(meta.name).toBe('Edit-Test-Lint Flow');
 	});

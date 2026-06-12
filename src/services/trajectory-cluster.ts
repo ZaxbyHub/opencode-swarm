@@ -393,9 +393,7 @@ export function buildWorkflowProposal(motif: SuccessMotif): string {
 		`Observed across ${motif.taskIds.length} task(s) for the **${motif.agent}** role. All steps completed successfully.`,
 		'',
 		'## Workflow sequence',
-		...motif.sequence.map(
-			(s, i) => `${i + 1}. \`${s.tool}\` (${s.action})`,
-		),
+		...motif.sequence.map((s, i) => `${i + 1}. \`${s.tool}\` (${s.action})`),
 		'',
 		'## Gates passed',
 		...(motif.gatesPassed.length > 0

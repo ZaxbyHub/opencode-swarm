@@ -33,14 +33,14 @@ import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
+import { hasActiveFullAuto } from '../state.js';
 import {
-	autoApplyProposals,
 	type AutoApplyResult,
+	autoApplyProposals,
 	generateSkills,
 	listSkills,
 	parseDraftFrontmatter,
 } from './skill-generator.js';
-import { hasActiveFullAuto } from '../state.js';
 import {
 	type QuotaWindow,
 	releaseQuota,
