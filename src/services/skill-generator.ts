@@ -22,7 +22,6 @@ import {
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
 } from '../hooks/knowledge-store.js';
-import { appendSkillChangelog } from './skill-changelog.js';
 import type {
 	HiveKnowledgeEntry,
 	KnowledgeEntryBase,
@@ -33,6 +32,7 @@ import {
 	validateSkillPath,
 } from '../hooks/knowledge-validator.js';
 import { warn } from '../utils/logger.js';
+import { appendSkillChangelog } from './skill-changelog.js';
 
 // ============================================================================
 // Slug & path helpers

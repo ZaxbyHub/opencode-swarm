@@ -1,18 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
-	mkdtempSync,
-	rmSync,
 	mkdirSync,
-	writeFileSync,
+	mkdtempSync,
 	readFileSync,
+	rmSync,
+	writeFileSync,
 } from 'node:fs';
-import * as path from 'node:path';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
 	appendSkillChangelog,
+	MAX_CHANGELOG_ENTRIES_PER_SKILL,
 	readSkillChangelog,
 	resolveSkillChangelogPath,
-	MAX_CHANGELOG_ENTRIES_PER_SKILL,
 } from '../../../src/services/skill-changelog';
 
 function makeEntry(
