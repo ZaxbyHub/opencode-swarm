@@ -48,3 +48,33 @@ We chose typed fields for validation, autocomplete, and discoverability.
   `reasoning.effort` is a separate, provider-native field. They are NOT
   synonymous and can be used together — the user controls how their
   provider interprets each.
+
+## Budget guidance (FB-003)
+
+The plugin does **not** impose a plugin-level upper bound on
+`thinking.budget_tokens`. The swarm plugin is provider-agnostic and
+treats this field as a provider-native pass-through: any cross-provider
+hardcoded maximum would be an arbitrary product policy that could
+reject legitimate values for some providers/models while still not
+guaranteeing cost safety across all of them. Validation is intentionally
+limited to positivity (rejecting zero and negative values).
+
+Practical implications:
+
+- **Provider/model limits still apply.** A budget that exceeds the
+  provider's or model's maximum may be rejected, clamped, or otherwise
+  constrained at the provider API. The plugin's surface cannot guarantee
+  acceptance; consult your provider's current documentation for the
+  selected model.
+- **Thinking tokens are typically billable output/reasoning tokens.**
+  Large budgets can materially increase cost even if the provider
+  accepts them. The smallest budget that achieves the desired behavior
+  is the safe default.
+- **Interaction with `max_tokens` and other limits.** Some providers
+  require `budget_tokens` to be compatible with the request's
+  `max_tokens` and other constraints. If you set both, verify the
+  combination against your provider's docs.
+- **Typo / runaway-value protection is the user's responsibility.**
+  The plugin does not catch `budget_tokens: 1e15` or similar mistakes;
+  review your config before deploying. Future per-provider capability
+  metadata (if added) could revisit this with provider-aware bounds.
