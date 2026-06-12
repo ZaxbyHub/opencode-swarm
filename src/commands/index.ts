@@ -64,6 +64,8 @@ export {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge';
 export { handleLearningCommand } from './learning';
 export {

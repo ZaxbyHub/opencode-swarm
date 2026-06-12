@@ -37,6 +37,9 @@ const TASK_DIVERSITY_WEIGHT = 0.05;
 /** Weight assigned to keyword-based context matching in the composite score. */
 const CONTEXT_WEIGHT = 0.2;
 
+/** Additive bonus for workflow-type skills when the task mentions their tools. */
+const WORKFLOW_BOOST = 0.1;
+
 /** Age in milliseconds at which recency score decays to zero (30 days). */
 const RECENCY_DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -79,6 +82,8 @@ export interface SkillMetadata {
 	name: string;
 	/** Short description from frontmatter, or a fallback when absent. */
 	description: string;
+	/** Skill type from frontmatter (directive or workflow). */
+	skillType?: 'directive' | 'workflow';
 }
 
 // ============================================================================
@@ -171,6 +176,7 @@ export function parseSkillFrontmatter(
 
 	let name = fallbackName;
 	let description = '';
+	let skillType: 'directive' | 'workflow' | undefined;
 
 	for (let i = 1; i < end; i++) {
 		const line = lines[i] ?? '';
@@ -183,6 +189,13 @@ export function parseSkillFrontmatter(
 		if (key === 'name') {
 			const parsed = stripQuotes(rawValue);
 			if (parsed) name = parsed;
+			continue;
+		}
+
+		if (key === 'skill_type') {
+			if (rawValue === 'directive' || rawValue === 'workflow') {
+				skillType = rawValue;
+			}
 			continue;
 		}
 
@@ -202,11 +215,13 @@ export function parseSkillFrontmatter(
 		}
 	}
 
-	return {
+	const meta: SkillMetadata = {
 		path: normalizedPath,
 		name: name || fallbackName,
 		description: normalizeDescription(description),
 	};
+	if (skillType) meta.skillType = skillType;
+	return meta;
 }
 
 function readFilePrefix(filePath: string): string {
@@ -354,12 +369,13 @@ export function computeSkillRelevanceScore(
 	skillPath: string,
 	taskDescription: string,
 	usageHistory: SkillUsageEntry[],
+	metadata?: SkillMetadata,
 ): number {
 	// --- Context component (0-0.20) ---
 	const contextScore =
 		computeContextMatchScore(taskDescription, skillPath) * CONTEXT_WEIGHT;
 
-	if (usageHistory.length === 0) return contextScore;
+	if (usageHistory.length === 0) return Math.min(1.0, contextScore);
 
 	// --- Frequency component (0-0.3) ---
 	const usageCount = usageHistory.length;
@@ -395,12 +411,23 @@ export function computeSkillRelevanceScore(
 		(distinctTaskIDs / Math.max(1, usageHistory.length)) *
 		TASK_DIVERSITY_WEIGHT;
 
-	return (
+	// --- Workflow boost (#1234 Part 4D) ---
+	// Workflow-type skills get an additive bonus when the task description
+	// mentions tools that appear in the skill's path/name (contextScore > 0
+	// serves as the proxy for tool overlap).
+	let workflowBoost = 0;
+	if (metadata?.skillType === 'workflow' && contextScore > 0) {
+		workflowBoost = WORKFLOW_BOOST;
+	}
+
+	return Math.min(
+		1.0,
 		frequencyScore +
-		complianceScore +
-		recencyScore +
-		taskDiversityScore +
-		contextScore
+			complianceScore +
+			recencyScore +
+			taskDiversityScore +
+			contextScore +
+			workflowBoost,
 	);
 }
 
@@ -426,10 +453,12 @@ export function rankSkillsForContext(
 
 	for (const skillPath of skills) {
 		const skillEntries = allEntries.filter((e) => e.skillPath === skillPath);
+		const metadata = _internals.readSkillMetadata(skillPath, directory);
 		const score = computeSkillRelevanceScore(
 			skillPath,
 			taskContext,
 			skillEntries,
+			metadata,
 		);
 
 		const entriesWithVerdict = skillEntries.filter(

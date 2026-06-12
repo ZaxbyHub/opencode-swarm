@@ -239,6 +239,7 @@ function uniqueStrings(arr: string[]): string[] {
 export interface SkillFrontmatterOverrides {
 	version?: number;
 	skillOrigin?: 'generated' | 'promoted_external';
+	skillType?: 'directive' | 'workflow';
 }
 
 export function renderSkillMarkdown(
@@ -254,6 +255,7 @@ export function renderSkillMarkdown(
 	const ids = cluster.entries.map((e) => `  - ${e.id}`).join('\n');
 	const version = overrides?.version ?? 1;
 	const skillOrigin = overrides?.skillOrigin ?? 'generated';
+	const skillType = overrides?.skillType;
 	const lines: string[] = [];
 	lines.push('---');
 	lines.push(`name: ${cluster.slug}`);
@@ -267,6 +269,9 @@ export function renderSkillMarkdown(
 	lines.push(`status: ${mode === 'active' ? 'active' : 'draft'}`);
 	lines.push(`version: ${version}`);
 	lines.push(`skill_origin: ${skillOrigin}`);
+	if (skillType) {
+		lines.push(`skill_type: ${skillType}`);
+	}
 	lines.push('---');
 	lines.push('');
 	lines.push(
@@ -551,6 +556,7 @@ export function parseDraftFrontmatter(content: string): {
 	sourceKnowledgeIds: string[];
 	version?: number;
 	skillOrigin?: string;
+	skillType?: 'directive' | 'workflow';
 } | null {
 	// Strip optional UTF-8 BOM that some editors prepend on Windows.
 	const stripped =
@@ -576,6 +582,7 @@ export function parseDraftFrontmatter(content: string): {
 		sourceKnowledgeIds: string[];
 		version?: number;
 		skillOrigin?: string;
+		skillType?: 'directive' | 'workflow';
 	} = {
 		sourceKnowledgeIds: [],
 	};
@@ -618,6 +625,11 @@ export function parseDraftFrontmatter(content: string): {
 		const so = line.match(/^skill_origin:\s*(\S+)\s*$/);
 		if (so) {
 			out.skillOrigin = so[1];
+			continue;
+		}
+		const stm = line.match(/^skill_type:\s*(\S+)\s*$/);
+		if (stm && (stm[1] === 'directive' || stm[1] === 'workflow')) {
+			out.skillType = stm[1];
 			continue;
 		}
 		if (/^generated_from_knowledge:\s*$/.test(line)) {
@@ -771,6 +783,86 @@ export async function listSkills(directory: string): Promise<{
 					path: skillPath,
 				});
 			}
+		}
+	}
+	return result;
+}
+
+// ============================================================================
+// Auto-apply proposals (full-auto mode only, #1234 Part 3D)
+// ============================================================================
+
+const AUTO_APPLY_BATCH_LIMIT = 5;
+
+export interface AutoApplyResult {
+	approved: string[];
+	rejected: string[];
+	skipped: string[];
+}
+
+/**
+ * In full-auto mode, send pending proposals to a critic LLM for APPROVE/REJECT
+ * and activate approved ones. Skips proposals whose slug already exists as an
+ * active skill, and caps each run to AUTO_APPLY_BATCH_LIMIT activations.
+ */
+export async function autoApplyProposals(
+	directory: string,
+	llmDelegate: (
+		systemPrompt: string,
+		userPrompt: string,
+		signal?: AbortSignal,
+	) => Promise<string>,
+): Promise<AutoApplyResult> {
+	const result: AutoApplyResult = { approved: [], rejected: [], skipped: [] };
+	const skills = await listSkills(directory);
+	const activeSlugs = new Set(skills.active.map((s) => s.slug));
+
+	for (const proposal of skills.proposals) {
+		if (result.approved.length >= AUTO_APPLY_BATCH_LIMIT) break;
+		if (activeSlugs.has(proposal.slug)) {
+			result.skipped.push(proposal.slug);
+			continue;
+		}
+		let content: string;
+		try {
+			content = await readFile(proposal.path, 'utf-8');
+		} catch {
+			result.skipped.push(proposal.slug);
+			continue;
+		}
+		const truncated = content.slice(0, 1500);
+		const prompt = [
+			'You are a skill-quality critic. Review this skill proposal and respond with ONLY "APPROVE" or "REJECT" (one word).',
+			'APPROVE if the skill is generalizable, actionable, and not redundant.',
+			'REJECT if it is too specific, vague, or likely harmful.',
+			'',
+			truncated,
+		].join('\n');
+
+		try {
+			const response = await llmDelegate(
+				'',
+				prompt,
+				AbortSignal.timeout(30_000),
+			);
+			const verdict = response.trim().toUpperCase();
+			if (verdict.startsWith('APPROVE')) {
+				const activation = await activateProposal(directory, proposal.slug);
+				if (activation.activated) {
+					result.approved.push(proposal.slug);
+				} else {
+					result.skipped.push(proposal.slug);
+				}
+			} else {
+				result.rejected.push(proposal.slug);
+				try {
+					_internals.unlinkSync(proposal.path);
+				} catch {
+					/* best-effort cleanup */
+				}
+			}
+		} catch {
+			result.skipped.push(proposal.slug);
 		}
 	}
 	return result;
@@ -1134,6 +1226,7 @@ export const _internals = {
 	parseDraftFrontmatter,
 	retireSkill,
 	regenerateSkill,
+	autoApplyProposals,
 	unlinkSync,
 };
 

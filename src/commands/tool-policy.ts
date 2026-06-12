@@ -160,11 +160,12 @@ export function classifySwarmCommandToolUse(
 
 	if (canonicalKey === 'knowledge') {
 		if (args.length === 0) return { allowed: true };
-		if (args.length === 1 && args[0] === 'list') return { allowed: true };
+		if (args.length === 1 && (args[0] === 'list' || args[0] === 'unactionable'))
+			return { allowed: true };
 		return {
 			allowed: false,
 			message:
-				'Only `/swarm knowledge` and `/swarm knowledge list` are available through swarm_command. Knowledge migrate/quarantine/restore are intentionally excluded.',
+				'Only `/swarm knowledge`, `/swarm knowledge list`, and `/swarm knowledge unactionable` are available through swarm_command. Knowledge migrate/quarantine/restore/retry-hardening are intentionally excluded.',
 		};
 	}
 

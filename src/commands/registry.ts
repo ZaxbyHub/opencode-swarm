@@ -34,6 +34,8 @@ import {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
 import { handleLearningCommand } from './learning.js';
 import {
@@ -893,6 +895,25 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Restores a quarantined knowledge entry back to the active knowledge store by ID. Validates entry ID format (1-64 alphanumeric/hyphen/underscore). Entry must currently be in quarantine state.',
 		args: '<entry-id>',
+		category: 'utility',
+	},
+	'knowledge unactionable': {
+		handler: (ctx) =>
+			handleKnowledgeUnactionableCommand(ctx.directory, ctx.args),
+		description: 'List unactionable knowledge entries pending hardening',
+		subcommandOf: 'knowledge',
+		details:
+			'Lists entries from .swarm/knowledge-unactionable.jsonl that failed the actionability gate. Shows pending entries (awaiting next hardening pass) and retire candidates (hardening failed). Use `/swarm knowledge retry-hardening` to reset retire candidates.',
+		category: 'utility',
+	},
+	'knowledge retry-hardening': {
+		handler: (ctx) =>
+			handleKnowledgeRetryHardeningCommand(ctx.directory, ctx.args),
+		description: 'Reset retire candidates for re-hardening [id]',
+		subcommandOf: 'knowledge',
+		details:
+			'Resets the retire_candidate flag on unactionable entries so the next scheduled hardening pass re-attempts LLM enrichment. Without arguments, resets all retire candidates. With an ID prefix, resets only the matching entry.',
+		args: '[entry-id]',
 		category: 'utility',
 	},
 	knowledge: {

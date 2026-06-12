@@ -34,16 +34,22 @@ import {
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
 import {
+	autoApplyProposals,
+	type AutoApplyResult,
 	generateSkills,
 	listSkills,
 	parseDraftFrontmatter,
 } from './skill-generator.js';
+import { hasActiveFullAuto } from '../state.js';
 import {
 	type QuotaWindow,
 	releaseQuota,
 	reserveQuota,
 } from './skill-improver-quota.js';
-import { writeMotifProposals } from './trajectory-cluster.js';
+import {
+	writeMotifProposals,
+	writeSuccessMotifProposals,
+} from './trajectory-cluster.js';
 import { hardenUnactionableEntries } from './unactionable-hardening.js';
 
 export interface SkillImproverConfigInput {
@@ -107,6 +113,13 @@ export interface SkillImproveResult {
 		motifs: number;
 		proposalsWritten: number;
 	};
+	/** #1234 Part 4: success workflow-motif proposals written this run. */
+	successMotifs?: {
+		motifs: number;
+		proposalsWritten: number;
+	};
+	/** #1234 Part 3D: critic-gated auto-apply of proposals in full-auto mode. */
+	autoApply?: AutoApplyResult;
 }
 
 function timestampSlug(d: Date): string {
@@ -605,6 +618,26 @@ export async function runSkillImprover(
 		proposalsWritten: motifResult.proposalsWritten.length,
 	};
 
+	// #1234 Part 4: mine recurring successful tool-sequences and emit
+	// workflow-type skill proposals. Same cadence, same proposals dir, no LLM.
+	const successMotifResult = await writeSuccessMotifProposals(req.directory);
+	const successMotifs = {
+		motifs: successMotifResult.motifs,
+		proposalsWritten: successMotifResult.proposalsWritten.length,
+	};
+
+	// #1234 Part 3D: critic-gated auto-apply of proposals in full-auto mode.
+	// Only runs when the session is in full-auto AND an LLM delegate is available
+	// (the delegate acts as the critic gate). Fail-open: never blocks the run.
+	let autoApply: AutoApplyResult | undefined;
+	if (delegate && hasActiveFullAuto(req.sessionId)) {
+		try {
+			autoApply = await autoApplyProposals(req.directory, delegate);
+		} catch {
+			// fail-open
+		}
+	}
+
 	return {
 		ran: true,
 		proposalPath: proposalFile,
@@ -618,6 +651,8 @@ export async function runSkillImprover(
 		model: cfg.model ?? undefined,
 		unactionableHardening,
 		macroMotifs,
+		successMotifs,
+		autoApply,
 	};
 }
 
