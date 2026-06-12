@@ -19,7 +19,7 @@ import {
 function trajLine(
 	step: number,
 	tool: string,
-	result: 'success' | 'failure',
+	result: 'success' | 'failure' | 'pending',
 	verdict = '',
 	agent = 'coder',
 	action = 'run',
@@ -66,6 +66,25 @@ describe('success motif mining', () => {
 		seedTask(dir, 'task-fail-2', [
 			trajLine(1, 'edit', 'success'),
 			trajLine(2, 'test_runner', 'failure'),
+			trajLine(3, 'lint', 'success'),
+		]);
+
+		const motifs = await gatherSuccessMotifs(dir);
+		expect(motifs).toHaveLength(0);
+	});
+
+	it('ignores trajectories with any pending (non-success) step', async () => {
+		// A 'pending' result is any verdict that is not literally success/failure
+		// (e.g. needs_revision, concerns, blocked). Such a run is NOT a clean
+		// all-success motif and must not contaminate workflow proposals.
+		seedTask(dir, 'task-pending-1', [
+			trajLine(1, 'edit', 'success'),
+			trajLine(2, 'review', 'pending', 'needs_revision'),
+			trajLine(3, 'lint', 'success'),
+		]);
+		seedTask(dir, 'task-pending-2', [
+			trajLine(1, 'edit', 'success'),
+			trajLine(2, 'review', 'pending', 'needs_revision'),
 			trajLine(3, 'lint', 'success'),
 		]);
 

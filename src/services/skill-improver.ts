@@ -627,10 +627,13 @@ export async function runSkillImprover(
 	};
 
 	// #1234 Part 3D: critic-gated auto-apply of proposals in full-auto mode.
-	// Only runs when the session is in full-auto AND an LLM delegate is available
-	// (the delegate acts as the critic gate). Fail-open: never blocks the run.
+	// Only runs when THIS session is in full-auto AND an LLM delegate is available
+	// (the delegate acts as the critic gate). The explicit `req.sessionId` check
+	// is load-bearing: hasActiveFullAuto(undefined) scans ALL sessions, so without
+	// it a request lacking a sessionId would auto-apply whenever any other session
+	// happened to be in full-auto (cross-session leak). Fail-open: never blocks.
 	let autoApply: AutoApplyResult | undefined;
-	if (delegate && hasActiveFullAuto(req.sessionId)) {
+	if (delegate && req.sessionId && hasActiveFullAuto(req.sessionId)) {
 		try {
 			autoApply = await autoApplyProposals(req.directory, delegate);
 		} catch {

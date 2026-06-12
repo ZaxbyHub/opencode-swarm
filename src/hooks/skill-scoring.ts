@@ -40,6 +40,14 @@ const CONTEXT_WEIGHT = 0.2;
 /** Additive bonus for workflow-type skills when the task mentions their tools. */
 const WORKFLOW_BOOST = 0.1;
 
+/**
+ * Minimum weighted context score (≈25% task-keyword overlap, since
+ * contextScore = matchRatio * CONTEXT_WEIGHT) required before a workflow skill
+ * earns the boost. Guards against a single weak keyword match triggering the
+ * full bonus, which would dwarf its own tiny context contribution.
+ */
+const WORKFLOW_BOOST_MIN_CONTEXT = 0.05;
+
 /** Age in milliseconds at which recency score decays to zero (30 days). */
 const RECENCY_DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -413,10 +421,14 @@ export function computeSkillRelevanceScore(
 
 	// --- Workflow boost (#1234 Part 4D) ---
 	// Workflow-type skills get an additive bonus when the task description
-	// mentions tools that appear in the skill's path/name (contextScore > 0
-	// serves as the proxy for tool overlap).
+	// meaningfully overlaps the skill's path/name (contextScore is the weighted
+	// tool-overlap proxy). A minimum threshold avoids rewarding a single weak
+	// keyword match with the full boost.
 	let workflowBoost = 0;
-	if (metadata?.skillType === 'workflow' && contextScore > 0) {
+	if (
+		metadata?.skillType === 'workflow' &&
+		contextScore >= WORKFLOW_BOOST_MIN_CONTEXT
+	) {
 		workflowBoost = WORKFLOW_BOOST;
 	}
 

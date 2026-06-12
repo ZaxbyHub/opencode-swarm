@@ -264,15 +264,19 @@ export interface SuccessMotifProposalResult {
 }
 
 /**
- * Extract the ordered tool sequence from a task's trajectory, keeping only
- * steps with `result === 'success'`. Returns the sequence if ALL steps
- * succeeded and the trajectory has >= SUCCESS_SEQUENCE_MIN_STEPS steps.
+ * Extract the ordered tool sequence from a task's trajectory. Returns the
+ * sequence only if EVERY step succeeded (no `failure` AND no `pending` steps)
+ * and the trajectory has >= SUCCESS_SEQUENCE_MIN_STEPS steps. A `pending`
+ * result is any verdict that is not literally `success`/`failure`
+ * (trajectory-logger `mapResult`), so a step with e.g. `needs_revision`,
+ * `concerns`, or `blocked` disqualifies the whole trajectory as a success
+ * motif — otherwise non-successful patterns would contaminate proposals.
  */
 function extractSuccessSequence(
 	trajectory: TrajectoryEntry[],
 ): Array<{ tool: string; action: string }> | null {
 	if (trajectory.length < SUCCESS_SEQUENCE_MIN_STEPS) return null;
-	if (trajectory.some((e) => e.result === 'failure')) return null;
+	if (trajectory.some((e) => e.result !== 'success')) return null;
 	return trajectory.map((e) => ({
 		tool: (e.tool ?? 'unknown').toLowerCase(),
 		action: (e.action ?? 'run').toLowerCase(),
