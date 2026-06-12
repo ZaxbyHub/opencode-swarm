@@ -22,7 +22,7 @@ function makeUnactionable(id: string, overrides: Record<string, unknown> = {}) {
 		tags: [],
 		scope: 'global',
 		confidence: 0.3,
-		status: 'quarantined',
+		status: 'quarantined_unactionable',
 		confirmed_by: [],
 		project_name: 'test',
 		retrieval_outcomes: {
@@ -92,7 +92,7 @@ describe('handleKnowledgeRetryHardeningCommand', () => {
 
 	it('reports no entries when queue is empty', async () => {
 		const result = await handleKnowledgeRetryHardeningCommand(dir, []);
-		expect(typeof result).toBe('string');
+		expect(result).toContain('No retire candidates');
 	});
 
 	it('resets retire_candidate flags', async () => {

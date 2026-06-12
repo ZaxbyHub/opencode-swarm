@@ -846,20 +846,30 @@ export async function autoApplyProposals(
 				AbortSignal.timeout(30_000),
 			);
 			const verdict = response.trim().toUpperCase();
-			if (verdict.startsWith('APPROVE')) {
+			if (verdict === 'APPROVE') {
 				const activation = await activateProposal(directory, proposal.slug);
 				if (activation.activated) {
 					result.approved.push(proposal.slug);
 				} else {
 					result.skipped.push(proposal.slug);
 				}
-			} else {
+			} else if (verdict === 'REJECT') {
+				// Only an explicit REJECT deletes the proposal. Log first so the
+				// deletion is auditable (proposals are regenerable, but silent
+				// loss on LLM misbehavior should still leave a trace).
+				warn(
+					`[skill-generator] auto-apply rejected proposal "${proposal.slug}"; deleting ${proposal.path}`,
+				);
 				result.rejected.push(proposal.slug);
 				try {
 					_internals.unlinkSync(proposal.path);
 				} catch {
 					/* best-effort cleanup */
 				}
+			} else {
+				// Ambiguous or malformed verdict: neither activate nor delete.
+				// Leave the proposal in place so it can be retried next pass.
+				result.skipped.push(proposal.slug);
 			}
 		} catch {
 			result.skipped.push(proposal.slug);
