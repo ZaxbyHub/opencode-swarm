@@ -502,4 +502,45 @@ describe('pr-subscriptions store', () => {
 			expect(swept).toBe(0);
 		});
 	});
+
+	describe('JSONL corruption resilience', () => {
+		test('listActive skips malformed/partial JSONL lines and returns valid records', async () => {
+			await subscribe(dir, {
+				sessionID: 'sess_good',
+				prNumber: 1,
+				repoFullName: 'o/r',
+				prUrl: 'https://github.com/o/r/pull/1',
+			});
+
+			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
+			fs.appendFileSync(filePath, '{INVALID JSON\n', 'utf-8');
+			fs.appendFileSync(filePath, 'not-json-at-all\n', 'utf-8');
+			fs.appendFileSync(filePath, '\n', 'utf-8');
+
+			const active = await listActive(dir);
+			expect(active).toHaveLength(1);
+			expect(active[0].sessionID).toBe('sess_good');
+			expect(active[0].prNumber).toBe(1);
+		});
+
+		test('listActive handles truncated JSON object gracefully', async () => {
+			await subscribe(dir, {
+				sessionID: 'sess_ok',
+				prNumber: 42,
+				repoFullName: 'owner/repo',
+				prUrl: 'https://github.com/owner/repo/pull/42',
+			});
+
+			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
+			fs.appendFileSync(
+				filePath,
+				'{"correlationId":"sess_trunc::o/r::99","sessionID":"sess_trunc","prNumb\n',
+				'utf-8',
+			);
+
+			const active = await listActive(dir);
+			expect(active).toHaveLength(1);
+			expect(active[0].prNumber).toBe(42);
+		});
+	});
 });

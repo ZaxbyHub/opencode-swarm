@@ -187,6 +187,7 @@ export class PrMonitorWorker {
 
 		this.status = 'stopped';
 		this.circuitBreakerMap.clear();
+		this.reviewStateMap.clear();
 		log('[PrMonitorWorker] Stopped');
 	}
 
@@ -714,6 +715,8 @@ export class PrMonitorWorker {
 		// Auto-unsubscribe merged PR
 		if (changes.isMerged && this.config.auto_unsubscribe_on_merge) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
+			this.reviewStateMap.delete(sub.correlationId);
+			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed merged PR', {
 				correlationId: sub.correlationId,
 			});
@@ -723,6 +726,8 @@ export class PrMonitorWorker {
 		// Auto-unsubscribe closed PR
 		if (changes.isClosed && this.config.auto_unsubscribe_on_close) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
+			this.reviewStateMap.delete(sub.correlationId);
+			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed closed PR', {
 				correlationId: sub.correlationId,
 			});
