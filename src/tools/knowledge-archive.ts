@@ -16,10 +16,11 @@ import { z } from 'zod';
 import { recordKnowledgeEvent } from '../hooks/knowledge-events.js';
 import {
 	readKnowledge,
+	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
 } from '../hooks/knowledge-store.js';
-import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
+import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -29,7 +30,7 @@ type ArchiveMode = (typeof MODES)[number];
 export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			"Archive (default), quarantine, or purge a swarm knowledge entry by ID, appending an immutable audit tombstone. 'archive'/'quarantine' set the entry status reversibly and hide it from recall; 'purge' hard-deletes and requires allow_purge:true.",
+			"Archive (default), quarantine, or purge a swarm or hive knowledge entry by ID, appending an immutable audit tombstone. 'archive'/'quarantine' set the entry status reversibly and hide it from recall; 'purge' hard-deletes and requires allow_purge:true. Use tier:'hive' to target a cross-project hive entry (default tier is 'swarm').",
 		args: {
 			id: z.string().min(1).describe('UUID of the knowledge entry'),
 			reason: z
@@ -49,6 +50,10 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				.boolean()
 				.optional()
 				.describe("Admin flag required when mode='purge'"),
+			tier: z
+				.enum(['swarm', 'hive'] as const)
+				.optional()
+				.describe("Target knowledge tier: 'swarm' (default, project-local) or 'hive' (cross-project)"),
 		},
 		execute: async (args: unknown, directory, ctx): Promise<string> => {
 			const a = (args ?? {}) as {
@@ -57,6 +62,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				evidence?: unknown;
 				mode?: unknown;
 				allow_purge?: unknown;
+				tier?: unknown;
 			};
 
 			const id = typeof a.id === 'string' ? a.id : '';
@@ -76,6 +82,8 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			const evidence = typeof a.evidence === 'string' ? a.evidence : undefined;
 			const mode: ArchiveMode =
 				a.mode === 'quarantine' || a.mode === 'purge' ? a.mode : 'archive';
+			const tier: 'swarm' | 'hive' =
+				a.tier === 'hive' ? 'hive' : 'swarm';
 
 			if (mode === 'purge' && a.allow_purge !== true) {
 				return JSON.stringify({
@@ -84,10 +92,13 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			const swarmPath = resolveSwarmKnowledgePath(directory);
-			let entries: SwarmKnowledgeEntry[];
+			const targetPath =
+				tier === 'hive'
+					? resolveHiveKnowledgePath()
+					: resolveSwarmKnowledgePath(directory);
+			let entries: KnowledgeEntryBase[];
 			try {
-				entries = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
+				entries = await readKnowledge<KnowledgeEntryBase>(targetPath);
 			} catch (err) {
 				return JSON.stringify({
 					success: false,
@@ -102,14 +113,14 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			const previousStatus = target.status;
 			const now = new Date().toISOString();
 
-			let nextEntries: SwarmKnowledgeEntry[];
+			let nextEntries: KnowledgeEntryBase[];
 			let resultStatus: string;
 			if (mode === 'purge') {
 				// Defense-in-depth: hard-delete is irreversible. Emit a prominent
 				// warning even though allow_purge:true was already required. The
 				// archived event below is the audit trail.
 				warn(
-					`[knowledge_archive] PURGE: hard-deleting entry id=${id} actor=${
+					`[knowledge_archive] PURGE: hard-deleting entry id=${id} tier=${tier} actor=${
 						ctx?.agent ?? 'unknown'
 					} reason=${reason}`,
 				);
@@ -124,7 +135,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			}
 
 			try {
-				await rewriteKnowledge(swarmPath, nextEntries);
+				await rewriteKnowledge(targetPath, nextEntries);
 			} catch (err) {
 				return JSON.stringify({
 					success: false,
@@ -142,12 +153,14 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				mode,
 				evidence,
 				previous_status: previousStatus,
+				tier,
 			});
 
 			return JSON.stringify({
 				success: true,
 				id,
 				mode,
+				tier,
 				previous_status: previousStatus,
 				status: resultStatus,
 			});

@@ -98,6 +98,17 @@ Quarantined entries are hidden from queries but preserved:
 /swarm knowledge restore lesson-abc123
 ```
 
+### Archival / Purge (knowledge_archive tool)
+
+Use the `knowledge_archive` tool to archive, quarantine, or purge knowledge entries with an immutable audit tombstone:
+
+- `knowledge_archive { id, reason }` — archive a swarm entry (default tier).
+- `knowledge_archive { id, reason, tier: 'hive' }` — archive a hive entry.
+- `mode: 'quarantine'` — set status to quarantined instead of archived.
+- `mode: 'purge', allow_purge: true` — hard-delete (requires admin flag).
+
+Archived and quarantined entries are automatically hidden from `searchKnowledge` results.
+
 ### Expiration (N-phase TTL decay)
 
 At every successful phase completion, `sweepAgedEntries()` runs:

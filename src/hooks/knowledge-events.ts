@@ -149,6 +149,8 @@ export interface ArchivedEvent {
 	mode: 'archive' | 'quarantine' | 'purge';
 	evidence?: string;
 	previous_status?: string;
+	/** Knowledge tier that was targeted ('swarm' or 'hive'). Defaults to 'swarm'. */
+	tier?: 'swarm' | 'hive';
 }
 
 /** An escalation: a directive was auto-promoted by the repeat-mistake escalator. */
