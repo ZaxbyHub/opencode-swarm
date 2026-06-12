@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.69.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.68.2...v7.69.0) (2026-06-12)
+
+
+### Features
+
+* **learning:** auto-triage queues and success motif mining ([#1234](https://github.com/zaxbysauce/opencode-swarm/issues/1234)) ([8fb3501](https://github.com/zaxbysauce/opencode-swarm/commit/8fb3501bd634e5c6a61cc9c73b90e27f2af445da))
+
+
+### Bug Fixes
+
+* **learning:** address cubic review threads + bot test-gap ([a26e27f](https://github.com/zaxbysauce/opencode-swarm/commit/a26e27fa6e2f2f10adbbd97dc5632405f5e9823d))
+* **learning:** address PR review findings F-001/F-004..F-010 ([a9c52a5](https://github.com/zaxbysauce/opencode-swarm/commit/a9c52a5c0bf64c6ce19c37d0d7d9137d2174e35f))
+* **learning:** log ambiguous auto-apply verdicts + clarify motif comment ([ebc0b6a](https://github.com/zaxbysauce/opencode-swarm/commit/ebc0b6a03eda99b3768fe5966367c7fa2205e7a6))
+* **learning:** raise CLI bundle limit + status-service containment ([ce9a0f6](https://github.com/zaxbysauce/opencode-swarm/commit/ce9a0f64fb637e9dc8f7fa922beff2132de96e32))
+* **skill-generator:** report REJECT as skipped when deletion fails ([fd338aa](https://github.com/zaxbysauce/opencode-swarm/commit/fd338aae6c586a0f5332eb868efaeee2e4634a78))
+
 ## [7.68.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.68.1...v7.68.2) (2026-06-12)
 
 
