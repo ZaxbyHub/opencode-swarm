@@ -19,7 +19,11 @@ import {
 	recordKnowledgeShown,
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
-import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
+import {
+	_internals,
+	appendKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 
 let tmp: string;
@@ -417,3 +421,141 @@ describe('filterHighConfidenceKnowledge', () => {
 		expect(entries).toHaveLength(2); // original unchanged
 	});
 });
+
+// =============================================================================
+// TOCTOU Fix — bumpCountersBatch now wraps its read+rewrite in a single
+// transactKnowledge transaction (issue #1285). Previously it did an unlocked
+// readKnowledge followed by a locked rewriteKnowledge; a concurrent
+// appendKnowledge in between could be silently dropped by the rewrite.
+//
+// These tests verify the fix:
+//   1. A concurrent appendKnowledge interleaved with a counter bump
+//      survives — it is NOT lost when the counter-bump rewrite happens.
+//   2. With the pre-fix code (unlocked read), a deliberate delay injected
+//      into the unlocked read would let a concurrent append sneak in and
+//      then be dropped. With the post-fix code, the read is under the
+//      directory lock, so the concurrent append is forced to wait until
+//      the bump transaction completes, and the final file state is
+//      consistent.
+// =============================================================================
+
+describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)', () => {
+	it('concurrent appendKnowledge is not lost when a counter bump runs in parallel', async () => {
+		// Pre-seed one entry that we will bump
+		const bumpId = '11111111-1111-4111-9111-111111111111';
+		await seedEntry(bumpId);
+
+		// Race: two appends + one counter bump. The appends must survive.
+		const appendA = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry('concurrent-a'),
+			id: '22222222-2222-4222-9222-222222222222',
+		} as SwarmKnowledgeEntry);
+		const bump = recordAcknowledgment(
+			tmp,
+			{ id: bumpId, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
+		const appendB = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry('concurrent-b'),
+			id: '33333333-3333-4333-9333-333333333333',
+		} as SwarmKnowledgeEntry);
+
+		await Promise.all([appendA, bump, appendB]);
+
+		// The file should contain all 3 entries: seeded + 2 concurrent appends.
+		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n');
+		const ids = lines.map((l) => JSON.parse(l).id);
+		expect(ids).toContain(bumpId);
+		expect(ids).toContain('22222222-2222-4222-9222-222222222222');
+		expect(ids).toContain('33333333-3333-4333-9333-333333333333');
+
+		// The bump must have applied: applied_explicit_count = 1 on the seed.
+		const seedLine = lines.find((l) => l.includes(bumpId));
+		const seed = JSON.parse(seedLine!);
+		expect(seed.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(seed.retrieval_outcomes.acknowledged_count).toBe(1);
+	});
+
+	it('forced delay inside the locked read does NOT cause the next call to drop entries', async () => {
+		// This mirrors the test in knowledge-store-caps.test.ts: inject a
+		// delay into the locked read so a second concurrent caller has time
+		// to interleave. With the fix (lock-before-read), the second caller
+		// is forced to wait for the first transaction to complete, so the
+		// final state is consistent — neither call drops entries.
+		const id1 = '44444444-4444-4444-9444-444444444444';
+		const id2 = '55555555-5555-4555-9555-555555555555';
+		// Seed both entries into the same file (seedEntry truncates, so
+		// call it once and append the second via appendKnowledge).
+		await seedEntry(id1);
+		await appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry(id2),
+			id: id2,
+		} as SwarmKnowledgeEntry);
+
+		const originalRead = _internals.readKnowledge;
+		let calls = 0;
+		_internals.readKnowledge = mock(
+			async <T>(filePath: string): Promise<T[]> => {
+				calls++;
+				if (calls === 1) {
+					// Hold the lock long enough for the second caller to queue.
+					await Bun.sleep(60);
+				}
+				return originalRead(filePath);
+			},
+		);
+
+		try {
+			await Promise.all([
+				recordAcknowledgment(
+					tmp,
+					{ id: id1, result: 'applied' },
+					{ phase: 'Phase 1' },
+				),
+				recordAcknowledgment(
+					tmp,
+					{ id: id2, result: 'applied' },
+					{ phase: 'Phase 1' },
+				),
+			]);
+
+			// Both entries must be present, both bumps must have landed.
+			const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+				.trim()
+				.split('\n');
+			expect(lines).toHaveLength(2);
+			const seed1 = JSON.parse(lines.find((l) => l.includes(id1))!);
+			const seed2 = JSON.parse(lines.find((l) => l.includes(id2))!);
+			expect(seed1.retrieval_outcomes.applied_explicit_count).toBe(1);
+			expect(seed2.retrieval_outcomes.applied_explicit_count).toBe(1);
+		} finally {
+			_internals.readKnowledge = originalRead;
+		}
+	});
+});
+
+// Helper: builds a minimal SwarmKnowledgeEntry (reused by the TOCTOU tests).
+function baseEntry(id: string): Partial<SwarmKnowledgeEntry> {
+	return {
+		id,
+		tier: 'swarm',
+		lesson: `Lesson ${id} with enough characters to be valid`,
+		category: 'process',
+		tags: [],
+		scope: 'global',
+		confidence: 0.5,
+		status: 'candidate',
+		confirmed_by: [],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2,
+		created_at: new Date().toISOString(),
+		updated_at: new Date().toISOString(),
+		project_name: 'test',
+	};
+}

@@ -12,10 +12,9 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { warn } from '../utils/logger.js';
 import {
-	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	transactKnowledge,
 } from './knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -155,14 +154,26 @@ async function bumpCountersBatch(
 		return updated;
 	};
 
+	// TOCTOU fix (issue #1285): run a single locked read-modify-write
+	// transaction per file via transactKnowledge, so a concurrent writer
+	// between read and rewrite cannot lose its update. Previously this
+	// did an unlocked readKnowledge followed by a locked rewriteKnowledge,
+	// which dropped concurrent appends — worst case the hive file, which
+	// is shared across concurrent sessions of different projects (global
+	// XDG path). The mutate callback returns null when no entry was
+	// touched, so transactKnowledge is a no-op in that case (no rewrite).
 	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
-	if (applyOne(swarm)) await rewriteKnowledge(swarmPath, swarm);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+		const updated = applyOne(entries);
+		return updated ? entries : null;
+	});
 
 	const hivePath = resolveHiveKnowledgePath();
 	if (existsSync(hivePath)) {
-		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-		if (applyOne(hive)) await rewriteKnowledge(hivePath, hive);
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
+			const updated = applyOne(entries);
+			return updated ? entries : null;
+		});
 	}
 }
 
