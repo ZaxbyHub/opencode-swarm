@@ -21,9 +21,14 @@
  *     loopback / private / link-local / unique-local / CGNAT / metadata ranges;
  *     literal-IP hosts are checked directly. This blocks cloud metadata
  *     (169.254.169.254) and internal services.
- *   - Redirects are followed manually (`redirect: 'manual'`) and the target of
- *     every hop is re-validated, so a public URL cannot 302 into the metadata
- *     endpoint or an internal host.
+ *   - The socket is then PINNED to the exact validated IP (host = resolved
+ *     address) while the original hostname is kept for the Host header and TLS
+ *     SNI/certificate identity. There is no second name resolution at connect
+ *     time, so DNS rebinding cannot swap in a private/metadata address after the
+ *     check (TOCTOU), and HTTPS verification still validates the hostname.
+ *   - Redirects are followed manually (the underlying request never auto-follows)
+ *     and every hop is re-validated AND re-pinned, so a public URL cannot 302
+ *     into the metadata endpoint or an internal host.
  *   - The body is streamed and aborted once it exceeds `max_bytes` of DECODED
  *     output (so a gzip bomb is bounded by decompressed size, not the
  *     advisory Content-Length header).
@@ -34,7 +39,11 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import { isIP } from 'node:net';
+import type { Readable } from 'node:stream';
+import * as zlib from 'node:zlib';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
@@ -42,10 +51,27 @@ import { writeEvidenceDocuments } from '../evidence/documents';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
-type FetchFn = (
-	input: string | URL | Request,
-	init?: RequestInit,
-) => Promise<Response>;
+interface HttpRequestArgs {
+	/** The URL to request. Used for path, Host header, and TLS SNI/identity. */
+	url: URL;
+	/**
+	 * The pre-validated address to open the socket to. The connection is pinned
+	 * to this exact IP so there is no second, unvalidated name resolution between
+	 * the SSRF check and the connection (defeats DNS rebinding).
+	 */
+	pinnedAddress: string;
+	signal: AbortSignal;
+	headers: Record<string, string>;
+}
+
+interface RawHttpResponse {
+	status: number;
+	headers: Record<string, string | undefined>;
+	/** Decoded (decompressed) body, streamed lazily so the byte cap bounds it. */
+	body: AsyncIterable<Uint8Array> | null;
+	/** Destroy the underlying socket/stream to close the connection early. */
+	cancel?: () => void;
+}
 
 const DEFAULT_MAX_BYTES = 1_000_000;
 const MAX_BYTES_HARD_CAP = 5_000_000;
@@ -112,6 +138,7 @@ function isBlockedIPv4(address: string): boolean {
 	if (a === 192 && b === 168) return true; // private
 	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10
 	if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking 198.18.0.0/15
+	if (a === 192 && b === 0 && octets[2] === 0) return true; // 192.0.0.0/24 IETF protocol assignments (RFC 6890)
 	if (a === 192 && b === 0 && octets[2] === 2) return true; // TEST-NET-1 192.0.2.0/24
 	if (a === 198 && b === 51 && octets[2] === 100) return true; // TEST-NET-2 198.51.100.0/24
 	if (a === 203 && b === 0 && octets[2] === 113) return true; // TEST-NET-3 203.0.113.0/24
@@ -197,7 +224,8 @@ async function validateFetchUrl(
 	candidate: string,
 	dnsLookup: typeof lookup,
 ): Promise<
-	{ ok: true; url: URL } | { ok: false; reason: string; message: string }
+	| { ok: true; url: URL; address: string }
+	| { ok: false; reason: string; message: string }
 > {
 	let url: URL;
 	try {
@@ -225,7 +253,7 @@ async function validateFetchUrl(
 				message: `Refusing to fetch a private, loopback, or reserved address: ${host}`,
 			};
 		}
-		return { ok: true, url };
+		return { ok: true, url, address: host };
 	}
 	let resolved: Array<{ address: string }>;
 	try {
@@ -253,7 +281,8 @@ async function validateFetchUrl(
 			};
 		}
 	}
-	return { ok: true, url };
+	// All resolved addresses passed the block check; pin the first one.
+	return { ok: true, url, address: resolved[0].address };
 }
 
 function isAllowedContentType(contentType: string | null): boolean {
@@ -364,12 +393,95 @@ interface FetchOutcome {
 	truncated: boolean;
 }
 
+function makeAbortError(): Error {
+	try {
+		return new DOMException('The operation was aborted', 'AbortError');
+	} catch {
+		const err = new Error('The operation was aborted');
+		err.name = 'AbortError';
+		return err;
+	}
+}
+
 /**
- * Fetch with manual redirect handling, per-hop SSRF re-validation, an
- * AbortController timeout, and a streamed byte cap on decoded output.
+ * Perform a single GET over node:http/node:https with the socket pinned to a
+ * pre-validated IP. The original hostname is preserved for the Host header and
+ * (for https) for TLS SNI + certificate identity, so connecting to the IP does
+ * NOT weaken certificate verification. Because we never re-resolve the hostname
+ * at connect time, DNS rebinding cannot swap in a private/metadata address after
+ * validateFetchUrl has approved the resolved address.
+ *
+ * Redirects are NOT followed here (handled by boundedFetch). Content-Encoding is
+ * decoded so the byte cap bounds DECODED output (a gzip bomb is bounded by the
+ * decompressed size, not the advisory Content-Length): the decoder only produces
+ * as fast as the consumer pulls, and boundedFetch stops pulling at the cap.
+ */
+function performHttpRequest(args: HttpRequestArgs): Promise<RawHttpResponse> {
+	const { url, pinnedAddress, signal, headers } = args;
+	const isHttps = url.protocol === 'https:';
+	const port = url.port ? Number(url.port) : isHttps ? 443 : 80;
+	const hostNoBrackets = url.hostname.replace(/^\[|\]$/g, '');
+	const useSni = isHttps && isIP(hostNoBrackets) === 0;
+	const options: https.RequestOptions = {
+		host: pinnedAddress,
+		port,
+		path: `${url.pathname}${url.search}`,
+		method: 'GET',
+		headers: { Host: url.host, ...headers },
+	};
+	// SNI + cert identity track the hostname, not the pinned IP, so TLS still
+	// verifies against the name the user asked for.
+	if (useSni) options.servername = url.hostname;
+
+	return new Promise<RawHttpResponse>((resolve, reject) => {
+		let req: http.ClientRequest;
+		const onResponse = (res: http.IncomingMessage) => {
+			const normHeaders: Record<string, string | undefined> = {};
+			for (const [key, value] of Object.entries(res.headers)) {
+				normHeaders[key] = Array.isArray(value) ? value[0] : value;
+			}
+			const encoding = (normHeaders['content-encoding'] ?? '').toLowerCase();
+			let stream: Readable = res;
+			if (encoding === 'gzip' || encoding === 'x-gzip') {
+				stream = res.pipe(zlib.createGunzip());
+			} else if (encoding === 'deflate') {
+				stream = res.pipe(zlib.createInflate());
+			} else if (encoding === 'br') {
+				stream = res.pipe(zlib.createBrotliDecompress());
+			}
+			// Absorb late 'error' events emitted when we destroy the socket /
+			// decoder on an early break (byte-cap truncation, redirect, cancel).
+			// An EventEmitter 'error' with no listener throws uncaught; the async
+			// iterator still rejects errors that occur during active reading, so
+			// genuinely corrupt bodies are reported while intentional teardown is
+			// swallowed. Attach to both res and the decoder when they differ.
+			res.on('error', () => {});
+			if (stream !== res) stream.on('error', () => {});
+			resolve({
+				status: res.statusCode ?? 0,
+				headers: normHeaders,
+				body: stream as AsyncIterable<Uint8Array>,
+				cancel: () => req.destroy(),
+			});
+		};
+		req = isHttps
+			? https.request(options, onResponse)
+			: http.request(options, onResponse);
+		const onAbort = () => req.destroy(makeAbortError());
+		if (signal.aborted) req.destroy(makeAbortError());
+		else signal.addEventListener('abort', onAbort, { once: true });
+		req.on('error', reject);
+		req.end();
+	});
+}
+
+/**
+ * Drive performHttpRequest with manual redirect handling, per-hop SSRF
+ * re-validation + IP re-pinning, an AbortController timeout, and a streamed byte
+ * cap on decoded output.
  */
 async function boundedFetch(
-	startUrl: URL,
+	start: { url: URL; address: string },
 	maxBytes: number,
 	timeoutMs: number,
 	deps: typeof _internals,
@@ -377,16 +489,16 @@ async function boundedFetch(
 	| { ok: true; outcome: FetchOutcome }
 	| { ok: false; reason: string; message: string }
 > {
-	let current = startUrl;
+	let current = start;
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
 		for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-			let response: Response;
+			let raw: RawHttpResponse;
 			try {
-				response = await deps.fetch(current.toString(), {
-					method: 'GET',
-					redirect: 'manual',
+				raw = await deps.httpRequest({
+					url: current.url,
+					pinnedAddress: current.address,
 					signal: controller.signal,
 					headers: {
 						Accept:
@@ -398,7 +510,7 @@ async function boundedFetch(
 					return {
 						ok: false,
 						reason: 'timeout',
-						message: `Fetch exceeded ${timeoutMs}ms for ${current.toString()}`,
+						message: `Fetch exceeded ${timeoutMs}ms for ${current.url.toString()}`,
 					};
 				}
 				return {
@@ -408,18 +520,19 @@ async function boundedFetch(
 				};
 			}
 
-			if (response.status >= 300 && response.status < 400) {
-				const location = response.headers.get('location');
+			if (raw.status >= 300 && raw.status < 400) {
+				const location = raw.headers.location;
+				raw.cancel?.();
 				if (!location) {
 					return {
 						ok: false,
 						reason: 'bad_redirect',
-						message: `Redirect ${response.status} with no Location header.`,
+						message: `Redirect ${raw.status} with no Location header.`,
 					};
 				}
 				let next: URL;
 				try {
-					next = new URL(location, current);
+					next = new URL(location, current.url);
 				} catch {
 					return {
 						ok: false,
@@ -439,23 +552,22 @@ async function boundedFetch(
 						message: `Exceeded ${MAX_REDIRECTS} redirects.`,
 					};
 				}
-				current = revalidated.url;
-				if (response.body) await response.body.cancel().catch(() => {});
+				current = { url: revalidated.url, address: revalidated.address };
 				continue;
 			}
 
-			if (!response.ok) {
-				if (response.body) await response.body.cancel().catch(() => {});
+			if (raw.status < 200 || raw.status >= 300) {
+				raw.cancel?.();
 				return {
 					ok: false,
 					reason: 'http_error',
-					message: `HTTP ${response.status} for ${current.toString()}`,
+					message: `HTTP ${raw.status} for ${current.url.toString()}`,
 				};
 			}
 
-			const contentType = response.headers.get('content-type');
+			const contentType = raw.headers['content-type'] ?? null;
 			if (!isAllowedContentType(contentType)) {
-				if (response.body) await response.body.cancel().catch(() => {});
+				raw.cancel?.();
 				return {
 					ok: false,
 					reason: 'unsupported_content_type',
@@ -465,13 +577,14 @@ async function boundedFetch(
 
 			let body: { bytes: Uint8Array; truncated: boolean };
 			try {
-				body = await readBounded(response, maxBytes);
+				body = await readBounded(raw.body, maxBytes);
 			} catch (err) {
+				raw.cancel?.();
 				if (controller.signal.aborted) {
 					return {
 						ok: false,
 						reason: 'timeout',
-						message: `Fetch exceeded ${timeoutMs}ms while reading the body of ${current.toString()}`,
+						message: `Fetch exceeded ${timeoutMs}ms while reading the body of ${current.url.toString()}`,
 					};
 				}
 				return {
@@ -480,11 +593,12 @@ async function boundedFetch(
 					message: err instanceof Error ? err.message : String(err),
 				};
 			}
+			raw.cancel?.();
 			return {
 				ok: true,
 				outcome: {
-					status: response.status,
-					finalUrl: current.toString(),
+					status: raw.status,
+					finalUrl: current.url.toString(),
 					contentType,
 					bytes: body.bytes,
 					truncated: body.truncated,
@@ -502,31 +616,27 @@ async function boundedFetch(
 }
 
 async function readBounded(
-	response: Response,
+	body: AsyncIterable<Uint8Array> | null,
 	maxBytes: number,
 ): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-	if (!response.body) return { bytes: new Uint8Array(0), truncated: false };
-	const reader = response.body.getReader();
+	if (!body) return { bytes: new Uint8Array(0), truncated: false };
 	const chunks: Uint8Array[] = [];
 	let received = 0;
 	let truncated = false;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
-			chunks.push(value);
-			received += value.byteLength;
-			// Strictly greater: a stream whose final chunk lands exactly on the
-			// cap and then completes is NOT truncated. More data → received
-			// exceeds the cap on the next read → truncated.
-			if (received > maxBytes) {
-				truncated = true;
-				break;
-			}
+	// Breaking the for-await invokes the iterator's return(), which destroys the
+	// underlying stream — combined with raw.cancel?.() in boundedFetch this halts
+	// decompression and closes the socket, bounding a decompression bomb.
+	for await (const value of body) {
+		if (!value || value.byteLength === 0) continue;
+		chunks.push(value);
+		received += value.byteLength;
+		// Strictly greater: a stream whose final chunk lands exactly on the cap
+		// and then completes is NOT truncated. More data → received exceeds the
+		// cap on the next read → truncated.
+		if (received > maxBytes) {
+			truncated = true;
+			break;
 		}
-	} finally {
-		await reader.cancel().catch(() => {});
 	}
 	const merged = new Uint8Array(Math.min(received, maxBytes));
 	let offset = 0;
@@ -632,7 +742,7 @@ export const web_fetch: ReturnType<typeof tool> = createSwarmTool({
 		const maxBytes = parsed.data.max_bytes ?? DEFAULT_MAX_BYTES;
 		const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_TIMEOUT_MS;
 		const result = await boundedFetch(
-			validated.url,
+			{ url: validated.url, address: validated.address },
 			maxBytes,
 			timeoutMs,
 			_internals,
@@ -717,12 +827,12 @@ async function captureFetchEvidence(
 }
 
 export const _internals: {
-	fetch: FetchFn;
+	httpRequest: (args: HttpRequestArgs) => Promise<RawHttpResponse>;
 	dnsLookup: typeof lookup;
 	loadPluginConfig: typeof loadPluginConfig;
 	writeEvidenceDocuments: typeof writeEvidenceDocuments;
 } = {
-	fetch: (input, init) => fetch(input, init),
+	httpRequest: performHttpRequest,
 	dnsLookup: lookup,
 	loadPluginConfig,
 	writeEvidenceDocuments,

@@ -12,7 +12,7 @@ const DIR = os.tmpdir();
 const original = { ..._internals };
 
 afterEach(() => {
-	_internals.fetch = original.fetch;
+	_internals.httpRequest = original.httpRequest;
 	_internals.dnsLookup = original.dnsLookup;
 	_internals.loadPluginConfig = original.loadPluginConfig;
 	_internals.writeEvidenceDocuments = original.writeEvidenceDocuments;
@@ -36,6 +36,29 @@ function publicDns() {
 	_internals.dnsLookup = (async () => [
 		{ address: '93.184.216.34' },
 	]) as unknown as typeof _internals.dnsLookup;
+}
+
+/** Build a one-chunk decoded body stream for the httpRequest seam. */
+function bodyOf(text: string | null): AsyncIterable<Uint8Array> | null {
+	if (text === null) return null;
+	const bytes = new TextEncoder().encode(text);
+	return (async function* () {
+		yield bytes;
+	})();
+}
+
+/** Stub _internals.httpRequest with a single canned response. */
+function stubHttp(
+	status: number,
+	headers: Record<string, string | undefined>,
+	body: string | null,
+) {
+	_internals.httpRequest = (async () => ({
+		status,
+		headers,
+		body: bodyOf(body),
+		cancel: () => {},
+	})) as unknown as typeof _internals.httpRequest;
 }
 
 async function run(args: Record<string, unknown>) {
@@ -124,14 +147,38 @@ describe('web_fetch — SSRF defenses', () => {
 		enableCouncil();
 		publicDns();
 		stubEvidence();
-		_internals.fetch = (async () =>
-			new Response(null, {
-				status: 302,
-				headers: { location: 'http://169.254.169.254/' },
-			})) as unknown as typeof _internals.fetch;
+		stubHttp(302, { location: 'http://169.254.169.254/' }, null);
 		const res = await run({ url: 'https://example.com/redirect' });
 		expect(res.success).toBe(false);
 		expect(res.reason).toBe('blocked_host');
+	});
+
+	test('pins the socket to the validated resolved IP, not the hostname (DNS-rebinding defense)', async () => {
+		enableCouncil();
+		stubEvidence();
+		_internals.dnsLookup = (async () => [
+			{ address: '93.184.216.34' },
+		]) as unknown as typeof _internals.dnsLookup;
+		let seen: { pinnedAddress: string; host: string } | undefined;
+		_internals.httpRequest = (async (a: {
+			url: URL;
+			pinnedAddress: string;
+		}) => {
+			seen = { pinnedAddress: a.pinnedAddress, host: a.url.hostname };
+			return {
+				status: 200,
+				headers: { 'content-type': 'text/html' },
+				body: bodyOf('<p>ok</p>'),
+				cancel: () => {},
+			};
+		}) as unknown as typeof _internals.httpRequest;
+		const res = await run({ url: 'https://example.com/page' });
+		expect(res.success).toBe(true);
+		// The connection target is the pre-validated IP; the hostname is kept only
+		// for the Host header and TLS SNI/identity. There is no second name
+		// resolution that a rebinding attacker could flip to a private address.
+		expect(seen?.pinnedAddress).toBe('93.184.216.34');
+		expect(seen?.host).toBe('example.com');
 	});
 });
 
@@ -140,14 +187,11 @@ describe('web_fetch — fetching and extraction', () => {
 		enableCouncil();
 		publicDns();
 		stubEvidence('evidence-cache:evd_abc');
-		_internals.fetch = (async () =>
-			new Response(
-				'<html><head><title>Hello &amp; World</title></head><body><script>bad()</script><p>First.</p><p>Second.</p></body></html>',
-				{
-					status: 200,
-					headers: { 'content-type': 'text/html; charset=utf-8' },
-				},
-			)) as unknown as typeof _internals.fetch;
+		stubHttp(
+			200,
+			{ 'content-type': 'text/html; charset=utf-8' },
+			'<html><head><title>Hello &amp; World</title></head><body><script>bad()</script><p>First.</p><p>Second.</p></body></html>',
+		);
 		const res = await run({ url: 'https://example.com/page' });
 		expect(res.success).toBe(true);
 		expect(res.title).toBe('Hello & World');
@@ -163,11 +207,7 @@ describe('web_fetch — fetching and extraction', () => {
 	test('rejects unsupported content types', async () => {
 		enableCouncil();
 		publicDns();
-		_internals.fetch = (async () =>
-			new Response('binary', {
-				status: 200,
-				headers: { 'content-type': 'image/png' },
-			})) as unknown as typeof _internals.fetch;
+		stubHttp(200, { 'content-type': 'image/png' }, 'binary');
 		const res = await run({ url: 'https://example.com/image.png' });
 		expect(res.success).toBe(false);
 		expect(res.reason).toBe('unsupported_content_type');
@@ -176,11 +216,7 @@ describe('web_fetch — fetching and extraction', () => {
 	test('reports HTTP errors', async () => {
 		enableCouncil();
 		publicDns();
-		_internals.fetch = (async () =>
-			new Response('nope', {
-				status: 500,
-				headers: { 'content-type': 'text/html' },
-			})) as unknown as typeof _internals.fetch;
+		stubHttp(500, { 'content-type': 'text/html' }, 'nope');
 		const res = await run({ url: 'https://example.com/boom' });
 		expect(res.success).toBe(false);
 		expect(res.reason).toBe('http_error');
@@ -190,12 +226,17 @@ describe('web_fetch — fetching and extraction', () => {
 		enableCouncil();
 		publicDns();
 		stubEvidence();
-		const big = 'a'.repeat(5000);
-		_internals.fetch = (async () =>
-			new Response(big, {
-				status: 200,
-				headers: { 'content-type': 'text/plain' },
-			})) as unknown as typeof _internals.fetch;
+		// 50 × 100-byte chunks (5000 bytes). With a 1024 cap the reader must stop
+		// mid-stream (after ~11 chunks) and mark the result truncated.
+		const chunk = new TextEncoder().encode('a'.repeat(100));
+		_internals.httpRequest = (async () => ({
+			status: 200,
+			headers: { 'content-type': 'text/plain' },
+			body: (async function* () {
+				for (let i = 0; i < 50; i++) yield chunk;
+			})(),
+			cancel: () => {},
+		})) as unknown as typeof _internals.httpRequest;
 		const res = await run({ url: 'https://example.com/big', max_bytes: 1024 });
 		expect(res.success).toBe(true);
 		expect(res.truncated).toBe(true);
@@ -207,19 +248,23 @@ describe('web_fetch — fetching and extraction', () => {
 		publicDns();
 		stubEvidence();
 		let call = 0;
-		_internals.fetch = (async () => {
+		_internals.httpRequest = (async () => {
 			call += 1;
 			if (call === 1) {
-				return new Response(null, {
+				return {
 					status: 301,
 					headers: { location: 'https://example.com/final' },
-				});
+					body: null,
+					cancel: () => {},
+				};
 			}
-			return new Response('<p>done</p>', {
+			return {
 				status: 200,
 				headers: { 'content-type': 'text/html' },
-			});
-		}) as unknown as typeof _internals.fetch;
+				body: bodyOf('<p>done</p>'),
+				cancel: () => {},
+			};
+		}) as unknown as typeof _internals.httpRequest;
 		const res = await run({ url: 'https://example.com/start' });
 		expect(res.success).toBe(true);
 		expect(res.finalUrl).toBe('https://example.com/final');
@@ -229,12 +274,12 @@ describe('web_fetch — fetching and extraction', () => {
 	test('reports a timeout when the request is aborted', async () => {
 		enableCouncil();
 		publicDns();
-		_internals.fetch = ((_url: string, opts: { signal: AbortSignal }) =>
+		_internals.httpRequest = ((args: { signal: AbortSignal }) =>
 			new Promise((_resolve, reject) => {
-				opts.signal.addEventListener('abort', () =>
+				args.signal.addEventListener('abort', () =>
 					reject(new DOMException('aborted', 'AbortError')),
 				);
-			})) as unknown as typeof _internals.fetch;
+			})) as unknown as typeof _internals.httpRequest;
 		const res = await run({
 			url: 'https://example.com/slow',
 			timeout_ms: 1000,
@@ -256,6 +301,7 @@ describe('isBlockedAddress', () => {
 			'169.254.169.254',
 			'100.64.0.1',
 			'224.0.0.1',
+			'192.0.0.1', // 192.0.0.0/24 IETF protocol assignments (RFC 6890)
 			'192.0.2.5',
 			'198.51.100.5',
 			'203.0.113.5',
@@ -269,6 +315,8 @@ describe('isBlockedAddress', () => {
 			'::ffff:a9fe:a9fe', // hex-compressed IPv4-mapped 169.254.169.254
 			'::ffff:7f00:1', // hex-compressed IPv4-mapped 127.0.0.1
 			'0:0:0:0:0:ffff:a9fe:a9fe', // fully expanded mapped form
+			'::7f00:1', // deprecated IPv4-compatible form of 127.0.0.1
+			'::c000:201', // deprecated IPv4-compatible form of 192.0.2.1 (TEST-NET-1)
 		]) {
 			expect(isBlockedAddress(ip)).toBe(true);
 		}

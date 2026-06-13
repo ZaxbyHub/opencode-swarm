@@ -43,6 +43,7 @@
 		".opencode/skills/pre-phase-briefing",
 		".opencode/skills/council",
 		".opencode/skills/deep-dive",
+		".opencode/skills/deep-research",
 		".opencode/skills/codebase-review-swarm",
 		".opencode/skills/design-docs",
 		".opencode/skills/swarm-pr-review",

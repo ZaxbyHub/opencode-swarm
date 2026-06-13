@@ -46,9 +46,11 @@ configure a search API key (Tavily or Brave) in global
 
 Then STOP. Do NOT produce ungrounded research from training memory.
 
-(`web_search` requires the key; `web_fetch` only requires the enabled flag. Both
-are owned by you, the architect. The sme workers do not have these tools and must
-not be expected to fetch — pass them the evidence you gather.)
+(`web_search` requires the key; `web_fetch` only requires the enabled flag and is
+architect-only. The sme workers do NOT have `web_fetch` and must not be expected to
+fetch sources. An sme may have `web_search`, but in this mode it synthesizes only
+from the evidence you gather — do NOT rely on sme-side searching; pass it the
+RESEARCH CONTEXT.)
 
 ## Step 2 — Decompose
 
@@ -161,6 +163,7 @@ the chat answer (matching MODE: DEEP_DIVE). Apply these rules:
   written under `.swarm/evidence-cache/` by the tools automatically).
 - Do NOT delegate to coder. Do NOT call declare_scope.
 - Do NOT report any claim that lacks a verified evidence citation.
-- The architect owns retrieval (`web_search`, `web_fetch`); sme workers synthesize
-  only from provided evidence and never fetch.
+- The architect owns retrieval for this mode (`web_search`, `web_fetch`); sme workers
+  synthesize only from the evidence you provide and must not run their own searches or
+  fetch sources here, even if `web_search` is available to them.
 - Never fabricate sources, URLs, or evidence refs.
