@@ -49,6 +49,7 @@ export { handleCouncilCommand } from './council';
 export { handleCurateCommand } from './curate';
 export { handleDarkMatterCommand } from './dark-matter';
 export { handleDeepDiveCommand } from './deep-dive';
+export { handleDeepResearchCommand } from './deep-research';
 export { handleDiagnoseCommand } from './diagnose';
 export { handleDoctorCommand } from './doctor';
 export {

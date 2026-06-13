@@ -451,6 +451,11 @@ export const TOOL_METADATA = {
 			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents and by SME for opt-in external skill/source evaluation.',
 		agents: ['architect', 'sme', 'skill_improver'],
 	},
+	web_fetch: {
+		description:
+			'Fetch the readable text of a single http(s) URL for architect-driven deep research (MODE: DEEP_RESEARCH). Returns decoded page text (HTML stripped to plain text), the document title, the final URL after redirects, and an evidence reference stored alongside web_search results. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. No search API key required. Blocks private/loopback/link-local/metadata addresses (re-validated across redirects), enforces a timeout, and caps the response body size.',
+		agents: ['architect'],
+	},
 	convene_general_council: {
 		description:
 			'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',

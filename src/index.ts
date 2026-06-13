@@ -1172,6 +1172,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
 				},
+				'swarm-deep-research': {
+					template: '/swarm deep-research $ARGUMENTS',
+					description:
+						'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+				},
 				'swarm-codebase-review': {
 					template: '/swarm codebase-review $ARGUMENTS',
 					description:

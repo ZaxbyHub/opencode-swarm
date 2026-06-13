@@ -12,6 +12,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'pre-phase-briefing',
 	'council',
 	'deep-dive',
+	'deep-research',
 	'codebase-review-swarm',
 	'design-docs',
 	'swarm-pr-review',
