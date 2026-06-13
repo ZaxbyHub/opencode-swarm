@@ -164,9 +164,18 @@ export function createFullAutoPermissionHook(
 			// overrides the init-time config mode — otherwise the command's mode
 			// argument would be cosmetic (adversarial review F1: the classifier
 			// must enforce the mode the run was actually started with).
+			// Validate mode from durable state: a hand-edited state file could
+			// contain an arbitrary string — fail-safe to 'strict' on unknown values.
+			const VALID_MODES = ['assisted', 'supervised', 'strict'] as const;
+			type ValidMode = (typeof VALID_MODES)[number];
+			const safeMode: ValidMode = (VALID_MODES as readonly string[]).includes(
+				runState.mode,
+			)
+				? (runState.mode as ValidMode)
+				: 'strict';
 			const effectiveFullAutoConfig = fullAutoConfig
-				? { ...fullAutoConfig, mode: runState.mode }
-				: { mode: runState.mode };
+				? { ...fullAutoConfig, mode: safeMode }
+				: { mode: safeMode };
 
 			const classifierInput: FullAutoClassifierInput = {
 				sessionID,

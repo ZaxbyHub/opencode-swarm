@@ -204,6 +204,26 @@ export function isScopeStale(
 // Read/Write
 // ============================================================================
 
+// In-process serialization of index updates: prevents two concurrent
+// persistReviewReceipt calls from racing on the last-write-wins index update.
+// Cross-process races are extremely rare (two distinct OpenCode instances
+// writing receipts simultaneously) and are accepted as best-effort.
+let _indexLockChain: Promise<void> = Promise.resolve();
+
+async function withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+	const prev = _indexLockChain;
+	let release!: () => void;
+	_indexLockChain = new Promise<void>((r) => {
+		release = r;
+	});
+	try {
+		await prev;
+		return await fn();
+	} finally {
+		release();
+	}
+}
+
 /** Read and parse the receipt index. Returns an empty index if missing. */
 async function readReceiptIndex(directory: string): Promise<ReceiptIndex> {
 	const indexPath = resolveReceiptIndexPath(directory);
@@ -264,18 +284,20 @@ export async function persistReviewReceipt(
 	);
 	fs.renameSync(tmpPath, receiptPath);
 
-	// Update index
-	const index = await readReceiptIndex(directory);
-	const entry: ReceiptIndexEntry = {
-		id: receipt.id,
-		verdict: receipt.verdict,
-		reviewed_at: receipt.reviewed_at,
-		scope_hash: receipt.scope_fingerprint.hash,
-		agent: receipt.reviewer.agent,
-		filename,
-	};
-	index.entries.push(entry);
-	await writeReceiptIndex(directory, index);
+	// Update index inside an in-process lock to prevent last-write-wins race.
+	await withIndexLock(async () => {
+		const index = await readReceiptIndex(directory);
+		const entry: ReceiptIndexEntry = {
+			id: receipt.id,
+			verdict: receipt.verdict,
+			reviewed_at: receipt.reviewed_at,
+			scope_hash: receipt.scope_fingerprint.hash,
+			agent: receipt.reviewer.agent,
+			filename,
+		};
+		index.entries.push(entry);
+		await writeReceiptIndex(directory, index);
+	});
 
 	return receiptPath;
 }

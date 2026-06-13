@@ -114,9 +114,24 @@ describe('parseReviewerOutput', () => {
 		expect(parseReviewerOutput(diffEcho)?.verdict).toBe('approved');
 	});
 
-	test('regression 1a: disagreeing anchored verdict lines are ambiguous → null', () => {
+	test('regression 1a: format-spec line VERDICT: APPROVED | REJECTED does not match — actual VERDICT: REJECTED wins', () => {
+		// The \s*$ trailing anchor (finding 1b fix) ensures that the format-spec
+		// line "VERDICT: APPROVED | REJECTED" does NOT match the pattern (the
+		// "| REJECTED" suffix prevents \s*$ from anchoring). Previously, without
+		// \s*$, the line matched as APPROVED, disagreed with REJECTED, and returned
+		// null — silently suppressing the real rejection (fail-open). Now the
+		// format-spec line is simply ignored and the real verdict is returned.
+		const quoted = [
+			'VERDICT: APPROVED | REJECTED', // format-spec line — must NOT match
+			'My actual conclusion:',
+			'VERDICT: REJECTED',
+		].join('\n');
+		expect(parseReviewerOutput(quoted)?.verdict).toBe('rejected');
+	});
+
+	test('regression 1a: two truly disagreeing anchored verdict lines are ambiguous → null', () => {
 		const ambiguous = [
-			'VERDICT: APPROVED | REJECTED', // quoted format spec line
+			'VERDICT: APPROVED',
 			'My actual conclusion:',
 			'VERDICT: REJECTED',
 		].join('\n');

@@ -109,8 +109,13 @@ function collectSectionLines(lines: string[], section: string): string[] {
  * record a false APPROVED receipt and suppress the rejection advisory —
  * fail-open in the unsafe direction.
  */
+// Trailing \s*$ is load-bearing (adversarial review 1b): without it,
+// `VERDICT: APPROVED | REJECTED` (a format-spec line that reviewers sometimes
+// quote verbatim) matches with capture "APPROVED", then disagrees with the
+// actual `VERDICT: REJECTED` line and returns null — silently suppressing the
+// rejection advisory (fail-open). The $ ensures only clean verdict lines match.
 const VERDICT_LINE_PATTERN =
-	/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|REJECTED)\b/gim;
+	/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|REJECTED)\s*$/gim;
 const RISK_LINE_PATTERN =
 	/^\s*(?:\*\*)?RISK(?:\*\*)?\s*:\s*(LOW|MEDIUM|HIGH|CRITICAL)\b/gim;
 

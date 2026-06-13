@@ -438,6 +438,7 @@ export async function loadPluginConfigWithMetaAsync(
 ): Promise<{
 	config: PluginConfig;
 	loadedFromFile: boolean;
+	configHadErrors: boolean;
 }> {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -457,7 +458,7 @@ export async function loadPluginConfigWithMetaAsync(
 		loadedFromFile,
 		configHadErrors,
 	);
-	return { config, loadedFromFile };
+	return { config, loadedFromFile, configHadErrors };
 }
 
 /**

@@ -251,7 +251,17 @@ interface AutoReviewEvent {
 function writeAutoReviewEvent(directory: string, event: AutoReviewEvent): void {
 	try {
 		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		// Append atomically via read-existing + write-tmp-rename so concurrent
+		// writes on the same event loop do not interleave bytes in the JSONL file.
+		const existing = fs.existsSync(eventsPath)
+			? fs.readFileSync(eventsPath, 'utf-8')
+			: '';
+		const line = `${JSON.stringify(event)}\n`;
+		const tmpPath = `${eventsPath}.tmp.${Date.now()}.${Math.random()
+			.toString(36)
+			.slice(2)}`;
+		fs.writeFileSync(tmpPath, existing + line, 'utf-8');
+		fs.renameSync(tmpPath, eventsPath);
 	} catch (err) {
 		logger.warn(
 			`[auto-review] event write failed: ${err instanceof Error ? err.message : String(err)}`,
