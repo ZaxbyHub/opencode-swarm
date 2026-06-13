@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.71.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.0...v7.71.1) (2026-06-13)
+
+
+### Bug Fixes
+
+* **ci:** add guardrails submodules to process.cwd() allowlist, correct doc reference ([#1318](https://github.com/zaxbysauce/opencode-swarm/issues/1318)) ([57e21d5](https://github.com/zaxbysauce/opencode-swarm/commit/57e21d535c33f9b251640baeda53f70e7af84b30))
+
 ## [7.71.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.70.0...v7.71.0) (2026-06-13)
 
 
