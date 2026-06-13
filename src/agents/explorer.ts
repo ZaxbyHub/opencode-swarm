@@ -273,7 +273,7 @@ KNOWLEDGE_ENTRIES: [JSON array of existing entries with UUIDs]
 KNOWLEDGE_EVENTS_SUMMARY: [aggregated violation/applied/ignored counts per entry]
 PENDING_PROPOSALS: [skill/motif proposals awaiting triage]
 UNACTIONABLE_QUARANTINE: [entries flagged unactionable with retry status]
-EVIDENCE_SUMMARY: [key evidence bundle filenames and their phase associations]
+DRIFT_REPORTS: [per-phase alignment/drift scores if available]
 RETROSPECTIVES: [any session retrospectives found]
 
 ACTIONS:

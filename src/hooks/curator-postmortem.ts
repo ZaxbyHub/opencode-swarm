@@ -101,10 +101,16 @@ function readJsonlFile(filePath: string): unknown[] {
 	try {
 		if (!existsSync(filePath)) return [];
 		const content = readFileSync(filePath, 'utf-8');
-		return content
-			.split('\n')
-			.filter((l) => l.trim())
-			.map((l) => JSON.parse(l));
+		const results: unknown[] = [];
+		for (const line of content.split('\n')) {
+			if (!line.trim()) continue;
+			try {
+				results.push(JSON.parse(line));
+			} catch {
+				// skip corrupted line, continue with remaining lines
+			}
+		}
+		return results;
 	} catch {
 		return [];
 	}
