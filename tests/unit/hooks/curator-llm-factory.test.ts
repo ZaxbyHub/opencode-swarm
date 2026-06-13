@@ -8,6 +8,7 @@ vi.mock('../../../src/state', () => ({
 		opencodeClient: null,
 		curatorInitAgentNames: [] as string[],
 		curatorPhaseAgentNames: [] as string[],
+		curatorPostmortemAgentNames: [] as string[],
 		activeAgent: new Map<string, string>(),
 	},
 }));
@@ -31,6 +32,9 @@ beforeEach(() => {
 		[];
 	(swarmState as { curatorPhaseAgentNames: string[] }).curatorPhaseAgentNames =
 		[];
+	(
+		swarmState as { curatorPostmortemAgentNames: string[] }
+	).curatorPostmortemAgentNames = [];
 	(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map();
 });
 

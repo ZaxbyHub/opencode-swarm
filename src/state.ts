@@ -520,7 +520,7 @@ export function resetSwarmState(): void {
 }
 
 /**
- * Reset swarm state while preserving the 7 module-scoped singletons that are
+ * Reset swarm state while preserving the 8 module-scoped singletons that are
  * populated once at plugin init and must survive a /swarm close + re-init
  * within the same process lifetime.
  *
