@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+	mkdtemp,
+	readFile,
+	rm,
+	stat,
+	utimes,
+	writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	cloneCachedValue,
 	getSwarmArtifactCacheStats,
 	readCachedParsedFile,
 	readCachedParsedFileSync,
@@ -41,6 +49,23 @@ describe('swarm-artifact-cache', () => {
 		expect(await readCachedTextFile(filePath, read)).toBe('two-two');
 
 		stats = getSwarmArtifactCacheStats();
+		expect(stats.textReadCount).toBe(2);
+		expect(stats.textCacheMissCount).toBe(2);
+	});
+
+	test('invalidates same-size rewrites even when mtime is restored', async () => {
+		const filePath = join(tempDir, 'knowledge.jsonl');
+		await writeFile(filePath, 'one', 'utf-8');
+		const originalStat = await stat(filePath);
+
+		const read = () => readFile(filePath, 'utf-8');
+		expect(await readCachedTextFile(filePath, read)).toBe('one');
+
+		await writeFile(filePath, 'two', 'utf-8');
+		await utimes(filePath, originalStat.atime, originalStat.mtime);
+
+		expect(await readCachedTextFile(filePath, read)).toBe('two');
+		const stats = getSwarmArtifactCacheStats();
 		expect(stats.textReadCount).toBe(2);
 		expect(stats.textCacheMissCount).toBe(2);
 	});
@@ -130,5 +155,86 @@ describe('swarm-artifact-cache', () => {
 		expect(stats.parsedReadCount).toBe(1);
 		expect(stats.parseCount).toBe(1);
 		expect(stats.parsedCacheHitCount).toBe(1);
+	});
+
+	test('does not cache a parsed read when the file changes during the read', async () => {
+		const filePath = join(tempDir, 'racy-plan.json');
+		await writeFile(filePath, '{"value":"old"}', 'utf-8');
+
+		const first = await readCachedParsedFile(
+			filePath,
+			'race-test',
+			async () => {
+				const content = await readFile(filePath, 'utf-8');
+				await writeFile(filePath, '{"value":"new"}', 'utf-8');
+				return content;
+			},
+			(content) => JSON.parse(content) as { value: string },
+		);
+
+		expect(first?.value).toBe('old');
+		let stats = getSwarmArtifactCacheStats();
+		expect(stats.parsedEntryCount).toBe(0);
+		expect(stats.parseCount).toBe(1);
+
+		const second = await readCachedParsedFile(
+			filePath,
+			'race-test',
+			() => readFile(filePath, 'utf-8'),
+			(content) => JSON.parse(content) as { value: string },
+		);
+
+		expect(second?.value).toBe('new');
+		stats = getSwarmArtifactCacheStats();
+		expect(stats.parsedEntryCount).toBe(1);
+		expect(stats.parseCount).toBe(2);
+	});
+
+	test('keeps FIFO eviction stable after cache hits', async () => {
+		const paths = Array.from({ length: 129 }, (_, index) =>
+			join(tempDir, `artifact-${index}.md`),
+		);
+		for (const [index, filePath] of paths.entries()) {
+			await writeFile(filePath, `value-${index}`, 'utf-8');
+		}
+
+		for (let index = 0; index < 128; index++) {
+			const filePath = paths[index]!;
+			await readCachedTextFile(filePath, () => readFile(filePath, 'utf-8'));
+		}
+		expect(
+			await readCachedTextFile(paths[0]!, () => readFile(paths[0]!, 'utf-8')),
+		).toBe('value-0');
+
+		await readCachedTextFile(paths[128]!, () => readFile(paths[128]!, 'utf-8'));
+		let stats = getSwarmArtifactCacheStats();
+		expect(stats.evictionCount).toBe(1);
+		expect(stats.textEvictionCount).toBe(1);
+		expect(stats.parsedEvictionCount).toBe(0);
+
+		expect(
+			await readCachedTextFile(paths[0]!, () => readFile(paths[0]!, 'utf-8')),
+		).toBe('value-0');
+		stats = getSwarmArtifactCacheStats();
+		expect(stats.textReadCount).toBe(130);
+		expect(stats.textCacheMissCount).toBe(130);
+	});
+
+	test('counts JSON-compatible clone fallback when structuredClone is unavailable', () => {
+		const mutableGlobal = globalThis as typeof globalThis & {
+			structuredClone?: typeof structuredClone;
+		};
+		const originalStructuredClone = mutableGlobal.structuredClone;
+		try {
+			mutableGlobal.structuredClone = undefined;
+			const cloned = cloneCachedValue({ nested: { value: 'kept' } });
+			cloned.nested.value = 'mutated';
+
+			expect(cloned.nested.value).toBe('mutated');
+			const stats = getSwarmArtifactCacheStats();
+			expect(stats.cloneFallbackCount).toBe(1);
+		} finally {
+			mutableGlobal.structuredClone = originalStructuredClone;
+		}
 	});
 });

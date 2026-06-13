@@ -1,7 +1,8 @@
 # Swarm Artifact Cache
 
-- Added a bounded mtime/size keyed read-through cache for frequently read swarm artifacts on the chat injection path.
+- Added a bounded stat-metadata keyed read-through cache for frequently read swarm artifacts on the chat injection path.
 - Reused cached parsed plan and knowledge JSONL forms when files are unchanged, while returning cloned parsed values so callers cannot mutate cached state.
+- Hardened cache invalidation for same-size rewrites and mid-read file changes, kept eviction FIFO as documented, and split text/parsed eviction counters for clearer diagnostics.
 - Preserved fail-open behavior: stat/read/parse failures continue through the existing fallback paths instead of blocking hook execution.
 - Focused regression coverage shows unchanged raw `.swarm` reads drop from two direct reads to one cached read, and repeated parsed `plan.json` / `knowledge.jsonl` loads drop to one parsed read until rewrite invalidation.
 - Fixed reviewer `SKILL_COMPLIANCE` capture so verdict lines no longer require a trailing space to be recorded.
