@@ -394,10 +394,9 @@ export async function runCuratorPostMortem(
 			planId = derivePlanId(plan);
 			const phaseCount = plan.phases?.length ?? 0;
 			const completedPhases =
-				plan.phases?.filter(
-					(p: { status?: string }) => p.status === 'completed',
-				).length ?? 0;
-			planSummary = `Plan "${plan.title}" (${plan.swarm}): ${completedPhases}/${phaseCount} phases completed.`;
+				plan.phases?.filter((p: { status?: string }) => p.status === 'complete')
+					.length ?? 0;
+			planSummary = `Plan "${plan.title}" (${plan.swarm}): ${completedPhases}/${phaseCount} phases complete.`;
 		} else {
 			warnings.push('Plan not found — using fallback plan ID.');
 		}

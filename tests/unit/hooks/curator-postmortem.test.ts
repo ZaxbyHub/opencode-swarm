@@ -152,8 +152,8 @@ describe('runCuratorPostMortem', () => {
 			title: 'Test Project',
 			swarm: 'test',
 			phases: [
-				{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] },
-				{ id: 2, name: 'Phase 2', status: 'completed', tasks: [] },
+				{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] },
+				{ id: 2, name: 'Phase 2', status: 'complete', tasks: [] },
 			],
 		});
 		writeKnowledge(dir, [
@@ -178,13 +178,15 @@ describe('runCuratorPostMortem', () => {
 		expect(content).toContain('Post-Mortem Report');
 		expect(content).toContain('2 applied');
 		expect(content).toContain('1 violated');
+		// Verify phase count uses correct 'complete' status (not 'completed')
+		expect(content).toContain('2/2 phases complete');
 	});
 
 	test('idempotent: skips if report already exists', async () => {
 		writePlan(dir, {
 			title: 'Test Project',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		// First run creates the report
@@ -201,7 +203,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Test Project',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		const result1 = await runCuratorPostMortem(dir);
@@ -216,7 +218,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Test Project',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		const failingDelegate = async () => {
@@ -252,7 +254,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Stale Test',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 		writeKnowledge(dir, [
 			{ id: applied, lesson: 'This entry was applied' },
@@ -272,7 +274,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Queue Test',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		const swarmDir = ensureSwarmDir(dir);
@@ -297,7 +299,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Drift Test',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		const swarmDir = ensureSwarmDir(dir);
@@ -321,7 +323,7 @@ describe('runCuratorPostMortem', () => {
 		writePlan(dir, {
 			title: 'Retro Test',
 			swarm: 'test',
-			phases: [{ id: 1, name: 'Phase 1', status: 'completed', tasks: [] }],
+			phases: [{ id: 1, name: 'Phase 1', status: 'complete', tasks: [] }],
 		});
 
 		const retroDir = join(dir, '.swarm', 'evidence', 'retro-1');
