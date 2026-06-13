@@ -77,8 +77,12 @@ export interface PhaseReviewerResult {
  * Uses the `{swarmId}_reviewer` pattern for named swarms and bare `reviewer`
  * for the default swarm. Follows the same suffix-based resolution used by
  * `getCanonicalAgentRole` so that arbitrary swarm prefixes are handled correctly.
+ *
+ * Exported for reuse by the auto-review hook (src/hooks/auto-review.ts).
  */
-function resolveDefaultReviewerAgent(generatedAgentNames: string[]): string {
+export function resolveDefaultReviewerAgent(
+	generatedAgentNames: string[],
+): string {
 	if (generatedAgentNames.length === 0) {
 		return 'reviewer';
 	}

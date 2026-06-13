@@ -138,7 +138,8 @@ export function tickAndEvaluate(
 	counter: 'toolCalls' | 'architectTurns',
 	config: PluginConfig,
 ): CadenceDecision | undefined {
-	if (!config.full_auto?.enabled) return undefined;
+	// First-class toggle: no config.full_auto.enabled gate — the durable
+	// per-session run state is the sole runtime authority.
 	const before = loadFullAutoRunState(directory, sessionID);
 	if (!before || before.status !== 'running') return undefined;
 	const updated = incrementFullAutoCounter(directory, sessionID, counter);

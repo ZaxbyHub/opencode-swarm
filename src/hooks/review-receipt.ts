@@ -20,6 +20,13 @@
  *
  * Critic drift verification can consume prior receipts as supporting context
  * but MUST NOT blindly trust them — staleness check is mandatory.
+ *
+ * Scope-description heterogeneity: receipts in one index may be fingerprinted
+ * over different canonical contents (e.g. 'reviewer-task-prompt' hashes the
+ * delegation prompt; 'auto-review-*-diff' hashes the reviewed diff). A prompt
+ * fingerprint does NOT change when the worktree changes, so consumers MUST
+ * filter by `scope_fingerprint.scope_description` (or compare like-for-like
+ * content) before treating an approved receipt as fresh via isScopeStale().
  */
 
 import * as crypto from 'node:crypto';

@@ -216,6 +216,38 @@ Runs a type-checking or linting command after the coder agent completes.
 }
 ```
 
+### auto_review
+
+Opt-in automatic review of the execution diff by the reviewer agent — its own configured model (`agents.reviewer.model`), in a fresh ephemeral session, with write/edit/patch disabled. This is the "second model reviews the work in a clean context" pattern used by Claude Code's auto-review and Codex's review model.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable automatic execution-diff review |
+| `trigger` | `"task_completion" \| "phase_boundary" \| "both"` | `"phase_boundary"` | When to dispatch: after `update_task_status` → `completed`, at `phase_complete`, or both |
+| `timeout_ms` | number | `300000` | Reviewer dispatch timeout (10s–30min) |
+| `max_diff_kb` | number | `256` | Maximum diff size included in the review prompt (16–2048 KiB). Larger diffs are truncated to this size; if the raw diff exceeds twice this cap, collection aborts and the pass is skipped with an `error` event. |
+
+Behavior:
+
+- **Advisory and fire-and-forget** — the tool call that triggered the review is never delayed; dispatches are deduplicated per session with a 60-second cooldown (repeated `phase_complete` retries do not spam review sessions).
+- Verdicts are persisted as **durable review receipts** under `.swarm/review-receipts/` (scope-fingerprinted over the reviewed diff) and an `auto_review` event is appended to `.swarm/events.jsonl`.
+- A **REJECTED** verdict injects an `[AUTO-REVIEW]` advisory (top findings + required fixes) into the architect's next prompt; an unparseable response injects an UNVERIFIED advisory; APPROVED stays silent.
+- A clean working tree or missing git skips the pass with a `skipped` event.
+
+Independently of `auto_review`, every returning reviewer Task delegation now has its `VERDICT`/`RISK`/`ISSUES`/`FIXES` block parsed and persisted as a review receipt — a durable machine-readable record of prior judgments that future re-review and drift-verification consumers can build on (the parser is fail-safe: ambiguous or missing verdict lines persist nothing).
+
+```json
+{
+  "auto_review": {
+    "enabled": true,
+    "trigger": "both"
+  },
+  "agents": {
+    "reviewer": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": ["opencode/big-pickle"] }
+  }
+}
+```
+
 ### slop_detector
 
 Detects low-quality code patterns (AI slop) in generated output.

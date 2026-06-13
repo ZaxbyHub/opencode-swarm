@@ -242,12 +242,39 @@ export function isFullAutoStateUnreadable(): {
 	return { unreadable: stateUnreadable, reason: stateUnreadableReason };
 }
 
+/**
+ * mtime+size-keyed read cache (adversarial review F6). The always-armed hooks
+ * call `readPersisted` on every tool call; once a state file exists, an
+ * uncached implementation pays a full read+parse on the hot path forever.
+ * The cache returns a structuredClone of the parsed state when the file's
+ * mtimeMs+size are unchanged — cloning keeps caller mutations (which are
+ * always followed by `writePersisted` under the state lock) from poisoning
+ * the cache. Cross-process writers bump mtime, which invalidates the entry.
+ */
+const readCache = new Map<
+	string,
+	{ mtimeMs: number; size: number; state: FullAutoPersistedState }
+>();
+
 function readPersisted(directory: string): FullAutoPersistedState {
 	try {
 		const filePath = validateSwarmPath(directory, STATE_FILE);
-		if (!fs.existsSync(filePath)) {
+		let stats: fs.Stats;
+		try {
+			stats = fs.statSync(filePath);
+		} catch {
 			clearStateUnreadable();
+			readCache.delete(filePath);
 			return emptyPersisted();
+		}
+		const cached = readCache.get(filePath);
+		if (
+			cached &&
+			cached.mtimeMs === stats.mtimeMs &&
+			cached.size === stats.size
+		) {
+			clearStateUnreadable();
+			return structuredClone(cached.state);
 		}
 		const raw = fs.readFileSync(filePath, 'utf-8');
 		const parsed = JSON.parse(raw) as Partial<FullAutoPersistedState>;
@@ -263,10 +290,11 @@ function readPersisted(directory: string): FullAutoPersistedState {
 			markStateUnreadable(
 				`malformed shape (version=${parsed?.version}, sessions type=${Array.isArray(parsed?.sessions) ? 'array' : typeof parsed?.sessions})`,
 			);
+			readCache.delete(filePath);
 			return emptyPersisted();
 		}
 		clearStateUnreadable();
-		return {
+		const state: FullAutoPersistedState = {
 			version: 2,
 			updatedAt: parsed.updatedAt ?? nowISO(),
 			oversightSequence:
@@ -275,6 +303,12 @@ function readPersisted(directory: string): FullAutoPersistedState {
 					: 0,
 			sessions: parsed.sessions as Record<string, FullAutoRunState>,
 		};
+		readCache.set(filePath, {
+			mtimeMs: stats.mtimeMs,
+			size: stats.size,
+			state: structuredClone(state),
+		});
+		return state;
 	} catch (error) {
 		// C5 partial: a corrupt JSON (truncated mid-write) MUST NOT silently
 		// disable Full-Auto. Try to recover from the .bak copy first; if that
@@ -313,6 +347,7 @@ function readPersisted(directory: string): FullAutoPersistedState {
 			);
 		}
 		markStateUnreadable(`canonical=${reason}; .bak=missing-or-corrupt`);
+		readCache.clear();
 		return emptyPersisted();
 	}
 }
@@ -379,6 +414,8 @@ function writePersisted(
 			// block the main path.
 		}
 		fs.renameSync(tmpPath, filePath);
+		// Invalidate the read cache — the next read re-stats and re-parses.
+		readCache.delete(filePath);
 		// Read back the canonical file to confirm the rename succeeded and
 		// the payload round-trips. This is what makes the durable write
 		// genuinely durable from the caller's perspective.
@@ -466,6 +503,36 @@ export function pauseFullAutoRun(
 		if (!state) return undefined;
 		state.status = 'paused';
 		state.pauseReason = reason;
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
+		return state;
+	});
+}
+
+/**
+ * Disarm a Full-Auto run in response to an explicit user `off`.
+ *
+ * Unlike `pauseFullAutoRun` / `terminateFullAutoRun` (system-initiated halts
+ * that fail-closed-block non-read-only tools until the user re-enables),
+ * disarming returns the session to normal interactive operation: the record
+ * transitions to `'idle'`, which every enforcement path treats as
+ * "no active Full-Auto run". Counters and denial history are preserved for
+ * audit. (Adversarial review F3: `off` must not be a one-way door into a
+ * write-blocked session.)
+ */
+export function disarmFullAutoRun(
+	directory: string,
+	sessionID: string,
+	reason: string,
+): FullAutoRunState | undefined {
+	return withStateLock(directory, () => {
+		const persisted = readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return undefined;
+		state.status = 'idle';
+		state.pauseReason = reason;
+		state.terminateReason = undefined;
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);

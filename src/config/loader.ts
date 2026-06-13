@@ -181,6 +181,16 @@ function sanitizeExternalSkillsConfig(
  * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
  * Zod defaults don't override explicit user values.
  */
+/** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
+function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
+	if (!raw || typeof raw !== 'object') return false;
+	const fullAuto = raw.full_auto;
+	if (!fullAuto || typeof fullAuto !== 'object' || Array.isArray(fullAuto)) {
+		return false;
+	}
+	return (fullAuto as Record<string, unknown>).locked === true;
+}
+
 export function loadPluginConfig(directory: string): PluginConfig {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -210,6 +220,23 @@ export function loadPluginConfig(directory: string): PluginConfig {
 			string,
 			unknown
 		>;
+	}
+
+	// `full_auto.locked` is an administrative hard-off and must OR across
+	// config levels: a project-level `locked: false` must NOT override a
+	// user-level `locked: true` (deep-merge alone would let a repo-controlled
+	// .opencode/opencode-swarm.json defeat the user's lock).
+	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
+		const fullAutoRaw =
+			mergedRaw.full_auto &&
+			typeof mergedRaw.full_auto === 'object' &&
+			!Array.isArray(mergedRaw.full_auto)
+				? (mergedRaw.full_auto as Record<string, unknown>)
+				: {};
+		mergedRaw = {
+			...mergedRaw,
+			full_auto: { ...fullAutoRaw, locked: true },
+		};
 	}
 
 	// Migrate v6.12 presets format to v6.13+ agents format
@@ -269,6 +296,11 @@ export function loadPluginConfig(directory: string): PluginConfig {
 export function loadPluginConfigWithMeta(directory: string): {
 	config: PluginConfig;
 	loadedFromFile: boolean;
+	/** True when a config file existed but could not be loaded (corrupt JSON,
+	 *  oversized, permission error). Consumers with fail-closed semantics —
+	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
+	 *  "config unknown", not "config defaults". */
+	configHadErrors: boolean;
 } {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -280,8 +312,9 @@ export function loadPluginConfigWithMeta(directory: string): {
 	const projectResult = loadRawConfigFromPath(projectConfigPath);
 	// Use fileExisted to track if files existed (regardless of load success)
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
+	const configHadErrors = userResult.hadError || projectResult.hadError;
 	const config = loadPluginConfig(directory);
-	return { config, loadedFromFile };
+	return { config, loadedFromFile, configHadErrors };
 }
 
 /**

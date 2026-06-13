@@ -846,10 +846,14 @@ export const COMMAND_REGISTRY = {
 	'full-auto': {
 		handler: (ctx) =>
 			handleFullAutoCommand(ctx.directory, ctx.args, ctx.sessionID),
-		description: 'Toggle Full-Auto Mode for the active session [on|off]',
-		args: 'on, off',
+		description:
+			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
+		args: 'on [assisted|supervised|strict], off, status',
 		details:
-			'Toggles Full-Auto Mode which enables autonomous execution without confirmation prompts. When enabled, the architect proceeds through implementation steps automatically. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
+			'First-class toggle for Full-Auto Mode — autonomous execution with the critic reviewing escalations on your behalf. No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
+			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
 	},
 	'auto-proceed': {

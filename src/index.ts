@@ -27,6 +27,7 @@ import {
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
+	AutoReviewConfigSchema,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
@@ -67,6 +68,7 @@ import {
 	handleDebuggingSpiral,
 	recordToolCall,
 } from './hooks/adversarial-detector.js';
+import { createAutoReviewHook } from './hooks/auto-review.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
@@ -88,6 +90,7 @@ import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
+import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
@@ -540,8 +543,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 	);
 
-	// Full-Auto v2 hooks: permission, input-probe, delegation. Each is a no-op
-	// when full_auto.enabled is false. Hook ordering (tool.execute.before):
+	// Full-Auto v2 hooks: permission, input-probe, delegation. Always armed
+	// (first-class toggle); each gates at runtime on the durable per-session
+	// run state, so they no-op for sessions that never ran
+	// `/swarm full-auto on`. Hook ordering (tool.execute.before):
 	//   1. guardrails (existing)
 	//   2. scope-guard (existing)
 	//   3. delegation-gate (existing)
@@ -603,6 +608,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		},
 		advisoryInjector,
 	);
+
+	// Auto-review hook (opt-in): dispatches the reviewer agent over an
+	// ephemeral session to review the execution diff at task/phase
+	// boundaries. Advisory + fire-and-forget — never blocks a tool call.
+	const autoReviewHook = createAutoReviewHook({
+		config: AutoReviewConfigSchema.parse(config.auto_review ?? {}),
+		directory: ctx.directory,
+		injectAdvisory: advisoryInjector,
+	});
 
 	const summaryConfig = SummaryConfigSchema.parse(config.summaries ?? {});
 	const toolSummarizerHook = createToolSummarizerHook(
@@ -1789,6 +1803,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 						),
 					)(input, output);
 				}
+				// Reviewer receipt collection: persist a returning reviewer Task's
+				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;
+				// independent of the knowledge system.
+				await safeHook(async () => {
+					await collectReviewerReceiptAfter(ctx.directory, input, output);
+				})(input, output);
+				// Auto-review (opt-in): fire-and-forget execution-diff review by
+				// the reviewer model at task/phase boundaries.
+				await safeHook(autoReviewHook.toolAfter)(input, output);
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)
@@ -2078,11 +2101,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// no durable run state, so they short-circuit inside
 				// tickAndMaybeDispatchCadence and do NOT recurse.
 				try {
-					if (
-						config.full_auto?.enabled === true &&
-						input?.sessionID &&
-						input?.agent
-					) {
+					// First-class toggle: no config.full_auto.enabled gate — the
+					// tick short-circuits on the durable run state when Full-Auto
+					// was never activated for this session.
+					if (input?.sessionID && input?.agent) {
 						const stripped = stripKnownSwarmPrefix(String(input.agent));
 						if (stripped === 'architect') {
 							tickAndMaybeDispatchCadence(
