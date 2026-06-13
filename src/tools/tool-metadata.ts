@@ -453,7 +453,7 @@ export const TOOL_METADATA = {
 	},
 	web_fetch: {
 		description:
-			'Fetch the readable text of a single http(s) URL for architect-driven deep research (MODE: DEEP_RESEARCH). Returns decoded page text (HTML stripped to plain text), the document title, the final URL after redirects, and an evidence reference stored alongside web_search results. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. No search API key required. Blocks private/loopback/link-local/metadata addresses (re-validated across redirects), enforces a timeout, and caps the response body size.',
+			'Fetch the readable text of a single http(s) URL for architect-driven deep research (MODE: DEEP_RESEARCH). Returns decoded page text, document title, final URL after redirects, and an evidence reference. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled. Blocks private/loopback/link-local/metadata addresses (re-validated across redirects); enforces timeout and body size cap.',
 		agents: ['architect'],
 	},
 	convene_general_council: {
