@@ -249,7 +249,7 @@ were reviewing.
 
 ```bash
 git fetch origin <pr-branch>
-git log local..origin/<pr-branch> --oneline
+git log HEAD..origin/<pr-branch> --oneline
 ```
 
 ### Step 2 — Evaluate new commits
@@ -270,10 +270,12 @@ For each new commit on the remote:
 
 ### Step 3 — Three outcomes
 
-- **Parallel work supersedes:** Abort your rebase, `git reset --hard
-  origin/<pr-branch>` to take the remote state, then re-verify that all your
-  findings are addressed. If the remote missed any, add minor improvements on
-  top. Do NOT waste effort redoing work the parallel agent already did better.
+- **Parallel work supersedes:** Abort your rebase. First verify the working tree
+  is clean (`git status --porcelain`); stash or discard any uncommitted changes
+  before proceeding. Then `git reset --hard origin/<pr-branch>` to take the
+  remote state, then re-verify that all your findings are addressed. If the
+  remote missed any, add minor improvements on top. Do NOT waste effort redoing
+  work the parallel agent already did better.
 - **Parallel work complements:** Cherry-pick or merge the remote commits into
   your local branch, then continue with your fix.
 - **Parallel work unrelated:** Continue with your planned fix.
