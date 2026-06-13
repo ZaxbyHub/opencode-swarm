@@ -106,6 +106,7 @@ import { createPrmHook } from './prm';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import {
+	applyShareOverrides,
 	createInjectionBudgetPool,
 	DEFAULT_ARCHITECT_SOURCES,
 	DEFAULT_DELEGATE_SOURCES,
@@ -114,7 +115,7 @@ import {
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
-import { ensureAgentSession, swarmState } from './state';
+import { ensureAgentSession, setInjectionPool, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { log, warn } from './utils';
@@ -1373,11 +1374,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					const injBudgetCfg = config.context_budget?.injection_budget;
 					if (injBudgetCfg?.enabled === false) return Promise.resolve();
 					const totalChars = injBudgetCfg?.architect_pool_chars ?? 3_000;
-					const pool = createInjectionBudgetPool(
-						totalChars,
+					const sources = applyShareOverrides(
 						DEFAULT_ARCHITECT_SOURCES,
+						injBudgetCfg?.source_shares,
 					);
-					swarmState.architectInjectionPools.set(p.sessionID, pool);
+					const pool = createInjectionBudgetPool(totalChars, sources);
+					setInjectionPool(
+						swarmState.architectInjectionPools,
+						p.sessionID,
+						pool,
+					);
 					return Promise.resolve();
 				},
 				memoryLifecycleHooks.messagesTransform,
@@ -1544,11 +1550,16 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				const injBudgetCfg = config.context_budget?.injection_budget;
 				if (injBudgetCfg?.enabled !== false) {
 					const totalChars = injBudgetCfg?.delegate_pool_chars ?? 4_000;
-					const pool = createInjectionBudgetPool(
-						totalChars,
+					const sources = applyShareOverrides(
 						DEFAULT_DELEGATE_SOURCES,
+						injBudgetCfg?.source_shares,
 					);
-					swarmState.delegateInjectionPools.set(input.sessionID, pool);
+					const pool = createInjectionBudgetPool(totalChars, sources);
+					setInjectionPool(
+						swarmState.delegateInjectionPools,
+						input.sessionID,
+						pool,
+					);
 				}
 			}
 

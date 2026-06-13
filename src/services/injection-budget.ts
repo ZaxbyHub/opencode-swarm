@@ -6,8 +6,10 @@
  *   - Architect pool (messagesTransform): memory recall + knowledge + curator briefing
  *   - Delegate pool (tool.execute.before): delegate directives + skill recommendations
  *
- * Each source has a proportional share. Draws are first-come-first-served;
- * committing less than allocated returns surplus for lower-priority sources.
+ * Each source has a proportional share. Draws are first-come-first-served,
+ * capped at the source's share (or minChars if higher). Pools are created
+ * fresh each hook-chain invocation (per-request), so commit() is available
+ * for multi-pass scenarios but not required in the current single-pass flow.
  *
  * Architecture decision (WP5): Memory = episodic recall (auto-retrieved),
  * Knowledge = enforceable directives (curator-curated, compliance-tracked).
@@ -85,7 +87,7 @@ class InjectionBudgetPoolImpl implements InjectionBudgetPool {
 		const shareRemaining = Math.max(0, share - alreadyAllocated);
 		const poolRemaining = this.remaining;
 
-		// Allow drawing up to share + any surplus from the pool, but at least minChars
+		// Grant up to share remaining (capped by pool remaining), or minChars floor if higher
 		const available = Math.max(
 			Math.min(shareRemaining, poolRemaining),
 			Math.min(min, poolRemaining),
@@ -133,6 +135,21 @@ export function createInjectionBudgetPool(
 	return new InjectionBudgetPoolImpl(totalBudget, sources);
 }
 
+export function applyShareOverrides(
+	sources: InjectionSourceConfig[],
+	overrides: Record<string, number> | undefined,
+): InjectionSourceConfig[] {
+	if (!overrides || Object.keys(overrides).length === 0) return sources;
+	return sources.map((src) => {
+		const override = overrides[src.id];
+		if (override !== undefined && override >= 0 && override <= 1) {
+			return { ...src, share: override };
+		}
+		return src;
+	});
+}
+
 export const _internals = {
 	createInjectionBudgetPool,
+	applyShareOverrides,
 };

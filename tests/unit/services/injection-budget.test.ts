@@ -1,11 +1,18 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
 import {
-	type InjectionBudgetPool,
-	type InjectionSourceConfig,
+	applyShareOverrides,
+	createInjectionBudgetPool,
 	DEFAULT_ARCHITECT_SOURCES,
 	DEFAULT_DELEGATE_SOURCES,
-	createInjectionBudgetPool,
+	type InjectionBudgetPool,
+	type InjectionSourceConfig,
 } from '../../../src/services/injection-budget.js';
+import {
+	MAX_INJECTION_POOL_SESSIONS,
+	resetSwarmState,
+	setInjectionPool,
+	swarmState,
+} from '../../../src/state.js';
 
 describe('InjectionBudgetPool', () => {
 	test('allocate returns requested chars when within share', () => {
@@ -33,10 +40,7 @@ describe('InjectionBudgetPool', () => {
 
 	test('allocate returns 0 for unknown source', () => {
 		const pool = createInjectionBudgetPool(1000, DEFAULT_ARCHITECT_SOURCES);
-		const granted = pool.allocate(
-			'delegate_directives' as any,
-			500,
-		);
+		const granted = pool.allocate('delegate_directives' as any, 500);
 		expect(granted).toBe(0);
 	});
 
@@ -154,12 +158,102 @@ describe('InjectionBudgetPool', () => {
 	});
 
 	test('fail-open: pool absence does not break consumers', () => {
-		// Simulates the scenario where no pool is created (pool is undefined)
 		const pool: InjectionBudgetPool | undefined = undefined;
 		const fallbackBudget = 2000;
 		const effectiveBudget = pool
 			? pool.allocate('knowledge_directives', fallbackBudget)
 			: fallbackBudget;
 		expect(effectiveBudget).toBe(2000);
+	});
+
+	test('commit without prior allocate returns zero surplus', () => {
+		const pool = createInjectionBudgetPool(1000, DEFAULT_ARCHITECT_SOURCES);
+		pool.commit('knowledge_directives', 500);
+		// No allocation existed → alloc=0, actual=min(500,0)=0, returned=0
+		expect(pool.remaining).toBe(1000);
+	});
+
+	test('pool fully exhausted returns 0 even with minChars > 0', () => {
+		const sources: InjectionSourceConfig[] = [
+			{ id: 'knowledge_directives', share: 0.5, minChars: 300 },
+			{ id: 'memory_recall', share: 0.5, minChars: 200 },
+		];
+		const pool = createInjectionBudgetPool(1000, sources);
+		pool.allocate('knowledge_directives', 500);
+		pool.allocate('memory_recall', 500);
+		expect(pool.remaining).toBe(0);
+		// Pool is fully exhausted — minChars cannot exceed poolRemaining=0
+		const extra = pool.allocate('knowledge_directives', 300);
+		expect(extra).toBe(0);
+	});
+});
+
+describe('applyShareOverrides', () => {
+	test('returns original sources when no overrides', () => {
+		const result = applyShareOverrides(DEFAULT_ARCHITECT_SOURCES, undefined);
+		expect(result).toBe(DEFAULT_ARCHITECT_SOURCES);
+	});
+
+	test('returns original sources when overrides is empty', () => {
+		const result = applyShareOverrides(DEFAULT_ARCHITECT_SOURCES, {});
+		expect(result).toBe(DEFAULT_ARCHITECT_SOURCES);
+	});
+
+	test('applies valid overrides to matching sources', () => {
+		const result = applyShareOverrides(DEFAULT_ARCHITECT_SOURCES, {
+			knowledge_directives: 0.6,
+			memory_recall: 0.3,
+		});
+		expect(result[0].share).toBe(0.6);
+		expect(result[1].share).toBe(0.3);
+		expect(result[2].share).toBe(0.15); // curator_briefing unchanged
+	});
+
+	test('ignores overrides for unknown source IDs', () => {
+		const result = applyShareOverrides(DEFAULT_ARCHITECT_SOURCES, {
+			unknown_source: 0.9,
+		});
+		expect(result).toEqual(DEFAULT_ARCHITECT_SOURCES);
+	});
+
+	test('ignores overrides outside valid range', () => {
+		const result = applyShareOverrides(DEFAULT_ARCHITECT_SOURCES, {
+			knowledge_directives: -0.1,
+		});
+		expect(result[0].share).toBe(0.45); // unchanged
+	});
+});
+
+describe('setInjectionPool eviction', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	test('sets pool in map', () => {
+		const pool = createInjectionBudgetPool(1000, DEFAULT_ARCHITECT_SOURCES);
+		setInjectionPool(swarmState.architectInjectionPools, 'sess-1', pool);
+		expect(swarmState.architectInjectionPools.get('sess-1')).toBe(pool);
+	});
+
+	test('overwrites existing pool for same sessionID', () => {
+		const pool1 = createInjectionBudgetPool(1000, DEFAULT_ARCHITECT_SOURCES);
+		const pool2 = createInjectionBudgetPool(2000, DEFAULT_ARCHITECT_SOURCES);
+		setInjectionPool(swarmState.architectInjectionPools, 'sess-1', pool1);
+		setInjectionPool(swarmState.architectInjectionPools, 'sess-1', pool2);
+		expect(swarmState.architectInjectionPools.get('sess-1')).toBe(pool2);
+		expect(swarmState.architectInjectionPools.size).toBe(1);
+	});
+
+	test('evicts oldest entry when cap exceeded', () => {
+		const map = new Map<string, unknown>();
+		for (let i = 0; i < MAX_INJECTION_POOL_SESSIONS; i++) {
+			setInjectionPool(map, `sess-${i}`, { id: i });
+		}
+		expect(map.size).toBe(MAX_INJECTION_POOL_SESSIONS);
+		// Add one more — should evict sess-0
+		setInjectionPool(map, 'sess-new', { id: 'new' });
+		expect(map.size).toBe(MAX_INJECTION_POOL_SESSIONS);
+		expect(map.has('sess-0')).toBe(false);
+		expect(map.has('sess-new')).toBe(true);
 	});
 });

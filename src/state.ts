@@ -466,9 +466,9 @@ export const swarmState = {
 	generatedAgentNames: [] as string[],
 
 	/** Per-request unified injection budget pools (WP5).
-	 * Keyed by sessionID. Created at hook-chain start, consumed by injection
-	 * hooks, cleared at end of cycle. Two scopes: architect (messagesTransform)
-	 * and delegate (tool.execute.before). */
+	 * Keyed by sessionID. Created fresh each hook-chain invocation, consumed by
+	 * injection hooks. FIFO-capped at MAX_INJECTION_POOL_SESSIONS to prevent
+	 * unbounded growth from accumulated sessionIDs. */
 	architectInjectionPools: new Map<string, unknown>(),
 	delegateInjectionPools: new Map<string, unknown>(),
 
@@ -1844,6 +1844,23 @@ export function ensureSessionEnvironment(
 // preserves insertion order so `Map.keys().next()` is the FIFO oldest.
 export const MAX_TRACKED_CRITICAL_SHOWN = 500;
 export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
+export const MAX_INJECTION_POOL_SESSIONS = 500;
+
+/** Set a pool in the injection pool map with FIFO eviction. */
+export function setInjectionPool(
+	map: Map<string, unknown>,
+	sessionID: string,
+	pool: unknown,
+): void {
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, pool);
+	if (map.size > MAX_INJECTION_POOL_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
 
 /** Set the critical shown ids for a session, FIFO-evicting the oldest entry
  * if the cap is exceeded. Re-setting an existing key keeps insertion order
