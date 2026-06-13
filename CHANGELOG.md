@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.71.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.1...v7.71.2) (2026-06-13)
+
+
+### Bug Fixes
+
+* **skill-propagation-gate:** remove stray space breaking COMPLIANCE_PATTERN regex ([d65d426](https://github.com/zaxbysauce/opencode-swarm/commit/d65d4260a0171b5b215b889226454d2cf63af9b7))
+
 ## [7.71.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.0...v7.71.1) (2026-06-13)
 
 
