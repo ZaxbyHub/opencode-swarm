@@ -227,7 +227,12 @@ function buildStatusReport(
 	const lines: string[] = [];
 	lines.push(`Full-Auto session flag: ${sessionFlag ? 'on' : 'off'}`);
 	try {
-		const { config } = loadPluginConfigWithMeta(directory);
+		const { config, configHadErrors } = loadPluginConfigWithMeta(directory);
+		if (configHadErrors) {
+			lines.push(
+				'Config: UNREADABLE (a config file exists but could not be loaded; `full_auto.locked` cannot be verified, so runtime activation refuses by fail-closed default). Fix the config file to restore normal status.',
+			);
+		}
 		if (config.full_auto?.locked === true) {
 			lines.push(
 				'Config: locked (runtime activation disabled via full_auto.locked)',

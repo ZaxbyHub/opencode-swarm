@@ -121,6 +121,47 @@ function emptyCounters(): FullAutoCounters {
 	};
 }
 
+const VALID_RUN_MODES = new Set<string>(['assisted', 'supervised', 'strict']);
+const VALID_RUN_STATUSES = new Set<string>([
+	'idle',
+	'running',
+	'paused',
+	'terminated',
+]);
+
+/**
+ * Sanitize a raw FullAutoRunState loaded from disk. Coerces unrecognised
+ * `mode` and `status` values to safe defaults so a hand-edited state file
+ * cannot inject an unknown mode into the permission classifier.
+ *
+ * Returns `null` if the input is not a usable run-state shape (missing
+ * `sessionID` or wrong type) so callers can drop the entry rather than
+ * silently materialising an invalid state record.
+ */
+function sanitizeRunState(raw: unknown): FullAutoRunState | null {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+	const r = raw as Record<string, unknown>;
+	if (typeof r.sessionID !== 'string' || !r.sessionID) return null;
+	const mode: FullAutoRunState['mode'] = VALID_RUN_MODES.has(r.mode as string)
+		? (r.mode as FullAutoRunState['mode'])
+		: 'supervised';
+	const status: FullAutoStatus = VALID_RUN_STATUSES.has(r.status as string)
+		? (r.status as FullAutoStatus)
+		: 'idle';
+	return { ...(raw as FullAutoRunState), mode, status };
+}
+
+function sanitizeSessions(
+	raw: Record<string, unknown>,
+): Record<string, FullAutoRunState> {
+	const result: Record<string, FullAutoRunState> = {};
+	for (const [id, session] of Object.entries(raw)) {
+		const sanitized = sanitizeRunState(session);
+		if (sanitized) result[id] = sanitized;
+	}
+	return result;
+}
+
 function emptyState(
 	sessionID: string,
 	mode: FullAutoRunState['mode'] = 'supervised',
@@ -303,7 +344,9 @@ function readPersisted(directory: string): FullAutoPersistedState {
 				typeof parsed.oversightSequence === 'number'
 					? parsed.oversightSequence
 					: 0,
-			sessions: parsed.sessions as Record<string, FullAutoRunState>,
+			sessions: sanitizeSessions(
+				parsed.sessions as Record<string, unknown>,
+			),
 		};
 		readCache.set(filePath, {
 			mtimeMs: stats.mtimeMs,
@@ -339,7 +382,9 @@ function readPersisted(directory: string): FullAutoPersistedState {
 							typeof parsed.oversightSequence === 'number'
 								? parsed.oversightSequence
 								: 0,
-						sessions: parsed.sessions as Record<string, FullAutoRunState>,
+						sessions: sanitizeSessions(
+							parsed.sessions as Record<string, unknown>,
+						),
 					};
 				}
 			}
