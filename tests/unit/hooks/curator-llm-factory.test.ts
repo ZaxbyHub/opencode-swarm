@@ -142,6 +142,31 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
+	test('multi-swarm: postmortem mode picks correct swarm curator_postmortem', async () => {
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(
+			swarmState as { curatorPostmortemAgentNames: string[] }
+		).curatorPostmortemAgentNames = [
+			'alpha_curator_postmortem',
+			'beta_curator_postmortem',
+		];
+		(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map([
+			['sess-a', 'alpha_reviewer'],
+		]);
+		mockCreate.mockResolvedValue({ data: { id: 'sess-pm' } });
+		mockPrompt.mockResolvedValue({
+			data: { info: {}, parts: [{ type: 'text', text: 'ok' }] },
+		});
+
+		const delegate = createCuratorLLMDelegate('/tmp/test', 'postmortem')!;
+		await delegate('SYS', 'input');
+
+		expect(mockPrompt).toHaveBeenCalledWith({
+			path: { id: 'sess-pm' },
+			body: expect.objectContaining({ agent: 'alpha_curator_postmortem' }),
+		});
+	});
+
 	test('multi-swarm: falls back to default swarm when no active session matches named swarm', async () => {
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
 		// Mix of default and named swarms
