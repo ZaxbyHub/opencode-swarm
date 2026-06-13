@@ -73,6 +73,7 @@ import type { SpecStaleDetectedEvent } from '../types/events';
 import { warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
 import { isSpecStale } from '../utils/spec-hash';
+import { readCachedParsedFile } from '../utils/swarm-artifact-cache';
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
@@ -100,6 +101,8 @@ const startupLedgerCheckedWorkspaces = new Set<string>();
 // Prevents two concurrent loadPlan calls from racing through the
 // approved-snapshot recovery and both calling savePlan (#444 item 6).
 const recoveryMutexes = new Map<string, Promise<void>>();
+
+const PLAN_JSON_CACHE_NAMESPACE = 'plan-json:validated:v1';
 
 /** Reset the startup ledger check flag. For testing only. */
 export function resetStartupLedgerCheck(): void {
@@ -212,8 +215,7 @@ export async function loadPlanJsonOnly(
 			return null;
 		}
 		try {
-			const parsed = JSON.parse(planJsonContent);
-			const validated = PlanSchema.parse(parsed);
+			const validated = await parsePlanJsonCached(directory, planJsonContent);
 			return validated;
 		} catch (error) {
 			warn(
@@ -256,6 +258,26 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
 	} catch {
 		return '';
 	}
+}
+
+async function parsePlanJsonCached(
+	directory: string,
+	content: string,
+): Promise<Plan> {
+	const planJsonPath = path.resolve(directory, '.swarm', 'plan.json');
+	const validated = await readCachedParsedFile<Plan>(
+		planJsonPath,
+		PLAN_JSON_CACHE_NAMESPACE,
+		async () => content,
+		(planJsonContent) => {
+			const parsed = JSON.parse(planJsonContent);
+			return PlanSchema.parse(parsed);
+		},
+	);
+	if (validated === null) {
+		throw new Error('plan.json disappeared during cached parse');
+	}
+	return validated;
 }
 
 /**
@@ -402,8 +424,7 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 			// Skip to plan.md migration path - don't parse tainted content
 		} else {
 			try {
-				const parsed = JSON.parse(planJsonContent);
-				const validated = PlanSchema.parse(parsed);
+				const validated = await parsePlanJsonCached(directory, planJsonContent);
 
 				// Auto-heal case 1: Valid plan.json exists, check if plan.md needs regeneration
 				const inSync = await isPlanMdInSync(directory, validated);

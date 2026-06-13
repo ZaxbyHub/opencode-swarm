@@ -6,12 +6,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { readCachedParsedFile } from '../utils/swarm-artifact-cache.js';
 import type {
 	ActionableDirectiveFields,
 	KnowledgeEntryBase,
 	RejectedLesson,
 	RetrievalOutcome,
 } from './knowledge-types.js';
+
+const KNOWLEDGE_JSONL_CACHE_NAMESPACE = 'knowledge-jsonl:normalized:v1';
 
 // ============================================================================
 // Path Resolvers
@@ -108,25 +111,35 @@ export function resolveHiveEventsPath(): string {
 // v2: each parsed entry is passed through normalizeEntry() so v1 entries get
 // optional v2 fields filled in WITHOUT mutating on-disk JSONL.
 export async function readKnowledge<T>(filePath: string): Promise<T[]> {
-	if (!existsSync(filePath)) return [];
-	const content = await readFile(filePath, 'utf-8');
-	const results: T[] = [];
-	for (const line of content.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			const raw = JSON.parse(trimmed) as T;
-			results.push(normalizeEntry(raw));
-		} catch {
-			console.warn(
-				`[knowledge-store] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
-					0,
-					80,
-				)}`,
-			);
-		}
-	}
-	return results;
+	const resolvedPath = path.resolve(filePath);
+	const entries = await readCachedParsedFile<T[]>(
+		resolvedPath,
+		KNOWLEDGE_JSONL_CACHE_NAMESPACE,
+		async () => {
+			if (!existsSync(resolvedPath)) return null;
+			return await readFile(resolvedPath, 'utf-8');
+		},
+		(content) => {
+			const results: T[] = [];
+			for (const line of content.split('\n')) {
+				const trimmed = line.trim();
+				if (!trimmed) continue;
+				try {
+					const raw = JSON.parse(trimmed) as T;
+					results.push(normalizeEntry(raw));
+				} catch {
+					console.warn(
+						`[knowledge-store] Skipping corrupted JSONL line in ${resolvedPath}: ${trimmed.slice(
+							0,
+							80,
+						)}`,
+					);
+				}
+			}
+			return results;
+		},
+	);
+	return entries ?? [];
 }
 
 // v2: Normalize a parsed entry to the current shape in memory.
