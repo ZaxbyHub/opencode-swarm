@@ -344,9 +344,7 @@ function readPersisted(directory: string): FullAutoPersistedState {
 				typeof parsed.oversightSequence === 'number'
 					? parsed.oversightSequence
 					: 0,
-			sessions: sanitizeSessions(
-				parsed.sessions as Record<string, unknown>,
-			),
+			sessions: sanitizeSessions(parsed.sessions as Record<string, unknown>),
 		};
 		readCache.set(filePath, {
 			mtimeMs: stats.mtimeMs,
