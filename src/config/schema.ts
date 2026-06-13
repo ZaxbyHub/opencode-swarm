@@ -1368,6 +1368,7 @@ export const AgentAuthorityRuleSchema = z.object({
 		.optional(),
 	blockedGlobs: z.array(z.string()).optional(),
 	allowedGlobs: z.array(z.string()).optional(),
+	allowedCaseSensitiveGlobs: z.array(z.string()).optional(),
 });
 
 export type AgentAuthorityRule = z.infer<typeof AgentAuthorityRuleSchema>;

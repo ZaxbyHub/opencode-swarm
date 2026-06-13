@@ -9,8 +9,10 @@ import {
 } from '../../../src/config/schema';
 import {
 	checkFileAuthority,
+	clearGuardrailsCaches,
 	createGuardrailsHooks,
 	DEFAULT_AGENT_AUTHORITY_RULES,
+	getGlobMatcher,
 } from '../../../src/hooks/guardrails';
 import {
 	beginInvocation,
@@ -392,6 +394,78 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			expect(result.allowed).toBe(true);
 		});
 
+		it('allows test_engineer to write Python test_*.py files under src/', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/auth/test_login.py',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write Python *_test.py files under src/', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/auth/login_test.py',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write Go *_test.go files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'cmd/server/main_test.go',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write Ruby *_spec.rb files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'app/models/user_spec.rb',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write JUnit *Test.java files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/main/java/com/example/UserServiceTest.java',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write Kotlin *Test.kt files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/main/kotlin/com/example/UserServiceTest.kt',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write C# *Tests.cs files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/Services/UserServiceTests.cs',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
+		it('allows test_engineer to write PowerShell *.Tests.ps1 files beside source', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'scripts/UserService.Tests.ps1',
+				tempDir,
+			);
+			expect(result.allowed).toBe(true);
+		});
+
 		it('blocks test_engineer from writing to src/ production files (no test marker)', () => {
 			const result = checkFileAuthority(
 				'test_engineer',
@@ -401,6 +475,59 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
 				expect(result.reason).toContain('Path blocked');
+			}
+		});
+
+		it('blocks test_engineer from writing non-test config-looking files with test_ prefix', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'src/test_config.json',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('Path blocked');
+			}
+		});
+
+		it('blocks test_engineer from writing Java production names ending with lowercase test', () => {
+			for (const filePath of [
+				'src/main/java/com/example/Contest.java',
+				'src/main/java/com/example/Latest.java',
+				'src/main/java/com/example/Protest.java',
+			]) {
+				const result = checkFileAuthority('test_engineer', filePath, tempDir);
+				expect(result.allowed).toBe(false);
+				if (isDenied(result)) {
+					expect(result.reason).toContain('Path blocked');
+				}
+			}
+		});
+
+		it('blocks test_engineer from writing Kotlin production names ending with lowercase test', () => {
+			for (const filePath of [
+				'src/main/kotlin/com/example/Contest.kt',
+				'src/main/kotlin/com/example/Latest.kt',
+				'src/main/kotlin/com/example/Protest.kt',
+			]) {
+				const result = checkFileAuthority('test_engineer', filePath, tempDir);
+				expect(result.allowed).toBe(false);
+				if (isDenied(result)) {
+					expect(result.reason).toContain('Path blocked');
+				}
+			}
+		});
+
+		it('blocks test_engineer from writing C# production names ending with lowercase tests', () => {
+			for (const filePath of [
+				'src/domain/Contests.cs',
+				'src/domain/Protests.cs',
+			]) {
+				const result = checkFileAuthority('test_engineer', filePath, tempDir);
+				expect(result.allowed).toBe(false);
+				if (isDenied(result)) {
+					expect(result.reason).toContain('Path blocked');
+				}
 			}
 		});
 
@@ -560,6 +687,18 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 				tempDir,
 			);
 			expect(result.allowed).toBe(false);
+		});
+
+		it('blocks test_engineer from writing dist/main_test.go (generated zone beats *_test.* glob)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'dist/main_test.go',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('generated');
+			}
 		});
 
 		it('blocks docs from writing dist/README.md (generated zone beats *.md glob)', () => {
@@ -997,6 +1136,48 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 				},
 			});
 			expect(result.allowed).toBe(true);
+		});
+
+		it('user rules allow case-sensitive glob paths without matching lowercase suffixes', () => {
+			const authorityConfig = {
+				enabled: true,
+				rules: {
+					custom_agent: {
+						allowedCaseSensitiveGlobs: ['**/*Test.java'],
+						blockedPrefix: ['src/'],
+					},
+				},
+			};
+
+			const testResult = checkFileAuthority(
+				'custom_agent',
+				'src/main/java/UserServiceTest.java',
+				tempDir,
+				authorityConfig,
+			);
+			expect(testResult.allowed).toBe(true);
+
+			const productionResult = checkFileAuthority(
+				'custom_agent',
+				'src/main/java/Contest.java',
+				tempDir,
+				authorityConfig,
+			);
+			expect(productionResult.allowed).toBe(false);
+			if (isDenied(productionResult)) {
+				expect(productionResult.reason).toContain('Path blocked');
+			}
+		});
+
+		it('keeps case-sensitive glob matchers isolated from nocase cache entries', () => {
+			clearGuardrailsCaches();
+			const nocaseMatcher = getGlobMatcher('**/*Test.java', true);
+			expect(nocaseMatcher('src/main/java/Contest.java')).toBe(true);
+
+			const caseMatcher = getGlobMatcher('**/*Test.java', false);
+			expect(caseMatcher('src/main/java/UserServiceTest.java')).toBe(true);
+			expect(caseMatcher('src/main/java/Contest.java')).toBe(false);
+			clearGuardrailsCaches();
 		});
 
 		it('user rules add new agent not in defaults', () => {
