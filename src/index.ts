@@ -897,6 +897,30 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							appliedFixes: doctorResult.appliedFixes.length,
 							autofixEnabled: enableAutofix,
 						});
+
+						// Emit chat-visible advisory for auto-fixable findings.
+						// Uses console.warn (always visible, non-blocking).
+						// Wrapped in try/catch per AGENTS.md invariant #1 (fail-open).
+						try {
+							const autoFixableCount = doctorResult.result.findings.filter(
+								(f) => f.autoFixable,
+							).length;
+
+							if (!enableAutofix && autoFixableCount > 0) {
+								console.warn(
+									`[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`,
+								);
+							} else if (
+								enableAutofix &&
+								doctorResult.appliedFixes.length > 0
+							) {
+								console.warn(
+									`[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`,
+								);
+							}
+						} catch {
+							// Advisory emission must never block startup
+						}
 					}
 				})
 				.catch((err) => {

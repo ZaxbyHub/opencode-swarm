@@ -37,10 +37,13 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5MB)', () => {
+	test('dist/index.js file size is reasonable (< 5.5MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
-		// Main bundle should be under 5MB
-		expect(stats.size).toBeLessThan(5 * 1024 * 1024);
+		// Main bundle should be under 5.5MB (raised from 5MB due to #1263
+		// config-doctor validation expansion: 62+ switch cases, Levenshtein
+		// suggestion, atomic writes, symlink rejection; was at ~5.0MB with
+		// little headroom before this feature landed)
+		expect(stats.size).toBeLessThan(5.5 * 1024 * 1024);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);
 	});

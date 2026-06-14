@@ -88,12 +88,12 @@ describe('Command-not-found UX — Adversarial Security', () => {
 		sessionId = `cmd-not-found-adv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		makeSession(sessionId);
 
-		// Pre-create sentinel to ensure this test is NOT first-run
+		// Pre-create a marker file to ensure .swarm directory is non-empty
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(
-			path.join(swarmDir, '.first-run-complete'),
-			`first-run-complete: ${new Date().toISOString()}\n`,
+			path.join(swarmDir, '.test-marker'),
+			`test-marker: ${new Date().toISOString()}\n`,
 		);
 	});
 
@@ -131,9 +131,6 @@ describe('Command-not-found UX — Adversarial Security', () => {
 				expect(output.parts).toHaveLength(1);
 				const text = (output.parts[0] as { text: string }).text;
 				expect(typeof text).toBe('string');
-
-				// Must NOT be the welcome message (first-run sentinel should still exist)
-				expect(text).not.toContain('Welcome to OpenCode Swarm');
 
 				// Must NOT contain the raw long string in a dangerous way
 				// The command name should appear truncated or escaped in the output

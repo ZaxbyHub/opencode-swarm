@@ -418,8 +418,16 @@ Show the current resolved plugin configuration (merged global + project + CLI ov
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
-- `--fix`: auto-repair issues where safe. Creates encrypted backup first.
+The doctor validates all 62+ top-level schema keys with type checks (string, boolean, number, object). Unknown keys produce warnings with Levenshtein-based typo suggestions. Swarms configuration is hardened: empty `swarms` emits an INFO finding, and path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) emit HIGH/ERROR findings. Deprecated config fields (`skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models`) emit INFO findings with migration guidance.
+
+- `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
+
+**Last-run summary:** When run without `--fix`, the command displays a summary of the previous run (if available) showing the timestamp, total findings count, and auto-fixable count before the current findings.
+
+**Startup auto-fix advisory:** On plugin initialization, if `automation.capabilities.config_doctor_on_startup` is enabled, the config doctor runs automatically. If auto-fixable issues are found and `config_doctor_autofix` capability is not enabled, a chat-visible advisory is emitted suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown.
+
+> **Agent vs. human context:** The `--fix` flag is accepted for human-initiated chat commands. For agent-initiated commands, the `tool-policy` layer blocks `--fix` — auto-fixing config from agent context is a privileged operation requiring explicit user initiation.
 
 ### `/swarm doctor tools`
 

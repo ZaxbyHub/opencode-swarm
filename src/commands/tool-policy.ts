@@ -140,6 +140,9 @@ export function classifySwarmCommandToolUse(
 		};
 	}
 
+	// The --fix flag is blocked for agent-initiated commands (via swarm_command tool)
+	// because auto-fixing config from agent context is a privileged operation.
+	// Human-initiated chat commands bypass this gate — see src/commands/doctor.ts.
 	if (
 		canonicalKey === 'config doctor' &&
 		args.some((arg) => arg === '--fix' || arg === '-f')

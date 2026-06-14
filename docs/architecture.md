@@ -723,7 +723,7 @@ project/
 │       ├── index.ts       # Barrel exports
 │       └── manager.ts     # CRUD: save/load/list/delete/archive evidence
 │
-├── tests/unit/            # 1211 tests across 54+ files (bun test)
+├── tests/unit/            # 1214 tests across 54+ files (bun test)
 │   ├── agents/            # creation (64), factory (20), architect-v6-prompt (15),
 │   │                      # security-categories (12)
 │   ├── config/            # constants (14), schema (35), loader (17), plan-schema (40),
@@ -1811,14 +1811,21 @@ Validates project state before agent execution:
 #### Config Doctor
 
 Startup service that validates and fixes configuration:
-- Validates config schema and types
-- Detects stale/invalid settings
+- **Extended validation coverage** — validates all 62+ top-level schema keys with type checks for strings, booleans, numbers, and objects
+- **Unknown key detection** — warns on typos with Levenshtein-based suggestions (edit distance ≤ 2)
+- **Swarms hardening** — warns on empty `swarms` configuration (INFO), rejects path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) as HIGH/ERROR
+- **Deprecated field flagging** — emits INFO findings for legacy `skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models` with replacement guidance
+- **Auto-fix inventory** — 156 range-bounded numeric keys (e.g. `max_iterations`, `qa_retry_limit`) are auto-clampable
 - Classifies findings by severity (info/warn/error)
 - Proposes safe auto-fixes
 
 **Security:** Defaults to scan-only mode. Autofix requires explicit `automation.capabilities.config_doctor_autofix = true`.
 
 **Backups:** Creates encrypted backups in `.swarm/` before auto-fix. Supports restore via `/swarm config doctor --restore <backup-id>`.
+
+**Startup advisory:** When the doctor runs on startup (via `config_doctor_on_startup`) and finds auto-fixable issues without autofix enabled, it emits a console-visible advisory to the user suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown instead.
+
+**Last-run summary:** The `/swarm config doctor` command (without `--fix`) reads the previous run artifact from `.swarm/config-doctor.json` and displays a compact summary line showing the last run timestamp, findings count, and auto-fixable count before the current findings.
 
 #### Decision Drift Analyzer
 

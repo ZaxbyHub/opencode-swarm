@@ -36,8 +36,7 @@ export const CLEANUP_COMMANDS = ['reset.ts', 'close.ts'] as const;
 // Adding a new entry here is the normal way to allow a new persistent artifact
 // or audit log. Use directory prefixes (e.g. 'evidence/') for nested writes.
 export const PRESERVED_SWARM_PATHS = [
-	// Sentinels / first-run
-	'.first-run-complete',
+	// Sentinels / migration
 	'.knowledge-migrated',
 
 	// Audit / event logs (append-only, cross-session forensic value)
