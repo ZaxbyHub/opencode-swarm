@@ -16,17 +16,23 @@ export function addDeferredWarning(warning: string): void {
 }
 
 /**
- * Returns the current deferred warnings array (read-only reference).
- * Callers must not mutate this array directly; use addDeferredWarning() instead.
+ * Returns a shallow copy of the current deferred warnings. The copy is
+ * safe to read but cannot mutate the internal buffer. Use
+ * addDeferredWarning() to add entries.
  */
 export function getDeferredWarnings(): readonly string[] {
-	return deferredWarnings;
+	// Return a SHALLOW COPY, not the live reference. Defense-in-depth: even
+	// if a caller casts away the readonly annotation via
+	// (getDeferredWarnings() as string[]).push('x'), the cast now mutates
+	// the throwaway copy, not the internal buffer. The MAX_DEFERRED_WARNINGS
+	// cap and `addDeferredWarning` boundary are still the only way to add
+	// entries to the actual buffer.
+	return [...deferredWarnings];
 }
 
 /**
- * Clears all deferred warnings. Used at session boundaries for isolation.
- * Only exported for session lifecycle management; normal callers should
- * not invoke this.
+ * Clears all deferred warnings. This is for session-lifecycle management
+ * and is called by src/index.ts at session start to isolate state.
  */
 export function clearDeferredWarnings(): void {
 	deferredWarnings.length = 0;

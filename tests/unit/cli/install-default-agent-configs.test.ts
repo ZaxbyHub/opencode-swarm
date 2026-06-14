@@ -178,6 +178,12 @@ describe('writeProjectConfigIfMissing', () => {
 	// would be created causes mkdirSync to fail on both POSIX (EEXIST) and
 	// Windows (EEXIST/ENOTDIR). The try/catch in writeProjectConfigIfMissing
 	// must surface this as a warning, not abort the install.
+	//
+	// Note: XDG_CONFIG_HOME here is incidental — it only points the install
+	// command at the test's tempDir. The test exercises the writeProjectConfigIfMissing
+	// try/catch regardless of which env var (XDG_CONFIG_HOME on POSIX, APPDATA
+	// on Windows) the production CLI uses internally. The actual production
+	// env var resolution is the installer's job, not this test's job.
 	test('does NOT abort install when .opencode path is blocked by a regular file', async () => {
 		// Pre-create a regular file at the path where .opencode/ would be created
 		const blockedPath = join(tempDir, '.opencode');
