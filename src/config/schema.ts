@@ -1260,8 +1260,17 @@ export const SkillImproverConfigSchema = z.object({
 	fallback_models: z.array(z.string()).default([]),
 	/** Hard daily quota. Default: 10. */
 	max_calls_per_day: z.number().int().min(1).max(1000).default(10),
-	/** 'manual' is the only supported trigger today; 'scheduled' is reserved. */
+	/** 'manual' runs only on explicit request; 'scheduled' enables bounded consolidation at safe cadence points. */
 	trigger: z.enum(['manual', 'scheduled']).default('manual'),
+	/** Minimum hours between opportunistic scheduled consolidation runs. */
+	consolidation_interval_hours: z
+		.number()
+		.int()
+		.min(1)
+		.max(24 * 30)
+		.default(24),
+	/** Per-run reservation for scheduled consolidation, still capped by max_calls_per_day. */
+	consolidation_max_calls_per_run: z.number().int().min(1).max(100).default(1),
 	/** Targets the skill_improver may inspect/improve. */
 	targets: z
 		.array(z.enum(['skills', 'spec', 'architect_prompt', 'knowledge']))

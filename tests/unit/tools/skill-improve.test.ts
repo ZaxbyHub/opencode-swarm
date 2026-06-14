@@ -215,6 +215,16 @@ describe('skill_improve tool', () => {
 			expect(callArgs.maxCalls).toBe(5);
 		});
 
+		it('passes evaluate as evaluateDrafts to runSkillImprover', async () => {
+			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
+				config: { skill_improver: { enabled: true } },
+				meta: { source: 'test' },
+			});
+			await skill_improve.execute({ evaluate: true }, tmp);
+			const callArgs = mockRunSkillImprover.mock.calls[0][0];
+			expect(callArgs.evaluateDrafts).toBe(true);
+		});
+
 		it('passes config from loadPluginConfigWithMeta', async () => {
 			const config = { enabled: true, max_calls_per_day: 20 };
 			mockLoadPluginConfigWithMeta.mockReturnValueOnce({

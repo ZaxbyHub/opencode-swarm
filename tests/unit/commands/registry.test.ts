@@ -237,6 +237,13 @@ describe('resolveCommand()', () => {
 			expect(result!.remainingArgs).toEqual(['2']);
 		});
 
+		test('resolves consolidate command with flags', () => {
+			const result = resolveCommand(['consolidate', '--respect-interval']);
+			expect(result).not.toBeNull();
+			expect(result!.key).toBe('consolidate');
+			expect(result!.remainingArgs).toEqual(['--respect-interval']);
+		});
+
 		test('resolves two-token compound "evidence summary"', () => {
 			const result = resolveCommand(['evidence', 'summary']);
 			expect(result).not.toBeNull();

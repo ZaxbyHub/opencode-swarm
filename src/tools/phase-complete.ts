@@ -14,6 +14,7 @@ import {
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
+	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
@@ -64,6 +65,7 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
 	ensureAgentSession,
@@ -1384,6 +1386,50 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
+		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
+		// It may call an LLM and write proposal files, so only launch it after the
+		// phase gates have accepted completion.
+		try {
+			const skillConfig = SkillImproverConfigSchema.parse(
+				config.skill_improver ?? {},
+			);
+			if (skillConfig.enabled && skillConfig.trigger === 'scheduled') {
+				runSkillConsolidationFireAndForget(
+					{
+						directory: dir,
+						config: skillConfig,
+						source: 'phase_complete',
+						sessionId: sessionID,
+						enrichmentQuota: {
+							maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+							window: knowledgeConfig.enrichment.quota_window,
+						},
+						evaluateDrafts: true,
+					},
+					(consolidationResult) => {
+						if (!consolidationResult.started) return;
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (!sessionState) return;
+						sessionState.pendingAdvisoryMessages ??= [];
+						sessionState.pendingAdvisoryMessages.push(
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						);
+					},
+					(err) => {
+						safeWarn(
+							'[phase_complete] Scheduled skill consolidation error (non-blocking):',
+							err,
+						);
+					},
+				);
+			}
+		} catch (skillConsolidationError) {
+			safeWarn(
+				'[phase_complete] Scheduled skill consolidation setup error (non-blocking):',
+				skillConsolidationError,
+			);
+		}
+
 		// Reset phase-tracking state for all contributor sessions
 		for (const contributorSessionId of crossSessionResult.contributorSessionIds) {
 			const contributorSession =

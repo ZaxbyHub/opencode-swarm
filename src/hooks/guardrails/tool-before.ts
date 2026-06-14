@@ -640,6 +640,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					'reset-session',
 					'rollback',
 					'checkpoint',
+					'consolidate',
 				]);
 
 				let probe = seg
@@ -1383,7 +1384,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const payloads = extractAllPatchPayloads(args);
 		if (payloads.length === 0) return false;
 		const re =
-			/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i;
+			/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint|consolidate)\b/i;
 		return payloads.some((p) => re.test(p));
 	}
 
@@ -1501,7 +1502,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				toolArgs?.newText;
 			if (
 				typeof content === 'string' &&
-				/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint)\b/i.test(
+				/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint|consolidate)\b/i.test(
 					content,
 				)
 			) {

@@ -33,6 +33,7 @@ import {
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
+	SkillImproverConfigSchema,
 	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
@@ -614,9 +615,47 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// v6.17 Knowledge system hooks — fire-and-forget, wrapped in safeHook
 	const knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+	const skillImproverConfig = SkillImproverConfigSchema.parse(
+		config.skill_improver ?? {},
+	);
 	const skillPropagationConfig = SkillPropagationConfigSchema.parse(
 		config.skillPropagation ?? {},
 	);
+	if (
+		skillImproverConfig.enabled &&
+		skillImproverConfig.trigger === 'scheduled'
+	) {
+		queueMicrotask(() => {
+			import('./services/skill-consolidation.js')
+				.then(({ runSkillConsolidationFireAndForget }) => {
+					runSkillConsolidationFireAndForget(
+						{
+							directory: ctx.directory,
+							config: skillImproverConfig,
+							source: 'startup',
+							enrichmentQuota: {
+								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+								window: knowledgeConfig.enrichment.quota_window,
+							},
+							evaluateDrafts: true,
+						},
+						undefined,
+						(err) => {
+							const msg = err instanceof Error ? err.message : String(err);
+							log('scheduled skill consolidation failed (non-fatal)', {
+								error: msg,
+							});
+						},
+					);
+				})
+				.catch((err: unknown) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					log('failed to schedule skill consolidation (non-fatal)', {
+						error: msg,
+					});
+				});
+		});
+	}
 	// skill_improver keeps its own proposal quota; curator/micro-reflector
 	// enrichment uses knowledge.enrichment below.
 	const knowledgeCuratorHook = knowledgeConfig.enabled
@@ -1055,7 +1094,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
 					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|deep-research|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|consolidate|concurrency|turbo|full-auto|auto-proceed|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1263,6 +1302,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm curate',
 					description:
 						'Use /swarm curate to curate knowledge artifacts and entries',
+				},
+				'swarm-consolidate': {
+					template: '/swarm consolidate $ARGUMENTS',
+					description:
+						'Use /swarm consolidate to run quota-bounded skill-improver consolidation',
 				},
 				'swarm-concurrency': {
 					template: '/swarm concurrency $ARGUMENTS',

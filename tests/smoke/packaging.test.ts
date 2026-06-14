@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
+const MAIN_BUNDLE_MAX_BYTES = 5.2 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -37,10 +38,11 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5MB)', () => {
+	test('dist/index.js file size is reasonable (< 5.2MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
-		// Main bundle should be under 5MB
-		expect(stats.size).toBeLessThan(5 * 1024 * 1024);
+		// Raised from 5MiB by #1302 Wave 2's eval-gated skill machinery; keep
+		// the cap narrow so future bundle growth remains visible in smoke CI.
+		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);
 	});

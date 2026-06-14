@@ -25,6 +25,7 @@ import type { MessageWithParts } from './knowledge-types.js';
 import {
 	computeSkillRelevanceScore,
 	formatSkillIndexWithContext,
+	readSkillMetadata,
 } from './skill-scoring.js';
 import {
 	appendSkillUsageEntry,
@@ -277,6 +278,7 @@ export const _internals: {
 	extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
 	extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
 	computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
+	readSkillMetadata: typeof readSkillMetadata;
 	formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
 	loadRoutingSkills: typeof loadRoutingSkills;
 } = {
@@ -305,6 +307,7 @@ export const _internals: {
 	extractSkillsFieldFromPrompt:
 		null as unknown as typeof extractSkillsFieldFromPrompt,
 	computeSkillRelevanceScore,
+	readSkillMetadata,
 	formatSkillIndexWithContext,
 	loadRoutingSkills: null as unknown as typeof loadRoutingSkills,
 };
@@ -678,10 +681,12 @@ export async function skillPropagationGateBefore(
 						const skillEntries = sessionEntries.filter(
 							(e) => e.skillPath === skillPath,
 						);
+						const metadata = _internals.readSkillMetadata(skillPath, directory);
 						const score = _internals.computeSkillRelevanceScore(
 							skillPath,
 							prompt,
 							skillEntries,
+							metadata,
 						);
 						return { skillPath, score, usageCount: skillEntries.length };
 					})

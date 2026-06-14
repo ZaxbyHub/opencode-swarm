@@ -87,6 +87,7 @@ export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
 	'reset-session',
 	'rollback',
 	'checkpoint',
+	'consolidate',
 	'memory import',
 	'memory migrate',
 	'memory compact',

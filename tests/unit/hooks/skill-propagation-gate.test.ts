@@ -1910,14 +1910,15 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 
 	test('calls computeSkillRelevanceScore for each available skill when skills are present', async () => {
 		let scoringCallCount = 0;
-		let lastScoringArgs: [string, string, unknown[]] | null = null;
+		let lastScoringArgs: [string, string, unknown[], unknown] | null = null;
 		const mockComputeSkillRelevanceScore = (
 			skillPath: string,
 			taskDescription: string,
 			usageHistory: unknown[],
+			metadata?: unknown,
 		) => {
 			scoringCallCount++;
-			lastScoringArgs = [skillPath, taskDescription, usageHistory];
+			lastScoringArgs = [skillPath, taskDescription, usageHistory, metadata];
 			return 0.85;
 		};
 
@@ -1945,6 +1946,11 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 					complianceVerdict: 'compliant',
 				},
 			],
+			readSkillMetadata: (skillPath: string) => ({
+				path: skillPath,
+				name: path.basename(path.dirname(skillPath)),
+				description: 'metadata description',
+			}),
 			computeSkillRelevanceScore: mockComputeSkillRelevanceScore,
 		});
 
@@ -1966,6 +1972,80 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 		expect(scoringCallCount).toBe(2);
 		expect(lastScoringArgs).not.toBeNull();
 		expect(lastScoringArgs![1]).toContain('implement the feature');
+		expect(lastScoringArgs![3]).toMatchObject({
+			description: 'metadata description',
+		});
+	});
+
+	test('frontmatter triggers affect the real propagation-gate recommendation path', async () => {
+		const triggeredSkill = '.opencode/skills/generated/biome-lint/SKILL.md';
+		const untriggeredSkill = '.opencode/skills/generated/package-docs/SKILL.md';
+		const triggeredDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'biome-lint',
+		);
+		const untriggeredDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'package-docs',
+		);
+		fs.mkdirSync(triggeredDir, { recursive: true });
+		fs.mkdirSync(untriggeredDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(triggeredDir, 'SKILL.md'),
+			[
+				'---',
+				'name: biome-lint',
+				'description: Handle lint configuration',
+				'triggers:',
+				'  - biome lint config',
+				'---',
+				'# Body',
+			].join('\n'),
+			'utf-8',
+		);
+		fs.writeFileSync(
+			path.join(untriggeredDir, 'SKILL.md'),
+			[
+				'---',
+				'name: package-docs',
+				'description: Package documentation',
+				'---',
+				'# Body',
+			].join('\n'),
+			'utf-8',
+		);
+
+		applyOverrides(_internals, {
+			discoverAvailableSkills: () => [untriggeredSkill, triggeredSkill],
+			readSkillUsageEntriesTail: () => [],
+			appendSkillUsageEntry: makeMockAppendSkillUsageEntry([]),
+			parseSkillPaths: () => [],
+		});
+
+		const result = await skillPropagationGateBefore(
+			tmp,
+			{
+				tool: 'task',
+				agent: 'architect',
+				sessionID: 'sess-trigger-score',
+				args: {
+					subagent_type: 'coder',
+					prompt: 'fix the biome lint config',
+				},
+			},
+			{ enabled: true },
+		);
+
+		expect(result.recommendedSkills?.[0].skillPath).toBe(triggeredSkill);
+		expect(result.recommendedSkills?.[0].score).toBeGreaterThan(
+			result.recommendedSkills?.[1].score ?? 0,
+		);
 	});
 
 	test('scoring error does not block the delegation recording', async () => {

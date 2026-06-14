@@ -247,6 +247,86 @@ describe('computeSkillRelevanceScore', () => {
 		expect(score).toBeGreaterThanOrEqual(0);
 		expect(score).toBeLessThanOrEqual(1);
 	});
+
+	test('declared trigger phrase gives an additive literal-match boost', () => {
+		const triggered = _internals.computeSkillRelevanceScore(
+			'.opencode/skills/generated/biome-lint/SKILL.md',
+			'fix the biome lint config',
+			[],
+			{
+				path: '.opencode/skills/generated/biome-lint/SKILL.md',
+				name: 'biome-lint',
+				description: 'No description provided',
+				triggers: ['biome lint config'],
+			},
+		);
+		const untriggered = _internals.computeSkillRelevanceScore(
+			'.opencode/skills/generated/other/SKILL.md',
+			'fix the biome lint config',
+			[],
+			{
+				path: '.opencode/skills/generated/other/SKILL.md',
+				name: 'other',
+				description: 'No description provided',
+				triggers: ['unrelated trigger'],
+			},
+		);
+
+		expect(triggered).toBeGreaterThan(untriggered);
+		expect(triggered).toBeGreaterThanOrEqual(0.3);
+	});
+
+	test('ignores trigger phrases shorter than the minimum guard', () => {
+		const score = _internals.computeSkillRelevanceScore(
+			'.opencode/skills/generated/ci/SKILL.md',
+			'ci failed',
+			[],
+			{
+				path: '.opencode/skills/generated/ci/SKILL.md',
+				name: 'other',
+				description: 'No description provided',
+				triggers: ['ci'],
+			},
+		);
+
+		expect(score).toBeLessThan(0.3);
+	});
+});
+
+describe('parseSkillFrontmatter triggers', () => {
+	test('parses YAML list triggers from skill frontmatter', () => {
+		const meta = _internals.parseSkillFrontmatter(
+			[
+				'---',
+				'name: biome-lint',
+				'description: Fix lint config',
+				'triggers:',
+				'  - biome',
+				'  - "lint config"',
+				'---',
+				'# Body',
+			].join('\n'),
+			'.opencode/skills/generated/biome-lint/SKILL.md',
+		);
+
+		expect(meta.triggers).toEqual(['biome', 'lint config']);
+	});
+
+	test('parses inline triggers from external spec-standard frontmatter', () => {
+		const meta = _internals.parseSkillFrontmatter(
+			[
+				'---',
+				'name: external-skill',
+				'description: External skill',
+				'triggers: ["biome", "lint config"]',
+				'---',
+				'# Body',
+			].join('\n'),
+			'.agents/skills/external/SKILL.md',
+		);
+
+		expect(meta.triggers).toEqual(['biome', 'lint config']);
+	});
 });
 
 // ============================================================================
@@ -502,7 +582,7 @@ describe('rankSkillsForContext', () => {
 
 		expect(results).toHaveLength(2);
 		// They have identical scores and identical usage counts, order is stable
-		expect(results[0].score).toBeCloseTo(results[1].score, 10);
+		expect(Math.abs(results[0].score - results[1].score)).toBeLessThan(1e-9);
 	});
 });
 

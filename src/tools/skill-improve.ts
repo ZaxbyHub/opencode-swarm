@@ -37,12 +37,20 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 				.describe(
 					'Override the per-run reservation count (capped by daily max).',
 				),
+			evaluate: z
+				.boolean()
+				.optional()
+				.default(false)
+				.describe(
+					'When mode="draft_skills", validate generated draft skills before writing proposals. Default false.',
+				),
 		},
 		execute: async (args: unknown, directory, ctx): Promise<string> => {
 			const a = (args ?? {}) as {
 				targets?: Array<'skills' | 'spec' | 'architect_prompt' | 'knowledge'>;
 				mode?: 'proposal' | 'draft_skills';
 				max_calls?: number;
+				evaluate?: boolean;
 			};
 			const { config } = loadPluginConfigWithMeta(directory);
 			const parsed = SkillImproverConfigSchema.parse(
@@ -77,6 +85,7 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 					maxCalls: enrichmentConfig.max_calls_per_day,
 					window: enrichmentConfig.quota_window,
 				},
+				evaluateDrafts: a.evaluate ?? false,
 			});
 			return JSON.stringify(result, null, 2);
 		},

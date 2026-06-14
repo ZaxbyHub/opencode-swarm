@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+	HUMAN_ONLY_SWARM_COMMANDS,
 	SWARM_COMMAND_TOOL_ALLOWLIST,
 	SWARM_COMMAND_TOOL_COMMANDS,
 } from '../../../src/commands/tool-policy';
@@ -37,5 +38,17 @@ describe('auto-proceed is consistently present in both lists', () => {
 		const inAllowlist = SWARM_COMMAND_TOOL_ALLOWLIST.has('auto-proceed');
 		expect(inCommands).toBe(true);
 		expect(inAllowlist).toBe(true);
+	});
+});
+
+describe('state-changing consolidation command policy', () => {
+	test('consolidate is explicitly excluded from swarm_command allowlist', () => {
+		expect(SWARM_COMMAND_TOOL_ALLOWLIST.has('consolidate')).toBe(false);
+		expect(
+			(SWARM_COMMAND_TOOL_COMMANDS as readonly string[]).includes(
+				'consolidate',
+			),
+		).toBe(false);
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('consolidate')).toBe(true);
 	});
 });
