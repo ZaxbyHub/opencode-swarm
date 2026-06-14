@@ -1014,11 +1014,9 @@ describe('computeComplianceByVersion (verdict vocabulary)', () => {
 		expect(agg.rate).toBeCloseTo(0.25); // 1 compliant / 4 total
 	});
 
-	test('"violation" (legacy) entries are NOT counted without read-path normalization', () => {
-		// This verifies that computeComplianceByVersion uses the canonical spelling.
-		// Raw entries with legacy 'violation' that bypass readSkillUsageEntries
-		// normalization should not be counted (they'd be caught by the read path
-		// in production).
+	test('"violation" (legacy) entries are counted after normalization', () => {
+		// Raw entries can reach this helper in tests and legacy callers. Keep the
+		// computation path defensive so legacy verdicts still count as violations.
 		const entries = [
 			{ ...makeEntry({ complianceVerdict: 'violation' }), id: 'v1' },
 			{ ...makeEntry({ complianceVerdict: 'compliant' }), id: 'c1' },
@@ -1030,7 +1028,7 @@ describe('computeComplianceByVersion (verdict vocabulary)', () => {
 		);
 		const agg = stats.get(undefined)!;
 		expect(agg.total).toBe(2);
-		expect(agg.violation).toBe(0); // 'violation' ≠ 'violated'
+		expect(agg.violation).toBe(1);
 		expect(agg.compliant).toBe(1);
 	});
 });
