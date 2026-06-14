@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { warn } from '../utils/logger.js';
@@ -31,6 +31,13 @@ import type {
 export function resolveApplicationLogPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-application.jsonl');
 }
+
+/**
+ * Cap on `.swarm/knowledge-application.jsonl` entries. Legacy audit log only;
+ * the event log is authoritative. FIFO trim after each append to prevent
+ * unbounded growth and hot-path re-reads of massive files.
+ */
+export const MAX_APPLICATION_LOG_ENTRIES = 5000;
 
 // ============================================================================
 // Acknowledgment parser
@@ -84,6 +91,27 @@ async function appendAudit(
 	const filePath = resolveApplicationLogPath(directory);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+
+	// Best-effort FIFO trim once the log exceeds MAX_APPLICATION_LOG_ENTRIES.
+	// Legacy audit log is informational only; the event log is authoritative.
+	// Per recomputeCounters contract, legacy `shown` records are ignored once
+	// any `retrieved` event exists; trimming is safe.
+	try {
+		const content = await readFile(filePath, 'utf-8');
+		const lines = content
+			.split('\n')
+			.filter((line) => line.trim().length > 0);
+		if (lines.length > MAX_APPLICATION_LOG_ENTRIES) {
+			const trimmed = lines.slice(lines.length - MAX_APPLICATION_LOG_ENTRIES);
+			await writeFile(filePath, `${trimmed.join('\n')}\n`, 'utf-8');
+		}
+	} catch (err) {
+		warn(
+			`[knowledge-application] audit log trim failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
 }
 
 // ============================================================================
