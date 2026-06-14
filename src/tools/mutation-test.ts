@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
 	executeMutationSuite,
 	type MutationReport,
+	validateTestCommand,
 } from '../mutation/engine.js';
 import {
 	evaluateMutationGate,
@@ -118,6 +119,18 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 					return JSON.stringify(
 						{
 							error: 'test_command must contain only strings',
+							success: false,
+						},
+						null,
+						2,
+					);
+				}
+
+				const cmdValidationError = validateTestCommand(typedArgs.test_command);
+				if (cmdValidationError) {
+					return JSON.stringify(
+						{
+							error: cmdValidationError,
 							success: false,
 						},
 						null,

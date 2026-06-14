@@ -36,10 +36,21 @@ import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
+	computeLearningMetrics,
+	formatLearningSummary,
+} from '../services/learning-metrics.js';
+import {
 	listSkills,
 	parseDraftFrontmatter,
 	retireSkill,
 } from '../services/skill-generator.js';
+import {
+	getSkillVersion,
+	MAX_REVISION_CALLS_PER_PHASE,
+	REVISION_VIOLATION_THRESHOLD,
+	reviseSkill,
+	type ViolationContext,
+} from '../services/skill-reviser.js';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
@@ -108,6 +119,8 @@ export const _internals = {
 			fs.readFile(filePath, encoding as BufferEncoding),
 		),
 	readKnowledge,
+	reviseSkill,
+	getSkillVersion,
 };
 
 /**
@@ -120,6 +133,7 @@ export const _internals = {
 async function autoRetireSkills(
 	directory: string,
 	curatorKnowledgePath: string,
+	excludeSlugs?: ReadonlySet<string>,
 ): Promise<string[]> {
 	const observations: string[] = [];
 	try {
@@ -127,6 +141,7 @@ async function autoRetireSkills(
 		const usageEntries = _internals.readSkillUsageEntries(directory);
 
 		for (const active of skillListResult.active) {
+			if (excludeSlugs?.has(active.slug)) continue;
 			const skillUsage = usageEntries.filter((e) => {
 				let p = e.skillPath;
 				if (p.startsWith('file:')) p = p.slice(5);
@@ -1235,6 +1250,78 @@ export async function runCuratorPhase(
 			}
 		}
 
+		// 8b. Skill revision: revise skills with violation rate in the
+		// 15-30% range (soft threshold). Runs BEFORE auto-retire so
+		// revised skills are not immediately retired. Non-blocking.
+		const revisedSlugs = new Set<string>();
+		try {
+			const skillListResult = await _internals.listSkills(directory);
+			const usageEntries = _internals.readSkillUsageEntries(directory);
+			let revisionCallsThisPhase = 0;
+
+			for (const active of skillListResult.active) {
+				if (revisionCallsThisPhase >= MAX_REVISION_CALLS_PER_PHASE) break;
+
+				const skillUsage = usageEntries.filter((e) => {
+					let p = e.skillPath;
+					if (p.startsWith('file:')) p = p.slice(5);
+					const normalizedUsage = p.replace(/\\/g, '/');
+					const normalizedActive = active.path.replace(/\\/g, '/');
+					if (normalizedUsage === normalizedActive) return true;
+					if (normalizedActive.endsWith(`/${normalizedUsage}`)) return true;
+					if (normalizedUsage.endsWith(`/${normalizedActive}`)) return true;
+					return false;
+				});
+
+				if (skillUsage.length === 0) continue;
+
+				const violations = skillUsage.filter(
+					(e) => e.complianceVerdict === 'violation',
+				).length;
+				const violationRate = violations / skillUsage.length;
+
+				if (
+					violationRate > REVISION_VIOLATION_THRESHOLD &&
+					violationRate <= 0.3
+				) {
+					const content = await _internals.readFileAsync(active.path, 'utf-8');
+					const fm = _internals.parseDraftFrontmatter(content);
+					if (fm && fm.skillOrigin === 'promoted_external') continue;
+
+					const currentVersion = fm?.version ?? 1;
+					const violationContexts: ViolationContext[] = skillUsage
+						.filter((e) => e.complianceVerdict === 'violation')
+						.slice(-10)
+						.map((e) => ({
+							taskId: e.taskID,
+							agent: e.agentName,
+							verdict: e.complianceVerdict,
+							reviewerNotes: e.reviewerNotes,
+							timestamp: e.timestamp,
+						}));
+
+					const result = await _internals.reviseSkill({
+						directory,
+						slug: active.slug,
+						skillPath: active.path,
+						violationContexts,
+						currentContent: content,
+						currentVersion,
+					});
+
+					if (result.revised) {
+						revisedSlugs.add(active.slug);
+						phaseDigest.summary += ` [skill '${active.slug}' revised to v${result.newVersion}]`;
+					}
+					if (result.quotaConsumed) revisionCallsThisPhase++;
+				}
+			}
+		} catch (revisionErr) {
+			logger.warn(
+				`[curator] skill revision check failed: ${revisionErr instanceof Error ? revisionErr.message : String(revisionErr)}`,
+			);
+		}
+
 		// 9. Auto-retire health check for generated skills.
 		// Retires skills whose violation rate exceeds 30% or whose source
 		// knowledge entries are all archived. Non-blocking: errors are
@@ -1242,11 +1329,27 @@ export async function runCuratorPhase(
 		const autoRetireObservations = await _internals.autoRetireSkills(
 			directory,
 			curatorKnowledgePath,
+			revisedSlugs,
 		);
 		if (autoRetireObservations.length > 0) {
-			// Append auto-retire observations to the phase digest summary
 			const retireNote = ` [${autoRetireObservations.length} skill(s) auto-retired]`;
 			phaseDigest.summary += retireNote;
+		}
+
+		// 9b. Learning summary: compute lightweight learning metrics and
+		// append a 3-line summary to the phase digest. Non-blocking.
+		try {
+			const metrics = await computeLearningMetrics(directory, {
+				currentPhase: phase,
+			});
+			const summary = formatLearningSummary(metrics);
+			if (summary && summary !== 'No learning data yet') {
+				phaseDigest.summary += `\n\n--- Learning ---\n${summary}`;
+			}
+		} catch (learningErr) {
+			logger.warn(
+				`[curator] learning summary failed: ${learningErr instanceof Error ? learningErr.message : String(learningErr)}`,
+			);
 		}
 
 		const result: CuratorPhaseResult = {

@@ -10,12 +10,14 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import type { SkillImproverLLMDelegate } from '../../../src/hooks/skill-improver-llm-factory';
 import { runSkillImprover } from '../../../src/services/skill-improver';
 import {
 	getQuotaState,
 	reserveQuota,
 	resolveQuotaPath,
 } from '../../../src/services/skill-improver-quota';
+import { type AgentSessionState, swarmState } from '../../../src/state';
 
 let tmp: string;
 beforeEach(() => {
@@ -208,5 +210,62 @@ describe('runSkillImprover', () => {
 		expect(existsSync(path.join(tmp, '.swarm', 'skills', 'proposals'))).toBe(
 			true,
 		);
+	});
+});
+
+describe('runSkillImprover auto-apply full-auto gate (#1234 Part 3D)', () => {
+	const sessionId = 'sess-autoapply-1';
+
+	afterEach(() => {
+		swarmState.agentSessions.delete(sessionId);
+	});
+
+	function fullAutoSession(): AgentSessionState {
+		// hasActiveFullAuto only reads `fullAutoMode`; a minimal cast keeps the
+		// fixture focused on the gate under test.
+		return { fullAutoMode: true } as unknown as AgentSessionState;
+	}
+
+	// A delegate is required for auto-apply to run (it is the critic gate). It
+	// also drives main proposal-body generation, so it must return a string.
+	const delegate: SkillImproverLLMDelegate = async () => 'proposal body';
+
+	it('does NOT auto-apply when the session is not in full-auto', async () => {
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: baseConfig,
+			delegate,
+			sessionId,
+		});
+		expect(r.ran).toBe(true);
+		expect(r.autoApply).toBeUndefined();
+	});
+
+	it('does NOT auto-apply when no sessionId is provided (cross-session leak guard)', async () => {
+		// Make some OTHER session full-auto; a request without a sessionId must
+		// not inherit it via hasActiveFullAuto's global scan.
+		swarmState.agentSessions.set(sessionId, fullAutoSession());
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: baseConfig,
+			delegate,
+			// sessionId intentionally omitted
+		});
+		expect(r.ran).toBe(true);
+		expect(r.autoApply).toBeUndefined();
+	});
+
+	it('auto-applies when THIS session is in full-auto', async () => {
+		swarmState.agentSessions.set(sessionId, fullAutoSession());
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: baseConfig,
+			delegate,
+			sessionId,
+		});
+		expect(r.ran).toBe(true);
+		expect(r.autoApply).toBeDefined();
+		// No proposals seeded → empty result object, but defined (gate open).
+		expect(r.autoApply?.approved).toEqual([]);
 	});
 });

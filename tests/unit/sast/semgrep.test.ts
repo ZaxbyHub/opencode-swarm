@@ -113,4 +113,55 @@ describe('executeWithTimeout subprocess hardening', () => {
 		);
 		expect(result.truncated).toBe(false);
 	});
+
+	it('bounds runaway stderr accumulation (F-001 parity with stdout)', async () => {
+		// Emit far more than the cap to stderr; accumulated stderr must stay bounded.
+		const script = writeScript(
+			'flood-stderr.js',
+			'process.stderr.write("e".repeat(500_000)); process.exit(0);',
+		);
+		const result = await _internals.executeWithTimeout(
+			process.execPath,
+			[script],
+			{ timeoutMs: 10_000, maxOutputBytes: 1024 },
+		);
+		// stderr must not exceed the cap
+		expect(result.stderr.length).toBeLessThanOrEqual(1024);
+		// Truncation flag must be raised (same as stdout path)
+		expect(result.truncated).toBe(true);
+	});
+
+	it('terminates the child via SIGKILL after SIGTERM grace period (KILL_GRACE_MS escalation)', async () => {
+		// Script ignores SIGTERM and writes endlessly to stdout so that:
+		// 1. The timeout triggers and SIGTERM is sent.
+		// 2. The child ignores SIGTERM and stays alive.
+		// 3. After KILL_GRACE_MS (2 s) SIGKILL is escalated.
+		// We cannot reliably observe the signal name from outside the process,
+		// so we verify that the helper settles within the timeout budget and
+		// that the child is not left running after resolve (we just check that
+		// we get the timeout exit code and the promise resolves at all, which
+		// means the SIGKILL escalation path must have fired for the process to
+		// actually die on platforms where SIGTERM can be ignored).
+		const script = writeScript(
+			'ignore-sigterm.js',
+			[
+				// Trap SIGTERM and keep running
+				'process.on("SIGTERM", () => { /* ignore */ });',
+				'setInterval(() => process.stdout.write("x"), 10);',
+			].join('\n'),
+		);
+		const start = Date.now();
+		// Use a short timeout so the test doesn't take long.
+		// KILL_GRACE_MS=2000ms, so add 4s buffer for the escalation path.
+		const result = await _internals.executeWithTimeout(
+			process.execPath,
+			[script],
+			{ timeoutMs: 300 },
+		);
+		const elapsed = Date.now() - start;
+		// Must settle (SIGKILL fired)
+		expect(result.exitCode).toBe(124);
+		// Must not block for the child's natural lifetime
+		expect(elapsed).toBeLessThan(10_000);
+	});
 });

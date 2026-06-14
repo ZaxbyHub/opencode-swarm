@@ -141,6 +141,27 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+// Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
+// `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
+// This is distinct from the swarm-plugin's own `variant` field: `variant` is
+// passed through to the SDK as `variant` (a generic OpenCode hook), while
+// `reasoning` is passed through as-is and consumed by provider-native APIs.
+// Both may be set on the same agent; users control how their provider
+// interprets each.
+export const AgentReasoningConfigSchema = z.object({
+	effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+});
+export type AgentReasoningConfig = z.infer<typeof AgentReasoningConfigSchema>;
+
+// Per-agent extended-thinking block. Mirrors the OpenCode SDK's `thinking`
+// field on AgentConfig (e.g. Anthropic Claude extended thinking with
+// `type: "enabled"` and `budget_tokens`). Passed through as-is to the SDK.
+export const AgentThinkingConfigSchema = z.object({
+	type: z.enum(['enabled', 'disabled']).optional(),
+	budget_tokens: z.number().int().positive().optional(),
+});
+export type AgentThinkingConfig = z.infer<typeof AgentThinkingConfigSchema>;
+
 // Agent override configuration
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
@@ -160,6 +181,12 @@ export const AgentOverrideConfigSchema = z.object({
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
 	fallback_models: z.array(z.string()).max(3).optional(),
+	// Provider-native extended-reasoning / extended-thinking blocks. These
+	// were previously silently stripped by Zod's default strip behavior;
+	// they are now first-class fields. See AgentReasoningConfigSchema /
+	// AgentThinkingConfigSchema above for shape. Issue #1220.
+	reasoning: AgentReasoningConfigSchema.optional(),
+	thinking: AgentThinkingConfigSchema.optional(),
 });
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
@@ -1112,6 +1139,8 @@ export const CuratorConfigSchema = z.object({
 	init_enabled: z.boolean().default(true),
 	/** Run CURATOR_PHASE at phase boundaries. Default: true (when curator enabled) */
 	phase_enabled: z.boolean().default(true),
+	/** Run CURATOR_POSTMORTEM at project end / finalize. Default: true (when curator enabled) */
+	postmortem_enabled: z.boolean().default(true),
 	/** Maximum tokens for curator summary. Default: 2000 */
 	max_summary_tokens: z.number().min(500).max(8000).default(2000),
 	/** Minimum confidence for knowledge entries to include in curator context. Default: 0.7 */
@@ -1460,6 +1489,49 @@ export const CouncilConfigSchema = z
 	.strict();
 
 export type CouncilConfig = z.infer<typeof CouncilConfigSchema>;
+
+// PR Monitor configuration (FR-001 — GitHub PR subscription and polling)
+// Off by default. When enabled, the architect can subscribe to PRs and
+// receive real-time status updates (CI, reviews, merge conflicts, comments)
+// via background gh CLI polling.
+export const PrMonitorConfigSchema = z
+	.object({
+		/** Master feature flag. Defaults to false — no PR polling when omitted. */
+		enabled: z.boolean().default(false),
+		/** Seconds between poll cycles. Clamped to 30–300. */
+		poll_interval_seconds: z.number().int().min(30).max(300).default(60),
+		/** Maximum concurrent PR subscriptions. Clamped to 1–100. */
+		max_subscriptions: z.number().int().min(1).max(100).default(20),
+		/** Maximum PRs polled per cycle. Clamped to 1–20. */
+		max_prs_per_cycle: z.number().int().min(1).max(20).default(5),
+		/** Maximum concurrent PR polls per cycle. Clamped to 1–10. */
+		max_concurrent_pr_polls: z.number().int().min(1).max(10).default(3),
+		/** Per-poll timeout in milliseconds. Clamped to 5 000–120 000. */
+		poll_timeout_ms: z.number().int().min(5_000).max(120_000).default(30_000),
+		/** Consecutive failures before circuit breaker trips. Clamped to 1–20. */
+		failure_threshold: z.number().int().min(1).max(20).default(5),
+		/** Circuit breaker cooldown in seconds. Clamped to 5–600. */
+		cooldown_seconds: z.number().int().min(5).max(600).default(30),
+		/** Maximum cooldown with exponential backoff in seconds. Clamped to 30–3600. */
+		max_cooldown_seconds: z.number().int().min(30).max(3_600).default(300),
+		/** TTL in days for stale subscription cleanup. Clamped to 1–90. */
+		cleanup_ttl_days: z.number().int().min(1).max(90).default(7),
+		/** Automatically unsubscribe when PR is merged. */
+		auto_unsubscribe_on_merge: z.boolean().default(true),
+		/** Automatically unsubscribe when PR is closed (without merge). */
+		auto_unsubscribe_on_close: z.boolean().default(true),
+		/** Emit notification on CI failure. */
+		notify_ci_failure: z.boolean().default(true),
+		/** Emit notification on new comments. */
+		notify_new_comments: z.boolean().default(true),
+		/** Emit notification on merge conflict detection. */
+		notify_merge_conflict: z.boolean().default(true),
+		/** Automatically trigger PR_FEEDBACK mode on CI failure or merge conflict. */
+		auto_pr_feedback: z.boolean().default(false),
+	})
+	.strict();
+
+export type PrMonitorConfig = z.infer<typeof PrMonitorConfigSchema>;
 
 // Parallelization configuration (PR 1 — dark foundation, disabled by default)
 // All fields default to single-run-equivalent values so no production path
@@ -1817,7 +1889,12 @@ export const PluginConfigSchema = z.object({
 	// Multiple swarms support
 	// Keys are swarm IDs (e.g., "cloud", "local", "fast")
 	// First swarm or one named "default" becomes the primary architect
-	swarms: z.record(z.string(), SwarmConfigSchema).optional(),
+	swarms: z
+		.record(
+			z.string().regex(/^[^_]+$/, 'Swarm ID must not contain underscores'),
+			SwarmConfigSchema,
+		)
+		.optional(),
 
 	// Pipeline settings
 	max_iterations: z.number().min(1).max(10).default(5),
@@ -2171,6 +2248,10 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 			},
 		})),
+
+	// PR Monitor — GitHub PR subscription and polling (FR-001)
+	// Disabled by default; opt-in for real-time PR status updates.
+	pr_monitor: PrMonitorConfigSchema.optional(),
 
 	// External skills — candidate model, discovery, and quarantine store (FR-001)
 	// Disabled by default; all subsystems are opt-in.

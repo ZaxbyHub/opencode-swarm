@@ -21,14 +21,21 @@ import type { CuratorLLMDelegate } from './curator.js';
  * when both are registered (prefix-collision avoidance).
  */
 function resolveCuratorAgentName(
-	mode: 'init' | 'phase',
+	mode: 'init' | 'phase' | 'postmortem',
 	sessionId?: string,
 ): string {
-	const suffix = mode === 'init' ? 'curator_init' : 'curator_phase';
-	const registeredNames =
-		mode === 'init'
-			? swarmState.curatorInitAgentNames
-			: swarmState.curatorPhaseAgentNames;
+	const suffixMap = {
+		init: 'curator_init',
+		phase: 'curator_phase',
+		postmortem: 'curator_postmortem',
+	} as const;
+	const suffix = suffixMap[mode];
+	const registeredNamesMap = {
+		init: swarmState.curatorInitAgentNames,
+		phase: swarmState.curatorPhaseAgentNames,
+		postmortem: swarmState.curatorPostmortemAgentNames,
+	} as const;
+	const registeredNames = registeredNamesMap[mode];
 
 	// Fast path: only one registered (single-swarm or default-only)
 	if (registeredNames.length === 1) return registeredNames[0];
@@ -97,8 +104,9 @@ function resolveCuratorAgentName(
  * re-entrancy with the current session's message flow.
  *
  * The `mode` parameter determines which registered named agent is used:
- *   - 'init'  → curator_init  (e.g. 'curator_init' or 'swarm1_curator_init')
- *   - 'phase' → curator_phase (e.g. 'curator_phase' or 'swarm1_curator_phase')
+ *   - 'init'       → curator_init       (e.g. 'curator_init' or 'swarm1_curator_init')
+ *   - 'phase'      → curator_phase      (e.g. 'curator_phase' or 'swarm1_curator_phase')
+ *   - 'postmortem' → curator_postmortem  (e.g. 'curator_postmortem' or 'swarm1_curator_postmortem')
  *
  * The optional `sessionId` parameter enables deterministic swarm resolution:
  * when provided, the factory uses the calling session's registered agent to
@@ -109,7 +117,7 @@ function resolveCuratorAgentName(
  */
 export function createCuratorLLMDelegate(
 	directory: string,
-	mode: 'init' | 'phase' = 'init',
+	mode: 'init' | 'phase' | 'postmortem' = 'init',
 	sessionId?: string,
 ): CuratorLLMDelegate | undefined {
 	const client = swarmState.opencodeClient;

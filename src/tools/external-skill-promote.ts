@@ -102,6 +102,8 @@ function buildSkillMarkdown(
 		`sha256: ${candidate.sha256}`,
 		`promoted_at: ${timestamp}`,
 		`promoted_by: user`,
+		`skill_origin: promoted_external`,
+		`version: 1`,
 		'---',
 		'',
 		candidate.skill_body,

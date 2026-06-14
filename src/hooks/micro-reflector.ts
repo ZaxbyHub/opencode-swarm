@@ -17,7 +17,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { sanitizeTaskId } from '../evidence/manager.js';
@@ -25,6 +25,7 @@ import { reserveQuota } from '../services/skill-improver-quota.js';
 import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
+import { transactFile } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
 import {
 	validateActionability,
@@ -162,16 +163,63 @@ export async function readTaskTrajectory(
 	}
 }
 
-/** Append validated candidates to the insight queue (best-effort, fail-open). */
+export const INSIGHT_CANDIDATES_MAX_ENTRIES = 500;
+
+/** Append validated candidates to the insight queue (best-effort, fail-open).
+ *  Uses transactFile for consistency with consumeInsightCandidates and enforces
+ *  a FIFO cap to prevent unbounded growth between phase completions. */
 async function appendInsightCandidates(
 	directory: string,
 	candidates: InsightCandidate[],
 ): Promise<void> {
 	if (candidates.length === 0) return;
 	const filePath = resolveInsightCandidatesPath(directory);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	const lines = candidates.map((c) => JSON.stringify(c)).join('\n');
-	await appendFile(filePath, `${lines}\n`, 'utf-8');
+	await transactFile<InsightCandidate[]>(
+		filePath,
+		async (p) => {
+			try {
+				const content = await readFile(p, 'utf-8');
+				return readInsightJsonl(content);
+			} catch (err) {
+				// First write: the file simply doesn't exist yet → empty is the
+				// correct base. Any OTHER read error (EACCES, EIO, …) must abort
+				// the transaction by rethrowing: returning [] here would, under
+				// the write-back half of transactFile, clobber an existing queue
+				// with only the new candidates (silent data loss).
+				if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
+				throw err;
+			}
+		},
+		async (p, data) => {
+			const body =
+				data.length === 0
+					? ''
+					: `${data.map((c) => JSON.stringify(c)).join('\n')}\n`;
+			await writeFile(p, body, 'utf-8');
+		},
+		(all) => {
+			const merged = [...all, ...candidates];
+			const capped =
+				merged.length > INSIGHT_CANDIDATES_MAX_ENTRIES
+					? merged.slice(-INSIGHT_CANDIDATES_MAX_ENTRIES)
+					: merged;
+			return capped;
+		},
+	);
+}
+
+function readInsightJsonl(content: string): InsightCandidate[] {
+	const out: InsightCandidate[] = [];
+	for (const line of content.split('\n')) {
+		const t = line.trim();
+		if (!t) continue;
+		try {
+			out.push(JSON.parse(t) as InsightCandidate);
+		} catch {
+			// skip corrupt line
+		}
+	}
+	return out;
 }
 
 // ============================================================================

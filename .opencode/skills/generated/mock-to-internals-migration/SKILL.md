@@ -1,20 +1,22 @@
 ---
 name: mock-to-internals-migration
 description: >
-  Apply when converting test files from mock.module('node:child_process') to _internals DI seam pattern.
-  Guides the complete migration: adding spawnSync/_internals to source files, converting test files,
-  adding proper beforeEach/afterEach save/restore lifecycle, mockReset() cleanup, and temp directory cleanup.
-  Prevents mock.module leaks across Bun's shared test-runner process.
+  Apply when converting test files from mock.module or vi.spyOn to _internals DI seam pattern. While examples
+  use spawnSync from node:child_process, the pattern applies to ANY function needing test injection
+  (readFileSync, fetch, execGit, etc.). Guides the complete migration: adding functions to _internals in source
+  files, converting test files, adding proper beforeEach/afterEach save/restore lifecycle, mockReset() cleanup,
+  and temp directory cleanup. Prevents mock.module and vi.spyOn leaks across Bun's shared test-runner process.
 effort: medium
 ---
 
-# mock.module → _internals DI Seam Migration Protocol
+# mock.module / vi.spyOn → _internals DI Seam Migration Protocol
 
 Follow every step in order. Do not skip steps.
 
 ## When to use this skill
 
 - A test file uses `mock.module('node:child_process')` or `mock.module('node:fs')` or similar
+- A test file uses `vi.spyOn(module, 'functionName')` on a module's exported functions (same anti-pattern as `mock.module` — unreliable across Bun's shared test runner when the module is split or functions move)
 - The production code already has an `_internals` export (or needs one added)
 - The goal is to eliminate `mock.module` usage per AGENTS.md invariant 7 and the writing-tests skill
 
@@ -29,13 +31,36 @@ Follow every step in order. Do not skip steps.
 2. Read the source module (e.g., `src/mutation/engine.ts`)
 3. Check if `_internals` already exists:
    ```typescript
-   export const _internals = { ... };
+    export const _internals = {
+      existingHelper,
+      // other entries...
+    };
    ```
 4. Identify which function/method the mock.module was intercepting (usually `spawnSync`, `execFileSync`, `readFileSync`, etc.)
 
+## Step 0b — Check ALL test files consuming the target module
+
+**CRITICAL:** Before converting any test file, identify EVERY test file that imports or spies on the target module. Cross-file mock leakage in Bun's shared test runner means a migration in one file can silently break tests in another file.
+
+```bash
+# Find all test files that import the module
+grep -rln "from.*<source-module>" src/ tests/ --include="*.test.ts"
+
+# Find all test files that spy on the module
+grep -rln "vi.spyOn.*<source-module>" src/ tests/ --include="*.test.ts"
+grep -rln "spyOn.*<source-module>" src/ tests/ --include="*.test.ts"
+
+# Find all test files that mock the module
+grep -rln "mock.module.*<source-module>" src/ tests/ --include="*.test.ts"
+```
+
+Prefer the `imports` tool for comprehensive discovery — grep misses dynamic imports and re-exports.
+
+Record every file found. ALL of them must pass after migration — not just the one being explicitly converted.
+
 ## Step 1 — Add the function to _internals in the source file
 
-**CRITICAL:** Do NOT import type aliases from Node.js built-ins (e.g., `type SpawnSyncFn` from `node:child_process`). Use `typeof` instead.
+**CRITICAL:** Do NOT import type aliases from Node.js built-ins (e.g., `type SpawnSyncFn` from `node:child_process`). Use `typeof` instead. This applies to ALL Node built-in functions, not just spawnSync.
 
 ```typescript
 // BAD — fails build
@@ -84,7 +109,7 @@ Delete the entire `mock.module(...)` block and any related mock setup.
 
 ```typescript
 // Module-level reference to the original function (saved/restored in beforeEach/afterEach)
-let originalSpawnSync: typeof import('node:child_process').spawnSync | undefined;
+let originalSpawnSync: typeof import('node:child_process').spawnSync;
 
 // Module-level mock that logs calls and delegates to original
 const mockSpawnSync = mock(
@@ -148,7 +173,7 @@ afterEach(() => {
 Replace assertions that checked `mockSpawnSync.mock.calls` with assertions that check `spawnCallLog`:
 ```typescript
 // BEFORE (with mock.module)
-expect(mockSpawnSync).toHaveBeenCalledWith('git', ['apply', ...]);
+expect(mockSpawnSync).toHaveBeenCalledWith('git', ['apply', '<patch-file>']);
 
 // AFTER (with _internals seam)
 const gitCalls = spawnCallLog.filter(c => c.cmd === 'git');
@@ -175,11 +200,27 @@ Some test helpers (like `initGitRepo`) may use `require('node:child_process')` d
 ```typescript
 function initGitRepo(dir: string): void {
   const { spawnSync: s } = require('node:child_process');
-  s('git', ['init'], { cwd: dir });
+  s('git', ['init'], {
+    cwd: dir,
+    stdin: 'ignore',          // AGENTS.md invariant 3: non-interactive
+    timeout: 5000,            // AGENTS.md invariant 3: bounded
+    stdio: ['ignore', 'ignore', 'ignore'],  // bounded output
+  });
 }
 ```
 
 Do NOT change these helpers to use the DI seam.
+
+### Distinguishing safe local spies from module spies that need migration
+
+Not every `vi.spyOn` needs migration. Use this table to decide:
+
+| Spy target | Needs migration? | Why |
+|-----------|-----------------|-----|
+| `vi.spyOn(console, 'warn')` | NO | `console` is a global singleton, not a module export |
+| `vi.spyOn(process.stdout, 'write')` | NO | Global process object, not module-scoped |
+| `vi.spyOn(importedModule, 'functionName')` | YES | Module export — unreliable across shared test runner |
+| `vi.spyOn(someObject.method)` where object is from import | YES | Same as above |
 
 ## Common mistakes
 
@@ -192,6 +233,19 @@ Do NOT change these helpers to use the DI seam.
 | Forgetting vi.mock() captures closures at hoist-time | Reassigning mockFn.mockImplementation(newFn) in test body does NOT update the hoisted closure — mock still calls original function. Symptom: toHaveBeenCalledTimes(N) fails unexpectedly. Fix: use _internals seam instead |
 | Converting `initGitRepo`-style helpers | These need the REAL subprocess; keep them as `require()` |
 
+## When NOT to add a function to _internals
+
+Not every function belongs in `_internals`. Adding unnecessary functions creates mockable surface area that tests might accidentally override:
+
+- **Pure functions** (no side effects, no I/O) — test them directly with real inputs/outputs
+- **Constants and type guards** — these have no behavior to mock
+- **Functions only called from within the module itself** that don't touch external state
+
+Only add a function to `_internals` when:
+1. It has side effects or external dependencies (filesystem, network, subprocess)
+2. Tests need to control or observe those side effects
+3. The function is called from production code that you need to test in isolation
+
 ## Verification checklist
 
 - [ ] Source file `_internals` includes the function
@@ -200,4 +254,5 @@ Do NOT change these helpers to use the DI seam.
 - [ ] `beforeEach` saves original and assigns mock
 - [ ] `afterEach` restores original, calls `mockReset()`, cleans temp dir
 - [ ] All tests pass
+- [ ] ALL test files from Step 0b pass (not just the explicitly converted file)
 - [ ] `bun run build` passes

@@ -570,6 +570,62 @@ describe('skillPropagationGateBefore — recommendedSkills field', () => {
 			expect(Object.hasOwn(result, 'recommendedSkills')).toBe(true);
 			expect(result.recommendedSkills).toEqual([]);
 		});
+
+		test('SKILLS field missing (warn path, enforce=false) → recommendedSkills present with scored entries for auto-injection', async () => {
+			// Regression test: when the architect omits the SKILLS field, the hook
+			// must still compute and return recommendedSkills so that index.ts step 8
+			// can auto-inject the top relevant skills into the delegation prompt.
+			applyOverrides(_internals, {
+				parseDelegationArgs: () => ({
+					targetAgent: 'coder',
+					skillsField: '', // SKILLS field missing
+				}),
+				discoverAvailableSkills: () => [
+					'.claude/skills/writing-tests/SKILL.md',
+					'.claude/skills/engineering-conventions/SKILL.md',
+				],
+				readSkillUsageEntriesTail: () => [],
+				computeSkillRelevanceScore: (skillPath: string) => {
+					// Simulate writing-tests being more relevant to the task
+					return skillPath.includes('writing-tests') ? 0.7 : 0.3;
+				},
+				writeWarnEvent: () => {},
+				formatSkillIndexWithContext: () => '',
+				loadRoutingSkills: () => [],
+			});
+
+			const result = await skillPropagationGateBefore(
+				tmp,
+				{
+					tool: 'task',
+					agent: 'architect',
+					sessionID: 'sess-missing-auto-inject',
+					args: {
+						subagent_type: 'mega_coder',
+						prompt: 'write tests for the new feature',
+					},
+				},
+				{ enabled: true, enforce: false },
+			);
+
+			// Warn path: delegation is not blocked
+			expect(result.blocked).toBe(false);
+			expect(result.reason).toContain('Skill propagation warning');
+
+			// recommendedSkills must be populated so index.ts can auto-inject
+			expect(Array.isArray(result.recommendedSkills)).toBe(true);
+			expect(result.recommendedSkills!.length).toBe(2);
+
+			// writing-tests should be ranked first (higher score)
+			expect(result.recommendedSkills![0].skillPath).toBe(
+				'.claude/skills/writing-tests/SKILL.md',
+			);
+			expect(result.recommendedSkills![0].score).toBe(0.7);
+			expect(result.recommendedSkills![1].skillPath).toBe(
+				'.claude/skills/engineering-conventions/SKILL.md',
+			);
+			expect(result.recommendedSkills![1].score).toBe(0.3);
+		});
 	});
 
 	// -------------------------------------------------------------------------

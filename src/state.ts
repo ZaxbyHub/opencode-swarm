@@ -7,6 +7,11 @@
  * and delegation chains.
  */
 
+// FR-007: This module spans 6+ distinct concerns (session management, agent tracking,
+// tool call history, spiral detection, QA gate overrides, worktree tracking) with 48
+// exported symbols and 100+ importing files. Splitting is deferred pending a concrete
+// driver. See .swarm/spec.md FR-007.
+
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -96,6 +101,20 @@ export type DelegationReason =
 	| 'retry_circuit_breaker'
 	| 'conflict_escalation'
 	| 'stale_recovery';
+
+/**
+ * Per-session PR subscription state for the background PR poller.
+ * Keyed by `${repoFullName}::${prNumber}` within the session's prSubscriptions Map.
+ */
+export interface PrSubscriptionState {
+	prNumber: number;
+	repoFullName: string;
+	prUrl: string;
+	lastKnownStatus: string;
+	lastPollTime: number;
+	errorCount: number;
+	isWatching: boolean;
+}
 
 /**
  * Per-task workflow state for gate progression tracking.
@@ -267,6 +286,14 @@ export interface AgentSessionState {
 	 *  for delegation-gate guidance. Cleared on session reset. */
 	maxConcurrencyOverride?: number;
 
+	// Auto-proceed session overrides (Phase 1)
+	/** Session-scoped override for execution_profile.auto_proceed.
+	 *  When set, overrides the plan's auto_proceed for this session.
+	 *  true = auto-advance, false = do not auto-advance. Cleared on session reset. */
+	autoProceedOverride?: boolean;
+	/** Tracks whether the FR-004 nudge ("would you like to auto-advance?") has already been shown this session. */
+	autoProceedNudgeDone?: boolean;
+
 	// QA Gate Profile session overrides (ratchet-tighter only)
 	/** Session-level QA gate overrides layered on top of the spec-level profile.
 	 *  Overrides can only enable gates (true); false values are ignored by
@@ -314,6 +341,10 @@ export interface AgentSessionState {
 	prmHardStopPending: boolean;
 	/** Per-session escalation tracker instance (set lazily by PRM hook) */
 	prmEscalationTracker?: EscalationTracker;
+
+	// PR Monitor subscriptions (Phase 1)
+	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
+	prSubscriptions: Map<string, PrSubscriptionState>;
 }
 
 /**
@@ -405,6 +436,7 @@ export const swarmState = {
 	 * name at call time by matching the active session's agent prefix. */
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
+	curatorPostmortemAgentNames: [] as string[],
 
 	/** All registered skill_improver / spec_writer agent names across swarms,
 	 * mirroring curatorInitAgentNames so the LLM delegate factory can resolve
@@ -470,6 +502,7 @@ export function resetSwarmState(): void {
 	swarmState.opencodeClient = null;
 	swarmState.curatorInitAgentNames = [];
 	swarmState.curatorPhaseAgentNames = [];
+	swarmState.curatorPostmortemAgentNames = [];
 	swarmState.skillImproverAgentNames = [];
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
@@ -492,18 +525,18 @@ export function resetSwarmState(): void {
 }
 
 /**
- * Reset swarm state while preserving the 7 module-scoped singletons that are
+ * Reset swarm state while preserving the 8 module-scoped singletons that are
  * populated once at plugin init and must survive a /swarm close + re-init
  * within the same process lifetime.
  *
  * The preserved fields are:
  * - opencodeClient (SDK client for curator/full-auto delegation)
  * - fullAutoEnabledInConfig (config flag read at init)
- * - curatorInitAgentNames, curatorPhaseAgentNames (curator registry)
+ * - curatorInitAgentNames, curatorPhaseAgentNames, curatorPostmortemAgentNames (curator registry)
  * - skillImproverAgentNames, specWriterAgentNames (skill/spec registry)
  * - generatedAgentNames (full-auto delegation guard registry)
  *
- * Implementation: save all 7 to locals, call resetSwarmState(), restore all 7.
+ * Implementation: save all 8 to locals, call resetSwarmState(), restore all 8.
  * Synchronous (matches resetSwarmState contract). Errors from resetSwarmState
  * propagate to caller (no try/catch wrapper).
  */
@@ -512,6 +545,8 @@ export function resetSwarmStatePreservingSingletons(): void {
 	const preservedFullAutoEnabledInConfig = swarmState.fullAutoEnabledInConfig;
 	const preservedCuratorInitAgentNames = swarmState.curatorInitAgentNames;
 	const preservedCuratorPhaseAgentNames = swarmState.curatorPhaseAgentNames;
+	const preservedCuratorPostmortemAgentNames =
+		swarmState.curatorPostmortemAgentNames;
 	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
 	const preservedSpecWriterAgentNames = swarmState.specWriterAgentNames;
 	const preservedGeneratedAgentNames = swarmState.generatedAgentNames;
@@ -522,6 +557,7 @@ export function resetSwarmStatePreservingSingletons(): void {
 	swarmState.fullAutoEnabledInConfig = preservedFullAutoEnabledInConfig;
 	swarmState.curatorInitAgentNames = preservedCuratorInitAgentNames;
 	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseAgentNames;
+	swarmState.curatorPostmortemAgentNames = preservedCuratorPostmortemAgentNames;
 	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
 	swarmState.specWriterAgentNames = preservedSpecWriterAgentNames;
 	swarmState.generatedAgentNames = preservedGeneratedAgentNames;
@@ -623,6 +659,8 @@ export function startAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// PR Monitor subscriptions
+		prSubscriptions: new Map<string, PrSubscriptionState>(),
 	};
 
 	swarmState.agentSessions.set(sessionId, sessionState);
@@ -643,6 +681,20 @@ export function startAgentSession(
 		let rehydrationPromise: Promise<void>;
 		rehydrationPromise = _internals
 			.rehydrateSessionFromDisk(directory, sessionState)
+			.then(async () => {
+				// Rehydrate PR subscriptions for this session (fail-open).
+				try {
+					sessionState.prSubscriptions = await rehydratePrSubscriptions(
+						sessionId,
+						directory,
+					);
+				} catch (err) {
+					logger.warn(
+						'[state] PR subscription rehydration failed, starting with empty subscriptions:',
+						err instanceof Error ? err.message : String(err),
+					);
+				}
+			})
 			.catch((err) => {
 				logger.warn(
 					'[state] Rehydration failed:',
@@ -719,6 +771,10 @@ export function ensureAgentSession(
 			session.windows = {};
 		}
 
+		// FR-009: The `=== undefined` migration guards below are intentional
+		// forward-compatibility checks. The `undefined` value carries different semantics
+		// from an explicit default. Do not replace with default-value coalescing.
+		// See .swarm/spec.md FR-009.
 		// Initialize lastCompactionHint if missing (migration safety)
 		if (session.lastCompactionHint === undefined) {
 			session.lastCompactionHint = 0;
@@ -862,6 +918,10 @@ export function ensureAgentSession(
 		}
 		if (session.prmHardStopPending === undefined) {
 			session.prmHardStopPending = false;
+		}
+		// PR Monitor subscriptions migration safety
+		if (!session.prSubscriptions) {
+			session.prSubscriptions = new Map<string, PrSubscriptionState>();
 		}
 
 		session.lastToolCallTime = now;
@@ -1726,6 +1786,19 @@ export function hasActiveLeanTurbo(sessionID?: string): boolean {
 	return false;
 }
 
+/**
+ * Resolves the effective auto_proceed value for a session.
+ * Session override (autoProceedOverride) takes precedence over the plan default.
+ * Accepts `boolean | undefined` for the plan default so callers can pass
+ * `plan?.execution_profile?.auto_proceed` directly without a falsy fallback.
+ */
+export function getResolvedAutoProceed(
+	session: AgentSessionState,
+	planAutoProceed: boolean | undefined,
+): boolean {
+	return session.autoProceedOverride ?? planAutoProceed ?? false;
+}
+
 // ============================================================================
 // Environment Profile Helpers
 // ============================================================================
@@ -1812,6 +1885,48 @@ export function addKnowledgeAckDedup(key: string): void {
 		const oldest = set.values().next().value;
 		if (oldest !== undefined) set.delete(oldest);
 	}
+}
+
+/**
+ * Rehydrate PR subscriptions for a given session from durable storage.
+ * Reads active subscriptions from the JSONL store and filters to those
+ * belonging to the specified sessionID, converting each to a PrSubscriptionState.
+ *
+ * @param sessionID - The session identifier to filter subscriptions by
+ * @param directory - Project root containing .swarm/ subdirectory
+ * @returns Map of PrSubscriptionState keyed by `${repoFullName}::${prNumber}`
+ */
+export async function rehydratePrSubscriptions(
+	sessionID: string,
+	directory: string,
+): Promise<Map<string, PrSubscriptionState>> {
+	const map = new Map<string, PrSubscriptionState>();
+
+	try {
+		const { listActive } = await import('./background/pr-subscriptions.js');
+		const records = await listActive(directory);
+
+		for (const record of records) {
+			if (record.sessionID !== sessionID) continue;
+
+			const key = `${record.repoFullName}::${record.prNumber}`;
+			map.set(key, {
+				prNumber: record.prNumber,
+				repoFullName: record.repoFullName,
+				prUrl: record.prUrl,
+				lastKnownStatus: record.mergeableState ?? 'unknown',
+				lastPollTime: record.lastCheckedAt,
+				errorCount: record.errorCount,
+				isWatching: record.isWatching,
+			});
+		}
+	} catch (err) {
+		logger.warn(
+			`[state] rehydratePrSubscriptions failed for session ${sessionID}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return map;
 }
 
 /**

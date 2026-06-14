@@ -45,10 +45,12 @@ describe('packaging smoke tests', () => {
 		expect(stats.size).toBeGreaterThan(10 * 1024);
 	});
 
-	test('dist/cli/index.js file size is reasonable (< 2.2MB)', () => {
+	test('dist/cli/index.js file size is reasonable (< 2.4MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/cli/index.js'));
-		// CLI bundle should be under 2.2MB (raised from 2MB due to v7.44+ event-sourced knowledge tools)
-		expect(stats.size).toBeLessThan(2.2 * 1024 * 1024);
+		// CLI bundle should be under 2.4MB (raised from 2.2MB due to #1234
+		// auto-triage commands + success-motif learning machinery; main was at
+		// ~2.30MB with little headroom before this feature landed)
+		expect(stats.size).toBeLessThan(2.4 * 1024 * 1024);
 		// But should be at least 1KB (non-empty)
 		expect(stats.size).toBeGreaterThan(1 * 1024);
 	});

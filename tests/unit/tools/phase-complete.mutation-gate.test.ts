@@ -249,7 +249,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 		expect(result.success).toBe(false);
 		expect(result.status).toBe('blocked');
 		expect(result.reason).toBe('MUTATION_GATE_FAIL');
-		expect(result.message).toContain('fail');
+		expect(result.message).toContain("returned verdict 'fail'");
 	});
 
 	test('7. gate enabled + unrecognized verdict → blocked MUTATION_GATE_FAIL', async () => {

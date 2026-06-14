@@ -303,9 +303,11 @@ describe('skillPropagationGateBefore — skill description format in scoring res
 	// Behavior 4: SKILLS: none is unaffected
 	// -------------------------------------------------------------------------
 
-	test('skillsField=none skips scoring block → recommendedSkills undefined', async () => {
-		// When skillsField is "none", the gate short-circuits before scoring
-		// recommendedSkills is undefined (not an empty array)
+	test('skillsField=none skips scoring block → recommendedSkills is empty array (warn return)', async () => {
+		// When skillsField is "none", the scoring block is skipped (condition guards it).
+		// The function reaches the warn return, which now always includes recommendedSkills: scored.
+		// Since scoring was skipped, scored is [] — so recommendedSkills is [] not undefined.
+		// index.ts step 8 still will NOT auto-inject because existingSkills='none' is truthy.
 		applyOverrides(_internals, {
 			parseDelegationArgs: () => ({
 				targetAgent: 'coder',
@@ -331,9 +333,10 @@ describe('skillPropagationGateBefore — skill description format in scoring res
 			{ enabled: true },
 		);
 
-		// When skillsField is "none", scoring block is skipped entirely
-		// recommendedSkills is undefined (early return path)
-		expect(result.recommendedSkills).toBeUndefined();
+		// Scoring was skipped but the warn return now includes recommendedSkills: scored.
+		// scored is [] because scoring was skipped for SKILLS: none.
+		expect(Array.isArray(result.recommendedSkills)).toBe(true);
+		expect(result.recommendedSkills).toEqual([]);
 	});
 
 	test('no skills above threshold 0.5 → gate returns scored results (index.ts applies threshold filter)', async () => {

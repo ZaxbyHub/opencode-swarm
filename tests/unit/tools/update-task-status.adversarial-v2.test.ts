@@ -36,6 +36,13 @@ import {
 
 let tmpDir: string;
 
+function runUpdate(
+	args: Parameters<typeof executeUpdateTaskStatus>[0],
+	fallbackDir: string | undefined = tmpDir,
+) {
+	return executeUpdateTaskStatus(args, fallbackDir);
+}
+
 beforeEach(() => {
 	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'uts-adv2-'));
 	mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
@@ -185,98 +192,76 @@ describe('ADVERSARIAL: executeUpdateTaskStatus with undefined fallbackDir', () =
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('ADVERSARIAL: type confusion on working_directory', () => {
-	it('VULNERABILITY: crashes when working_directory is a number', async () => {
-		// Type confusion: pass number where string expected
-		// BUG: Line 524 calls args.working_directory.includes('\0') but number has no .includes()
-		// This is a DoS vulnerability - attacker can crash the process
-		let crashed = false;
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				working_directory: 12345 as unknown as string,
-			});
-		} catch {
-			crashed = true;
-		}
-		expect(crashed).toBe(true); // BUG: should gracefully reject, not crash
+	it('rejects number working_directory without crashing', async () => {
+		const result = await runUpdate({
+			task_id: '1.1',
+			status: 'pending',
+			working_directory: 12345 as unknown as string,
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
-	it('VULNERABILITY: crashes when working_directory is NaN', async () => {
-		// BUG: NaN is not a string but passes != null check, crashes at .includes()
-		let crashed = false;
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				working_directory: NaN as unknown as string,
-			});
-		} catch {
-			crashed = true;
-		}
-		expect(crashed).toBe(true); // BUG: should gracefully reject, not crash
+	it('rejects NaN working_directory without crashing', async () => {
+		const result = await runUpdate({
+			task_id: '1.1',
+			status: 'pending',
+			working_directory: NaN as unknown as string,
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
-	it('VULNERABILITY: crashes when working_directory is Infinity', async () => {
-		// BUG: Infinity is not a string but passes != null check, crashes at .includes()
-		let crashed = false;
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				working_directory: Infinity as unknown as string,
-			});
-		} catch {
-			crashed = true;
-		}
-		expect(crashed).toBe(true); // BUG: should gracefully reject, not crash
+	it('rejects Infinity working_directory without crashing', async () => {
+		const result = await runUpdate({
+			task_id: '1.1',
+			status: 'pending',
+			working_directory: Infinity as unknown as string,
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
 	it('should NOT crash when working_directory is null', async () => {
-		// null != null is false, so this takes the else branch (fallbackDir path)
-		const result = await executeUpdateTaskStatus({
+		// null is treated like an omitted working_directory and uses the injected fallback
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: 'pending',
 			working_directory: null as unknown as string,
 		});
 
-		// Should fail safely (uses fallbackDir)
+		expect(result.success).toBe(true);
+		expect(result.new_status).toBe('pending');
+	});
+
+	it('rejects object working_directory without crashing', async () => {
+		const result = await runUpdate({
+			task_id: '1.1',
+			status: 'pending',
+			working_directory: { path: '/etc' } as unknown as string,
+		});
+
 		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
-	it('VULNERABILITY: crashes when working_directory is an object', async () => {
-		// BUG: crashes at path.normalize() when object passed
-		let crashed = false;
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				working_directory: { path: '/etc' } as unknown as string,
-			});
-		} catch {
-			crashed = true;
-		}
-		expect(crashed).toBe(true); // BUG: should gracefully reject, not crash
-	});
+	it('rejects array working_directory without crashing', async () => {
+		const result = await runUpdate({
+			task_id: '1.1',
+			status: 'pending',
+			working_directory: ['/etc', '../'] as unknown as string,
+		});
 
-	it('VULNERABILITY: crashes when working_directory is an array', async () => {
-		// BUG: path.normalize() crashes when array passed
-		let crashed = false;
-		try {
-			await executeUpdateTaskStatus({
-				task_id: '1.1',
-				status: 'pending',
-				working_directory: ['/etc', '../'] as unknown as string,
-			});
-		} catch {
-			crashed = true;
-		}
-		expect(crashed).toBe(true); // BUG: should gracefully reject, not crash
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('must be a string');
 	});
 
 	it('should NOT crash when working_directory is MAX_SAFE_INTEGER', async () => {
 		// Number as string passes type check, but path doesn't exist
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: 'pending',
 			working_directory:
@@ -289,7 +274,7 @@ describe('ADVERSARIAL: type confusion on working_directory', () => {
 
 	it('should NOT crash when working_directory is negative zero', async () => {
 		// '-0' as string is valid
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: 'pending',
 			working_directory: '-0' as unknown as string,
@@ -306,7 +291,7 @@ describe('ADVERSARIAL: type confusion on working_directory', () => {
 
 describe('ADVERSARIAL: type confusion on task_id', () => {
 	it('should NOT crash when task_id is a number', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: 1.1 as unknown as string,
 			status: 'pending',
 			working_directory: tmpDir,
@@ -317,7 +302,7 @@ describe('ADVERSARIAL: type confusion on task_id', () => {
 	});
 
 	it('should NOT crash when task_id is an array', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: ['1.1'] as unknown as string,
 			status: 'pending',
 			working_directory: tmpDir,
@@ -327,7 +312,7 @@ describe('ADVERSARIAL: type confusion on task_id', () => {
 	});
 
 	it('should NOT crash when task_id is an object', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: { id: '1.1' } as unknown as string,
 			status: 'pending',
 			working_directory: tmpDir,
@@ -337,7 +322,7 @@ describe('ADVERSARIAL: type confusion on task_id', () => {
 	});
 
 	it('should NOT crash when task_id is null', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: null as unknown as string,
 			status: 'pending',
 			working_directory: tmpDir,
@@ -353,7 +338,7 @@ describe('ADVERSARIAL: type confusion on task_id', () => {
 
 describe('ADVERSARIAL: type confusion on status', () => {
 	it('should NOT crash when status is a number', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: 123 as unknown as string,
 			working_directory: tmpDir,
@@ -364,7 +349,7 @@ describe('ADVERSARIAL: type confusion on status', () => {
 	});
 
 	it('should NOT crash when status is an array', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: ['pending'] as unknown as string,
 			working_directory: tmpDir,
@@ -374,7 +359,7 @@ describe('ADVERSARIAL: type confusion on status', () => {
 	});
 
 	it('should NOT crash when status is null', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: null as unknown as string,
 			working_directory: tmpDir,
@@ -384,7 +369,7 @@ describe('ADVERSARIAL: type confusion on status', () => {
 	});
 
 	it('should NOT crash when status is undefined', async () => {
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: '1.1',
 			status: undefined as unknown as string,
 			working_directory: tmpDir,
@@ -402,7 +387,7 @@ describe('ADVERSARIAL: oversized task_id', () => {
 	it('should NOT crash with very long task_id (10KB)', async () => {
 		const longTaskId = '1.' + '1'.repeat(10 * 1024);
 
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: longTaskId,
 			status: 'pending',
 			working_directory: tmpDir,
@@ -415,7 +400,7 @@ describe('ADVERSARIAL: oversized task_id', () => {
 	it('should NOT crash with deeply nested task_id (100 levels)', async () => {
 		const nestedTaskId = '1.' + Array(100).fill('1').join('.');
 
-		const result = await executeUpdateTaskStatus({
+		const result = await runUpdate({
 			task_id: nestedTaskId,
 			status: 'pending',
 			working_directory: tmpDir,

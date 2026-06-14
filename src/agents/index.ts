@@ -31,6 +31,7 @@ import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
 import { createDocsAgent } from './docs';
 import { createExplorerAgent } from './explorer';
+import { createResearcherAgent } from './researcher';
 import { createReviewerAgent } from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
@@ -43,13 +44,15 @@ export type { AgentDefinition } from './architect';
 // Track agents for which we've already warned about missing config
 const warnedAgents = new Set<string>();
 
-// Module-level reference to swarm agents config for runtime fallback resolution by guardrails
-let _swarmAgents:
-	| Record<
-			string,
-			{ model?: string; fallback_models?: string[]; disabled?: boolean }
-	  >
-	| undefined;
+// Module-level map of swarm agents config for runtime fallback resolution by guardrails
+// Keyed by swarmId: "default" for the default swarm, "local", "fast", "precise", etc. for named swarms
+const _swarmAgentsMap = new Map<
+	string,
+	Record<
+		string,
+		{ model?: string; fallback_models?: string[]; disabled?: boolean }
+	>
+>();
 
 /**
  * Strip the user-defined swarm prefix from an agent name to get the base
@@ -74,6 +77,22 @@ export function stripSwarmPrefix(
 		return agentName.substring(prefixWithUnderscore.length);
 	}
 	return agentName;
+}
+
+/**
+ * Extract the swarm ID from a prefixed agent name.
+ * For multi-swarm configurations, agent names are prefixed: "swarmId_agentName"
+ * For the default swarm, agent names have no prefix.
+ *
+ * Example: "local_coder" -> "local", "coder" -> undefined (default swarm)
+ * The regex matches everything before the first underscore.
+ */
+export function extractSwarmIdFromAgentName(
+	agentName: string,
+): string | undefined {
+	if (!agentName) return undefined;
+	const match = agentName.match(/^([^_]+)_/);
+	return match ? match[1] : undefined;
 }
 
 /**
@@ -103,7 +122,7 @@ function getModelForAgent(
 
 	// NOTE: fallback_models resolution happens at runtime in guardrails (toolAfter),
 	// not here. getModelForAgent runs once at agent creation. The guardrails hook
-	// modifies _swarmAgents[name].model directly when session.model_fallback_index > 0.
+	// modifies the swarmAgents config in _swarmAgentsMap directly when session.model_fallback_index > 0.
 	// The config's fallback_models array is read by guardrails to select the fallback.
 
 	// 2. Default from constants — warn once per agent if not in config
@@ -155,7 +174,9 @@ export function resolveFallbackModel(
 	// Only inherit if the curator agent does NOT have fallback_models key at all
 	if (
 		fallbackModels === undefined &&
-		(agentBaseName === 'curator_init' || agentBaseName === 'curator_phase')
+		(agentBaseName === 'curator_init' ||
+			agentBaseName === 'curator_phase' ||
+			agentBaseName === 'curator_postmortem')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
@@ -167,14 +188,21 @@ export function resolveFallbackModel(
 
 /**
  * Get the swarm agents config (for runtime fallback resolution by guardrails).
+ *
+ * @param swarmId - The swarm ID to retrieve config for. Defaults to 'default' for the default swarm.
+ *                  For multi-swarm configs, use the swarm's ID (e.g., 'local', 'fast', 'precise').
+ *                  Can also be extracted from a prefixed agent name using extractSwarmIdFromAgentName().
  */
-export function getSwarmAgents():
+export function getSwarmAgents(
+	swarmId?: string,
+):
 	| Record<
 			string,
 			{ model?: string; fallback_models?: string[]; disabled?: boolean }
 	  >
 	| undefined {
-	return _swarmAgents;
+	const id = swarmId ?? 'default';
+	return _swarmAgentsMap.get(id);
 }
 
 /**
@@ -244,7 +272,15 @@ function getVariantOverride(
  */
 function applyOverrides(
 	agent: AgentDefinition,
-	swarmAgents?: Record<string, { temperature?: number; variant?: string }>,
+	swarmAgents?: Record<
+		string,
+		{
+			temperature?: number;
+			variant?: string;
+			reasoning?: { effort?: 'low' | 'medium' | 'high' | 'max' };
+			thinking?: { type?: 'enabled' | 'disabled'; budget_tokens?: number };
+		}
+	>,
 	swarmPrefix?: string,
 	quiet?: boolean,
 ): AgentDefinition {
@@ -297,6 +333,26 @@ function applyOverrides(
 		// the cast just satisfies the strict known-keys check.
 		(agent.config as { variant?: string }).variant = variantOverride;
 	}
+
+	// Plumb provider-native extended-reasoning / extended-thinking overrides
+	// (issue #1220). These were previously silently dropped at config parse
+	// time because `AgentOverrideConfigSchema` did not declare them. Now that
+	// the schema accepts them, we forward them to the SDK as-is. Like
+	// `variant` above, the cast satisfies the strict known-keys check on
+	// @opencode-ai/sdk's AgentConfig type; the SDK's open-ended index
+	// signature makes this structurally valid.
+	const baseAgentName = stripSwarmPrefix(agent.name, swarmPrefix);
+	const reasoningOverride = swarmAgents?.[baseAgentName]?.reasoning;
+	if (reasoningOverride !== undefined) {
+		(agent.config as { reasoning?: typeof reasoningOverride }).reasoning =
+			reasoningOverride;
+	}
+	const thinkingOverride = swarmAgents?.[baseAgentName]?.thinking;
+	if (thinkingOverride !== undefined) {
+		(agent.config as { thinking?: typeof thinkingOverride }).thinking =
+			thinkingOverride;
+	}
+
 	return agent;
 }
 
@@ -312,7 +368,7 @@ function createSwarmAgents(
 ): AgentDefinition[] {
 	const agents: AgentDefinition[] = [];
 	const swarmAgents = swarmConfig.agents;
-	_swarmAgents = swarmAgents;
+	_swarmAgentsMap.set(swarmId, swarmAgents ?? {});
 
 	// Prefix for non-default swarms (e.g., "local" for swarmId "local")
 	// We pass swarmId as the prefix identifier, but only prepend to names if not default
@@ -429,6 +485,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		sme.name = prefixName('sme');
 		agents.push(applyOverrides(sme, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 3b. Create Researcher agent — automated multi-source research specialist
+	if (!isAgentDisabled('researcher', swarmAgents, swarmPrefix)) {
+		const researcherPrompts = getPrompts('researcher');
+		const researcher = createResearcherAgent(
+			getModel('researcher'),
+			researcherPrompts.prompt,
+			researcherPrompts.appendPrompt,
+		);
+		researcher.name = prefixName('researcher');
+		agents.push(applyOverrides(researcher, swarmAgents, swarmPrefix, quiet));
 	}
 
 	// 4. Create pipeline agents
@@ -552,6 +620,21 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		curatorPhase.name = prefixName('curator_phase');
 		agents.push(applyOverrides(curatorPhase, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5e. Create Curator Post-mortem agent
+	if (!isAgentDisabled('curator_postmortem', swarmAgents, swarmPrefix)) {
+		const curatorPostmortemPrompts = getPrompts('curator_postmortem');
+		const curatorPostmortem = createCuratorAgent(
+			swarmAgents?.curator_postmortem?.model ?? getModel('explorer'),
+			curatorPostmortemPrompts.prompt,
+			curatorPostmortemPrompts.appendPrompt,
+			'curator_postmortem' as CuratorRole,
+		);
+		curatorPostmortem.name = prefixName('curator_postmortem');
+		agents.push(
+			applyOverrides(curatorPostmortem, swarmAgents, swarmPrefix, quiet),
+		);
 	}
 
 	// 5f. v2: skill_improver — issue #629. Registered when enabled in config.
@@ -753,6 +836,7 @@ export function createAgents(
 		// Multiple swarms mode
 		// Only a swarm explicitly named "default" gets unprefixed agents
 		// All other swarms get prefixed (cloud_*, local_*, etc.)
+		_swarmAgentsMap.set('default', {});
 		for (const swarmId of Object.keys(swarms)) {
 			let swarmConfig = swarms[swarmId];
 			const isDefault = swarmId === 'default';
@@ -1165,6 +1249,7 @@ export { createCuratorAgent } from './curator-agent';
 export { createDesignerAgent } from './designer';
 export { createDocsAgent } from './docs';
 export { createExplorerAgent } from './explorer';
+export { createResearcherAgent } from './researcher';
 export {
 	createReviewerAgent,
 	SECURITY_CATEGORIES,

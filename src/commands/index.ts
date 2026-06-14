@@ -29,6 +29,7 @@ export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
 export { handleArchiveCommand } from './archive';
+export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
@@ -48,6 +49,7 @@ export { handleCouncilCommand } from './council';
 export { handleCurateCommand } from './curate';
 export { handleDarkMatterCommand } from './dark-matter';
 export { handleDeepDiveCommand } from './deep-dive';
+export { handleDeepResearchCommand } from './deep-research';
 export { handleDiagnoseCommand } from './diagnose';
 export { handleDoctorCommand } from './doctor';
 export {
@@ -63,7 +65,10 @@ export {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge';
+export { handleLearningCommand } from './learning';
 export {
 	handleMemoryCommand,
 	handleMemoryExportCommand,

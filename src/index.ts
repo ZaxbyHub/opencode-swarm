@@ -10,8 +10,10 @@ import {
 	createAutomationManager,
 	PlanSyncWorker,
 	type PreflightTriggerManager,
+	PrMonitorWorker,
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
+import { setOnSubscriptionCreated } from './background/pr-subscriptions';
 import {
 	agentHasSwarmCommandTool,
 	createSwarmCommandHandler,
@@ -28,6 +30,7 @@ import {
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
 	SkillImproverConfigSchema,
@@ -38,6 +41,7 @@ import {
 } from './config/schema';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
+import { isGhAvailable } from './git';
 import {
 	composeHandlers,
 	consolidateSystemMessages,
@@ -107,7 +111,7 @@ import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import { ensureAgentSession, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
-import { log } from './utils';
+import { log, warn } from './utils';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -130,7 +134,7 @@ const _heartbeatTimers = new Map<string, number>();
 
 import {
 	addDeferredWarning,
-	deferredWarnings,
+	clearDeferredWarnings,
 } from './services/warning-buffer.js';
 
 const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
@@ -201,7 +205,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 
 	// Clear deferred warnings at session start for per-session isolation
-	deferredWarnings.length = 0;
+	clearDeferredWarnings();
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -416,6 +420,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	swarmState.curatorPhaseAgentNames = Object.keys(agents).filter(
 		(k) => k === 'curator_phase' || k.endsWith('_curator_phase'),
 	);
+	swarmState.curatorPostmortemAgentNames = Object.keys(agents).filter(
+		(k) => k === 'curator_postmortem' || k.endsWith('_curator_postmortem'),
+	);
 	// v2: skill_improver and spec_writer agent registries — same multi-swarm
 	// resolution pattern as curator. Used by skill-improver-llm-factory to
 	// pick the right prefixed agent under named swarms.
@@ -493,38 +500,29 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// SECURITY AUDIT: Emit explicit warning when guardrails are disabled via user config
 	// This is a security-relevant action that requires explicit acknowledgment
-	// INTENTIONALLY NOT gated behind config.quiet — security warnings must always be visible
+	// Warnings are emitted via debug logger only (OPENCODE_SWARM_DEBUG=1) to prevent
+	// TUI corruption. Users can enable debug mode to see the full warning.
 	if (loadedFromFile && guardrailsConfig.enabled === false) {
-		console.warn('');
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn(
-			'[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED',
-		);
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn(
-			'Guardrails have been explicitly disabled in user configuration.',
-		);
-		console.warn('This disables safety measures including:');
-		console.warn('  - Tool call limits');
-		console.warn('  - Duration limits');
-		console.warn('  - Repetition detection');
-		console.warn('  - Error rate limits');
-		console.warn('  - Idle timeouts');
-		console.warn('');
-		console.warn(
+		warn('');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('Guardrails have been explicitly disabled in user configuration.');
+		warn('This disables safety measures including:');
+		warn('  - Tool call limits');
+		warn('  - Duration limits');
+		warn('  - Repetition detection');
+		warn('  - Error rate limits');
+		warn('  - Idle timeouts');
+		warn('');
+		warn(
 			'Only disable guardrails if you fully understand the security implications.',
 		);
-		console.warn(
+		warn(
 			'To re-enable guardrails, set "guardrails.enabled" to true in your config.',
 		);
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn('');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('');
 	}
 
 	const delegationHandler = createDelegationTrackerHook(
@@ -714,6 +712,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	let automationManager: BackgroundAutomationManager | undefined;
 	let preflightTriggerManager: PreflightTriggerManager | undefined;
 	let statusArtifact: AutomationStatusArtifact | undefined;
+	let prMonitorWorker: PrMonitorWorker | null = null;
 
 	if (automationConfig.mode !== 'manual') {
 		automationManager = createAutomationManager(automationConfig);
@@ -788,14 +787,6 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 		}
 
-		// Cleanup: stop automation manager and workers on process exit
-		const cleanupAutomation = () => {
-			automationManager?.stop();
-		};
-		process.on('exit', cleanupAutomation);
-		process.on('SIGINT', cleanupAutomation);
-		process.on('SIGTERM', cleanupAutomation);
-
 		log('Automation framework initialized', {
 			mode: automationConfig.mode,
 			enabled: automationManager?.isEnabled(),
@@ -803,6 +794,77 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			preflightEnabled: preflightTriggerManager?.isEnabled(),
 		});
 	}
+
+	// PR Monitor Worker — lazy start
+	// Worker is NOT started at plugin init — it starts lazily when the
+	// first subscription is created via the onSubscriptionCreated callback.
+	// This runs regardless of automation mode — gated only by pr_monitor.enabled.
+	const prMonitorConfig = PrMonitorConfigSchema.parse(config.pr_monitor ?? {});
+
+	// Wire the lazy-start callback into the subscription store so the
+	// worker starts automatically when the first PR is subscribed.
+	setOnSubscriptionCreated((directory: string, _record) => {
+		try {
+			// Only start if pr_monitor is enabled and gh CLI is available
+			if (!prMonitorConfig.enabled) return;
+			if (!isGhAvailable(directory)) {
+				log('[pr-monitor] gh CLI not available — skipping worker start');
+				return;
+			}
+			// Create worker on first trigger, reuse on subsequent
+			if (!prMonitorWorker) {
+				prMonitorWorker = new PrMonitorWorker({
+					directory,
+					config: prMonitorConfig,
+					// sessionId removed: worker polls ALL active subscriptions,
+					// not just the one from the triggering session. Session-scoped
+					// delivery is handled at the event layer (task 2.4).
+				});
+			}
+			if (!prMonitorWorker.isRunning()) {
+				prMonitorWorker.start();
+				log('PR Monitor Worker lazy-started', { directory });
+			}
+		} catch (err) {
+			log('PR Monitor Worker failed to lazy-start (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	});
+
+	// Register PR event subscribers for advisory delivery to active sessions
+	let prEventCleanup: (() => void) | null = null;
+	if (prMonitorConfig.enabled) {
+		try {
+			const { registerPrEventSubscribers } = await import(
+				'./background/pr-event-subscribers'
+			);
+			prEventCleanup = registerPrEventSubscribers({
+				directory: ctx.directory,
+				config: prMonitorConfig,
+			});
+		} catch (err) {
+			log('[pr-monitor] Failed to register PR event subscribers (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	// Cleanup: stop automation manager and workers on process exit
+	const cleanupAutomation = () => {
+		automationManager?.stop();
+		prMonitorWorker?.stop();
+		prEventCleanup?.();
+	};
+	process.on('exit', cleanupAutomation);
+	process.once('SIGINT', () => {
+		cleanupAutomation();
+		process.exit(130);
+	});
+	process.once('SIGTERM', () => {
+		cleanupAutomation();
+		process.exit(143);
+	});
 
 	// v6.7 Task 5.7: Config Doctor - run on startup if automation flags permit
 	// Runs in background-safe way (non-blocking, no errors propagate)
@@ -1110,6 +1172,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
 				},
+				'swarm-deep-research': {
+					template: '/swarm deep-research $ARGUMENTS',
+					description:
+						'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+				},
 				'swarm-codebase-review': {
 					template: '/swarm codebase-review $ARGUMENTS',
 					description:
@@ -1202,6 +1269,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				'swarm-full-auto': {
 					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
+				},
+				'swarm-auto-proceed': {
+					template: '/swarm auto-proceed $ARGUMENTS',
+					description:
+						'Toggle auto-proceed mode for automatic phase advancement',
 				},
 				'swarm-write-retro': {
 					template: '/swarm write-retro $ARGUMENTS',

@@ -134,6 +134,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 			max_concurrent_tasks: 2,
 			council_parallel: false,
 			locked: true,
+			auto_proceed: false,
 		};
 		const firstResult = await executeSavePlan(
 			makeArgs({
@@ -271,6 +272,70 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 	});
 });
 
+describe('execution_profile: auto_proceed field', () => {
+	test('accepts auto_proceed: true in execution_profile', async () => {
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: { auto_proceed: true },
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(true);
+		expect(result.execution_profile).toBeDefined();
+		expect(result.execution_profile?.auto_proceed).toBe(true);
+	});
+
+	test('accepts auto_proceed: false in execution_profile', async () => {
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: { auto_proceed: false },
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(true);
+		expect(result.execution_profile).toBeDefined();
+		expect(result.execution_profile?.auto_proceed).toBe(false);
+	});
+
+	test('accepts auto_proceed alongside other profile fields', async () => {
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: {
+				parallelization_enabled: true,
+				max_concurrent_tasks: 4,
+				auto_proceed: true,
+				locked: false,
+			},
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(true);
+		expect(result.execution_profile?.parallelization_enabled).toBe(true);
+		expect(result.execution_profile?.max_concurrent_tasks).toBe(4);
+		expect(result.execution_profile?.auto_proceed).toBe(true);
+		expect(result.execution_profile?.locked).toBe(false);
+	});
+
+	test('rejects non-boolean string value for auto_proceed', async () => {
+		// @ts-expect-error — intentional invalid input at runtime
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: { auto_proceed: 'true' },
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('execution_profile');
+	});
+
+	test('rejects non-boolean number value for auto_proceed', async () => {
+		// @ts-expect-error — intentional invalid input at runtime
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: { auto_proceed: 1 },
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('execution_profile');
+	});
+});
+
 describe('execution_profile: schema validation', () => {
 	test('rejects max_concurrent_tasks: 0', async () => {
 		const args = makeArgs({
@@ -329,6 +394,7 @@ describe('execution_profile: disk round-trip', () => {
 			max_concurrent_tasks: 4,
 			council_parallel: true,
 			locked: false,
+			auto_proceed: true,
 		};
 		const result = await executeSavePlan(
 			makeArgs({ working_directory: tmpDir, execution_profile: profile }),
@@ -348,6 +414,7 @@ describe('execution_profile: disk round-trip', () => {
 		expect(planData.execution_profile?.max_concurrent_tasks).toBe(4);
 		expect(planData.execution_profile?.council_parallel).toBe(true);
 		expect(planData.execution_profile?.locked).toBe(false);
+		expect(planData.execution_profile?.auto_proceed).toBe(true);
 	});
 
 	test('locked profile is persisted and survives a second read', async () => {
@@ -355,6 +422,7 @@ describe('execution_profile: disk round-trip', () => {
 			parallelization_enabled: true,
 			max_concurrent_tasks: 2,
 			locked: true,
+			auto_proceed: true,
 		};
 		await executeSavePlan(
 			makeArgs({ working_directory: tmpDir, execution_profile: profile }),
@@ -365,8 +433,30 @@ describe('execution_profile: disk round-trip', () => {
 			'utf8',
 		);
 		const planData = JSON.parse(planJson) as {
-			execution_profile?: { locked: boolean };
+			execution_profile?: { locked: boolean; auto_proceed: boolean };
 		};
 		expect(planData.execution_profile?.locked).toBe(true);
+		expect(planData.execution_profile?.auto_proceed).toBe(true);
+	});
+
+	test('auto_proceed: false is persisted to .swarm/plan.json', async () => {
+		const args = makeArgs({
+			working_directory: tmpDir,
+			execution_profile: {
+				auto_proceed: false,
+				parallelization_enabled: false,
+			},
+		});
+		const result = await executeSavePlan(args);
+		expect(result.success).toBe(true);
+
+		const planJson = await readFile(
+			join(tmpDir, '.swarm', 'plan.json'),
+			'utf8',
+		);
+		const planData = JSON.parse(planJson) as {
+			execution_profile?: { auto_proceed?: boolean };
+		};
+		expect(planData.execution_profile?.auto_proceed).toBe(false);
 	});
 });

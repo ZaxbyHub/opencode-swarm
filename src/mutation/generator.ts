@@ -15,6 +15,17 @@ function slugify(str: string): string {
 }
 
 /**
+ * Strip control characters and quotes from a filename before inserting into
+ * an LLM prompt. This is a defence-in-depth measure against prompt injection
+ * via attacker-controlled filenames.
+ */
+function sanitizeFilename(filename: string): string {
+	// Remove ASCII control characters (0x00–0x1F, 0x7F) and common quote chars
+	// that could be used to break out of the prompt context.
+	return filename.replace(/[\p{Cc}"'`]/gu, '_');
+}
+
+/**
  * Extract a JSON array substring from an LLM response that may include
  * markdown code fences or natural-language preamble/postamble text.
  *
@@ -100,7 +111,7 @@ export async function generateMutants(
 			'side-effect-deletion',
 		].join(', ');
 
-		const promptText = `Generate mutation testing patches for the following files: ${files.join(', ')}
+		const promptText = `Generate mutation testing patches for the following files: ${files.map(sanitizeFilename).join(', ')}
 
 Return a JSON array where each element has:
 { id, filePath, functionName, mutationType, patch, lineNumber }

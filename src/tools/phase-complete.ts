@@ -533,18 +533,18 @@ export async function executePhaseComplete(
 				warnings,
 			});
 		}
-		if (requestedAccept.length > 0 && justification.length === 0) {
+		if (requestedAccept.length > 0 && justification.length < 10) {
 			return blockedResult(phase, {
 				reason: 'override_requires_justification',
 				message:
-					'accept_violations requires accept_violations_justification (a written reason).',
+					'accept_violations requires accept_violations_justification (minimum 10 characters of substantive reasoning).',
 				agentsDispatched,
 				agentsMissing: [],
 				warnings,
 			});
 		}
 		const effectiveAccept =
-			requestedAccept.length > 0 && isArchitect && justification.length > 0
+			requestedAccept.length > 0 && isArchitect && justification.length >= 10
 				? requestedAccept
 				: [];
 		const directiveGate = await evaluatePhaseCriticalDirectives({
@@ -1117,6 +1117,58 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Knowledge verdict feedback: bridge applied/violated/ignored events → confidence.
+	try {
+		const verdictMarkerPath = validateSwarmPath(
+			dir,
+			'verdict-feedback-last-processed.json',
+		);
+		let verdictSinceTimestamp: string | undefined;
+		try {
+			const markerData = JSON.parse(
+				fs.readFileSync(verdictMarkerPath, 'utf-8'),
+			);
+			verdictSinceTimestamp = markerData.lastProcessedTimestamp;
+		} catch {
+			// marker doesn't exist yet — process all entries
+		}
+
+		const verdictMarkerTimestamp = new Date().toISOString();
+		const { applyKnowledgeVerdictFeedback } = await import(
+			'../hooks/knowledge-events.js'
+		);
+		const verdictResult = await applyKnowledgeVerdictFeedback(dir, {
+			sinceTimestamp: verdictSinceTimestamp,
+		});
+
+		try {
+			fs.writeFileSync(
+				verdictMarkerPath,
+				JSON.stringify({
+					lastProcessedTimestamp: verdictMarkerTimestamp,
+				}),
+				'utf-8',
+			);
+		} catch {
+			// best-effort marker write
+		}
+
+		if (verdictResult.bumps > 0) {
+			const sessionState = swarmState.agentSessions.get(sessionID);
+			if (sessionState) {
+				sessionState.pendingAdvisoryMessages ??= [];
+				sessionState.pendingAdvisoryMessages.push(
+					`[FEEDBACK] Knowledge verdict feedback: ${verdictResult.processed} entries processed, ${verdictResult.bumps} confidence updates applied.`,
+				);
+			}
+		}
+	} catch (verdictError) {
+		safeWarn(
+			'[phase_complete] Knowledge verdict feedback error (non-blocking):',
+			verdictError,
+		);
+	}
+
 	// Build the effective required-agents list.
 	// If the phase defines its own required_agents, use those instead of the global config.
 	// This allows non-code phases (acceptance, docs) to skip coder/reviewer/test_engineer requirements.
@@ -1537,6 +1589,38 @@ export async function executePhaseComplete(
 
 	// Write root-level checkpoint artifact (non-blocking)
 	await writeCheckpoint(dir).catch(() => {});
+
+	// Auto-fire post-mortem when all plan phases are now complete (WP7, #1234).
+	// Fail-open: post-mortem failures never affect phase_complete result.
+	try {
+		const curatorCfg = CuratorConfigSchema.parse(config.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const finalPlan = await loadPlan(dir);
+			if (finalPlan?.phases?.length) {
+				const allComplete = finalPlan.phases.every(
+					(p: { status?: string }) => p.status === 'complete',
+				);
+				if (allComplete) {
+					const { runCuratorPostMortem } = await import(
+						'../hooks/curator-postmortem.js'
+					);
+					const pmResult = await runCuratorPostMortem(dir, {
+						llmDelegate: createCuratorLLMDelegate(dir, 'postmortem', sessionID),
+					});
+					if (pmResult.success && pmResult.summary) {
+						warnings.push(`[POST-MORTEM] ${pmResult.summary}`);
+					}
+					if (pmResult.warnings.length > 0) {
+						for (const w of pmResult.warnings) {
+							warnings.push(`[POST-MORTEM] ${w}`);
+						}
+					}
+				}
+			}
+		}
+	} catch {
+		// fail-open: post-mortem never blocks phase completion
+	}
 
 	const outputData = {
 		...result,

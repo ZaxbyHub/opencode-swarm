@@ -1,6 +1,9 @@
 /**
  * Locking behavior verification tests for update-task-status.ts
  * Tests lock acquisition, release, error handling, and concurrent access patterns
+ *
+ * Uses _internals DI seam instead of module-scope vi.mock to avoid
+ * cross-file leakage in Bun's shared test-runner process.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
@@ -9,33 +12,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { swarmState } from '../../../src/state';
 import {
+	_internals,
 	executeUpdateTaskStatus,
 	type UpdateTaskStatusArgs,
 } from '../../../src/tools/update-task-status';
-
-// Mock the plan/manager module to control updateTaskStatus behavior
-vi.mock('../../../src/plan/manager', () => ({
-	updateTaskStatus: vi.fn<() => Promise<{ current_phase: number }>>(),
-	closePlanTerminalState: async () => {},
-	_snapshot_test_exports: {},
-}));
-
-// Mock the parallel/file-locks module to control lock acquisition
-vi.mock('../../../src/parallel/file-locks', () => ({
-	tryAcquireLock: vi.fn(),
-}));
-
-import { tryAcquireLock } from '../../../src/parallel/file-locks';
-// Import mocked modules
-import { updateTaskStatus } from '../../../src/plan/manager';
-
-const mockUpdateTaskStatus = updateTaskStatus as ReturnType<typeof vi.fn>;
-const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
 
 describe('executeUpdateTaskStatus locking behavior', () => {
 	let tempDir: string;
 	let originalCwd: string;
 	let originalAgentSessions: typeof swarmState.agentSessions;
+	let originalTryAcquireLock: typeof _internals.tryAcquireLock;
+	let originalUpdateTaskStatus: typeof _internals.updateTaskStatus;
+	let mockTryAcquireLock: ReturnType<typeof vi.fn>;
+	let mockUpdateTaskStatus: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
@@ -80,7 +69,15 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 		originalAgentSessions = new Map(swarmState.agentSessions);
 		swarmState.agentSessions.clear();
 
-		// Reset mocks
+		// Save original _internals functions and replace with mocks
+		originalTryAcquireLock = _internals.tryAcquireLock;
+		originalUpdateTaskStatus = _internals.updateTaskStatus;
+		mockTryAcquireLock = vi.fn();
+		mockUpdateTaskStatus = vi.fn();
+		_internals.tryAcquireLock = mockTryAcquireLock;
+		_internals.updateTaskStatus = mockUpdateTaskStatus;
+
+		// Reset call tracking
 		vi.clearAllMocks();
 	});
 
@@ -90,6 +87,10 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 		for (const [key, value] of originalAgentSessions) {
 			swarmState.agentSessions.set(key, value);
 		}
+
+		// Restore _internals to original implementations
+		_internals.tryAcquireLock = originalTryAcquireLock;
+		_internals.updateTaskStatus = originalUpdateTaskStatus;
 
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
@@ -387,6 +388,7 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 			// Arrange: First call acquires lock, second call tries to acquire same lock
 			let firstCallComplete = false;
 			const mockRelease = vi.fn().mockResolvedValue(undefined);
+			const callOrder: string[] = [];
 
 			// First lock acquisition succeeds
 			mockTryAcquireLock.mockResolvedValueOnce({
@@ -415,8 +417,6 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 				await new Promise((r) => setTimeout(r, 100));
 				return { current_phase: 1 };
 			});
-
-			const callOrder: string[] = [];
 
 			// Act: Call twice in sequence (not parallel, since we need to control timing)
 			const args: UpdateTaskStatusArgs = {

@@ -5,6 +5,8 @@ description: >
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
   PR follow-up work that must close all known issues without dropping findings.
+  Supports multi-round bot reviews (the repository's bot posts a new review
+  after every push) via the iterative pattern documented in the body.
 ---
 
 # Swarm PR Feedback
@@ -13,6 +15,51 @@ Use this skill to close known PR feedback. This is not a fresh broad PR review.
 `swarm-pr-review` discovers new findings; `swarm-pr-feedback` ingests existing
 feedback surfaces, verifies each claim, clusters related problems, fixes confirmed
 issues, validates the branch, and reports closure status for every item.
+
+## Multi-Round Bot Reviews (Iterative Pattern)
+
+The repository's bot reviewer (`hermes-pr-review` / Qwen3.6 + Gemma-4 dual-model)
+posts a new review comment after **every push** to the PR branch, not just the
+final state. Expect N rounds of review for N pushes, and budget for it.
+
+**Round N+1 deltas vs Round N:**
+- Fresh `FB-###` ledger IDs for new findings (do not reuse IDs from earlier rounds)
+- Findings from prior rounds that remain unfixed will reappear with the same evidence
+- Findings you marked DISPROVED with new evidence may reappear if the bot disagrees
+- New findings may be introduced that the prior round did not see (the bot's read scope
+  is the new commit, not the full diff history)
+
+**Operating principles for multi-round triage:**
+
+1. **Continue the ledger, do not start over.** Append to the same `FB-###` counter
+   across rounds. Track each finding's state per round (open, fixed, disproved,
+   awaiting-decision, repeated).
+2. **Carry forward unresolved items.** Findings you marked `PARTIAL` or `NEEDS_USER_DECISION`
+   in round N will still be open in round N+1. The closure ledger should show their
+   evolution (e.g., "PARTIAL round 1 → CONFIRMED round 2 after evidence collected").
+3. **Apply the 3-strikes-then-defense-in-depth rule.** When the same finding is
+   raised 3+ times across rounds, prefer to add the suggested code change with a
+   defense-in-depth rationale comment rather than continue to debate. One extra
+   condition is cheap; per-round debate is expensive. Document the parent-vs-inner
+   relationship inline so future readers see the rationale.
+4. **Verify bot fix-direction suggestions against actual file structure.** Bots
+   read files linearly and can miss parent-block guards. For any "add an X check"
+   suggestion, read the surrounding function/block to confirm the check is genuinely
+   missing or already exists at a higher scope.
+5. **Each round produces its own closure ledger as a PR comment.** Prefix with
+   "Round N" so the bot and reviewers can see progression. Maintain a running
+   summary table at the end of each comment showing totals across rounds
+   (confirmed+fixed / disproved / partial / awaiting-decision).
+6. **Stop the cycle deliberately.** If a finding is disproved with code evidence 3+
+   times and the bot keeps re-raising it, leave the comment, post the closure
+   ledger with the cumulative evidence, and surface the disagreement to the user
+   rather than continuing to push fixes. The user can resolve persistent
+   reviewer-AI disagreement.
+
+**Why this matters:** Without the multi-round pattern, each round looks like
+"start over, re-triage everything." With it, the rounds become incremental:
+each round's work is bounded by new findings + carried-forward items only.
+This matches how the bot actually behaves and avoids wasted cycles.
 
 ## Operating Stance
 
@@ -35,6 +82,14 @@ tree:
 
 - If `head_ref` is a remote branch that is not checked out locally, fetch it
   (`git fetch origin <head_ref>`).
+- **Check for parallel work first.** Before checkout, run the
+  [`parallel-work-check`](../generated/parallel-work-check/SKILL.md) protocol to
+  detect concurrent pushes from other agents (e.g., `hermes-pr-review` bot
+  following up, maintainer pushing fixes, parallel swarm work). If remote has new
+  commits: read `git log local..remote`, evaluate whether the parallel work
+  supersedes your planned fixes, and prefer the parallel work if it's more
+  comprehensive (more tests, better edge coverage, clearer error handling).
+  Abort your rebase, take the remote state, then add minor improvements on top.
 - Verify the working tree is clean first (`git status --porcelain`). If uncommitted
   changes exist, stash them or abort to prevent data loss.
 - **Check out the head branch locally.** Feedback verification reads the working-tree

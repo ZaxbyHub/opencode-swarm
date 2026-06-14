@@ -4,6 +4,7 @@ import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
 import { handleArchiveCommand } from './archive.js';
+import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
@@ -16,6 +17,7 @@ import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
 import { handleDeepDiveCommand } from './deep-dive.js';
+import { handleDeepResearchCommand } from './deep-research.js';
 import { handleDesignDocsCommand } from './design-docs.js';
 import { handleDiagnoseCommand } from './diagnose.js';
 import { handleDoctorCommand, handleDoctorToolsCommand } from './doctor.js';
@@ -33,7 +35,10 @@ import {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
+import { handleLearningCommand } from './learning.js';
 import {
 	handleMemoryCommand,
 	handleMemoryCompactCommand,
@@ -47,8 +52,12 @@ import {
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
+import { handlePostMortemCommand } from './post-mortem.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
+import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
+import { handlePrSubscribeCommand } from './pr-subscribe.js';
+import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
@@ -389,6 +398,14 @@ export const COMMAND_REGISTRY = {
 		args: '--cumulative, --ci-gate',
 		category: 'diagnostics',
 	},
+	learning: {
+		handler: (ctx) => handleLearningCommand(ctx.directory, ctx.args),
+		description: 'Show learning metrics and violation trends',
+		args: '--json, --phase <N>',
+		details:
+			'Computes aggregate learning metrics from knowledge events: violation-rate trends, directive application rates, escalation frequency, per-entry ROI, and never-applied entries. Surfaces a learning summary for the curator digest.',
+		category: 'diagnostics',
+	},
 	export: {
 		handler: (ctx) => handleExportCommand(ctx.directory, ctx.args),
 		description: 'Export plan and context as JSON',
@@ -520,6 +537,18 @@ export const COMMAND_REGISTRY = {
 		aliasOf: 'finalize',
 		deprecated: true,
 	},
+	'post-mortem': {
+		handler: (ctx) =>
+			handlePostMortemCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run the post-mortem agent: project-end synthesis, queue triage, and final curation pass',
+		details:
+			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed.',
+		args: '--force',
+		category: 'core',
+	},
 	concurrency: {
 		handler: (ctx) =>
 			handleConcurrencyCommand(ctx.directory, ctx.args, ctx.sessionID),
@@ -649,6 +678,35 @@ export const COMMAND_REGISTRY = {
 			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 	},
+	'pr subscribe': {
+		handler: (ctx) =>
+			handlePrSubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Subscribe the current session to PR state-change notifications',
+		args: '<pr-url|owner/repo#N|N>',
+		details:
+			'Subscribes the current session to receive advisory notifications for the specified PR. When pr_monitor.enabled is true, the background polling worker will detect CI failures, new comments, merge conflicts, review state changes, and merge/close events. Notifications are delivered as session-scoped advisories with dedup tokens. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin). Requires pr_monitor.enabled: true in config.',
+		category: 'agent',
+	},
+	'pr unsubscribe': {
+		handler: (ctx) =>
+			handlePrUnsubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Unsubscribe the current session from PR state-change notifications',
+		args: '<pr-url|owner/repo#N|N>',
+		details:
+			'Unsubscribes the current session from receiving advisory notifications for the specified PR. Removes the active subscription record. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+		category: 'agent',
+	},
+	'pr status': {
+		handler: (ctx) =>
+			handlePrMonitorStatusCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description: 'Show PR monitor subscription status for the current session',
+		args: '',
+		details:
+			'Displays all active PR subscriptions for the current session. Shows PR URL, last checked time, watching status, and error count per subscription. Also shows total active subscriptions across all sessions.',
+		category: 'agent',
+	},
 	'deep-dive': {
 		handler: (ctx) =>
 			handleModeCommandWithBundledSkills(ctx, handleDeepDiveCommand),
@@ -666,6 +724,25 @@ export const COMMAND_REGISTRY = {
 		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
 		category: 'agent',
 		aliasOf: 'deep-dive',
+	},
+	'deep-research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Launch a multi-source, fact-checked deep research pass and synthesize a cited report [question]',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		details:
+			'Runs the orchestrator-worker deep-research protocol: the architect decomposes the question into subtopics, gathers evidence with web_search and web_fetch across up to N iterative rounds, dispatches parallel sme synthesis workers, verifies every claim against cited sources with dual reviewers, challenges high-stakes claims with the critic, and presents a cited report in chat. Read-only — does not mutate source code, delegate to coder, or call declare_scope. Requires council.general.enabled and a search API key.',
+		category: 'agent',
+	},
+	'deep research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Alias for /swarm deep-research — launch a cited deep research pass',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		category: 'agent',
+		aliasOf: 'deep-research',
 	},
 	'codebase-review': {
 		handler: (ctx) =>
@@ -808,6 +885,15 @@ export const COMMAND_REGISTRY = {
 			'Toggles Full-Auto Mode which enables autonomous execution without confirmation prompts. When enabled, the architect proceeds through implementation steps automatically. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
 		category: 'utility',
 	},
+	'auto-proceed': {
+		handler: (ctx: CommandContext) =>
+			handleAutoProceedCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description: 'Toggle or set auto-proceed override for the active session',
+		args: '[on|off]',
+		category: 'config',
+		details:
+			'Without argument, toggles auto-proceed mode. With "on" or "off", sets the state explicitly.',
+	},
 	'write-retro': {
 		handler: (ctx) => handleWriteRetroCommand(ctx.directory, ctx.args),
 		description:
@@ -842,6 +928,25 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Restores a quarantined knowledge entry back to the active knowledge store by ID. Validates entry ID format (1-64 alphanumeric/hyphen/underscore). Entry must currently be in quarantine state.',
 		args: '<entry-id>',
+		category: 'utility',
+	},
+	'knowledge unactionable': {
+		handler: (ctx) =>
+			handleKnowledgeUnactionableCommand(ctx.directory, ctx.args),
+		description: 'List unactionable knowledge entries pending hardening',
+		subcommandOf: 'knowledge',
+		details:
+			'Lists entries from .swarm/knowledge-unactionable.jsonl that failed the actionability gate. Shows pending entries (awaiting next hardening pass) and retire candidates (hardening failed). Use `/swarm knowledge retry-hardening` to reset retire candidates.',
+		category: 'utility',
+	},
+	'knowledge retry-hardening': {
+		handler: (ctx) =>
+			handleKnowledgeRetryHardeningCommand(ctx.directory, ctx.args),
+		description: 'Reset retire candidates for re-hardening [id]',
+		subcommandOf: 'knowledge',
+		details:
+			'Resets the retire_candidate flag on unactionable entries so the next scheduled hardening pass re-attempts LLM enrichment. Without arguments, resets all retire candidates. With an ID prefix, resets only the matching entry.',
+		args: '[entry-id]',
 		category: 'utility',
 	},
 	knowledge: {

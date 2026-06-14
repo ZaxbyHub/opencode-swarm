@@ -231,6 +231,8 @@ async function executeWithTimeout(
 
 		let stdout = '';
 		let stderr = '';
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
 		let stdoutTruncated = false;
 		let stderrTruncated = false;
 		let settled = false;
@@ -288,8 +290,17 @@ async function executeWithTimeout(
 		child.stdout?.on('data', (data) => {
 			if (stdoutTruncated) return;
 			const chunk = data.toString();
-			if (stdout.length + chunk.length > maxOutputBytes) {
-				stdout += chunk.slice(0, Math.max(0, maxOutputBytes - stdout.length));
+			const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+			if (stdoutBytes + chunkBytes > maxOutputBytes) {
+				// Slice by characters to fit within the remaining byte budget.
+				// For ASCII-only output this is exact; for multibyte chars the
+				// result may be slightly under the cap, which is conservative
+				// and safe (F-003).
+				const remaining = Math.max(0, maxOutputBytes - stdoutBytes);
+				stdout += Buffer.from(chunk, 'utf8')
+					.subarray(0, remaining)
+					.toString('utf8');
+				stdoutBytes = maxOutputBytes;
 				stdoutTruncated = true;
 				// Runaway output — terminate so we stop accumulating. The close
 				// event then settles with the truncated buffer.
@@ -300,17 +311,31 @@ async function executeWithTimeout(
 				}
 			} else {
 				stdout += chunk;
+				stdoutBytes += chunkBytes;
 			}
 		});
 
 		child.stderr?.on('data', (data) => {
 			if (stderrTruncated) return;
 			const chunk = data.toString();
-			if (stderr.length + chunk.length > maxOutputBytes) {
-				stderr += chunk.slice(0, Math.max(0, maxOutputBytes - stderr.length));
+			const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+			if (stderrBytes + chunkBytes > maxOutputBytes) {
+				// Slice by bytes to fit within the remaining byte budget (F-003).
+				const remaining = Math.max(0, maxOutputBytes - stderrBytes);
+				stderr += Buffer.from(chunk, 'utf8')
+					.subarray(0, remaining)
+					.toString('utf8');
+				stderrBytes = maxOutputBytes;
 				stderrTruncated = true;
+				// Runaway stderr — terminate so we stop accumulating (F-001).
+				try {
+					child.kill('SIGTERM');
+				} catch {
+					// already gone
+				}
 			} else {
 				stderr += chunk;
+				stderrBytes += chunkBytes;
 			}
 		});
 

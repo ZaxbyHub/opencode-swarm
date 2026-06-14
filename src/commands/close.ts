@@ -713,6 +713,36 @@ export async function handleCloseCommand(
 		}
 	}
 
+	// ─── POST-MORTEM (WP7, #1234) ──────────────────────────────────
+	// Run the post-mortem agent as part of finalize. Idempotent: if
+	// phase_complete already produced a report, this is a no-op.
+	let postMortemSummary = '';
+	try {
+		const { CuratorConfigSchema: CCS } = await import('../config/schema.js');
+		const { config: pmLoadedConfig } = loadPluginConfigWithMeta(directory);
+		const curatorCfg = CCS.parse(pmLoadedConfig.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const { runCuratorPostMortem } = await import(
+				'../hooks/curator-postmortem.js'
+			);
+			const pmResult = await runCuratorPostMortem(directory, {
+				llmDelegate: createCuratorLLMDelegate(
+					directory,
+					'postmortem',
+					options.sessionID,
+				),
+			});
+			if (pmResult.success && pmResult.summary) {
+				postMortemSummary = pmResult.summary;
+			}
+			for (const w of pmResult.warnings) {
+				warnings.push(`[POST-MORTEM] ${w}`);
+			}
+		}
+	} catch {
+		// fail-open: post-mortem never blocks finalize
+	}
+
 	// ─── STAGE 2: ARCHIVE ────────────────────────────────────────────
 	const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 	const suffix = Math.random().toString(36).slice(2, 8);
@@ -1103,11 +1133,14 @@ export async function handleCloseCommand(
 	const skillReviewOutput = skillReviewSummary
 		? `\n\n**Skill Review:** ${skillReviewSummary}`
 		: '';
+	const postMortemOutput = postMortemSummary
+		? `\n\n**Post-Mortem:** ${postMortemSummary}`
+		: '';
 
 	if (planAlreadyDone) {
-		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
+		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
 	}
-	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
+	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
 }
 
 export const _internals = {

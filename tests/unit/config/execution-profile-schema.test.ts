@@ -14,8 +14,9 @@ describe('ExecutionProfileSchema', () => {
 			const profile: ExecutionProfile = result.data;
 			expect(profile.parallelization_enabled).toBe(false);
 			expect(profile.max_concurrent_tasks).toBe(1);
-			expect(profile.council_parallel).toBe(false);
+			expect(profile.council_parallel).toBe(true);
 			expect(profile.locked).toBe(false);
+			expect(profile.auto_proceed).toBe(false);
 		});
 	});
 
@@ -61,12 +62,27 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.locked).toBe(true);
 		});
 
+		it('accepts auto_proceed: true', () => {
+			const result = ExecutionProfileSchema.safeParse({ auto_proceed: true });
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.auto_proceed).toBe(true);
+		});
+
+		it('accepts auto_proceed: false', () => {
+			const result = ExecutionProfileSchema.safeParse({ auto_proceed: false });
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.auto_proceed).toBe(false);
+		});
+
 		it('accepts a fully populated profile', () => {
 			const result = ExecutionProfileSchema.safeParse({
 				parallelization_enabled: true,
 				max_concurrent_tasks: 4,
 				council_parallel: true,
 				locked: true,
+				auto_proceed: true,
 			});
 			expect(result.success).toBe(true);
 			if (!result.success) return;
@@ -74,6 +90,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.max_concurrent_tasks).toBe(4);
 			expect(result.data.council_parallel).toBe(true);
 			expect(result.data.locked).toBe(true);
+			expect(result.data.auto_proceed).toBe(true);
 		});
 	});
 
@@ -110,6 +127,21 @@ describe('ExecutionProfileSchema', () => {
 			const result = ExecutionProfileSchema.safeParse({ locked: 1 });
 			expect(result.success).toBe(false);
 		});
+
+		it('rejects string for auto_proceed', () => {
+			const result = ExecutionProfileSchema.safeParse({ auto_proceed: 'yes' });
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects number for auto_proceed', () => {
+			const result = ExecutionProfileSchema.safeParse({ auto_proceed: 1 });
+			expect(result.success).toBe(false);
+		});
+
+		it('rejects null for auto_proceed', () => {
+			const result = ExecutionProfileSchema.safeParse({ auto_proceed: null });
+			expect(result.success).toBe(false);
+		});
 	});
 
 	describe('PlanSchema integration', () => {
@@ -132,6 +164,7 @@ describe('ExecutionProfileSchema', () => {
 					max_concurrent_tasks: 2,
 					council_parallel: false,
 					locked: false,
+					auto_proceed: true,
 				},
 			};
 			const result = PlanSchema.safeParse(planData);
@@ -139,6 +172,7 @@ describe('ExecutionProfileSchema', () => {
 			if (!result.success) return;
 			expect(result.data.execution_profile?.parallelization_enabled).toBe(true);
 			expect(result.data.execution_profile?.max_concurrent_tasks).toBe(2);
+			expect(result.data.execution_profile?.auto_proceed).toBe(true);
 		});
 
 		it('PlanSchema parses plan without execution_profile (optional)', () => {

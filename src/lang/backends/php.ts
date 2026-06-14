@@ -53,7 +53,3 @@ export function buildPhpBackend(): LanguageBackend {
 		selectFramework,
 	};
 }
-
-export const _internals: {
-	selectFramework: typeof selectFramework;
-} = { selectFramework };

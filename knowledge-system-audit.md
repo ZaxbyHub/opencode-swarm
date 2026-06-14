@@ -250,36 +250,21 @@ messages.transform fires
 
 **Severity**: Critical  
 **Confidence**: High  
-**Status**: Source-backed
+**Status**: ✅ RESOLVED (v7.63.0+)
 
-**Evidence**:
-- `src/hooks/hive-promoter.ts:L146-L148` — `const hiveEntries = await readKnowledge<HiveKnowledgeEntry>(resolveHiveKnowledgePath())` where `resolveHiveKnowledgePath()` (in `knowledge-store.ts:68`) returns `{platform-data-dir}/shared-learnings.jsonl`
-- `src/hooks/hive-promoter.ts:L211` — `const hiveRejectedPath = resolveHiveRejectedPath()` writes to `shared-learnings-rejected.jsonl`
-- `src/knowledge/hive-promoter.ts:L94` — `getHiveFilePath()` returns `{platform-data-dir}/hive-knowledge.jsonl`
-- `src/commands/promote.ts:L12-L15` — imports `promoteToHive, promoteFromSwarm, validateLesson` from `../knowledge/hive-promoter` (the duplicate)
+**Original Issue**:
+- `src/knowledge/hive-promoter.ts` contained a duplicate implementation that wrote to `{platform-data-dir}/hive-knowledge.jsonl`
+- `src/commands/promote.ts` imported from the duplicate, causing manual promotions to be invisible to `knowledge_query`
+- Manual promotions were written to a file that `knowledge_recall` and `readMergedKnowledge` never read
 
-**What happens**:
-- When the knowledge hooks system promotes entries automatically, it writes to `shared-learnings.jsonl` with the full `HiveKnowledgeEntry` schema
-- When a user runs `/swarm promote`, it writes to `hive-knowledge.jsonl` with a different, flat schema (`{ id, lesson, category, scope_tag, confidence, status, ... }`)
-- The `knowledge_recall` and `readMergedKnowledge` functions only read `shared-learnings.jsonl`
-- Manual promotions via `/swarm promote` are therefore written to a file that the knowledge system NEVER READS
+**Resolution**:
+- Removed `src/knowledge/hive-promoter.ts` duplicate (no longer exists in repo)
+- Updated `src/commands/promote.ts:11` to import from `../hooks/hive-promoter` instead
+- Manual `/swarm promote` now writes to the canonical `shared-learnings.jsonl` via `promoteToHive()` in `src/hooks/hive-promoter.ts`
+- Verified evidence: `src/commands/promote.ts` line 11 shows `import { promoteFromSwarm, promoteToHive } from '../hooks/hive-promoter'`
 
-**Why it matters**:
-Manual hive promotions are invisible to the knowledge system. Users think they're contributing cross-project knowledge, but those entries are isolated in a separate file. This is a complete data loss path for manually promoted content.
-
-**Reproduction**:
-1. Run `/swarm promote "Always validate inputs"`
-2. The content is written to `hive-knowledge.jsonl`
-3. Run `/swarm knowledge query --tier hive`
-4. The entry is NOT returned (the query tool reads `shared-learnings.jsonl`)
-
-**Recommended fix**:
-- Remove the duplicate `src/knowledge/hive-promoter.ts` implementation
-- Update `src/commands/promote.ts` to import from `src/hooks/hive-promoter.ts` instead
-- Migrate any existing data from `hive-knowledge.jsonl` to `shared-learnings.jsonl`
-
-**Test to add**:
-- Integration test verifying `/swarm promote` produces data visible to `knowledge_query`
+**Regression test added**:
+- `tests/integration/promote-knowledge-query-visibility.test.ts` verifies `/swarm promote` output is visible to `knowledge_query --tier hive`
 
 ---
 
@@ -287,15 +272,16 @@ Manual hive promotions are invisible to the knowledge system. Users think they'r
 
 **Severity**: High  
 **Confidence**: High  
-**Status**: Source-backed
+**Status**: ✅ RESOLVED (v7.63.0+)
 
-**Evidence**:
-- `src/hooks/hive-promoter.ts:L211` — uses `resolveHiveRejectedPath()` which returns `shared-learnings-rejected.jsonl`
-- `src/knowledge/hive-promoter.ts` — has NO rejected-path logic at all
+**Original Issue**:
+- The duplicate `src/knowledge/hive-promoter.ts` had no rejected-path logic
+- Validation failures during manual promotion were simply thrown as errors
 
-**What happens**: Hive validation failures from the hooks system go to `shared-learnings-rejected.jsonl`, but the duplicate has no rejected handling, so validation failures during manual promotion are simply thrown as errors and the rejected information is lost.
-
-**Recommended fix**: Same as Finding 1 — consolidate into single implementation.
+**Resolution**:
+- Consolidation into `src/hooks/hive-promoter.ts` now handles rejection uniformly
+- `src/hooks/hive-promoter.ts:~225-240` contains rejection-path handling for manual promotions
+- Both automatic and manual promotions now use the same rejected-lessons store: `shared-learnings-rejected.jsonl`
 
 ---
 
@@ -303,20 +289,40 @@ Manual hive promotions are invisible to the knowledge system. Users think they'r
 
 **Severity**: Medium  
 **Confidence**: High  
-**Status**: Source-backed
+**Status**: ✅ RESOLVED (v7.59.x+)
 
-**Evidence**:
-- `src/tools/knowledge-add.ts:L148-L166` — calls `validateLesson` conditional on `validation_enabled` config
-- `src/tools/knowledge-add.ts:L168-L177` — calls `appendKnowledge(resolveSwarmKnowledgePath(directory), entry)` — no call to `findNearDuplicate()`
-- Compare with `src/hooks/knowledge-curator.ts:L321-L329` — `curateAndStoreSwarm` calls `findNearDuplicate()` before appending
+**Original Issue**:
+- `src/tools/knowledge-add.ts` called `appendKnowledge` without dedup checking
+- Users/agents could create near-duplicate entries
 
-**What happens**: Users/agents calling `knowledge_add` can create near-duplicate entries. The dedup threshold (default 0.6 Jaccard) is only enforced in the curator path, not the tool path.
+**Resolution**:
+- `src/tools/knowledge-add.ts:234` now calls `findNearDuplicate(lesson, existingEntries, 0.6)`
+- Lines 235-240 reject near-duplicates with a clear message
+- Second call site at line 449 also performs dedup checking
+- Verified: both call sites enforce the configured dedup threshold (default 0.6 Jaccard)
 
-**Why it matters**: Over time, the knowledge store accumulates redundant entries, reducing signal quality and wasting context budget.
+---
 
-**Recommended fix**: Add `findNearDuplicate` check to `knowledge-add.ts` before the `appendKnowledge` call. If duplicate found, return a success message indicating the existing entry was reused.
+### Legacy Data Migration — NEW ISSUE (v7.63.0)
 
-**Test to add**: Add test in `tests/unit/tools/knowledge-add.test.ts` (which doesn't exist yet) verifying that adding a near-duplicate is handled.
+**Severity**: Medium  
+**Confidence**: High  
+**Status**: IMPLEMENTED
+
+**Issue**:
+- Users who ran `/swarm promote` before v7.63.0 have entries stranded in `{platform-data-dir}/hive-knowledge.jsonl`
+- These entries are orphaned and not visible to the knowledge system
+
+**Solution**:
+- Added `migrateHiveKnowledgeLegacy()` to `src/hooks/knowledge-migrator.ts`
+- One-time, idempotent migration function that:
+  - Reads from legacy `hive-knowledge.jsonl` path
+  - Converts entries to `HiveKnowledgeEntry` format
+  - Deduplicates against existing `shared-learnings.jsonl` with configured threshold
+  - Appends non-duplicate entries to canonical store
+  - Writes sentinel file to prevent re-running
+- Integrated into `handleKnowledgeMigrateCommand()` in `src/commands/knowledge.ts`
+- Can be triggered manually via `swarm knowledge migrate` command
 
 ---
 

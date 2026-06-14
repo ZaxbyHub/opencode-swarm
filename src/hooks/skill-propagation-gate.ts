@@ -556,8 +556,9 @@ export function extractTaskIdFromPrompt(prompt: string): string {
  * SKILLS field.
  *
  * @returns { blocked: boolean; reason: string | null; recommendedSkills?: Array<{ skillPath: string; score: number; usageCount: number }> }
- *          When scoring has computed results, includes `recommendedSkills` with ranked skill recommendations.
- *          When scoring was skipped or errored, `recommendedSkills` is undefined.
+ *          `recommendedSkills` is populated (possibly `[]`) on both the happy path (SKILLS present)
+ *          and the warn path (SKILLS missing or 'none'). It is `undefined` only on early-exit returns
+ *          (unsupported tool/agent/target, no available skills in project, or enforce-blocked).
  */
 export async function skillPropagationGateBefore(
 	directory: string,
@@ -656,11 +657,7 @@ export async function skillPropagationGateBefore(
 	let scoringSkipped = false;
 	let scored: Array<{ skillPath: string; score: number; usageCount: number }> =
 		[];
-	if (
-		skillsValue &&
-		skillsValue.toLowerCase() !== 'none' &&
-		availableSkills.length > 0
-	) {
+	if (skillsValue.toLowerCase() !== 'none' && availableSkills.length > 0) {
 		try {
 			const sessionEntries = _internals.readSkillUsageEntriesTail(directory, {
 				sessionID,
@@ -878,7 +875,7 @@ export async function skillPropagationGateBefore(
 		return { blocked: true, reason: blockedMsg, recommendedSkills: undefined };
 	}
 
-	return { blocked: false, reason: warningMsg, recommendedSkills: undefined };
+	return { blocked: false, reason: warningMsg, recommendedSkills: scored };
 }
 
 // ============================================================================

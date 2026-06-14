@@ -1,15 +1,24 @@
 import { join } from 'node:path';
 import { KnowledgeConfigSchema } from '../config/schema.js';
-import { migrateContextToKnowledge } from '../hooks/knowledge-migrator.js';
+import {
+	migrateContextToKnowledge,
+	migrateHiveKnowledgeLegacy,
+} from '../hooks/knowledge-migrator.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
+	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
 	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
-import { quarantineEntry, restoreEntry } from '../hooks/knowledge-validator.js';
+import {
+	quarantineEntry,
+	resolveUnactionablePath,
+	restoreEntry,
+} from '../hooks/knowledge-validator.js';
+import type { HardenableRecord } from '../services/unactionable-hardening.js';
 
 /**
  * Resolves a user-supplied ID or prefix against a list of entries.
@@ -128,33 +137,65 @@ export async function handleKnowledgeMigrateCommand(
 	args: string[],
 ): Promise<string> {
 	const targetDir = args[0] || directory;
+	const config = KnowledgeConfigSchema.parse({});
 
 	try {
-		const result = await migrateContextToKnowledge(
-			targetDir,
-			KnowledgeConfigSchema.parse({}),
-		);
+		// Run context.md → knowledge.jsonl migration
+		const contextResult = await migrateContextToKnowledge(targetDir, config);
 
-		if (result.skippedReason) {
-			switch (result.skippedReason) {
+		// Run legacy hive-knowledge.jsonl → shared-learnings.jsonl migration
+		const hiveResult = await migrateHiveKnowledgeLegacy(config);
+
+		const messages: string[] = [];
+
+		// Handle context migration result
+		if (contextResult.skippedReason) {
+			switch (contextResult.skippedReason) {
 				case 'sentinel-exists':
-					return '⏭ Migration already completed for this project. Delete .swarm/.knowledge-migrated to re-run.';
+					messages.push(
+						'⏭ Context migration already completed. Delete .swarm/.knowledge-migrated to re-run.',
+					);
+					break;
 				case 'no-context-file':
-					return 'ℹ️ No .swarm/context.md found — nothing to migrate.';
+					messages.push('ℹ️ No .swarm/context.md found — nothing to migrate.');
+					break;
 				case 'empty-context':
-					return 'ℹ️ .swarm/context.md is empty — nothing to migrate.';
-				default:
-					return '⚠️ Migration skipped for an unknown reason.';
+					messages.push('ℹ️ .swarm/context.md is empty — nothing to migrate.');
+					break;
 			}
+		} else {
+			messages.push(
+				`✅ Context migration: ${contextResult.entriesMigrated} entries added, ${contextResult.entriesDropped} dropped`,
+			);
 		}
 
-		return `✅ Migration complete: ${result.entriesMigrated} entries added, ${result.entriesDropped} dropped (validation/dedup), ${result.entriesTotal} total processed.`;
+		// Handle hive migration result
+		if (hiveResult.skippedReason) {
+			switch (hiveResult.skippedReason) {
+				case 'sentinel-exists':
+					messages.push(
+						'⏭ Hive legacy migration already completed. Delete the sentinel in the hive data dir to re-run.',
+					);
+					break;
+				case 'no-context-file':
+					messages.push(
+						'ℹ️ No legacy hive-knowledge.jsonl found — nothing to migrate.',
+					);
+					break;
+			}
+		} else if (hiveResult.migrated) {
+			messages.push(
+				`✅ Hive legacy migration: ${hiveResult.entriesMigrated} entries added, ${hiveResult.entriesDropped} dropped`,
+			);
+		}
+
+		return messages.join('\n');
 	} catch (error) {
 		console.warn(
-			'[knowledge-command] migrateContextToKnowledge error:',
+			'[knowledge-command] migration error:',
 			error instanceof Error ? error.message : String(error),
 		);
-		return '❌ Migration failed. Check .swarm/context.md is readable.';
+		return '❌ Migration failed. Check that knowledge source files are readable.';
 	}
 }
 
@@ -204,5 +245,136 @@ export async function handleKnowledgeListCommand(
 			error instanceof Error ? error.message : String(error),
 		);
 		return '❌ Failed to list knowledge entries. Ensure .swarm/knowledge.jsonl exists.';
+	}
+}
+
+/**
+ * Handles /swarm knowledge unactionable command.
+ * Lists entries from the unactionable queue with retire_candidate status.
+ */
+export async function handleKnowledgeUnactionableCommand(
+	directory: string,
+	_args: string[],
+): Promise<string> {
+	try {
+		const queuePath = resolveUnactionablePath(directory);
+		const entries = await readKnowledge<HardenableRecord>(queuePath);
+
+		if (entries.length === 0) {
+			return 'No unactionable entries in the queue.';
+		}
+
+		const active = entries.filter((e) => !e.retire_candidate);
+		const retired = entries.filter((e) => e.retire_candidate);
+
+		const lines: string[] = [
+			`## Unactionable Queue (${entries.length} total: ${active.length} pending, ${retired.length} retire candidates)`,
+			'',
+		];
+
+		if (active.length > 0) {
+			lines.push(
+				'### Pending hardening',
+				'',
+				'| ID (prefix) | Lesson | Reason | Quarantined |',
+				'|-------------|--------|--------|-------------|',
+			);
+			for (const entry of active) {
+				const lesson =
+					entry.lesson.length > 50
+						? `${entry.lesson.slice(0, 47)}...`
+						: entry.lesson;
+				lines.push(
+					`| ${entry.id.slice(0, 12)}… | ${lesson} | ${entry.unactionable_reason} | ${entry.quarantined_at?.slice(0, 10) ?? 'unknown'} |`,
+				);
+			}
+			lines.push('');
+		}
+
+		if (retired.length > 0) {
+			lines.push(
+				'### Retire candidates (hardening failed)',
+				'',
+				'| ID (prefix) | Reason | Quarantined |',
+				'|-------------|--------|-------------|',
+			);
+			for (const entry of retired) {
+				lines.push(
+					`| ${entry.id.slice(0, 12)}… | ${entry.unactionable_reason} | ${entry.quarantined_at?.slice(0, 10) ?? 'unknown'} |`,
+				);
+			}
+			lines.push('');
+		}
+
+		lines.push(
+			'Use `/swarm knowledge retry-hardening [id-prefix]` to reset retire candidates for re-processing on the next scheduled hardening pass.',
+		);
+
+		return lines.join('\n');
+	} catch (error) {
+		console.warn(
+			'[knowledge-command] unactionable list error:',
+			error instanceof Error ? error.message : String(error),
+		);
+		return 'Failed to list unactionable entries.';
+	}
+}
+
+/**
+ * Handles /swarm knowledge retry-hardening [id] command.
+ * Resets retire_candidate flags so the next scheduled hardening pass re-attempts them.
+ */
+export async function handleKnowledgeRetryHardeningCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const inputId = args[0];
+
+	if (inputId && !/^[a-zA-Z0-9_-]{1,64}$/.test(inputId)) {
+		return 'Invalid entry ID. IDs must be 1-64 characters: letters, digits, hyphens, underscores only.';
+	}
+
+	try {
+		const queuePath = resolveUnactionablePath(directory);
+		let resetCount = 0;
+
+		await transactKnowledge<HardenableRecord>(queuePath, (current) => {
+			let changed = false;
+			const next: HardenableRecord[] = [];
+			for (const rec of current) {
+				if (!rec.retire_candidate) {
+					next.push(rec);
+					continue;
+				}
+				if (inputId) {
+					if (rec.id === inputId || rec.id.startsWith(inputId)) {
+						next.push({ ...rec, retire_candidate: undefined });
+						resetCount++;
+						changed = true;
+					} else {
+						next.push(rec);
+					}
+				} else {
+					next.push({ ...rec, retire_candidate: undefined });
+					resetCount++;
+					changed = true;
+				}
+			}
+			return changed ? next : null;
+		});
+
+		if (resetCount === 0) {
+			return inputId
+				? `No retire candidates found matching '${inputId}'.`
+				: 'No retire candidates to reset.';
+		}
+
+		return `Reset ${resetCount} retire candidate(s). They will be re-processed on the next scheduled hardening pass.`;
+	} catch (error) {
+		console.warn(
+			'[knowledge-command] retry-hardening error:',
+			error instanceof Error ? error.message : String(error),
+		);
+		return 'Failed to reset retire candidates.';
 	}
 }

@@ -5,8 +5,9 @@ import { z } from 'zod';
 export const ExecutionProfileSchema = z.object({
 	parallelization_enabled: z.boolean().default(false),
 	max_concurrent_tasks: z.number().int().min(1).max(64).default(1),
-	council_parallel: z.boolean().default(false),
+	council_parallel: z.boolean().default(true),
 	locked: z.boolean().default(false),
+	auto_proceed: z.boolean().default(false),
 });
 export type ExecutionProfile = z.infer<typeof ExecutionProfileSchema>;
 

@@ -48,6 +48,24 @@ Tasks: 3/5 complete
 Agents: 11 registered
 ```
 
+### `/swarm learning [--json] [--phase N]`
+
+Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:
+
+- **Violation trends** — per-directive violation rates over 7-day and 30-day windows with trend direction (improving/worsening/stable)
+- **Application rates by priority** — how often directives are applied when shown, grouped by priority level
+- **Escalation activity** — auto-escalation frequency over recent windows
+- **Entry ROI** — per-entry applied/shown/succeeded/failed counts with ROI classification (high/medium/low/unused)
+- **Never-applied entries** — directives that have never been applied despite being alive for multiple phases
+- **Time to first application** — median/min/max days from directive creation to first application
+
+A 3-line learning summary is automatically injected into the curator phase digest after each phase.
+
+| Flag | Effect |
+|------|--------|
+| `--json` | Output metrics as structured JSON in a `[LEARNING_JSON]...[/LEARNING_JSON]` envelope |
+| `--phase N` | Set the current phase number for never-applied threshold calculations |
+
 ### `/swarm diagnose`
 
 Run a health check on `.swarm/` files, plan structure, and evidence completeness. Reports missing files, schema mismatches, and recovery steps.
@@ -370,6 +388,23 @@ See [Modes Guide](modes.md) for tradeoffs.
 ### `/swarm full-auto [on|off]`
 
 Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
+
+### `/swarm auto-proceed [on|off]`
+
+Toggle auto-proceed for phase transitions. When enabled, the swarm skips the "Ready for Phase N+1?" confirmation prompt and advances automatically. Session-scoped — resets to the plan's `execution_profile.auto_proceed` default on new sessions.
+
+The effective value is shown to the architect via an injected `AUTO PROCEED STATUS` banner at every phase boundary.
+
+```text
+/swarm auto-proceed on    # enable auto-proceed for this session
+/swarm auto-proceed off   # disable auto-proceed for this session
+```
+
+**Resolution order:** Session override always wins over the plan default. If no session override is set, the plan's `execution_profile.auto_proceed` (default `false`) is used.
+
+**First-boundary nudge:** When auto-proceed is `false` and no session override is set, the architect offers to enable it once per session at the first phase boundary.
+
+**Architect-only:** Only the architect session can call this command. Subagents receive an error.
 
 ---
 

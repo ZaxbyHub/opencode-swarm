@@ -8,6 +8,7 @@ vi.mock('../../../src/state', () => ({
 		opencodeClient: null,
 		curatorInitAgentNames: [] as string[],
 		curatorPhaseAgentNames: [] as string[],
+		curatorPostmortemAgentNames: [] as string[],
 		activeAgent: new Map<string, string>(),
 	},
 }));
@@ -31,6 +32,9 @@ beforeEach(() => {
 		[];
 	(swarmState as { curatorPhaseAgentNames: string[] }).curatorPhaseAgentNames =
 		[];
+	(
+		swarmState as { curatorPostmortemAgentNames: string[] }
+	).curatorPostmortemAgentNames = [];
 	(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map();
 });
 
@@ -135,6 +139,31 @@ describe('createCuratorLLMDelegate', () => {
 		expect(mockPrompt).toHaveBeenCalledWith({
 			path: { id: 'sess-y' },
 			body: expect.objectContaining({ agent: 'beta_curator_phase' }),
+		});
+	});
+
+	test('multi-swarm: postmortem mode picks correct swarm curator_postmortem', async () => {
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(
+			swarmState as { curatorPostmortemAgentNames: string[] }
+		).curatorPostmortemAgentNames = [
+			'alpha_curator_postmortem',
+			'beta_curator_postmortem',
+		];
+		(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map([
+			['sess-a', 'alpha_reviewer'],
+		]);
+		mockCreate.mockResolvedValue({ data: { id: 'sess-pm' } });
+		mockPrompt.mockResolvedValue({
+			data: { info: {}, parts: [{ type: 'text', text: 'ok' }] },
+		});
+
+		const delegate = createCuratorLLMDelegate('/tmp/test', 'postmortem')!;
+		await delegate('SYS', 'input');
+
+		expect(mockPrompt).toHaveBeenCalledWith({
+			path: { id: 'sess-pm' },
+			body: expect.objectContaining({ agent: 'alpha_curator_postmortem' }),
 		});
 	});
 

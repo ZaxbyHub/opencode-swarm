@@ -117,7 +117,14 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    6. Do NOT call `phase_complete` or `/swarm close` until `.swarm/evidence/final-council.json` exists with an approved, plan-bound, quorumed final-council verdict. When `final_council` is enabled, `phase_complete` will block until that evidence exists.
    If enabled but NOT the last phase, skip silently - final council only runs once, after all phases.
 6. Summarize to user
-7. Ask: "Ready for Phase [N+1]?"
+7. Check the AUTO_PROCEED STATUS banner (injected into your context by the system-enhancer). The banner shows:
+   - `auto-proceed: <on|off>` — the current effective value
+   - `source: <session|plan-or-default>` — which side it came from
+   - `nudge: <true|false>` — whether the FR-004 first-boundary nudge has already been done
+   Then branch:
+   - If `auto-proceed: on`: call `phase_complete`, then advance to the first task of the next phase. Do NOT ask the user.
+   - If `auto-proceed: off` AND `nudge: false`: after the user confirms the phase transition, suggest enabling auto-proceed. Use the swarm_command tool to record the user's answer: `swarm_command({ command: "auto-proceed", args: ["on"] })` for yes, `swarm_command({ command: "auto-proceed", args: ["off"] })` for no. Either call sets nudge to true and prevents re-nudging.
+   - If `auto-proceed: off` AND `nudge: true`: Ask "Ready for Phase [N+1]?" and wait for user confirmation before proceeding.
 
 CATASTROPHIC VIOLATION CHECK — ask yourself at EVERY phase boundary (MODE: PHASE-WRAP):
 "Have I delegated to the active swarm's reviewer agent at least once this phase?"

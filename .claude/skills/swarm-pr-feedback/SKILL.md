@@ -4,7 +4,9 @@ description: >
   Claude Code adapter for closing known PR feedback. Use when addressing pasted
   review feedback, GitHub review comments or threads, requested changes,
   CI/check failures, merge conflicts, stale PR branches, or PR follow-up work
-  that must verify every claim before fixing it.
+  that must verify every claim before fixing it. Supports multi-round bot
+  reviews (bot posts a new review after every push) via the iterative pattern
+  in the canonical skill.
 ---
 
 # Swarm PR Feedback

@@ -624,7 +624,7 @@ describe('skillPropagationGateBefore', () => {
 					prompt: 'SKILLS: none\ndo work',
 				},
 			}),
-		).resolves.toEqual({
+		).resolves.toMatchObject({
 			blocked: false,
 			reason: expect.stringContaining('Skill propagation warning:'),
 		});
@@ -2002,7 +2002,7 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 				},
 				{ enabled: true },
 			),
-		).resolves.toEqual({
+		).resolves.toMatchObject({
 			blocked: false,
 			reason: expect.stringContaining('Skill propagation warning:'),
 		});
