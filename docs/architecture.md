@@ -68,6 +68,9 @@ This mode is strictly **read-only**: it does NOT mutate source code, delegate to
 It persists `.swarm/repo-graph.json` using the same bounded async graph builder
 that runs after plugin registration, so on-demand `repo_map action="build"` and
 startup graph injection now read/write the same graph schema.
+The published package exposes only the root plugin entry and `./package.json`
+through `package.json#exports`; the Bun-targeted CLI remains available via
+`bin` and is intentionally not exported as a package subpath.
 
 The graph stores imports, exports, inferred file roles, route facts, data
 operations, security-related facts, conventions, and ontology findings. Query
@@ -79,7 +82,7 @@ actions include:
   and findings.
 - `package_boundaries` for inferred package/layer summaries across the graph.
 - `preflight_packet` for a bounded agent packet covering target files,
-  ontology facts, findings, and package boundaries.
+  ontology facts, findings, and a target-local package-boundary summary.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.

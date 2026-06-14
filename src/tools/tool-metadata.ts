@@ -426,7 +426,7 @@ export const TOOL_METADATA = {
 	},
 	repo_map: {
 		description:
-			'query the repo code graph: importers, dependencies, blast radius, localization, ontology facts, package boundaries, and preflight packets before refactoring',
+			'query the repo code graph: importers, dependencies, blast radius, localization, ontology facts, package boundaries, and heuristic preflight packets before refactoring; ontology findings are advisory, not formal proofs',
 		agents: [
 			'architect',
 			'critic_sounding_board',

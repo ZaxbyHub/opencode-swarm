@@ -201,74 +201,7 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 				code: 'CORRUPTION',
 			});
 		}
-
-		// Validate structure
-		if (!parsed.schema_version) {
-			throw Object.assign(new Error('repo-graph.json missing schema_version'), {
-				code: 'CORRUPTION',
-			});
-		}
-		if (!parsed.nodes || typeof parsed.nodes !== 'object') {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid nodes'),
-				{ code: 'CORRUPTION' },
-			);
-		}
-		if (!Array.isArray(parsed.edges)) {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid edges'),
-				{ code: 'CORRUPTION' },
-			);
-		}
-
-		// Validate nodes
-		for (const [key, node] of Object.entries(parsed.nodes)) {
-			if (!key || typeof key !== 'string') {
-				throw Object.assign(
-					new Error('repo-graph.json contains invalid node key'),
-					{ code: 'CORRUPTION' },
-				);
-			}
-			try {
-				validateGraphNode(node);
-			} catch (err) {
-				const msg =
-					err instanceof Error ? err.message : 'Invalid node structure';
-				throw Object.assign(
-					new Error(`repo-graph.json node validation failed: ${msg}`),
-					{ code: 'CORRUPTION' },
-				);
-			}
-		}
-
-		// Validate edges
-		for (const edge of parsed.edges) {
-			try {
-				validateGraphEdge(edge);
-			} catch (err) {
-				const msg =
-					err instanceof Error ? err.message : 'Invalid edge structure';
-				throw Object.assign(
-					new Error(`repo-graph.json edge validation failed: ${msg}`),
-					{ code: 'CORRUPTION' },
-				);
-			}
-		}
-
-		// Validate metadata
-		if (
-			!parsed.metadata ||
-			typeof parsed.metadata !== 'object' ||
-			typeof parsed.metadata.generatedAt !== 'string' ||
-			typeof parsed.metadata.generator !== 'string' ||
-			typeof parsed.metadata.nodeCount !== 'number' ||
-			typeof parsed.metadata.edgeCount !== 'number'
-		) {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid metadata'),
-				{ code: 'CORRUPTION' },
-			);
-		}
+		validateLoadedGraph(parsed);
 
 		// Update cache with current file mtime
 		setCachedGraph(normalized, parsed, stats.mtimeMs);

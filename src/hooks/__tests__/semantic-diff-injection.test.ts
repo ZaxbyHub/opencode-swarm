@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
+import * as realRepoGraph from '../../tools/repo-graph.js';
 
 // Top-level mock function references (same pattern as diff-summary.test.ts)
 let mockExecFileSync: ReturnType<typeof vi.fn>;
@@ -84,7 +85,8 @@ describe('buildSemanticDiffBlock', () => {
 			getCachedGraph: mockGetCachedGraph,
 		}));
 
-		vi.mock('../../tools/repo-graph/query.js', () => ({
+		vi.mock('../../tools/repo-graph.js', () => ({
+			...realRepoGraph,
 			getImporters: mockGetImporters,
 		}));
 	});

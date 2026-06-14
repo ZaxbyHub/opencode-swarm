@@ -9,7 +9,31 @@ import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../../utils/path-security';
-import type { GraphEdge, GraphNode } from './types';
+import {
+	DATA_ACCESS_VALUES,
+	DATA_OPERATION_VALUES,
+	FILE_ROLE_VALUES,
+	type GraphEdge,
+	type GraphNode,
+	IMPORT_TYPE_VALUES,
+	ONTOLOGY_FINDING_SEVERITY_VALUES,
+	ROUTE_METHOD_VALUES,
+	ROUTE_SOURCE_VALUES,
+	SECURITY_CONFIDENCE_VALUES,
+	SECURITY_KIND_VALUES,
+} from './types';
+
+const FILE_ROLE_SET = new Set<string>(FILE_ROLE_VALUES);
+const ROUTE_METHOD_SET = new Set<string>(ROUTE_METHOD_VALUES);
+const ROUTE_SOURCE_SET = new Set<string>(ROUTE_SOURCE_VALUES);
+const DATA_OPERATION_SET = new Set<string>(DATA_OPERATION_VALUES);
+const DATA_ACCESS_SET = new Set<string>(DATA_ACCESS_VALUES);
+const SECURITY_KIND_SET = new Set<string>(SECURITY_KIND_VALUES);
+const SECURITY_CONFIDENCE_SET = new Set<string>(SECURITY_CONFIDENCE_VALUES);
+const ONTOLOGY_FINDING_SEVERITY_SET = new Set<string>(
+	ONTOLOGY_FINDING_SEVERITY_VALUES,
+);
+const IMPORT_TYPE_SET = new Set<string>(IMPORT_TYPE_VALUES);
 
 // ============ Validation ============
 
@@ -158,6 +182,72 @@ function validateOntologyStrings(node: GraphNode): void {
 			);
 		}
 	}
+	for (const role of ontology.roles ?? []) {
+		validateAllowedOntologyValue(node, 'ontology.roles', role, FILE_ROLE_SET);
+	}
+	for (const route of ontology.routes ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.routes.method',
+			route.method,
+			ROUTE_METHOD_SET,
+		);
+		validateAllowedOntologyValue(
+			node,
+			'ontology.routes.source',
+			route.source,
+			ROUTE_SOURCE_SET,
+		);
+	}
+	for (const fact of ontology.dataOperations ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.dataOperations.operation',
+			fact.operation,
+			DATA_OPERATION_SET,
+		);
+		validateAllowedOntologyValue(
+			node,
+			'ontology.dataOperations.access',
+			fact.access,
+			DATA_ACCESS_SET,
+		);
+	}
+	for (const fact of ontology.security ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.security.kind',
+			fact.kind,
+			SECURITY_KIND_SET,
+		);
+		validateAllowedOntologyValue(
+			node,
+			'ontology.security.confidence',
+			fact.confidence,
+			SECURITY_CONFIDENCE_SET,
+		);
+	}
+	for (const finding of ontology.findings ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.findings.severity',
+			finding.severity,
+			ONTOLOGY_FINDING_SEVERITY_SET,
+		);
+	}
+}
+
+function validateAllowedOntologyValue(
+	node: GraphNode,
+	field: string,
+	value: string,
+	allowed: ReadonlySet<string>,
+): void {
+	if (allowed.has(value)) return;
+	const preview = value.slice(0, 120);
+	throw new Error(
+		`Invalid node: ${field} contains invalid value (file=${node.filePath}, value="${preview}")`,
+	);
 }
 
 /**
@@ -192,11 +282,7 @@ export function validateGraphEdge(edge: GraphEdge): void {
 			'Invalid edge: importSpecifier contains control characters',
 		);
 	}
-	if (
-		!['default', 'named', 'namespace', 'require', 'sideeffect'].includes(
-			edge.importType,
-		)
-	) {
+	if (!IMPORT_TYPE_SET.has(edge.importType)) {
 		throw new Error('Invalid edge: importType is invalid');
 	}
 	if (edge.importedSymbols !== undefined) {

@@ -19,10 +19,10 @@
 import * as fs from 'node:fs';
 import {
 	getBlastRadius,
+	getGraphNode,
 	getGraphPath,
 	getLocalizationContext,
 	loadGraphSync,
-	normalizeGraphPath,
 	type RepoGraph,
 } from '../tools/repo-graph';
 
@@ -90,9 +90,7 @@ export function buildCoderLocalizationBlock(
 	const graph = getCachedGraph(directory);
 	if (!graph) return null;
 	const normalized = targetFile.replace(/\\/g, '/').replace(/^\.\/+/, '');
-	const targetNode = Object.values(graph.nodes).find(
-		(node) => normalizeGraphPath(node.moduleName) === normalized,
-	);
+	const targetNode = getGraphNode(graph, normalized);
 	if (!targetNode) return null;
 	const ctx = getLocalizationContext(graph, normalized, {
 		maxImporters: 5,
@@ -123,11 +121,7 @@ export function buildReviewerBlastRadiusBlock(
 	if (!graph) return null;
 	const normalized = changedFiles
 		.map((f) => f.replace(/\\/g, '/').replace(/^\.\/+/, ''))
-		.filter((f) =>
-			Object.values(graph.nodes).some(
-				(node) => normalizeGraphPath(node.moduleName) === f,
-			),
-		);
+		.filter((f) => getGraphNode(graph, f) !== undefined);
 	if (normalized.length === 0) return null;
 
 	const blast = getBlastRadius(graph, normalized, 3);

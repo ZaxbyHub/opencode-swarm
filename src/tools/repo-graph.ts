@@ -39,6 +39,7 @@ export {
 	getBlastRadius,
 	getDependencies,
 	getFileOntology,
+	getGraphNode,
 	getImporters,
 	getKeyFiles,
 	getLocalizationContext,

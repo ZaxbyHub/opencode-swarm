@@ -64,4 +64,46 @@ describe('repo graph ontology extraction', () => {
 			'api_route_without_detected_auth',
 		);
 	});
+
+	test('handles empty non-route files without inventing ontology facts', () => {
+		const ontology = extractFileOntology({
+			moduleName: 'src/lib/empty.ts',
+			filePath: '/repo/src/lib/empty.ts',
+			language: 'typescript',
+			exports: [],
+			imports: [],
+			content: '',
+		});
+
+		expect(ontology.roles).not.toContain('api_route');
+		expect(ontology.routes).toEqual([]);
+		expect(ontology.dataOperations).toEqual([]);
+		expect(ontology.security).toEqual([]);
+		expect(ontology.findings).toEqual([]);
+	});
+
+	test('extracts multiple route handlers from one file', () => {
+		const ontology = extractFileOntology({
+			moduleName: 'app/api/projects/route.ts',
+			filePath: '/repo/app/api/projects/route.ts',
+			language: 'typescript',
+			exports: ['GET', 'POST'],
+			imports: [],
+			content: [
+				'export async function GET() {',
+				'  return Response.json({ ok: true });',
+				'}',
+				'export async function POST() {',
+				'  return Response.json({ created: true });',
+				'}',
+			].join('\n'),
+		});
+
+		expect(ontology.routes).toContainEqual(
+			expect.objectContaining({ method: 'GET', path: '/api/projects' }),
+		);
+		expect(ontology.routes).toContainEqual(
+			expect.objectContaining({ method: 'POST', path: '/api/projects' }),
+		);
+	});
 });

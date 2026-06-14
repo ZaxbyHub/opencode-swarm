@@ -3,6 +3,7 @@ import type {
 	BlastRadiusResult,
 	FileOntology,
 	FileReference,
+	GraphEdge,
 	GraphNode,
 	LocalizationBlock,
 	PackageBoundarySummary,
@@ -14,6 +15,8 @@ import { normalizeGraphPath } from './types';
 let cachedReverseIndex: {
 	graph: RepoGraph;
 	index: Map<string, FileReference[]>;
+	forwardIndex: Map<string, FileReference[]>;
+	moduleNameIndex: Map<string, GraphNode>;
 } | null = null;
 
 function normalizeLookupPath(input: string): string {
@@ -36,14 +39,14 @@ function absoluteKeyForModule(graph: RepoGraph, moduleName: string): string {
 	return normalizeGraphPath(path.resolve(graphRoot(graph), moduleName));
 }
 
-function getNode(graph: RepoGraph, input: string): GraphNode | undefined {
+export function getGraphNode(
+	graph: RepoGraph,
+	input: string,
+): GraphNode | undefined {
 	const moduleName = toModuleName(graph, input);
 	const direct = graph.nodes[absoluteKeyForModule(graph, moduleName)];
 	if (direct) return direct;
-	for (const node of Object.values(graph.nodes)) {
-		if (normalizeLookupPath(node.moduleName) === moduleName) return node;
-	}
-	return undefined;
+	return getQueryIndexes(graph).moduleNameIndex.get(moduleName);
 }
 
 function moduleNameForEdgePath(graph: RepoGraph, edgePath: string): string {
@@ -55,29 +58,60 @@ function moduleNameForEdgePath(graph: RepoGraph, edgePath: string): string {
 
 function buildReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
 	const reverse = new Map<string, FileReference[]>();
+	const forward = new Map<string, FileReference[]>();
+	const moduleNameIndex = new Map<string, GraphNode>();
+	for (const node of Object.values(graph.nodes)) {
+		moduleNameIndex.set(normalizeLookupPath(node.moduleName), node);
+	}
 	for (const edge of graph.edges) {
+		const source = normalizeGraphPath(edge.source);
 		const target = normalizeGraphPath(edge.target);
-		const list = reverse.get(target);
-		const ref: FileReference = {
+		const sourceRef: FileReference = {
 			file: moduleNameForEdgePath(graph, edge.source),
 			importType: edge.importType,
 		};
-		if (list) list.push(ref);
-		else reverse.set(target, [ref]);
+		const targetRef: FileReference = {
+			file: moduleNameForEdgePath(graph, edge.target),
+			importType: edge.importType,
+		};
+		const reverseRefs = reverse.get(target);
+		if (reverseRefs) reverseRefs.push(sourceRef);
+		else reverse.set(target, [sourceRef]);
+		const forwardRefs = forward.get(source);
+		if (forwardRefs) forwardRefs.push(targetRef);
+		else forward.set(source, [targetRef]);
 	}
 	for (const refs of reverse.values()) {
 		refs.sort((a, b) => a.file.localeCompare(b.file));
 	}
+	for (const refs of forward.values()) {
+		refs.sort((a, b) => a.file.localeCompare(b.file));
+	}
+	cachedReverseIndex = {
+		graph,
+		index: reverse,
+		forwardIndex: forward,
+		moduleNameIndex,
+	};
 	return reverse;
 }
 
-function getReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
+function getQueryIndexes(
+	graph: RepoGraph,
+): NonNullable<typeof cachedReverseIndex> {
 	if (cachedReverseIndex && cachedReverseIndex.graph === graph) {
-		return cachedReverseIndex.index;
+		return cachedReverseIndex;
 	}
-	const index = buildReverseIndex(graph);
-	cachedReverseIndex = { graph, index };
-	return index;
+	buildReverseIndex(graph);
+	return cachedReverseIndex as NonNullable<typeof cachedReverseIndex>;
+}
+
+function getReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
+	return getQueryIndexes(graph).index;
+}
+
+function getForwardIndex(graph: RepoGraph): Map<string, FileReference[]> {
+	return getQueryIndexes(graph).forwardIndex;
 }
 
 export function resetQueryCache(): void {
@@ -98,7 +132,7 @@ export function getImporters(
 	graph: RepoGraph,
 	filePath: string,
 ): FileReference[] {
-	const node = getNode(graph, filePath);
+	const node = getGraphNode(graph, filePath);
 	if (!node) return [];
 	return getReverseIndex(graph).get(normalizeGraphPath(node.filePath)) ?? [];
 }
@@ -107,17 +141,10 @@ export function getDependencies(
 	graph: RepoGraph,
 	filePath: string,
 ): FileReference[] {
-	const node = getNode(graph, filePath);
+	const node = getGraphNode(graph, filePath);
 	if (!node) return [];
 	const sourceKey = normalizeGraphPath(node.filePath);
-	const refs = graph.edges
-		.filter((edge) => normalizeGraphPath(edge.source) === sourceKey)
-		.map((edge) => ({
-			file: moduleNameForEdgePath(graph, edge.target),
-			importType: edge.importType,
-		}));
-	refs.sort((a, b) => a.file.localeCompare(b.file));
-	return refs;
+	return getForwardIndex(graph).get(sourceKey) ?? [];
 }
 
 export function getSymbolConsumers(
@@ -125,7 +152,7 @@ export function getSymbolConsumers(
 	filePath: string,
 	symbolName: string,
 ): SymbolReference[] {
-	const node = getNode(graph, filePath);
+	const node = getGraphNode(graph, filePath);
 	if (!node) return [];
 	const targetKey = normalizeGraphPath(node.filePath);
 	const refs: SymbolReference[] = [];
@@ -156,7 +183,7 @@ export function getBlastRadius(
 	maxDepth = 3,
 ): BlastRadiusResult {
 	const targetNodes = filePaths
-		.map((filePath) => getNode(graph, filePath))
+		.map((filePath) => getGraphNode(graph, filePath))
 		.filter((node): node is GraphNode => node !== undefined);
 	const targets = targetNodes.map((node) =>
 		normalizeLookupPath(node.moduleName),
@@ -189,7 +216,7 @@ export function getBlastRadius(
 		for (const { key, depth } of queue) {
 			const importers = reverse.get(key) ?? [];
 			for (const ref of importers) {
-				const importerNode = getNode(graph, ref.file);
+				const importerNode = getGraphNode(graph, ref.file);
 				if (!importerNode) continue;
 				const importerKey = normalizeGraphPath(importerNode.filePath);
 				if (visited.has(importerKey)) continue;
@@ -240,7 +267,7 @@ export function getFileOntology(
 	graph: RepoGraph,
 	filePath: string,
 ): FileOntology | null {
-	return getNode(graph, filePath)?.ontology ?? null;
+	return getGraphNode(graph, filePath)?.ontology ?? null;
 }
 
 export function getLocalizationContext(
@@ -249,7 +276,7 @@ export function getLocalizationContext(
 	options: { maxImporters?: number; maxDeps?: number; maxDepth?: number } = {},
 ): LocalizationBlock {
 	const target = toModuleName(graph, filePath);
-	const node = getNode(graph, target);
+	const node = getGraphNode(graph, target);
 	const importers = getImporters(graph, target);
 	const dependencies = getDependencies(graph, target);
 	const blast = getBlastRadius(graph, [target], options.maxDepth ?? 2);
@@ -349,6 +376,18 @@ export function getPackageBoundaries(
 	graph: RepoGraph,
 	topN = 25,
 ): PackageBoundarySummary[] {
+	return summarizePackageBoundaries(
+		Object.values(graph.nodes),
+		graph.edges,
+		topN,
+	);
+}
+
+function summarizePackageBoundaries(
+	nodes: GraphNode[],
+	edges: GraphEdge[],
+	topN: number,
+): PackageBoundarySummary[] {
 	const groups = new Map<string, PackageBoundarySummary>();
 	const ensure = (node: GraphNode): PackageBoundarySummary => {
 		const ontology = node.ontology;
@@ -373,7 +412,7 @@ export function getPackageBoundaries(
 	};
 
 	const boundaryByPath = new Map<string, string>();
-	for (const node of Object.values(graph.nodes)) {
+	for (const node of nodes) {
 		const group = ensure(node);
 		boundaryByPath.set(normalizeGraphPath(node.filePath), group.name);
 		group.fileCount++;
@@ -391,7 +430,7 @@ export function getPackageBoundaries(
 
 	const dependsOn = new Map<string, Set<string>>();
 	const dependedOnBy = new Map<string, Set<string>>();
-	for (const edge of graph.edges) {
+	for (const edge of edges) {
 		const sourceBoundary = boundaryByPath.get(normalizeGraphPath(edge.source));
 		const targetBoundary = boundaryByPath.get(normalizeGraphPath(edge.target));
 		if (
@@ -428,6 +467,13 @@ export function getPackageBoundaries(
 		.slice(0, topN);
 }
 
+function summarizeSelectedPackageBoundaries(
+	nodes: GraphNode[],
+	topN = 25,
+): PackageBoundarySummary[] {
+	return summarizePackageBoundaries(nodes, [], topN);
+}
+
 function inferBoundary(moduleName: string): string {
 	const parts = normalizeLookupPath(moduleName).split('/').filter(Boolean);
 	if (parts[0] === 'src' && parts.length >= 2) return `src/${parts[1]}`;
@@ -451,7 +497,7 @@ export function buildOntologyPreflightPacket(
 	const selectedNodes =
 		filePaths.length > 0
 			? filePaths
-					.map((filePath) => getNode(graph, filePath))
+					.map((filePath) => getGraphNode(graph, filePath))
 					.filter((node): node is GraphNode => node !== undefined)
 			: getKeyFiles(graph, maxFiles);
 	const boundedNodes = selectedNodes.slice(0, maxFiles);
@@ -510,6 +556,9 @@ export function buildOntologyPreflightPacket(
 		dataOperations,
 		security,
 		findings,
-		packageBoundaries: getPackageBoundaries(graph, options.maxBoundaries ?? 10),
+		packageBoundaries: summarizeSelectedPackageBoundaries(
+			boundedNodes,
+			options.maxBoundaries ?? 10,
+		),
 	};
 }

@@ -253,6 +253,7 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 				targets: string[];
 				summary: { targetCount: number; routeCount: number };
 				findings: Array<{ file: string; code: string }>;
+				packageBoundaries: Array<{ name: string }>;
 			};
 		};
 		expect(r.success).toBe(true);
@@ -267,6 +268,9 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 				file: 'app/api/public/route.ts',
 				code: 'api_route_without_detected_auth',
 			}),
+		);
+		expect(r.packet.packageBoundaries.map((boundary) => boundary.name)).toEqual(
+			['app'],
 		);
 	});
 });

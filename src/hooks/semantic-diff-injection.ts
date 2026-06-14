@@ -21,8 +21,7 @@ import {
 	generateSummaryMarkdown,
 	type SemanticDiffSummary,
 } from '../diff/summary-generator.js';
-import { getImporters } from '../tools/repo-graph/query.js';
-import { normalizeGraphPath } from '../tools/repo-graph/types.js';
+import { getImporters, normalizeGraphPath } from '../tools/repo-graph.js';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,

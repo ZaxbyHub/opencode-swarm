@@ -16,57 +16,94 @@ export const GRAPH_SCHEMA_VERSION = '1.0.0';
 
 // ============ Types ============
 
-export type FileRole =
-	| 'api_route'
-	| 'middleware'
-	| 'service_module'
-	| 'data_module'
-	| 'swarm_tool'
-	| 'agent'
-	| 'hook'
-	| 'config'
-	| 'schema'
-	| 'test_file'
-	| 'cli_command'
-	| 'documentation'
-	| 'source_module';
+export const FILE_ROLE_VALUES = [
+	'api_route',
+	'middleware',
+	'service_module',
+	'data_module',
+	'swarm_tool',
+	'agent',
+	'hook',
+	'config',
+	'schema',
+	'test_file',
+	'cli_command',
+	'documentation',
+	'source_module',
+] as const;
+export type FileRole = (typeof FILE_ROLE_VALUES)[number];
 
-export type RouteMethod =
-	| 'GET'
-	| 'POST'
-	| 'PUT'
-	| 'PATCH'
-	| 'DELETE'
-	| 'OPTIONS'
-	| 'HEAD'
-	| 'ALL';
+export const ROUTE_METHOD_VALUES = [
+	'GET',
+	'POST',
+	'PUT',
+	'PATCH',
+	'DELETE',
+	'OPTIONS',
+	'HEAD',
+	'ALL',
+] as const;
+export type RouteMethod = (typeof ROUTE_METHOD_VALUES)[number];
+
+export const ROUTE_SOURCE_VALUES = [
+	'file_path',
+	'handler_export',
+	'router_call',
+] as const;
+export type RouteSource = (typeof ROUTE_SOURCE_VALUES)[number];
 
 export interface RouteFact {
 	method: RouteMethod;
 	path: string;
 	line?: number;
-	source: 'file_path' | 'handler_export' | 'router_call';
+	source: RouteSource;
 }
 
+export const DATA_OPERATION_VALUES = [
+	'read',
+	'write',
+	'delete',
+	'transaction',
+	'migration',
+] as const;
+export type DataOperation = (typeof DATA_OPERATION_VALUES)[number];
+
+export const DATA_ACCESS_VALUES = [
+	'database',
+	'orm',
+	'sql',
+	'filesystem',
+	'network',
+	'unknown',
+] as const;
+export type DataAccess = (typeof DATA_ACCESS_VALUES)[number];
+
 export interface DataOperationFact {
-	operation: 'read' | 'write' | 'delete' | 'transaction' | 'migration';
-	access: 'database' | 'orm' | 'sql' | 'filesystem' | 'network' | 'unknown';
+	operation: DataOperation;
+	access: DataAccess;
 	entity?: string;
 	line: number;
 	evidence: string;
 }
 
+export const SECURITY_KIND_VALUES = [
+	'authentication',
+	'authorization',
+	'input_validation',
+	'csrf',
+	'sanitization',
+	'secret_handling',
+] as const;
+export type SecurityKind = (typeof SECURITY_KIND_VALUES)[number];
+
+export const SECURITY_CONFIDENCE_VALUES = ['low', 'medium', 'high'] as const;
+export type SecurityConfidence = (typeof SECURITY_CONFIDENCE_VALUES)[number];
+
 export interface SecurityFact {
-	kind:
-		| 'authentication'
-		| 'authorization'
-		| 'input_validation'
-		| 'csrf'
-		| 'sanitization'
-		| 'secret_handling';
+	kind: SecurityKind;
 	line: number;
 	evidence: string;
-	confidence: 'low' | 'medium' | 'high';
+	confidence: SecurityConfidence;
 }
 
 export interface ConventionFact {
@@ -75,9 +112,18 @@ export interface ConventionFact {
 	evidence: string;
 }
 
+export const ONTOLOGY_FINDING_SEVERITY_VALUES = [
+	'info',
+	'low',
+	'medium',
+	'high',
+] as const;
+export type OntologyFindingSeverity =
+	(typeof ONTOLOGY_FINDING_SEVERITY_VALUES)[number];
+
 export interface OntologyFinding {
 	code: string;
-	severity: 'info' | 'low' | 'medium' | 'high';
+	severity: OntologyFindingSeverity;
 	message: string;
 	line?: number;
 }
@@ -112,6 +158,15 @@ export interface GraphNode {
 	ontology?: FileOntology;
 }
 
+export const IMPORT_TYPE_VALUES = [
+	'default',
+	'named',
+	'namespace',
+	'require',
+	'sideeffect',
+] as const;
+export type ImportType = (typeof IMPORT_TYPE_VALUES)[number];
+
 /**
  * An edge in the dependency graph representing a dependency relationship.
  */
@@ -123,7 +178,7 @@ export interface GraphEdge {
 	/** Import specifier used */
 	importSpecifier: string;
 	/** Type of import */
-	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+	importType: ImportType;
 	/** Named symbols imported from the target, when statically detectable */
 	importedSymbols?: string[];
 }

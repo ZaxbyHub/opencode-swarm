@@ -76,11 +76,15 @@ describe('graph injection — after build', () => {
 	it('coder block contains the localization summary', () => {
 		const block = buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block).not.toBeNull();
-		expect(block).toContain('REPO GRAPH');
-		expect(block).toContain('LOCALIZATION');
-		expect(block).toContain('src/util.ts');
+		expect(block?.split('\n')[0]).toBe('## REPO GRAPH — LOCALIZATION');
+		expect(block).toContain('LOCALIZATION CONTEXT');
+		expect(block).toContain('Target: src/util.ts');
 		// Two importers (main.ts + other.ts) should be reflected.
 		expect(block).toContain('Imported by (2)');
+		expect(block).toContain(
+			'_(Run `repo_map action="blast_radius"` for full transitive dependents.)_',
+		);
+		expect(block!.length).toBeLessThanOrEqual(500);
 	});
 
 	it('coder block returns null for files not in the graph', () => {
@@ -109,6 +113,21 @@ describe('graph injection — after build', () => {
 		expect(block).toContain('Direct dependents');
 		expect(block).toContain('main.ts');
 		expect(block).toContain('Risk:');
+	});
+
+	it('reviewer block truncates long direct-dependent lists with a +N suffix', async () => {
+		for (let i = 0; i < 7; i++) {
+			fs.writeFileSync(
+				path.join(tmp, `src/extra-${i}.ts`),
+				"import { add } from './util';\nexport const value = add(1, 2);\n",
+			);
+		}
+		await buildAndSaveStartupGraph();
+
+		const block = buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']);
+		expect(block).not.toBeNull();
+		expect(block).toContain('+1 more');
+		expect(block).toContain('extra-0.ts');
 	});
 
 	it('reviewer block returns null when no changed files match the graph', () => {
