@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.74.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.0...v7.74.1) (2026-06-14)
+
+
+### Bug Fixes
+
+* **knowledge:** complete issue 1302 wave 0 and wave 1 ([#1345](https://github.com/zaxbysauce/opencode-swarm/issues/1345)) ([c5f68f2](https://github.com/zaxbysauce/opencode-swarm/commit/c5f68f2f5bf5835f59188f8abb1d16708a399e3b))
+
 ## [7.74.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.73.3...v7.74.0) (2026-06-14)
 
 
