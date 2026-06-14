@@ -75,27 +75,31 @@ export async function fetchGitingest(args: GitingestArgs): Promise<string> {
 			}
 
 			// Stream response with early abort on size limit to prevent unbounded buffering
-			let buffer = '';
+			// Fallback to text() if streaming is not available (e.g., in some test environments)
+			let text: string;
 			const reader = response.body?.getReader();
-			if (!reader) {
-				throw new Error('gitingest response has no body reader');
-			}
-
-			const decoder = new TextDecoder();
-			let totalBytes = 0;
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				totalBytes += value.byteLength;
-				if (totalBytes > GITINGEST_MAX_RESPONSE_BYTES) {
-					reader.cancel();
-					throw new Error('gitingest response too large');
+			if (reader) {
+				// Use streaming approach for better memory efficiency
+				let buffer = '';
+				const decoder = new TextDecoder();
+				let totalBytes = 0;
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					totalBytes += value.byteLength;
+					if (totalBytes > GITINGEST_MAX_RESPONSE_BYTES) {
+						reader.cancel();
+						throw new Error('gitingest response too large');
+					}
+					buffer += decoder.decode(value, { stream: true });
 				}
-				buffer += decoder.decode(value, { stream: true });
+				buffer += decoder.decode(); // Flush decoder
+				text = buffer;
+			} else {
+				// Fallback: use response.text() if streaming is not available
+				text = await response.text();
 			}
-			buffer += decoder.decode(); // Flush decoder
 
-			const text = buffer;
 			if (Buffer.byteLength(text) > GITINGEST_MAX_RESPONSE_BYTES) {
 				throw new Error('gitingest response too large');
 			}
