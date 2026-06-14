@@ -300,9 +300,9 @@ describe('knowledge_add tool verification tests', () => {
 		});
 	});
 
-	// ========== Test 4: Near-duplicate returns existing ID ==========
-	describe('Near-duplicate returns existing ID', () => {
-		it('Returns existing ID when adding near-duplicate lesson', async () => {
+	// ========== Test 4: Near-duplicate reinforces existing ID ==========
+	describe('Near-duplicate reinforces existing ID', () => {
+		it('returns existing ID and reinforces when adding near-duplicate lesson', async () => {
 			// First add a valid lesson
 			const firstResult = await knowledge_add.execute(
 				{
@@ -331,9 +331,20 @@ describe('knowledge_add tool verification tests', () => {
 
 			const duplicateParsed = JSON.parse(duplicateResult);
 
-			expect(duplicateParsed.success).toBe(false);
+			expect(duplicateParsed.success).toBe(true);
 			expect(duplicateParsed.id).toBe(firstId);
+			expect(duplicateParsed.reinforced).toBe(true);
 			expect(duplicateParsed.message).toContain('duplicate');
+
+			const entries = readKnowledgeEntries();
+			expect(entries).toHaveLength(1);
+			expect(entries[0].confirmed_by).toEqual([
+				expect.objectContaining({
+					phase_number: 1,
+					project_name: '',
+				}),
+			]);
+			expect(entries[0].confidence).toBe(0.7);
 		});
 
 		it('Adds a sufficiently different lesson successfully', async () => {
@@ -365,7 +376,7 @@ describe('knowledge_add tool verification tests', () => {
 			expect(secondParsed.id).not.toBe(firstParsed.id);
 		});
 
-		it('Only one entry exists after near-duplicate is rejected', async () => {
+		it('Only one entry exists after near-duplicate is reinforced', async () => {
 			// First add a valid lesson
 			await knowledge_add.execute(
 				{
@@ -388,6 +399,98 @@ describe('knowledge_add tool verification tests', () => {
 
 			const entries = readKnowledgeEntries();
 			expect(entries).toHaveLength(1);
+		});
+
+		it('does not append duplicate confirmations when re-adding in the same phase', async () => {
+			const firstResult = await knowledge_add.execute(
+				{
+					lesson: 'Always validate user inputs before processing them',
+					category: 'security',
+					...V3_FIELDS,
+				},
+				tmpDir,
+			);
+			const firstId = JSON.parse(firstResult).id;
+
+			await knowledge_add.execute(
+				{
+					lesson: 'Always validate user inputs before processing them',
+					category: 'security',
+					...V3_FIELDS,
+				},
+				tmpDir,
+			);
+			const duplicateResult = await knowledge_add.execute(
+				{
+					lesson: 'Always validate user inputs before processing them',
+					category: 'security',
+					...V3_FIELDS,
+				},
+				tmpDir,
+			);
+			const duplicateParsed = JSON.parse(duplicateResult);
+
+			expect(duplicateParsed.success).toBe(true);
+			expect(duplicateParsed.id).toBe(firstId);
+			expect(duplicateParsed.reinforced).toBe(false);
+			expect(duplicateParsed.idempotent).toBe(true);
+
+			const entries = readKnowledgeEntries();
+			expect(entries).toHaveLength(1);
+			expect(entries[0].confirmed_by).toHaveLength(1);
+		});
+
+		it('does not reinforce or mutate inactive near-duplicate entries', async () => {
+			const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
+			const archivedEntry = {
+				id: 'archived-id',
+				tier: 'swarm',
+				lesson: 'Always validate user input before processing',
+				category: 'security',
+				tags: ['validation'],
+				scope: 'global',
+				confidence: 0.7,
+				status: 'archived',
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00.000Z',
+						project_name: '',
+					},
+				],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00.000Z',
+				updated_at: '2026-01-01T00:00:00.000Z',
+				project_name: '',
+				auto_generated: false,
+				phases_alive: 9,
+			};
+			await fs.writeFile(knowledgePath, `${JSON.stringify(archivedEntry)}\n`);
+
+			const result = await knowledge_add.execute(
+				{
+					lesson: 'Always validate user input before processing in the system',
+					category: 'security',
+					...V3_FIELDS,
+				},
+				tmpDir,
+			);
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.id).toBe('archived-id');
+			expect(parsed.message).toBe('near-duplicate of inactive existing entry');
+
+			const entries = readKnowledgeEntries();
+			expect(entries).toHaveLength(1);
+			expect(entries[0].status).toBe('archived');
+			expect(entries[0].confirmed_by).toHaveLength(1);
+			expect(entries[0].phases_alive).toBe(9);
 		});
 	});
 

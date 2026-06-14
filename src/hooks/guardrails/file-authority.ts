@@ -138,7 +138,7 @@ const pathNormalizationCache = new QuickLRU<string, string>({
 
 /**
  * LRU cache for compiled picomatch matchers.
- * Maps glob pattern -> matcher function.
+ * Maps glob pattern + case-sensitivity mode -> matcher function.
  */
 const globMatcherCache = new QuickLRU<string, (path: string) => boolean>({
 	maxSize: 200,
@@ -204,7 +204,8 @@ export function getGlobMatcher(
 	caseInsensitive = process.platform === 'win32' ||
 		process.platform === 'darwin',
 ): (path: string) => boolean {
-	const cached = globMatcherCache.get(pattern);
+	const cacheKey = `${caseInsensitive ? 'nocase' : 'case'}\0${pattern}`;
+	const cached = globMatcherCache.get(cacheKey);
 	if (cached !== undefined) {
 		return cached;
 	}
@@ -216,7 +217,7 @@ export function getGlobMatcher(
 			nocase: caseInsensitive, // Case-insensitive on Windows/macOS
 		});
 
-		globMatcherCache.set(pattern, matcher);
+		globMatcherCache.set(cacheKey, matcher);
 
 		return matcher;
 	} catch (err) {
@@ -235,6 +236,7 @@ export type AgentRule = {
 	blockedZones?: FileZone[];
 	blockedGlobs?: string[];
 	allowedGlobs?: string[];
+	allowedCaseSensitiveGlobs?: string[];
 };
 
 export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
@@ -286,12 +288,12 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 		allowedPrefix: ['tests/', 'test/', '.swarm/evidence/'],
 		// v7.x (#bug-test-engineer-write-access): allow writes to any tests/test
 		// directory at any depth (e.g. src-tauri/tests/, packages/foo/test/) and
-		// to any .test.* / .spec.* file so that projects with non-root test
-		// layouts are not blocked. allowedGlobs runs at Step 6, BEFORE blockedPrefix
+		// to common framework test-file conventions so that projects with non-root
+		// test layouts are not blocked. allowedGlobs runs at Step 6, BEFORE blockedPrefix
 		// at Step 7; this ordering is intentional — it means test files inside a
-		// blocked directory like src/ (e.g. src/__tests__/, src/auth/login.test.ts)
+		// blocked directory like src/ (e.g. src/__tests__/, src/auth/test_login.py)
 		// are explicitly re-allowed by the glob before blockedPrefix can deny them.
-		// NOTE: blockedZones runs at Step 5, BEFORE allowedGlobs, so test files
+		// NOTE: blockedZones runs at Step 5, BEFORE allowed globs, so test files
 		// inside generated output dirs (dist/, build/) are still blocked.
 		allowedGlobs: [
 			'**/tests/**',
@@ -299,6 +301,27 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 			'**/__tests__/**',
 			'**/*.test.*',
 			'**/*.spec.*',
+			'test_*.py',
+			'**/test_*.py',
+			'*_test.py',
+			'**/*_test.py',
+			'*_test.go',
+			'**/*_test.go',
+			'*_spec.rb',
+			'**/*_spec.rb',
+			'*.Tests.ps1',
+			'**/*.Tests.ps1',
+		],
+		// Language class suffixes must remain case-sensitive even on Windows/macOS:
+		// case-insensitive "*Test.java" matches Contest.java, and "*Tests.cs"
+		// matches Contests.cs.
+		allowedCaseSensitiveGlobs: [
+			'*Test.java',
+			'**/*Test.java',
+			'*Test.kt',
+			'**/*Test.kt',
+			'*Tests.cs',
+			'**/*Tests.cs',
 		],
 		blockedZones: ['generated'],
 	},
@@ -433,6 +456,9 @@ export function buildEffectiveRules(
 			blockedZones: userRule.blockedZones ?? existing.blockedZones,
 			blockedGlobs: userRule.blockedGlobs ?? existing.blockedGlobs,
 			allowedGlobs: userRule.allowedGlobs ?? existing.allowedGlobs,
+			allowedCaseSensitiveGlobs:
+				userRule.allowedCaseSensitiveGlobs ??
+				existing.allowedCaseSensitiveGlobs,
 		};
 	}
 	return merged;
@@ -638,6 +664,23 @@ export function checkFileAuthorityWithRules(
 			return matcher(normalizedPath);
 		});
 		if (isGlobAllowed) {
+			return { allowed: true };
+		}
+	}
+
+	// Step 6b: allowedCaseSensitiveGlobs - explicit allow for language suffix
+	// conventions that must not use Windows/macOS nocase matching.
+	if (
+		rules.allowedCaseSensitiveGlobs &&
+		rules.allowedCaseSensitiveGlobs.length > 0
+	) {
+		const isCaseSensitiveGlobAllowed = rules.allowedCaseSensitiveGlobs.some(
+			(glob) => {
+				const matcher = getGlobMatcher(glob, false);
+				return matcher(normalizedPath);
+			},
+		);
+		if (isCaseSensitiveGlobAllowed) {
 			return { allowed: true };
 		}
 	}
