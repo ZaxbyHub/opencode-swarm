@@ -12,12 +12,15 @@ import {
 	readKnowledgeCounterRollups,
 } from './knowledge-events.js';
 import {
+	findActiveSwarmNearDuplicate,
+	reinforceSwarmKnowledgeEntry,
+} from './knowledge-reinforcement.js';
+import {
 	appendRejectedLesson,
 	appendRetractionRecord,
 	computeConfidence,
 	computeOutcomeSignal,
 	enforceKnowledgeCap,
-	findNearDuplicate,
 	inferTags,
 	normalize,
 	readKnowledge,
@@ -683,6 +686,7 @@ export async function curateAndStoreSwarm(
 	},
 ): Promise<{
 	stored: number;
+	reinforced: number;
 	skipped: number;
 	rejected: number;
 	quarantined: number;
@@ -717,6 +721,7 @@ export async function curateAndStoreSwarm(
 	// The in-progress accumulator (snapshotPlusNew) prevents intra-batch duplicates.
 	const snapshotPlusNew: SwarmKnowledgeEntry[] = [...snapshot];
 	const toAdd: SwarmKnowledgeEntry[] = [];
+	const pendingReinforcementIds = new Set<string>();
 
 	for (const lesson of lessons) {
 		// Determine category from tags
@@ -764,12 +769,13 @@ export async function curateAndStoreSwarm(
 		}
 
 		// Check for near-duplicates against snapshot + already-planned new entries
-		const duplicate = findNearDuplicate(
+		const duplicate = findActiveSwarmNearDuplicate(
 			lesson,
 			snapshotPlusNew,
 			config.dedup_threshold,
 		);
 		if (duplicate) {
+			pendingReinforcementIds.add(duplicate.id);
 			skipped++;
 			continue; // skip duplicate
 		}
@@ -887,9 +893,13 @@ export async function curateAndStoreSwarm(
 				}
 				continue;
 			}
-			if (
-				findNearDuplicate(entry.lesson, snapshotPlusNew, config.dedup_threshold)
-			) {
+			const duplicate = findActiveSwarmNearDuplicate(
+				entry.lesson,
+				snapshotPlusNew,
+				config.dedup_threshold,
+			);
+			if (duplicate) {
+				pendingReinforcementIds.add(duplicate.id);
 				skipped++;
 				continue;
 			}
@@ -904,16 +914,55 @@ export async function curateAndStoreSwarm(
 	// fresh disk state prevents two concurrent curator calls from both appending the
 	// same lesson).
 	let stored = 0;
-	if (toAdd.length > 0) {
+	let reinforced = 0;
+	if (toAdd.length > 0 || pendingReinforcementIds.size > 0) {
 		await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (current) => {
-			const trulyNew = toAdd.filter(
-				(e) => !findNearDuplicate(e.lesson, current, config.dedup_threshold),
-			);
-			const extraDups = toAdd.length - trulyNew.length;
-			skipped += extraDups;
-			if (trulyNew.length === 0) return null;
-			stored = trulyNew.length;
-			return [...current, ...trulyNew];
+			let changed = false;
+
+			for (const id of pendingReinforcementIds) {
+				const existing = current.find((entry) => entry.id === id);
+				if (!existing) continue;
+				const result = reinforceSwarmKnowledgeEntry(existing, {
+					phase_number: phaseInfo.phase_number,
+					confirmed_at: new Date().toISOString(),
+					project_name: projectName,
+				});
+				if (result.reinforced) {
+					reinforced++;
+					changed = true;
+				}
+			}
+
+			const trulyNew: SwarmKnowledgeEntry[] = [];
+			for (const entry of toAdd) {
+				const duplicate = findActiveSwarmNearDuplicate(
+					entry.lesson,
+					current,
+					config.dedup_threshold,
+				);
+				if (duplicate) {
+					skipped++;
+					const result = reinforceSwarmKnowledgeEntry(duplicate, {
+						phase_number: phaseInfo.phase_number,
+						confirmed_at: new Date().toISOString(),
+						project_name: projectName,
+					});
+					if (result.reinforced) {
+						reinforced++;
+						changed = true;
+					}
+					continue;
+				}
+				trulyNew.push(entry);
+			}
+
+			if (trulyNew.length > 0) {
+				current.push(...trulyNew);
+				stored = trulyNew.length;
+				changed = true;
+			}
+
+			return changed ? current : null;
 		});
 	}
 
@@ -953,7 +1002,7 @@ export async function curateAndStoreSwarm(
 		await _internals.runAutoPromotion(directory, config);
 	}
 
-	return { stored, skipped, rejected, quarantined };
+	return { stored, reinforced, skipped, rejected, quarantined };
 }
 
 // A track-record signal at or below this (negatives clearly outweighing positives,

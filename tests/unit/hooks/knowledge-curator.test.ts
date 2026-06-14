@@ -4,7 +4,10 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import type {
+	KnowledgeConfig,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types.js';
 
 // IMPORTANT: use local mock variables for all mock.module() delegates
 
@@ -470,7 +473,7 @@ Another line without a bullet
 			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
-		test('near-duplicate lesson is silently skipped', async () => {
+		test('near-duplicate lesson reinforces the existing active entry', async () => {
 			// First, return a valid validation result
 			mockValidateLesson.mockReturnValue({
 				valid: true,
@@ -478,23 +481,123 @@ Another line without a bullet
 				reason: null,
 				severity: null,
 			});
-			// Return an existing entry as near-duplicate
-			mockFindNearDuplicate.mockReturnValueOnce({
+			const existingEntry: SwarmKnowledgeEntry = {
 				id: 'existing-id',
+				tier: 'swarm',
 				lesson: 'Similar lesson',
-			});
-			mockReadKnowledge.mockResolvedValueOnce([]);
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'candidate',
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00.000Z',
+						project_name: 'test-project',
+					},
+				],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00.000Z',
+				updated_at: '2026-01-01T00:00:00.000Z',
+				project_name: 'test-project',
+				auto_generated: true,
+				phases_alive: 2,
+			};
+			// Return an existing active entry as near-duplicate
+			mockFindNearDuplicate.mockReturnValueOnce(existingEntry);
+			mockReadKnowledge.mockResolvedValue([existingEntry]);
 
-			await curateAndStoreSwarm(
+			const result = await curateAndStoreSwarm(
 				['Always validate user input'],
 				'test-project',
-				{ phase_number: 1 },
+				{ phase_number: 2 },
 				'/project',
 				defaultConfig,
 			);
 
-			// Should skip the duplicate
-			expect(transactKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
+			expect(result).toEqual(
+				expect.objectContaining({ stored: 0, reinforced: 1, skipped: 1 }),
+			);
+			expect(
+				existingEntry.confirmed_by.map((record) => record.phase_number),
+			).toEqual([1, 2]);
+			expect(existingEntry.phases_alive).toBe(0);
+			expect(existingEntry.updated_at).toEqual(expect.any(String));
+			expect(mockComputeConfidence).toHaveBeenCalledWith(2, true);
+		});
+
+		test('inactive near-duplicate lesson creates a fresh candidate without reviving the old entry', async () => {
+			mockValidateLesson.mockReturnValue({
+				valid: true,
+				layer: null,
+				reason: null,
+				severity: null,
+			});
+			const archivedEntry: SwarmKnowledgeEntry = {
+				id: 'archived-id',
+				tier: 'swarm',
+				lesson: 'Always validate user input',
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'archived',
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00.000Z',
+						project_name: 'test-project',
+					},
+				],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00.000Z',
+				updated_at: '2026-01-01T00:00:00.000Z',
+				project_name: 'test-project',
+				auto_generated: true,
+				phases_alive: 7,
+			};
+			const store = [archivedEntry];
+			mockReadKnowledge.mockResolvedValue(store);
+
+			const result = await curateAndStoreSwarm(
+				['Always validate user input before processing'],
+				'test-project',
+				{ phase_number: 2 },
+				'/project',
+				defaultConfig,
+			);
+
+			expect(result).toEqual(
+				expect.objectContaining({ stored: 1, reinforced: 0, skipped: 0 }),
+			);
+			expect(store).toHaveLength(2);
+			expect(archivedEntry.status).toBe('archived');
+			expect(archivedEntry.confirmed_by).toHaveLength(1);
+			expect(archivedEntry.phases_alive).toBe(7);
+			expect(store[1]).toEqual(
+				expect.objectContaining({
+					lesson: 'Always validate user input before processing',
+					status: 'candidate',
+					confirmed_by: [
+						expect.objectContaining({
+							phase_number: 2,
+							project_name: 'test-project',
+						}),
+					],
+				}),
+			);
 		});
 
 		test('lesson with validation warning (vague) is still stored', async () => {

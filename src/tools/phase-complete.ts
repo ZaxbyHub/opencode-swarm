@@ -883,7 +883,7 @@ export async function executePhaseComplete(
 				if (sessionState) {
 					sessionState.pendingAdvisoryMessages ??= [];
 					sessionState.pendingAdvisoryMessages.push(
-						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
+						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
 			}

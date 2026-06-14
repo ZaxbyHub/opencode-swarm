@@ -77,6 +77,15 @@ Entries can be created four ways:
 3. **Curator recommends** — LLM-driven promotions from the curator agent.
 4. **Migration: `/swarm knowledge migrate`** — one-time import from legacy `.swarm/context.md`.
 
+### Reinforcement
+
+Near-duplicate lessons are not discarded when they match an active swarm entry.
+The curator and `knowledge_add` reinforce the existing entry by appending one
+`confirmed_by` record for the current phase when that phase is not already
+present. Same-phase repeats are idempotent no-ops. A real new phase
+confirmation refreshes `updated_at`, resets `phases_alive` to `0`, and
+recomputes confidence from the distinct phase-confirmation count.
+
 ### Promotion (swarm → hive)
 
 Three routes in `checkHivePromotions()`:

@@ -134,7 +134,7 @@ const _heartbeatTimers = new Map<string, number>();
 
 import {
 	addDeferredWarning,
-	deferredWarnings,
+	clearDeferredWarnings,
 } from './services/warning-buffer.js';
 
 const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
@@ -205,7 +205,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 
 	// Clear deferred warnings at session start for per-session isolation
-	deferredWarnings.length = 0;
+	clearDeferredWarnings();
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -1171,6 +1171,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm deep-dive $ARGUMENTS',
 					description:
 						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+				},
+				'swarm-deep-research': {
+					template: '/swarm deep-research $ARGUMENTS',
+					description:
+						'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
 				},
 				'swarm-codebase-review': {
 					template: '/swarm codebase-review $ARGUMENTS',

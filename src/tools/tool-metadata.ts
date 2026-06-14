@@ -59,6 +59,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'critic_sounding_board',
@@ -106,6 +107,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',
@@ -126,6 +128,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'critic_sounding_board',
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
@@ -138,11 +141,11 @@ export const TOOL_METADATA = {
 	},
 	schema_drift: {
 		description: 'OpenAPI spec vs route drift',
-		agents: ['architect', 'sme', 'docs', 'explorer'],
+		agents: ['architect', 'sme', 'researcher', 'docs', 'explorer'],
 	},
 	todo_extract: {
 		description: 'structured TODO/FIXME extraction',
-		agents: ['architect', 'docs', 'explorer'],
+		agents: ['architect', 'researcher', 'docs', 'explorer'],
 	},
 	evidence_check: {
 		description: 'verify task evidence completeness',
@@ -385,6 +388,7 @@ export const TOOL_METADATA = {
 			'explorer',
 			'coder',
 			'test_engineer',
+			'researcher',
 		],
 	},
 	batch_symbols: {
@@ -448,8 +452,13 @@ export const TOOL_METADATA = {
 	},
 	web_search: {
 		description:
-			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents and by SME for opt-in external skill/source evaluation.',
-		agents: ['architect', 'sme', 'skill_improver'],
+			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, researcher auto-research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents, by SME for opt-in external skill/source evaluation, and by the researcher agent for multi-source auto-research.',
+		agents: ['architect', 'sme', 'researcher', 'skill_improver'],
+	},
+	web_fetch: {
+		description:
+			'Fetch the readable text of a single http(s) URL (architect-only). Returns decoded page text, document title, final URL after redirects, and an evidence reference. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled. Blocks private/loopback/link-local/metadata addresses (re-validated and re-pinned across redirects); enforces timeout and body size cap.',
+		agents: ['architect'],
 	},
 	convene_general_council: {
 		description:
@@ -525,6 +534,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',
@@ -541,6 +551,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',

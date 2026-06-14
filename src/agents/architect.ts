@@ -789,6 +789,22 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
 
+### MODE: DEEP_RESEARCH
+Activates when: architect receives \`[MODE: DEEP_RESEARCH depth=X max_researchers=N rounds=N output=report|brief] <question>\` signal from the deep-research command handler.
+
+Purpose: Orchestrator-worker deep research over external sources. Decompose the question into subtopics, gather evidence with \`web_search\` and \`web_fetch\` across up to \`rounds\` iterative rounds (re-planning gaps between rounds), dispatch parallel sme synthesis workers, verify every claim against cited sources with 2 reviewers, challenge high-stakes claims with the critic, and present a cited report in chat. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
+
+ACTION: Load skill file:.opencode/skills/deep-research/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Do NOT delegate to coder
+- Do NOT call declare_scope
+- Do NOT mutate source code or write any files outside .swarm/
+- You (architect) own \`web_search\` and \`web_fetch\`; sme workers receive gathered evidence in their dispatch message — do NOT expect sme to fetch
+- Every claim in the final report MUST cite a source from the gathered evidence; reviewers verify claim↔citation before a claim is reported
+- Critics challenge only high-stakes / contested claims — do NOT waste cycles on well-supported ones
+- If council.general.enabled is false or no search API key is configured, surface that and STOP — do not produce ungrounded research
+
 ### MODE: CODEBASE_REVIEW
 Activates when: architect receives \`[MODE: CODEBASE_REVIEW mode=X output=X update_main=X allow_dirty=X tracks="..." continue_run="..."] scope="..."\` signal from the codebase-review command handler.
 

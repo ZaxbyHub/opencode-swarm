@@ -1,5 +1,63 @@
 # Changelog
 
+## [7.73.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.73.1...v7.73.2) (2026-06-14)
+
+
+### Bug Fixes
+
+* **knowledge:** reinforce duplicate lessons across phases ([b010f30](https://github.com/zaxbysauce/opencode-swarm/commit/b010f307319def8cc5bb3e45c208a919e6807575))
+
+## [7.73.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.73.0...v7.73.1) (2026-06-14)
+
+
+### Bug Fixes
+
+* **test-engineer:** expand cross-language write authority ([a11fb44](https://github.com/zaxbysauce/opencode-swarm/commit/a11fb44cc7903b5e4be6737dd284c1824805ca9a))
+
+## [7.73.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.72.1...v7.73.0) (2026-06-14)
+
+
+### Features
+
+* **agents:** add auto-research agent with multi-source search protocol ([15457b8](https://github.com/zaxbysauce/opencode-swarm/commit/15457b84608093e557c225c93e4e4b49d2d44c47))
+
+
+### Bug Fixes
+
+* **agents:** address review feedback for researcher subagent ([fad9c69](https://github.com/zaxbysauce/opencode-swarm/commit/fad9c6916bac5316ed0ff87eaf8e09138a3516ec))
+* **rebase:** update agent count assertions for main divergence ([b18e541](https://github.com/zaxbysauce/opencode-swarm/commit/b18e541110dff7a19d44094745240c843ef54a1a))
+* **tests:** correct stale agent count descriptions in constants.test.ts ([a0b4c7a](https://github.com/zaxbysauce/opencode-swarm/commit/a0b4c7ab7dfc954f0f2f62065f8a99c9716dd8f6))
+
+## [7.72.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.72.0...v7.72.1) (2026-06-14)
+
+
+### Bug Fixes
+
+* **quality-debt:** address PR [#1241](https://github.com/zaxbysauce/opencode-swarm/issues/1241) review findings ([a4367fc](https://github.com/zaxbysauce/opencode-swarm/commit/a4367fc89672ccbe524f682a2e8dd568d2de3d60))
+* **quality-debt:** Restrict deferredWarnings access and include in DiagnoseData payload ([3fc712d](https://github.com/zaxbysauce/opencode-swarm/commit/3fc712da3a17649d6f29d14836cdfa31554dc28b))
+* **quality-debt:** Round 2 defense-in-depth for warning-buffer ([5aab740](https://github.com/zaxbysauce/opencode-swarm/commit/5aab74099291fe501a31b0b87c03821db63f237d))
+
+## [7.72.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.3...v7.72.0) (2026-06-14)
+
+
+### Features
+
+* add DEEP_RESEARCH mode and web_fetch tool ([bb3fa24](https://github.com/zaxbysauce/opencode-swarm/commit/bb3fa24b5dbc45f89d6f9f8f495b97b90b45ff18))
+
+
+### Bug Fixes
+
+* **package:** register deep-research in package-smoke bundled-skill allowlist ([c5c1e70](https://github.com/zaxbysauce/opencode-swarm/commit/c5c1e704d343a3e151a023a521b71ef26f7b6fba))
+* **web-fetch:** close PR feedback rounds 2-4 ([48179ac](https://github.com/zaxbysauce/opencode-swarm/commit/48179ac7d76537c965de68d02c0841c49c442cb6))
+* **web-fetch:** pin SSRF-validated IP to defeat DNS rebinding + close PR feedback ([1d0dca7](https://github.com/zaxbysauce/opencode-swarm/commit/1d0dca7bc8cbe630fa86c8463c776af3145c1620))
+
+## [7.71.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.2...v7.71.3) (2026-06-13)
+
+
+### Bug Fixes
+
+* **skills:** address reviewer feedback on parallel-work-check ([1e3293c](https://github.com/zaxbysauce/opencode-swarm/commit/1e3293ca2dbc67a50a4925ff10feed97b2045ece))
+
 ## [7.71.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.1...v7.71.2) (2026-06-13)
 
 

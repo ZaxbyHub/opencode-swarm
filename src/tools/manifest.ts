@@ -107,6 +107,7 @@ import { test_runner } from './test-runner';
 import { todo_extract } from './todo-extract';
 import type { ToolName } from './tool-metadata';
 import { update_task_status } from './update-task-status';
+import { web_fetch } from './web-fetch';
 import { web_search } from './web-search';
 import { write_architecture_supervisor_evidence } from './write-architecture-supervisor-evidence';
 import { write_drift_evidence } from './write-drift-evidence';
@@ -189,6 +190,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	get_qa_gate_profile: () => get_qa_gate_profile,
 	set_qa_gates: () => set_qa_gates,
 	web_search: () => web_search,
+	web_fetch: () => web_fetch,
 	convene_general_council: () => convene_general_council,
 	write_final_council_evidence: () => write_final_council_evidence,
 	skill_generate: () => skill_generate,

@@ -153,6 +153,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 			// candidates — WITHOUT auto-promotion, so this never promotes unrelated
 			// pre-existing candidates as a side effect.
 			let knowledgeProposed = 0;
+			let knowledgeReinforced = 0;
 			let knowledgeQuarantined = 0;
 			try {
 				const config = loadPluginConfig(dirResult.directory);
@@ -190,6 +191,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 						},
 					);
 					knowledgeProposed = result.stored;
+					knowledgeReinforced = result.reinforced;
 					knowledgeQuarantined = result.quarantined;
 				}
 			} catch {
@@ -231,6 +233,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 					verdict: args.verdict,
 					findings_count: args.findings.length,
 					knowledge_proposed: knowledgeProposed,
+					knowledge_reinforced: knowledgeReinforced,
 					knowledge_quarantined: knowledgeQuarantined,
 					skills_proposed: skillsProposed,
 					evidence_path: evidencePath,

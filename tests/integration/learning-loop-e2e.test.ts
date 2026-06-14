@@ -15,7 +15,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../src/config/schema';
-import { curateAndStoreSwarm } from '../../src/hooks/knowledge-curator';
+import {
+	curateAndStoreSwarm,
+	runAutoPromotion,
+} from '../../src/hooks/knowledge-curator';
 import { appendKnowledgeEvent } from '../../src/hooks/knowledge-events';
 import {
 	readKnowledge,
@@ -54,17 +57,22 @@ function candidate(
 describe('learning loop end-to-end (capture -> curate -> retrieve -> outcome)', () => {
 	let dir: string;
 	let kp: string;
+	let prevLocalAppData: string | undefined;
 	let prevXdg: string | undefined;
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-loop-'));
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		kp = resolveSwarmKnowledgePath(dir);
+		prevLocalAppData = process.env.LOCALAPPDATA;
 		prevXdg = process.env.XDG_DATA_HOME;
+		process.env.LOCALAPPDATA = path.join(dir, 'local-app-data');
 		process.env.XDG_DATA_HOME = path.join(dir, 'xdg');
 	});
 
 	afterEach(() => {
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -159,5 +167,53 @@ describe('learning loop end-to-end (capture -> curate -> retrieve -> outcome)', 
 		const debug2 = await computeKnowledgeDebug(dir);
 		expect(debug2.learning.events_by_type.retrieved).toBeGreaterThanOrEqual(1);
 		expect(debug2.learning.events_by_type.applied).toBe(1);
+	});
+
+	it('reinforces repeated near-duplicate lessons across phases into promotion eligibility', async () => {
+		const lesson =
+			'prefer dependency seams over module mocks when isolating tests';
+
+		for (const phase of [1, 2, 3]) {
+			seedInsights([
+				candidate(lesson, {
+					source: {
+						kind: 'micro_reflection',
+						task_id: `t-${phase}`,
+						agent: 'coder',
+						outcome: 'failure_test',
+						trajectory_steps: 3,
+					},
+				}),
+			]);
+			const result = await curateAndStoreSwarm(
+				[],
+				'proj',
+				{ phase_number: phase },
+				dir,
+				config,
+			);
+
+			expect(result.quarantined).toBe(0);
+			if (phase === 1) {
+				expect(result.stored).toBe(1);
+			} else {
+				expect(result.stored).toBe(0);
+				expect(result.reinforced).toBe(1);
+			}
+		}
+
+		const established = await readKnowledge(kp);
+		expect(established).toHaveLength(1);
+		expect(established[0].confirmed_by.map((c) => c.phase_number)).toEqual([
+			1, 2, 3,
+		]);
+		expect(established[0].status).toBe('established');
+		expect(established[0].confidence).toBe(0.8);
+		expect(established[0].phases_alive).toBe(0);
+
+		await runAutoPromotion(dir, config);
+		const promoted = await readKnowledge(kp);
+		expect(promoted[0].status).toBe('promoted');
+		expect(promoted[0].hive_eligible).toBe(true);
 	});
 });

@@ -229,11 +229,11 @@ describe('Diagnose output with deferred warnings', () => {
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 
-		// Add some warnings
-		warningBuffer.deferredWarnings.push('Test warning 1');
-		warningBuffer.deferredWarnings.push('Test warning 2');
+		// Add some warnings using the public API
+		warningBuffer.addDeferredWarning('Test warning 1');
+		warningBuffer.addDeferredWarning('Test warning 2');
 
 		const { getDiagnoseData } = await import(
 			'../../../src/services/diagnose-service.js'
@@ -249,7 +249,7 @@ describe('Diagnose output with deferred warnings', () => {
 		expect(deferredCheck.detail).toContain('2 warning(s) deferred');
 
 		// Cleanup
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 	});
 
 	it('does not include Deferred Warnings check when buffer is empty', async () => {
@@ -257,7 +257,7 @@ describe('Diagnose output with deferred warnings', () => {
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 
 		const { getDiagnoseData } = await import(
 			'../../../src/services/diagnose-service.js'
@@ -271,7 +271,7 @@ describe('Diagnose output with deferred warnings', () => {
 		expect(deferredCheck).toBeUndefined();
 
 		// Cleanup
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 	});
 
 	it('reports correct warning count in Deferred Warnings check', async () => {
@@ -279,11 +279,11 @@ describe('Diagnose output with deferred warnings', () => {
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 
-		// Add exactly 5 warnings
+		// Add exactly 5 warnings using the public API
 		for (let i = 0; i < 5; i++) {
-			warningBuffer.deferredWarnings.push(`Warning ${i + 1}`);
+			warningBuffer.addDeferredWarning(`Warning ${i + 1}`);
 		}
 
 		const { getDiagnoseData } = await import(
@@ -299,7 +299,7 @@ describe('Diagnose output with deferred warnings', () => {
 		expect(deferredCheck.detail).toContain('5 warning(s) deferred');
 
 		// Cleanup
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 	});
 
 	it('formatDiagnoseMarkdown includes Deferred Warnings section when present', async () => {
@@ -307,10 +307,10 @@ describe('Diagnose output with deferred warnings', () => {
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 
-		warningBuffer.deferredWarnings.push('Warning A');
-		warningBuffer.deferredWarnings.push('Warning B');
+		warningBuffer.addDeferredWarning('Warning A');
+		warningBuffer.addDeferredWarning('Warning B');
 
 		const { formatDiagnoseMarkdown, getDiagnoseData } = await import(
 			'../../../src/services/diagnose-service.js'
@@ -324,7 +324,7 @@ describe('Diagnose output with deferred warnings', () => {
 		expect(markdown).toContain('- Warning B');
 
 		// Cleanup
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 	});
 
 	it('formatDiagnoseMarkdown omits Deferred Warnings section when empty', async () => {
@@ -332,7 +332,7 @@ describe('Diagnose output with deferred warnings', () => {
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 
 		const { formatDiagnoseMarkdown, getDiagnoseData } = await import(
 			'../../../src/services/diagnose-service.js'
@@ -344,7 +344,7 @@ describe('Diagnose output with deferred warnings', () => {
 		expect(markdown).not.toContain('## Deferred Warnings');
 
 		// Cleanup
-		warningBuffer.deferredWarnings.length = 0;
+		warningBuffer.clearDeferredWarnings();
 	});
 });
 
@@ -364,20 +364,20 @@ describe('Import dependency validation (no circular dependency)', () => {
 		expect(indexSource).not.toMatch(/require.*diagnose-service/);
 	});
 
-	it('diagnose-service.ts imports deferredWarnings from warning-buffer (no circular dependency)', async () => {
+	it('diagnose-service.ts imports from warning-buffer (no circular dependency)', async () => {
 		// Read the diagnose-service.ts source to verify the import
 		const diagnoseSource = await Bun.file(
 			path.join(process.cwd(), 'src', 'services', 'diagnose-service.ts'),
 		).text();
 
-		// Should import deferredWarnings from warning-buffer (not from ../index to avoid circular dep)
+		// Should import getDeferredWarnings from warning-buffer (not from ../index to avoid circular dep)
 		expect(diagnoseSource).toMatch(
-			/import.*deferredWarnings.*from.*warning-buffer/,
+			/import.*getDeferredWarnings.*from.*warning-buffer/,
 		);
 
-		// Verify the import statement exists - deferredWarnings from ./warning-buffer.js
+		// Verify the import statement exists - getDeferredWarnings from ./warning-buffer.js
 		const importMatch = diagnoseSource.match(
-			/import\s*\{\s*deferredWarnings\s*\}\s*from\s*["']\.\/warning-buffer/,
+			/import\s*\{\s*getDeferredWarnings\s*\}\s*from\s*["']\.\/warning-buffer/,
 		);
 		expect(importMatch).not.toBeNull();
 	});
@@ -385,8 +385,8 @@ describe('Import dependency validation (no circular dependency)', () => {
 	it('index.ts and diagnose-service.ts can be imported without circular reference error', async () => {
 		// This test verifies that importing both modules doesn't throw
 		// "Cannot call module before it's fully loaded" or similar.
-		// After issue #675 fix, deferredWarnings is no longer re-exported from
-		// index.ts — diagnose-service imports it directly from warning-buffer.js.
+		// After the access-control refactor, deferredWarnings is no longer exported —
+		// instead we export getDeferredWarnings() and addDeferredWarning() for access control.
 
 		const indexModule = await import('../../../src/index');
 		// index.ts default export is the v1 plugin object { id, server }
@@ -394,12 +394,15 @@ describe('Import dependency validation (no circular dependency)', () => {
 		expect(typeof indexModule.default).toBe('object');
 		expect(typeof indexModule.default.server).toBe('function');
 
-		// Both warning-buffer (where deferredWarnings actually lives) and
-		// diagnose-service should import cleanly without circular reference.
+		// warning-buffer should export getDeferredWarnings and addDeferredWarning functions,
+		// not the raw deferredWarnings array.
 		const warningBuffer = await import(
 			'../../../src/services/warning-buffer.js'
 		);
-		expect(Array.isArray(warningBuffer.deferredWarnings)).toBe(true);
+		expect(typeof warningBuffer.getDeferredWarnings).toBe('function');
+		expect(typeof warningBuffer.addDeferredWarning).toBe('function');
+		expect(typeof warningBuffer.clearDeferredWarnings).toBe('function');
+		expect(Array.isArray(warningBuffer.getDeferredWarnings())).toBe(true);
 
 		const { getDiagnoseData } = await import(
 			'../../../src/services/diagnose-service.js'
