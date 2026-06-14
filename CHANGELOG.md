@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.72.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.3...v7.72.0) (2026-06-14)
+
+
+### Features
+
+* add DEEP_RESEARCH mode and web_fetch tool ([bb3fa24](https://github.com/zaxbysauce/opencode-swarm/commit/bb3fa24b5dbc45f89d6f9f8f495b97b90b45ff18))
+
+
+### Bug Fixes
+
+* **package:** register deep-research in package-smoke bundled-skill allowlist ([c5c1e70](https://github.com/zaxbysauce/opencode-swarm/commit/c5c1e704d343a3e151a023a521b71ef26f7b6fba))
+* **web-fetch:** close PR feedback rounds 2-4 ([48179ac](https://github.com/zaxbysauce/opencode-swarm/commit/48179ac7d76537c965de68d02c0841c49c442cb6))
+* **web-fetch:** pin SSRF-validated IP to defeat DNS rebinding + close PR feedback ([1d0dca7](https://github.com/zaxbysauce/opencode-swarm/commit/1d0dca7bc8cbe630fa86c8463c776af3145c1620))
+
 ## [7.71.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.2...v7.71.3) (2026-06-13)
 
 
