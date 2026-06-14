@@ -28,6 +28,12 @@ mock.module('../plan/manager.js', () => ({
 	_snapshot_test_exports: {},
 }));
 
+// Restore mocks after each test to prevent cross-test pollution when this
+// file is batched with other delegation*.test.ts files in the same process.
+afterEach(() => {
+	mock.restore();
+});
+
 // We need to import the module after mocking
 const { _internals: delegationGateInternals } = await import(
 	'./delegation-gate'

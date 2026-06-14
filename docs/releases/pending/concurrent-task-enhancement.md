@@ -54,6 +54,8 @@ None for new plans. Existing behavior is preserved for plans without `execution_
 None—preset names remain the same, only their numeric values changed.
 
 ## Known caveats
+- Adaptive backoff only counts tasks explicitly blocked by execution failures (status `blocked` with a `blocked_reason` containing "fail", "error", or "exception"). Tasks waiting on dependencies do not count toward the threshold.
+- Requires at least 2 blocked tasks to trigger. This prevents single-task flakiness in small plans from causing unnecessary throttling.
 - Adaptive backoff only triggers when failure rate exceeds 20%, to avoid over-reacting to minor issues
 - The 50% reduction multiplier is fixed; users can manually adjust via `/swarm concurrency set` if needed
 - Backoff is reported in parallel execution guidance when triggered

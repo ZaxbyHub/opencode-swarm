@@ -573,9 +573,24 @@ async function buildParallelExecutionGuidance(
 	// Override only applies in standard mode — Lean Turbo short-circuits above.
 	let effectiveMaxConcurrent = session?.maxConcurrencyOverride ?? maxConcurrent;
 
-	// Adaptive backoff on errors: detect failures and reduce concurrency
+	// Adaptive backoff on errors: detect failures and reduce concurrency.
+	// Only count tasks explicitly blocked by a failure, not normal dependency
+	// ordering. `blocked_reason` is set by the execution engine when a task
+	// fails; absent or non-failure reasons (e.g. "waiting on dependency")
+	// are NOT treated as backoff-worthy failures.
 	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
-	const blockedTasks = allTasks.filter((task) => task.status === 'blocked');
+	const blockedTasks = allTasks.filter((task) => {
+		if (task.status !== 'blocked') return false;
+		const reason = (task.blocked_reason ?? '').toLowerCase();
+		// Treat as a failure only when the reason explicitly indicates
+		// execution failure. Falls back to conservative "count nothing"
+		// when the reason is absent to avoid false-positive throttling.
+		return (
+			reason.includes('fail') ||
+			reason.includes('error') ||
+			reason.includes('exception')
+		);
+	});
 	const totalTasks = allTasks.length;
 	let backoffTriggered = false;
 
