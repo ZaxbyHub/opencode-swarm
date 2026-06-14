@@ -62,6 +62,30 @@ The protocol executes in the following stages:
 
 This mode is strictly **read-only**: it does NOT mutate source code, delegate to the coder, or call `declare_scope`.
 
+### Repo Graph Ontology
+
+`repo_map` is the shared structural-awareness surface for planning and review.
+It persists `.swarm/repo-graph.json` using the same bounded async graph builder
+that runs after plugin registration, so on-demand `repo_map action="build"` and
+startup graph injection now read/write the same graph schema.
+
+The graph stores imports, exports, inferred file roles, route facts, data
+operations, security-related facts, conventions, and ontology findings. Query
+actions include:
+
+- `importers`, `dependencies`, `blast_radius`, `localization`, and `key_files`
+  for dependency and impact analysis.
+- `ontology` for one file's roles, routes, data/security facts, conventions,
+  and findings.
+- `package_boundaries` for inferred package/layer summaries across the graph.
+- `preflight_packet` for a bounded agent packet covering target files,
+  ontology facts, findings, and package boundaries.
+
+The ontology extractor is intentionally conservative. It records detected facts
+and "detected missing guard" findings; it does not claim formal security proofs.
+Tree-sitter remains the syntax and AST-diff engine, while repo graph startup
+continues to use bounded source scanning to preserve plugin-init invariants.
+
 ### Signal-Triggered Modes (On-Demand Skills)
 
 `DEEP_DIVE` is one of several **signal-triggered modes**. A `/swarm <command>` handler emits a `[MODE: X ...]` activation signal; the architect recognizes it and loads the matching `### MODE: X` section + skill on demand. This keeps the core prompt lean while supporting deep specialized workflows.

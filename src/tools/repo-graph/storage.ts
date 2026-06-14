@@ -6,7 +6,7 @@
  * cache. Symlink resolution guards against workspace-escape attacks.
  */
 
-import { constants, existsSync } from 'node:fs';
+import { constants, existsSync, readFileSync, statSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../../hooks/utils';
@@ -56,6 +56,65 @@ const WINDOWS_RENAME_MAX_RETRIES = 3;
  * Delay between rename retries on Windows (ms).
  */
 const WINDOWS_RENAME_RETRY_DELAY_MS = 50;
+
+function validateLoadedGraph(parsed: RepoGraph): void {
+	if (!parsed.schema_version) {
+		throw Object.assign(new Error('repo-graph.json missing schema_version'), {
+			code: 'CORRUPTION',
+		});
+	}
+	if (!parsed.nodes || typeof parsed.nodes !== 'object') {
+		throw Object.assign(new Error('repo-graph.json missing or invalid nodes'), {
+			code: 'CORRUPTION',
+		});
+	}
+	if (!Array.isArray(parsed.edges)) {
+		throw Object.assign(new Error('repo-graph.json missing or invalid edges'), {
+			code: 'CORRUPTION',
+		});
+	}
+	for (const [key, node] of Object.entries(parsed.nodes)) {
+		if (!key || typeof key !== 'string') {
+			throw Object.assign(
+				new Error('repo-graph.json contains invalid node key'),
+				{ code: 'CORRUPTION' },
+			);
+		}
+		try {
+			validateGraphNode(node);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Invalid node structure';
+			throw Object.assign(
+				new Error(`repo-graph.json node validation failed: ${msg}`),
+				{ code: 'CORRUPTION' },
+			);
+		}
+	}
+	for (const edge of parsed.edges) {
+		try {
+			validateGraphEdge(edge);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Invalid edge structure';
+			throw Object.assign(
+				new Error(`repo-graph.json edge validation failed: ${msg}`),
+				{ code: 'CORRUPTION' },
+			);
+		}
+	}
+	if (
+		!parsed.metadata ||
+		typeof parsed.metadata !== 'object' ||
+		typeof parsed.metadata.generatedAt !== 'string' ||
+		typeof parsed.metadata.generator !== 'string' ||
+		typeof parsed.metadata.nodeCount !== 'number' ||
+		typeof parsed.metadata.edgeCount !== 'number'
+	) {
+		throw Object.assign(
+			new Error('repo-graph.json missing or invalid metadata'),
+			{ code: 'CORRUPTION' },
+		);
+	}
+}
 
 // ============ Safe Load/Save Operations ============
 
@@ -225,6 +284,49 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 			throw error;
 		}
 		// Only return null for ENOENT (file not found); rethrow other I/O errors
+		if (
+			error instanceof Error &&
+			'code' in error &&
+			(error as { code: string }).code === 'ENOENT'
+		) {
+			return null;
+		}
+		throw error;
+	}
+}
+
+/**
+ * Synchronous graph loader for prompt-injection hooks.
+ *
+ * Mirrors loadGraph validation but avoids async file I/O in system prompt
+ * construction. Returns null only when the graph file is absent.
+ */
+export function loadGraphSync(workspace: string): RepoGraph | null {
+	validateWorkspace(workspace);
+	const normalized = path.normalize(workspace);
+	try {
+		const graphPath = getGraphPath(workspace);
+		if (!existsSync(graphPath)) return null;
+		const stats = statSync(graphPath);
+		const content = readFileSync(graphPath, 'utf-8');
+		if (content.includes('\0') || content.includes('\uFFFD')) {
+			throw Object.assign(
+				new Error('repo-graph.json contains null bytes or invalid encoding'),
+				{ code: 'CORRUPTION' },
+			);
+		}
+		let parsed: RepoGraph;
+		try {
+			parsed = JSON.parse(content) as RepoGraph;
+		} catch {
+			throw Object.assign(new Error('repo-graph.json contains invalid JSON'), {
+				code: 'CORRUPTION',
+			});
+		}
+		validateLoadedGraph(parsed);
+		setCachedGraph(normalized, parsed, stats.mtimeMs);
+		return parsed;
+	} catch (error: unknown) {
 		if (
 			error instanceof Error &&
 			'code' in error &&

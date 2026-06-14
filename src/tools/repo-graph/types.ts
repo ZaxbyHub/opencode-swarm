@@ -16,6 +16,82 @@ export const GRAPH_SCHEMA_VERSION = '1.0.0';
 
 // ============ Types ============
 
+export type FileRole =
+	| 'api_route'
+	| 'middleware'
+	| 'service_module'
+	| 'data_module'
+	| 'swarm_tool'
+	| 'agent'
+	| 'hook'
+	| 'config'
+	| 'schema'
+	| 'test_file'
+	| 'cli_command'
+	| 'documentation'
+	| 'source_module';
+
+export type RouteMethod =
+	| 'GET'
+	| 'POST'
+	| 'PUT'
+	| 'PATCH'
+	| 'DELETE'
+	| 'OPTIONS'
+	| 'HEAD'
+	| 'ALL';
+
+export interface RouteFact {
+	method: RouteMethod;
+	path: string;
+	line?: number;
+	source: 'file_path' | 'handler_export' | 'router_call';
+}
+
+export interface DataOperationFact {
+	operation: 'read' | 'write' | 'delete' | 'transaction' | 'migration';
+	access: 'database' | 'orm' | 'sql' | 'filesystem' | 'network' | 'unknown';
+	entity?: string;
+	line: number;
+	evidence: string;
+}
+
+export interface SecurityFact {
+	kind:
+		| 'authentication'
+		| 'authorization'
+		| 'input_validation'
+		| 'csrf'
+		| 'sanitization'
+		| 'secret_handling';
+	line: number;
+	evidence: string;
+	confidence: 'low' | 'medium' | 'high';
+}
+
+export interface ConventionFact {
+	name: string;
+	line?: number;
+	evidence: string;
+}
+
+export interface OntologyFinding {
+	code: string;
+	severity: 'info' | 'low' | 'medium' | 'high';
+	message: string;
+	line?: number;
+}
+
+export interface FileOntology {
+	roles: FileRole[];
+	packageBoundary: string;
+	routes: RouteFact[];
+	dataOperations: DataOperationFact[];
+	security: SecurityFact[];
+	conventions: ConventionFact[];
+	findings: OntologyFinding[];
+}
+
 /**
  * A node in the dependency graph representing a source file.
  */
@@ -32,6 +108,8 @@ export interface GraphNode {
 	language: string;
 	/** Last modified timestamp */
 	mtime: string;
+	/** Optional code ontology facts for agent context/preflight packets */
+	ontology?: FileOntology;
 }
 
 /**
@@ -46,6 +124,53 @@ export interface GraphEdge {
 	importSpecifier: string;
 	/** Type of import */
 	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+	/** Named symbols imported from the target, when statically detectable */
+	importedSymbols?: string[];
+}
+
+export interface FileReference {
+	file: string;
+	line?: number;
+	importType?: GraphEdge['importType'];
+}
+
+export interface SymbolReference {
+	file: string;
+	line?: number;
+	importedAs: string;
+}
+
+export interface BlastRadiusResult {
+	target: string[];
+	directDependents: string[];
+	transitiveDependents: string[];
+	depthReached: number;
+	totalDependents: number;
+	riskLevel: 'low' | 'medium' | 'high' | 'critical';
+}
+
+export interface LocalizationBlock {
+	target: string;
+	importerCount: number;
+	importers: FileReference[];
+	dependencyCount: number;
+	dependencies: FileReference[];
+	exportedSymbolsUsedExternally: string[];
+	blastRadius: BlastRadiusResult;
+	summary: string;
+}
+
+export interface PackageBoundarySummary {
+	name: string;
+	root: string;
+	fileCount: number;
+	roles: Partial<Record<FileRole, number>>;
+	dependsOn: string[];
+	dependedOnBy: string[];
+	routeCount: number;
+	dataOperationCount: number;
+	findingCount: number;
+	publicFiles: string[];
 }
 
 /**

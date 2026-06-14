@@ -18,5 +18,17 @@ Codex-specific execution notes:
   new behavior is wired through config/registration/docs/tests/generated
   artifacts as applicable, no work was deferred or declared out of scope without
   explicit user instruction, and scope decisions were not made silently.
+- For any worktree edit, also run the swarm final gate before declaring completion:
+  - objective validation is recorded,
+  - an independent implementation reviewer approved the actual latest diff,
+  - a separate critic approved after reviewer approval,
+  - every `NEEDS_REVISION` or `BLOCKED` item was fixed and re-reviewed,
+  - no edit occurred after the latest reviewer/critic approval.
+- Record reviewer and critic verdicts in durable task artifacts. For issue-tracer
+  work, use `08b-implementation-review.md` and `09-final-critic.md`; otherwise
+  use a task-local review artifact that names the verdicts, evidence reviewed,
+  and responses to every blocker.
+- Do not count explorer output, plan criticism, passing tests, or self-review as
+  the final implementation reviewer gate when subagent delegation is available.
 
 Do not invoke OpenCode `/swarm` commands from Codex unless the user explicitly asks to operate OpenCode Swarm itself.

@@ -108,6 +108,56 @@ export function validateGraphNode(node: GraphNode): void {
 			);
 		}
 	}
+	if (node.ontology !== undefined) {
+		validateOntologyStrings(node);
+	}
+}
+
+function validateOntologyStrings(node: GraphNode): void {
+	const ontology = node.ontology;
+	if (!ontology || typeof ontology !== 'object') {
+		throw new Error('Invalid node: ontology must be an object');
+	}
+	const values: string[] = [
+		...(ontology.roles ?? []),
+		ontology.packageBoundary,
+		...(ontology.routes ?? []).flatMap((route) => [
+			route.method,
+			route.path,
+			route.source,
+		]),
+		...(ontology.dataOperations ?? []).flatMap((fact) => [
+			fact.operation,
+			fact.access,
+			fact.entity ?? '',
+			fact.evidence,
+		]),
+		...(ontology.security ?? []).flatMap((fact) => [
+			fact.kind,
+			fact.evidence,
+			fact.confidence,
+		]),
+		...(ontology.conventions ?? []).flatMap((fact) => [
+			fact.name,
+			fact.evidence,
+		]),
+		...(ontology.findings ?? []).flatMap((finding) => [
+			finding.code,
+			finding.severity,
+			finding.message,
+		]),
+	];
+	for (const value of values) {
+		if (typeof value !== 'string') {
+			throw new Error('Invalid node: ontology contains non-string value');
+		}
+		if (containsControlChars(value)) {
+			const preview = value.slice(0, 120);
+			throw new Error(
+				`Invalid node: ontology contains control characters (file=${node.filePath}, value="${preview}")`,
+			);
+		}
+	}
 }
 
 /**
@@ -133,5 +183,37 @@ export function validateGraphEdge(edge: GraphEdge): void {
 	}
 	if (containsControlChars(edge.source) || containsControlChars(edge.target)) {
 		throw new Error('Invalid edge: control characters detected');
+	}
+	if (!edge.importSpecifier || typeof edge.importSpecifier !== 'string') {
+		throw new Error('Invalid edge: importSpecifier is required');
+	}
+	if (containsControlChars(edge.importSpecifier)) {
+		throw new Error(
+			'Invalid edge: importSpecifier contains control characters',
+		);
+	}
+	if (
+		!['default', 'named', 'namespace', 'require', 'sideeffect'].includes(
+			edge.importType,
+		)
+	) {
+		throw new Error('Invalid edge: importType is invalid');
+	}
+	if (edge.importedSymbols !== undefined) {
+		if (!Array.isArray(edge.importedSymbols)) {
+			throw new Error('Invalid edge: importedSymbols must be an array');
+		}
+		for (const symbol of edge.importedSymbols) {
+			if (typeof symbol !== 'string') {
+				throw new Error(
+					'Invalid edge: importedSymbols must be an array of strings',
+				);
+			}
+			if (containsControlChars(symbol)) {
+				throw new Error(
+					'Invalid edge: importedSymbols contains control characters',
+				);
+			}
+		}
 	}
 }

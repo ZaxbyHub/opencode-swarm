@@ -32,19 +32,47 @@ export {
 	setCachedGraph,
 } from './repo-graph/cache';
 export { updateGraphForFiles } from './repo-graph/incremental';
-
+export type { ExtractFileOntologyInput } from './repo-graph/ontology';
+export { extractFileOntology } from './repo-graph/ontology';
+export {
+	buildOntologyPreflightPacket,
+	getBlastRadius,
+	getDependencies,
+	getFileOntology,
+	getImporters,
+	getKeyFiles,
+	getLocalizationContext,
+	getPackageBoundaries,
+	getSymbolConsumers,
+	isGraphFresh,
+	resetQueryCache,
+} from './repo-graph/query';
 export {
 	getGraphPath,
 	loadGraph,
+	loadGraphSync,
 	loadOrCreateGraph,
 	saveGraph,
 	saveIfDirty,
 } from './repo-graph/storage';
 export type {
+	BlastRadiusResult,
 	BuildWorkspaceGraphOptions,
+	ConventionFact,
+	DataOperationFact,
+	FileOntology,
+	FileReference,
+	FileRole,
 	GraphEdge,
 	GraphNode,
+	LocalizationBlock,
+	OntologyFinding,
+	PackageBoundarySummary,
 	RepoGraph,
+	RouteFact,
+	RouteMethod,
+	SecurityFact,
+	SymbolReference,
 } from './repo-graph/types';
 export {
 	createEmptyGraph,

@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { buildAndSaveGraph } from '../../../src/graph';
 import {
 	buildCoderLocalizationBlock,
 	buildReviewerBlastRadiusBlock,
 	getCachedGraph,
 	resetGraphInjectionCache,
 } from '../../../src/hooks/repo-graph-injection';
+import {
+	buildWorkspaceGraphAsync,
+	saveGraph,
+} from '../../../src/tools/repo-graph';
 
 let tmp: string;
 
@@ -34,6 +37,11 @@ afterEach(() => {
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+async function buildAndSaveStartupGraph(): Promise<void> {
+	const graph = await buildWorkspaceGraphAsync(tmp);
+	await saveGraph(tmp, graph);
+}
+
 describe('graph injection — silent fallback when no graph exists', () => {
 	it('returns null for coder block', () => {
 		expect(buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
@@ -46,11 +54,23 @@ describe('graph injection — silent fallback when no graph exists', () => {
 	it('returns null when getCachedGraph called pre-build', () => {
 		expect(getCachedGraph(tmp)).toBeNull();
 	});
+
+	it('regression RGI-001: corrupt graph files fail open instead of throwing', () => {
+		fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(tmp, '.swarm', 'repo-graph.json'), '{ nope');
+
+		// Previous code let loadGraphSync corruption errors escape into prompt
+		// construction, violating this hook's documented silent-fallback contract.
+		expect(() => getCachedGraph(tmp)).not.toThrow();
+		expect(getCachedGraph(tmp)).toBeNull();
+		expect(buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
+		expect(buildReviewerBlastRadiusBlock(tmp, ['src/util.ts'])).toBeNull();
+	});
 });
 
 describe('graph injection — after build', () => {
 	beforeEach(async () => {
-		await buildAndSaveGraph(tmp);
+		await buildAndSaveStartupGraph();
 	});
 
 	it('coder block contains the localization summary', () => {
@@ -103,7 +123,7 @@ describe('graph injection — after build', () => {
 
 describe('cache invalidation', () => {
 	it('reloads the graph when the file mtime changes', async () => {
-		await buildAndSaveGraph(tmp);
+		await buildAndSaveStartupGraph();
 		const block1 = buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block1).not.toBeNull();
 
@@ -116,7 +136,7 @@ describe('cache invalidation', () => {
 		// (and bun's stat) use millisecond resolution, so a back-to-back
 		// rebuild can land on the same mtimeMs and skip cache invalidation.
 		await new Promise((r) => setTimeout(r, 20));
-		await buildAndSaveGraph(tmp);
+		await buildAndSaveStartupGraph();
 
 		const block2 = buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block2).not.toBeNull();
