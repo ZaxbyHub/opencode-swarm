@@ -174,6 +174,29 @@ describe('writeProjectConfigIfMissing', () => {
 		expect(parsed).toEqual(originalContent);
 	});
 
+	// Cross-platform error trigger: a regular file at the path where .opencode/
+	// would be created causes mkdirSync to fail on both POSIX (EEXIST) and
+	// Windows (EEXIST/ENOTDIR). The try/catch in writeProjectConfigIfMissing
+	// must surface this as a warning, not abort the install.
+	test('does NOT abort install when .opencode path is blocked by a regular file', async () => {
+		// Pre-create a regular file at the path where .opencode/ would be created
+		const blockedPath = join(tempDir, '.opencode');
+		await writeFile(blockedPath, 'blocked');
+
+		const result = await runCLI(
+			['install'],
+			{ XDG_CONFIG_HOME: tempDir },
+			tempDir,
+		);
+		expect(result.exitCode).toBe(0);
+
+		const combined = result.stdout + result.stderr;
+		expect(combined).toContain('Could not create project config');
+
+		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
+		expect(existsSync(configPath)).toBe(false);
+	});
+
 	test('creates fresh config when project config does not exist', async () => {
 		await runCLI(['install'], { XDG_CONFIG_HOME: tempDir }, tempDir);
 
