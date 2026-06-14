@@ -17,6 +17,13 @@ retry loops. Three root causes were fixed:
 3. **Cross-language test file patterns added to write authority** - the
    `test_engineer` authority rules now recognize the test-file conventions
    advertised in the agent prompt, including Python `test_*.py` / `*_test.py`,
-   Go `*_test.go`, Ruby `*_spec.rb`, JUnit `*Test.java`, C# `*Tests.cs`, and
-   PowerShell `*.Tests.ps1`. These paths remain blocked in generated output
-   directories such as `dist/` and `build/`.
+   Go `*_test.go`, Ruby `*_spec.rb`, JUnit `*Test.java`, Kotlin `*Test.kt`,
+   C# `*Tests.cs`, and PowerShell `*.Tests.ps1`. These paths remain blocked in
+   generated output directories such as `dist/` and `build/`. Java, Kotlin, and
+   C# suffix patterns are matched case-sensitively to avoid false matches like
+   `Contest.java` or `Contests.cs` on Windows/macOS, and the glob matcher cache
+   now keys entries by case mode as well as pattern.
+
+   Custom `authority.rules.<agent>.allowedCaseSensitiveGlobs` values follow the
+   same replacement semantics as the existing authority array fields; setting an
+   empty array intentionally clears the default case-sensitive suffix allowlist.

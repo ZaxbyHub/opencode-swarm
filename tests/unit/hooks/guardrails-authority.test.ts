@@ -531,6 +531,39 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			}
 		});
 
+		it('blocks case-insensitive class-name false matches before prefix rules can mask them', () => {
+			const authorityConfig = {
+				enabled: true,
+				rules: {
+					custom_agent: {
+						allowedCaseSensitiveGlobs: [
+							'**/*Test.java',
+							'**/*Test.kt',
+							'**/*Tests.cs',
+						],
+						allowedPrefix: [],
+					},
+				},
+			};
+
+			for (const filePath of [
+				'lib/Contest.java',
+				'lib/Latest.kt',
+				'lib/Contests.cs',
+			]) {
+				const result = checkFileAuthority(
+					'custom_agent',
+					filePath,
+					tempDir,
+					authorityConfig,
+				);
+				expect(result.allowed).toBe(false);
+				if (isDenied(result)) {
+					expect(result.reason).toContain('not in allowed list');
+				}
+			}
+		});
+
 		it('allows prefixed test_engineer (e.g. local_test_engineer) to write to subdirectory tests/', () => {
 			const result = checkFileAuthority(
 				'local_test_engineer',
@@ -693,6 +726,42 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			const result = checkFileAuthority(
 				'test_engineer',
 				'dist/main_test.go',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('generated');
+			}
+		});
+
+		it('blocks test_engineer from writing dist/UserServiceTest.java (generated zone beats *Test.java)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'dist/UserServiceTest.java',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('generated');
+			}
+		});
+
+		it('blocks test_engineer from writing dist/UserServiceTest.kt (generated zone beats *Test.kt)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'dist/UserServiceTest.kt',
+				tempDir,
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('generated');
+			}
+		});
+
+		it('blocks test_engineer from writing dist/UserServiceTests.cs (generated zone beats *Tests.cs)', () => {
+			const result = checkFileAuthority(
+				'test_engineer',
+				'dist/UserServiceTests.cs',
 				tempDir,
 			);
 			expect(result.allowed).toBe(false);
@@ -1169,6 +1238,101 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			}
 		});
 
+		it('blockedGlobs take precedence over allowedCaseSensitiveGlobs', () => {
+			const result = checkFileAuthority(
+				'custom_agent',
+				'src/main/java/UserServiceTest.java',
+				tempDir,
+				{
+					enabled: true,
+					rules: {
+						custom_agent: {
+							blockedGlobs: ['**/*Test.java'],
+							allowedCaseSensitiveGlobs: ['**/*Test.java'],
+						},
+					},
+				},
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('Path blocked (glob **/*Test.java)');
+			}
+		});
+
+		it('invalid allowedCaseSensitiveGlobs patterns fail closed without throwing', () => {
+			const result = checkFileAuthority(
+				'custom_agent',
+				'src/main/java/UserServiceTest.java',
+				tempDir,
+				{
+					enabled: true,
+					rules: {
+						custom_agent: {
+							allowedCaseSensitiveGlobs: ['['],
+							allowedPrefix: [],
+						},
+					},
+				},
+			);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.reason).toContain('not in allowed list');
+			}
+		});
+
+		it('user rules replace default allowedCaseSensitiveGlobs for test_engineer', () => {
+			const clearedResult = checkFileAuthority(
+				'test_engineer',
+				'src/main/java/UserServiceTest.java',
+				tempDir,
+				{
+					enabled: true,
+					rules: {
+						test_engineer: {
+							allowedCaseSensitiveGlobs: [],
+						},
+					},
+				},
+			);
+			expect(clearedResult.allowed).toBe(false);
+			if (isDenied(clearedResult)) {
+				expect(clearedResult.reason).toContain('Path blocked');
+			}
+
+			const customResult = checkFileAuthority(
+				'test_engineer',
+				'src/main/java/UserServiceSpec.java',
+				tempDir,
+				{
+					enabled: true,
+					rules: {
+						test_engineer: {
+							allowedCaseSensitiveGlobs: ['**/*Spec.java'],
+						},
+					},
+				},
+			);
+			expect(customResult.allowed).toBe(true);
+
+			const replacedDefaultResult = checkFileAuthority(
+				'test_engineer',
+				'src/main/java/UserServiceTest.java',
+				tempDir,
+				{
+					enabled: true,
+					rules: {
+						test_engineer: {
+							allowedCaseSensitiveGlobs: ['**/*Spec.java'],
+						},
+					},
+				},
+			);
+			expect(replacedDefaultResult.allowed).toBe(false);
+			if (isDenied(replacedDefaultResult)) {
+				expect(replacedDefaultResult.reason).toContain('Path blocked');
+			}
+		});
+
 		it('keeps case-sensitive glob matchers isolated from nocase cache entries', () => {
 			clearGuardrailsCaches();
 			const nocaseMatcher = getGlobMatcher('**/*Test.java', true);
@@ -1177,6 +1341,17 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 			const caseMatcher = getGlobMatcher('**/*Test.java', false);
 			expect(caseMatcher('src/main/java/UserServiceTest.java')).toBe(true);
 			expect(caseMatcher('src/main/java/Contest.java')).toBe(false);
+			clearGuardrailsCaches();
+		});
+
+		it('keeps nocase glob matchers isolated from case-sensitive cache entries', () => {
+			clearGuardrailsCaches();
+			const caseMatcher = getGlobMatcher('**/*Test.java', false);
+			expect(caseMatcher('src/main/java/Contest.java')).toBe(false);
+
+			const nocaseMatcher = getGlobMatcher('**/*Test.java', true);
+			expect(nocaseMatcher('src/main/java/UserServiceTest.java')).toBe(true);
+			expect(nocaseMatcher('src/main/java/Contest.java')).toBe(true);
 			clearGuardrailsCaches();
 		});
 

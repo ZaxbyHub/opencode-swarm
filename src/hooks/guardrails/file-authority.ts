@@ -668,6 +668,8 @@ export function checkFileAuthorityWithRules(
 		}
 	}
 
+	// Step 6b: allowedCaseSensitiveGlobs - explicit allow for language suffix
+	// conventions that must not use Windows/macOS nocase matching.
 	if (
 		rules.allowedCaseSensitiveGlobs &&
 		rules.allowedCaseSensitiveGlobs.length > 0
