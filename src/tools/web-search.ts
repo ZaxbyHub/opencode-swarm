@@ -176,14 +176,16 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 			const scannedResults: WebSearchOk['results'] = results.map(
 				({ title, url, snippet }) => {
 					const titleScan = scanExternalContent(title, { trustLevel: 'low' });
-					const snippetScan = scanExternalContent(snippet, { trustLevel: 'low' });
+					const snippetScan = scanExternalContent(snippet, {
+						trustLevel: 'low',
+					});
 
 					const threatLevel: 'error' | 'warning' | 'none' =
 						titleScan.threatLevel === 'error' ||
 						snippetScan.threatLevel === 'error'
 							? 'error'
 							: titleScan.threatLevel === 'warning' ||
-								  snippetScan.threatLevel === 'warning'
+									snippetScan.threatLevel === 'warning'
 								? 'warning'
 								: 'none';
 

@@ -71,7 +71,10 @@ function scanInvisibleFormatChars(text: string): ValidationFinding[] {
  * Neutralize threat patterns in text by wrapping them with delimiters.
  * This makes them visible to the LLM as data, not instructions.
  */
-function neutralizeThreatPatterns(text: string, findings: ValidationFinding[]): string {
+function neutralizeThreatPatterns(
+	text: string,
+	findings: ValidationFinding[],
+): string {
 	if (findings.length === 0) {
 		return text;
 	}
@@ -194,7 +197,10 @@ export function scanExternalContent(
 	}
 
 	// Neutralize error-severity threats
-	const neutralized = neutralizeThreatPatterns(text, modulatedFindings.filter((f) => f.severity === 'error'));
+	const neutralized = neutralizeThreatPatterns(
+		text,
+		modulatedFindings.filter((f) => f.severity === 'error'),
+	);
 
 	return {
 		clean: threatLevel === 'none',
