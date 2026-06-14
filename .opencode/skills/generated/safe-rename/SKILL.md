@@ -5,6 +5,16 @@ description: >
   constants, variables) across a codebase. Uses repo_map, batch_symbols, and
   build_check to ensure every consumer is updated and nothing breaks.
 effort: small
+generated_from_knowledge: []
+source_knowledge_ids: []
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.5
+status: active
+version: 2
+skill_origin: generated
+provenance_note: >
+  Original source knowledge IDs could not be recovered from the knowledge base.
+  Metadata backfilled manually; body content preserved from the prior active revision.
 ---
 
 # Safe Rename Skill

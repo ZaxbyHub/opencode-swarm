@@ -5,6 +5,17 @@ description: >
   default and activated via config flag. Covers tool metadata registration,
   manifest handler wiring, separate tool map, conditional merge, execute()
   guard ordering, and gating tests.
+effort: medium
+generated_from_knowledge: []
+source_knowledge_ids: []
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.5
+status: active
+version: 2
+skill_origin: generated
+provenance_note: >
+  Original source knowledge IDs could not be recovered from the knowledge base.
+  Metadata backfilled manually; body content preserved from the prior active revision.
 ---
 
 # Opt-In Tool Registration Pattern
