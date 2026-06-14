@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.74.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.1...v7.74.2) (2026-06-14)
+
+
+### Bug Fixes
+
+* **security:** consistent prompt-injection scanning for external content ([#1336](https://github.com/zaxbysauce/opencode-swarm/issues/1336)) ([882572c](https://github.com/zaxbysauce/opencode-swarm/commit/882572cd2f73af56396d21a651e0d2fd7ac5011b))
+
 ## [7.74.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.0...v7.74.1) (2026-06-14)
 
 
