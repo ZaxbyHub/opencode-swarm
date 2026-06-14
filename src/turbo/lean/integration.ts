@@ -59,7 +59,7 @@ export interface PhaseCriticResult {
 	evidencePath: string;
 }
 
-// ─── Internal Types ────────────────────────────────────────────────────────────
+// ─── Internal Types ───────────────────────────────────────────────────────────
 
 /**
  * Reviewer evidence record (lean-turbo-reviewer.json).
@@ -373,12 +373,14 @@ async function writeCriticEvidence(
  * @param criticPackage - Compiled boundary review package
  * @param agentName - Name of the critic agent to dispatch
  * @param timeoutMs - Timeout in milliseconds (0 for no timeout)
+ * @param parentSessionId - Parent session ID to attach as child session
  */
 async function defaultDispatchCriticAgent(
 	directory: string,
 	criticPackage: CriticPackage,
 	agentName: string,
 	timeoutMs: number,
+	parentSessionId?: string,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -387,6 +389,9 @@ async function defaultDispatchCriticAgent(
 
 	// Create an ephemeral session for the critic, scoped to the project directory
 	const sessionResult = await client.session.create({
+		...(parentSessionId
+			? { body: { parentID: parentSessionId, title: 'lean_turbo_critic background' } }
+			: {}),
 		query: { directory },
 	});
 
@@ -503,6 +508,7 @@ export const _internals: {
 		pkg: CriticPackage,
 		agentName: string,
 		timeoutMs: number,
+		parentSessionId?: string,
 	) => Promise<string>;
 	resolveDefaultCriticAgent: typeof resolveDefaultCriticAgent;
 	readReviewerEvidence: typeof readReviewerEvidence;
@@ -571,6 +577,7 @@ export async function dispatchPhaseCritic(
 			pkg,
 			agentName,
 			mergedConfig.timeoutMs,
+			sessionID,
 		);
 	} catch (error) {
 		// Fail-closed: dispatch failure → write REJECTED verdict
