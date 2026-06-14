@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.72.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.72.0...v7.72.1) (2026-06-14)
+
+
+### Bug Fixes
+
+* **quality-debt:** address PR [#1241](https://github.com/zaxbysauce/opencode-swarm/issues/1241) review findings ([a4367fc](https://github.com/zaxbysauce/opencode-swarm/commit/a4367fc89672ccbe524f682a2e8dd568d2de3d60))
+* **quality-debt:** Restrict deferredWarnings access and include in DiagnoseData payload ([3fc712d](https://github.com/zaxbysauce/opencode-swarm/commit/3fc712da3a17649d6f29d14836cdfa31554dc28b))
+* **quality-debt:** Round 2 defense-in-depth for warning-buffer ([5aab740](https://github.com/zaxbysauce/opencode-swarm/commit/5aab74099291fe501a31b0b87c03821db63f237d))
+
 ## [7.72.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.71.3...v7.72.0) (2026-06-14)
 
 
