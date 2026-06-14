@@ -2166,14 +2166,12 @@ invalid json here
 			expect(queued.some((r) => r.lesson === lesson14)).toBe(false);
 		});
 
-		it('lesson length boundary: exactly 280 chars is quarantined in full, 281 chars is truncated to 280 on the queued record (Change 4 Layer-5 gate)', async () => {
+		it('lesson length boundary: exactly 280 chars is quarantined in full (Change 4 Layer-5 gate)', async () => {
 			const swarmDir = path.join(tempDir, '.swarm');
 			fs.mkdirSync(swarmDir, { recursive: true });
 			fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), '');
 
 			const lesson280 = 'C'.repeat(280);
-			const lesson281 = 'D'.repeat(281);
-
 			const recommendations: KnowledgeRecommendation[] = [
 				{
 					action: 'promote',
@@ -2181,6 +2179,34 @@ invalid json here
 					lesson: lesson280,
 					reason: 'r',
 				},
+			];
+
+			const result = await applyCuratorKnowledgeUpdates(
+				tempDir,
+				recommendations,
+				defaultKnowledgeConfig,
+			);
+
+			// Change 4 Layer-5 gate: the 280-char lesson passes length/validation,
+			// then is quarantined (skipped) instead of being applied to the store.
+			expect(result.applied).toBe(0);
+			expect(result.skipped).toBe(1);
+			expect(readKnowledgeJsonl(tempDir)).toHaveLength(0);
+
+			const queued = readUnactionableJsonl(tempDir);
+			expect(queued).toHaveLength(1);
+			expect(queued[0].lesson).toBe(lesson280);
+			expect(queued[0].lesson).toHaveLength(280);
+			expect(queued[0].status).toBe('quarantined_unactionable');
+		});
+
+		it('lesson length boundary: 281 chars is truncated to 280 on the queued record (Change 4 Layer-5 gate)', async () => {
+			const swarmDir = path.join(tempDir, '.swarm');
+			fs.mkdirSync(swarmDir, { recursive: true });
+			fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), '');
+
+			const lesson281 = 'D'.repeat(281);
+			const recommendations: KnowledgeRecommendation[] = [
 				{
 					action: 'promote',
 					entry_id: undefined,
@@ -2195,24 +2221,18 @@ invalid json here
 				defaultKnowledgeConfig,
 			);
 
-			// Change 4 Layer-5 gate: both lessons pass length/validation, then both
-			// are quarantined (skipped) instead of being applied to the store.
+			// Change 4 Layer-5 gate: the 281-char lesson passes validation after the
+			// curator trims it to 280, then is quarantined (skipped) instead of being
+			// applied to the store.
 			expect(result.applied).toBe(0);
-			expect(result.skipped).toBe(2);
+			expect(result.skipped).toBe(1);
 			expect(readKnowledgeJsonl(tempDir)).toHaveLength(0);
 
-			// Boundary discrimination is verified on the queued records.
 			const queued = readUnactionableJsonl(tempDir);
-			expect(queued).toHaveLength(2);
-
-			const record280 = queued.find((r) => r.lesson === lesson280);
-			expect(record280?.lesson).toHaveLength(280);
-			expect(record280?.status).toBe('quarantined_unactionable');
-
-			const record281 = queued.find((r) => r.lesson.startsWith('D'));
-			expect(record281?.lesson).toHaveLength(280); // truncated 281 → 280
-			expect(record281?.lesson).toBe('D'.repeat(280));
-			expect(record281?.status).toBe('quarantined_unactionable');
+			expect(queued).toHaveLength(1);
+			expect(queued[0].lesson).toBe('D'.repeat(280));
+			expect(queued[0].lesson).toHaveLength(280); // truncated 281 → 280
+			expect(queued[0].status).toBe('quarantined_unactionable');
 		});
 
 		it('skips new entry creation for non-promote actions with undefined entry_id', async () => {
@@ -2445,15 +2465,15 @@ invalid json here
 			expect(queued[0].status).toBe('quarantined_unactionable');
 		});
 
-		it('SC-003: identical new candidates in same call are each quarantined — intra-batch dedup never extends because nothing is appended (Change 4 Layer-5 gate)', async () => {
+		it('SC-003: identical new candidates in same call collapse to one queued record because unactionable dedup is reason-aware (Change 4 Layer-5 gate)', async () => {
 			const swarmDir = path.join(tempDir, '.swarm');
 			fs.mkdirSync(swarmDir, { recursive: true });
 			fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), '');
 
 			// Two identical promote-new recommendations with identical lesson text.
-			// Pre-Change-4, the first append extended the dedup list so the second
-			// was deduped. Under the Layer-5 gate no new candidate is appended, so
-			// the dedup list never grows and BOTH duplicates reach the gate.
+			// `appendUnactionable` dedups by lesson plus the curator quarantine reason,
+			// so the second quarantine refreshes the existing record instead of
+			// creating a second queue entry.
 			const recommendations: KnowledgeRecommendation[] = [
 				{
 					action: 'promote',
@@ -2465,7 +2485,7 @@ invalid json here
 					action: 'promote',
 					entry_id: undefined,
 					lesson: 'Always validate layer two security checks before deployment',
-					reason: 'security best practice again',
+					reason: 'security best practice',
 				},
 			];
 
@@ -2481,13 +2501,11 @@ invalid json here
 			expect(readKnowledgeJsonl(tempDir)).toHaveLength(0);
 
 			const queued = readUnactionableJsonl(tempDir);
-			expect(queued).toHaveLength(2);
-			for (const record of queued) {
-				expect(record.lesson).toBe(
-					'Always validate layer two security checks before deployment',
-				);
-				expect(record.status).toBe('quarantined_unactionable');
-			}
+			expect(queued).toHaveLength(1);
+			expect(queued[0].lesson).toBe(
+				'Always validate layer two security checks before deployment',
+			);
+			expect(queued[0].status).toBe('quarantined_unactionable');
 		});
 
 		// ============================================================================
