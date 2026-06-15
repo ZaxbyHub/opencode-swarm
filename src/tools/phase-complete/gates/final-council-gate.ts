@@ -83,16 +83,12 @@ export async function runFinalCouncilGate(
 								if (
 									fcTime &&
 									!Number.isNaN(fcTime.getTime()) &&
-									now.getTime() - fcTime.getTime() >
-										24 * 60 * 60 * 1000
+									now.getTime() - fcTime.getTime() > 24 * 60 * 60 * 1000
 								) {
 									const warning =
 										'Final council evidence is older than 24 hours. Consider re-running the final council for fresh review.';
 									gateWarnings.push(warning);
-									safeWarn(
-										`[phase_complete] ${warning}`,
-										undefined,
-									);
+									safeWarn(`[phase_complete] ${warning}`, undefined);
 								}
 
 								// Plan ID binding: prevent stale evidence from prior project

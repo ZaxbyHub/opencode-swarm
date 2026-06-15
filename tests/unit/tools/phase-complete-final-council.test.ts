@@ -455,8 +455,15 @@ describe('final_council gate (Gate 6)', () => {
 			// Manually write evidence with a timestamp 25 hours in the past so the
 			// stale-timestamp branch fires.  writeFinalCouncilEvidence does not accept
 			// a custom timestamp, so we bypass it here.
-			const staleTimestamp = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
-			const evidencePath = join(tempDir, '.swarm', 'evidence', 'final-council.json');
+			const staleTimestamp = new Date(
+				Date.now() - 25 * 60 * 60 * 1000,
+			).toISOString();
+			const evidencePath = join(
+				tempDir,
+				'.swarm',
+				'evidence',
+				'final-council.json',
+			);
 			mkdirSync(join(tempDir, '.swarm', 'evidence'), { recursive: true });
 			writeFileSync(
 				evidencePath,
@@ -495,7 +502,9 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.status).toBe('success');
 			expect(parsed.warnings).toBeDefined();
 			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
-			expect(parsed.warnings.some((w: string) => w.includes('older than 24 hours'))).toBe(true);
+			expect(
+				parsed.warnings.some((w: string) => w.includes('older than 24 hours')),
+			).toBe(true);
 		});
 
 		test('fail-open when plan is missing: returns blocked:false with warning', async () => {
@@ -516,7 +525,9 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.status).not.toBe('blocked');
 			expect(parsed.warnings).toBeDefined();
 			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
-			expect(parsed.warnings.some((w: string) => w.includes('plan.json is missing'))).toBe(true);
+			expect(
+				parsed.warnings.some((w: string) => w.includes('plan.json is missing')),
+			).toBe(true);
 		});
 	});
 

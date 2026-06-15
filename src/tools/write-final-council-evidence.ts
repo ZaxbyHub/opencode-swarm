@@ -161,14 +161,18 @@ export async function executeWriteFinalCouncilEvidence(
 
 	const plan = await loadPlan(directory);
 	if (!plan) {
-		return JSON.stringify({
-			success: false,
-			reason: 'plan_not_found',
-			message:
-				'Cannot write final council evidence: plan.json not found. The plan must be loaded and available before writing final council evidence.',
-			phase: input.phase,
-			plan_id: 'unknown',
-		}, null, 2);
+		return JSON.stringify(
+			{
+				success: false,
+				reason: 'plan_not_found',
+				message:
+					'Cannot write final council evidence: plan.json not found. The plan must be loaded and available before writing final council evidence.',
+				phase: input.phase,
+				plan_id: 'unknown',
+			},
+			null,
+			2,
+		);
 	}
 	const planId = derivePlanId(plan);
 	const normalizedVerdict = normalizeFinalVerdict(
