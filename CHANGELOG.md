@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.76.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.75.0...v7.76.0) (2026-06-15)
+
+
+### Features
+
+* **repo-map:** add ontology and review workflow guidance ([#1349](https://github.com/zaxbysauce/opencode-swarm/issues/1349)) ([588912a](https://github.com/zaxbysauce/opencode-swarm/commit/588912a9104dd53544da3c33135355443cf6d4ce))
+
 ## [7.75.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.3...v7.75.0) (2026-06-15)
 
 
