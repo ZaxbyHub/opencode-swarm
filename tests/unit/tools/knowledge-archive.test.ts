@@ -72,10 +72,12 @@ describe('knowledge_archive', () => {
 	let dir: string;
 	let swarmPath: string;
 	let hivePath: string;
+	let previousHome: string | undefined;
 	let previousXdgDataHome: string | undefined;
 	let previousLocalAppData: string | undefined;
 
 	beforeEach(async () => {
+		previousHome = process.env.HOME;
 		previousXdgDataHome = process.env.XDG_DATA_HOME;
 		previousLocalAppData = process.env.LOCALAPPDATA;
 		dir = join(
@@ -83,6 +85,10 @@ describe('knowledge_archive', () => {
 			`swarm-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(dir, { recursive: true });
+		// Redirect hive path resolution for all platforms:
+		// macOS (darwin) uses HOME; Linux uses XDG_DATA_HOME; Windows uses LOCALAPPDATA.
+		// resolveHiveKnowledgePath() reads process.env.HOME live per call (see knowledge-store.ts).
+		process.env.HOME = dir;
 		process.env.XDG_DATA_HOME = join(dir, 'xdg-data');
 		process.env.LOCALAPPDATA = join(dir, 'localappdata');
 		swarmPath = resolveSwarmKnowledgePath(dir);
@@ -91,6 +97,8 @@ describe('knowledge_archive', () => {
 	});
 
 	afterEach(() => {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 		if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = previousXdgDataHome;
 		if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
