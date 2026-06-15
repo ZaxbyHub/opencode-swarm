@@ -76,7 +76,7 @@ function execGit(
 	opts: { timeoutMs: number; maxBuffer: number },
 ): Promise<string> {
 	return new Promise((resolve, reject) => {
-		child_process.execFile(
+		const proc = child_process.execFile(
 			'git',
 			args,
 			{
@@ -88,6 +88,9 @@ function execGit(
 				stdio: ['ignore', 'pipe', 'pipe'],
 			} as child_process.ExecFileOptionsWithStringEncoding,
 			(error, stdout) => {
+				// Best-effort cleanup: kill the child once the callback fires so
+				// it cannot outlive the caller after success, error, or timeout.
+				proc.kill();
 				if (error) {
 					reject(error);
 					return;
@@ -248,20 +251,40 @@ interface AutoReviewEvent {
 	receipt_path?: string;
 }
 
+// In-process serialization of events.jsonl appends: prevents two concurrent
+// writeAutoReviewEvent calls from racing on the read-N + write-N+1 + rename
+// pattern, where the second rename silently drops the first caller's new line.
+// Serializing through a promise chain also eliminates the O(n) read/write cost
+// — each append becomes O(1) via appendFileSync regardless of file size.
+// Cross-process races are extremely rare (two distinct OpenCode instances
+// writing events simultaneously) and are accepted as best-effort.
+// NOTE: writeAutoReviewEvent is synchronous (: void) so we cannot `await prev`
+// here. The serialization guarantee comes from appendFileSync being blocking:
+// each call completes before the next event-loop callback runs, so writes are
+// naturally ordered. The promise chain preserves the structural pattern from
+// review-receipt.ts withIndexLock for consistency and future async migration.
+let _eventWriteLockChain: Promise<void> = Promise.resolve();
+
+function withEventWriteLock<T>(fn: () => T): T {
+	const _prev = _eventWriteLockChain;
+	let release!: () => void;
+	_eventWriteLockChain = new Promise<void>((r) => {
+		release = r;
+	});
+	try {
+		return fn();
+	} finally {
+		release();
+	}
+}
+
 function writeAutoReviewEvent(directory: string, event: AutoReviewEvent): void {
 	try {
 		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		// Append atomically via read-existing + write-tmp-rename so concurrent
-		// writes on the same event loop do not interleave bytes in the JSONL file.
-		const existing = fs.existsSync(eventsPath)
-			? fs.readFileSync(eventsPath, 'utf-8')
-			: '';
 		const line = `${JSON.stringify(event)}\n`;
-		const tmpPath = `${eventsPath}.tmp.${Date.now()}.${Math.random()
-			.toString(36)
-			.slice(2)}`;
-		fs.writeFileSync(tmpPath, existing + line, 'utf-8');
-		fs.renameSync(tmpPath, eventsPath);
+		withEventWriteLock(() => {
+			fs.appendFileSync(eventsPath, line, 'utf-8');
+		});
 	} catch (err) {
 		logger.warn(
 			`[auto-review] event write failed: ${err instanceof Error ? err.message : String(err)}`,

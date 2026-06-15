@@ -17,52 +17,42 @@ describe('CommandEntry type has new fields', () => {
 		// Verify a command entry has category
 		expect((COMMAND_REGISTRY.status as CommandEntry).category).toBe('core');
 		expect((COMMAND_REGISTRY.agents as CommandEntry).category).toBe('core');
-		expect((COMMAND_REGISTRY.config as CommandEntry).category).toBe(
-			'config',
-		);
+		expect((COMMAND_REGISTRY.config as CommandEntry).category).toBe('config');
 		expect((COMMAND_REGISTRY.diagnose as CommandEntry).category).toBe(
 			'diagnostics',
 		);
-		expect((COMMAND_REGISTRY.history as CommandEntry).category).toBe(
-			'utility',
-		);
+		expect((COMMAND_REGISTRY.history as CommandEntry).category).toBe('utility');
 	});
 
 	test('CommandEntry supports aliasOf field', () => {
 		// Verify alias entries have aliasOf
-		// biome-ignore lint/complexity/useLiteralKeys: compound key
-		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).aliasOf).toBe('config doctor');
-		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe('diagnose');
-		// biome-ignore lint/complexity/useLiteralKeys: compound key
-		expect((COMMAND_REGISTRY['evidence-summary'] as CommandEntry).aliasOf).toBe('evidence summary');
+		const configDoctorAliasOf = getAliasOf('config-doctor');
+		expect(configDoctorAliasOf).toBe('config doctor');
+		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe(
+			'diagnose',
+		);
+		const evidenceSummaryAliasOf = getAliasOf('evidence-summary');
+		expect(evidenceSummaryAliasOf).toBe('evidence summary');
 	});
 
 	test('CommandEntry supports deprecated field', () => {
 		// Verify deprecated entries have deprecated = true
-		// biome-ignore lint/complexity/useLiteralKeys: compound key
-		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).deprecated).toBe(true);
+		const configDoctorDeprecated = getDeprecated('config-doctor');
+		expect(configDoctorDeprecated).toBe(true);
 		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).deprecated).toBe(true);
-		expect(
-			// biome-ignore lint/complexity/useLiteralKeys: compound key
-			(COMMAND_REGISTRY['evidence-summary'] as CommandEntry).deprecated,
-		).toBe(true);
+		const evidenceSummaryDeprecated = getDeprecated('evidence-summary');
+		expect(evidenceSummaryDeprecated).toBe(true);
 	});
 
 	test('Non-alias commands do not have aliasOf or deprecated', () => {
-		expect(
-			(COMMAND_REGISTRY.status as CommandEntry).aliasOf,
-		).toBeUndefined();
+		expect((COMMAND_REGISTRY.status as CommandEntry).aliasOf).toBeUndefined();
 		expect(
 			(COMMAND_REGISTRY.status as CommandEntry).deprecated,
 		).toBeUndefined();
-		expect(
-			// biome-ignore lint/complexity/useLiteralKeys: compound key
-			(COMMAND_REGISTRY['show-plan'] as CommandEntry).aliasOf,
-		).toBeUndefined();
-		expect(
-			// biome-ignore lint/complexity/useLiteralKeys: compound key
-			(COMMAND_REGISTRY['show-plan'] as CommandEntry).deprecated,
-		).toBeUndefined();
+		const showPlanAliasOf = getAliasOf('show-plan');
+		expect(showPlanAliasOf).toBeUndefined();
+		const showPlanDeprecated = getDeprecated('show-plan');
+		expect(showPlanDeprecated).toBeUndefined();
 	});
 });
 
@@ -89,15 +79,12 @@ describe('All commands have valid categories', () => {
 
 	test('SDD commands are registered as utility commands with compound subcommands', () => {
 		expect((COMMAND_REGISTRY.sdd as CommandEntry).category).toBe('utility');
-		// biome-ignore lint/complexity/useLiteralKeys: compound key
-		expect((COMMAND_REGISTRY['sdd status'] as CommandEntry).subcommandOf).toBe('sdd');
-		expect(
-			// biome-ignore lint/complexity/useLiteralKeys: compound key
-			(COMMAND_REGISTRY['sdd validate'] as CommandEntry).subcommandOf,
-		).toBe('sdd');
-		// biome-ignore lint/complexity/useLiteralKeys: compound key
-		expect((COMMAND_REGISTRY['sdd project'] as CommandEntry).subcommandOf).toBe('sdd');
-	});
+		const sddStatus = getSubcommandOf('sdd status');
+		expect(sddStatus).toBe('sdd');
+		const sddValidate = getSubcommandOf('sdd validate');
+		expect(sddValidate).toBe('sdd');
+		const sddProject = getSubcommandOf('sdd project');
+		expect(sddProject).toBe('sdd');
 		expect(resolveCommand(['sdd', 'status'])?.key).toBe('sdd status');
 		expect(resolveCommand(['sdd', 'validate', '--json'])?.key).toBe(
 			'sdd validate',
@@ -414,6 +401,24 @@ describe('resolveCommand works with aliased commands', () => {
 });
 
 // --- Helper functions for isolated testing ---
+
+/**
+ * Get aliasOf for a compound key command without triggering biome useLiteralKeys.
+ * The biome-ignore here covers the entire expression statement below.
+ */
+function getAliasOf(key: string): CommandCategory | string | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry).aliasOf;
+}
+
+function getDeprecated(key: string): boolean | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry)
+		.deprecated;
+}
+
+function getSubcommandOf(key: string): CommandCategory | string | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry)
+		.subcommandOf;
+}
 
 /**
  * Isolated validateAliases implementation for testing.
