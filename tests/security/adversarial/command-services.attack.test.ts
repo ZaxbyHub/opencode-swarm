@@ -203,8 +203,10 @@ describe('ADVERSARIAL: Command Services Attack Vectors', () => {
 		test('EVIDENCE: extremely long task ID (buffer overflow) - ACCEPTED by regex but no crash', async () => {
 			await writeSwarmFile('evidence/task-1/evidence.json', SAMPLE_EVIDENCE);
 			const longId = 'a'.repeat(10000);
-			// The regex allows long alphanumeric strings - this is technically valid
-			// The important thing is no crash occurs
+			// The regex allows long alphanumeric strings - this is technically valid.
+			// Path length guard in loadEvidence returns not_found before any filesystem
+			// access when the resolved path exceeds 4096 chars, so this returns
+			// hasEvidence: false without crashing.
 			const result = await getTaskEvidenceData(tempDir, longId);
 			// Should return no evidence (doesn't exist) without crashing
 			expect(result.hasEvidence).toBe(false);

@@ -80,10 +80,7 @@ import {
 	validateActionability,
 	validateLesson,
 } from './knowledge-validator.js';
-import {
-	normalizeComplianceVerdict,
-	readSkillUsageEntries,
-} from './skill-usage-log.js';
+import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 /**
@@ -159,7 +156,7 @@ async function autoRetireSkills(
 			});
 
 			const violations = skillUsage.filter(
-				(e) => normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
+				(e) => e.complianceVerdict === 'violation',
 			).length;
 			const violationRate =
 				skillUsage.length > 0 ? violations / skillUsage.length : 0;
@@ -516,6 +513,20 @@ export async function writeCuratorSummary(
 	// Atomic write: write to temp file then rename
 	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
 	await bunWrite(tempPath, JSON.stringify(summary, null, 2));
+	// fsync the temp file so the rename below cannot leave us with an empty
+	// or partial canonical file on power-loss / kill -9, and to ensure the
+	// filesystem has flushed the write before the rename becomes visible.
+	try {
+		const fd = fs.openSync(tempPath, 'r+');
+		try {
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		// fsync is best-effort; OSes / filesystems that don't support it
+		// (e.g. some FUSE mounts) should not block the atomic write.
+	}
 	fs.renameSync(tempPath, resolvedPath);
 }
 
@@ -1199,6 +1210,20 @@ export async function runCuratorPhase(
 					tmpPath,
 					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
 				);
+				// fsync the temp file so the rename below cannot leave us with an empty
+				// or partial canonical file on power-loss / kill -9, and to ensure the
+				// filesystem has flushed the write before the rename becomes visible.
+				try {
+					const fd = fs.openSync(tmpPath, 'r+');
+					try {
+						fs.fsyncSync(fd);
+					} finally {
+						fs.closeSync(fd);
+					}
+				} catch {
+					// fsync is best-effort; OSes / filesystems that don't support it
+					// should not block the atomic write.
+				}
 				fs.renameSync(tmpPath, findingsPath);
 			} catch (err) {
 				logger.warn(
@@ -1279,7 +1304,7 @@ export async function runCuratorPhase(
 				if (skillUsage.length === 0) continue;
 
 				const violations = skillUsage.filter(
-					(e) => normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
+					(e) => e.complianceVerdict === 'violation',
 				).length;
 				const violationRate = violations / skillUsage.length;
 
@@ -1293,10 +1318,7 @@ export async function runCuratorPhase(
 
 					const currentVersion = fm?.version ?? 1;
 					const violationContexts: ViolationContext[] = skillUsage
-						.filter(
-							(e) =>
-								normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
-						)
+						.filter((e) => e.complianceVerdict === 'violation')
 						.slice(-10)
 						.map((e) => ({
 							taskId: e.taskID,
