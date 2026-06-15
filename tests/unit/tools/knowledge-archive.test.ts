@@ -47,7 +47,7 @@ function makeHiveEntry(id: string): HiveKnowledgeEntry {
 		tags: [],
 		scope: 'global',
 		confidence: 0.8,
-		status: 'active',
+		status: 'established',
 		confirmed_by: [],
 		source_project: 'original-project',
 		encounter_score: 1.5,
@@ -222,7 +222,7 @@ describe('knowledge_archive', () => {
 			expect(parsed.success).toBe(true);
 			expect(parsed.mode).toBe('archive');
 			expect(parsed.tier).toBe('hive');
-			expect(parsed.previous_status).toBe('active');
+			expect(parsed.previous_status).toBe('established');
 			expect(parsed.status).toBe('archived');
 
 			const entries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
@@ -235,7 +235,7 @@ describe('knowledge_archive', () => {
 			expect(tomb).toHaveLength(1);
 			expect(tomb[0].entry_id).toBe('hive-1');
 			expect(tomb[0].tier).toBe('hive');
-			expect(tomb[0].previous_status).toBe('active');
+			expect(tomb[0].previous_status).toBe('established');
 		});
 
 		it('quarantines hive entry when tier=hive and mode=quarantine', async () => {
@@ -288,7 +288,7 @@ describe('knowledge_archive', () => {
 
 			const entries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
 			expect(entries).toHaveLength(1);
-			expect(entries[0].status).toBe('active');
+			expect(entries[0].status).toBe('established');
 		});
 
 		it('returns not found for unknown hive entry', async () => {
