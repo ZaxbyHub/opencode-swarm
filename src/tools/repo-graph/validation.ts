@@ -34,6 +34,7 @@ const ONTOLOGY_FINDING_SEVERITY_SET = new Set<string>(
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
 );
 const IMPORT_TYPE_SET = new Set<string>(IMPORT_TYPE_VALUES);
+const ONTOLOGY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 
 // ============ Validation ============
 
@@ -228,6 +229,7 @@ function validateOntologyStrings(node: GraphNode): void {
 		);
 	}
 	for (const finding of ontology.findings ?? []) {
+		validateOntologyName(node, 'ontology.findings.code', finding.code);
 		validateAllowedOntologyValue(
 			node,
 			'ontology.findings.severity',
@@ -235,6 +237,18 @@ function validateOntologyStrings(node: GraphNode): void {
 			ONTOLOGY_FINDING_SEVERITY_SET,
 		);
 	}
+}
+
+function validateOntologyName(
+	node: GraphNode,
+	field: string,
+	value: string,
+): void {
+	if (ONTOLOGY_NAME_PATTERN.test(value)) return;
+	const preview = value.slice(0, 120);
+	throw new Error(
+		`Invalid node: ${field} must be lower_snake_case (file=${node.filePath}, value="${preview}")`,
+	);
 }
 
 function validateAllowedOntologyValue(

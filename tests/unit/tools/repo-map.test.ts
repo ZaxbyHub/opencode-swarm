@@ -156,9 +156,15 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 	beforeEach(async () => {
 		fs.mkdirSync(path.join(tmp, 'app/api/users'), { recursive: true });
 		fs.mkdirSync(path.join(tmp, 'app/api/public'), { recursive: true });
+		fs.mkdirSync(path.join(tmp, 'lib'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'lib/db.ts'),
+			'export const db = { user: { create: async (_input: unknown) => ({ id: "1" }) } };\n',
+		);
 		fs.writeFileSync(
 			path.join(tmp, 'app/api/users/route.ts'),
 			[
+				"import { db } from '../../../lib/db';",
 				"import { z } from 'zod';",
 				'const Body = z.object({ name: z.string() });',
 				'export async function POST(req: Request) {',
@@ -245,7 +251,7 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 	it('builds a bounded ontology preflight packet for target files', async () => {
 		const out = await call({
 			action: 'preflight_packet',
-			files: ['app/api/users/route.ts', 'app/api/public/route.ts'],
+			files: ['app/api/users/route.ts', 'app/api/public/route.ts', 'lib/db.ts'],
 		});
 		const r = JSON.parse(out) as {
 			success: boolean;
@@ -253,15 +259,20 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 				targets: string[];
 				summary: { targetCount: number; routeCount: number };
 				findings: Array<{ file: string; code: string }>;
-				packageBoundaries: Array<{ name: string }>;
+				packageBoundaries: Array<{
+					name: string;
+					dependsOn: string[];
+					dependedOnBy: string[];
+				}>;
 			};
 		};
 		expect(r.success).toBe(true);
 		expect(r.packet.targets).toEqual([
 			'app/api/users/route.ts',
 			'app/api/public/route.ts',
+			'lib/db.ts',
 		]);
-		expect(r.packet.summary.targetCount).toBe(2);
+		expect(r.packet.summary.targetCount).toBe(3);
 		expect(r.packet.summary.routeCount).toBe(2);
 		expect(r.packet.findings).toContainEqual(
 			expect.objectContaining({
@@ -269,9 +280,14 @@ describe('repo_map: ontology / package boundaries / preflight packet', () => {
 				code: 'api_route_without_detected_auth',
 			}),
 		);
-		expect(r.packet.packageBoundaries.map((boundary) => boundary.name)).toEqual(
-			['app'],
+		const app = r.packet.packageBoundaries.find(
+			(boundary) => boundary.name === 'app',
 		);
+		const lib = r.packet.packageBoundaries.find(
+			(boundary) => boundary.name === 'lib',
+		);
+		expect(app?.dependsOn).toEqual(['lib']);
+		expect(lib?.dependedOnBy).toEqual(['app']);
 	});
 });
 
@@ -281,6 +297,43 @@ describe('repo_map: validation', () => {
 		const r = JSON.parse(out) as { success: boolean; error: string };
 		expect(r.success).toBe(false);
 		expect(r.error).toContain('unknown action');
+	});
+
+	it('requires build before new ontology actions are queried', async () => {
+		const out = await call({ action: 'ontology', file: 'src/util.ts' });
+		const r = JSON.parse(out) as { success: boolean; error: string };
+		expect(r.success).toBe(false);
+		expect(r.error).toContain('repo_map with action="build"');
+	});
+
+	it('requires file for ontology', async () => {
+		await call({ action: 'build' });
+		const out = await call({ action: 'ontology' });
+		const r = JSON.parse(out) as { success: boolean; error: string };
+		expect(r.success).toBe(false);
+		expect(r.error).toContain('ontology requires `file`');
+	});
+
+	it('rejects path traversal in preflight_packet files', async () => {
+		await call({ action: 'build' });
+		const out = await call({
+			action: 'preflight_packet',
+			files: ['src/util.ts', '../outside.ts'],
+		});
+		const r = JSON.parse(out) as { success: boolean; error: string };
+		expect(r.success).toBe(false);
+		expect(r.error).toContain('path traversal');
+	});
+
+	it('supports package_boundaries after build without a target file', async () => {
+		await call({ action: 'build' });
+		const out = await call({ action: 'package_boundaries' });
+		const r = JSON.parse(out) as {
+			success: boolean;
+			boundaries: Array<{ name: string }>;
+		};
+		expect(r.success).toBe(true);
+		expect(r.boundaries.length).toBeGreaterThan(0);
 	});
 
 	it('rejects path traversal in file argument', async () => {

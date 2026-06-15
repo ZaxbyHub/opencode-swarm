@@ -468,10 +468,53 @@ function summarizePackageBoundaries(
 }
 
 function summarizeSelectedPackageBoundaries(
+	graph: RepoGraph,
 	nodes: GraphNode[],
 	topN = 25,
 ): PackageBoundarySummary[] {
-	return summarizePackageBoundaries(nodes, [], topN);
+	const summaries = summarizePackageBoundaries(nodes, [], topN);
+	const boundaryByModule = new Map<string, string>();
+	for (const node of nodes) {
+		boundaryByModule.set(
+			normalizeLookupPath(node.moduleName),
+			node.ontology?.packageBoundary ?? inferBoundary(node.moduleName),
+		);
+	}
+	const byName = new Map(summaries.map((summary) => [summary.name, summary]));
+	const dependsOn = new Map<string, Set<string>>();
+	const dependedOnBy = new Map<string, Set<string>>();
+	for (const node of nodes) {
+		const sourceBoundary = boundaryByModule.get(
+			normalizeLookupPath(node.moduleName),
+		);
+		if (!sourceBoundary) continue;
+		for (const dep of getDependencies(graph, node.moduleName)) {
+			const targetBoundary = boundaryByModule.get(
+				normalizeLookupPath(dep.file),
+			);
+			if (
+				!targetBoundary ||
+				sourceBoundary === targetBoundary ||
+				!byName.has(sourceBoundary) ||
+				!byName.has(targetBoundary)
+			) {
+				continue;
+			}
+			if (!dependsOn.has(sourceBoundary)) {
+				dependsOn.set(sourceBoundary, new Set());
+			}
+			if (!dependedOnBy.has(targetBoundary)) {
+				dependedOnBy.set(targetBoundary, new Set());
+			}
+			dependsOn.get(sourceBoundary)?.add(targetBoundary);
+			dependedOnBy.get(targetBoundary)?.add(sourceBoundary);
+		}
+	}
+	for (const summary of summaries) {
+		summary.dependsOn = [...(dependsOn.get(summary.name) ?? [])].sort();
+		summary.dependedOnBy = [...(dependedOnBy.get(summary.name) ?? [])].sort();
+	}
+	return summaries;
 }
 
 function inferBoundary(moduleName: string): string {
@@ -557,6 +600,7 @@ export function buildOntologyPreflightPacket(
 		security,
 		findings,
 		packageBoundaries: summarizeSelectedPackageBoundaries(
+			graph,
 			boundedNodes,
 			options.maxBoundaries ?? 10,
 		),

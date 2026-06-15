@@ -57,5 +57,6 @@ repo-graph.json
 # Claude Code session artifacts (investigation traces, event logs, local settings)
 events.jsonl
 .claude/issue-traces/
+.codex/issue-traces/
 .Codex/issue-traces/
 

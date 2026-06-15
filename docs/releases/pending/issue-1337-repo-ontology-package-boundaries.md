@@ -10,8 +10,14 @@ Adds richer repository intelligence to the existing `repo_map` surface:
   findings.
 - New `repo_map` actions expose `ontology`, `package_boundaries`, and
   `preflight_packet` data for planning and review.
+- `preflight_packet` now includes target-local package-boundary dependency
+  relationships for the bounded target set, while full graph-wide boundary
+  relationships remain available through `action="package_boundaries"`.
 - Coder/reviewer graph injections and semantic-diff consumer counts now read
   the active startup graph schema.
+- Graph-load validation now rejects invalid ontology enum values, free-form
+  finding codes, and broader control/directional formatting characters before
+  they can reach prompt context.
 - `package.json#exports` now declares the root plugin entry and package
   metadata boundary without changing the published `dist/index.js` runtime
   contract; the Bun-targeted CLI remains exposed through `bin`.
