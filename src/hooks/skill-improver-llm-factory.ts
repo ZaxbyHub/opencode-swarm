@@ -14,19 +14,7 @@
  */
 
 import { swarmState } from '../state.js';
-
-/**
- * True only for genuine cancellation errors (a native `AbortError` /
- * `TimeoutError` raised when a forwarded `AbortSignal` fires). Used to map
- * cancellation — and only cancellation — onto the `SKILL_IMPROVER_LLM_TIMEOUT`
- * sentinel, so a real failure that merely coincides with an aborted signal
- * still surfaces as itself rather than being misclassified as a timeout.
- */
-function isAbortError(err: unknown): boolean {
-	if (typeof err !== 'object' || err === null) return false;
-	const name = (err as { name?: unknown }).name;
-	return name === 'AbortError' || name === 'TimeoutError';
-}
+import { isAbortError } from './abort-utils.js';
 
 export type SkillImproverLLMDelegate = (
 	systemPrompt: string,
@@ -156,9 +144,6 @@ export function createSkillImproverLLMDelegate(
 			});
 
 			if (!promptResult.data) {
-				// A null result while the signal is aborted is the cancellation
-				// path, not a real prompt failure.
-				if (signal?.aborted) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
 				throw new Error(
 					`skill_improver LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
 				);
