@@ -15,6 +15,8 @@ const MAX_PROMPT_CHARS = 80_000;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const MAX_LANE_OUTPUT_CHARS = 20_000;
+const MAX_ERROR_CHARS = 200;
+const ERROR_TRUNCATION_SUFFIX = '...';
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
@@ -55,6 +57,8 @@ const READ_ONLY_TOOL_DENYLIST = [
 		'write_mutation_evidence',
 		'knowledge_add',
 		'knowledge_remove',
+		'summarize_work',
+		'doc_scan',
 	]),
 ] as const;
 
@@ -167,6 +171,8 @@ export const _internals: {
 	createParallelDispatcher,
 	now: () => Date.now(),
 };
+
+export const _test_exports = { formatError };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
 	write: false;
@@ -288,9 +294,7 @@ async function runLane(
 			})
 			.catch(() => undefined);
 		const createResult = await withTimeout(
-			createPromise.catch((error) => {
-				throw error;
-			}),
+			createPromise,
 			timeoutMs,
 			createTimeoutMessage,
 		).catch((error) => {
@@ -488,8 +492,10 @@ function boundLaneOutput(output: string): {
 		};
 	}
 	const omitted = output.length - MAX_LANE_OUTPUT_CHARS;
+	const suffix = `\n[... ${omitted} chars truncated by dispatch_lanes ...]`;
+	const maxContent = Math.max(0, MAX_LANE_OUTPUT_CHARS - suffix.length);
 	return {
-		output: `${output.slice(0, MAX_LANE_OUTPUT_CHARS)}\n[... ${omitted} chars truncated by dispatch_lanes ...]`,
+		output: `${output.slice(0, maxContent)}${suffix}`,
 		output_chars: output.length,
 		output_truncated: true,
 	};
@@ -559,12 +565,13 @@ function extractText(
 
 function formatError(error: unknown): string {
 	if (error instanceof Error) return error.message;
-	if (typeof error === 'string') return error;
-	try {
-		return JSON.stringify(error);
-	} catch {
-		return String(error);
-	}
+	const text = typeof error === 'string' ? error : String(error);
+	return boundErrorString(text);
+}
+
+function boundErrorString(text: string): string {
+	if (text.length <= MAX_ERROR_CHARS) return text;
+	return `${text.slice(0, MAX_ERROR_CHARS)}${ERROR_TRUNCATION_SUFFIX}`;
 }
 
 function isoNow(): string {
