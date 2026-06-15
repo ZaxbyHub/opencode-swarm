@@ -13,6 +13,7 @@ import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
+import { handleConsolidateCommand } from './consolidate.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
@@ -521,6 +522,18 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleCurateCommand(ctx.directory, ctx.args),
 		description: 'Run knowledge curation and hive promotion review',
 		args: '',
+		category: 'utility',
+	},
+	consolidate: {
+		handler: (ctx) =>
+			handleConsolidateCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run quota-bounded skill-improver consolidation and stage skill proposals',
+		details:
+			'Runs the same consolidation pass used by scheduled skill_improver trigger points: queue hardening, skill-improver proposal writing, and optional draft-skill generation. It never auto-activates skills. Use --respect-interval to obey the configured cadence instead of forcing a run.',
+		args: '--force, --respect-interval, --evaluate',
 		category: 'utility',
 	},
 	'dark-matter': {

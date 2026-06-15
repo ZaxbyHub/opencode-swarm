@@ -549,6 +549,18 @@ Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson 
 
 Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse.
 
+### `/swarm consolidate [--force] [--respect-interval] [--evaluate]`
+
+Run quota-bounded skill-improver consolidation. This drains the same bounded
+skill/knowledge maintenance passes used by scheduled consolidation, writes a
+skill-improver proposal, and may draft generated skill proposals when
+`skill_improver.write_mode` is `draft_skills`. It never auto-activates skills.
+
+By default the command forces a run while still respecting
+`skill_improver.enabled` and daily quota. Use `--respect-interval` to obey
+`skill_improver.consolidation_interval_hours`; use `--evaluate` to validate any
+drafted skills against `.swarm/skills/evals/<slug>/*.json` before writing them.
+
 ### `/swarm concurrency <set|status|reset>`
 
 Manage the session-scoped runtime concurrency override for plan execution. This requires an active OpenCode session.

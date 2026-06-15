@@ -404,11 +404,14 @@ that subagents load via the existing `SKILLS:` delegation field.
 | `skill_list` | List drafts and active generated skills. |
 | `skill_apply` | Activate a draft into `.opencode/skills/generated/<slug>/SKILL.md`. |
 | `skill_inspect` | Print a skill body with source knowledge IDs. |
+| `skill_regenerate` | Rebuild an active generated skill from current source knowledge. |
 
 ### Layout
 
 ```
 .swarm/skills/proposals/<slug>.md           # drafts (curator + skill_improver)
+.swarm/skills/evals/<slug>/*.json           # optional validation fixtures
+.swarm/skills/rejected-edits.jsonl          # FIFO buffer for rejected candidates
 .opencode/skills/generated/<slug>/SKILL.md  # active generated skills
 ```
 
@@ -420,6 +423,24 @@ Generated files include the marker
 
 `skill_apply` will refuse to overwrite an active SKILL.md that lacks this
 marker (i.e. one a human authored or modified) unless `force=true` is passed.
+
+Generated frontmatter includes `triggers:` when source knowledge provided
+trigger phrases. The propagation scorer treats those phrases as bounded literal
+hints, so a task such as "fix the biome lint config" can surface a skill whose
+frontmatter includes `triggers: ["biome", "lint config"]`.
+
+### Validation fixtures
+
+Optional eval fixtures under `.swarm/skills/evals/<slug>/*.json` gate generated
+skill changes when callers pass `evaluate=true`. Each fixture can be a single
+case, an array, or `{ "cases": [...] }`; cases support
+`required_phrases` and `forbidden_phrases`.
+
+When no eval set exists, the gate fails open and reports `unevaluated`. When an
+incumbent active skill exists, the candidate must strictly improve the incumbent
+before `skill_apply`, active `skill_generate`, `skill_regenerate`, or automatic
+skill revision writes anything. Rejected candidates are recorded in the bounded
+`.swarm/skills/rejected-edits.jsonl` buffer.
 
 ### Curator integration
 
@@ -464,6 +485,8 @@ directives, Concrete recommendations, Optional cluster suggestions, Risks.
   "enabled": false,
   "max_calls_per_day": 10,
   "trigger": "manual",
+  "consolidation_interval_hours": 24,
+  "consolidation_max_calls_per_run": 1,
   "targets": ["skills", "spec", "architect_prompt", "knowledge"],
   "write_mode": "proposal",       // 'proposal' (no source mutation) | 'draft_skills'
   "require_user_approval": true,
@@ -532,6 +555,13 @@ Skill-improver proposal quota state lives at `.swarm/skill-improver-quota.json`:
   `.swarm/skill-improver/proposals/<timestamp>.md` only. With
   `write_mode: "draft_skills"` it additionally drafts SKILL.md proposals via
   the `skill_generate` pipeline (still draft mode — never auto-activated).
+
+- Set `trigger: "scheduled"` to allow opportunistic consolidation on startup
+  and phase completion. The scheduler is cadence-gated by
+  `consolidation_interval_hours`, reserves at most
+  `consolidation_max_calls_per_run` calls per run, validates drafted skills
+  against matching eval fixtures, and never auto-activates proposals. Use
+  `/swarm consolidate` for an explicit manual pass.
 
 > **CI verification limitation.** The real-LLM dispatch path requires an
 > OpenCode runtime to wire `swarmState.opencodeClient`. Unit and integration

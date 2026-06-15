@@ -15,19 +15,59 @@ files that agents can load through the normal skill system.
 5. `skill_apply` promotes a reviewed draft to
    `.opencode/skills/generated/<slug>/SKILL.md`.
 
-Generated skills are never activated automatically. A human or architect must
-review and apply the draft.
+Scheduled consolidation never activates generated skills automatically. A human
+or architect must review and apply staged drafts from that path.
+
+Generated frontmatter carries the same trigger phrases that matured the source
+knowledge:
+
+```yaml
+---
+name: biome-lint
+description: Fix lint config
+triggers:
+  - biome
+  - lint config
+---
+```
+
+The skill scorer treats `triggers` as bounded literal hints. A task that contains
+a trigger phrase receives a relevance boost, while short phrases are ignored so
+generic tokens do not dominate ranking.
 
 ## File Layout
 
 ```text
 .swarm/skills/proposals/<slug>.md
+.swarm/skills/evals/<slug>/*.json
+.swarm/skills/rejected-edits.jsonl
 .opencode/skills/generated/<slug>/SKILL.md
 ```
 
 Active generated skills include a generator marker comment. `skill_apply`
 refuses to overwrite an active skill that lacks that marker unless `force=true`
 is passed.
+
+## Validation Evals
+
+Place optional deterministic eval fixtures under
+`.swarm/skills/evals/<slug>/*.json`. A fixture can be a single case, an array,
+or `{ "cases": [...] }`:
+
+```json
+{
+  "required_phrases": ["call declare_scope"],
+  "forbidden_phrases": ["skip scope declaration"]
+}
+```
+
+When `evaluate=true` is passed to `skill_generate`, `skill_apply`,
+`skill_regenerate`, or `skill_improve` in `draft_skills` mode, candidate content
+is checked before any file write, knowledge stamp, proposal deletion, or
+changelog append. Missing eval fixtures fail open and report `unevaluated`.
+Scheduled consolidation uses this validation path for drafted skills by default.
+Existing active skills require a strict improvement over the incumbent. Rejected
+candidates are recorded in `.swarm/skills/rejected-edits.jsonl`.
 
 ## Review Checklist
 

@@ -297,4 +297,17 @@ describe('runSkillImprover auto-apply full-auto gate (#1234 Part 3D)', () => {
 		// No proposals seeded → empty result object, but defined (gate open).
 		expect(r.autoApply?.approved).toEqual([]);
 	});
+
+	it('does NOT auto-apply when allowAutoApply=false even in full-auto', async () => {
+		swarmState.agentSessions.set(sessionId, fullAutoSession());
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: baseConfig,
+			delegate,
+			sessionId,
+			allowAutoApply: false,
+		});
+		expect(r.ran).toBe(true);
+		expect(r.autoApply).toBeUndefined();
+	});
 });

@@ -40,6 +40,16 @@ const CONTEXT_WEIGHT = 0.2;
 /** Additive bonus for workflow-type skills when the task mentions their tools. */
 const WORKFLOW_BOOST = 0.1;
 
+/** Additive bonus when a declared skill trigger phrase appears in the task. */
+const SKILL_TRIGGER_BOOST = 0.3;
+
+/** Ignore very short trigger strings so broad tokens like "ci" do not dominate. */
+const SKILL_TRIGGER_MIN_LENGTH = 3;
+
+/** Bound metadata extracted from skill frontmatter. */
+const MAX_SKILL_TRIGGERS = 20;
+const MAX_SKILL_TRIGGER_LENGTH = 120;
+
 /**
  * Minimum weighted context score (≈25% task-keyword overlap, since
  * contextScore = matchRatio * CONTEXT_WEIGHT) required before a workflow skill
@@ -92,6 +102,8 @@ export interface SkillMetadata {
 	description: string;
 	/** Skill type from frontmatter (directive or workflow). */
 	skillType?: 'directive' | 'workflow';
+	/** Literal trigger phrases from frontmatter. */
+	triggers?: string[];
 }
 
 // ============================================================================
@@ -108,6 +120,7 @@ export const _internals: {
 	extractSkillName: typeof extractSkillName;
 	computeRecencyScore: typeof computeRecencyScore;
 	computeContextMatchScore: typeof computeContextMatchScore;
+	computeTriggerMatchBoost: typeof computeTriggerMatchBoost;
 } = {
 	computeSkillRelevanceScore:
 		null as unknown as typeof computeSkillRelevanceScore,
@@ -120,6 +133,7 @@ export const _internals: {
 	extractSkillName: null as unknown as typeof extractSkillName,
 	computeRecencyScore: null as unknown as typeof computeRecencyScore,
 	computeContextMatchScore: null as unknown as typeof computeContextMatchScore,
+	computeTriggerMatchBoost: null as unknown as typeof computeTriggerMatchBoost,
 };
 
 // ============================================================================
@@ -157,6 +171,65 @@ function normalizeDescription(description: string): string {
 		: singleLine;
 }
 
+function normalizeTrigger(value: string): string {
+	return stripQuotes(value)
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, MAX_SKILL_TRIGGER_LENGTH);
+}
+
+function normalizeTriggerList(values: string[]): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const raw of values) {
+		const value = normalizeTrigger(raw);
+		if (!value) continue;
+		const key = value.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(value);
+		if (out.length >= MAX_SKILL_TRIGGERS) break;
+	}
+	return out;
+}
+
+function parseInlineStringList(rawValue: string): string[] {
+	const trimmed = rawValue.trim();
+	if (!trimmed) return [];
+	if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+		const body = trimmed.slice(1, -1).trim();
+		if (!body) return [];
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (Array.isArray(parsed)) {
+				return parsed.filter(
+					(entry): entry is string => typeof entry === 'string',
+				);
+			}
+		} catch {
+			// Fall back to a conservative comma split below.
+		}
+		return body.split(',').map((entry) => stripQuotes(entry));
+	}
+	return [trimmed];
+}
+
+function collectYamlList(
+	lines: string[],
+	start: number,
+	end: number,
+): { values: string[]; nextIndex: number } {
+	const values: string[] = [];
+	let i = start;
+	for (; i < end; i++) {
+		const line = lines[i] ?? '';
+		if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(line)) break;
+		const match = line.match(/^\s+-\s+(.+?)\s*$/);
+		if (match) values.push(match[1]);
+	}
+	return { values, nextIndex: i - 1 };
+}
+
 /**
  * Parse the YAML-like frontmatter from a SKILL.md file. This intentionally
  * supports only the small subset skills use today: scalar `name` and scalar,
@@ -185,6 +258,7 @@ export function parseSkillFrontmatter(
 	let name = fallbackName;
 	let description = '';
 	let skillType: 'directive' | 'workflow' | undefined;
+	let triggers: string[] = [];
 
 	for (let i = 1; i < end; i++) {
 		const line = lines[i] ?? '';
@@ -203,6 +277,17 @@ export function parseSkillFrontmatter(
 		if (key === 'skill_type') {
 			if (rawValue === 'directive' || rawValue === 'workflow') {
 				skillType = rawValue;
+			}
+			continue;
+		}
+
+		if (key === 'triggers') {
+			if (rawValue === '') {
+				const collected = collectYamlList(lines, i + 1, end);
+				triggers = normalizeTriggerList(collected.values);
+				i = collected.nextIndex;
+			} else {
+				triggers = normalizeTriggerList(parseInlineStringList(rawValue));
 			}
 			continue;
 		}
@@ -229,6 +314,7 @@ export function parseSkillFrontmatter(
 		description: normalizeDescription(description),
 	};
 	if (skillType) meta.skillType = skillType;
+	if (triggers.length > 0) meta.triggers = triggers;
 	return meta;
 }
 
@@ -344,6 +430,26 @@ function computeContextMatchScore(
 	return matchCount / taskKeywords.size;
 }
 
+function normalizeTriggerMatchText(text: string): string {
+	return text.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function computeTriggerMatchBoost(
+	taskDescription: string,
+	triggers?: string[],
+): number {
+	if (!triggers || triggers.length === 0) return 0;
+	const task = normalizeTriggerMatchText(taskDescription);
+	if (!task) return 0;
+	for (const raw of triggers) {
+		const trigger = normalizeTriggerMatchText(raw);
+		if (trigger.length >= SKILL_TRIGGER_MIN_LENGTH && task.includes(trigger)) {
+			return SKILL_TRIGGER_BOOST;
+		}
+	}
+	return 0;
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -384,8 +490,14 @@ export function computeSkillRelevanceScore(
 	const contextScore =
 		computeContextMatchScore(taskDescription, skillPath, metadata) *
 		CONTEXT_WEIGHT;
+	const triggerBoost = computeTriggerMatchBoost(
+		taskDescription,
+		metadata?.triggers,
+	);
 
-	if (usageHistory.length === 0) return Math.min(1.0, contextScore);
+	if (usageHistory.length === 0) {
+		return Math.min(1.0, contextScore + triggerBoost);
+	}
 
 	// --- Frequency component (0-0.3) ---
 	const usageCount = usageHistory.length;
@@ -441,6 +553,7 @@ export function computeSkillRelevanceScore(
 			recencyScore +
 			taskDiversityScore +
 			contextScore +
+			triggerBoost +
 			workflowBoost,
 	);
 }
@@ -638,3 +751,4 @@ _internals.readSkillMetadata = readSkillMetadata;
 _internals.extractSkillName = extractSkillName;
 _internals.computeRecencyScore = computeRecencyScore;
 _internals.computeContextMatchScore = computeContextMatchScore;
+_internals.computeTriggerMatchBoost = computeTriggerMatchBoost;

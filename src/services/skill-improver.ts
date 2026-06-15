@@ -63,6 +63,8 @@ export interface SkillImproverConfigInput {
 	fallback_models: string[];
 	max_calls_per_day: number;
 	trigger: 'manual' | 'scheduled';
+	consolidation_interval_hours?: number;
+	consolidation_max_calls_per_run?: number;
 	targets: Array<'skills' | 'spec' | 'architect_prompt' | 'knowledge'>;
 	write_mode: 'proposal' | 'draft_skills';
 	require_user_approval: boolean;
@@ -92,6 +94,10 @@ export interface SkillImproveRequest {
 	/** Dedicated quota for hardening quarantined knowledge entries. This is
 	 *  separate from the skill_improver proposal quota above. */
 	enrichmentQuota?: EnrichmentQuotaOptions;
+	/** Validate generated draft skills when write_mode is draft_skills. */
+	evaluateDrafts?: boolean;
+	/** Consolidation callers stage proposals only and must never auto-apply. */
+	allowAutoApply?: boolean;
 }
 
 export interface SkillImproveResult {
@@ -558,6 +564,7 @@ export async function runSkillImprover(
 			mode: 'draft',
 			minConfidence: DEFAULT_SKILL_MIN_CONFIDENCE,
 			minConfirmations: DEFAULT_SKILL_MIN_CONFIRMATIONS,
+			evaluate: req.evaluateDrafts ?? false,
 		});
 		draftSkillsWritten = gen.written.map((w) => ({
 			slug: w.slug,
@@ -637,7 +644,12 @@ export async function runSkillImprover(
 	// it a request lacking a sessionId would auto-apply whenever any other session
 	// happened to be in full-auto (cross-session leak). Fail-open: never blocks.
 	let autoApply: AutoApplyResult | undefined;
-	if (delegate && req.sessionId && hasActiveFullAuto(req.sessionId)) {
+	if (
+		req.allowAutoApply !== false &&
+		delegate &&
+		req.sessionId &&
+		hasActiveFullAuto(req.sessionId)
+	) {
 		try {
 			autoApply = await autoApplyProposals(req.directory, delegate);
 		} catch {

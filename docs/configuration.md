@@ -657,6 +657,23 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
 
+## Skill Improver Consolidation
+
+`skill_improver` can run manually or at safe scheduled cadence points.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables the skill-improver service and consolidation command. |
+| `trigger` | `"manual" \| "scheduled"` | `"manual"` | `scheduled` allows opportunistic startup and phase-complete consolidation. |
+| `max_calls_per_day` | number | `10` | Hard daily quota for skill-improver proposal calls. |
+| `consolidation_interval_hours` | number | `24` | Minimum hours between scheduled consolidation runs. |
+| `consolidation_max_calls_per_run` | number | `1` | Per-run reservation for scheduled consolidation, capped by `max_calls_per_day`. |
+| `write_mode` | `"proposal" \| "draft_skills"` | `"proposal"` | Whether consolidation only writes improver proposals or also drafts generated skill proposals. |
+
+Scheduled consolidation is fire-and-forget, validates drafted skills against
+matching eval fixtures, and never auto-activates skills. Use `/swarm
+consolidate` for an explicit pass.
+
 ## External Skills Curation Pipeline
 
 Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.
