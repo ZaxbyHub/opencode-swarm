@@ -94,7 +94,12 @@ export async function generateMutants(
 		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
 			...(ctx?.sessionID
-				? { body: { parentID: ctx.sessionID, title: 'mutation_generator background' } }
+				? {
+						body: {
+							parentID: ctx.sessionID,
+							title: 'mutation_generator background',
+						},
+					}
 				: {}),
 			query: { directory },
 		});
