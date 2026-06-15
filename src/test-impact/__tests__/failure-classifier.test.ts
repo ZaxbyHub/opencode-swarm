@@ -346,6 +346,34 @@ describe('classifyFailure', () => {
 
 		const result = classifyFailure(current, []);
 		expect(result.classification).toBe('infrastructure_failure');
+		expect(result.confidence).toBe(0.1);
+	});
+
+	test('does not classify exit codes other than 137 as infrastructure_failure', () => {
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'exit-138',
+			result: 'fail',
+			errorMessage: 'Command failed: exited with code 138',
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(current, []);
+		expect(result.classification).not.toBe('infrastructure_failure');
+	});
+
+	test('classifies context-window infra failure when keyword-to-errno gap is exactly 80 chars', () => {
+		const keywordToErrnoGap = ' '.repeat(80);
+		const current = makeRecord({
+			testFile: 'src/foo.test.ts',
+			testName: 'boundary-80-connect-etimedout',
+			result: 'fail',
+			errorMessage: `connect${keywordToErrnoGap}ETIMEDOUT`,
+			changedFiles: ['src/foo.test.ts'],
+		});
+
+		const result = classifyFailure(current, []);
+		expect(result.classification).toBe('infrastructure_failure');
 	});
 
 	test('regression: assertion text containing killed preserves regression classification', () => {

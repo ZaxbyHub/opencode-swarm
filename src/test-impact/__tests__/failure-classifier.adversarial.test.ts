@@ -110,7 +110,7 @@ test('classifyFailure handles large history (1000 entries) without hanging', () 
 	const elapsed = Date.now() - start;
 
 	expect(elapsed).toBeLessThan(1000); // Should complete in under 1 second
-	expect(result.classification).toBeDefined();
+	expect(result.classification).toBe('flaky');
 });
 
 test('classifyAndCluster handles large testResults array (500 failing results)', () => {
