@@ -258,6 +258,75 @@ describe('getShownButNotAcknowledged', () => {
 });
 
 // ============================================================================
+// bumpCountersBatch — TOCTOU race condition fix
+// ============================================================================
+
+describe('bumpCountersBatch - lock-before-read TOCTOU regression', () => {
+	it('recordAcknowledgment re-reads after an interleaved append instead of rewriting a stale snapshot', async () => {
+		const id = '99999999-9999-4999-9999-999999999999';
+		await seedEntry(id);
+
+		const { appendKnowledge } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+
+		const secondId = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const secondEntry: SwarmKnowledgeEntry = {
+			id: secondId,
+			tier: 'swarm',
+			lesson: 'second entry for concurrency test',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.8,
+			status: 'candidate',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: 'test',
+		};
+
+		const knowledgePath = resolveSwarmKnowledgePath(tmp);
+		const staleSnapshot = readFileSync(knowledgePath, 'utf-8')
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		expect(staleSnapshot.map((entry: any) => entry.id)).toEqual([id]);
+
+		// Previous code read before acquiring the rewrite lock. This fixed
+		// interleaving models that stale snapshot, appends a second entry, then
+		// performs the counter update. The fixed path must re-read under
+		// transactKnowledge and preserve the append.
+		await appendKnowledge(knowledgePath, secondEntry);
+		await recordAcknowledgment(
+			tmp,
+			{ id, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
+
+		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
+		const allEntries = lines.map((line) => JSON.parse(line));
+
+		expect(allEntries).toHaveLength(2);
+
+		const originalEntry = allEntries.find((e: any) => e.id === id);
+		expect(originalEntry).toBeDefined();
+		expect(originalEntry.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(originalEntry.retrieval_outcomes.acknowledged_count).toBe(1);
+
+		const appendedEntry = allEntries.find((e: any) => e.id === secondId);
+		expect(appendedEntry).toBeDefined();
+		expect(appendedEntry.id).toBe(secondId);
+	});
+});
+
+// ============================================================================
 // filterHighConfidenceKnowledge — unit tests
 // ============================================================================
 

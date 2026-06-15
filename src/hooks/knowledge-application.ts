@@ -153,7 +153,7 @@ async function bumpCountersBatch(
 	const now = new Date().toISOString();
 	const applyOne = <T extends SwarmKnowledgeEntry | HiveKnowledgeEntry>(
 		entries: T[],
-	): boolean => {
+	): T[] | null => {
 		let updated = false;
 		for (const e of entries) {
 			const fields = idToFields.get(e.id);
@@ -170,19 +170,17 @@ async function bumpCountersBatch(
 				updated = true;
 			}
 		}
-		return updated;
+		return updated ? entries : null;
 	};
 
+	// Atomically bump counters in swarm knowledge (lock-before-read prevents TOCTOU)
 	const swarmPath = resolveSwarmKnowledgePath(directory);
-	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (swarm) =>
-		applyOne(swarm) ? swarm : null,
-	);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, applyOne);
 
+	// Atomically bump counters in hive knowledge if it exists
 	const hivePath = resolveHiveKnowledgePath();
 	if (existsSync(hivePath)) {
-		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (hive) =>
-			applyOne(hive) ? hive : null,
-		);
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, applyOne);
 	}
 }
 
