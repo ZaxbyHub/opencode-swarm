@@ -6,6 +6,7 @@
  * token estimation for swarm-related operations.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
 import { bunFile } from '../utils/bun-compat';
@@ -23,7 +24,14 @@ export const _internals: {
 	composeHandlers: typeof composeHandlers;
 	validateSwarmPath: typeof validateSwarmPath;
 	readSwarmFileAsync: typeof readSwarmFileAsync;
-} = { safeHook, composeHandlers, validateSwarmPath, readSwarmFileAsync };
+	fs: { realpathSync: typeof fs.realpathSync };
+} = {
+	safeHook,
+	composeHandlers,
+	validateSwarmPath,
+	readSwarmFileAsync,
+	fs: { realpathSync: fs.realpathSync },
+};
 
 export function safeHook<I, O>(
 	fn: (input: I, output: O) => Promise<void>,
@@ -160,6 +168,30 @@ export function validateSwarmPath(directory: string, filename: string): string {
 		// On other platforms, do case-sensitive comparison
 		if (!resolved.startsWith(baseDir + path.sep)) {
 			throw new Error('Invalid filename: path escapes .swarm directory');
+		}
+	}
+
+	// Symlink containment check: resolve the real path to detect symlinks
+	// that escape the .swarm directory. Nonexistent targets are allowed
+	// (write paths may point to files not yet created).
+	try {
+		const realPath = _internals.fs.realpathSync(resolved);
+		if (process.platform === 'win32') {
+			if (
+				!realPath.toLowerCase().startsWith((baseDir + path.sep).toLowerCase())
+			) {
+				throw new Error('Invalid filename: path escapes .swarm directory');
+			}
+		} else {
+			if (!realPath.startsWith(baseDir + path.sep)) {
+				throw new Error('Invalid filename: path escapes .swarm directory');
+			}
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			// Nonexistent target is fine — the path is intended for writing
+		} else {
+			throw error;
 		}
 	}
 

@@ -15,7 +15,7 @@ mock.module('../../../src/utils/logger', () => ({
 	error: (...args: any[]) => console.error(...args),
 }));
 
-import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -406,6 +406,107 @@ describe('Hook Utilities', () => {
 			// Test with a path that needs normalization but doesn't contain traversal
 			const result = validateSwarmPath(tempDir, 'subdir/./test.txt');
 			expect(result).toBe(testFile);
+		});
+
+		describe('validateSwarmPath — symlink regression (F#)', async () => {
+			let tempDir: string;
+			let symlinksSupported = true;
+
+			try {
+				const testDir = await mkdtemp(
+					join(tmpdir(), 'swarm-symlink-test-'),
+				);
+				try {
+					await symlink(
+						join(testDir, 'target'),
+						join(testDir, 'link'),
+					);
+					await rm(testDir, { recursive: true, force: true });
+				} catch (error) {
+					const err = error as NodeJS.ErrnoException;
+					if (err.code === 'ENOSYS' || err.code === 'EPERM') {
+						symlinksSupported = false;
+					}
+					try {
+						await rm(testDir, { recursive: true, force: true });
+					} catch {
+						// ignore cleanup errors
+					}
+				}
+			} catch {
+				symlinksSupported = false;
+			}
+
+			beforeEach(async () => {
+				tempDir = await mkdtemp(join(tmpdir(), 'swarm-test-'));
+			});
+
+			afterEach(async () => {
+				try {
+					await rm(tempDir, { recursive: true, force: true });
+				} catch {
+					// ignore cleanup errors
+				}
+			});
+
+			const defineSymlinkTest = (
+				name: string,
+				fn: () => Promise<void>,
+			) => {
+				if (symlinksSupported) {
+					return it(name, fn);
+				}
+				return it.skip(name, () => {});
+			};
+
+			defineSymlinkTest(
+				'rejects symlinks pointing outside .swarm',
+				async () => {
+					const swarmDir = join(tempDir, '.swarm');
+					await mkdir(swarmDir, { recursive: true });
+					const outsideFile = join(tempDir, 'outside.txt');
+					await writeFile(outsideFile, 'outside content');
+					const symlinkPath = join(swarmDir, 'escape-link.txt');
+
+					await symlink(outsideFile, symlinkPath);
+
+					expect(() =>
+						validateSwarmPath(tempDir, 'escape-link.txt'),
+					).toThrow(
+						'Invalid filename: path escapes .swarm directory',
+					);
+				},
+			);
+
+			defineSymlinkTest(
+				'allows symlinks pointing inside .swarm',
+				async () => {
+					const swarmDir = join(tempDir, '.swarm');
+					await mkdir(swarmDir, { recursive: true });
+					const insideFile = join(swarmDir, 'inside.txt');
+					await writeFile(insideFile, 'inside content');
+					const symlinkPath = join(swarmDir, 'inside-link.txt');
+
+					await symlink(insideFile, symlinkPath);
+
+					const result = validateSwarmPath(
+						tempDir,
+						'inside-link.txt',
+					);
+					expect(result).toBe(symlinkPath);
+				},
+			);
+
+			it('returns normalized path for nonexistent targets via parent fallback', () => {
+				const swarmDir = join(tempDir, '.swarm');
+				const nonexistentFile = join(swarmDir, 'nonexistent.txt');
+
+				const result = validateSwarmPath(
+					tempDir,
+					'nonexistent.txt',
+				);
+				expect(result).toBe(nonexistentFile);
+			});
 		});
 	});
 
