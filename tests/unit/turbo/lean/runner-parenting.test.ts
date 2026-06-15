@@ -6,6 +6,13 @@ import type { LeanTurboLane } from '../../../../src/turbo/lean/state';
 // owning session (parentID) so OpenCode does not persist it as a new TUI root.
 // We drive dispatchLane directly with an injected _sessionOps mock, avoiding
 // the full plan/lock machinery.
+//
+// Injection seam: LeanTurboRunner stores its SDK session operations in the
+// `_sessionOps` field (prefixed by convention as a test seam). The cast below
+// replaces it before the first `dispatchLane` call, skipping network I/O
+// while keeping the full business logic path under test. If the runner is
+// refactored to expose _internals (like integration.ts / reviewer.ts), update
+// to use that instead.
 
 const LANE: LeanTurboLane = {
 	laneId: 'lane-1',
