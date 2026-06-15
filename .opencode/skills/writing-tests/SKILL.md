@@ -389,6 +389,78 @@ mockRealpathSync.mockImplementation((inputPath: string) => {
   Do not call recursive `rm` on a computed path unless the helper has rejected
   empty strings, `os.tmpdir()` itself, and paths outside the temp root.
 
+### Platform-specific environment variable redirection
+
+When tests redirect `process.env.HOME` to isolate path-resolver-dependent code
+(functions like `resolveHiveKnowledgePath`, `resolveSwarmKnowledgePath`, or any
+function that reads `os.homedir()` / platform env vars), they MUST redirect ALL
+platform-specific env vars, not just `HOME`. A partial redirect silently falls
+back to the real user profile on some platforms, causing tests to read/write
+actual user data instead of the isolated temp directory.
+
+Per-platform requirements:
+
+- **Linux**: redirect `HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME`.
+- **macOS**: redirect `HOME` (macOS resolves `~/Library/Application Support` from
+  the home directory).
+- **Windows**: redirect `HOME`, `LOCALAPPDATA`, AND `APPDATA`. Windows path
+  resolvers read `LOCALAPPDATA` and `APPDATA`, neither of which is derived from
+  `HOME`. Redirecting only `HOME` silently fails on Windows, causing tests to
+  touch the real `%LOCALAPPDATA%` and `%APPDATA%` trees.
+
+> **⚠️ Bun caches `os.homedir()` on first call.** If a module calls `os.homedir()`
+> before the test sets `process.env.HOME`, the cached value persists for the
+> lifetime of the process and later env changes are silently ignored. Set
+> `process.env.HOME` (and other redirected vars) **before** importing any module
+> that calls `os.homedir()`. The source code documents this at
+> `src/hooks/knowledge-store.ts`: "Bun caches os.homedir(), so changing $HOME
+> after first call is ignored."
+
+Use per-variable save/restore rather than saving and replacing the entire
+`process.env` object — the latter discards process-level env state and can
+interfere with other test infrastructure:
+
+```typescript
+import { beforeEach, afterEach } from 'bun:test';
+import os from 'node:os';
+import path from 'node:path';
+
+const saved = {
+  HOME: process.env.HOME,
+  LOCALAPPDATA: process.env.LOCALAPPDATA,
+  APPDATA: process.env.APPDATA,
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+};
+
+beforeEach(() => {
+  const isolatedDir = path.join(os.tmpdir(), 'test-home');
+  process.env.HOME = isolatedDir;
+  process.env.LOCALAPPDATA = isolatedDir;
+  process.env.APPDATA = isolatedDir;
+  process.env.XDG_CONFIG_HOME = isolatedDir;
+  process.env.XDG_DATA_HOME = isolatedDir;
+});
+
+afterEach(() => {
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+```
+
+For cross-file isolation (tests that must survive across multiple files in the
+same process, e.g. batch steps), use `beforeAll` / `afterAll` with the same
+per-var save/restore pattern. Never mutate `process.env` without restoring it in
+a matching teardown hook.
+
+**Preferred approach:** Use `createIsolatedTestEnv()` from
+`tests/helpers/isolated-test-env.ts`. It handles `XDG_CONFIG_HOME`, `APPDATA`,
+`LOCALAPPDATA`, and `HOME` with correct per-variable save/restore and returns a
+cleanup function that removes the temp directory. Use this helper unless your
+test has specific requirements it doesn't cover.
+
 ### Line ending normalization
 
 Git on Windows converts LF to CRLF by default. Tests that compare file contents
