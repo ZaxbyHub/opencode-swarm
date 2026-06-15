@@ -15,22 +15,29 @@
 import { z } from 'zod';
 import { recordKnowledgeEvent } from '../hooks/knowledge-events.js';
 import {
+	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
-import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
+import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MODES = ['archive', 'quarantine', 'purge'] as const;
 type ArchiveMode = (typeof MODES)[number];
+const TIERS = ['swarm', 'hive'] as const;
+type ArchiveTier = (typeof TIERS)[number];
 
 export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			"Archive (default), quarantine, or purge a swarm knowledge entry by ID, appending an immutable audit tombstone. 'archive'/'quarantine' set the entry status reversibly and hide it from recall; 'purge' hard-deletes and requires allow_purge:true.",
+			"Archive (default), quarantine, or purge a swarm or hive knowledge entry by ID, appending an immutable audit tombstone. 'archive'/'quarantine' set the entry status reversibly and hide it from recall; 'purge' hard-deletes and requires allow_purge:true.",
 		args: {
 			id: z.string().min(1).describe('UUID of the knowledge entry'),
+			tier: z
+				.enum(TIERS)
+				.optional()
+				.describe("Knowledge tier to modify; default 'swarm'"),
 			reason: z
 				.string()
 				.min(1)
@@ -53,6 +60,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			const a = (args ?? {}) as {
 				id?: unknown;
 				reason?: unknown;
+				tier?: unknown;
 				evidence?: unknown;
 				mode?: unknown;
 				allow_purge?: unknown;
@@ -73,6 +81,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				});
 			}
 			const evidence = typeof a.evidence === 'string' ? a.evidence : undefined;
+			const tier: ArchiveTier = a.tier === 'hive' ? 'hive' : 'swarm';
 			const mode: ArchiveMode =
 				a.mode === 'quarantine' || a.mode === 'purge' ? a.mode : 'archive';
 
@@ -83,54 +92,52 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			const swarmPath = resolveSwarmKnowledgePath(directory);
+			const knowledgePath =
+				tier === 'hive'
+					? resolveHiveKnowledgePath()
+					: resolveSwarmKnowledgePath(directory);
+			let found = false;
+			let previousStatus: string | undefined;
 			const now = new Date().toISOString();
+			let resultStatus: string | undefined;
 
-			// TOCTOU fix (issue #1285): perform the read, find, and rewrite inside
-			// a single locked transactKnowledge transaction so a concurrent
-			// appendKnowledge between the read and rewrite cannot be silently
-			// dropped (CF-2 pattern, matching knowledge_remove / curator / etc.).
-			// Out-params on the outer scope carry the result back so the audit
-			// tombstone can still be appended post-transaction.
-			let entryFound = false;
-			let previousStatus: SwarmKnowledgeEntry['status'] | undefined;
-			let resultStatus = '';
 			try {
-				await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
-					const target = entries.find((e) => e.id === id);
-					if (!target) {
-						entryFound = false;
-						return null; // not found, no write
-					}
-					entryFound = true;
-					previousStatus = target.status;
-					if (mode === 'purge') {
-						// Defense-in-depth: hard-delete is irreversible. Emit a
-						// prominent warning even though allow_purge:true was
-						// already required. The archived event below is the
-						// audit trail.
-						warn(
-							`[knowledge_archive] PURGE: hard-deleting entry id=${id} actor=${
-								ctx?.agent ?? 'unknown'
-							} reason=${reason}`,
+				await transactKnowledge<KnowledgeEntryBase>(
+					knowledgePath,
+					(entries) => {
+						const target = entries.find((e) => e.id === id);
+						if (!target) return null;
+						found = true;
+						previousStatus = target.status;
+
+						if (mode === 'purge') {
+							// Defense-in-depth: hard-delete is irreversible. Emit a prominent
+							// warning even though allow_purge:true was already required. The
+							// archived event below is the audit trail.
+							warn(
+								`[knowledge_archive] PURGE: hard-deleting ${tier} entry id=${id} actor=${
+									ctx?.agent ?? 'unknown'
+								} reason=${reason}`,
+							);
+							resultStatus = 'purged';
+							return entries.filter((e) => e.id !== id);
+						}
+
+						const newStatus =
+							mode === 'quarantine' ? 'quarantined' : 'archived';
+						resultStatus = newStatus;
+						return entries.map((e) =>
+							e.id === id ? { ...e, status: newStatus, updated_at: now } : e,
 						);
-						resultStatus = 'purged';
-						return entries.filter((e) => e.id !== id);
-					}
-					const newStatus = mode === 'quarantine' ? 'quarantined' : 'archived';
-					resultStatus = newStatus;
-					return entries.map((e) =>
-						e.id === id ? { ...e, status: newStatus, updated_at: now } : e,
-					);
-				});
+					},
+				);
 			} catch (err) {
 				return JSON.stringify({
 					success: false,
 					error: err instanceof Error ? err.message : 'Unknown error',
 				});
 			}
-
-			if (!entryFound) {
+			if (!found) {
 				return JSON.stringify({ success: false, message: 'entry not found' });
 			}
 
@@ -139,6 +146,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			await recordKnowledgeEvent(directory, {
 				type: 'archived',
 				entry_id: id,
+				tier,
 				actor: ctx?.agent ?? 'unknown',
 				reason,
 				mode,
@@ -149,6 +157,7 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			return JSON.stringify({
 				success: true,
 				id,
+				tier,
 				mode,
 				previous_status: previousStatus,
 				status: resultStatus,

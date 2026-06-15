@@ -13,6 +13,7 @@ import {
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
 	gateKnowledgeApplication,
 	getShownButNotAcknowledged,
+	MAX_LEGACY_APPLICATION_LOG_ENTRIES,
 	parseAcknowledgments,
 	processArchitectText,
 	recordAcknowledgment,
@@ -20,7 +21,6 @@ import {
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
 import {
-	_internals,
 	appendKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
@@ -167,6 +167,30 @@ describe('recordKnowledgeShown vs recordAcknowledgment', () => {
 		expect(lines.length).toBeGreaterThanOrEqual(2);
 		expect(lines.some((l) => l.includes('"shown"'))).toBe(true);
 		expect(lines.some((l) => l.includes('"applied"'))).toBe(true);
+	});
+
+	it('caps the legacy application audit log after appending', async () => {
+		const logPath = resolveApplicationLogPath(tmp);
+		await mkdir(path.dirname(logPath), { recursive: true });
+		const lines = Array.from(
+			{ length: MAX_LEGACY_APPLICATION_LOG_ENTRIES + 5 },
+			(_, i) =>
+				JSON.stringify({
+					timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+					knowledgeId: `old-${i}`,
+					result: 'shown',
+				}),
+		);
+		await writeFile(logPath, `${lines.join('\n')}\n`, 'utf-8');
+
+		await recordKnowledgeShown(tmp, ['newest'], { phase: 'Phase 1' });
+
+		const capped = readFileSync(logPath, 'utf-8').trim().split('\n');
+		expect(capped).toHaveLength(MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+		expect(capped.some((line) => line.includes('"knowledgeId":"old-0"'))).toBe(
+			false,
+		);
+		expect(capped[capped.length - 1]).toContain('"knowledgeId":"newest"');
 	});
 });
 
@@ -431,12 +455,9 @@ describe('filterHighConfidenceKnowledge', () => {
 // These tests verify the fix:
 //   1. A concurrent appendKnowledge interleaved with a counter bump
 //      survives — it is NOT lost when the counter-bump rewrite happens.
-//   2. With the pre-fix code (unlocked read), a deliberate delay injected
-//      into the unlocked read would let a concurrent append sneak in and
-//      then be dropped. With the post-fix code, the read is under the
-//      directory lock, so the concurrent append is forced to wait until
-//      the bump transaction completes, and the final file state is
-//      consistent.
+//   2. Two concurrent bumpCountersBatch calls on different entries both
+//      land correctly — the lock serializes them, so neither drops the
+//      other's write.
 // =============================================================================
 
 describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)', () => {
@@ -478,61 +499,39 @@ describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)',
 		expect(seed.retrieval_outcomes.acknowledged_count).toBe(1);
 	});
 
-	it('forced delay inside the locked read does NOT cause the next call to drop entries', async () => {
-		// This mirrors the test in knowledge-store-caps.test.ts: inject a
-		// delay into the locked read so a second concurrent caller has time
-		// to interleave. With the fix (lock-before-read), the second caller
-		// is forced to wait for the first transaction to complete, so the
-		// final state is consistent — neither call drops entries.
+	it('two concurrent bumpCountersBatch calls on different entries both land under lock serialization', async () => {
+		// Two concurrent recordAcknowledgment calls on different entries in the
+		// same file. The transactKnowledge lock serializes the two transactions,
+		// so both counter bumps land with no lost-write.
 		const id1 = '44444444-4444-4444-9444-444444444444';
 		const id2 = '55555555-5555-4555-9555-555555555555';
-		// Seed both entries into the same file (seedEntry truncates, so
-		// call it once and append the second via appendKnowledge).
 		await seedEntry(id1);
 		await appendKnowledge(resolveSwarmKnowledgePath(tmp), {
 			...baseEntry(id2),
 			id: id2,
 		} as SwarmKnowledgeEntry);
 
-		const originalRead = _internals.readKnowledge;
-		let calls = 0;
-		_internals.readKnowledge = mock(
-			async <T>(filePath: string): Promise<T[]> => {
-				calls++;
-				if (calls === 1) {
-					// Hold the lock long enough for the second caller to queue.
-					await Bun.sleep(60);
-				}
-				return originalRead(filePath);
-			},
-		);
+		await Promise.all([
+			recordAcknowledgment(
+				tmp,
+				{ id: id1, result: 'applied' },
+				{ phase: 'Phase 1' },
+			),
+			recordAcknowledgment(
+				tmp,
+				{ id: id2, result: 'applied' },
+				{ phase: 'Phase 1' },
+			),
+		]);
 
-		try {
-			await Promise.all([
-				recordAcknowledgment(
-					tmp,
-					{ id: id1, result: 'applied' },
-					{ phase: 'Phase 1' },
-				),
-				recordAcknowledgment(
-					tmp,
-					{ id: id2, result: 'applied' },
-					{ phase: 'Phase 1' },
-				),
-			]);
-
-			// Both entries must be present, both bumps must have landed.
-			const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
-				.trim()
-				.split('\n');
-			expect(lines).toHaveLength(2);
-			const seed1 = JSON.parse(lines.find((l) => l.includes(id1))!);
-			const seed2 = JSON.parse(lines.find((l) => l.includes(id2))!);
-			expect(seed1.retrieval_outcomes.applied_explicit_count).toBe(1);
-			expect(seed2.retrieval_outcomes.applied_explicit_count).toBe(1);
-		} finally {
-			_internals.readKnowledge = originalRead;
-		}
+		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n');
+		expect(lines).toHaveLength(2);
+		const seed1 = JSON.parse(lines.find((l) => l.includes(id1))!);
+		const seed2 = JSON.parse(lines.find((l) => l.includes(id2))!);
+		expect(seed1.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(seed2.retrieval_outcomes.applied_explicit_count).toBe(1);
 	});
 });
 

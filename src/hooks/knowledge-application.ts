@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import {
 	resolveHiveKnowledgePath,
@@ -30,6 +31,8 @@ import type {
 export function resolveApplicationLogPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-application.jsonl');
 }
+
+export const MAX_LEGACY_APPLICATION_LOG_ENTRIES = 5000;
 
 // ============================================================================
 // Acknowledgment parser
@@ -81,8 +84,24 @@ async function appendAudit(
 	record: KnowledgeApplicationRecord,
 ): Promise<void> {
 	const filePath = resolveApplicationLogPath(directory);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	const dirPath = path.dirname(filePath);
+	await mkdir(dirPath, { recursive: true });
+	let release: (() => Promise<void>) | undefined;
+	try {
+		release = await lockfile.lock(dirPath, {
+			retries: { retries: 50, minTimeout: 10, maxTimeout: 100 },
+			stale: 5000,
+		});
+		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		const content = await readFile(filePath, 'utf-8');
+		const lines = content.split('\n').filter((line) => line.trim().length > 0);
+		if (lines.length > MAX_LEGACY_APPLICATION_LOG_ENTRIES) {
+			const trimmed = lines.slice(-MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+			await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
+		}
+	} finally {
+		if (release) await release().catch(() => {});
+	}
 }
 
 // ============================================================================
@@ -154,26 +173,16 @@ async function bumpCountersBatch(
 		return updated;
 	};
 
-	// TOCTOU fix (issue #1285): run a single locked read-modify-write
-	// transaction per file via transactKnowledge, so a concurrent writer
-	// between read and rewrite cannot lose its update. Previously this
-	// did an unlocked readKnowledge followed by a locked rewriteKnowledge,
-	// which dropped concurrent appends — worst case the hive file, which
-	// is shared across concurrent sessions of different projects (global
-	// XDG path). The mutate callback returns null when no entry was
-	// touched, so transactKnowledge is a no-op in that case (no rewrite).
 	const swarmPath = resolveSwarmKnowledgePath(directory);
-	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
-		const updated = applyOne(entries);
-		return updated ? entries : null;
-	});
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (swarm) =>
+		applyOne(swarm) ? swarm : null,
+	);
 
 	const hivePath = resolveHiveKnowledgePath();
 	if (existsSync(hivePath)) {
-		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (entries) => {
-			const updated = applyOne(entries);
-			return updated ? entries : null;
-		});
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, (hive) =>
+			applyOne(hive) ? hive : null,
+		);
 	}
 }
 
