@@ -700,7 +700,7 @@ export async function executePhaseComplete(
 	// check, so it is enforced even under lean turbo.
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
 		);
 	} else {
 		// Gate 1: Completion Verify
@@ -762,13 +762,11 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
-	if (!hasActiveTurboMode(sessionID)) {
-		const gateResult = await runFinalCouncilGate(gateCtx);
-		if (gateResult.blocked) {
-			return blockedResult(phase, gateResult);
-		}
-		warnings.push(...gateResult.warnings);
+	const gateResult = await runFinalCouncilGate(gateCtx);
+	if (gateResult.blocked) {
+		return blockedResult(phase, gateResult);
 	}
+	warnings.push(...gateResult.warnings);
 
 	// ── Post-gate logic ────────────────────────────────────────────────────────
 

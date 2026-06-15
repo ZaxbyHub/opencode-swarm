@@ -466,7 +466,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	write_final_council_evidence: {
-		description: 'write final council evidence for project completion',
+		description:
+			'Persist project-scoped final council evidence to .swarm/evidence/final-council.json. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks and collect their CouncilMemberVerdict JSON — this tool synthesizes only. Rejects on insufficient quorum or CONCERNS with unresolved requiredFixes; normalizes verdicts to approved/concerns/rejected. Architect-only.',
 		agents: ['architect'],
 	},
 	skill_generate: {
