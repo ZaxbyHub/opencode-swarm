@@ -444,6 +444,25 @@ export const ReviewPassesConfigSchema = z.object({
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 
+// Auto-review configuration (opt-in): automatic review of the execution diff
+// by the reviewer agent (its own configured model) in a fresh ephemeral
+// session at task/phase boundaries. Advisory-only: verdicts are persisted as
+// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
+export const AutoReviewConfigSchema = z.object({
+	/** Enable automatic execution-diff review. Default: false (opt-in). */
+	enabled: z.boolean().default(false),
+	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
+	trigger: z
+		.enum(['task_completion', 'phase_boundary', 'both'])
+		.default('phase_boundary'),
+	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+});
+
+export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
+
 // Adversarial detection configuration (same-model adversarial detection)
 export const AdversarialDetectionConfigSchema = z.object({
 	enabled: z.boolean().default(true),
@@ -1938,6 +1957,10 @@ export const PluginConfigSchema = z.object({
 	// Self-review configuration (advisory after coder delegation)
 	self_review: SelfReviewConfigSchema.optional(),
 
+	// Auto-review configuration (opt-in execution-diff review by the reviewer
+	// model in a fresh ephemeral session at task/phase boundaries)
+	auto_review: AutoReviewConfigSchema.optional(),
+
 	// Tool filter configuration - controls which tools each agent is allowed to use
 	tool_filter: ToolFilterConfigSchema.optional(),
 
@@ -2102,7 +2125,19 @@ export const PluginConfigSchema = z.object({
 	// escalation_mode, critic_model) so existing configs continue to load unchanged.
 	full_auto: z
 		.object({
+			/** @deprecated Full-Auto is now a first-class session toggle
+			 *  (`/swarm full-auto on|off`) and no longer requires config-level
+			 *  enablement. The hooks are always armed and gated at runtime by
+			 *  the durable per-session run state. This flag is retained so
+			 *  existing configs continue to parse; it only controls the
+			 *  init-time critic-model advisory. Use `locked: true` to prevent
+			 *  runtime activation entirely. */
 			enabled: z.boolean().default(false),
+			/** When true, `/swarm full-auto on` is refused — Full-Auto cannot be
+			 *  activated at runtime in this project. `off` and `status` still
+			 *  work. Use this as an administrative hard-off (the pre-v8 behavior
+			 *  of `enabled: false`). Default: false (toggle available). */
+			locked: z.boolean().default(false),
 			critic_model: z.string().optional(),
 			max_interactions_per_phase: z.number().int().min(5).max(200).default(50),
 			deadlock_threshold: z.number().int().min(2).max(10).default(3),
@@ -2120,6 +2155,7 @@ export const PluginConfigSchema = z.object({
 						.default([
 							'.git',
 							'.github/workflows',
+							'.opencode',
 							'.swarm',
 							'package.json',
 							'package-lock.json',
@@ -2148,6 +2184,7 @@ export const PluginConfigSchema = z.object({
 					protected_paths: [
 						'.git',
 						'.github/workflows',
+						'.opencode',
 						'.swarm',
 						'package.json',
 						'package-lock.json',
@@ -2207,6 +2244,7 @@ export const PluginConfigSchema = z.object({
 		.optional()
 		.default(() => ({
 			enabled: false,
+			locked: false,
 			max_interactions_per_phase: 50,
 			deadlock_threshold: 3,
 			escalation_mode: 'pause' as const,
@@ -2219,6 +2257,7 @@ export const PluginConfigSchema = z.object({
 				protected_paths: [
 					'.git',
 					'.github/workflows',
+					'.opencode',
 					'.swarm',
 					'package.json',
 					'package-lock.json',

@@ -775,8 +775,9 @@ export async function executePhaseComplete(
 	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
 	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
 	// the autonomous-oversight approval — fail-closed by default. The gate is
-	// a no-op when full_auto.enabled is false or when no durable Full-Auto run
-	// is active for this session. Runs after Gate 6 (Final Council) so that
+	// a no-op when no durable Full-Auto run is active for this session
+	// (first-class toggle: config.full_auto.enabled no longer gates it).
+	// Runs after Gate 6 (Final Council) so that
 	// last-phase completions are gated by both council approval (when
 	// final_council is enabled) AND Full-Auto v2 approval (when active).
 	{

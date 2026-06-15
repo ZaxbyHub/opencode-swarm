@@ -55,9 +55,24 @@ afterEach(() => {
 });
 
 describe('verifyFullAutoPhaseApproval', () => {
-	test('no-op when full_auto disabled', () => {
+	test('no-op when config has enabled: false and no run is active', () => {
 		const r = verifyFullAutoPhaseApproval(tmpDir, 'sess', 1, makeConfig(false));
 		expect(r.ok).toBe(true);
+	});
+
+	test('regression: first-class toggle — gate enforces an active run even when config has enabled: false', () => {
+		// Previous code returned { ok: true, reason: 'full_auto disabled' } purely
+		// from config, letting an active run's phase boundary pass unverified
+		// when the config flag was off. The active run state is now the gate.
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: false });
+		const r = verifyFullAutoPhaseApproval(
+			tmpDir,
+			'sess-1',
+			1,
+			makeConfig(false),
+		);
+		expect(r.ok).toBe(false);
+		expect(r.reason).toContain('no full-auto oversight evidence');
 	});
 
 	test('no-op when no Full-Auto run is active', () => {

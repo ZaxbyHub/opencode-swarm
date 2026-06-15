@@ -207,6 +207,7 @@ describe('config/loader', () => {
 				adversarial_testing: { enabled: true, scope: 'all' },
 				full_auto: {
 					enabled: false,
+					locked: false,
 					mode: 'supervised',
 					max_interactions_per_phase: 50,
 					deadlock_threshold: 3,
@@ -220,6 +221,7 @@ describe('config/loader', () => {
 						protected_paths: [
 							'.git',
 							'.github/workflows',
+							'.opencode',
 							'.swarm',
 							'package.json',
 							'package-lock.json',

@@ -647,14 +647,12 @@ export function createFullAutoInterceptHook(
 		escalation_mode: 'pause',
 	};
 
-	// If full-auto is disabled, return no-op handler
-	if (fullAutoConfig.enabled !== true) {
-		return {
-			messagesTransform: async (): Promise<void> => {
-				// No-op when full-auto is disabled
-			},
-		};
-	}
+	// First-class toggle: always armed. The per-invocation
+	// `hasActiveFullAuto(sessionID)` check below is the runtime gate. Note:
+	// for messages without a sessionID, hasActiveFullAuto falls back to
+	// "any session has full-auto on" (deliberate v1 single-session behavior,
+	// covered by the regression suite) — so this gate is the in-memory
+	// session flag, not the durable run state used by the v2 hooks.
 
 	const deadlockThreshold = fullAutoConfig.deadlock_threshold ?? 3;
 	const maxInteractions = fullAutoConfig.max_interactions_per_phase ?? 50;

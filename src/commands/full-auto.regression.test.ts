@@ -22,7 +22,7 @@ describe('Full-Auto Mode Regression Tests', () => {
 
 	beforeEach(() => {
 		testSessionId = `full-auto-regression-${Date.now()}`;
-		// Enable config-level full-auto so command activation succeeds
+		// Legacy informational flag — no longer gates activation (first-class toggle).
 		swarmState.fullAutoEnabledInConfig = true;
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
@@ -91,9 +91,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			expect(session?.fullAutoMode).toBe(false);
 
-			const result = await handleFullAutoCommand('/test', [], testSessionId);
+			const result = await handleFullAutoCommand(tmpDir, [], testSessionId);
 
-			expect(result).toBe('Full-Auto Mode enabled');
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(session?.fullAutoMode).toBe(true);
 		});
 
@@ -101,19 +101,15 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			const result = await handleFullAutoCommand('/test', [], testSessionId);
+			const result = await handleFullAutoCommand(tmpDir, [], testSessionId);
 
-			expect(result).toBe('Full-Auto Mode disabled');
+			expect(result).toContain('Full-Auto Mode disabled');
 			expect(session?.fullAutoMode).toBe(false);
 		});
 
 		it('1.3 "on" arg enables', async () => {
-			const result = await handleFullAutoCommand(
-				'/test',
-				['on'],
-				testSessionId,
-			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
 		});
 
@@ -125,12 +121,12 @@ describe('Full-Auto Mode Regression Tests', () => {
 			session!.fullAutoLastQuestionHash = 'hash';
 
 			const result = await handleFullAutoCommand(
-				'/test',
+				tmpDir,
 				['off'],
 				testSessionId,
 			);
 
-			expect(result).toBe('Full-Auto Mode disabled');
+			expect(result).toContain('Full-Auto Mode disabled');
 			expect(session?.fullAutoMode).toBe(false);
 			expect(session?.fullAutoInteractionCount).toBe(0);
 			expect(session?.fullAutoDeadlockCount).toBe(0);
@@ -222,7 +218,7 @@ describe('Full-Auto Mode Regression Tests', () => {
 			session!.fullAutoMode = true;
 			session!.fullAutoInteractionCount = 3;
 
-			await handleFullAutoCommand('/test', ['off'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['off'], testSessionId);
 
 			expect(hasActiveFullAuto(testSessionId)).toBe(false);
 			expect(session?.fullAutoInteractionCount).toBe(0);
