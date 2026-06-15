@@ -22,7 +22,7 @@ import {
 import type { LeanTurboRunState } from './state';
 import { readPersisted } from './state';
 
-// ─── Config ──────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 
 /**
  * Configuration options for phase reviewer dispatch.
@@ -55,7 +55,7 @@ const DEFAULT_CONFIG: Required<LeanTurboPhaseReviewerConfig> = {
 	requireDiffSummary: false,
 };
 
-// ─── Result Types ────────────────────────────────────────────────
+// ─── Result Types ─────────────────────────────────────────────────────────────
 
 /**
  * Result of a phase reviewer dispatch.
@@ -69,7 +69,7 @@ export interface PhaseReviewerResult {
 	evidencePath: string;
 }
 
-// ─── Internal Functions ─────────────────────────────────────────────
+// ─── Internal Functions ────────────────────────────────────────────────────────
 
 /**
  * Resolves the default reviewer agent name from the generated agent names.
@@ -474,7 +474,7 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 	}
 }
 
-// ─── _internals Seam ────────────────────────────────────────────────
+// ─── _internals Seam ───────────────────────────────────────────────────────────
 
 /**
  * Test-only dependency-injection seam.
@@ -506,7 +506,7 @@ export const _internals: {
 	readPersisted,
 };
 
-// ─── Public API ──────────────────────────────────────────────────
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase.
