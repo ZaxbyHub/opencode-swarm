@@ -516,7 +516,9 @@ export async function dispatchCriticAndWriteEvent(
 		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
 			...(sessionID
-				? { body: { parentID: sessionID, title: 'full_auto_critic background' } }
+				? {
+						body: { parentID: sessionID, title: 'full_auto_critic background' },
+					}
 				: {}),
 			query: { directory },
 		});
