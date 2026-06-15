@@ -68,7 +68,7 @@ interface SessionClient {
 	delete(options: { path: { id: string } }): Promise<void>;
 }
 
-// ─── Result Types ─────────────────────────────────────────────────────────────
+// ─── Result Types ───────────────────────────────────────────────────────────────────
 
 /**
  * Result of a single lane dispatch (session creation + prompt).
@@ -195,7 +195,7 @@ function isTransientProvisionError(errorMsg: string): boolean {
 	return false;
 }
 
-// ─── Runner Class ─────────────────────────────────────────────────────────────
+// ─── Runner Class ───────────────────────────────────────────────────────────────
 
 /**
  * Orchestrates Lean Turbo lane execution.
@@ -340,7 +340,7 @@ export class LeanTurboRunner {
 		this._availableAgents = this._resolveCoderAgents(names);
 	}
 
-	// ─── Public Methods ──────────────────────────────────────────────────────────
+	// ─── Public Methods ─────────────────────────────────────────────────────────────
 
 	/**
 	 * Run a single phase: plan lanes, acquire locks, dispatch coders.
@@ -601,7 +601,12 @@ export class LeanTurboRunner {
 			// Create ephemeral session
 			const createResult = await session.create({
 				...(this._sessionID
-					? { body: { parentID: this._sessionID, title: `lean_turbo_lane_${lane.laneId} background` } }
+					? {
+							body: {
+								parentID: this._sessionID,
+								title: `lean_turbo_lane_${lane.laneId} background`,
+							},
+						}
 					: {}),
 				query: { directory: effectiveDirectory },
 			});
@@ -1467,7 +1472,7 @@ export class LeanTurboRunner {
 	}
 }
 
-// ─── Exported Types ──────────────────────────────────────────────────────────────
+// ─── Exported Types ───────────────────────────────────────────────────────────────
 
 /**
  * Current status of a lane (returned by waitForLanes).
