@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.77.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.76.2...v7.77.0) (2026-06-15)
+
+
+### Features
+
+* **skills:** add eval-gated skill consolidation ([#1353](https://github.com/zaxbysauce/opencode-swarm/issues/1353)) ([bdefe77](https://github.com/zaxbysauce/opencode-swarm/commit/bdefe77c6311062ba67f82cf1924ae25f3da5c2c))
+
 ## [7.76.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.76.1...v7.76.2) (2026-06-15)
 
 
