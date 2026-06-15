@@ -266,7 +266,6 @@ interface AutoReviewEvent {
 let _eventWriteLockChain: Promise<void> = Promise.resolve();
 
 function withEventWriteLock<T>(fn: () => T): T {
-	const _prev = _eventWriteLockChain;
 	let release!: () => void;
 	_eventWriteLockChain = new Promise<void>((r) => {
 		release = r;

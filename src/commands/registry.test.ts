@@ -144,7 +144,7 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
@@ -169,7 +169,7 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
@@ -191,7 +191,7 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' }, // Not an alias
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -211,7 +211,7 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -227,7 +227,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -256,7 +256,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			'real-cmd': { handler: () => Promise.resolve(''), description: 'Real' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) => e.includes("non-existent command 'ghost-cmd'")),
@@ -280,7 +280,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			target: { handler: () => Promise.resolve(''), description: 'Target' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -311,7 +311,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -424,7 +424,7 @@ function getSubcommandOf(key: string): CommandCategory | string | undefined {
  * Isolated validateAliases implementation for testing.
  * This is a copy of the logic from registry.ts to test without module load side effects.
  */
-function validateAliasesIn隔离(registry: Record<string, CommandEntry>): {
+function validateAliasesIsolated(registry: Record<string, CommandEntry>): {
 	valid: boolean;
 	errors: string[];
 } {
