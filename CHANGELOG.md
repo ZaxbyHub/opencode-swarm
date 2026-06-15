@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.77.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.1...v7.77.2) (2026-06-15)
+
+
+### Bug Fixes
+
+* **pr-review:** dispatch explorer lanes deterministically ([#1358](https://github.com/zaxbysauce/opencode-swarm/issues/1358)) ([5e8ff16](https://github.com/zaxbysauce/opencode-swarm/commit/5e8ff162ff7a5ab450952ab9a12aac0a0968d3f3))
+
 ## [7.77.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.0...v7.77.1) (2026-06-15)
 
 
