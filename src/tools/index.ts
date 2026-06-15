@@ -166,6 +166,7 @@ export {
 	type UpdateTaskStatusResult,
 	update_task_status,
 } from './update-task-status';
+export { web_fetch } from './web-fetch';
 export { web_search } from './web-search';
 export { write_drift_evidence } from './write-drift-evidence';
 export { write_final_council_evidence } from './write-final-council-evidence';

@@ -21,6 +21,8 @@ import {
 import {
 	appendSkillUsageEntry,
 	applySkillUsageFeedback,
+	computeComplianceByVersion,
+	normalizeComplianceVerdict,
 	readSkillUsageEntries,
 	resolveSourceKnowledgeIds,
 	type SkillUsageEntry,
@@ -505,6 +507,40 @@ describe('applySkillUsageFeedback', () => {
 		expect(entries[0]!.confidence).toBeCloseTo(0.55); // 0.5 + 0.05
 	});
 
+	test('processed entry markers prevent marker-loss reapplication', async () => {
+		writeSwarmKnowledge(tempDir, [
+			{
+				id: 'idempotent-source-uuid',
+				lesson: 'idempotent feedback test entry',
+				confidence: 0.5,
+			},
+		]);
+		writeSkillFile(tempDir, '.claude/skills/idempotent-skill/SKILL.md', [
+			'idempotent-source-uuid',
+		]);
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/idempotent-skill/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-001',
+			timestamp: '2026-01-01T00:01:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+
+		const first = await applySkillUsageFeedback(tempDir);
+		const second = await applySkillUsageFeedback(tempDir);
+
+		expect(first).toEqual({ processed: 1, bumps: 1 });
+		expect(second).toEqual({ processed: 0, bumps: 0 });
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+		expect(readSkillUsageEntries(tempDir)).toHaveLength(1);
+		const rawLog = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'skill-usage.jsonl'),
+			'utf-8',
+		);
+		expect(rawLog).toContain('"type":"feedback_applied"');
+	});
+
 	test('violation entry → source knowledge confidence decreases', async () => {
 		writeSwarmKnowledge(tempDir, [
 			{
@@ -523,7 +559,7 @@ describe('applySkillUsageFeedback', () => {
 			agentName: 'test-agent',
 			taskID: 'task-001',
 			timestamp: '2026-01-01T00:02:00.000Z',
-			complianceVerdict: 'violation',
+			complianceVerdict: 'violated',
 			sessionID: 'session-abc',
 		});
 
@@ -535,6 +571,43 @@ describe('applySkillUsageFeedback', () => {
 		const entries = readSwarmKnowledge(tempDir);
 		expect(entries).toHaveLength(1);
 		expect(entries[0]!.confidence).toBe(0.4); // 0.5 - 0.1
+	});
+
+	test('legacy violation entry is normalized and still decreases confidence', async () => {
+		writeSwarmKnowledge(tempDir, [
+			{
+				id: 'legacy-violation-source-uuid',
+				lesson: 'legacy violation test entry',
+				confidence: 0.5,
+			},
+		]);
+
+		writeSkillFile(tempDir, '.claude/skills/legacy-violation-skill/SKILL.md', [
+			'legacy-violation-source-uuid',
+		]);
+
+		writeRawLog(
+			tempDir,
+			`${JSON.stringify({
+				id: 'legacy-skill-usage-id',
+				skillPath: '.claude/skills/legacy-violation-skill/SKILL.md',
+				agentName: 'test-agent',
+				taskID: 'task-001',
+				timestamp: '2026-01-01T00:02:00.000Z',
+				complianceVerdict: 'violation',
+				sessionID: 'session-abc',
+			})}\n`,
+		);
+
+		expect(readSkillUsageEntries(tempDir)[0]!.complianceVerdict).toBe(
+			'violated',
+		);
+
+		const result = await applySkillUsageFeedback(tempDir);
+
+		expect(result.processed).toBe(1);
+		expect(result.bumps).toBe(1);
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBe(0.4);
 	});
 
 	test('mixed: 3 compliant + 1 violation → net positive delta (compliant > violation)', async () => {
@@ -580,7 +653,7 @@ describe('applySkillUsageFeedback', () => {
 			agentName: 'test-agent',
 			taskID: 'task-004',
 			timestamp: '2026-01-01T00:04:00.000Z',
-			complianceVerdict: 'violation',
+			complianceVerdict: 'violated',
 			sessionID: 'session-abc',
 		});
 
@@ -756,7 +829,7 @@ Content
 			agentName: 'test-agent',
 			taskID: 'task-002',
 			timestamp: '2026-01-01T00:02:00.000Z',
-			complianceVerdict: 'violation',
+			complianceVerdict: 'violated',
 			sessionID: 'session-abc',
 		});
 
@@ -821,6 +894,142 @@ Content
 		const knowledge = readSwarmKnowledge(tempDir);
 		expect(knowledge).toHaveLength(1);
 		expect(knowledge[0]!.confidence).toBeCloseTo(0.55);
+	});
+});
+
+// =============================================================================
+// normalizeComplianceVerdict + computeComplianceByVersion regression tests
+//
+// Issue #1281: producer writes 'violated' but consumers filtered 'violation'.
+// These tests verify the canonical 'violated' spelling flows through every
+// code path, and that legacy 'violation' entries are normalized on read.
+// =============================================================================
+
+describe('normalizeComplianceVerdict', () => {
+	test('maps legacy "violation" to canonical "violated"', () => {
+		expect(normalizeComplianceVerdict('violation')).toBe('violated');
+	});
+
+	test('passes through canonical "violated" unchanged', () => {
+		expect(normalizeComplianceVerdict('violated')).toBe('violated');
+	});
+
+	test('passes through other verdicts unchanged', () => {
+		expect(normalizeComplianceVerdict('compliant')).toBe('compliant');
+		expect(normalizeComplianceVerdict('partial')).toBe('partial');
+		expect(normalizeComplianceVerdict('not_checked')).toBe('not_checked');
+	});
+});
+
+describe('read-path normalization (legacy backward-compat)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = makeTempDir();
+	});
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	test('legacy "violation" entries on disk are normalized to "violated" on read', () => {
+		// Write a raw JSONL line with the legacy spelling directly to disk
+		writeRawLog(
+			tempDir,
+			JSON.stringify({
+				...makeEntry({ complianceVerdict: 'violation' }),
+				id: 'legacy-001',
+			}) + '\n',
+		);
+
+		const entries = readSkillUsageEntries(tempDir);
+		expect(entries).toHaveLength(1);
+		expect(entries[0]!.complianceVerdict).toBe('violated');
+	});
+
+	test('canonical "violated" entries are read back unchanged', () => {
+		writeRawLog(
+			tempDir,
+			JSON.stringify({
+				...makeEntry({ complianceVerdict: 'violated' }),
+				id: 'canonical-001',
+			}) + '\n',
+		);
+
+		const entries = readSkillUsageEntries(tempDir);
+		expect(entries).toHaveLength(1);
+		expect(entries[0]!.complianceVerdict).toBe('violated');
+	});
+
+	test('legacy "violation" verdict triggers negative confidence delta (issue #1281)', async () => {
+		// This verifies the full producer→consumer round-trip:
+		// The producer writes 'violated' (simulated here as legacy 'violation' on disk),
+		// readSkillUsageEntries normalizes it, and applySkillUsageFeedback produces -0.1.
+		writeSwarmKnowledge(tempDir, [
+			{ id: 'legacy-fb-uuid', lesson: 'legacy entry', confidence: 0.5 },
+		]);
+		writeSkillFile(tempDir, '.claude/skills/legacy-fb-skill/SKILL.md', [
+			'legacy-fb-uuid',
+		]);
+
+		// Write a legacy 'violation' entry directly to disk (bypassing appendSkillUsageEntry)
+		writeRawLog(
+			tempDir,
+			JSON.stringify({
+				...makeEntry({
+					skillPath: '.claude/skills/legacy-fb-skill/SKILL.md',
+					complianceVerdict: 'violation',
+				}),
+				id: 'legacy-fb-001',
+			}) + '\n',
+		);
+
+		const result = await applySkillUsageFeedback(tempDir);
+
+		expect(result.processed).toBe(1);
+		expect(result.bumps).toBe(1);
+
+		const knowledge = readSwarmKnowledge(tempDir);
+		expect(knowledge[0]!.confidence).toBe(0.4); // 0.5 - 0.1 = negative delta
+	});
+});
+
+describe('computeComplianceByVersion (verdict vocabulary)', () => {
+	test('counts "violated" entries in stats.violation', () => {
+		const entries = [
+			{ ...makeEntry({ complianceVerdict: 'violated' }), id: 'v1' },
+			{ ...makeEntry({ complianceVerdict: 'violated' }), id: 'v2' },
+			{ ...makeEntry({ complianceVerdict: 'compliant' }), id: 'c1' },
+			{ ...makeEntry({ complianceVerdict: 'not_checked' }), id: 'n1' },
+		] as SkillUsageEntry[];
+
+		const stats = computeComplianceByVersion(
+			entries,
+			'.claude/skills/my-skill/SKILL.md',
+		);
+		const agg = stats.get(undefined)!;
+		expect(agg.total).toBe(4);
+		expect(agg.violation).toBe(2);
+		expect(agg.compliant).toBe(1);
+		expect(agg.rate).toBeCloseTo(0.25); // 1 compliant / 4 total
+	});
+
+	test('"violation" (legacy) entries are counted after normalization', () => {
+		// Raw entries can reach this helper in tests and legacy callers. Keep the
+		// computation path defensive so legacy verdicts still count as violations.
+		const entries = [
+			{ ...makeEntry({ complianceVerdict: 'violation' }), id: 'v1' },
+			{ ...makeEntry({ complianceVerdict: 'compliant' }), id: 'c1' },
+		] as SkillUsageEntry[];
+
+		const stats = computeComplianceByVersion(
+			entries,
+			'.claude/skills/my-skill/SKILL.md',
+		);
+		const agg = stats.get(undefined)!;
+		expect(agg.total).toBe(2);
+		expect(agg.violation).toBe(1);
+		expect(agg.compliant).toBe(1);
 	});
 });
 

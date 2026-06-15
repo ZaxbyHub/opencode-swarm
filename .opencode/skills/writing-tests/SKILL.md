@@ -383,8 +383,11 @@ mockRealpathSync.mockImplementation((inputPath: string) => {
 - Use `os.tmpdir()` + `path.join()` for temp paths. **Never** hardcode `/tmp` or `C:\`.
 - Wrap `mkdtempSync` in `realpathSync` if the result is `chdir`'d on macOS (temp
   dirs are often symlinked to `/private/var/...`).
-- Clean up temp dirs in `afterEach` or `afterAll` using the `rm` utility with
-  `{ force: true, recursive: true }`.
+- Clean up temp dirs in `afterEach` or `afterAll` with a bounded helper that
+  verifies the resolved cleanup target is a child of `os.tmpdir()` before
+  calling recursive `rm`. Reuse `tests/helpers/safe-test-dir.ts` when possible.
+  Do not call recursive `rm` on a computed path unless the helper has rejected
+  empty strings, `os.tmpdir()` itself, and paths outside the temp root.
 
 ### Line ending normalization
 
@@ -457,6 +460,27 @@ Rules:
 - One regression test per finding. Do not pile unrelated assertions into a single regression block.
 
 Examples in-tree: `tests/unit/graph/graph-query.test.ts`, `tests/unit/graph/import-extractor.test.ts`, `tests/unit/graph/graph-store.test.ts`.
+
+### Guardrail Authority Tests
+
+When testing `src/hooks/guardrails/file-authority.ts` or similar ordered
+authority checks:
+
+- Test the specific allow/deny rule under review, not just the final denial. A
+  later deny rule such as `blockedPrefix` can mask a bad earlier allow match.
+- For case-sensitive glob behavior, place negative cases outside default blocked
+  prefixes or use a custom agent with no other deny rules and explicit
+  `allowedPrefix: []`. Include a positive case that the case-sensitive glob
+  allows, and for negative cases assert the denial reason is the allowlist
+  fallback (for example, `not in allowed list`) so the test proves the glob did
+  not match.
+- For generated-zone precedence, include at least one case where the filename
+  matches the newly allowed convention under `dist/` or `build/`.
+- For custom authority arrays, pin whether the array replaces or extends defaults
+  with tests for both an empty array and a custom non-empty array when the
+  semantics matter.
+- For matcher caches or other shared state, test both priming orders when the
+  selected behavior depends on mode, platform, or prior calls.
 
 ## Cross-Entry Invariants (config maps)
 

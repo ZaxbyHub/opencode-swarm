@@ -21,6 +21,7 @@ const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'pre-phase-briefing',
 	'council',
 	'deep-dive',
+	'deep-research',
 	'codebase-review-swarm',
 	'design-docs',
 	'swarm-pr-review',
@@ -291,6 +292,20 @@ async function main() {
 				"if (!mod.default || mod.default.id !== 'opencode-swarm') throw new Error('bad plugin id');",
 				"if (typeof mod.default.server !== 'function') throw new Error('missing server function');",
 				"console.log('installed package import OK');",
+			].join(' '),
+		], { cwd: installDir });
+
+		runCommand(process.execPath, [
+			'--input-type=module',
+			'--eval',
+			[
+				"try {",
+				"  await import('opencode-swarm/cli');",
+				"  throw new Error('CLI subpath should not be exported');",
+				"} catch (error) {",
+				"  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;",
+				"}",
+				"console.log('installed package cli subpath not exported OK');",
 			].join(' '),
 		], { cwd: installDir });
 

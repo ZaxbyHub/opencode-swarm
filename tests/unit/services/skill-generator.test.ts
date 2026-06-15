@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import {
@@ -70,7 +71,7 @@ function makeEntry(
 		required_actions: ['call declare_scope'],
 		forbidden_actions: ['heredoc bash writes'],
 		applies_to_agents: ['coder'],
-		directive_priority: 'critical',
+		directive_priority: 'medium',
 		...overrides,
 	};
 }
@@ -121,6 +122,60 @@ describe('selectCandidateEntries', () => {
 		});
 		expect(cands.length).toBe(2);
 	});
+
+	it('selects low-confidence entries with a strong positive outcome record', async () => {
+		const id = 'outcome-strong';
+		await seed([
+			makeEntry(id, {
+				confidence: 0.6,
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: new Date().toISOString(),
+						project_name: 'test',
+					},
+				],
+				directive_priority: 'high',
+			}),
+		]);
+		for (let i = 0; i < 4; i++) {
+			await appendKnowledgeEvent(tmp, {
+				type: 'applied',
+				event_id: `applied-${i}`,
+				trace_id: `trace-${i}`,
+				knowledge_id: id,
+				timestamp: `2026-01-01T00:00:0${i}.000Z`,
+				session_id: 's',
+				agent: 'coder',
+			});
+		}
+
+		const cands = await selectCandidateEntries(tmp, {
+			minConfidence: 0.85,
+			minConfirmations: 2,
+		});
+		expect(cands.map((e) => e.id)).toEqual([id]);
+		expect(cands[0].retrieval_outcomes.applied_explicit_count).toBe(4);
+	});
+
+	it('excludes entries with negative outcome signal even when confirmed', async () => {
+		await seed([
+			makeEntry('negative', {
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+					violated_count: 4,
+				},
+			}),
+		]);
+
+		const cands = await selectCandidateEntries(tmp, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(cands).toEqual([]);
+	});
 });
 
 describe('renderSkillMarkdown', () => {
@@ -151,10 +206,48 @@ describe('generateSkills draft mode', () => {
 		});
 		expect(result.written.length).toBeGreaterThan(0);
 		for (const w of result.written) {
-			expect(w.path).toContain('.swarm/skills/proposals/');
+			expect(w.path.replace(/\\/g, '/')).toContain('.swarm/skills/proposals/');
 			expect(w.path.endsWith('.md')).toBe(true);
 			expect(existsSync(w.path)).toBe(true);
 		}
+	});
+
+	it('compiles a strong-outcome high-priority singleton to a draft skill', async () => {
+		const id = 'singleton-generated';
+		await seed([
+			makeEntry(id, {
+				confidence: 0.6,
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: new Date().toISOString(),
+						project_name: 'test',
+					},
+				],
+				directive_priority: 'high',
+			}),
+		]);
+		for (let i = 0; i < 4; i++) {
+			await appendKnowledgeEvent(tmp, {
+				type: 'applied',
+				event_id: `singleton-applied-${i}`,
+				trace_id: `singleton-trace-${i}`,
+				knowledge_id: id,
+				timestamp: `2026-01-02T00:00:0${i}.000Z`,
+				session_id: 's',
+				agent: 'coder',
+			});
+		}
+
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			minConfidence: 0.85,
+			minConfirmations: 2,
+		});
+		expect(result.written).toHaveLength(1);
+		expect(result.written[0].sourceKnowledgeIds).toEqual([id]);
+		expect(existsSync(result.written[0].path)).toBe(true);
 	});
 });
 
@@ -167,14 +260,16 @@ describe('generateSkills active mode', () => {
 		});
 		expect(result.written.length).toBeGreaterThan(0);
 		for (const w of result.written) {
-			expect(w.path).toContain('.opencode/skills/generated/');
+			expect(w.path.replace(/\\/g, '/')).toContain(
+				'.opencode/skills/generated/',
+			);
 			expect(w.path.endsWith('SKILL.md')).toBe(true);
 		}
 		const stamped = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
 			.trim()
 			.split('\n')
 			.map((l) => JSON.parse(l));
-		expect(stamped[0].generated_skill_path).toContain(
+		expect(stamped[0].generated_skill_path.replace(/\\/g, '/')).toContain(
 			'.opencode/skills/generated/',
 		);
 		expect(stamped[0].generated_skill_slug).toBeTruthy();
@@ -282,6 +377,23 @@ describe('clusterEntries (min cluster size)', () => {
 	it('single entry produces no clusters (dropped by min size guard)', () => {
 		const result = clusterEntries([makeEntry('solo', { tags: ['solo'] })]);
 		expect(result).toEqual([]);
+	});
+
+	it('high-priority singleton with strong outcomes produces one cluster', () => {
+		const result = clusterEntries([
+			makeEntry('solo-strong', {
+				tags: ['solo'],
+				directive_priority: 'high',
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+					applied_explicit_count: 3,
+				},
+			}),
+		]);
+		expect(result).toHaveLength(1);
+		expect(result[0].entries.map((e) => e.id)).toEqual(['solo-strong']);
 	});
 
 	it('two entries with similar tags produce one cluster', () => {

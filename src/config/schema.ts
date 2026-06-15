@@ -141,6 +141,27 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+// Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
+// `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
+// This is distinct from the swarm-plugin's own `variant` field: `variant` is
+// passed through to the SDK as `variant` (a generic OpenCode hook), while
+// `reasoning` is passed through as-is and consumed by provider-native APIs.
+// Both may be set on the same agent; users control how their provider
+// interprets each.
+export const AgentReasoningConfigSchema = z.object({
+	effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+});
+export type AgentReasoningConfig = z.infer<typeof AgentReasoningConfigSchema>;
+
+// Per-agent extended-thinking block. Mirrors the OpenCode SDK's `thinking`
+// field on AgentConfig (e.g. Anthropic Claude extended thinking with
+// `type: "enabled"` and `budget_tokens`). Passed through as-is to the SDK.
+export const AgentThinkingConfigSchema = z.object({
+	type: z.enum(['enabled', 'disabled']).optional(),
+	budget_tokens: z.number().int().positive().optional(),
+});
+export type AgentThinkingConfig = z.infer<typeof AgentThinkingConfigSchema>;
+
 // Agent override configuration
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
@@ -160,6 +181,12 @@ export const AgentOverrideConfigSchema = z.object({
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
 	fallback_models: z.array(z.string()).max(3).optional(),
+	// Provider-native extended-reasoning / extended-thinking blocks. These
+	// were previously silently stripped by Zod's default strip behavior;
+	// they are now first-class fields. See AgentReasoningConfigSchema /
+	// AgentThinkingConfigSchema above for shape. Issue #1220.
+	reasoning: AgentReasoningConfigSchema.optional(),
+	thinking: AgentThinkingConfigSchema.optional(),
 });
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
@@ -416,6 +443,25 @@ export const ReviewPassesConfigSchema = z.object({
 });
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
+
+// Auto-review configuration (opt-in): automatic review of the execution diff
+// by the reviewer agent (its own configured model) in a fresh ephemeral
+// session at task/phase boundaries. Advisory-only: verdicts are persisted as
+// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
+export const AutoReviewConfigSchema = z.object({
+	/** Enable automatic execution-diff review. Default: false (opt-in). */
+	enabled: z.boolean().default(false),
+	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
+	trigger: z
+		.enum(['task_completion', 'phase_boundary', 'both'])
+		.default('phase_boundary'),
+	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+});
+
+export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 
 // Adversarial detection configuration (same-model adversarial detection)
 export const AdversarialDetectionConfigSchema = z.object({
@@ -1028,6 +1074,13 @@ export const KnowledgeConfigSchema = z.object({
 			synonym_map_max_pairs: z.number().int().min(1).max(10000).default(500),
 		})
 		.optional(),
+	/** Dedicated quota for LLM enrichment of plain-prose lessons into v3 directives. */
+	enrichment: z
+		.object({
+			max_calls_per_day: z.number().int().min(0).max(1000).default(30),
+			quota_window: z.enum(['utc', 'local']).default('utc'),
+		})
+		.default({ max_calls_per_day: 30, quota_window: 'utc' }),
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
@@ -1112,6 +1165,8 @@ export const CuratorConfigSchema = z.object({
 	init_enabled: z.boolean().default(true),
 	/** Run CURATOR_PHASE at phase boundaries. Default: true (when curator enabled) */
 	phase_enabled: z.boolean().default(true),
+	/** Run CURATOR_POSTMORTEM at project end / finalize. Default: true (when curator enabled) */
+	postmortem_enabled: z.boolean().default(true),
 	/** Maximum tokens for curator summary. Default: 2000 */
 	max_summary_tokens: z.number().min(500).max(8000).default(2000),
 	/** Minimum confidence for knowledge entries to include in curator context. Default: 0.7 */
@@ -1130,8 +1185,8 @@ export const CuratorConfigSchema = z.object({
 	skill_generation_enabled: z.boolean().default(true),
 	/** v2: Skill generation mode: 'draft' writes only proposals; 'active' compiles directly into .opencode/skills/generated. Default: 'draft' */
 	skill_generation_mode: z.enum(['draft', 'active']).default('draft'),
-	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.85 */
-	min_skill_confidence: z.number().min(0).max(1).default(0.85),
+	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.7 */
+	min_skill_confidence: z.number().min(0).max(1).default(0.7),
 	/** v2: Minimum number of phase confirmations for a skill candidate cluster. Default: 2 */
 	min_skill_confirmations: z.number().int().min(1).max(50).default(2),
 });
@@ -1224,8 +1279,17 @@ export const SkillImproverConfigSchema = z.object({
 	fallback_models: z.array(z.string()).default([]),
 	/** Hard daily quota. Default: 10. */
 	max_calls_per_day: z.number().int().min(1).max(1000).default(10),
-	/** 'manual' is the only supported trigger today; 'scheduled' is reserved. */
+	/** 'manual' runs only on explicit request; 'scheduled' enables bounded consolidation at safe cadence points. */
 	trigger: z.enum(['manual', 'scheduled']).default('manual'),
+	/** Minimum hours between opportunistic scheduled consolidation runs. */
+	consolidation_interval_hours: z
+		.number()
+		.int()
+		.min(1)
+		.max(24 * 30)
+		.default(24),
+	/** Per-run reservation for scheduled consolidation, still capped by max_calls_per_day. */
+	consolidation_max_calls_per_run: z.number().int().min(1).max(100).default(1),
 	/** Targets the skill_improver may inspect/improve. */
 	targets: z
 		.array(z.enum(['skills', 'spec', 'architect_prompt', 'knowledge']))
@@ -1339,6 +1403,7 @@ export const AgentAuthorityRuleSchema = z.object({
 		.optional(),
 	blockedGlobs: z.array(z.string()).optional(),
 	allowedGlobs: z.array(z.string()).optional(),
+	allowedCaseSensitiveGlobs: z.array(z.string()).optional(),
 });
 
 export type AgentAuthorityRule = z.infer<typeof AgentAuthorityRuleSchema>;
@@ -1901,6 +1966,10 @@ export const PluginConfigSchema = z.object({
 	// Self-review configuration (advisory after coder delegation)
 	self_review: SelfReviewConfigSchema.optional(),
 
+	// Auto-review configuration (opt-in execution-diff review by the reviewer
+	// model in a fresh ephemeral session at task/phase boundaries)
+	auto_review: AutoReviewConfigSchema.optional(),
+
 	// Tool filter configuration - controls which tools each agent is allowed to use
 	tool_filter: ToolFilterConfigSchema.optional(),
 
@@ -2065,7 +2134,19 @@ export const PluginConfigSchema = z.object({
 	// escalation_mode, critic_model) so existing configs continue to load unchanged.
 	full_auto: z
 		.object({
+			/** @deprecated Full-Auto is now a first-class session toggle
+			 *  (`/swarm full-auto on|off`) and no longer requires config-level
+			 *  enablement. The hooks are always armed and gated at runtime by
+			 *  the durable per-session run state. This flag is retained so
+			 *  existing configs continue to parse; it only controls the
+			 *  init-time critic-model advisory. Use `locked: true` to prevent
+			 *  runtime activation entirely. */
 			enabled: z.boolean().default(false),
+			/** When true, `/swarm full-auto on` is refused — Full-Auto cannot be
+			 *  activated at runtime in this project. `off` and `status` still
+			 *  work. Use this as an administrative hard-off (the pre-v8 behavior
+			 *  of `enabled: false`). Default: false (toggle available). */
+			locked: z.boolean().default(false),
 			critic_model: z.string().optional(),
 			max_interactions_per_phase: z.number().int().min(5).max(200).default(50),
 			deadlock_threshold: z.number().int().min(2).max(10).default(3),
@@ -2083,6 +2164,7 @@ export const PluginConfigSchema = z.object({
 						.default([
 							'.git',
 							'.github/workflows',
+							'.opencode',
 							'.swarm',
 							'package.json',
 							'package-lock.json',
@@ -2111,6 +2193,7 @@ export const PluginConfigSchema = z.object({
 					protected_paths: [
 						'.git',
 						'.github/workflows',
+						'.opencode',
 						'.swarm',
 						'package.json',
 						'package-lock.json',
@@ -2170,6 +2253,7 @@ export const PluginConfigSchema = z.object({
 		.optional()
 		.default(() => ({
 			enabled: false,
+			locked: false,
 			max_interactions_per_phase: 50,
 			deadlock_threshold: 3,
 			escalation_mode: 'pause' as const,
@@ -2182,6 +2266,7 @@ export const PluginConfigSchema = z.object({
 				protected_paths: [
 					'.git',
 					'.github/workflows',
+					'.opencode',
 					'.swarm',
 					'package.json',
 					'package-lock.json',

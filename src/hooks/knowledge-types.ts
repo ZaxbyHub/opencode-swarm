@@ -240,6 +240,11 @@ export interface KnowledgeConfig {
 		synonym_min_cooccurrence?: number;
 		synonym_map_max_pairs?: number;
 	};
+	/** Dedicated quota for LLM enrichment of plain-prose lessons into v3 directives. */
+	enrichment: {
+		max_calls_per_day: number;
+		quota_window: 'utc' | 'local';
+	};
 }
 
 export interface MessageInfo {

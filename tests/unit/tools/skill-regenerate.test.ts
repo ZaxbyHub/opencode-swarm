@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { resolveSkillChangelogPath } from '../../../src/services/skill-changelog';
 import {
 	regenerateSkill,
 	_internals as serviceInternals,
@@ -204,6 +205,50 @@ describe('regenerateSkill', () => {
 		expect(newContent).toContain('source_knowledge_ids:');
 		expect(newContent).toMatch(/^generated_at:\s+\S+/m);
 		expect(newContent).not.toContain('generated_at: 2000-01-01T00:00:00.000Z');
+	});
+
+	it('evaluate=true rejects non-improving regeneration before write or changelog', async () => {
+		const entry1 = makeEntry('entry-gate-1', {
+			required_actions: ['add tests for scope guard'],
+		});
+		const entry2 = makeEntry('entry-gate-2', {
+			required_actions: ['add tests for delegation'],
+		});
+		await seed([entry1, entry2]);
+
+		const skillContent = `${buildFrontmatter('testing-skill', [
+			'entry-gate-1',
+			'entry-gate-2',
+		])}\nlegacy sentinel requirement\n`;
+		const skillDir = await createActiveSkill('testing-skill', skillContent);
+		const skillPath = path.join(skillDir, 'SKILL.md');
+		const evalDir = path.join(
+			tmp,
+			'.swarm',
+			'skills',
+			'evals',
+			'testing-skill',
+		);
+		await mkdir(evalDir, { recursive: true });
+		await writeFile(
+			path.join(evalDir, 'cases.json'),
+			JSON.stringify({ required_phrases: ['legacy sentinel requirement'] }),
+			'utf-8',
+		);
+
+		const result = await regenerateSkill(tmp, 'testing-skill', {
+			evaluate: true,
+		});
+
+		expect(result.regenerated).toBe(false);
+		expect(result.reason).toContain('validation_failed');
+		expect(readFileSync(skillPath, 'utf-8')).toBe(skillContent);
+		expect(existsSync(resolveSkillChangelogPath(tmp, 'testing-skill'))).toBe(
+			false,
+		);
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skills', 'rejected-edits.jsonl')),
+		).toBe(true);
 	});
 
 	// ------------------------------------------------------------------
@@ -543,6 +588,33 @@ describe('skill_regenerate tool', () => {
 
 		expect(parsed.regenerated).toBe(true);
 		expect(parsed.entryCount).toBe(2);
+	});
+
+	it('passes evaluate=true through to regeneration service', async () => {
+		const entry1 = makeEntry('tool-eval-entry-1', {
+			tags: ['scope'],
+			lesson: 'tool evaluate test lesson',
+		});
+		const entry2 = makeEntry('tool-eval-entry-2', {
+			tags: ['scope'],
+			lesson: 'tool evaluate test second lesson',
+		});
+		await seed([entry1, entry2]);
+
+		const skillContent = buildFrontmatter('tool-eval-skill', [
+			'tool-eval-entry-1',
+			'tool-eval-entry-2',
+		]);
+		await createActiveSkill('tool-eval-skill', skillContent);
+
+		const result = await skill_regenerate.execute({
+			slug: 'tool-eval-skill',
+			evaluate: true,
+		});
+		const parsed = JSON.parse(result);
+
+		expect(parsed.regenerated).toBe(true);
+		expect(parsed.evaluation.status).toBe('unevaluated');
 	});
 
 	// ------------------------------------------------------------------

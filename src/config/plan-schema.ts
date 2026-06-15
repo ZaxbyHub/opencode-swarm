@@ -4,8 +4,8 @@ import { z } from 'zod';
 // When locked, the profile is immutable; any attempt to modify it via save_plan is rejected.
 export const ExecutionProfileSchema = z.object({
 	parallelization_enabled: z.boolean().default(false),
-	max_concurrent_tasks: z.number().int().min(1).max(64).default(1),
-	council_parallel: z.boolean().default(false),
+	max_concurrent_tasks: z.number().int().min(1).max(64).default(10),
+	council_parallel: z.boolean().default(true),
 	locked: z.boolean().default(false),
 	auto_proceed: z.boolean().default(false),
 });

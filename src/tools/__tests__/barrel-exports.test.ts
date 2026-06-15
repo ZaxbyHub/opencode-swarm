@@ -34,6 +34,11 @@ describe('barrel exports — test-impact utilities', () => {
 			expect(_val).toBe('new_regression');
 		});
 
+		test('FailureClassification includes infrastructure_failure', () => {
+			const _val: tools.FailureClassification = 'infrastructure_failure';
+			expect(_val).toBe('infrastructure_failure');
+		});
+
 		test('FailureCluster type is exported', () => {
 			const _val: tools.FailureCluster = {
 				clusterId: 'abc123',

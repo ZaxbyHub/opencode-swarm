@@ -7,6 +7,11 @@
  * and delegation chains.
  */
 
+// FR-007: This module spans 6+ distinct concerns (session management, agent tracking,
+// tool call history, spiral detection, QA gate overrides, worktree tracking) with 48
+// exported symbols and 100+ importing files. Splitting is deferred pending a concrete
+// driver. See .swarm/spec.md FR-007.
+
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -431,6 +436,7 @@ export const swarmState = {
 	 * name at call time by matching the active session's agent prefix. */
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
+	curatorPostmortemAgentNames: [] as string[],
 
 	/** All registered skill_improver / spec_writer agent names across swarms,
 	 * mirroring curatorInitAgentNames so the LLM delegate factory can resolve
@@ -496,6 +502,7 @@ export function resetSwarmState(): void {
 	swarmState.opencodeClient = null;
 	swarmState.curatorInitAgentNames = [];
 	swarmState.curatorPhaseAgentNames = [];
+	swarmState.curatorPostmortemAgentNames = [];
 	swarmState.skillImproverAgentNames = [];
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
@@ -518,18 +525,18 @@ export function resetSwarmState(): void {
 }
 
 /**
- * Reset swarm state while preserving the 7 module-scoped singletons that are
+ * Reset swarm state while preserving the 8 module-scoped singletons that are
  * populated once at plugin init and must survive a /swarm close + re-init
  * within the same process lifetime.
  *
  * The preserved fields are:
  * - opencodeClient (SDK client for curator/full-auto delegation)
  * - fullAutoEnabledInConfig (config flag read at init)
- * - curatorInitAgentNames, curatorPhaseAgentNames (curator registry)
+ * - curatorInitAgentNames, curatorPhaseAgentNames, curatorPostmortemAgentNames (curator registry)
  * - skillImproverAgentNames, specWriterAgentNames (skill/spec registry)
  * - generatedAgentNames (full-auto delegation guard registry)
  *
- * Implementation: save all 7 to locals, call resetSwarmState(), restore all 7.
+ * Implementation: save all 8 to locals, call resetSwarmState(), restore all 8.
  * Synchronous (matches resetSwarmState contract). Errors from resetSwarmState
  * propagate to caller (no try/catch wrapper).
  */
@@ -538,6 +545,8 @@ export function resetSwarmStatePreservingSingletons(): void {
 	const preservedFullAutoEnabledInConfig = swarmState.fullAutoEnabledInConfig;
 	const preservedCuratorInitAgentNames = swarmState.curatorInitAgentNames;
 	const preservedCuratorPhaseAgentNames = swarmState.curatorPhaseAgentNames;
+	const preservedCuratorPostmortemAgentNames =
+		swarmState.curatorPostmortemAgentNames;
 	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
 	const preservedSpecWriterAgentNames = swarmState.specWriterAgentNames;
 	const preservedGeneratedAgentNames = swarmState.generatedAgentNames;
@@ -548,6 +557,7 @@ export function resetSwarmStatePreservingSingletons(): void {
 	swarmState.fullAutoEnabledInConfig = preservedFullAutoEnabledInConfig;
 	swarmState.curatorInitAgentNames = preservedCuratorInitAgentNames;
 	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseAgentNames;
+	swarmState.curatorPostmortemAgentNames = preservedCuratorPostmortemAgentNames;
 	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
 	swarmState.specWriterAgentNames = preservedSpecWriterAgentNames;
 	swarmState.generatedAgentNames = preservedGeneratedAgentNames;
@@ -761,6 +771,10 @@ export function ensureAgentSession(
 			session.windows = {};
 		}
 
+		// FR-009: The `=== undefined` migration guards below are intentional
+		// forward-compatibility checks. The `undefined` value carries different semantics
+		// from an explicit default. Do not replace with default-value coalescing.
+		// See .swarm/spec.md FR-009.
 		// Initialize lastCompactionHint if missing (migration safety)
 		if (session.lastCompactionHint === undefined) {
 			session.lastCompactionHint = 0;

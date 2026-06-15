@@ -4,7 +4,7 @@
 
 ## Summary
 
-Tree-sitter is the right long-term architecture for import parsing and symbol extraction in the repo graph, but the current regex-based implementation is sufficient for the MVP (TypeScript/JavaScript/Python only). Adopt tree-sitter when expanding language support beyond the current three or when import extraction accuracy becomes a blocker.
+Tree-sitter is the right long-term architecture for import parsing and symbol extraction in the repo graph, but the current bounded source-scanner implementation is sufficient for the startup graph path (TypeScript/JavaScript/Python only). Adopt tree-sitter when expanding language support beyond the current three or when import extraction accuracy becomes a blocker.
 
 ## Current State
 
@@ -14,7 +14,14 @@ Tree-sitter is the right long-term architecture for import parsing and symbol ex
 | WASM Grammars | 18 languages available |
 | Runtime | `src/lang/runtime.ts` — parser cache, async grammar loading |
 | Current Usage | `syntax-check.ts` — syntax validation with ERROR node extraction |
-| Repo Graph | Regex-based via `imports.ts` and `symbols.ts` patterns |
+| Repo Graph | Bounded source scanning in `src/tools/repo-graph/*`; stores imports, exports, ontology facts, package boundaries, and preflight-packet data |
+
+As of issue #1337, repo graph ontology facts cover file roles, route facts, data
+operations, security-related detections, conventions, and findings. These facts
+are extracted during the same bounded graph scan used by startup and `repo_map
+action="build"`. The extractor does not load tree-sitter grammars during plugin
+initialization; this preserves the fail-open startup contract while still
+surfacing richer context to agents.
 
 ## Go Criteria
 
@@ -46,7 +53,7 @@ Do NOT adopt when:
 | Parse Time (100KB) | ~10ms | ~30-50ms |
 | Accuracy | ~85% | ~99% |
 
-**Key insight:** The codebase already pays WASM init cost for syntax-check.ts. Adding tree-sitter to repo-graph reuses the same parsers from cache — no additional init overhead.
+**Key insight:** The codebase already pays WASM init cost when `syntax-check.ts` runs, but repo graph cannot rely on that cache being warm during startup or `repo_map action="build"`. A tree-sitter repo-graph migration must therefore treat WASM init and grammar loading as additional bounded work on the graph path.
 
 ## Recommended Migration Path
 
@@ -57,4 +64,4 @@ Do NOT adopt when:
 
 ## Decision
 
-**DEFERRED** — Tree-sitter migration is deferred until language expansion or accuracy requirements justify the investment. The current regex-based approach is sufficient for the MVP.
+**DEFERRED** - Tree-sitter migration for repo graph import/symbol extraction is deferred until language expansion or accuracy requirements justify the investment. The current bounded scanner is sufficient for the startup graph and ontology MVP.

@@ -1,13 +1,20 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-// Import actual modules as namespaces for spying
-import * as stateModule from '../../state';
-import * as telemetryModule from '../../telemetry';
-import * as courseCorrectionModule from '../course-correction';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { EscalationTracker } from '../escalation';
-import { createPrmHook } from '../index';
-import * as patternDetectorModule from '../pattern-detector';
-import * as trajectoryStoreModule from '../trajectory-store';
+import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
+
+// Original function references saved once at module load for save/restore
+const originalGetAgentSession = _internals.getAgentSession;
+const originalReadTrajectory = _internals.readTrajectory;
+const originalGetInMemoryTrajectory = _internals.getInMemoryTrajectory;
+const originalDetectPatterns = _internals.detectPatterns;
+const originalGenerateCourseCorrection = _internals.generateCourseCorrection;
+const originalFormatCourseCorrectionForInjection =
+	_internals.formatCourseCorrectionForInjection;
+const originalCleanupOldTrajectoryFiles = _internals.cleanupOldTrajectoryFiles;
+const originalRecordReplayEntry = _internals.recordReplayEntry;
+const originalStartReplayRecording = _internals.startReplayRecording;
+const originalTelemetry = _internals.telemetry;
 
 function createMockConfig(overrides: Partial<PrmConfig> = {}): PrmConfig {
 	return {
@@ -126,74 +133,36 @@ function createMockSession(sessionId: string, delegationActive = true) {
 	};
 }
 
+/**
+ * No-op mock for telemetry methods — tests verify the calls happen,
+ * not the telemetry payload transport.
+ */
+function createNoopTelemetry(): typeof originalTelemetry {
+	return {
+		...originalTelemetry,
+		prmPatternDetected: () => {},
+		prmCourseCorrectionInjected: () => {},
+		prmEscalationTriggered: () => {},
+		prmHardStop: () => {},
+	};
+}
+
 function setupHappyPathMocks(
 	_sessionId: string,
 	trajectory: TrajectoryEntry[],
 	matches: PatternMatch[],
 ) {
-	vi.spyOn(stateModule, 'getAgentSession').mockReturnValue({
-		agentName: 'test-agent',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
-		delegationActive: true,
-		activeInvocationId: 1,
-		lastInvocationIdByAgent: {},
-		windows: {},
-		lastCompactionHint: 0,
-		architectWriteCount: 0,
-		lastCoderDelegationTaskId: null,
-		currentTaskId: '1.1',
-		gateLog: new Map(),
-		reviewerCallCount: new Map(),
-		lastGateFailure: null,
-		partialGateWarningsIssuedForTask: new Set<string>(),
-		selfFixAttempted: false,
-		selfCodingWarnedAtCount: 0,
-		catastrophicPhaseWarnings: new Set<number>(),
-		qaSkipCount: 0,
-		qaSkipTaskIds: [],
-		taskWorkflowStates: new Map(),
-		stageBCompletion: new Map(),
-		taskCouncilApproved: new Map(),
-		lastGateOutcome: null,
-		declaredCoderScope: null,
-		lastScopeViolation: null,
-		scopeViolationDetected: false,
-		modifiedFilesThisCoderTask: [],
-		turboMode: false,
-		qaGateSessionOverrides: {},
-		fullAutoMode: false,
-		fullAutoInteractionCount: 0,
-		fullAutoDeadlockCount: 0,
-		fullAutoLastQuestionHash: null,
-		model_fallback_index: 0,
-		modelFallbackExhausted: false,
-		coderRevisions: 0,
-		revisionLimitHit: false,
-		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [],
-		sessionRehydratedAt: 0,
-		lastPhaseCompleteTimestamp: 0,
-		lastPhaseCompletePhase: 0,
-		phaseAgentsDispatched: new Set<string>(),
-		lastCompletedPhaseAgentsDispatched: new Set<string>(),
-		prmPatternCounts: new Map(),
-		prmEscalationLevel: 0,
-		prmLastPatternDetected: null as PatternMatch | null,
-		prmTrajectoryStep: 0,
-		prmHardStopPending: false,
-		prmEscalationTracker: undefined,
-	});
+	_internals.getAgentSession = () => createMockSession(_sessionId);
 
-	vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-		trajectory,
-	);
-	vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+	_internals.readTrajectory = async () => trajectory;
+
+	_internals.detectPatterns = () => ({
 		matches,
 		detectionTimeMs: 5,
 		patternsChecked: 5,
 	});
-	vi.spyOn(courseCorrectionModule, 'generateCourseCorrection').mockReturnValue({
+
+	_internals.generateCourseCorrection = () => ({
 		alert: 'TRAJECTORY ALERT: repetition_loop detected',
 		category: 'coordination_error',
 		guidance: 'Stop the repetitive loop',
@@ -201,10 +170,8 @@ function setupHappyPathMocks(
 		pattern: 'repetition_loop',
 		stepRange: [1, 3],
 	});
-	vi.spyOn(
-		courseCorrectionModule,
-		'formatCourseCorrectionForInjection',
-	).mockReturnValue('FORMATTED CORRECTION');
+
+	_internals.formatCourseCorrectionForInjection = () => 'FORMATTED CORRECTION';
 }
 
 describe('createPrmHook', () => {
@@ -212,127 +179,127 @@ describe('createPrmHook', () => {
 	const directory = '/test/project';
 
 	beforeEach(() => {
-		vi.clearAllMocks();
-		// Set up default mocks for telemetry - ensure methods exist even if other tests' mocks don't have them
-		if (!telemetryModule.telemetry.prmPatternDetected) {
-			telemetryModule.telemetry.prmPatternDetected = vi.fn();
-		} else {
-			vi.spyOn(
-				telemetryModule.telemetry,
-				'prmPatternDetected',
-			).mockImplementation(() => {});
-		}
-		if (!telemetryModule.telemetry.prmCourseCorrectionInjected) {
-			telemetryModule.telemetry.prmCourseCorrectionInjected = vi.fn();
-		} else {
-			vi.spyOn(
-				telemetryModule.telemetry,
-				'prmCourseCorrectionInjected',
-			).mockImplementation(() => {});
-		}
-		if (!telemetryModule.telemetry.prmEscalationTriggered) {
-			telemetryModule.telemetry.prmEscalationTriggered = vi.fn();
-		} else {
-			vi.spyOn(
-				telemetryModule.telemetry,
-				'prmEscalationTriggered',
-			).mockImplementation(() => {});
-		}
-		if (!telemetryModule.telemetry.prmHardStop) {
-			telemetryModule.telemetry.prmHardStop = vi.fn();
-		} else {
-			vi.spyOn(telemetryModule.telemetry, 'prmHardStop').mockImplementation(
-				() => {},
-			);
-		}
+		// Restore all originals before each test
+		_internals.getAgentSession = originalGetAgentSession;
+		_internals.readTrajectory = originalReadTrajectory;
+		_internals.getInMemoryTrajectory = originalGetInMemoryTrajectory;
+		_internals.detectPatterns = originalDetectPatterns;
+		_internals.generateCourseCorrection = originalGenerateCourseCorrection;
+		_internals.formatCourseCorrectionForInjection =
+			originalFormatCourseCorrectionForInjection;
+		_internals.cleanupOldTrajectoryFiles = originalCleanupOldTrajectoryFiles;
+		_internals.recordReplayEntry = originalRecordReplayEntry;
+		_internals.startReplayRecording = originalStartReplayRecording;
+		_internals.telemetry = createNoopTelemetry();
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		// Restore all originals to prevent cross-file leakage
+		_internals.getAgentSession = originalGetAgentSession;
+		_internals.readTrajectory = originalReadTrajectory;
+		_internals.getInMemoryTrajectory = originalGetInMemoryTrajectory;
+		_internals.detectPatterns = originalDetectPatterns;
+		_internals.generateCourseCorrection = originalGenerateCourseCorrection;
+		_internals.formatCourseCorrectionForInjection =
+			originalFormatCourseCorrectionForInjection;
+		_internals.cleanupOldTrajectoryFiles = originalCleanupOldTrajectoryFiles;
+		_internals.recordReplayEntry = originalRecordReplayEntry;
+		_internals.startReplayRecording = originalStartReplayRecording;
+		_internals.telemetry = originalTelemetry;
 	});
 
 	describe('enabled/disabled config', () => {
 		test('returns early when config.enabled is false', async () => {
 			const config = createMockConfig({ enabled: false });
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(
-				createMockSession(sessionId),
-			);
-			// Spy to track calls even though we expect early return
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue([]);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
-				matches: [],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.getAgentSession = () => createMockSession(sessionId);
+
+			// Track calls
+			let readTrajectoryCalled = false;
+			_internals.readTrajectory = async () => {
+				readTrajectoryCalled = true;
+				return [];
+			};
+			let detectPatternsCalled = false;
+			_internals.detectPatterns = () => {
+				detectPatternsCalled = true;
+				return { matches: [], detectionTimeMs: 5, patternsChecked: 5 };
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
 			// Should NOT call trajectory or detection
-			expect(trajectoryStoreModule.readTrajectory).not.toHaveBeenCalled();
-			expect(patternDetectorModule.detectPatterns).not.toHaveBeenCalled();
+			expect(readTrajectoryCalled).toBe(false);
+			expect(detectPatternsCalled).toBe(false);
 		});
 
 		test('processes when config.enabled is true', async () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				createMockTrajectory(),
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
-				matches: [],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.getAgentSession = () => session;
+
+			const trajectory = createMockTrajectory();
+			let readTrajectoryArgs: [string, string] | null = null;
+			_internals.readTrajectory = async (...args) => {
+				readTrajectoryArgs = args;
+				return trajectory;
+			};
+			let detectPatternsCalled = false;
+			_internals.detectPatterns = () => {
+				detectPatternsCalled = true;
+				return { matches: [], detectionTimeMs: 5, patternsChecked: 5 };
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(trajectoryStoreModule.readTrajectory).toHaveBeenCalledWith(
-				sessionId,
-				directory,
-			);
-			expect(patternDetectorModule.detectPatterns).toHaveBeenCalled();
+			expect(readTrajectoryArgs).toEqual([sessionId, directory]);
+			expect(detectPatternsCalled).toBe(true);
 		});
 
 		test('returns early when session not found', async () => {
 			const config = createMockConfig({ enabled: true });
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(undefined);
-			// Spy to track calls even though we expect early return
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue([]);
+			_internals.getAgentSession = () => undefined;
+
+			let readTrajectoryCalled = false;
+			_internals.readTrajectory = async () => {
+				readTrajectoryCalled = true;
+				return [];
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(trajectoryStoreModule.readTrajectory).not.toHaveBeenCalled();
+			expect(readTrajectoryCalled).toBe(false);
 		});
 
 		test('returns early when delegationActive is false', async () => {
 			const config = createMockConfig({ enabled: true });
-			const session = createMockSession(sessionId, false); // delegationActive = false
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			// Spy to track calls even though we expect early return
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue([]);
+			const session = createMockSession(sessionId, false);
+			_internals.getAgentSession = () => session;
+
+			let readTrajectoryCalled = false;
+			_internals.readTrajectory = async () => {
+				readTrajectoryCalled = true;
+				return [];
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(trajectoryStoreModule.readTrajectory).not.toHaveBeenCalled();
+			expect(readTrajectoryCalled).toBe(false);
 		});
 
 		test('returns early when no pattern matches found', async () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				createMockTrajectory(),
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => createMockTrajectory();
+			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
@@ -354,16 +321,32 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			setupHappyPathMocks(sessionId, trajectory, [match]);
 
+			// Track calls via call log
+			const generateCCArgs: [PatternMatch, TrajectoryEntry[]][] = [];
+			_internals.generateCourseCorrection = (...args) => {
+				generateCCArgs.push(args as [PatternMatch, TrajectoryEntry[]]);
+				return {
+					alert: 'ALERT',
+					category: 'coordination_error',
+					guidance: 'Stop the repetitive loop',
+					action: 'Consolidate changes',
+					pattern: 'repetition_loop',
+					stepRange: [1, 3],
+				};
+			};
+			let formatCalled = false;
+			_internals.formatCourseCorrectionForInjection = () => {
+				formatCalled = true;
+				return 'FORMATTED CORRECTION';
+			};
+
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(
-				courseCorrectionModule.generateCourseCorrection,
-			).toHaveBeenCalledWith(match, trajectory);
-			expect(
-				courseCorrectionModule.formatCourseCorrectionForInjection,
-			).toHaveBeenCalled();
+			expect(generateCCArgs).toHaveLength(1);
+			expect(generateCCArgs[0]).toEqual([match, trajectory]);
+			expect(formatCalled).toBe(true);
 		});
 
 		test('processes multiple pattern matches in sequence', async () => {
@@ -371,21 +354,44 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match1 = createMockPatternMatch('repetition_loop');
 			const match2 = createMockPatternMatch('ping_pong');
-			setupHappyPathMocks(sessionId, trajectory, [match1, match2]);
+
+			// Create a single session instance to track state mutations
+			const session = createMockSession(sessionId);
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
+				matches: [match1, match2],
+				detectionTimeMs: 5,
+				patternsChecked: 5,
+			});
+
+			// Track call counts
+			let generateCCCount = 0;
+			_internals.generateCourseCorrection = () => {
+				generateCCCount++;
+				return {
+					alert: 'ALERT',
+					category: 'coordination_error',
+					guidance: 'GUIDANCE',
+					action: 'ACTION',
+					pattern: 'repetition_loop',
+					stepRange: [1, 3],
+				};
+			};
+			let formatCount = 0;
+			_internals.formatCourseCorrectionForInjection = () => {
+				formatCount++;
+				return 'FORMATTED';
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
 			// Should process both matches
-			expect(
-				courseCorrectionModule.generateCourseCorrection,
-			).toHaveBeenCalledTimes(2);
-			expect(
-				courseCorrectionModule.formatCourseCorrectionForInjection,
-			).toHaveBeenCalledTimes(2);
-			const session = stateModule.getAgentSession(sessionId);
-			expect(session?.pendingAdvisoryMessages ?? []).toHaveLength(2);
+			expect(generateCCCount).toBe(2);
+			expect(formatCount).toBe(2);
+			expect(session.pendingAdvisoryMessages ?? []).toHaveLength(2);
 		});
 
 		test('passes correct config to detectPatterns', async () => {
@@ -400,26 +406,24 @@ describe('createPrmHook', () => {
 				},
 			});
 			const session = createMockSession(sessionId);
+			_internals.getAgentSession = () => session;
 			const trajectory = createMockTrajectory();
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
-				matches: [],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.readTrajectory = async () => trajectory;
+
+			const detectPatternsArgs: [TrajectoryEntry[], PrmConfig, number][] = [];
+			_internals.detectPatterns = (...args) => {
+				detectPatternsArgs.push(args as [TrajectoryEntry[], PrmConfig, number]);
+				return { matches: [], detectionTimeMs: 5, patternsChecked: 5 };
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(patternDetectorModule.detectPatterns).toHaveBeenCalledWith(
-				trajectory,
-				config,
-				0, // lastProcessedStep defaults to 0 for first call
-			);
+			expect(detectPatternsArgs).toHaveLength(1);
+			expect(detectPatternsArgs[0][0]).toEqual(trajectory);
+			expect(detectPatternsArgs[0][1]).toEqual(config);
+			expect(detectPatternsArgs[0][2]).toBe(0);
 		});
 	});
 
@@ -429,19 +433,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -449,10 +448,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -466,19 +462,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -486,10 +477,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -508,19 +496,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -528,18 +511,18 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED CORRECTION STRING');
+			_internals.formatCourseCorrectionForInjection = () =>
+				'FORMATTED CORRECTION STRING';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(session.pendingAdvisoryMessages as string[]).toContain(
-				'FORMATTED CORRECTION STRING',
-			);
+			expect(
+				(session.pendingAdvisoryMessages as string[]).includes(
+					'FORMATTED CORRECTION STRING',
+				),
+			).toBe(true);
 		});
 
 		test('updates prmPatternCounts for detected pattern', async () => {
@@ -547,19 +530,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -567,10 +545,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -584,19 +559,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -604,10 +574,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -623,19 +590,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -643,10 +605,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -669,28 +628,20 @@ describe('createPrmHook', () => {
 			const match1 = createMockPatternMatch('repetition_loop');
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
 
-			// First call returns repetition_loop
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValueOnce({
-				matches: [match1],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
-			// Second call returns ping_pong
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValueOnce({
-				matches: [match2],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			// detectPatterns returns first pattern on first call, second on second call
+			let detectCallCount = 0;
+			_internals.detectPatterns = () => {
+				detectCallCount++;
+				if (detectCallCount === 1) {
+					return { matches: [match1], detectionTimeMs: 5, patternsChecked: 5 };
+				}
+				return { matches: [match2], detectionTimeMs: 5, patternsChecked: 5 };
+			};
 
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -698,10 +649,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -717,19 +665,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -737,10 +680,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -769,21 +709,16 @@ describe('createPrmHook', () => {
 				createMockPatternMatch('repetition_loop');
 			session.prmHardStopPending = false;
 
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
 
 			const match = createMockPatternMatch('repetition_loop');
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -791,10 +726,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -816,19 +748,14 @@ describe('createPrmHook', () => {
 				stepRange: [1, 5] as [number, number],
 			});
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -836,22 +763,32 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
+
+			// Track telemetry calls
+			const prmPatternDetectedCalls: unknown[][] = [];
+			_internals.telemetry = {
+				...originalTelemetry,
+				prmPatternDetected: (...args: unknown[]) => {
+					prmPatternDetectedCalls.push(args);
+				},
+				prmCourseCorrectionInjected: () => {},
+				prmEscalationTriggered: () => {},
+				prmHardStop: () => {},
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(telemetryModule.telemetry.prmPatternDetected).toHaveBeenCalledWith(
+			expect(prmPatternDetectedCalls).toHaveLength(1);
+			expect(prmPatternDetectedCalls[0]).toEqual([
 				sessionId,
 				'repetition_loop',
 				'high',
 				'coordination_error',
 				[1, 5],
-			);
+			]);
 		});
 
 		test('emits prmCourseCorrectionInjected for each pattern match', async () => {
@@ -859,19 +796,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -879,23 +811,31 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
+
+			// Track telemetry calls
+			const prmCCICalls: unknown[][] = [];
+			_internals.telemetry = {
+				...originalTelemetry,
+				prmPatternDetected: () => {},
+				prmCourseCorrectionInjected: (...args: unknown[]) => {
+					prmCCICalls.push(args);
+				},
+				prmEscalationTriggered: () => {},
+				prmHardStop: () => {},
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
 			// prmCourseCorrectionInjected is called with sessionId, pattern, escalationLevel
-			expect(
-				telemetryModule.telemetry.prmCourseCorrectionInjected,
-			).toHaveBeenCalledWith(
+			expect(prmCCICalls).toHaveLength(1);
+			expect(prmCCICalls[0]).toEqual([
 				sessionId,
 				'repetition_loop',
 				1, // escalation level
-			);
+			]);
 		});
 
 		test('emits telemetry for multiple pattern matches', async () => {
@@ -904,19 +844,14 @@ describe('createPrmHook', () => {
 			const match1 = createMockPatternMatch('repetition_loop');
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match1, match2],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -924,21 +859,29 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
+
+			// Track telemetry calls
+			const prmPatternCalls: unknown[][] = [];
+			const prmCCICalls: unknown[][] = [];
+			_internals.telemetry = {
+				...originalTelemetry,
+				prmPatternDetected: (...args: unknown[]) => {
+					prmPatternCalls.push(args);
+				},
+				prmCourseCorrectionInjected: (...args: unknown[]) => {
+					prmCCICalls.push(args);
+				},
+				prmEscalationTriggered: () => {},
+				prmHardStop: () => {},
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			expect(
-				telemetryModule.telemetry.prmPatternDetected,
-			).toHaveBeenCalledTimes(2);
-			expect(
-				telemetryModule.telemetry.prmCourseCorrectionInjected,
-			).toHaveBeenCalledTimes(2);
+			expect(prmPatternCalls).toHaveLength(2);
+			expect(prmCCICalls).toHaveLength(2);
 		});
 	});
 
@@ -946,13 +889,11 @@ describe('createPrmHook', () => {
 		test('catches and logs error from readTrajectory without throwing', async () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			// Use mockImplementation to throw synchronously
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockImplementation(
-				() => {
-					throw new Error('Trajectory read failed');
-				},
-			);
+			_internals.getAgentSession = () => session;
+			// Throw synchronously to simulate error
+			_internals.readTrajectory = () => {
+				throw new Error('Trajectory read failed');
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -965,16 +906,12 @@ describe('createPrmHook', () => {
 		test('catches and logs error from detectPatterns without throwing', async () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				createMockTrajectory(),
-			);
-			// Use mockImplementation to throw synchronously
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockImplementation(
-				() => {
-					throw new Error('Detection failed');
-				},
-			);
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => createMockTrajectory();
+			// Throw synchronously to simulate error
+			_internals.detectPatterns = () => {
+				throw new Error('Detection failed');
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -987,22 +924,17 @@ describe('createPrmHook', () => {
 		test('catches and logs error from generateCourseCorrection without throwing', async () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				createMockTrajectory(),
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => createMockTrajectory();
+			_internals.detectPatterns = () => ({
 				matches: [createMockPatternMatch('repetition_loop')],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			// Use mockImplementation to throw synchronously
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockImplementation(() => {
+			// Throw synchronously to simulate error
+			_internals.generateCourseCorrection = () => {
 				throw new Error('Course correction failed');
-			});
+			};
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -1017,19 +949,14 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
+			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockReturnValue({
+			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
 				guidance: 'GUIDANCE',
@@ -1037,10 +964,7 @@ describe('createPrmHook', () => {
 				pattern: 'repetition_loop',
 				stepRange: [1, 3],
 			});
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -1062,32 +986,24 @@ describe('createPrmHook', () => {
 			const match1 = createMockPatternMatch('repetition_loop');
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				trajectory,
-			);
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => trajectory;
 
 			// detectPatterns returns first pattern on first call, second on second call
-			vi.spyOn(patternDetectorModule, 'detectPatterns')
-				.mockReturnValueOnce({
-					matches: [match1],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				})
-				.mockReturnValueOnce({
-					matches: [match2],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				});
+			let detectCallCount = 0;
+			_internals.detectPatterns = () => {
+				detectCallCount++;
+				if (detectCallCount === 1) {
+					return { matches: [match1], detectionTimeMs: 5, patternsChecked: 5 };
+				}
+				return { matches: [match2], detectionTimeMs: 5, patternsChecked: 5 };
+			};
 
 			// First call throws, second succeeds
-			let callCount = 0;
-			vi.spyOn(
-				courseCorrectionModule,
-				'generateCourseCorrection',
-			).mockImplementation((match) => {
-				callCount++;
-				if (callCount === 1) {
+			let ccCallCount = 0;
+			_internals.generateCourseCorrection = (match) => {
+				ccCallCount++;
+				if (ccCallCount === 1) {
 					throw new Error('First correction failed');
 				}
 				return {
@@ -1098,12 +1014,9 @@ describe('createPrmHook', () => {
 					pattern: match.pattern,
 					stepRange: [1, 3],
 				};
-			});
+			};
 
-			vi.spyOn(
-				courseCorrectionModule,
-				'formatCourseCorrectionForInjection',
-			).mockReturnValue('FORMATTED');
+			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -1111,13 +1024,13 @@ describe('createPrmHook', () => {
 			await expect(
 				toolAfter({ sessionID: sessionId }),
 			).resolves.toBeUndefined();
-			expect(callCount).toBe(1);
+			expect(ccCallCount).toBe(1);
 
 			// Second toolAfter call - succeeds
 			await expect(
 				toolAfter({ sessionID: sessionId }),
 			).resolves.toBeUndefined();
-			expect(callCount).toBe(2);
+			expect(ccCallCount).toBe(2);
 
 			// Second correction was added
 			expect(session.pendingAdvisoryMessages).toHaveLength(1);
@@ -1135,8 +1048,7 @@ describe('createPrmHook', () => {
 
 		test('toolAfter returns Promise<void>', async () => {
 			const config = createMockConfig({ enabled: false });
-			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
+			_internals.getAgentSession = () => createMockSession(sessionId);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -1150,10 +1062,9 @@ describe('createPrmHook', () => {
 	describe('edge cases', () => {
 		test('handles empty trajectory array', async () => {
 			const config = createMockConfig({ enabled: true });
-			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue([]);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => createMockSession(sessionId);
+			_internals.readTrajectory = async () => [];
+			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
@@ -1168,12 +1079,9 @@ describe('createPrmHook', () => {
 
 		test('handles missing optional fields in ToolAfterContext', async () => {
 			const config = createMockConfig({ enabled: true });
-			const session = createMockSession(sessionId);
-			vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-			vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-				createMockTrajectory(),
-			);
-			vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+			_internals.getAgentSession = () => createMockSession(sessionId);
+			_internals.readTrajectory = async () => createMockTrajectory();
+			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
 				patternsChecked: 5,
@@ -1199,21 +1107,16 @@ describe('createPrmHook', () => {
 			for (const pattern of patternTypes) {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${pattern}`);
-				vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-				vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-					createMockTrajectory(),
-				);
+				_internals.getAgentSession = () => session;
+				_internals.readTrajectory = async () => createMockTrajectory();
 
 				const match = createMockPatternMatch(pattern);
-				vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+				_internals.detectPatterns = () => ({
 					matches: [match],
 					detectionTimeMs: 5,
 					patternsChecked: 5,
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'generateCourseCorrection',
-				).mockReturnValue({
+				_internals.generateCourseCorrection = () => ({
 					alert: 'ALERT',
 					category: 'coordination_error',
 					guidance: 'GUIDANCE',
@@ -1221,10 +1124,7 @@ describe('createPrmHook', () => {
 					pattern,
 					stepRange: [1, 3],
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'formatCourseCorrectionForInjection',
-				).mockReturnValue('FORMATTED');
+				_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 				const { toolAfter } = createPrmHook(config, directory);
 
@@ -1246,21 +1146,16 @@ describe('createPrmHook', () => {
 			for (const severity of severities) {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${severity}`);
-				vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-				vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-					createMockTrajectory(),
-				);
+				_internals.getAgentSession = () => session;
+				_internals.readTrajectory = async () => createMockTrajectory();
 
 				const match = createMockPatternMatch('repetition_loop', { severity });
-				vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+				_internals.detectPatterns = () => ({
 					matches: [match],
 					detectionTimeMs: 5,
 					patternsChecked: 5,
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'generateCourseCorrection',
-				).mockReturnValue({
+				_internals.generateCourseCorrection = () => ({
 					alert: 'ALERT',
 					category: 'coordination_error',
 					guidance: 'GUIDANCE',
@@ -1268,10 +1163,7 @@ describe('createPrmHook', () => {
 					pattern: 'repetition_loop',
 					stepRange: [1, 3],
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'formatCourseCorrectionForInjection',
-				).mockReturnValue('FORMATTED');
+				_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 				const { toolAfter } = createPrmHook(config, directory);
 
@@ -1291,21 +1183,16 @@ describe('createPrmHook', () => {
 			for (const category of categories) {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${category}`);
-				vi.spyOn(stateModule, 'getAgentSession').mockReturnValue(session);
-				vi.spyOn(trajectoryStoreModule, 'readTrajectory').mockResolvedValue(
-					createMockTrajectory(),
-				);
+				_internals.getAgentSession = () => session;
+				_internals.readTrajectory = async () => createMockTrajectory();
 
 				const match = createMockPatternMatch('repetition_loop', { category });
-				vi.spyOn(patternDetectorModule, 'detectPatterns').mockReturnValue({
+				_internals.detectPatterns = () => ({
 					matches: [match],
 					detectionTimeMs: 5,
 					patternsChecked: 5,
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'generateCourseCorrection',
-				).mockReturnValue({
+				_internals.generateCourseCorrection = () => ({
 					alert: 'ALERT',
 					category,
 					guidance: 'GUIDANCE',
@@ -1313,10 +1200,7 @@ describe('createPrmHook', () => {
 					pattern: 'repetition_loop',
 					stepRange: [1, 3],
 				});
-				vi.spyOn(
-					courseCorrectionModule,
-					'formatCourseCorrectionForInjection',
-				).mockReturnValue('FORMATTED');
+				_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
 
 				const { toolAfter } = createPrmHook(config, directory);
 

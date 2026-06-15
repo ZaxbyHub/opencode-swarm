@@ -27,7 +27,9 @@ export interface SkillUsageEntry {
 	taskID: string;
 	/** ISO 8601 timestamp of the event. */
 	timestamp: string;
-	/** Compliance outcome — 'compliant' | 'violation' | 'partial' | 'not_checked' | custom. */
+	/** Compliance outcome — 'compliant' | 'partial' | 'violated' | 'not_checked' | custom.
+	 *  Legacy on-disk entries may carry the pre-fix spelling 'violation'; these are
+	 *  normalized to 'violated' on the read path (see normalizeComplianceVerdict). */
 	complianceVerdict: string;
 	/** Optional free-text notes from the reviewer. */
 	reviewerNotes?: string;
@@ -35,6 +37,12 @@ export interface SkillUsageEntry {
 	sessionID: string;
 	/** Skill version at the time of this usage event (omitted for pre-versioning entries). */
 	skillVersion?: number;
+}
+
+interface SkillFeedbackAppliedMarker {
+	type: 'feedback_applied';
+	timestamp: string;
+	processedEntryIds: string[];
 }
 
 /** Filter options for reading skill-usage entries. */
@@ -71,6 +79,23 @@ function resolveLogPath(directory: string): string {
 }
 
 // ============================================================================
+// Verdict normalization (legacy backward-compat)
+// ============================================================================
+
+/**
+ * Normalize a compliance verdict to the canonical spelling.
+ * The sole producer (`skill-propagation-gate.ts`) lowercases the regex
+ * capture, yielding 'violated'.  Pre-fix on-disk entries may carry the
+ * legacy spelling 'violation'; this maps them to the canonical form so
+ * that every downstream comparison can use a single string.
+ *
+ * Exported for unit-testing.
+ */
+export function normalizeComplianceVerdict(verdict: string): string {
+	return verdict === 'violation' ? 'violated' : verdict;
+}
+
+// ============================================================================
 // DI seam
 // ============================================================================
 
@@ -96,7 +121,102 @@ export const _internals = {
 	applySkillUsageFeedback,
 	parseGeneratedFromKnowledge,
 	computeComplianceByVersion,
+	normalizeComplianceVerdict,
+	readFeedbackAppliedEntryIds,
+	appendFeedbackAppliedMarker,
 };
+
+function normalizeSkillUsageEntry(raw: unknown): SkillUsageEntry {
+	const entry = raw as SkillUsageEntry;
+	return {
+		...entry,
+		complianceVerdict: normalizeComplianceVerdict(entry.complianceVerdict),
+	};
+}
+
+function legacySkillUsageId(entry: Partial<SkillUsageEntry>): string {
+	const stable = JSON.stringify({
+		skillPath: entry.skillPath,
+		agentName: entry.agentName,
+		taskID: entry.taskID,
+		timestamp: entry.timestamp,
+		complianceVerdict: entry.complianceVerdict,
+		sessionID: entry.sessionID,
+		skillVersion: entry.skillVersion,
+	});
+	return `legacy:${crypto.createHash('sha256').update(stable).digest('hex')}`;
+}
+
+function parseSkillUsageEntry(raw: unknown): SkillUsageEntry | null {
+	const entry = raw as Partial<SkillUsageEntry> & { type?: string };
+	if (entry.type === 'feedback_applied') return null;
+	if (
+		typeof entry.skillPath !== 'string' ||
+		typeof entry.agentName !== 'string' ||
+		typeof entry.taskID !== 'string' ||
+		typeof entry.timestamp !== 'string' ||
+		typeof entry.complianceVerdict !== 'string' ||
+		typeof entry.sessionID !== 'string'
+	) {
+		return null;
+	}
+	return normalizeSkillUsageEntry({
+		...entry,
+		id: typeof entry.id === 'string' ? entry.id : legacySkillUsageId(entry),
+	});
+}
+
+function parseFeedbackMarker(raw: unknown): SkillFeedbackAppliedMarker | null {
+	const marker = raw as Partial<SkillFeedbackAppliedMarker> & { type?: string };
+	if (marker.type !== 'feedback_applied') return null;
+	if (typeof marker.timestamp !== 'string') return null;
+	if (!Array.isArray(marker.processedEntryIds)) return null;
+	const processedEntryIds = marker.processedEntryIds.filter(
+		(id): id is string => typeof id === 'string' && id.length > 0,
+	);
+	return {
+		type: 'feedback_applied',
+		timestamp: marker.timestamp,
+		processedEntryIds,
+	};
+}
+
+function readFeedbackAppliedEntryIds(directory: string): Set<string> {
+	const resolved = resolveLogPath(directory);
+	const processed = new Set<string>();
+	if (!_internals.existsSync(resolved)) return processed;
+	const raw = _internals.readFileSync(resolved, 'utf-8');
+	for (const line of raw.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const marker = parseFeedbackMarker(JSON.parse(trimmed));
+			if (!marker) continue;
+			for (const id of marker.processedEntryIds) processed.add(id);
+		} catch {
+			// skip malformed marker lines
+		}
+	}
+	return processed;
+}
+
+function appendFeedbackAppliedMarker(
+	directory: string,
+	processedEntryIds: string[],
+): void {
+	if (processedEntryIds.length === 0) return;
+	const resolved = resolveLogPath(directory);
+	const dir = path.dirname(resolved);
+	if (!_internals.existsSync(dir)) {
+		_internals.mkdirSync(dir, { recursive: true });
+	}
+	const marker: SkillFeedbackAppliedMarker = {
+		type: 'feedback_applied',
+		timestamp: new Date().toISOString(),
+		processedEntryIds: [...new Set(processedEntryIds)],
+	};
+	_internals.appendFileSync(resolved, `${JSON.stringify(marker)}\n`, 'utf-8');
+}
 
 // ============================================================================
 // Append
@@ -161,7 +281,7 @@ export function appendSkillUsageEntry(
 		agentName,
 		taskID,
 		timestamp,
-		complianceVerdict,
+		complianceVerdict: normalizeComplianceVerdict(complianceVerdict),
 		sessionID,
 		...(reviewerNotes !== undefined && { reviewerNotes }),
 		...(skillVersion !== undefined && { skillVersion }),
@@ -213,7 +333,8 @@ export function readSkillUsageEntries(
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
-			entries.push(JSON.parse(trimmed) as SkillUsageEntry);
+			const entry = parseSkillUsageEntry(JSON.parse(trimmed));
+			if (entry) entries.push(entry);
 		} catch {
 			// skip malformed line — consistent with knowledge-application pattern
 		}
@@ -299,7 +420,8 @@ export function readSkillUsageEntriesTail(
 			for (const line of usable.split('\n')) {
 				if (!line.trim()) continue;
 				try {
-					const entry: SkillUsageEntry = JSON.parse(line);
+					const entry = parseSkillUsageEntry(JSON.parse(line));
+					if (!entry) continue;
 					if (
 						filters.sessionID !== undefined &&
 						entry.sessionID !== filters.sessionID
@@ -358,7 +480,9 @@ export function computeComplianceByVersion(
 		}
 		stats.total += 1;
 		if (e.complianceVerdict === 'compliant') stats.compliant += 1;
-		if (e.complianceVerdict === 'violation') stats.violation += 1;
+		if (normalizeComplianceVerdict(e.complianceVerdict) === 'violated') {
+			stats.violation += 1;
+		}
 	}
 
 	for (const stats of map.values()) {
@@ -570,9 +694,9 @@ const VIOLATION_DECAY = 0.1;
  * Read skill-usage entries, resolve source knowledge IDs for each skill,
  * and apply confidence bumps/decays to the originating knowledge entries.
  *
- * For each unique skillPath with at least one compliance or violation entry:
+ * For each unique skillPath with at least one compliance or violated entry:
  * 1. Resolve source knowledge UUIDs from the skill's SKILL.md frontmatter.
- * 2. Count compliant and violation events for that skill.
+ * 2. Count compliant and violated events for that skill.
  * 3. Compute net delta: if compliant count > violation count → +0.05; else → -0.1.
  * 4. Call `bumpKnowledgeConfidenceBatch` with the aggregated deltas.
  *
@@ -589,16 +713,20 @@ export async function applySkillUsageFeedback(
 
 	try {
 		const allEntries = readSkillUsageEntries(directory);
+		const alreadyProcessed = readFeedbackAppliedEntryIds(directory);
 
 		// Filter to entries with actionable compliance verdicts
 		const actionable = allEntries.filter((e) => {
 			if (
 				e.complianceVerdict !== 'compliant' &&
-				e.complianceVerdict !== 'violation'
+				e.complianceVerdict !== 'violated'
 			) {
 				return false;
 			}
 			if (options?.sinceTimestamp && e.timestamp <= options.sinceTimestamp) {
+				return false;
+			}
+			if (alreadyProcessed.has(e.id)) {
 				return false;
 			}
 			return true;
@@ -618,6 +746,7 @@ export async function applySkillUsageFeedback(
 
 		// Collect all deltas across all skills, then batch-apply once
 		const allDeltas: Array<{ id: string; delta: number }> = [];
+		const processedEntryIds: string[] = [];
 
 		for (const [skillPath, entries] of Array.from(groups)) {
 			let compliantCount = 0;
@@ -625,7 +754,7 @@ export async function applySkillUsageFeedback(
 
 			for (const entry of entries) {
 				if (entry.complianceVerdict === 'compliant') compliantCount++;
-				else if (entry.complianceVerdict === 'violation') violationCount++;
+				else if (entry.complianceVerdict === 'violated') violationCount++;
 			}
 
 			// Skip skills with no actionable verdicts (shouldn't happen due to filter, but defensive)
@@ -641,6 +770,7 @@ export async function applySkillUsageFeedback(
 			for (const id of sourceIds) {
 				allDeltas.push({ id, delta });
 			}
+			processedEntryIds.push(...entries.map((entry) => entry.id));
 
 			processed++;
 			bumps += sourceIds.length;
@@ -663,6 +793,7 @@ export async function applySkillUsageFeedback(
 		// Batch-apply clamped deltas in a single call
 		if (clampedDeltas.length > 0) {
 			await bumpKnowledgeConfidenceBatch(directory, clampedDeltas);
+			appendFeedbackAppliedMarker(directory, processedEntryIds);
 		}
 	} catch (err) {
 		console.warn(

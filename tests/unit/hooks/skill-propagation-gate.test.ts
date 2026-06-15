@@ -1910,14 +1910,15 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 
 	test('calls computeSkillRelevanceScore for each available skill when skills are present', async () => {
 		let scoringCallCount = 0;
-		let lastScoringArgs: [string, string, unknown[]] | null = null;
+		let lastScoringArgs: [string, string, unknown[], unknown] | null = null;
 		const mockComputeSkillRelevanceScore = (
 			skillPath: string,
 			taskDescription: string,
 			usageHistory: unknown[],
+			metadata?: unknown,
 		) => {
 			scoringCallCount++;
-			lastScoringArgs = [skillPath, taskDescription, usageHistory];
+			lastScoringArgs = [skillPath, taskDescription, usageHistory, metadata];
 			return 0.85;
 		};
 
@@ -1945,6 +1946,11 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 					complianceVerdict: 'compliant',
 				},
 			],
+			readSkillMetadata: (skillPath: string) => ({
+				path: skillPath,
+				name: path.basename(path.dirname(skillPath)),
+				description: 'metadata description',
+			}),
 			computeSkillRelevanceScore: mockComputeSkillRelevanceScore,
 		});
 
@@ -1966,6 +1972,80 @@ describe('skillPropagationGateBefore — delegation recording', () => {
 		expect(scoringCallCount).toBe(2);
 		expect(lastScoringArgs).not.toBeNull();
 		expect(lastScoringArgs![1]).toContain('implement the feature');
+		expect(lastScoringArgs![3]).toMatchObject({
+			description: 'metadata description',
+		});
+	});
+
+	test('frontmatter triggers affect the real propagation-gate recommendation path', async () => {
+		const triggeredSkill = '.opencode/skills/generated/biome-lint/SKILL.md';
+		const untriggeredSkill = '.opencode/skills/generated/package-docs/SKILL.md';
+		const triggeredDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'biome-lint',
+		);
+		const untriggeredDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'package-docs',
+		);
+		fs.mkdirSync(triggeredDir, { recursive: true });
+		fs.mkdirSync(untriggeredDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(triggeredDir, 'SKILL.md'),
+			[
+				'---',
+				'name: biome-lint',
+				'description: Handle lint configuration',
+				'triggers:',
+				'  - biome lint config',
+				'---',
+				'# Body',
+			].join('\n'),
+			'utf-8',
+		);
+		fs.writeFileSync(
+			path.join(untriggeredDir, 'SKILL.md'),
+			[
+				'---',
+				'name: package-docs',
+				'description: Package documentation',
+				'---',
+				'# Body',
+			].join('\n'),
+			'utf-8',
+		);
+
+		applyOverrides(_internals, {
+			discoverAvailableSkills: () => [untriggeredSkill, triggeredSkill],
+			readSkillUsageEntriesTail: () => [],
+			appendSkillUsageEntry: makeMockAppendSkillUsageEntry([]),
+			parseSkillPaths: () => [],
+		});
+
+		const result = await skillPropagationGateBefore(
+			tmp,
+			{
+				tool: 'task',
+				agent: 'architect',
+				sessionID: 'sess-trigger-score',
+				args: {
+					subagent_type: 'coder',
+					prompt: 'fix the biome lint config',
+				},
+			},
+			{ enabled: true },
+		);
+
+		expect(result.recommendedSkills?.[0].skillPath).toBe(triggeredSkill);
+		expect(result.recommendedSkills?.[0].score).toBeGreaterThan(
+			result.recommendedSkills?.[1].score ?? 0,
+		);
 	});
 
 	test('scoring error does not block the delegation recording', async () => {
@@ -3285,6 +3365,72 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 			for (const entry of complianceEntries) {
 				expect(entry.taskID).toBe('task-latest');
 			}
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('explicit reviewer TASK attribution overrides latest delegation fallback', async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribution-task-'));
+		const swarmDir = path.join(tempDir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+
+		const sessionID = `attr-task-${Date.now()}`;
+		const skillA = 'file:.claude/skills/writing-tests/SKILL.md';
+		const skillB = 'file:.claude/skills/engineering-conventions/SKILL.md';
+
+		for (const sp of [skillA, skillB]) {
+			const absPath = path.join(tempDir, sp.replace('file:', ''));
+			fs.mkdirSync(path.dirname(absPath), { recursive: true });
+			fs.writeFileSync(absPath, '# Skill\n');
+		}
+
+		appendSkillUsageEntry(tempDir, {
+			skillPath: skillA,
+			agentName: 'coder',
+			taskID: 'task-earlier',
+			complianceVerdict: 'not_checked',
+			sessionID,
+			timestamp: new Date().toISOString(),
+		});
+		appendSkillUsageEntry(tempDir, {
+			skillPath: skillB,
+			agentName: 'coder',
+			taskID: 'task-latest',
+			complianceVerdict: 'not_checked',
+			sessionID,
+			timestamp: new Date().toISOString(),
+		});
+
+		const messages = [
+			{
+				info: { role: 'assistant', agent: 'reviewer', sessionID },
+				parts: [
+					{
+						type: 'text',
+						text: 'TASK: task-earlier\nSKILL_COMPLIANCE: COMPLIANT — all guidelines followed',
+					},
+				],
+			},
+		];
+
+		try {
+			await _internals.skillPropagationTransformScan(
+				tempDir,
+				{
+					messages: messages as Parameters<
+						typeof _internals.skillPropagationTransformScan
+					>[1]['messages'],
+				},
+				sessionID,
+			);
+
+			const complianceEntries = readSkillUsageEntries(tempDir, {
+				sessionID,
+			}).filter((e) => e.agentName === 'reviewer');
+			expect(complianceEntries).toHaveLength(1);
+			expect(complianceEntries[0].skillPath).toBe(skillA);
+			expect(complianceEntries[0].taskID).toBe('task-earlier');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

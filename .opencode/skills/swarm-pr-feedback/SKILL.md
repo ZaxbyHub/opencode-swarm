@@ -61,6 +61,25 @@ final state. Expect N rounds of review for N pushes, and budget for it.
 each round's work is bounded by new findings + carried-forward items only.
 This matches how the bot actually behaves and avoids wasted cycles.
 
+### Bot Review Verification Traps
+
+When a bot or pasted review cites a code fact, verify the fact against the
+current branch before editing:
+
+- **Import/export claims:** Check the exact import path used by the changed file.
+  A symbol may be missing from an internal submodule but correctly exported by the
+  public barrel the tests or runtime actually import.
+- **Line numbers:** Treat bot line references as approximate after any follow-up
+  push or local edit. Re-locate the symbol or block with `rg` before patching.
+- **Ordering claims:** If the concern is about rule precedence, add or run a
+  direct precedence test that would fail under the wrong ordering; comments alone
+  are not enough.
+- **Disproved findings:** Do not change unrelated code to satisfy a false claim.
+  Keep the finding in the closure ledger with the source or test evidence that
+  disproves it.
+- **Cache/state claims:** Test both relevant state orders when the behavior
+  depends on cache priming, singleton state, or prior calls.
+
 ## Operating Stance
 
 Treat every review comment, CI failure, bot summary, PR body claim, and pasted note
@@ -82,6 +101,14 @@ tree:
 
 - If `head_ref` is a remote branch that is not checked out locally, fetch it
   (`git fetch origin <head_ref>`).
+- **Check for parallel work first.** Before checkout, run the
+  [`parallel-work-check`](../generated/parallel-work-check/SKILL.md) protocol to
+  detect concurrent pushes from other agents (e.g., `hermes-pr-review` bot
+  following up, maintainer pushing fixes, parallel swarm work). If remote has new
+  commits: read `git log local..remote`, evaluate whether the parallel work
+  supersedes your planned fixes, and prefer the parallel work if it's more
+  comprehensive (more tests, better edge coverage, clearer error handling).
+  Abort your rebase, take the remote state, then add minor improvements on top.
 - Verify the working tree is clean first (`git status --porcelain`). If uncommitted
   changes exist, stash them or abort to prevent data loss.
 - **Check out the head branch locally.** Feedback verification reads the working-tree

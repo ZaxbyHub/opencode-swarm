@@ -13,6 +13,7 @@ import {
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
 	gateKnowledgeApplication,
 	getShownButNotAcknowledged,
+	MAX_LEGACY_APPLICATION_LOG_ENTRIES,
 	parseAcknowledgments,
 	processArchitectText,
 	recordAcknowledgment,
@@ -164,6 +165,30 @@ describe('recordKnowledgeShown vs recordAcknowledgment', () => {
 		expect(lines.some((l) => l.includes('"shown"'))).toBe(true);
 		expect(lines.some((l) => l.includes('"applied"'))).toBe(true);
 	});
+
+	it('caps the legacy application audit log after appending', async () => {
+		const logPath = resolveApplicationLogPath(tmp);
+		await mkdir(path.dirname(logPath), { recursive: true });
+		const lines = Array.from(
+			{ length: MAX_LEGACY_APPLICATION_LOG_ENTRIES + 5 },
+			(_, i) =>
+				JSON.stringify({
+					timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+					knowledgeId: `old-${i}`,
+					result: 'shown',
+				}),
+		);
+		await writeFile(logPath, `${lines.join('\n')}\n`, 'utf-8');
+
+		await recordKnowledgeShown(tmp, ['newest'], { phase: 'Phase 1' });
+
+		const capped = readFileSync(logPath, 'utf-8').trim().split('\n');
+		expect(capped).toHaveLength(MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+		expect(capped.some((line) => line.includes('"knowledgeId":"old-0"'))).toBe(
+			false,
+		);
+		expect(capped[capped.length - 1]).toContain('"knowledgeId":"newest"');
+	});
 });
 
 describe('gateKnowledgeApplication', () => {
@@ -236,83 +261,69 @@ describe('getShownButNotAcknowledged', () => {
 // bumpCountersBatch — TOCTOU race condition fix
 // ============================================================================
 
-describe('bumpCountersBatch — concurrent counter bump with append', () => {
-	it(
-		'concurrent recordAcknowledgment and appendKnowledge do not lose entries — ' +
-			'lock-before-read ensures atomic read-modify-write',
-		async () => {
-			const id = '99999999-9999-4999-9999-999999999999';
-			await seedEntry(id);
+describe('bumpCountersBatch - lock-before-read TOCTOU regression', () => {
+	it('recordAcknowledgment re-reads after an interleaved append instead of rewriting a stale snapshot', async () => {
+		const id = '99999999-9999-4999-9999-999999999999';
+		await seedEntry(id);
 
-			// Import appendKnowledge to simulate concurrent append during counter bump
-			const { appendKnowledge } = await import(
-				'../../../src/hooks/knowledge-store.js'
-			);
-			const { bumpCountersBatch } = await import(
-				'../../../src/hooks/knowledge-application.js'
-			);
+		const { appendKnowledge } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
 
-			// Simulate the race: recordAcknowledgment will read and update counters
-			// while appendKnowledge tries to append new entries.
-			// Without the lock-before-read fix, the appended entry would be lost
-			// when the counter update is written back.
+		const secondId = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const secondEntry: SwarmKnowledgeEntry = {
+			id: secondId,
+			tier: 'swarm',
+			lesson: 'second entry for concurrency test',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.8,
+			status: 'candidate',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: 'test',
+		};
 
-			// First, create a second entry that will be "appended" during the race
-			const secondId = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
-			const secondEntry: SwarmKnowledgeEntry = {
-				id: secondId,
-				tier: 'swarm',
-				lesson: 'second entry for concurrency test',
-				category: 'process',
-				tags: [],
-				scope: 'global',
-				confidence: 0.8,
-				status: 'candidate',
-				confirmed_by: [],
-				retrieval_outcomes: {
-					applied_count: 0,
-					succeeded_after_count: 0,
-					failed_after_count: 0,
-				},
-				schema_version: 2,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				project_name: 'test',
-			};
+		const knowledgePath = resolveSwarmKnowledgePath(tmp);
+		const staleSnapshot = readFileSync(knowledgePath, 'utf-8')
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		expect(staleSnapshot.map((entry: any) => entry.id)).toEqual([id]);
 
-			// Concurrently bump counters (which would trigger a rewrite) and append
-			// a new entry. With the TOCTOU fix (lock-before-read), both operations
-			// are serialized by the directory lock and no entry is lost.
-			await Promise.all([
-				recordAcknowledgment(tmp, { id, result: 'applied' }, { phase: 'Phase 1' }),
-				appendKnowledge(resolveSwarmKnowledgePath(tmp), secondEntry),
-			]);
+		// Previous code read before acquiring the rewrite lock. This fixed
+		// interleaving models that stale snapshot, appends a second entry, then
+		// performs the counter update. The fixed path must re-read under
+		// transactKnowledge and preserve the append.
+		await appendKnowledge(knowledgePath, secondEntry);
+		await recordAcknowledgment(
+			tmp,
+			{ id, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
 
-			// Verify both the counter update and the append succeeded
-			const knowledgePath = resolveSwarmKnowledgePath(tmp);
-			const entries = JSON.parse(
-				readFileSync(knowledgePath, 'utf-8').trim().split('\n').pop()!,
-			);
+		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
+		const allEntries = lines.map((line) => JSON.parse(line));
 
-			// The file should have both entries (the file is JSONL, so we need to read all lines)
-			const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
-			const allEntries = lines.map((line) => JSON.parse(line));
+		expect(allEntries).toHaveLength(2);
 
-			// Should have 2 entries: original + appended
-			expect(allEntries).toHaveLength(2);
+		const originalEntry = allEntries.find((e: any) => e.id === id);
+		expect(originalEntry).toBeDefined();
+		expect(originalEntry.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(originalEntry.retrieval_outcomes.acknowledged_count).toBe(1);
 
-			// Original entry should have updated counters
-			const originalEntry = allEntries.find((e: any) => e.id === id);
-			expect(originalEntry).toBeDefined();
-			expect(originalEntry.retrieval_outcomes.applied_explicit_count).toBe(1);
-			expect(originalEntry.retrieval_outcomes.acknowledged_count).toBe(1);
-
-			// Appended entry should still exist
-			const appendedEntry = allEntries.find((e: any) => e.id === secondId);
-			expect(appendedEntry).toBeDefined();
-			expect(appendedEntry.id).toBe(secondId);
-		},
-	);
+		const appendedEntry = allEntries.find((e: any) => e.id === secondId);
+		expect(appendedEntry).toBeDefined();
+		expect(appendedEntry.id).toBe(secondId);
+	});
 });
 
 // ============================================================================

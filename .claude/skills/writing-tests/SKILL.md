@@ -384,6 +384,10 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - Test real behavior: call the actual function with real inputs, assert on real outputs.
 - Test error paths: what happens with `null`, `undefined`, empty string, oversized input?
 - Use temp directories (`fs.mkdtemp`) for file I/O tests. Clean up in `afterEach`.
+- Recursive temp cleanup must be bounded by a helper that verifies the resolved
+  cleanup target is a child of `os.tmpdir()` before deleting. Prefer
+  `tests/helpers/safe-test-dir.ts`; it rejects empty strings, `os.tmpdir()`
+  itself, and paths outside the temp root.
 - Assert on specific values, not just truthiness: `expect(result.status).toBe('pending')` not `expect(result).toBeTruthy()`.
 
 ### DO NOT

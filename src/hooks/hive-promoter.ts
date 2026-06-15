@@ -87,6 +87,10 @@ export function isHiveEligible(
 	entry: SwarmKnowledgeEntry,
 	autoPromoteDays: number,
 ): boolean {
+	if (!isActiveForHivePromotion(entry)) {
+		return false;
+	}
+
 	// Route 1: hive_eligible flag + 3+ distinct phases
 	const phaseNumbers = new Set<number>();
 	for (const record of entry.confirmed_by ?? []) {
@@ -112,6 +116,12 @@ export function isHiveEligible(
 	}
 
 	return false;
+}
+
+function isActiveForHivePromotion(entry: SwarmKnowledgeEntry): boolean {
+	return !['archived', 'quarantined', 'quarantined_unactionable'].includes(
+		entry.status,
+	);
 }
 
 /**
@@ -281,7 +291,7 @@ export async function checkHivePromotions(
 		// Find near-duplicate swarm entries from different projects
 		const nearDuplicate = findNearDuplicate(
 			hiveEntry.lesson,
-			swarmEntries,
+			swarmEntries.filter(isActiveForHivePromotion),
 			config.dedup_threshold,
 		);
 

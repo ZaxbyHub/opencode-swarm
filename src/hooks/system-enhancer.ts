@@ -717,6 +717,9 @@ export function createSystemEnhancerHook(
 						config.context_budget?.scoring?.enabled === true;
 
 					if (!scoringEnabled) {
+						// FR-006: The non-scoring branch below contains frozen legacy code (Path A).
+						// This duplication exists because the two paths diverged during a phased rollout.
+						// Path A is intentionally frozen and should not be modified. See .swarm/spec.md FR-006.
 						// Path A: EXACT LEGACY CODE - do not change
 						// Priority 0: Minimal phase header
 						let plan = null;

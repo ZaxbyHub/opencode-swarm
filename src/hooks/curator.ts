@@ -80,7 +80,10 @@ import {
 	validateActionability,
 	validateLesson,
 } from './knowledge-validator.js';
-import { readSkillUsageEntries } from './skill-usage-log.js';
+import {
+	normalizeComplianceVerdict,
+	readSkillUsageEntries,
+} from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 /**
@@ -156,7 +159,7 @@ async function autoRetireSkills(
 			});
 
 			const violations = skillUsage.filter(
-				(e) => e.complianceVerdict === 'violation',
+				(e) => normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
 			).length;
 			const violationRate =
 				skillUsage.length > 0 ? violations / skillUsage.length : 0;
@@ -1276,7 +1279,7 @@ export async function runCuratorPhase(
 				if (skillUsage.length === 0) continue;
 
 				const violations = skillUsage.filter(
-					(e) => e.complianceVerdict === 'violation',
+					(e) => normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
 				).length;
 				const violationRate = violations / skillUsage.length;
 
@@ -1290,7 +1293,10 @@ export async function runCuratorPhase(
 
 					const currentVersion = fm?.version ?? 1;
 					const violationContexts: ViolationContext[] = skillUsage
-						.filter((e) => e.complianceVerdict === 'violation')
+						.filter(
+							(e) =>
+								normalizeComplianceVerdict(e.complianceVerdict) === 'violated',
+						)
 						.slice(-10)
 						.map((e) => ({
 							taskId: e.taskID,

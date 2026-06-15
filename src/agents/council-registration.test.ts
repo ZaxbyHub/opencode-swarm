@@ -23,7 +23,10 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { PluginConfig } from '../config';
-import { deferredWarnings } from '../services/warning-buffer.js';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../services/warning-buffer.js';
 import { createAgents } from './index';
 
 // Bypass the strict schema for these focused unit tests — we want to feed
@@ -41,11 +44,11 @@ const COUNCIL_AGENTS = [
 beforeEach(() => {
 	// deferredWarnings is module-scoped; clear before each test to avoid
 	// cross-test bleed.
-	deferredWarnings.length = 0;
+	clearDeferredWarnings();
 });
 
 afterEach(() => {
-	deferredWarnings.length = 0;
+	clearDeferredWarnings();
 });
 
 describe('council agent registration — model resolution', () => {
@@ -152,7 +155,7 @@ describe('council agent registration — deprecation warning pathway', () => {
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council.general.moderatorModel is deprecated'),
 		);
 		expect(matched.length).toBeGreaterThan(0);
@@ -165,7 +168,7 @@ describe('council agent registration — deprecation warning pathway', () => {
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council.general.moderatorModel is deprecated'),
 		);
 		expect(matched.length).toBe(0);
@@ -182,7 +185,7 @@ describe('council agent registration — deprecation warning pathway', () => {
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council.general.moderatorModel is deprecated'),
 		);
 		expect(matched.length).toBe(0);
@@ -197,7 +200,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBe(0);
@@ -211,7 +214,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBeGreaterThan(0);
@@ -227,7 +230,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBeGreaterThan(0);
@@ -243,7 +246,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBeGreaterThan(0);
@@ -269,7 +272,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 		);
 		expect(councilAgents).toHaveLength(0);
 		// Warning names all three missing roles and shows 0/3
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBeGreaterThan(0);
@@ -295,7 +298,7 @@ describe('council agent registration — reduced-council warning (councilAgentsC
 				quiet: true,
 			}),
 		);
-		const matched = deferredWarnings.filter((w) =>
+		const matched = getDeferredWarnings().filter((w) =>
 			w.includes('council agents could be registered'),
 		);
 		expect(matched.length).toBeGreaterThan(0);

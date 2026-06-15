@@ -228,7 +228,15 @@ In approved-implementation mode, record why approval was already implied by the 
 [For opencode-swarm touched invariants, list concrete command/source evidence.]
 ```
 
-## `09-pr-body.md`
+## `08b-implementation-review.md`
+
+Use `references/critic-gate.md` (Implementation Review section).
+
+## `09-final-critic.md`
+
+Use `references/critic-gate.md` (Final Critic section).
+
+## `10-pr-body.md`
 
 Use `assets/pr-template.md`.
 

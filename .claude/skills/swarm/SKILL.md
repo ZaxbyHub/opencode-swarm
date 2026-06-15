@@ -116,14 +116,13 @@ If a workflow step does not materially improve quality, correctness, or trust, k
 If a workflow step prevents real bugs from shipping, keep it even if it costs time.
 
 ## Default triage model
-Use this default escalation ladder:
+Use this default escalation ladder for exploration, candidate findings, and read-only work:
 1. Parallel exploration and mapping for breadth
 2. Parallel specialist review for disjoint concerns
 3. Independent reviewer validation for findings that are high-risk, ambiguous, cross-file, or likely false-positive-prone
 4. Critic challenge only for reviewer-confirmed high-impact findings or when confidence is still not high enough
 
-Do not force every task through every layer if the extra layer adds cost but not quality.
-Do not force high-risk work through the full ladder.
+Do not use this risk ladder to weaken the mandatory implementation closeout gate below. Any task that edits code, tests, docs, package metadata, release notes, or skill files must still complete the implementation reviewer and final critic gates on the latest diff and evidence.
 
 High-risk work includes:
 - auth, authz, permissions, identity, session handling
@@ -133,11 +132,26 @@ High-risk work includes:
 - concurrency, retries, state machines, caching, queueing
 - security-sensitive parsing, file access, subprocesses, secrets
 
-Lower-risk work can use a lighter path if evidence is strong:
-- docs-only changes
-- localized refactors with strong existing test coverage
-- small UI copy changes
-- isolated low-risk cleanup with no behavior change
+Lower-risk read-only or answer-only work can use a lighter path if evidence is strong:
+- answering a question about existing code or docs
+- summarizing an already-reviewed diff without editing it
+- reading logs or test output and explaining the likely cause
+- checking whether a file or command exists without changing the worktree
+
+## Mandatory implementation closeout gate
+
+For any swarm task that edits code, tests, docs, package metadata, release notes, or skill files, do not declare completion until all of these are true:
+
+1. Objective validation has run and the commands/results are recorded.
+2. A fresh independent implementation reviewer has reviewed the actual current diff and validation evidence.
+3. A separate critic has challenged the reviewer-approved current diff and evidence.
+4. Every `NEEDS_REVISION`, `REJECTED`, or `BLOCKED` reviewer/critic item was fixed with code, docs, or evidence and then re-reviewed.
+5. The latest edit is older than the latest reviewer approval and critic approval.
+6. Reviewer and critic verdicts are recorded in durable task artifacts. For issue-tracer work, use `08b-implementation-review.md` and `09-final-critic.md`; for other changed-work tasks, create or update task-local review artifacts unless the repo forbids artifacts.
+
+Explorer findings, plan critics, passing tests, and self-review do not satisfy the implementation reviewer gate. If subagent delegation is available and the user/session has authorized swarm work, fallback self-review is not allowed. If no independent context is available, disclose that limitation explicitly and do not imply full swarm validation.
+
+Any edit after reviewer or critic approval invalidates that approval. Re-run the affected reviewer/critic gate before final synthesis.
 
 ## Enablement steps
 1. Create `.claude/session/` if it does not exist.
@@ -171,6 +185,10 @@ Swarm mode is enabled for this session.
 - Candidate findings should be validated by an independent reviewer context before being treated as confirmed whenever the task is important enough to justify it.
 - Reviewer should default to DISPROVED or UNVERIFIED unless the finding is actually supported by code evidence and, when relevant, runtime-aware verification.
 - Critic should challenge reviewer-confirmed findings in small batches.
+- For any task that edits code, tests, docs, package metadata, release notes, or skill files, final completion requires an independent implementation reviewer approval and a separate critic approval on the latest diff and evidence.
+- Passing tests, explorer output, plan critique, and self-review do not satisfy the final implementation reviewer or critic gates when independent subagents are available.
+- Any edit after reviewer or critic approval invalidates that approval; re-run the affected gate.
+- A `NEEDS_REVISION`, `REJECTED`, or `BLOCKED` verdict blocks final completion until fixed and re-reviewed.
 - If quality and speed conflict, quality wins.
 - Do not batch more aggressively or skip validation because the repo is large.
 - Premature completion is a failure state.
@@ -198,7 +216,7 @@ Serial work is for synthesis, conflict-prone edits, and final high-confidence va
 2. Build a plan.
 3. Implement in scoped units.
 4. Validate with independent reviewer context.
-5. Challenge with critic context when needed.
+5. Challenge changed-work completion with a separate critic context.
 6. Synthesize only validated results.
 
 ## Anti-rationalization rules
@@ -227,9 +245,10 @@ After enabling swarm mode, immediately execute `$ARGUMENTS` using this swarm-lik
 3. Create a scoped plan.
 4. Implement in coherent units.
 5. Run objective verification.
-6. Use independent reviewer validation where risk justifies it.
-7. Use critic challenge only for high-impact or still-ambiguous results.
-8. Summarize what changed, what was verified, and what risks remain.
+6. For any worktree edit, use independent reviewer validation on the actual final diff and evidence.
+7. For any worktree edit, use a separate critic challenge after reviewer approval.
+8. Verify the final reviewer and critic approvals happened after the latest edit.
+9. Summarize what changed, what was verified, and what risks remain.
 
 Do not treat the presence of `$ARGUMENTS` as permission to skip the swarm-mode contract.
 The task must still follow the quality, speed, and risk-tiering rules above.

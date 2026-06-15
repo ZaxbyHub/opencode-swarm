@@ -1,5 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
-import { syncBundledProjectSkillsIfMissing } from '../config/bundled-skills.js';
+import { syncBundledProjectSkillsIfMissingAsync } from '../config/bundled-skills.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -13,10 +13,12 @@ import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
+import { handleConsolidateCommand } from './consolidate.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
 import { handleDeepDiveCommand } from './deep-dive.js';
+import { handleDeepResearchCommand } from './deep-research.js';
 import { handleDesignDocsCommand } from './design-docs.js';
 import { handleDiagnoseCommand } from './diagnose.js';
 import { handleDoctorCommand, handleDoctorToolsCommand } from './doctor.js';
@@ -34,6 +36,8 @@ import {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
 import { handleLearningCommand } from './learning.js';
 import {
@@ -49,6 +53,7 @@ import {
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
+import { handlePostMortemCommand } from './post-mortem.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
@@ -236,7 +241,13 @@ async function handleModeCommandWithBundledSkills(
 	handler: (directory: string, args: string[]) => string | CommandResult,
 ): CommandResult {
 	if (ctx.packageRoot) {
-		syncBundledProjectSkillsIfMissing(ctx.directory, ctx.packageRoot);
+		// Backstop for projects that predate init-time materialization (the
+		// primary sync now runs at plugin init; see src/index.ts). Missing-only
+		// and fail-open, so it self-heals legacy projects without regression.
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+		);
 	}
 	return Promise.resolve(handler(ctx.directory, ctx.args));
 }
@@ -363,6 +374,18 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
 		description: 'Run tool registration coherence check',
 		category: 'diagnostics',
+	},
+	// Alias for the hyphenated form '/swarm doctor-tools'. Without it,
+	// resolveCommand(['doctor-tools']) returns null and the TUI shows
+	// "command not found". NOTE: aliasOf is warning text only — resolveCommand
+	// invokes this entry's OWN handler, so the handler must be set here (mirrors
+	// the 'config-doctor' alias above).
+	'doctor-tools': {
+		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
+		description: 'Run tool registration coherence check',
+		category: 'diagnostics',
+		aliasOf: 'doctor tools',
+		deprecated: true,
 	},
 	diagnose: {
 		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
@@ -501,6 +524,18 @@ export const COMMAND_REGISTRY = {
 		args: '',
 		category: 'utility',
 	},
+	consolidate: {
+		handler: (ctx) =>
+			handleConsolidateCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run quota-bounded skill-improver consolidation and stage skill proposals',
+		details:
+			'Runs the same consolidation pass used by scheduled skill_improver trigger points: queue hardening, skill-improver proposal writing, and optional draft-skill generation. It never auto-activates skills. Use --respect-interval to obey the configured cadence instead of forcing a run.',
+		args: '--force, --respect-interval, --evaluate',
+		category: 'utility',
+	},
 	'dark-matter': {
 		handler: (ctx) => handleDarkMatterCommand(ctx.directory, ctx.args),
 		description: 'Detect hidden file couplings via co-change NPMI analysis',
@@ -532,6 +567,18 @@ export const COMMAND_REGISTRY = {
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,
+	},
+	'post-mortem': {
+		handler: (ctx) =>
+			handlePostMortemCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run the post-mortem agent: project-end synthesis, queue triage, and final curation pass',
+		details:
+			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed.',
+		args: '--force',
+		category: 'core',
 	},
 	concurrency: {
 		handler: (ctx) =>
@@ -709,6 +756,25 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 		aliasOf: 'deep-dive',
 	},
+	'deep-research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Launch a multi-source, fact-checked deep research pass and synthesize a cited report [question]',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		details:
+			'Runs the orchestrator-worker deep-research protocol: the architect decomposes the question into subtopics, gathers evidence with web_search and web_fetch across up to N iterative rounds, dispatches parallel sme synthesis workers, verifies every claim against cited sources with dual reviewers, challenges high-stakes claims with the critic, and presents a cited report in chat. Read-only — does not mutate source code, delegate to coder, or call declare_scope. Requires council.general.enabled and a search API key.',
+		category: 'agent',
+	},
+	'deep research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Alias for /swarm deep-research — launch a cited deep research pass',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		category: 'agent',
+		aliasOf: 'deep-research',
+	},
 	'codebase-review': {
 		handler: (ctx) =>
 			handleModeCommandWithBundledSkills(ctx, handleCodebaseReviewCommand),
@@ -844,10 +910,14 @@ export const COMMAND_REGISTRY = {
 	'full-auto': {
 		handler: (ctx) =>
 			handleFullAutoCommand(ctx.directory, ctx.args, ctx.sessionID),
-		description: 'Toggle Full-Auto Mode for the active session [on|off]',
-		args: 'on, off',
+		description:
+			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
+		args: 'on [assisted|supervised|strict], off, status',
 		details:
-			'Toggles Full-Auto Mode which enables autonomous execution without confirmation prompts. When enabled, the architect proceeds through implementation steps automatically. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
+			'First-class toggle for Full-Auto Mode — autonomous execution with the critic reviewing escalations on your behalf. No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
+			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
 	},
 	'auto-proceed': {
@@ -893,6 +963,25 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Restores a quarantined knowledge entry back to the active knowledge store by ID. Validates entry ID format (1-64 alphanumeric/hyphen/underscore). Entry must currently be in quarantine state.',
 		args: '<entry-id>',
+		category: 'utility',
+	},
+	'knowledge unactionable': {
+		handler: (ctx) =>
+			handleKnowledgeUnactionableCommand(ctx.directory, ctx.args),
+		description: 'List unactionable knowledge entries pending hardening',
+		subcommandOf: 'knowledge',
+		details:
+			'Lists entries from .swarm/knowledge-unactionable.jsonl that failed the actionability gate. Shows pending entries (awaiting next hardening pass) and retire candidates (hardening failed). Use `/swarm knowledge retry-hardening` to reset retire candidates.',
+		category: 'utility',
+	},
+	'knowledge retry-hardening': {
+		handler: (ctx) =>
+			handleKnowledgeRetryHardeningCommand(ctx.directory, ctx.args),
+		description: 'Reset retire candidates for re-hardening [id]',
+		subcommandOf: 'knowledge',
+		details:
+			'Resets the retire_candidate flag on unactionable entries so the next scheduled hardening pass re-attempts LLM enrichment. Without arguments, resets all retire candidates. With an ID prefix, resets only the matching entry.',
+		args: '[entry-id]',
 		category: 'utility',
 	},
 	knowledge: {

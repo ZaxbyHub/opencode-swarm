@@ -5,98 +5,84 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { getEffectiveGates, getProfile } from '../../../db/qa-gate-profile.js';
-import { loadPlan } from '../../../plan/manager';
-import { derivePlanId } from '../../../plan/utils';
-import { swarmState } from '../../../state';
+import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
 
 export async function runMutationGate(ctx: GateContext): Promise<GateResult> {
 	const { phase, dir, sessionID, agentsDispatched, safeWarn } = ctx;
 
 	try {
-		const plan = await loadPlan(dir);
-		if (plan) {
-			const planId = derivePlanId(plan);
-			const profile = getProfile(dir, planId);
-			if (profile) {
-				const session = sessionID
-					? swarmState.agentSessions.get(sessionID)
-					: undefined;
-				const overrides = session?.qaGateSessionOverrides ?? {};
-				const effective = getEffectiveGates(profile, overrides);
+		const preamble = await resolveGatePreamble(dir, sessionID);
 
-				if (effective.mutation_test === true) {
-					const mgPath = path.join(
-						dir,
-						'.swarm',
-						'evidence',
-						String(phase),
-						'mutation-gate.json',
-					);
-					let mgVerdictFound = false;
-					let mgVerdict: string | undefined;
+		if (preamble.resolved && preamble.effectiveGates?.mutation_test === true) {
+			const mgPath = path.join(
+				dir,
+				'.swarm',
+				'evidence',
+				String(phase),
+				'mutation-gate.json',
+			);
+			let mgVerdictFound = false;
+			let mgVerdict: string | undefined;
 
-					try {
-						const mgContent = fs.readFileSync(mgPath, 'utf-8');
-						const mgBundle = JSON.parse(mgContent);
-						for (const entry of mgBundle.entries ?? []) {
-							if (
-								typeof entry.type === 'string' &&
-								entry.type === 'mutation-gate' &&
-								typeof entry.verdict === 'string'
-							) {
-								mgVerdictFound = true;
-								mgVerdict = entry.verdict;
-								if (entry.verdict === 'fail') {
-									return {
-										blocked: true,
-										reason: 'MUTATION_GATE_FAIL',
-										message: `Phase ${phase} cannot be completed: mutation gate returned verdict 'fail'. Resolve surviving mutants or lower the kill-rate threshold before completing the phase.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								} else if (!['pass', 'warn', 'skip'].includes(entry.verdict)) {
-									return {
-										blocked: true,
-										reason: 'MUTATION_GATE_FAIL',
-										message: `Phase ${phase} cannot be completed: mutation gate evidence contains unrecognized verdict '${entry.verdict}'. Expected one of: pass, warn, fail, skip.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								}
-							}
+			try {
+				const mgContent = fs.readFileSync(mgPath, 'utf-8');
+				const mgBundle = JSON.parse(mgContent);
+				for (const entry of mgBundle.entries ?? []) {
+					if (
+						typeof entry.type === 'string' &&
+						entry.type === 'mutation-gate' &&
+						typeof entry.verdict === 'string'
+					) {
+						mgVerdictFound = true;
+						mgVerdict = entry.verdict;
+						if (entry.verdict === 'fail') {
+							return {
+								blocked: true,
+								reason: 'MUTATION_GATE_FAIL',
+								message: `Phase ${phase} cannot be completed: mutation gate returned verdict 'fail'. Resolve surviving mutants or lower the kill-rate threshold before completing the phase.`,
+								agentsDispatched,
+								agentsMissing: [],
+								warnings: [],
+							};
+						} else if (!['pass', 'warn', 'skip'].includes(entry.verdict)) {
+							return {
+								blocked: true,
+								reason: 'MUTATION_GATE_FAIL',
+								message: `Phase ${phase} cannot be completed: mutation gate evidence contains unrecognized verdict '${entry.verdict}'. Expected one of: pass, warn, fail, skip.`,
+								agentsDispatched,
+								agentsMissing: [],
+								warnings: [],
+							};
 						}
-					} catch (readErr) {
-						if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-							safeWarn(
-								`[phase_complete] Mutation gate evidence unreadable:`,
-								readErr,
-							);
-						}
-						mgVerdictFound = false;
-					}
-
-					if (!mgVerdictFound) {
-						return {
-							blocked: true,
-							reason: 'MUTATION_GATE_MISSING',
-							message: `Phase ${phase} cannot be completed: mutation_test is enabled and evidence not found at .swarm/evidence/${phase}/mutation-gate.json. Run mutation_test, then call write_mutation_evidence before completing the phase.`,
-							agentsDispatched,
-							agentsMissing: [],
-							warnings: [],
-						};
-					}
-
-					if (mgVerdict === 'warn') {
-						safeWarn(
-							`[phase_complete] Mutation gate verdict is 'warn' for phase ${phase} — proceeding with warning`,
-							undefined,
-						);
 					}
 				}
+			} catch (readErr) {
+				if ((readErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+					safeWarn(
+						`[phase_complete] Mutation gate evidence unreadable:`,
+						readErr,
+					);
+				}
+				mgVerdictFound = false;
+			}
+
+			if (!mgVerdictFound) {
+				return {
+					blocked: true,
+					reason: 'MUTATION_GATE_MISSING',
+					message: `Phase ${phase} cannot be completed: mutation_test is enabled and evidence not found at .swarm/evidence/${phase}/mutation-gate.json. Run mutation_test, then call write_mutation_evidence before completing the phase.`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [],
+				};
+			}
+
+			if (mgVerdict === 'warn') {
+				safeWarn(
+					`[phase_complete] Mutation gate verdict is 'warn' for phase ${phase} — proceeding with warning`,
+					undefined,
+				);
 			}
 		}
 	} catch (mgError) {

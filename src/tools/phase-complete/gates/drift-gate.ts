@@ -6,11 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { getEffectiveGates, getProfile } from '../../../db/qa-gate-profile.js';
-import { loadPlan } from '../../../plan/manager';
-import { derivePlanId } from '../../../plan/utils';
 import { readEffectiveSpecSync } from '../../../sdd/effective-spec';
-import { swarmState } from '../../../state';
+import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
 
 export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
@@ -19,25 +16,17 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 	const gateWarnings: string[] = [];
 
 	// Load QA gate profile to check drift_check flag
-	let driftCheckEnabled = true; // Default: preserve current mandatory behaviour
+	// Default: preserve current mandatory behaviour (enabled when no profile)
+	let driftCheckEnabled = true;
 	let driftHasEffectiveSpec = false;
 
 	try {
 		driftHasEffectiveSpec = readEffectiveSpecSync(dir) !== null;
 
-		const gatePlan = await loadPlan(dir);
-		if (gatePlan) {
-			const gatePlanId = derivePlanId(gatePlan);
-			const gateProfile = getProfile(dir, gatePlanId);
-			if (gateProfile) {
-				const gateSession = sessionID
-					? swarmState.agentSessions.get(sessionID)
-					: undefined;
-				const gateOverrides = gateSession?.qaGateSessionOverrides ?? {};
-				const gateEffective = getEffectiveGates(gateProfile, gateOverrides);
-				driftCheckEnabled = gateEffective.drift_check === true;
-			}
-			// No profile → driftCheckEnabled stays true (DEFAULT_QA_GATES fallback)
+		const preamble = await resolveGatePreamble(dir, sessionID);
+		// When preamble resolves, use the profile flag; otherwise default true
+		if (preamble.resolved) {
+			driftCheckEnabled = preamble.effectiveGates?.drift_check === true;
 		}
 	} catch (gateLoadError) {
 		safeWarn(

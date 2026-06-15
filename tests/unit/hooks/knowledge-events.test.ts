@@ -13,9 +13,11 @@ import {
 	KNOWLEDGE_EVENT_SCHEMA_VERSION,
 	type KnowledgeEvent,
 	MAX_EVENT_LOG_ENTRIES,
+	readKnowledgeCounterRollups,
 	readKnowledgeEvents,
 	recomputeCounters,
 	recordKnowledgeEvent,
+	resolveKnowledgeCounterBaselinePath,
 	resolveKnowledgeEventsPath,
 } from '../../../src/hooks/knowledge-events';
 import type { KnowledgeApplicationRecord } from '../../../src/hooks/knowledge-types';
@@ -198,9 +200,9 @@ describe('knowledge-events: append + read', () => {
 					agent: 'architect',
 					query: 'q',
 					retrieval_mode: 'manual',
-					result_ids: [],
-					ranks: {},
-					scores: {},
+					result_ids: ['old'],
+					ranks: { old: 1 },
+					scores: { old: 0.5 },
 				}),
 			);
 		}
@@ -213,9 +215,9 @@ describe('knowledge-events: append + read', () => {
 			agent: 'architect',
 			query: 'q',
 			retrieval_mode: 'manual',
-			result_ids: [],
-			ranks: {},
-			scores: {},
+			result_ids: ['new'],
+			ranks: { new: 1 },
+			scores: { new: 0.5 },
 		} as unknown as KnowledgeEvent);
 
 		const all = await readKnowledgeEvents(dir);
@@ -230,6 +232,49 @@ describe('knowledge-events: append + read', () => {
 		expect(
 			all.some((e) => (e as { event_id?: string }).event_id === 'e-0'),
 		).toBe(false);
+		const baseline = JSON.parse(
+			readFileSync(resolveKnowledgeCounterBaselinePath(dir), 'utf-8'),
+		);
+		expect(baseline.old.shown_count).toBe(6);
+		const rollups = await readKnowledgeCounterRollups(dir);
+		expect(rollups.get('old')?.shown_count).toBe(MAX_EVENT_LOG_ENTRIES + 5);
+		expect(rollups.get('new')?.shown_count).toBe(1);
+	});
+
+	it('memoizes counter rollups while isolating callers and invalidating on writes', async () => {
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-cache-1',
+			session_id: 's',
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'manual',
+			result_ids: ['cached'],
+			ranks: { cached: 1 },
+			scores: { cached: 0.5 },
+		});
+
+		const first = await readKnowledgeCounterRollups(dir);
+		expect(first.get('cached')?.shown_count).toBe(1);
+		first.get('cached')!.shown_count = 999;
+
+		const second = await readKnowledgeCounterRollups(dir);
+		expect(second.get('cached')?.shown_count).toBe(1);
+
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-cache-2',
+			session_id: 's',
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'manual',
+			result_ids: ['cached'],
+			ranks: { cached: 1 },
+			scores: { cached: 0.5 },
+		});
+
+		const third = await readKnowledgeCounterRollups(dir);
+		expect(third.get('cached')?.shown_count).toBe(2);
 	});
 });
 

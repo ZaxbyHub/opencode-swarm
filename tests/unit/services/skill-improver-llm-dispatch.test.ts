@@ -12,10 +12,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import {
+	readKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
+import type {
+	KnowledgeEntryBase,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
+import { resolveUnactionablePath } from '../../../src/hooks/knowledge-validator';
 import { runSkillImprover } from '../../../src/services/skill-improver';
-import { getQuotaState } from '../../../src/services/skill-improver-quota';
+import {
+	getQuotaState,
+	resolveQuotaPath,
+} from '../../../src/services/skill-improver-quota';
 
 let tmp: string;
 beforeEach(() => {
@@ -104,6 +114,43 @@ status: active
 # Seeded Skill
 `;
 	await writeFile(path.join(skillDir, 'SKILL.md'), skillMd, 'utf-8');
+}
+
+async function seedUnactionableRecord(): Promise<void> {
+	await mkdir(path.join(tmp, '.swarm'), { recursive: true });
+	const now = new Date().toISOString();
+	const record: KnowledgeEntryBase & {
+		status: 'quarantined_unactionable';
+		project_name: string;
+		unactionable_reason: string;
+		quarantined_at: string;
+	} = {
+		id: '33333333-3333-4333-9333-333333333333',
+		tier: 'swarm',
+		lesson: 'always run focused tests before declaring a release ready',
+		category: 'process',
+		tags: ['testing'],
+		scope: 'global',
+		confidence: 0.5,
+		status: 'quarantined_unactionable',
+		confirmed_by: [],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2,
+		created_at: now,
+		updated_at: now,
+		project_name: 't',
+		unactionable_reason: 'missing_predicate_and_scope',
+		quarantined_at: now,
+	};
+	await writeFile(
+		resolveUnactionablePath(tmp),
+		`${JSON.stringify(record)}\n`,
+		'utf-8',
+	);
 }
 
 describe('skill_improver LLM dispatch', () => {
@@ -336,5 +383,62 @@ describe('skill_improver LLM dispatch', () => {
 			window: 'utc',
 		});
 		expect(state.calls_used).toBe(0);
+	});
+
+	it('uses the dedicated knowledge enrichment quota for unactionable hardening', async () => {
+		await seedUnactionableRecord();
+		let calls = 0;
+		const delegate = async (_sys: string, user: string): Promise<string> => {
+			calls += 1;
+			if (user.includes('Convert this prose lesson')) {
+				return JSON.stringify({
+					applies_to_agents: ['reviewer'],
+					required_actions: ['run focused tests before declaring ready'],
+					triggers: ['release ready'],
+					directive_priority: 'high',
+				});
+			}
+			return '## Inventory snapshot\nquota split regression';
+		};
+
+		const r = await runSkillImprover({
+			directory: tmp,
+			config: { ...cfg, max_calls_per_day: 1 },
+			delegate,
+			enrichmentQuota: { maxCalls: 3, window: 'utc' },
+		});
+
+		expect(r.ran).toBe(true);
+		expect(calls).toBe(2);
+		expect(r.unactionableHardening).toEqual({
+			hardened: 1,
+			retired: 0,
+			remaining: 0,
+		});
+		const skillQuota = await getQuotaState(tmp, {
+			maxCalls: 1,
+			window: 'utc',
+		});
+		expect(skillQuota.calls_used).toBe(1);
+		const enrichmentQuota = await getQuotaState(tmp, {
+			maxCalls: 3,
+			window: 'utc',
+			scope: 'knowledge-enrichment',
+		});
+		expect(enrichmentQuota.calls_used).toBe(1);
+		expect(existsSync(resolveQuotaPath(tmp))).toBe(true);
+		expect(existsSync(resolveQuotaPath(tmp, 'knowledge-enrichment'))).toBe(
+			true,
+		);
+		const active = await readKnowledge<SwarmKnowledgeEntry>(
+			resolveSwarmKnowledgePath(tmp),
+		);
+		expect(active).toHaveLength(1);
+		expect(active[0].status).toBe('candidate');
+		expect(active[0].required_actions).toEqual([
+			'run focused tests before declaring ready',
+		]);
+		const queue = await readKnowledge(resolveUnactionablePath(tmp));
+		expect(queue).toHaveLength(0);
 	});
 });

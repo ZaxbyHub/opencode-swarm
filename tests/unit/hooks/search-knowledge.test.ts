@@ -49,6 +49,7 @@ describe('searchKnowledge (unified retrieval)', () => {
 	let dir: string;
 	let kp: string;
 	let prevXdg: string | undefined;
+	let prevLocalAppData: string | undefined;
 	beforeEach(() => {
 		dir = join(
 			tmpdir(),
@@ -57,11 +58,15 @@ describe('searchKnowledge (unified retrieval)', () => {
 		mkdirSync(dir, { recursive: true });
 		kp = resolveSwarmKnowledgePath(dir);
 		prevXdg = process.env.XDG_DATA_HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
 		process.env.XDG_DATA_HOME = join(dir, 'xdg');
+		process.env.LOCALAPPDATA = join(dir, 'localappdata');
 	});
 	afterEach(() => {
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -225,6 +230,38 @@ describe('searchKnowledge (unified retrieval)', () => {
 			results.find((r) => r.id === 'positive')?.retrieval_outcomes
 				.applied_explicit_count,
 		).toBe(8);
+	});
+
+	it('does not treat explicit applications with zero legacy applied_count as cold start', async () => {
+		await appendKnowledge(
+			kp,
+			makeEntry({
+				id: 'explicitly-applied',
+				lesson: 'explicitly applied retry guidance for flaky tests',
+				confidence: 0.55,
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+					applied_explicit_count: 3,
+				},
+			}),
+		);
+
+		const { results } = await searchKnowledge({
+			directory: dir,
+			config,
+			query: 'retry guidance for flaky tests',
+			mode: 'manual',
+			tier: 'swarm',
+			applyScopeFilter: false,
+			applyRoleScope: false,
+			emitEvent: false,
+		});
+
+		const result = results.find((r) => r.id === 'explicitly-applied');
+		expect(result).toBeDefined();
+		expect(result!.coldStartBoost).toBe(0);
 	});
 
 	it('filters archived and quarantined entries', async () => {

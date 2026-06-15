@@ -100,7 +100,8 @@ escalate automatically, and every stored lesson is machine-checkable.
   error lists the exact IDs and missing verdicts, and the architect override
   path is available for justified acceptance.
 - Knowledge curation now performs up to one small LLM call per new lesson at
-  phase end (shared `skill_improver.max_calls_per_day` budget, default 10).
+  phase end (dedicated `knowledge.enrichment.max_calls_per_day` budget,
+  default 30).
   Without an LLM available, lessons queue as unactionable instead of
   activating — recoverable, not lost.
 - Retrieval now surfaces more relevant directives for both architect and

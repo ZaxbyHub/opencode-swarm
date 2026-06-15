@@ -3,10 +3,13 @@ import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import type { PluginConfig } from '../config/schema.js';
 import {
-	appendKnowledgeWithCapEnforcement,
+	findActiveSwarmNearDuplicate,
+	reinforceSwarmKnowledgeEntry,
+} from '../hooks/knowledge-reinforcement.js';
+import {
 	findNearDuplicate,
-	readKnowledge,
 	resolveSwarmKnowledgePath,
+	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
 	KnowledgeCategory,
@@ -19,7 +22,6 @@ import {
 	validateLesson,
 } from '../hooks/knowledge-validator.js';
 import { loadPlan } from '../plan/manager.js';
-import { warn } from '../utils';
 import { createSwarmTool } from './create-tool.js';
 
 const VALID_CATEGORIES: KnowledgeCategory[] = [
@@ -175,9 +177,13 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 
 			// Derive project_name from plan title
 			let project_name = '';
+			let phase_number = 1;
 			try {
 				const plan = await loadPlan(directory);
 				project_name = plan?.title ?? '';
+				if (typeof plan?.current_phase === 'number') {
+					phase_number = plan.current_phase;
+				}
 			} catch {
 				// plan load failure must not prevent knowledge storage
 			}
@@ -233,32 +239,6 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				// Config load failure should not block knowledge storage
 			}
 
-			// Near-duplicate detection using configured threshold
-			try {
-				const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
-					resolveSwarmKnowledgePath(directory),
-				);
-				const duplicate = findNearDuplicate(
-					lesson,
-					existingEntries,
-					dedupThreshold,
-				);
-				if (duplicate) {
-					return JSON.stringify({
-						success: false,
-						id: duplicate.id,
-						message: 'near-duplicate of existing entry',
-					});
-				}
-			} catch (err) {
-				// Read failure should not block knowledge storage, but log a warning
-				// so silent dedup bypass doesn't accumulate near-duplicates unnoticed.
-				warn(
-					'knowledge_add: dedup check failed — skipping near-duplicate detection',
-					err,
-				);
-			}
-
 			// Layer-5 actionability gate (Change 4): a lesson without >=1 predicate
 			// AND >=1 scope tag is quarantined to the unactionable queue (recoverable
 			// by the hardening loop) rather than activated. The caller gets a hint
@@ -283,14 +263,84 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			// Append to knowledge store with atomic cap enforcement
+			// Append or reinforce under the knowledge lock. Near-duplicate matches
+			// against active entries are confirmations, not failures.
 			try {
 				const maxEntries = config?.knowledge?.swarm_max_entries ?? 100;
-				await appendKnowledgeWithCapEnforcement(
+				let duplicateResponse:
+					| {
+							id: string;
+							reinforced: boolean;
+							idempotent: boolean;
+							inactive: boolean;
+					  }
+					| undefined;
+
+				await transactKnowledge<SwarmKnowledgeEntry>(
 					resolveSwarmKnowledgePath(directory),
-					entry,
-					maxEntries,
+					(existingEntries) => {
+						const activeDuplicate = findActiveSwarmNearDuplicate(
+							lesson,
+							existingEntries,
+							dedupThreshold,
+						);
+						if (activeDuplicate) {
+							const result = reinforceSwarmKnowledgeEntry(activeDuplicate, {
+								phase_number,
+								confirmed_at: new Date().toISOString(),
+								project_name,
+							});
+							duplicateResponse = {
+								id: activeDuplicate.id,
+								reinforced: result.reinforced,
+								idempotent: result.reason === 'already_confirmed_phase',
+								inactive: false,
+							};
+							return result.reinforced ? existingEntries : null;
+						}
+
+						const inactiveDuplicate = findNearDuplicate(
+							lesson,
+							existingEntries,
+							dedupThreshold,
+						);
+						if (inactiveDuplicate) {
+							duplicateResponse = {
+								id: inactiveDuplicate.id,
+								reinforced: false,
+								idempotent: false,
+								inactive: true,
+							};
+							return null;
+						}
+
+						const updated = [...existingEntries, entry];
+						if (updated.length > maxEntries) {
+							return updated.slice(updated.length - maxEntries);
+						}
+						return updated;
+					},
 				);
+
+				if (duplicateResponse) {
+					if (duplicateResponse.inactive) {
+						return JSON.stringify({
+							success: false,
+							id: duplicateResponse.id,
+							message: 'near-duplicate of inactive existing entry',
+						});
+					}
+
+					return JSON.stringify({
+						success: true,
+						id: duplicateResponse.id,
+						reinforced: duplicateResponse.reinforced,
+						idempotent: duplicateResponse.idempotent,
+						message: duplicateResponse.reinforced
+							? 'near-duplicate reinforced existing entry'
+							: 'near-duplicate already confirmed for this phase',
+					});
+				}
 			} catch (err) {
 				const message = err instanceof Error ? err.message : 'Unknown error';
 				return JSON.stringify({

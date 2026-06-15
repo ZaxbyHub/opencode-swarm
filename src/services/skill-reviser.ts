@@ -16,6 +16,10 @@ import type { SkillImproverLLMDelegate } from '../hooks/skill-improver-llm-facto
 import { warn } from '../utils/logger.js';
 import type { SkillChangelogEntry } from './skill-changelog.js';
 import { appendSkillChangelog } from './skill-changelog.js';
+import {
+	appendRejectedSkillEdit,
+	evaluateSkillChange,
+} from './skill-evaluator.js';
 import type { QuotaWindow } from './skill-improver-quota.js';
 import { releaseQuota, reserveQuota } from './skill-improver-quota.js';
 
@@ -175,6 +179,43 @@ function validateLLMOutput(output: string): boolean {
 	return true;
 }
 
+async function validateRevisionCandidate(
+	params: ReviseSkillParams,
+	candidateContent: string,
+	operation: string,
+): Promise<{ passed: true } | { passed: false; reason: string }> {
+	const evaluation = await evaluateSkillChange({
+		directory: params.directory,
+		slug: params.slug,
+		candidateContent,
+		incumbentContent: params.currentContent,
+		operation,
+	});
+	if (evaluation.passed) return { passed: true };
+	try {
+		await appendRejectedSkillEdit(
+			{
+				directory: params.directory,
+				slug: params.slug,
+				candidateContent,
+				incumbentContent: params.currentContent,
+				operation,
+			},
+			evaluation,
+		);
+	} catch (rejectedErr) {
+		warn(
+			`[skill-reviser] rejected-skill edit append failed (non-fatal) for ${params.slug}: ${
+				rejectedErr instanceof Error ? rejectedErr.message : String(rejectedErr)
+			}`,
+		);
+	}
+	return {
+		passed: false,
+		reason: `validation_failed: ${evaluation.reason}`,
+	};
+}
+
 export async function reviseSkill(
 	params: ReviseSkillParams,
 ): Promise<SkillRevisionResult> {
@@ -189,6 +230,18 @@ export async function reviseSkill(
 				params.currentVersion,
 				params.violationContexts,
 			);
+			const validation = await validateRevisionCandidate(
+				params,
+				revised,
+				'skill_reviser:deterministic',
+			);
+			if (!validation.passed) {
+				return {
+					revised: false,
+					reason: validation.reason,
+					quotaConsumed: false,
+				};
+			}
 			const tmpPath = `${params.skillPath}.tmp-${process.pid}-${Date.now()}`;
 			await writeFile(tmpPath, revised, 'utf-8');
 			await rename(tmpPath, params.skillPath);
@@ -286,6 +339,19 @@ export async function reviseSkill(
 			);
 		}
 
+		const validation = await validateRevisionCandidate(
+			params,
+			`${finalOutput}\n`,
+			'skill_reviser:llm',
+		);
+		if (!validation.passed) {
+			return {
+				revised: false,
+				reason: validation.reason,
+				quotaConsumed: true,
+			};
+		}
+
 		const tmpPath = `${params.skillPath}.tmp-${process.pid}-${Date.now()}`;
 		await writeFile(tmpPath, `${finalOutput}\n`, 'utf-8');
 		await rename(tmpPath, params.skillPath);
@@ -350,6 +416,7 @@ export const _internals = {
 	buildDeterministicRevision,
 	buildLLMPrompt,
 	validateLLMOutput,
+	validateRevisionCandidate,
 	REVISION_VIOLATION_THRESHOLD,
 	MAX_REVISION_CALLS_PER_PHASE,
 };

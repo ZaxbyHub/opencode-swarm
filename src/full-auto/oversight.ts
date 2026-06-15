@@ -372,7 +372,17 @@ export async function dispatchFullAutoOversight(
 	let criticResponse = '';
 	let dispatchError: unknown;
 	try {
+		// Bind to the calling session as parent so OpenCode treats this as
+		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
+			...(input.sessionID
+				? {
+						body: {
+							parentID: input.sessionID,
+							title: 'full_auto_oversight background',
+						},
+					}
+				: {}),
 			query: { directory: input.directory },
 		});
 		if (!createResult.data) {
