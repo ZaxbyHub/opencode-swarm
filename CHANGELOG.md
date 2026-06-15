@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.74.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.2...v7.74.3) (2026-06-15)
+
+
+### Bug Fixes
+
+* **config-doctor:** extend validation coverage and onboarding polish ([#1347](https://github.com/zaxbysauce/opencode-swarm/issues/1347)) ([8c2940d](https://github.com/zaxbysauce/opencode-swarm/commit/8c2940de016e129664b626dba2f56109b4fe1758))
+
 ## [7.74.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.74.1...v7.74.2) (2026-06-14)
 
 
