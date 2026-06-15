@@ -1,4 +1,4 @@
-﻿import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	COMMAND_REGISTRY,
 	type CommandCategory,
@@ -30,31 +30,21 @@ describe('CommandEntry type has new fields', () => {
 
 	test('CommandEntry supports aliasOf field', () => {
 		// Verify alias entries have aliasOf
-		// biome-ignore useLiteralKeys: compound key
-
-			'config doctor',
-		);
-		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe(
-			'diagnose',
-		);
-		// biome-ignore useLiteralKeys: compound key
-
-			'evidence summary',
-		);
+		// biome-ignore lint/complexity/useLiteralKeys: compound key
+		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).aliasOf).toBe('config doctor');
+		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe('diagnose');
+		// biome-ignore lint/complexity/useLiteralKeys: compound key
+		expect((COMMAND_REGISTRY['evidence-summary'] as CommandEntry).aliasOf).toBe('evidence summary');
 	});
 
 	test('CommandEntry supports deprecated field', () => {
 		// Verify deprecated entries have deprecated = true
-		// biome-ignore useLiteralKeys: compound key
-
-			true,
-		);
-		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).deprecated).toBe(
-			true,
-		);
+		// biome-ignore lint/complexity/useLiteralKeys: compound key
+		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).deprecated).toBe(true);
+		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).deprecated).toBe(true);
 		expect(
-		// biome-ignore useLiteralKeys: compound key
-
+			// biome-ignore lint/complexity/useLiteralKeys: compound key
+			(COMMAND_REGISTRY['evidence-summary'] as CommandEntry).deprecated,
 		).toBe(true);
 	});
 
@@ -66,12 +56,12 @@ describe('CommandEntry type has new fields', () => {
 			(COMMAND_REGISTRY.status as CommandEntry).deprecated,
 		).toBeUndefined();
 		expect(
-		// biome-ignore useLiteralKeys: compound key
-
+			// biome-ignore lint/complexity/useLiteralKeys: compound key
+			(COMMAND_REGISTRY['show-plan'] as CommandEntry).aliasOf,
 		).toBeUndefined();
 		expect(
-		// biome-ignore useLiteralKeys: compound key
-
+			// biome-ignore lint/complexity/useLiteralKeys: compound key
+			(COMMAND_REGISTRY['show-plan'] as CommandEntry).deprecated,
 		).toBeUndefined();
 	});
 });
@@ -99,18 +89,15 @@ describe('All commands have valid categories', () => {
 
 	test('SDD commands are registered as utility commands with compound subcommands', () => {
 		expect((COMMAND_REGISTRY.sdd as CommandEntry).category).toBe('utility');
-		// biome-ignore useLiteralKeys: compound key
-
-			'sdd',
-		);
+		// biome-ignore lint/complexity/useLiteralKeys: compound key
+		expect((COMMAND_REGISTRY['sdd status'] as CommandEntry).subcommandOf).toBe('sdd');
 		expect(
-		// biome-ignore useLiteralKeys: compound key
-
+			// biome-ignore lint/complexity/useLiteralKeys: compound key
+			(COMMAND_REGISTRY['sdd validate'] as CommandEntry).subcommandOf,
 		).toBe('sdd');
-		// biome-ignore useLiteralKeys: compound key
-
-			'sdd',
-		);
+		// biome-ignore lint/complexity/useLiteralKeys: compound key
+		expect((COMMAND_REGISTRY['sdd project'] as CommandEntry).subcommandOf).toBe('sdd');
+	});
 		expect(resolveCommand(['sdd', 'status'])?.key).toBe('sdd status');
 		expect(resolveCommand(['sdd', 'validate', '--json'])?.key).toBe(
 			'sdd validate',
@@ -170,12 +157,12 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
 
-	test('detects indirect circular alias chain (A â†’ B â†’ C â†’ A)', () => {
+	test('detects indirect circular alias chain (A → B → C → A)', () => {
 		// Create a mock registry with indirect circular reference
 		const mockRegistry = {
 			'cmd-a': {
@@ -195,13 +182,13 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
 
 	test('detects circular alias that ends at a non-alias command', () => {
-		// A â†’ B â†’ C (C is not an alias, so no cycle)
+		// A → B → C (C is not an alias, so no cycle)
 		// But if C had aliasOf pointing to A, it would be circular
 		const mockRegistry = {
 			'cmd-a': {
@@ -217,12 +204,12 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' }, // Not an alias
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
 
-	test('no false positive for valid alias chain (A â†’ B â†’ C)', () => {
+	test('no false positive for valid alias chain (A → B → C)', () => {
 		const mockRegistry = {
 			'cmd-a': {
 				handler: () => Promise.resolve(''),
@@ -237,7 +224,7 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' },
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -253,7 +240,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			},
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -282,7 +269,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			'real-cmd': { handler: () => Promise.resolve(''), description: 'Real' },
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) => e.includes("non-existent command 'ghost-cmd'")),
@@ -306,7 +293,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			target: { handler: () => Promise.resolve(''), description: 'Target' },
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -337,7 +324,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			},
 		};
 
-		const result = validateAliasesInéš”ç¦»(mockRegistry);
+		const result = validateAliasesIn隔离(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -432,7 +419,7 @@ describe('resolveCommand works with aliased commands', () => {
  * Isolated validateAliases implementation for testing.
  * This is a copy of the logic from registry.ts to test without module load side effects.
  */
-function validateAliasesInéš”ç¦»(registry: Record<string, CommandEntry>): {
+function validateAliasesIn隔离(registry: Record<string, CommandEntry>): {
 	valid: boolean;
 	errors: string[];
 } {
@@ -466,7 +453,7 @@ function validateAliasesInéš”ç¦»(registry: Record<string, CommandEntry>):
 
 				if (visited.has(current)) {
 					errors.push(
-						`Circular alias detected: '${name}' â†’ '${current}' â†’ ... â†’ '${current}'`,
+						`Circular alias detected: '${name}' → '${current}' → ... → '${current}'`,
 					);
 					break;
 				}
@@ -487,4 +474,3 @@ function validateAliasesInéš”ç¦»(registry: Record<string, CommandEntry>):
 
 	return { valid: errors.length === 0, errors };
 }
-
