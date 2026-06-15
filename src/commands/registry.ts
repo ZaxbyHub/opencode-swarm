@@ -1,5 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
-import { syncBundledProjectSkillsIfMissing } from '../config/bundled-skills.js';
+import { syncBundledProjectSkillsIfMissingAsync } from '../config/bundled-skills.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -240,7 +240,13 @@ async function handleModeCommandWithBundledSkills(
 	handler: (directory: string, args: string[]) => string | CommandResult,
 ): CommandResult {
 	if (ctx.packageRoot) {
-		syncBundledProjectSkillsIfMissing(ctx.directory, ctx.packageRoot);
+		// Backstop for projects that predate init-time materialization (the
+		// primary sync now runs at plugin init; see src/index.ts). Missing-only
+		// and fail-open, so it self-heals legacy projects without regression.
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+		);
 	}
 	return Promise.resolve(handler(ctx.directory, ctx.args));
 }
@@ -367,6 +373,18 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
 		description: 'Run tool registration coherence check',
 		category: 'diagnostics',
+	},
+	// Alias for the hyphenated form '/swarm doctor-tools'. Without it,
+	// resolveCommand(['doctor-tools']) returns null and the TUI shows
+	// "command not found". NOTE: aliasOf is warning text only — resolveCommand
+	// invokes this entry's OWN handler, so the handler must be set here (mirrors
+	// the 'config-doctor' alias above).
+	'doctor-tools': {
+		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
+		description: 'Run tool registration coherence check',
+		category: 'diagnostics',
+		aliasOf: 'doctor tools',
+		deprecated: true,
 	},
 	diagnose: {
 		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
