@@ -100,7 +100,7 @@ Discovery is deliberate and robust:
 Current signal-triggered modes: `DEEP_DIVE`, `PR_REVIEW`, `PR_FEEDBACK`, `DESIGN_DOCS`, `COUNCIL`, `ISSUE_INGEST` (and the spec-workflow modes `SPECIFY`, `BRAINSTORM`, `CLARIFY-SPEC`).
 
 #### PR_REVIEW Protocol
-Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction → 6 parallel explorer lanes → independent reviewer confirmation → critic challenge on HIGH/CRITICAL → synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder.
+Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction → 6 parallel explorer lanes via the `dispatch_lanes` join barrier → independent reviewer confirmation → critic challenge on HIGH/CRITICAL → synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder.
 
 #### PR_FEEDBACK Protocol
 Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / DISPROVED / PRE_EXISTING / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. GitHub review threads are resolved only on explicit user instruction.

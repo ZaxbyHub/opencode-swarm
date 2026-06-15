@@ -38,6 +38,7 @@ import { declare_council_criteria } from './declare-council-criteria';
 import { declare_scope } from './declare-scope';
 import { diff } from './diff';
 import { diff_summary } from './diff-summary';
+import { dispatch_lanes } from './dispatch-lanes';
 import { doc_extract, doc_scan } from './doc-scan';
 import { detect_domains } from './domain-detector';
 import { evidence_check } from './evidence-check';
@@ -207,6 +208,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,
 	swarm_command: () => swarm_command,
+	dispatch_lanes: () => dispatch_lanes,
 	summarize_work: () => summarize_work,
 	write_architecture_supervisor_evidence: () =>
 		write_architecture_supervisor_evidence,

@@ -156,12 +156,12 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 
 **Workflow:**
 1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
-2. **Parallel Explorer Lanes** — 6 lanes: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+2. **Parallel Explorer Lanes** — 6 lanes dispatched through the deterministic `dispatch_lanes` join barrier: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
 3. **Independent Reviewer Confirmation** — Validate each finding with file:line evidence
 4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** — Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically — you no longer need to ask for these by hand.
+The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes` for read-only lane fan-out so local models do not need to emit background Agent calls by hand.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 

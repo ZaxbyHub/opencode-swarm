@@ -166,7 +166,7 @@ When the PR has merge conflicts:
 
 When the user asks for a "council", "independent review", "N-agent review", or uses phrases like "assume all work is wrong", run the explorer lanes as a parallel **adversarial council**:
 
-1. Launch all council agents in a **single message with multiple Agent tool calls** so they run in parallel, in the background (`run_in_background: true`), using the `Explore` subagent type.
+1. In OpenCode, launch all council agents with one `dispatch_lanes` call and treat `lane_results` as the join barrier. In Claude Code, launch the council agents as parallel Agent calls in the same response, using the `Explore` subagent type.
 2. Each agent is told to **assume all work is WRONG until code evidence proves otherwise** and to hunt for bugs in its lane only.
 3. Default lane set for a 5-agent council:
    - correctness and edge cases
@@ -221,9 +221,9 @@ Common patterns to verify:
 
 ---
 
-### Phase 2: Parallel Explorer Lanes (6 lanes, launch in single message)
+### Phase 2: Parallel Explorer Lanes (6 lanes, one dispatch batch)
 
-Launch all 6 lanes in parallel in a **single message with multiple Agent tool calls** (`run_in_background: true`). Each lane produces candidate findings with exact file:line evidence — not final verdicts.
+In OpenCode, launch all 6 lanes with one `dispatch_lanes` call, `max_concurrent: 6`, and use the returned `lane_results` as the join barrier before synthesis. In Claude Code, launch all 6 lanes as parallel Agent calls in the same response. Each lane produces candidate findings with exact file:line evidence — not final verdicts.
 
 | Lane | Focus | Lane-Specific Checklist |
 |------|-------|----------------------|
@@ -344,7 +344,7 @@ Run the **Runtime-Aware False-Positive Guard Checklist** (below) before confirmi
 
 When user requests council review or uses phrases like "independent review", "5-agent review", "assume all work is wrong":
 
-1. Launch all 6 explorer lanes as **adversarial council agents** in parallel (`run_in_background: true`)
+1. In OpenCode, launch all 6 explorer lanes as adversarial council agents with one `dispatch_lanes` call; in Claude Code, launch them as parallel Agent calls.
 2. Each agent assumes **all work is WRONG until code evidence proves otherwise**
 3. Each agent returns: `EVIDENCE_FOUND / SUSPICIOUS / CLEAN` with file:line evidence, capped at N words. Agents must not return CONFIRMED, DISPROVED, or final severity.
 4. Main thread acts as **independent reviewer** — re-reads file:line evidence directly and classifies candidates
@@ -462,6 +462,7 @@ parallel with explorer lanes to confirm candidate regressions are real.
 [TEST EXECUTION] result: ___ (N pass, N fail)
 [TEST EXECUTION] regression failures (PR-introduced): ___ (count)
 [TEST EXECUTION] pre-existing failures (base branch): ___ (count)
+[VALIDATION] deterministic lane dispatcher used: YES/NO — ___
 [VALIDATION] reviewer dispatched: ___ (agent type, task description)
 [VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
 [VALIDATION] critic dispatched: ___ (agent type, task description) OR "SKIPPED — no reviewer-confirmed HIGH or borderline-confidence findings"

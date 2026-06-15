@@ -545,6 +545,11 @@ export const TOOL_METADATA = {
 			'test_engineer',
 		],
 	},
+	dispatch_lanes: {
+		description:
+			'dispatch multiple read-only exploration/review lanes concurrently and return a structured join result',
+		agents: ['architect'],
+	},
 	summarize_work: {
 		description:
 			'emit a short structured summary of completed work (key decisions, assumptions, risks, constraints) at task completion; rolls up per phase for architecture-supervisor review. Advisory, never blocks.',
