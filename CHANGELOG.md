@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.76.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.76.1...v7.76.2) (2026-06-15)
+
+
+### Bug Fixes
+
+* **skills:** materialize bundled mode skills at plugin init for fresh-project onboarding ([#1356](https://github.com/zaxbysauce/opencode-swarm/issues/1356)) ([254f38b](https://github.com/zaxbysauce/opencode-swarm/commit/254f38b80937d1b8058bf9a3d8fa5b003d85aa30))
+
 ## [7.76.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.76.0...v7.76.1) (2026-06-15)
 
 
