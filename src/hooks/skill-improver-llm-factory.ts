@@ -15,6 +15,19 @@
 
 import { swarmState } from '../state.js';
 
+/**
+ * True only for genuine cancellation errors (a native `AbortError` /
+ * `TimeoutError` raised when a forwarded `AbortSignal` fires). Used to map
+ * cancellation — and only cancellation — onto the `SKILL_IMPROVER_LLM_TIMEOUT`
+ * sentinel, so a real failure that merely coincides with an aborted signal
+ * still surfaces as itself rather than being misclassified as a timeout.
+ */
+function isAbortError(err: unknown): boolean {
+	if (typeof err !== 'object' || err === null) return false;
+	const name = (err as { name?: unknown }).name;
+	return name === 'AbortError' || name === 'TimeoutError';
+}
+
 export type SkillImproverLLMDelegate = (
 	systemPrompt: string,
 	userInput: string,
@@ -112,7 +125,9 @@ export function createSkillImproverLLMDelegate(
 			// a child session and does not persist it as a new root in the TUI.
 			const createResult = await client.session.create({
 				...(sessionId
-					? { body: { parentID: sessionId, title: 'skill_improver background' } }
+					? {
+							body: { parentID: sessionId, title: 'skill_improver background' },
+						}
 					: {}),
 				query: { directory },
 				...sdkOpts,
@@ -141,6 +156,9 @@ export function createSkillImproverLLMDelegate(
 			});
 
 			if (!promptResult.data) {
+				// A null result while the signal is aborted is the cancellation
+				// path, not a real prompt failure.
+				if (signal?.aborted) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
 				throw new Error(
 					`skill_improver LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
 				);
@@ -151,9 +169,11 @@ export function createSkillImproverLLMDelegate(
 			);
 			return textParts.map((p) => p.text).join('\n');
 		} catch (err) {
-			// Translate a native AbortError (from signal cancellation) into the
-			// SKILL_IMPROVER_LLM_TIMEOUT sentinel that callers expect.
-			if (signal?.aborted) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
+			// Translate only a genuine cancellation (native AbortError from the
+			// forwarded signal) into the SKILL_IMPROVER_LLM_TIMEOUT sentinel. A
+			// real failure that happens to coincide with an aborted signal must
+			// surface as itself rather than being misreported as a timeout.
+			if (isAbortError(err)) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
 			throw err;
 		} finally {
 			cleanup();
