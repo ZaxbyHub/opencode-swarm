@@ -722,7 +722,7 @@ export function parseDraftFrontmatter(content: string): {
 			// Accept any non-empty, non-whitespace token bounded to 64 chars.
 			// Generator emits UUID v4 ids; tests may use short synthetic ids.
 			const m = inTriggersList
-				? line.match(/^\s+-\s+(.{1,160}?)\s*$/)
+				? line.match(/^\s+-\s+(.{1,120}?)\s*$/)
 				: line.match(/^\s+-\s+(\S{1,64})\s*$/);
 			if (m && inTriggersList) {
 				const trigger = stripGeneratedYamlQuotes(m[1]);

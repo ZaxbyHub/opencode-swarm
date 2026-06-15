@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
+import { withTimeout } from '../utils/timeout.js';
 import type {
 	SkillImproveResult,
 	SkillImproverConfigInput,
@@ -44,6 +45,7 @@ export interface SkillConsolidationResult {
 
 const DEFAULT_CONSOLIDATION_INTERVAL_HOURS = 24;
 const DEFAULT_CONSOLIDATION_MAX_CALLS_PER_RUN = 1;
+const CONSOLIDATION_RUN_TIMEOUT_MS = 5 * 60 * 1000;
 const runningByDirectory = new Map<string, Promise<SkillConsolidationResult>>();
 
 export function consolidationStatePath(directory: string): string {
@@ -152,18 +154,22 @@ async function runSkillConsolidationInner(
 				DEFAULT_CONSOLIDATION_MAX_CALLS_PER_RUN,
 		),
 	);
-	const result = await runSkillImprover({
-		directory: req.directory,
-		config: req.config,
-		targets: req.config.targets,
-		mode: req.config.write_mode,
-		maxCalls,
-		now,
-		sessionId: req.sessionId,
-		enrichmentQuota: req.enrichmentQuota,
-		evaluateDrafts: req.evaluateDrafts ?? false,
-		allowAutoApply: false,
-	});
+	const result = await withTimeout(
+		runSkillImprover({
+			directory: req.directory,
+			config: req.config,
+			targets: req.config.targets,
+			mode: req.config.write_mode,
+			maxCalls,
+			now,
+			sessionId: req.sessionId,
+			enrichmentQuota: req.enrichmentQuota,
+			evaluateDrafts: req.evaluateDrafts ?? false,
+			allowAutoApply: false,
+		}),
+		CONSOLIDATION_RUN_TIMEOUT_MS,
+		new Error('skill consolidation run exceeded budget'),
+	);
 
 	if (result.ran) {
 		await writeState(req.directory, {

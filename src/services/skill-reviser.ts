@@ -192,16 +192,24 @@ async function validateRevisionCandidate(
 		operation,
 	});
 	if (evaluation.passed) return { passed: true };
-	await appendRejectedSkillEdit(
-		{
-			directory: params.directory,
-			slug: params.slug,
-			candidateContent,
-			incumbentContent: params.currentContent,
-			operation,
-		},
-		evaluation,
-	);
+	try {
+		await appendRejectedSkillEdit(
+			{
+				directory: params.directory,
+				slug: params.slug,
+				candidateContent,
+				incumbentContent: params.currentContent,
+				operation,
+			},
+			evaluation,
+		);
+	} catch (rejectedErr) {
+		warn(
+			`[skill-reviser] rejected-skill edit append failed (non-fatal) for ${params.slug}: ${
+				rejectedErr instanceof Error ? rejectedErr.message : String(rejectedErr)
+			}`,
+		);
+	}
 	return {
 		passed: false,
 		reason: `validation_failed: ${evaluation.reason}`,

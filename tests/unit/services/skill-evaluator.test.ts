@@ -72,6 +72,29 @@ describe('evaluateSkillChange', () => {
 		expect(result.candidateScore).toBe(1);
 	});
 
+	it('rejects a candidate that contains a forbidden phrase (score zeroed)', async () => {
+		writeEval('forbidden-skill', 'cases.json', {
+			cases: [
+				{
+					id: 'no-forbidden',
+					required_phrases: ['call declare_scope'],
+					forbidden_phrases: ['skip scope declaration'],
+				},
+			],
+		});
+
+		const result = await evaluateSkillChange({
+			directory: tmp,
+			slug: 'forbidden-skill',
+			candidateContent:
+				'Required Procedure: call declare_scope. But skip scope declaration.',
+			operation: 'test',
+		});
+
+		expect(result.passed).toBe(false);
+		expect(result.status).toBe('rejected');
+	});
+
 	it('rejects an incumbent rewrite that is not a strict improvement', async () => {
 		writeEval('scope-skill', 'cases.json', {
 			required_phrases: ['call declare_scope'],
@@ -177,6 +200,34 @@ describe('evaluateSkillChange', () => {
 		const result = await evaluateSkillChange({
 			directory: tmp,
 			slug: 'bad-skill',
+			candidateContent: '# Candidate',
+			operation: 'test',
+		});
+
+		expect(result.passed).toBe(false);
+		expect(result.status).toBe('invalid_eval_set');
+	});
+
+	it('fails closed when an eval fixture exceeds 64KB', async () => {
+		const dir = path.join(tmp, '.swarm', 'skills', 'evals', 'oversized-skill');
+		mkdirSync(dir, { recursive: true });
+		const largePhrase = 'x'.repeat(70 * 1024);
+		writeFileSync(
+			path.join(dir, 'large.json'),
+			JSON.stringify({
+				cases: [
+					{
+						id: 'oversized',
+						required_phrases: [largePhrase],
+					},
+				],
+			}),
+			'utf-8',
+		);
+
+		const result = await evaluateSkillChange({
+			directory: tmp,
+			slug: 'oversized-skill',
 			candidateContent: '# Candidate',
 			operation: 'test',
 		});
