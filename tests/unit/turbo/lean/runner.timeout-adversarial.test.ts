@@ -908,3 +908,125 @@ describe('ATTACK VECTOR T8 — very large session ID handling', () => {
 		expect(result.sessionId).toBe(longSessionId);
 	});
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ATTACK VECTOR T9: Abort-before-delete ordering invariant
+// Verifies that promptController.abort() fires before session.delete() on every
+// exit path to prevent SQLiteError: FOREIGN KEY constraint failed.
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('ATTACK VECTOR T9 — abort-before-delete ordering invariant', () => {
+	test('signal is aborted before delete when prompt returns null data (no-timeout production path)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		let capturedSignal: AbortSignal | undefined;
+		let signalAbortedAtDelete = false;
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, {
+			create: mock(() =>
+				Promise.resolve({ data: { id: 'session-ord-1' }, error: null }),
+			),
+			prompt: mock((args: { signal?: AbortSignal }) => {
+				capturedSignal = args.signal;
+				return Promise.resolve({ data: null, error: 'prompt failed' });
+			}),
+			delete: mock(() => {
+				signalAbortedAtDelete = capturedSignal?.aborted ?? false;
+				return Promise.resolve();
+			}),
+		} as unknown as MockSessionOps);
+
+		const lane: LeanTurboLane = {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: [],
+			status: 'pending',
+		};
+
+		const result = await runner.dispatchLane(lane, 'mega_coder');
+
+		expect(result.ok).toBe(false);
+		expect(signalAbortedAtDelete).toBe(true);
+	});
+
+	test('signal is aborted before delete when prompt throws (no-timeout production path)', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		let capturedSignal: AbortSignal | undefined;
+		let signalAbortedAtDelete = false;
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, {
+			create: mock(() =>
+				Promise.resolve({ data: { id: 'session-ord-2' }, error: null }),
+			),
+			prompt: mock((args: { signal?: AbortSignal }) => {
+				capturedSignal = args.signal;
+				return Promise.reject(new Error('mid-stream network failure'));
+			}),
+			delete: mock(() => {
+				signalAbortedAtDelete = capturedSignal?.aborted ?? false;
+				return Promise.resolve();
+			}),
+		} as unknown as MockSessionOps);
+
+		const lane: LeanTurboLane = {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: [],
+			status: 'pending',
+		};
+
+		const result = await runner.dispatchLane(lane, 'mega_coder');
+
+		expect(result.ok).toBe(false);
+		expect(signalAbortedAtDelete).toBe(true);
+	});
+
+	test('signal is aborted before delete when timeout fires mid-prompt', async () => {
+		writeMinimalPlan(1);
+		writeScopeFiles({ '1.1': ['src/a.ts'] });
+
+		let capturedSignal: AbortSignal | undefined;
+		let signalAbortedAtDelete = false;
+
+		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
+		injectMockSessionOps(runner, {
+			create: mock(() =>
+				Promise.resolve({ data: { id: 'session-ord-3' }, error: null }),
+			),
+			prompt: mock((args: { signal?: AbortSignal }) => {
+				capturedSignal = args.signal;
+				return Bun.sleep(200).then(() =>
+					Promise.resolve({
+						data: { parts: [{ type: 'text', text: 'Done' }] },
+						error: null,
+					}),
+				);
+			}),
+			delete: mock(() => {
+				signalAbortedAtDelete = capturedSignal?.aborted ?? false;
+				return Promise.resolve();
+			}),
+		} as unknown as MockSessionOps);
+
+		LeanTurboRunner._internals.laneDispatchTimeoutMs = 30;
+
+		const lane: LeanTurboLane = {
+			laneId: 'lane-1',
+			taskIds: ['1.1'],
+			files: [],
+			status: 'pending',
+		};
+
+		const result = await runner.dispatchLane(lane, 'mega_coder');
+		await Bun.sleep(300);
+
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain('timed out');
+		expect(signalAbortedAtDelete).toBe(true);
+	});
+});
