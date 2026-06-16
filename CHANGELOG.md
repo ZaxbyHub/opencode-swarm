@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.77.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.3...v7.77.4) (2026-06-16)
+
+
+### Bug Fixes
+
+* **final-council:** port PR [#1244](https://github.com/zaxbysauce/opencode-swarm/issues/1244) hardening onto latest main ([#1363](https://github.com/zaxbysauce/opencode-swarm/issues/1363)) ([071d1bb](https://github.com/zaxbysauce/opencode-swarm/commit/071d1bbe9e83d246ad75cd230cc5461a41717ae2))
+
 ## [7.77.3](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.2...v7.77.3) (2026-06-15)
 
 
