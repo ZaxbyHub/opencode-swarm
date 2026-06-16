@@ -417,7 +417,8 @@ describe('Git Branch Module', () => {
 			setupMock({
 				status: 128,
 				stdout: '',
-				stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+				stderr:
+					'fatal: not a git repository (or any of the parent directories): .git',
 			});
 
 			const result = branch.getGitRepositoryStatus(testCwd);

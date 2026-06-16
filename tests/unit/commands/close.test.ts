@@ -74,10 +74,7 @@ function canonicalPlan(input: TestPlanInput) {
 	};
 }
 
-async function writeCanonicalPlan(
-	testDirectory: string,
-	input: TestPlanInput,
-) {
+async function writeCanonicalPlan(testDirectory: string, input: TestPlanInput) {
 	const plan = canonicalPlan(input);
 	writeFileSync(
 		path.join(testDirectory, '.swarm', 'plan.json'),
@@ -242,7 +239,9 @@ function mockResetSwarmStatePreservingSingletons(): void {
 		fullAutoEnabledInConfig: mockSwarmState.fullAutoEnabledInConfig,
 		curatorInitAgentNames: [...(mockSwarmState.curatorInitAgentNames || [])],
 		curatorPhaseAgentNames: [...(mockSwarmState.curatorPhaseAgentNames || [])],
-		skillImproverAgentNames: [...(mockSwarmState.skillImproverAgentNames || [])],
+		skillImproverAgentNames: [
+			...(mockSwarmState.skillImproverAgentNames || []),
+		],
 	};
 	mockResetSwarmState();
 	Object.assign(mockSwarmState, saved);

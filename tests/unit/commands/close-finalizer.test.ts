@@ -244,7 +244,6 @@ const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 // All mock.module calls require afterEach(mock.restore()) cleanup.
 // ─────────────────────────────────────────────────────────────────────
 
-
 // ── Helpers ──────────────────────────────────────────────────────────
 
 let testDir: string;

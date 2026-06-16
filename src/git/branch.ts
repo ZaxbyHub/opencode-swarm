@@ -24,7 +24,9 @@ function windowsGitCandidates(): string[] {
 	const roots = unique([
 		process.env.ProgramFiles ?? '',
 		process.env['ProgramFiles(x86)'] ?? '',
-		process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : '',
+		process.env.LOCALAPPDATA
+			? path.join(process.env.LOCALAPPDATA, 'Programs')
+			: '',
 	]);
 	const installed = roots.flatMap((root) => [
 		path.join(root, 'Git', 'cmd', 'git.exe'),
@@ -49,8 +51,7 @@ function errorMessage(err: unknown): string {
 function isNotGitRepositoryMessage(message: string): boolean {
 	const lower = message.toLowerCase();
 	return (
-		lower.includes('not a git repository') ||
-		lower.includes('not a git repo')
+		lower.includes('not a git repository') || lower.includes('not a git repo')
 	);
 }
 
