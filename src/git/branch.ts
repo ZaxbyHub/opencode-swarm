@@ -1,7 +1,7 @@
 import * as child_process from 'node:child_process';
 import path from 'node:path';
-import { warn } from '../utils/logger.js';
 import { GitBinaryMissingError } from '../utils/git-binary-missing-error.js';
+import { warn } from '../utils/logger.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
