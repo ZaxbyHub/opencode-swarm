@@ -37,25 +37,30 @@ import {
 /**
  * Internal function references for testability.
  * Replace _internals.safeRealpathSync in tests to mock symlink resolution.
+ * Replace _internals.fsRename to exercise the rename retry path (e.g. EPERM).
+ * Restore each entry in afterEach via the saved original reference.
  */
 export const _internals: {
 	safeRealpathSync: typeof safeRealpathSync;
+	fsRename: typeof fsPromises.rename;
 } = {
 	safeRealpathSync,
-} as const;
+	fsRename: fsPromises.rename.bind(fsPromises),
+};
 
 // ============ Constants ============
 
 /**
- * Maximum number of rename retries on Windows EEXIST errors.
- * Windows may hold the file open briefly during handle release.
+ * Maximum total rename attempts (initial + retries) for transient file-lock
+ * errors (EEXIST, EPERM, EBUSY). Windows holds files open briefly during
+ * handle release and during AV on-access scanning of newly written files.
  */
-const WINDOWS_RENAME_MAX_RETRIES = 3;
+const WINDOWS_RENAME_MAX_RETRIES = 5;
 
 /**
- * Delay between rename retries on Windows (ms).
+ * Delay between rename attempts (ms).
  */
-const WINDOWS_RENAME_RETRY_DELAY_MS = 50;
+const WINDOWS_RENAME_RETRY_DELAY_MS = 100;
 
 function validateLoadedGraph(parsed: RepoGraph): void {
 	if (!parsed.schema_version) {
@@ -383,41 +388,42 @@ export async function saveGraph(
 				throw lastError;
 			}
 		} else {
-			// On Windows, rename may fail if target exists and is open.
-			// Retry the rename without deleting the target (no delete-then-rename
-			// fallback) to eliminate the TOCTOU window where an attacker could
-			// create a malicious file at graphPath between delete and rename.
-			let retries = 0;
-			while (retries < WINDOWS_RENAME_MAX_RETRIES) {
+			// Retry rename on transient file-lock errors (EEXIST, EPERM, EBUSY).
+			// No delete-then-rename fallback — retrying without delete eliminates
+			// the TOCTOU window where a malicious file could be inserted between
+			// unlink and rename. On Windows, rename over a locked target returns
+			// EPERM (e.g. AV on-access scan) or EEXIST; EBUSY is also retried for
+			// consistency with the rest of the codebase (bun-compat.ts).
+			for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
 				try {
-					await fsPromises.rename(tempPath, graphPath);
+					await _internals.fsRename(tempPath, graphPath);
+					lastError = null;
 					break;
 				} catch (error: unknown) {
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Only retry on Windows EEXIST error
-					if (
-						lastError instanceof Error &&
-						'code' in lastError &&
-						(lastError as { code: string }).code === 'EEXIST' &&
-						retries < WINDOWS_RENAME_MAX_RETRIES - 1
-					) {
-						retries++;
-						// Wait before retry to allow handle release
+					const code = (lastError as NodeJS.ErrnoException).code;
+					if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
+						break;
+					}
+					if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
 						await new Promise((resolve) =>
 							setTimeout(resolve, WINDOWS_RENAME_RETRY_DELAY_MS),
 						);
-						continue;
 					}
-					// Not an EEXIST error or max retries reached - throw
-					throw lastError;
 				}
+			}
+			if (lastError) {
+				throw lastError;
 			}
 		}
 	} finally {
 		// Clean up temp file.
-		// For rename path: temp is gone after successful rename, so unlink fails with
-		// ENOENT which is ignored. For copy path (createAtomic): temp still exists and
-		// must be explicitly removed.
+		// Rename success: temp was moved to graphPath, so unlink throws ENOENT — ignored.
+		// Rename exhausted retries (e.g. persistent Windows EPERM): temp still exists.
+		//   If AV also holds the temp file, unlink throws EPERM — logged but not thrown.
+		//   Orphaned files are unique-named (Date.now() + random), so they do not
+		//   accumulate pathologically and are cleaned up on the next successful save.
+		// createAtomic path: temp still exists after copyFile and must be removed.
 		try {
 			await fsPromises.unlink(tempPath);
 		} catch (error: unknown) {
