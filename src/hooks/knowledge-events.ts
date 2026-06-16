@@ -23,11 +23,11 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
-import { resolveHiveEventsPath } from './knowledge-store.js';
 import type {
 	KnowledgeApplicationRecord,
 	RetrievalOutcome,
@@ -224,9 +224,29 @@ export function resolveKnowledgeCounterBaselinePath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-counter-baseline.json');
 }
 
-// Re-export so callers can reach the shared hive events log via this module
-// without a separate import; the canonical definition lives in knowledge-store.ts.
-export { resolveHiveEventsPath };
+// Defined locally to avoid importing from knowledge-store.ts, which tests mock.
+// Mirrors resolveHiveKnowledgePath()'s directory logic in knowledge-store.ts so
+// the two paths stay co-located in the same platform-specific data directory.
+export function resolveHiveEventsPath(): string {
+	const platform = process.platform;
+	const home = process.env.HOME || os.homedir();
+	let dir: string;
+	if (platform === 'win32') {
+		dir = path.join(
+			process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
+			'opencode-swarm',
+			'Data',
+		);
+	} else if (platform === 'darwin') {
+		dir = path.join(home, 'Library', 'Application Support', 'opencode-swarm');
+	} else {
+		dir = path.join(
+			process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'),
+			'opencode-swarm',
+		);
+	}
+	return path.join(dir, 'shared-knowledge-events.jsonl');
+}
 
 /** Returns `.swarm/knowledge-application.jsonl` for legacy v2 audit records. */
 export function resolveLegacyApplicationLogPath(directory: string): string {
