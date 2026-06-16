@@ -10,10 +10,10 @@
   built-in circuit breaker handles gh unavailability at poll time.
 
 - **Added startup scan for existing subscriptions** (`src/index.ts`): On plugin
-  init, `listActive()` is called. If active subscriptions exist and
-  `pr_monitor.enabled`, the worker starts immediately. Previously, the worker
-  only started via a lazy-start callback triggered by new `subscribe()` calls,
-  leaving existing subscriptions orphaned after plugin restart.
+  init, `listActive()` is called via a deferred `queueMicrotask` (fail-open).
+  If active subscriptions exist and `pr_monitor.enabled`, the worker starts.
+  Previously, the worker only started via a lazy-start callback triggered by
+  new `subscribe()` calls, leaving existing subscriptions orphaned after restart.
 
 - **Made circuit-breaker trip always-visible** (`src/background/pr-monitor-worker.ts`):
   Changed `log()` (debug-gated) to `error()` (always-visible) for circuit-breaker
@@ -39,8 +39,8 @@ will trip and log a visible error after `failure_threshold` consecutive failures
 
 ## Invariant audit
 
-- INV-1 (init): startup scan uses `listActive` which is sync-backed
-  (`readFileSync`); no unbounded I/O
+- INV-1 (init): startup scan runs via `queueMicrotask` (deferred, fail-open);
+  async `listActive()` completes after setup() returns — does not block init
 - INV-3 (subprocesses): no new subprocess calls; existing `ghExec` unchanged
 - INV-7 (tests): existing tests pass; no `mock.module` usage
 - INV-8 (session state): no session state changes
