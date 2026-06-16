@@ -21,11 +21,11 @@ The 5 newly TUI-discoverable commands and their classifications:
 | `pr unsubscribe` | `human-only` | not in TUI |
 | `pr status` | `agent` | not in TUI |
 | `learning` | `human-only` | not in TUI |
-| `post-mortem` | `human-only` | not in TUI |
+| `post-mortem` | `agent` | not in TUI |
 
 ### Derived policy sets (`src/commands/tool-policy.ts`)
 
-All 4 policy-gated sets are now **derived** from `COMMAND_REGISTRY` via lazy `Proxy` initialization (breaking the circular dependency with `registry.ts`):
+All 4 policy-gated sets are now **derived** from `COMMAND_REGISTRY` via lazy `Proxy` initialization (Lazy Proxy initialization defers set computation to first access, after module initialization completes, preventing transitive initialization-order issues):
 
 - `SWARM_COMMAND_TOOL_COMMANDS` — union of `agent` + `human-only`; drives `z.enum` for tool input
 - `SWARM_COMMAND_TOOL_ALLOWLIST` — `agent`-policy commands only

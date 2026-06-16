@@ -378,10 +378,10 @@ describe('validateToolPolicy() — fail-open loader validation', () => {
 		expect(result.warnings).toEqual([]);
 	});
 
-	test('validateToolPolicy() warns for a synthetic standalone command missing toolPolicy', () => {
-		// We can't easily inject a bad entry into COMMAND_REGISTRY at runtime,
-		// so we verify the warning path by checking that the real registry
-		// produces no warnings (proving the warning path exists for future use).
+	test('validateToolPolicy() returns no warnings when all standalone commands have explicit toolPolicy', () => {
+		// The negative-path (warning emission) is tested in registration-parity.test.ts
+		// via the findMissingToolPolicy helper with synthetic fixtures — that test injects
+		// entries missing toolPolicy and asserts on the warning count.
 		const result = _internals.validateToolPolicy();
 		expect(result.warnings.length).toBe(0);
 	});

@@ -678,6 +678,19 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
+		test('bunx opencode-swarm run pr unsubscribe → BLOCKED (compound human-only)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run pr unsubscribe',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run pr unsubscribe');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
 		test('opencode-swarm run memory import → BLOCKED (bare binary compound)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);

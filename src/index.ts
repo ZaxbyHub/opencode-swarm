@@ -1174,9 +1174,12 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			// Register /swarm command
 			// Build a model-facing shortcut description from the registry entry (SSOT — can't drift).
 			const shortcutDescription = (cmd: string): string => {
-				const entry = COMMAND_REGISTRY[
-					cmd as keyof typeof COMMAND_REGISTRY
-				] as { description: string };
+				const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as
+					| { description?: string }
+					| undefined;
+				if (!entry?.description) {
+					return `Use /swarm ${cmd}`; // fallback if registry entry is somehow missing
+				}
 				const desc =
 					entry.description.charAt(0).toLowerCase() +
 					entry.description.slice(1);
