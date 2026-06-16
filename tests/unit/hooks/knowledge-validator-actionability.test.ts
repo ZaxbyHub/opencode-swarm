@@ -148,4 +148,24 @@ describe('appendUnactionable', () => {
 		expect(record.id).toBe('u-1');
 		expect(typeof record.quarantined_at).toBe('string');
 	});
+
+	it('deduplicates near-identical queued lessons with the same reason', async () => {
+		await appendUnactionable(dir, makeEntry(), 'missing_predicate_and_scope');
+		await appendUnactionable(
+			dir,
+			{
+				...makeEntry(),
+				id: 'u-2',
+				lesson: 'A plain prose lesson with no predicate or scope.',
+			},
+			'missing_predicate_and_scope',
+		);
+
+		const lines = fs
+			.readFileSync(resolveUnactionablePath(dir), 'utf-8')
+			.trim()
+			.split('\n');
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).id).toBe('u-1');
+	});
 });

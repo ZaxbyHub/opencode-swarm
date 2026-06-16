@@ -340,6 +340,40 @@ describe('reviseSkill — deterministic (no delegate)', () => {
 		expect(entry.reason).toBe('deterministic_revision');
 	});
 
+	it('rejects deterministic revision that does not strictly improve evals before writing', async () => {
+		ensureSwarmDir();
+		const currentContent = `${SAMPLE_SKILL}\nlegacy sentinel requirement\n`;
+		const skillPath = writeSkillFile(currentContent);
+		const evalDir = path.join(tmp, '.swarm', 'skills', 'evals', 'test-skill');
+		mkdirSync(evalDir, { recursive: true });
+		writeFileSync(
+			path.join(evalDir, 'cases.json'),
+			JSON.stringify({ required_phrases: ['legacy sentinel requirement'] }),
+			'utf-8',
+		);
+
+		const result = await reviseSkill({
+			directory: tmp,
+			slug: 'test-skill',
+			skillPath,
+			violationContexts: [makeViolation()],
+			currentContent,
+			currentVersion: 1,
+		});
+
+		expect(result.revised).toBe(false);
+		expect(result.reason).toContain('validation_failed');
+		expect(readFileSync(skillPath, 'utf-8')).toBe(currentContent);
+		expect(
+			existsSync(
+				path.join(tmp, '.swarm', 'skill-changelogs', 'test-skill.jsonl'),
+			),
+		).toBe(false);
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skills', 'rejected-edits.jsonl')),
+		).toBe(true);
+	});
+
 	it('preserves all required sections in the revised file', async () => {
 		ensureSwarmDir();
 		const skillPath = writeSkillFile(SAMPLE_SKILL);

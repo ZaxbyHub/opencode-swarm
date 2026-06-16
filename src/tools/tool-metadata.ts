@@ -59,6 +59,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'critic_sounding_board',
@@ -106,6 +107,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',
@@ -126,6 +128,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'critic_sounding_board',
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
@@ -138,11 +141,11 @@ export const TOOL_METADATA = {
 	},
 	schema_drift: {
 		description: 'OpenAPI spec vs route drift',
-		agents: ['architect', 'sme', 'docs', 'explorer'],
+		agents: ['architect', 'sme', 'researcher', 'docs', 'explorer'],
 	},
 	todo_extract: {
 		description: 'structured TODO/FIXME extraction',
-		agents: ['architect', 'docs', 'explorer'],
+		agents: ['architect', 'researcher', 'docs', 'explorer'],
 	},
 	evidence_check: {
 		description: 'verify task evidence completeness',
@@ -385,6 +388,7 @@ export const TOOL_METADATA = {
 			'explorer',
 			'coder',
 			'test_engineer',
+			'researcher',
 		],
 	},
 	batch_symbols: {
@@ -422,7 +426,7 @@ export const TOOL_METADATA = {
 	},
 	repo_map: {
 		description:
-			'query the repo code graph: importers, dependencies, blast radius, and localization context for structural awareness before refactoring',
+			'query the repo code graph: importers, dependencies, blast radius, localization, ontology facts, package boundaries, and heuristic preflight packets before refactoring; ontology findings are advisory, not formal proofs',
 		agents: [
 			'architect',
 			'critic_sounding_board',
@@ -448,8 +452,13 @@ export const TOOL_METADATA = {
 	},
 	web_search: {
 		description:
-			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents and by SME for opt-in external skill/source evaluation.',
-		agents: ['architect', 'sme', 'skill_improver'],
+			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, researcher auto-research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents, by SME for opt-in external skill/source evaluation, and by the researcher agent for multi-source auto-research.',
+		agents: ['architect', 'sme', 'researcher', 'skill_improver'],
+	},
+	web_fetch: {
+		description:
+			'Fetch the readable text of a single http(s) URL (architect-only). Returns decoded page text, document title, final URL after redirects, and an evidence reference. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled. Blocks private/loopback/link-local/metadata addresses (re-validated and re-pinned across redirects); enforces timeout and body size cap.',
+		agents: ['architect'],
 	},
 	convene_general_council: {
 		description:
@@ -457,7 +466,8 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	write_final_council_evidence: {
-		description: 'write final council evidence for project completion',
+		description:
+			'Persist project-scoped final council evidence to .swarm/evidence/final-council.json. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks and collect their CouncilMemberVerdict JSON — this tool synthesizes only. Rejects on insufficient quorum or CONCERNS with unresolved requiredFixes; normalizes verdicts to approved/concerns/rejected. Architect-only.',
 		agents: ['architect'],
 	},
 	skill_generate: {
@@ -506,7 +516,7 @@ export const TOOL_METADATA = {
 	},
 	knowledge_archive: {
 		description:
-			'archive (default), quarantine, or purge a swarm knowledge entry by ID with an immutable audit tombstone; purge requires an admin flag',
+			'archive (default), quarantine, or purge a swarm or hive knowledge entry by ID with an immutable audit tombstone; purge requires an admin flag',
 		agents: ['architect'],
 	},
 	swarm_memory_recall: {
@@ -525,6 +535,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',
@@ -535,12 +546,18 @@ export const TOOL_METADATA = {
 			'test_engineer',
 		],
 	},
+	dispatch_lanes: {
+		description:
+			'dispatch multiple read-only exploration/review lanes concurrently and return a structured join result',
+		agents: ['architect'],
+	},
 	summarize_work: {
 		description:
 			'emit a short structured summary of completed work (key decisions, assumptions, risks, constraints) at task completion; rolls up per phase for architecture-supervisor review. Advisory, never blocks.',
 		agents: [
 			'architect',
 			'sme',
+			'researcher',
 			'docs',
 			'docs_design',
 			'designer',
@@ -586,7 +603,7 @@ export const TOOL_METADATA = {
 	apply_patch: {
 		description:
 			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation',
-		agents: ['coder'],
+		agents: ['coder', 'test_engineer'],
 	},
 	external_skill_discover: {
 		description:

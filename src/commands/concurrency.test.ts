@@ -308,26 +308,26 @@ describe('handleConcurrencyCommand', () => {
 			expect(getSession().maxConcurrencyOverride).toBe(1);
 		});
 
-		it('set medium sets to 3', async () => {
+		it('set medium sets to 8', async () => {
 			const result = await handleConcurrencyCommand(
 				testDirectory,
 				['set', 'medium'],
 				testSessionId,
 			);
 
-			expect(result).toBe('Concurrency override set to 3 (medium)');
-			expect(getSession().maxConcurrencyOverride).toBe(3);
+			expect(result).toBe('Concurrency override set to 8 (medium)');
+			expect(getSession().maxConcurrencyOverride).toBe(8);
 		});
 
-		it('set max sets to 8', async () => {
+		it('set max sets to 16', async () => {
 			const result = await handleConcurrencyCommand(
 				testDirectory,
 				['set', 'max'],
 				testSessionId,
 			);
 
-			expect(result).toBe('Concurrency override set to 8 (max)');
-			expect(getSession().maxConcurrencyOverride).toBe(8);
+			expect(result).toBe('Concurrency override set to 16 (max)');
+			expect(getSession().maxConcurrencyOverride).toBe(16);
 		});
 
 		it('presets are case-insensitive', async () => {
@@ -337,8 +337,8 @@ describe('handleConcurrencyCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Concurrency override set to 3 (medium)');
-			expect(getSession().maxConcurrencyOverride).toBe(3);
+			expect(result).toBe('Concurrency override set to 8 (medium)');
+			expect(getSession().maxConcurrencyOverride).toBe(8);
 		});
 	});
 

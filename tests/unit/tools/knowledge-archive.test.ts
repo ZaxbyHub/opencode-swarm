@@ -9,9 +9,13 @@ import {
 import {
 	appendKnowledge,
 	readKnowledge,
+	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import type {
+	HiveKnowledgeEntry,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
 import { knowledge_archive } from '../../../src/tools/knowledge-archive';
 
 function makeEntry(id: string): SwarmKnowledgeEntry {
@@ -37,6 +41,15 @@ function makeEntry(id: string): SwarmKnowledgeEntry {
 	};
 }
 
+function makeHiveEntry(id: string): HiveKnowledgeEntry {
+	return {
+		...makeEntry(id),
+		tier: 'hive',
+		source_project: 'other-project',
+		encounter_score: 1,
+	};
+}
+
 const ctx = (directory: string): any => ({
 	directory,
 	sessionID: 'sess-1',
@@ -46,16 +59,26 @@ const ctx = (directory: string): any => ({
 describe('knowledge_archive', () => {
 	let dir: string;
 	let kp: string;
+	let previousXdgDataHome: string | undefined;
+	let previousLocalAppData: string | undefined;
 	beforeEach(async () => {
+		previousXdgDataHome = process.env.XDG_DATA_HOME;
+		previousLocalAppData = process.env.LOCALAPPDATA;
 		dir = join(
 			tmpdir(),
 			`swarm-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(dir, { recursive: true });
+		process.env.XDG_DATA_HOME = join(dir, 'xdg-data');
+		process.env.LOCALAPPDATA = join(dir, 'localappdata');
 		kp = resolveSwarmKnowledgePath(dir);
 		await appendKnowledge(kp, makeEntry('k1'));
 	});
 	afterEach(() => {
+		if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = previousXdgDataHome;
+		if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = previousLocalAppData;
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -67,6 +90,7 @@ describe('knowledge_archive', () => {
 		const parsed = JSON.parse(raw);
 		expect(parsed.success).toBe(true);
 		expect(parsed.mode).toBe('archive');
+		expect(parsed.tier).toBe('swarm');
 		expect(parsed.previous_status).toBe('candidate');
 		expect(parsed.status).toBe('archived');
 
@@ -79,6 +103,7 @@ describe('knowledge_archive', () => {
 		);
 		expect(tomb).toHaveLength(1);
 		expect(tomb[0].entry_id).toBe('k1');
+		expect(tomb[0].tier).toBe('swarm');
 		expect(tomb[0].actor).toBe('architect');
 		expect(tomb[0].reason).toBe('stale');
 		expect(tomb[0].previous_status).toBe('candidate');
@@ -98,6 +123,31 @@ describe('knowledge_archive', () => {
 			(e): e is ArchivedEvent => e.type === 'archived',
 		);
 		expect(tomb[0].evidence).toBe('flaky');
+	});
+
+	it('archives hive entries when tier=hive', async () => {
+		const hivePath = resolveHiveKnowledgePath();
+		await appendKnowledge(hivePath, makeHiveEntry('h1'));
+
+		const raw = await knowledge_archive.execute(
+			{ id: 'h1', tier: 'hive', reason: 'shared lesson stale' },
+			ctx(dir),
+		);
+		const parsed = JSON.parse(raw);
+		expect(parsed.success).toBe(true);
+		expect(parsed.tier).toBe('hive');
+		expect(parsed.status).toBe('archived');
+
+		const entries = await readKnowledge<HiveKnowledgeEntry>(hivePath);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].status).toBe('archived');
+
+		const tomb = (await readKnowledgeEvents(dir)).filter(
+			(e): e is ArchivedEvent => e.type === 'archived',
+		);
+		expect(tomb).toHaveLength(1);
+		expect(tomb[0].entry_id).toBe('h1');
+		expect(tomb[0].tier).toBe('hive');
 	});
 
 	it('refuses to purge without the admin flag', async () => {

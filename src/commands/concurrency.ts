@@ -6,8 +6,8 @@ import { getAgentSession } from '../state';
  */
 const PRESETS: Record<string, number> = {
 	min: 1,
-	medium: 3,
-	max: 8,
+	medium: 8,
+	max: 16,
 };
 
 const MIN_CONCURRENCY = 1;
@@ -144,8 +144,8 @@ function buildStatusMessage(
 	const hasPlan = plan !== null && plan !== undefined;
 
 	const planBaseline = hasPlan
-		? (plan!.execution_profile?.max_concurrent_tasks ?? 1)
-		: 1;
+		? (plan!.execution_profile?.max_concurrent_tasks ?? 10)
+		: 10;
 	const parallelizationEnabled = hasPlan
 		? (plan!.execution_profile?.parallelization_enabled ?? false)
 		: false;

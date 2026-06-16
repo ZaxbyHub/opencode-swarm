@@ -29,10 +29,26 @@ describe('full_auto schema — legacy v1 shape', () => {
 		expect(r.success).toBe(true);
 		if (r.success) {
 			expect(r.data.full_auto?.enabled).toBe(false);
+			expect(r.data.full_auto?.locked).toBe(false);
 			expect(r.data.full_auto?.mode).toBe('supervised');
 			expect(r.data.full_auto?.fail_closed).toBe(true);
 			expect(r.data.full_auto?.denials?.max_consecutive).toBe(3);
 			expect(r.data.full_auto?.denials?.max_total).toBe(20);
+		}
+	});
+
+	test('locked defaults to false and parses when set true', () => {
+		const omitted = PluginConfigSchema.safeParse({ full_auto: {} });
+		expect(omitted.success).toBe(true);
+		if (omitted.success) {
+			expect(omitted.data.full_auto?.locked).toBe(false);
+		}
+		const locked = PluginConfigSchema.safeParse({
+			full_auto: { locked: true },
+		});
+		expect(locked.success).toBe(true);
+		if (locked.success) {
+			expect(locked.data.full_auto?.locked).toBe(true);
 		}
 	});
 });

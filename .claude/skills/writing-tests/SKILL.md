@@ -183,6 +183,24 @@ test('mainFn uses mocked helper', () => {
 - Fast (no module re-parsing)
 - Works in batch test runs without isolation
 
+**Critical limitation — reference-captured functions:** `_internals` interception requires the source code to read `_internals.fn` at the call site. When a function is instead passed as a direct argument or captured in a closure at module definition time, replacing `_internals.fn` has no effect — the mock is silently ignored and the real function runs.
+
+```typescript
+// Source: readKnowledge is captured at definition time, NOT via _internals
+export async function transactKnowledge(filePath: string, mutate: Fn) {
+  return transactFile(filePath, readKnowledge, ...);  // direct ref, captured at definition time
+}
+export const _internals = { readKnowledge };  // mutating this does NOT affect the closure above
+
+// Test — mock is silently ignored; real readKnowledge still runs
+const orig = _internals.readKnowledge;
+_internals.readKnowledge = mock(() => []);  // only mutates the object property
+await transactKnowledge(path, mutate);      // still calls the real readKnowledge
+_internals.readKnowledge = orig;
+```
+
+When `_internals` interception cannot work, verify **observable outcomes** instead: run concurrent callers and assert on final persisted state. See `tests/unit/hooks/knowledge-application.test.ts` ("two concurrent bumpCountersBatch calls") for the pattern.
+
 ### Tier 2: mock.module (Cross-Module)
 
 When mocking dependencies from other modules (especially Node built-ins), use `mock.module` with proper cleanup:
@@ -206,7 +224,7 @@ afterEach(() => mock.restore());
 ### Choosing Between Tiers
 
 | Scenario | Pattern | Example |
-|----------|---------|---------|
+|----------|---------|--------|
 | Mocking a function in the same module you're testing | `_internals` seam | `src/state.ts` `_internals.loadSnapshot` |
 | Mocking a Node built-in (fs, child_process, etc.) | `mock.module` + spread real | `mock.module('node:fs/promises', () => ({ ...realFs, readFile: mockFn }))` |
 | Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
@@ -384,6 +402,10 @@ When CI reports a `unit (ubuntu|macos|windows)` failure:
 - Test real behavior: call the actual function with real inputs, assert on real outputs.
 - Test error paths: what happens with `null`, `undefined`, empty string, oversized input?
 - Use temp directories (`fs.mkdtemp`) for file I/O tests. Clean up in `afterEach`.
+- Recursive temp cleanup must be bounded by a helper that verifies the resolved
+  cleanup target is a child of `os.tmpdir()` before deleting. Prefer
+  `tests/helpers/safe-test-dir.ts`; it rejects empty strings, `os.tmpdir()`
+  itself, and paths outside the temp root.
 - Assert on specific values, not just truthiness: `expect(result.status).toBe('pending')` not `expect(result).toBeTruthy()`.
 
 ### DO NOT
@@ -413,6 +435,84 @@ if (isWindows) test.skip('reason', () => {});
 ### Process spawning
 - Use `.cmd` extension on Windows for npm/bun binaries: `process.platform === 'win32' ? 'bun.cmd' : 'bun'`.
 - Use array-form `spawn`/`spawnSync`, never shell string commands.
+
+### macOS rename-visibility race (write-then-read atomic files)
+
+On macOS/APFS, `fs.renameSync` can complete before the data is visible to
+subsequent reads. Tests that write-then-read atomic files may fail on
+`macos-latest` but pass on `ubuntu-latest` and `windows-latest`.
+
+**Symptom:** Test fails only on macOS with `result === null` or
+`result === undefined` immediately after a write that should have made the
+file visible.
+
+**Root cause:** macOS filesystem updates the directory entry asynchronously
+after `fs.renameSync`. Immediately-following reads may see ENOENT or stale
+data.
+
+**Fix — three layers (use all three for production code):**
+
+**Layer 1: Use `bunWrite` for atomic writes.** The `bunWrite` function in
+`src/utils/bun-compat.ts` already handles temp file creation, fsync,
+atomic rename, and parent directory fsync correctly across platforms.
+Do NOT reimplement this pattern.
+
+**Layer 2: Add ENOENT retry in the read path.** Wrap `validateSwarmPath` and
+the file read in a try/catch with a bounded retry loop for ENOENT:
+
+```typescript
+// CORRECT — retry on ENOENT only (not other errors), bounded
+const maxAttempts = 5;
+const retryDelayMs = 10;
+for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  try {
+    const resolvedPath = _internals.validateSwarmPath(directory, filename);
+    const file = bunFile(resolvedPath);
+    const content = await file.text();
+    return content;
+  } catch (err) {
+    const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+    if (!isNotFound || attempt === maxAttempts - 1) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+}
+return null;
+```
+
+CRITICAL: `validateSwarmPath` must be INSIDE the try block so that throws
+(for path traversal attempts) are caught and return null. Security tests
+expect `readSwarmFileAsync` to return null for traversal attempts.
+
+**Layer 3: Don't add arbitrary delays.** `setTimeout` should be bounded
+(5-10ms, max 5 attempts). Do not add `await new Promise(r => setTimeout(r, 100))`
+"just in case" — that's a code smell. The retry loop handles it.
+
+### Node FileHandle API
+
+Node's `FileHandle` uses `.sync()`, NOT `.fsync()`:
+
+```typescript
+// CORRECT
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.sync();
+} finally {
+  await fd.close();
+}
+
+// WRONG — TypeScript error: Property 'fsync' does not exist on type 'FileHandle'
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.fsync();
+} finally {
+  await fd.close();
+}
+```
+
+See [`.claude/skills/engineering-conventions/SKILL.md`](../engineering-conventions/SKILL.md)
+for the evidence file flow that triggers this retry pattern in QA gates.
 
 ## Running Tests
 

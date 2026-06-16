@@ -41,6 +41,9 @@ LEGACY_EXEMPTS=(
   "src/tools/save-plan.ts"
   "src/tools/sbom-generate.ts"
   "src/hooks/guardrails.ts"
+  "src/hooks/guardrails/file-authority.ts"
+  "src/hooks/guardrails/helpers.ts"
+  "src/hooks/guardrails/index.ts"
   "src/hooks/scope-guard.ts"
 )
 while IFS= read -r file; do

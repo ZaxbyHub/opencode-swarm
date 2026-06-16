@@ -15,6 +15,7 @@ import {
 	runMicroReflection,
 } from '../../src/hooks/micro-reflector.js';
 import type { TrajectoryEntry } from '../../src/hooks/trajectory-logger.js';
+import { resolveQuotaPath } from '../../src/services/skill-improver-quota.js';
 
 const VALID_CANDIDATES = JSON.stringify([
 	{
@@ -157,7 +158,7 @@ describe('runMicroReflection (e2e)', () => {
 
 	it('respects the quota: no LLM call when the budget is exhausted', async () => {
 		fs.writeFileSync(
-			path.join(dir, '.swarm', 'skill-improver-quota.json'),
+			resolveQuotaPath(dir, 'knowledge-enrichment'),
 			JSON.stringify({
 				date: new Date().toISOString().slice(0, 10),
 				calls_used: 1,

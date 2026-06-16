@@ -1,6 +1,6 @@
 ---
 name: ci-fix-monitor
-description: Codex adapter for monitoring and fixing CI failures on opencode-swarm PRs. Use when diagnosing failed checks, fixing `package-check` (npm tarball) failures, resolving quality/lint/format errors, or watching a PR until all checks are green.
+description: Codex adapter for monitoring and fixing CI failures on opencode-swarm PRs. Use when diagnosing failed checks, fixing `package-check` (npm tarball) failures, resolving quality/lint/format errors, fixing macOS cross-platform file I/O failures, or watching a PR until all checks are green.
 ---
 
 # CI Fix Monitor

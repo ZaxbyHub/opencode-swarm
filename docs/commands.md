@@ -156,12 +156,12 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 
 **Workflow:**
 1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
-2. **Parallel Explorer Lanes** — 6 lanes: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+2. **Parallel Explorer Lanes** — 6 lanes dispatched through the deterministic `dispatch_lanes` join barrier: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
 3. **Independent Reviewer Confirmation** — Validate each finding with file:line evidence
 4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** — Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically — you no longer need to ask for these by hand.
+The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes` for read-only lane fan-out so local models do not need to emit background Agent calls by hand.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -418,8 +418,16 @@ Show the current resolved plugin configuration (merged global + project + CLI ov
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
-- `--fix`: auto-repair issues where safe. Creates encrypted backup first.
+The doctor validates all 62+ top-level schema keys with type checks (string, boolean, number, object). Unknown keys produce warnings with Levenshtein-based typo suggestions. Swarms configuration is hardened: empty `swarms` emits an INFO finding, and path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) emit HIGH/ERROR findings. Deprecated config fields (`skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models`) emit INFO findings with migration guidance.
+
+- `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
+
+**Last-run summary:** When run without `--fix`, the command displays a summary of the previous run (if available) showing the timestamp, total findings count, and auto-fixable count before the current findings.
+
+**Startup auto-fix advisory:** On plugin initialization, if `automation.capabilities.config_doctor_on_startup` is enabled, the config doctor runs automatically. If auto-fixable issues are found and `config_doctor_autofix` capability is not enabled, a chat-visible advisory is emitted suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown.
+
+> **Agent vs. human context:** The `--fix` flag is accepted for human-initiated chat commands. For agent-initiated commands, the `tool-policy` layer blocks `--fix` — auto-fixing config from agent context is a privileged operation requiring explicit user initiation.
 
 ### `/swarm doctor tools`
 
@@ -540,6 +548,18 @@ Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson 
 ### `/swarm curate`
 
 Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse.
+
+### `/swarm consolidate [--force] [--respect-interval] [--evaluate]`
+
+Run quota-bounded skill-improver consolidation. This drains the same bounded
+skill/knowledge maintenance passes used by scheduled consolidation, writes a
+skill-improver proposal, and may draft generated skill proposals when
+`skill_improver.write_mode` is `draft_skills`. It never auto-activates skills.
+
+By default the command forces a run while still respecting
+`skill_improver.enabled` and daily quota. Use `--respect-interval` to obey
+`skill_improver.consolidation_interval_hours`; use `--evaluate` to validate any
+drafted skills against `.swarm/skills/evals/<slug>/*.json` before writing them.
 
 ### `/swarm concurrency <set|status|reset>`
 

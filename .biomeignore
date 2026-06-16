@@ -1,0 +1,8 @@
+dist/
+dist-cli/
+node_modules/
+.swarm/
+.tmp/
+build/
+*.min.js
+*.bundle.js

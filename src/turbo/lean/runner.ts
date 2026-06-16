@@ -47,7 +47,10 @@ import {
  * requiring the full SDK type.
  */
 interface SessionClient {
-	create(options: { query: { directory: string } }): Promise<{
+	create(options: {
+		body?: { parentID?: string; title?: string };
+		query: { directory: string };
+	}): Promise<{
 		data: { id: string } | null;
 		error: unknown;
 	}>;
@@ -65,7 +68,7 @@ interface SessionClient {
 	delete(options: { path: { id: string } }): Promise<void>;
 }
 
-// ─── Result Types ─────────────────────────────────────────────────────────────
+// ─── Result Types ───────────────────────────────────────────────────────────────────
 
 /**
  * Result of a single lane dispatch (session creation + prompt).
@@ -137,7 +140,7 @@ export interface LeanTurboPhaseResult {
  */
 type LaneLockMap = Record<string, string[]>;
 
-// ─── Transient Error Detection ─────────────────────────────────────────────
+// ─── Transient Error Detection ───────────────────────────────────────────────
 
 /**
  * Determines whether a worktree provisioning error is transient and worth retrying.
@@ -192,7 +195,7 @@ function isTransientProvisionError(errorMsg: string): boolean {
 	return false;
 }
 
-// ─── Runner Class ────────────────────────────────────────────────────────────
+// ─── Runner Class ───────────────────────────────────────────────────────────────
 
 /**
  * Orchestrates Lean Turbo lane execution.
@@ -337,7 +340,7 @@ export class LeanTurboRunner {
 		this._availableAgents = this._resolveCoderAgents(names);
 	}
 
-	// ─── Public Methods ─────────────────────────────────────────────────────────
+	// ─── Public Methods ─────────────────────────────────────────────────────────────
 
 	/**
 	 * Run a single phase: plan lanes, acquire locks, dispatch coders.
@@ -597,6 +600,14 @@ export class LeanTurboRunner {
 			const effectiveDirectory = worktreeDirectory ?? this._directory;
 			// Create ephemeral session
 			const createResult = await session.create({
+				...(this._sessionID
+					? {
+							body: {
+								parentID: this._sessionID,
+								title: `lean_turbo_lane_${lane.laneId} background`,
+							},
+						}
+					: {}),
 				query: { directory: effectiveDirectory },
 			});
 
@@ -1461,7 +1472,7 @@ export class LeanTurboRunner {
 	}
 }
 
-// ─── Exported Types ────────────────────────────────────────────────────────────
+// ─── Exported Types ───────────────────────────────────────────────────────────────
 
 /**
  * Current status of a lane (returned by waitForLanes).

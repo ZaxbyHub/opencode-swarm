@@ -65,6 +65,7 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
 	ensureAgentSession,
@@ -533,18 +534,18 @@ export async function executePhaseComplete(
 				warnings,
 			});
 		}
-		if (requestedAccept.length > 0 && justification.length === 0) {
+		if (requestedAccept.length > 0 && justification.length < 10) {
 			return blockedResult(phase, {
 				reason: 'override_requires_justification',
 				message:
-					'accept_violations requires accept_violations_justification (a written reason).',
+					'accept_violations requires accept_violations_justification (minimum 10 characters of substantive reasoning).',
 				agentsDispatched,
 				agentsMissing: [],
 				warnings,
 			});
 		}
 		const effectiveAccept =
-			requestedAccept.length > 0 && isArchitect && justification.length > 0
+			requestedAccept.length > 0 && isArchitect && justification.length >= 10
 				? requestedAccept
 				: [];
 		const directiveGate = await evaluatePhaseCriticalDirectives({
@@ -701,7 +702,7 @@ export async function executePhaseComplete(
 	// check, so it is enforced even under lean turbo.
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
 		);
 	} else {
 		// Gate 1: Completion Verify
@@ -763,21 +764,20 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
-	if (!hasActiveTurboMode(sessionID)) {
-		const gateResult = await runFinalCouncilGate(gateCtx);
-		if (gateResult.blocked) {
-			return blockedResult(phase, gateResult);
-		}
-		warnings.push(...gateResult.warnings);
+	const gateResult = await runFinalCouncilGate(gateCtx);
+	if (gateResult.blocked) {
+		return blockedResult(phase, gateResult);
 	}
+	warnings.push(...gateResult.warnings);
 
 	// ── Post-gate logic ────────────────────────────────────────────────────────
 
 	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
 	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
 	// the autonomous-oversight approval — fail-closed by default. The gate is
-	// a no-op when full_auto.enabled is false or when no durable Full-Auto run
-	// is active for this session. Runs after Gate 6 (Final Council) so that
+	// a no-op when no durable Full-Auto run is active for this session
+	// (first-class toggle: config.full_auto.enabled no longer gates it).
+	// Runs after Gate 6 (Final Council) so that
 	// last-phase completions are gated by both council approval (when
 	// final_council is enabled) AND Full-Auto v2 approval (when active).
 	{
@@ -860,10 +860,7 @@ export async function executePhaseComplete(
 
 			// Change 4 (Task 4.2): provide the curator LLM delegate so plain-prose
 			// lessons are enriched with v3 actionability fields before the Layer-5
-			// gate; quota knobs come from the shared skill_improver budget.
-			const skillImproverCfg = SkillImproverConfigSchema.parse(
-				config.skill_improver ?? {},
-			);
+			// gate; quota knobs come from the dedicated knowledge.enrichment budget.
 			const curationResult = await curateAndStoreSwarm(
 				retroEntry.lessons_learned,
 				projectName,
@@ -873,8 +870,8 @@ export async function executePhaseComplete(
 				{
 					llmDelegate: createCuratorLLMDelegate(dir, 'phase', sessionID),
 					enrichmentQuota: {
-						maxCalls: skillImproverCfg.max_calls_per_day,
-						window: skillImproverCfg.quota_window,
+						maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+						window: knowledgeConfig.enrichment.quota_window,
 					},
 				},
 			);
@@ -883,7 +880,7 @@ export async function executePhaseComplete(
 				if (sessionState) {
 					sessionState.pendingAdvisoryMessages ??= [];
 					sessionState.pendingAdvisoryMessages.push(
-						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
+						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
 			}
@@ -1117,6 +1114,58 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Knowledge verdict feedback: bridge applied/violated/ignored events → confidence.
+	try {
+		const verdictMarkerPath = validateSwarmPath(
+			dir,
+			'verdict-feedback-last-processed.json',
+		);
+		let verdictSinceTimestamp: string | undefined;
+		try {
+			const markerData = JSON.parse(
+				fs.readFileSync(verdictMarkerPath, 'utf-8'),
+			);
+			verdictSinceTimestamp = markerData.lastProcessedTimestamp;
+		} catch {
+			// marker doesn't exist yet — process all entries
+		}
+
+		const verdictMarkerTimestamp = new Date().toISOString();
+		const { applyKnowledgeVerdictFeedback } = await import(
+			'../hooks/knowledge-events.js'
+		);
+		const verdictResult = await applyKnowledgeVerdictFeedback(dir, {
+			sinceTimestamp: verdictSinceTimestamp,
+		});
+
+		try {
+			fs.writeFileSync(
+				verdictMarkerPath,
+				JSON.stringify({
+					lastProcessedTimestamp: verdictMarkerTimestamp,
+				}),
+				'utf-8',
+			);
+		} catch {
+			// best-effort marker write
+		}
+
+		if (verdictResult.bumps > 0) {
+			const sessionState = swarmState.agentSessions.get(sessionID);
+			if (sessionState) {
+				sessionState.pendingAdvisoryMessages ??= [];
+				sessionState.pendingAdvisoryMessages.push(
+					`[FEEDBACK] Knowledge verdict feedback: ${verdictResult.processed} entries processed, ${verdictResult.bumps} confidence updates applied.`,
+				);
+			}
+		}
+	} catch (verdictError) {
+		safeWarn(
+			'[phase_complete] Knowledge verdict feedback error (non-blocking):',
+			verdictError,
+		);
+	}
+
 	// Build the effective required-agents list.
 	// If the phase defines its own required_agents, use those instead of the global config.
 	// This allows non-code phases (acceptance, docs) to skip coder/reviewer/test_engineer requirements.
@@ -1336,6 +1385,50 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
+		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
+		// It may call an LLM and write proposal files, so only launch it after the
+		// phase gates have accepted completion.
+		try {
+			const skillConfig = SkillImproverConfigSchema.parse(
+				config.skill_improver ?? {},
+			);
+			if (skillConfig.enabled && skillConfig.trigger === 'scheduled') {
+				runSkillConsolidationFireAndForget(
+					{
+						directory: dir,
+						config: skillConfig,
+						source: 'phase_complete',
+						sessionId: sessionID,
+						enrichmentQuota: {
+							maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+							window: knowledgeConfig.enrichment.quota_window,
+						},
+						evaluateDrafts: true,
+					},
+					(consolidationResult) => {
+						if (!consolidationResult.started) return;
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (!sessionState) return;
+						sessionState.pendingAdvisoryMessages ??= [];
+						sessionState.pendingAdvisoryMessages.push(
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						);
+					},
+					(err) => {
+						safeWarn(
+							'[phase_complete] Scheduled skill consolidation error (non-blocking):',
+							err,
+						);
+					},
+				);
+			}
+		} catch (skillConsolidationError) {
+			safeWarn(
+				'[phase_complete] Scheduled skill consolidation setup error (non-blocking):',
+				skillConsolidationError,
+			);
+		}
+
 		// Reset phase-tracking state for all contributor sessions
 		for (const contributorSessionId of crossSessionResult.contributorSessionIds) {
 			const contributorSession =
@@ -1537,6 +1630,38 @@ export async function executePhaseComplete(
 
 	// Write root-level checkpoint artifact (non-blocking)
 	await writeCheckpoint(dir).catch(() => {});
+
+	// Auto-fire post-mortem when all plan phases are now complete (WP7, #1234).
+	// Fail-open: post-mortem failures never affect phase_complete result.
+	try {
+		const curatorCfg = CuratorConfigSchema.parse(config.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const finalPlan = await loadPlan(dir);
+			if (finalPlan?.phases?.length) {
+				const allComplete = finalPlan.phases.every(
+					(p: { status?: string }) => p.status === 'complete',
+				);
+				if (allComplete) {
+					const { runCuratorPostMortem } = await import(
+						'../hooks/curator-postmortem.js'
+					);
+					const pmResult = await runCuratorPostMortem(dir, {
+						llmDelegate: createCuratorLLMDelegate(dir, 'postmortem', sessionID),
+					});
+					if (pmResult.success && pmResult.summary) {
+						warnings.push(`[POST-MORTEM] ${pmResult.summary}`);
+					}
+					if (pmResult.warnings.length > 0) {
+						for (const w of pmResult.warnings) {
+							warnings.push(`[POST-MORTEM] ${w}`);
+						}
+					}
+				}
+			}
+		}
+	} catch {
+		// fail-open: post-mortem never blocks phase completion
+	}
 
 	const outputData = {
 		...result,

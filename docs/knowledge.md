@@ -77,6 +77,15 @@ Entries can be created four ways:
 3. **Curator recommends** — LLM-driven promotions from the curator agent.
 4. **Migration: `/swarm knowledge migrate`** — one-time import from legacy `.swarm/context.md`.
 
+### Reinforcement
+
+Near-duplicate lessons are not discarded when they match an active swarm entry.
+The curator and `knowledge_add` reinforce the existing entry by appending one
+`confirmed_by` record for the current phase when that phase is not already
+present. Same-phase repeats are idempotent no-ops. A real new phase
+confirmation refreshes `updated_at`, resets `phases_alive` to `0`, and
+recomputes confidence from the distinct phase-confirmation count.
+
 ### Promotion (swarm → hive)
 
 Three routes in `checkHivePromotions()`:
@@ -97,6 +106,11 @@ Quarantined entries are hidden from queries but preserved:
 /swarm knowledge quarantine lesson-abc123 "false positive"
 /swarm knowledge restore lesson-abc123
 ```
+
+Quarantined, archived, and `quarantined_unactionable` entries are inactive for
+query injection, hive promotion, and hive encounter-score reinforcement. New
+near-duplicate evidence reinforces only active entries; inactive duplicates stay
+archived/quarantined and a fresh candidate can be created instead.
 
 ### Expiration (N-phase TTL decay)
 
@@ -158,6 +172,8 @@ All keys live under `knowledge.*` in your config (see `src/config/schema.ts:804`
 | `todo_max_phases` | int | 3 | TODO-category TTL |
 | `same_project_weight` | float | 1.0 | Encounter score (source project) |
 | `cross_project_weight` | float | 0.5 | Encounter score (other projects) |
+| `enrichment.max_calls_per_day` | int | 30 | Dedicated daily quota for curator/close-time/unactionable-hardening LLM enrichment of plain prose into actionable directives |
+| `enrichment.quota_window` | `"utc"`/`"local"` | `"utc"` | Calendar window for the enrichment quota |
 
 ---
 
@@ -388,11 +404,14 @@ that subagents load via the existing `SKILLS:` delegation field.
 | `skill_list` | List drafts and active generated skills. |
 | `skill_apply` | Activate a draft into `.opencode/skills/generated/<slug>/SKILL.md`. |
 | `skill_inspect` | Print a skill body with source knowledge IDs. |
+| `skill_regenerate` | Rebuild an active generated skill from current source knowledge. |
 
 ### Layout
 
 ```
 .swarm/skills/proposals/<slug>.md           # drafts (curator + skill_improver)
+.swarm/skills/evals/<slug>/*.json           # optional validation fixtures
+.swarm/skills/rejected-edits.jsonl          # FIFO buffer for rejected candidates
 .opencode/skills/generated/<slug>/SKILL.md  # active generated skills
 ```
 
@@ -405,6 +424,24 @@ Generated files include the marker
 `skill_apply` will refuse to overwrite an active SKILL.md that lacks this
 marker (i.e. one a human authored or modified) unless `force=true` is passed.
 
+Generated frontmatter includes `triggers:` when source knowledge provided
+trigger phrases. The propagation scorer treats those phrases as bounded literal
+hints, so a task such as "fix the biome lint config" can surface a skill whose
+frontmatter includes `triggers: ["biome", "lint config"]`.
+
+### Validation fixtures
+
+Optional eval fixtures under `.swarm/skills/evals/<slug>/*.json` gate generated
+skill changes when callers pass `evaluate=true`. Each fixture can be a single
+case, an array, or `{ "cases": [...] }`; cases support
+`required_phrases` and `forbidden_phrases`.
+
+When no eval set exists, the gate fails open and reports `unevaluated`. When an
+incumbent active skill exists, the candidate must strictly improve the incumbent
+before `skill_apply`, active `skill_generate`, `skill_regenerate`, or automatic
+skill revision writes anything. Rejected candidates are recorded in the bounded
+`.swarm/skills/rejected-edits.jsonl` buffer.
+
 ### Curator integration
 
 When `curator.skill_generation_enabled` is true (default), the curator's
@@ -413,6 +450,22 @@ JSON blocks that are parsed strictly. Malformed JSON is silently dropped.
 High-confidence candidates (>= `curator.min_skill_confidence`) trigger
 `skill_generate` in **draft** mode; activation always requires a human or
 architect to call `skill_apply`.
+
+### Maturity gate
+
+The compiler no longer requires only repeated high-confidence confirmations.
+Selection uses the effective event-sourced outcome rollup:
+
+- Repeated confirmations still qualify candidates.
+- Strong positive outcomes (`applied_explicit`, `succeeded_after_shown`, or
+  repeated acknowledgments) can qualify a well-evidenced singleton even when
+  confirmation count is low.
+- Negative outcome signal blocks compilation even when confidence is high.
+- The default confidence floor is `0.70`; high/critical priority and strong
+  outcome records can draft a singleton proposal, but activation remains manual.
+
+See [Generated Skills](skills.md) for the generated-skill lifecycle and file
+layout.
 
 ---
 
@@ -432,6 +485,8 @@ directives, Concrete recommendations, Optional cluster suggestions, Risks.
   "enabled": false,
   "max_calls_per_day": 10,
   "trigger": "manual",
+  "consolidation_interval_hours": 24,
+  "consolidation_max_calls_per_run": 1,
   "targets": ["skills", "spec", "architect_prompt", "knowledge"],
   "write_mode": "proposal",       // 'proposal' (no source mutation) | 'draft_skills'
   "require_user_approval": true,
@@ -462,7 +517,7 @@ no delegate is available.
 
 ### Quota policy
 
-Quota state lives at `.swarm/skill-improver-quota.json`:
+Skill-improver proposal quota state lives at `.swarm/skill-improver-quota.json`:
 
 ```json
 {
@@ -476,6 +531,9 @@ Quota state lives at `.swarm/skill-improver-quota.json`:
 
 - Quota reservation runs under a `proper-lockfile` so parallel
   `skill_improve` invocations cannot lost-update each other.
+- Knowledge enrichment uses a separate `.swarm/knowledge-enrichment-quota.json`
+  file, governed by `knowledge.enrichment.*`, so curator/close-time/hardening
+  LLM attempts do not consume the skill-improver proposal budget.
 - **No-client + fallback-disabled** → refuse pre-flight; quota untouched.
 - **Inventory failure (pre-network)** → release the reservation.
 - **LLM call started** → slot stays consumed even on failure (anti-flake
@@ -497,6 +555,13 @@ Quota state lives at `.swarm/skill-improver-quota.json`:
   `.swarm/skill-improver/proposals/<timestamp>.md` only. With
   `write_mode: "draft_skills"` it additionally drafts SKILL.md proposals via
   the `skill_generate` pipeline (still draft mode — never auto-activated).
+
+- Set `trigger: "scheduled"` to allow opportunistic consolidation on startup
+  and phase completion. The scheduler is cadence-gated by
+  `consolidation_interval_hours`, reserves at most
+  `consolidation_max_calls_per_run` calls per run, validates drafted skills
+  against matching eval fixtures, and never auto-activates proposals. Use
+  `/swarm consolidate` for an explicit manual pass.
 
 > **CI verification limitation.** The real-LLM dispatch path requires an
 > OpenCode runtime to wire `swarmState.opencodeClient`. Unit and integration

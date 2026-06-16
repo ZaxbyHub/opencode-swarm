@@ -100,6 +100,16 @@ describe('appendSkillUsageEntry', () => {
 		expect(parsed.reviewerNotes).toBeUndefined();
 	});
 
+	test('normalizes legacy violation verdicts on append', () => {
+		appendSkillUsageEntry(
+			tempDir,
+			makeEntry({ complianceVerdict: 'violation' }),
+		);
+
+		const parsed = JSON.parse(readRawLog(tempDir).trim()) as SkillUsageEntry;
+		expect(parsed.complianceVerdict).toBe('violated');
+	});
+
 	test('auto-generates UUID id field', () => {
 		const entry = makeEntry();
 		const uuidRegex =

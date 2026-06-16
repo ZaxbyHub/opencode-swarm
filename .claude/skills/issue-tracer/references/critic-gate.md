@@ -187,3 +187,63 @@ If no independent subagent is available, write `08b-implementation-review.md` us
 ### Revision Rules
 
 Resolve every `NEEDS_REVISION`/`BLOCKED` item by changing code or capturing real evidence, then re-review. Do not downgrade a blocker by rewording it. Record the response to every reviewer item in `08b-implementation-review.md`.
+
+## Final Critic (Phase 4.6)
+
+Use this section after the implementation reviewer has approved the current diff. This critic challenges the entire completion claim, including code, tests, docs, release notes, package metadata, validation evidence, and the reviewer artifact.
+
+### Preferred Invocation
+
+If subagent delegation is available, launch a separate critic with this prompt:
+
+```markdown
+You are the final critic for an issue-tracer implementation that already passed implementation review. Your job is to prove the completion claim is still wrong.
+
+Inputs:
+- the current full diff
+- 01-issue-summary.md through 08b-implementation-review.md
+- 08-test-results.md with captured command output
+- all changed files
+
+Check:
+- the reviewer approval is on the latest diff, not an earlier state
+- every NEEDS_REVISION/BLOCKED reviewer item was actually fixed and re-reviewed
+- docs, release notes, package metadata, CLI/API claims, and tests match the implemented behavior
+- validation claims are backed by commands and output
+- no work was silently deferred, scoped out, or left unwired
+- no edit occurred after the latest reviewer approval
+
+Return exactly:
+
+# Final Critic
+
+## Verdict
+APPROVE / NEEDS_REVISION / BLOCKED
+
+## Completion Integrity
+[Does the current diff satisfy the issue and no-gap checklist?]
+
+## Review Freshness
+[Did reviewer approval happen after the latest edit?]
+
+## Drift Check
+[Any mismatch among code, tests, docs, release notes, package metadata, and final summary?]
+
+## Evidence Integrity
+[Any unbacked validation or correctness claim?]
+
+## Required Revisions
+- [Required change or NONE]
+```
+
+### Fallback Invocation
+
+If no independent critic is available, write `09-final-critic.md` with the same headings in one clean adversarial pass, prefixed with "Fallback final critic: independent critic unavailable." Do not leave a stub artifact containing only the disclosure.
+
+### Verdict Semantics
+
+- `APPROVE`: no blocker remains; closure may proceed if no later edit happens.
+- `NEEDS_REVISION`: one or more code, docs, tests, or evidence changes are required before closure.
+- `BLOCKED`: the completion claim depends on missing context or an unresolved decision.
+
+Any edit after final critic approval invalidates the approval. Re-run implementation review when the edit changes the diff, then re-run the final critic.

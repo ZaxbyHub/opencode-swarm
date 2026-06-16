@@ -511,8 +511,15 @@ export async function dispatchCriticAndWriteEvent(
 
 	let criticResponse = '';
 	try {
-		// 1. Create ephemeral session scoped to project directory
+		// 1. Create ephemeral session scoped to project directory.
+		// Bind to the calling session as parent so OpenCode treats this as
+		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
+			...(sessionID
+				? {
+						body: { parentID: sessionID, title: 'full_auto_critic background' },
+					}
+				: {}),
 			query: { directory },
 		});
 		if (!createResult.data) {
@@ -647,14 +654,12 @@ export function createFullAutoInterceptHook(
 		escalation_mode: 'pause',
 	};
 
-	// If full-auto is disabled, return no-op handler
-	if (fullAutoConfig.enabled !== true) {
-		return {
-			messagesTransform: async (): Promise<void> => {
-				// No-op when full-auto is disabled
-			},
-		};
-	}
+	// First-class toggle: always armed. The per-invocation
+	// `hasActiveFullAuto(sessionID)` check below is the runtime gate. Note:
+	// for messages without a sessionID, hasActiveFullAuto falls back to
+	// "any session has full-auto on" (deliberate v1 single-session behavior,
+	// covered by the regression suite) — so this gate is the in-memory
+	// session flag, not the durable run state used by the v2 hooks.
 
 	const deadlockThreshold = fullAutoConfig.deadlock_threshold ?? 3;
 	const maxInteractions = fullAutoConfig.max_interactions_per_phase ?? 50;

@@ -260,19 +260,19 @@ export const UNSAFE_INSTRUCTION_PATTERNS: UnsafeInstructionPattern[] = [
 		pattern: /\bkill\s+-9\b/,
 		name: 'force_kill',
 		description: 'Force process termination',
-		severity: 'error',
+		severity: 'warning',
 	},
 	{
 		pattern: /\bpkill\b/,
 		name: 'process_group_kill',
 		description: 'Process group kill',
-		severity: 'error',
+		severity: 'warning',
 	},
 	{
 		pattern: /\bkillall\b/,
 		name: 'kill_all_processes',
 		description: 'Kill all processes by name',
-		severity: 'error',
+		severity: 'warning',
 	},
 
 	// Shell execution vectors
@@ -280,13 +280,13 @@ export const UNSAFE_INSTRUCTION_PATTERNS: UnsafeInstructionPattern[] = [
 		pattern: /`[^`]*`/,
 		name: 'backtick_execution',
 		description: 'Backtick shell execution',
-		severity: 'error',
+		severity: 'warning',
 	},
 	{
 		pattern: /\$\([^)]*\)/,
 		name: 'shell_substitution',
 		description: 'Shell command substitution',
-		severity: 'error',
+		severity: 'warning',
 	},
 
 	// Security bypass instructions
@@ -478,6 +478,13 @@ function scanInvisibleFormatChars(
 	return findings;
 }
 
+function stripMarkdownCodeForUnsafeScan(text: string): string {
+	return text
+		.replace(/```[\s\S]*?```/g, ' ')
+		.replace(/~~~[\s\S]*?~~~/g, ' ')
+		.replace(/`[^`\n]*`/g, ' ');
+}
+
 // ============================================================================
 // Gate 1 — scanPromptInjection (FR-004)
 // ============================================================================
@@ -599,9 +606,11 @@ export function scanUnsafeInstructions(
 
 	for (const { field, value } of fields) {
 		fieldsScanned.push(field);
+		const scanValue =
+			field === 'skill_body' ? stripMarkdownCodeForUnsafeScan(value) : value;
 
 		for (const entry of UNSAFE_INSTRUCTION_PATTERNS) {
-			const match = entry.pattern.exec(value);
+			const match = entry.pattern.exec(scanValue);
 			if (match !== null) {
 				findings.push({
 					pattern: entry.name,
@@ -863,4 +872,5 @@ export const _internals = {
 	getTimestamp: (): string => new Date().toISOString(),
 	computeSha256: (content: string): string =>
 		createHash('sha256').update(content).digest('hex'),
+	stripMarkdownCodeForUnsafeScan,
 };

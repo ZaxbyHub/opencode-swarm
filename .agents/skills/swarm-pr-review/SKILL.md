@@ -264,9 +264,9 @@ Tool candidate rules:
 
 ## Phase 3: Parallel Base Explorer Lanes
 
-Launch all base lanes in parallel in a single message with multiple Agent tool calls when the environment supports it (`run_in_background: true`). Use `Explore` subagents for exploration.
+Launch all base lanes with the `dispatch_lanes` tool in one call. Pass the six lane specs together, set `max_concurrent` to `6`, and treat the returned `lane_results` as the join barrier before synthesis. Use read-only explorer/reviewer-style agents; do not rely on model-emitted background Agent calls or native background flags for base-lane parallelism.
 
-If the Agent tool is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane.
+If `dispatch_lanes` is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record that deterministic dispatch was unavailable in the validation gate.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
@@ -304,7 +304,7 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING` as verdict la
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After base lanes start, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only. Do not launch irrelevant micro-lanes.
+After `dispatch_lanes` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes` again when more than one read-only micro-lane is needed. Do not launch irrelevant micro-lanes.
 
 Each micro-lane receives:
 
@@ -591,7 +591,7 @@ Council mode is opt-in only and adversarial.
 When triggered:
 
 1. Build the same context pack as default mode.
-2. Launch all council agents in a single message with multiple Agent tool calls when supported (`run_in_background: true`).
+2. Launch all council agents with one `dispatch_lanes` call when available; use the returned `lane_results` as the join barrier before reviewer classification.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
 5. Agents return evidence states only: `EVIDENCE_FOUND`, `SUSPICIOUS`, or `CLEAN`.
@@ -665,6 +665,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] obligation count: ___
 [VALIDATION] repo graph / impact cone source: ___
 [VALIDATION] deterministic signals ingested: ___
+[VALIDATION] deterministic lane dispatcher used: YES/NO — ___
 [VALIDATION] base explorer lanes dispatched: ___ / 6
 [VALIDATION] base explorer lanes returned: ___ / 6
 [VALIDATION] triggered micro-lanes: ___
