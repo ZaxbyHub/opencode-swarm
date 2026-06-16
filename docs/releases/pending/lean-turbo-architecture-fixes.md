@@ -11,11 +11,11 @@ Fixed 7 post-merge architectural concerns identified during Lean Turbo parallel 
 
 ### MEDIUM Priority (now fixed)
 4. **Lock Handling Defenses** — Implemented exponential backoff (50ms → 2000ms) with jitter for lock acquisition retry, following the pattern in `src/evidence/lock.ts`
-5. **TOCTOU in State Lock Timeout** — Fixed race where timeout could allow subsequent writes to overwrite a timed-out write by introducing an `aborted` flag that's checked before operation execution
+5. **TOCTOU in State Lock Timeout** — Eliminated abort-flag race window in `_withStateLock` by removing the `Promise.race`/`abortableFn` pattern; timeout is now enforced via a deadline passed to `withTurboStateLock`, preventing zombie promises
 6. **Phase-Ready Scalability** — Documented safe operational limits (≤5 lanes, ≤50 tasks per phase) pending future streaming/async validation optimization
 
 ### LOW Priority (now addressed)
-7. **integrated_diff_required Default Safety Gap** — Changed default to `false` for backward compatibility; added documentation recommending `true` for safety-critical projects and explaining the option's role in ensuring parallel lane changes integrate cleanly
+7. **integrated_diff_required Default Safety Gap** — Default was already `false`; added documentation recommending `true` for safety-critical projects and explaining the option's role in ensuring parallel lane changes integrate cleanly
 
 ## Why
 
@@ -31,7 +31,7 @@ These fixes restore fail-closed semantics and add coordination primitives for sa
 No migration required. All changes maintain backward compatibility:
 - File-based lock is transparent to callers
 - Retry logic is internal to evidence writing
-- Default config changes to conservative (no new validation requirements)
+- `integrated_diff_required` default unchanged (already `false`); added opt-in guidance only
 - Integration test documents expected caller behavior
 
 ## Breaking changes
@@ -48,10 +48,10 @@ None.
 
 ## Testing
 
-- 128 targeted tests across Lean Turbo runner and integration suites, all passing
+- 4 new tests added for the serializedTasks contract; full Lean Turbo suite (700+ tests) continues to pass
 - Verified serializedTasks contract: tasks routed due to lock conflicts are validated by phase-ready
 - Verified file-based lock: multiple runner instances coordinate access without race conditions
-- Verified retry logic: transient disk errors are retried; permanent errors fail-closed
+- Verified retry logic: transient disk errors are retried via `error.code`; permanent errors fail-closed
 
 ## Related
 

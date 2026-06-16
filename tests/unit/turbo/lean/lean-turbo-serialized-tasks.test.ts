@@ -15,23 +15,20 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { LeanTurboRunner } from '../../../src/turbo/lean/runner';
+import { verifyLeanTurboPhaseReady } from '../../../../src/turbo/lean/phase-ready';
+import type { LeanTurboPersistedState } from '../../../../src/turbo/lean/state';
 import {
 	emptyPersisted,
 	emptyRunState,
 	writePersisted,
-} from '../../../src/turbo/lean/state';
-import { verifyLeanTurboPhaseReady } from '../../../src/turbo/lean/phase-ready';
-import type { LeanTurboPersistedState } from '../../../src/turbo/lean/state';
+} from '../../../../src/turbo/lean/state';
 
 let tmpDir: string;
 const SESSION_ID = 'sess-serialized-tasks-test';
 
 beforeEach(() => {
 	tmpDir = fs.realpathSync(
-		fs.mkdtempSync(
-			path.join(os.tmpdir(), 'lean-turbo-serialized-tasks-'),
-		),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'lean-turbo-serialized-tasks-')),
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(tmpDir, '.swarm', 'evidence', '1', 'lean-turbo'), {
@@ -61,10 +58,7 @@ describe('Lean Turbo serialized task contract', () => {
 
 		// Verify that serializedTasks are persisted
 		const persisted = JSON.parse(
-			fs.readFileSync(
-				path.join(tmpDir, '.swarm', 'turbo-state.json'),
-				'utf-8',
-			),
+			fs.readFileSync(path.join(tmpDir, '.swarm', 'turbo-state.json'), 'utf-8'),
 		) as LeanTurboPersistedState;
 		expect(persisted.sessions[SESSION_ID]?.serializedTasks).toEqual([
 			'task-1',

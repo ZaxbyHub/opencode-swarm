@@ -1270,18 +1270,11 @@ export class LeanTurboRunner {
 	}
 
 	/**
-	 * Safely write lane evidence, catching errors to prevent evidence write
-	 * failure from blocking lane processing.
-	 */
-	/**
-	 * Write lane evidence with retry logic.
+	 * Write lane evidence with retry logic for transient disk errors.
 	 *
 	 * Evidence is required by phase-ready (step 4b) to verify lane completion.
-	 * Transient disk errors are retried with exponential backoff.
-	 *
-	 * FIXED (Issue #5): Added retry logic for transient failures.
-	 * Evidence write failure is non-fatal for runner operation but must succeed
-	 * eventually for phase-ready to proceed.
+	 * Transient I/O errors are retried with exponential backoff; permanent errors
+	 * are logged and dropped (evidence failure is non-fatal for runner operation).
 	 */
 	private async _writeLaneEvidenceSafely(
 		lane: LeanTurboLane,
@@ -1316,26 +1309,29 @@ export class LeanTurboRunner {
 					return; // Success
 				}
 			} catch (error) {
+				const errCode = (error as NodeJS.ErrnoException).code ?? '';
 				const isTransient =
 					error instanceof Error &&
-					(error.message.toLowerCase().includes('enoent') ||
-						error.message.toLowerCase().includes('ebusy') ||
-						error.message.toLowerCase().includes('eperm') ||
-						error.message.toLowerCase().includes('eio') ||
-						error.message.toLowerCase().includes('temporary') ||
-						error.message.toLowerCase().includes('disk full') ||
-						error.message.toLowerCase().includes('no space'));
+					[
+						'ENOENT',
+						'EBUSY',
+						'EPERM',
+						'EIO',
+						'EACCES',
+						'EAGAIN',
+						'ETIMEDOUT',
+						'ENOSPC',
+					].includes(errCode);
 
 				if (attempt < maxAttempts - 1 && isTransient) {
 					// Transient error — retry with exponential backoff
-					const delayMs = baseDelayMs * Math.pow(2, attempt);
+					const delayMs = baseDelayMs * 2 ** attempt;
 					await new Promise((resolve) => setTimeout(resolve, delayMs));
 					continue;
 				}
 
 				// Permanent error or last attempt — log but don't fail the runner
-				const msg =
-					error instanceof Error ? error.message : String(error);
+				const msg = error instanceof Error ? error.message : String(error);
 				console.warn(
 					`[lean-turbo] evidence write failed for lane ${lane.laneId}: ${msg}`,
 				);
@@ -1367,55 +1363,23 @@ export class LeanTurboRunner {
 	 * - Promise chain: serializes writes within a single runner instance
 	 * - File-based lock: coordinates between multiple runners with the same sessionID
 	 *
-	 * Includes a 10-second timeout: if state persistence hangs, the lock is
-	 * released so subsequent updates are not blocked indefinitely.
-	 *
-	 * FIXED (Issue #2): Added file-based lock for cross-runner durable state race.
-	 * FIXED (Issue #6): Properly handles timeout without leaving operation running.
+	 * Timeout is enforced inside withTurboStateLock using a deadline computed from
+	 * the moment this call is enqueued, so no zombie promises can escape.
 	 */
 	private async _withStateLock<T>(fn: () => Promise<T>): Promise<T> {
 		const timeoutMs = 10_000;
-		let timeoutId: ReturnType<typeof setTimeout> | undefined;
-		let aborted = false;
-
-		// Create an abortable wrapper around fn
-		const abortableFn = async (): Promise<T> => {
-			if (aborted) {
-				throw new Error(
-					`_withStateLock timed out after ${timeoutMs}ms — state update aborted`,
-				);
-			}
-			return fn();
-		};
-
-		const withTimeout = new Promise<T>((_resolve, reject) => {
-			timeoutId = setTimeout(() => {
-				aborted = true;
-				reject(
-					new Error(
-						`_withStateLock timed out after ${timeoutMs}ms — state update will not block subsequent operations`,
-					),
-				);
-			}, timeoutMs);
-		});
-
-		// Chain the file-based lock with the per-runner promise chain
-		const chain = this._stateLock.then(() =>
-			withTurboStateLock(
+		const deadline = Date.now() + timeoutMs;
+		const chain = this._stateLock.then(() => {
+			const remaining = Math.max(500, deadline - Date.now());
+			return withTurboStateLock(
 				this._directory,
 				this._sessionID,
-				abortableFn,
-				timeoutMs,
-			),
-		);
-
-		const promise = Promise.race([chain, withTimeout]).finally(() => {
-			if (timeoutId) clearTimeout(timeoutId);
+				fn,
+				remaining,
+			);
 		});
-
-		// Update state lock chain, catching errors so they don't block the chain
-		this._stateLock = promise.catch(() => {});
-		return promise;
+		this._stateLock = chain.catch(() => {});
+		return chain;
 	}
 
 	/**
