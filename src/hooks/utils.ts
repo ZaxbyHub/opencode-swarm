@@ -6,7 +6,6 @@
  * token estimation for swarm-related operations.
  */
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
 import { bunFile } from '../utils/bun-compat';
@@ -24,14 +23,7 @@ export const _internals: {
 	composeHandlers: typeof composeHandlers;
 	validateSwarmPath: typeof validateSwarmPath;
 	readSwarmFileAsync: typeof readSwarmFileAsync;
-	fs: { realpathSync: typeof fs.realpathSync };
-} = {
-	safeHook,
-	composeHandlers,
-	validateSwarmPath,
-	readSwarmFileAsync,
-	fs: { realpathSync: fs.realpathSync },
-};
+} = { safeHook, composeHandlers, validateSwarmPath, readSwarmFileAsync };
 
 export function safeHook<I, O>(
 	fn: (input: I, output: O) => Promise<void>,
@@ -171,30 +163,6 @@ export function validateSwarmPath(directory: string, filename: string): string {
 		}
 	}
 
-	// Symlink containment check: resolve the real path to detect symlinks
-	// that escape the .swarm directory. Nonexistent targets are allowed
-	// (write paths may point to files not yet created).
-	try {
-		const realPath = _internals.fs.realpathSync(resolved);
-		if (process.platform === 'win32') {
-			if (
-				!realPath.toLowerCase().startsWith((baseDir + path.sep).toLowerCase())
-			) {
-				throw new Error('Invalid filename: path escapes .swarm directory');
-			}
-		} else {
-			if (!realPath.startsWith(baseDir + path.sep)) {
-				throw new Error('Invalid filename: path escapes .swarm directory');
-			}
-		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-			// Nonexistent target is fine — the path is intended for writing
-		} else {
-			throw error;
-		}
-	}
-
 	return resolved;
 }
 
@@ -202,14 +170,29 @@ export async function readSwarmFileAsync(
 	directory: string,
 	filename: string,
 ): Promise<string | null> {
-	try {
-		const resolvedPath = _internals.validateSwarmPath(directory, filename);
-		const file = bunFile(resolvedPath);
-		const content = await file.text();
-		return content;
-	} catch {
-		return null;
+	const resolvedPath = _internals.validateSwarmPath(directory, filename);
+	// Retry loop to handle macOS/APFS rename-visibility race.
+	// After an atomic rename, the filesystem can take a few ms to update
+	// the directory entry. Immediately-following reads may see ENOENT.
+	// Retry up to 5 times with 10ms delay before giving up.
+	const maxAttempts = 5;
+	const retryDelayMs = 10;
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		try {
+			const file = bunFile(resolvedPath);
+			const content = await file.text();
+			return content;
+		} catch (err) {
+			// Only retry on ENOENT (file not found) — other errors should fail fast
+			const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+			if (!isNotFound || attempt === maxAttempts - 1) {
+				return null;
+			}
+			// Wait before retrying
+			await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+		}
 	}
+	return null;
 }
 
 export function estimateTokens(text: string): number {
