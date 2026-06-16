@@ -3,9 +3,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_test_exports,
-	syncBundledProjectSkillsIfMissing,
+	syncBundledProjectSkillsIfMissingAsync,
 } from '../../../src/config/bundled-skills';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+// Mirrors tests/unit/config/bundled-skills.test.ts for the async, init-path
+// variant. The async variant is what the plugin awaits (under withTimeout) at
+// startup so a fresh project has its architect MODE skills before the first
+// turn. It must preserve every guard of the sync version.
 
 function writePackageSkill(
 	packageRoot: string,
@@ -22,7 +27,7 @@ function writePackageSkill(
 	);
 }
 
-describe('syncBundledProjectSkillsIfMissing', () => {
+describe('syncBundledProjectSkillsIfMissingAsync', () => {
 	let projectDir: string;
 	let packageRoot: string;
 	let cleanupProject: () => void;
@@ -33,10 +38,10 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 	beforeEach(() => {
 		_test_exports.resetBundledProjectSkillSyncCache();
 		({ dir: projectDir, cleanup: cleanupProject } = createSafeTestDir(
-			'swarm-bundled-skill-project-',
+			'swarm-bundled-skill-async-project-',
 		));
 		({ dir: packageRoot, cleanup: cleanupPackage } = createSafeTestDir(
-			'swarm-bundled-skill-package-',
+			'swarm-bundled-skill-async-package-',
 		));
 		writePackageSkill(packageRoot);
 		writePackageSkill(packageRoot, 'design-docs', 'design docs skill\n');
@@ -56,8 +61,8 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 	const projectSkillPath = (slug = 'codebase-review-swarm') =>
 		path.join(projectDir, '.opencode', 'skills', slug, 'SKILL.md');
 
-	test('installs missing bundled skills into the project skill tree', () => {
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+	test('installs missing bundled skills (incl. nested references) into the project', async () => {
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
 			'canonical skill\n',
@@ -80,30 +85,27 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		expect(
 			warnOutput.some((m) => m.includes('codebase-review-swarm/SKILL.md')),
 		).toBe(true);
-		expect(warnOutput.some((m) => m.includes('design-docs/SKILL.md'))).toBe(
-			true,
-		);
 	});
 
-	test('does not overwrite an existing project skill', () => {
+	test('does not overwrite an existing project skill', async () => {
 		fs.mkdirSync(path.dirname(projectSkillPath()), { recursive: true });
 		fs.writeFileSync(projectSkillPath(), 'project override\n', 'utf-8');
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.readFileSync(projectSkillPath(), 'utf-8')).toBe(
 			'project override\n',
 		);
 	});
 
-	test('suppresses install warning when quiet is true', () => {
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot, true);
+	test('suppresses install warning when quiet is true', async () => {
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot, true);
 
 		expect(fs.existsSync(projectSkillPath())).toBe(true);
 		expect(warnOutput).toEqual([]);
 	});
 
-	test('skips a symlinked .opencode directory', () => {
+	test('skips a symlinked .opencode directory', async () => {
 		const target = path.join(projectDir, 'real-opencode');
 		fs.mkdirSync(target, { recursive: true });
 		fs.symlinkSync(
@@ -112,24 +114,24 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 			process.platform === 'win32' ? 'junction' : 'dir',
 		);
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.existsSync(path.join(target, 'skills'))).toBe(false);
 	});
 
-	test('fails open when the bundled source skill is absent', () => {
+	test('fails open when the bundled source skill is absent', async () => {
 		cleanupPackage();
 		({ dir: packageRoot, cleanup: cleanupPackage } = createSafeTestDir(
-			'swarm-bundled-skill-empty-package-',
+			'swarm-bundled-skill-async-empty-package-',
 		));
 
-		expect(() =>
-			syncBundledProjectSkillsIfMissing(projectDir, packageRoot),
-		).not.toThrow();
+		await expect(
+			syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot),
+		).resolves.toBeUndefined();
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
 	});
 
-	test('warns non-fatally when bundled skill sync fails', () => {
+	test('warns non-fatally when bundled skill sync fails', async () => {
 		const destDir = path.join(
 			projectDir,
 			'.opencode',
@@ -139,9 +141,9 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		fs.mkdirSync(destDir, { recursive: true });
 		fs.writeFileSync(path.join(destDir, 'references'), 'not a directory\n');
 
-		expect(() =>
-			syncBundledProjectSkillsIfMissing(projectDir, packageRoot),
-		).not.toThrow();
+		await expect(
+			syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot),
+		).resolves.toBeUndefined();
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
 		expect(
 			warnOutput.some((m) =>
@@ -150,7 +152,10 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		).toBe(true);
 	});
 
-	test('suppresses sync failure warning when quiet is true', () => {
+	test('suppresses the failure warning when quiet is true', async () => {
+		// Force a sync failure (a file where a directory is expected) AND pass
+		// quiet=true. The catch block only warns `if (!quiet)`, so this asserts
+		// the init-path quiet branch stays silent while still failing open.
 		const destDir = path.join(
 			projectDir,
 			'.opencode',
@@ -160,13 +165,14 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		fs.mkdirSync(destDir, { recursive: true });
 		fs.writeFileSync(path.join(destDir, 'references'), 'not a directory\n');
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot, true);
-
+		await expect(
+			syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot, true),
+		).resolves.toBeUndefined();
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
 		expect(warnOutput).toEqual([]);
 	});
 
-	test('regression F-001/F-006: does not leave a partial skill when file bounds are exceeded', () => {
+	test('regression: does not leave a partial skill when file bounds are exceeded', async () => {
 		const skillDir = path.join(
 			packageRoot,
 			'.opencode',
@@ -184,7 +190,7 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 			'utf-8',
 		);
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		const destDir = path.join(
 			projectDir,
@@ -201,7 +207,7 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		).toBe(true);
 	});
 
-	test('regression F-001/F-006: does not leave a partial skill when byte bounds are exceeded', () => {
+	test('regression: does not leave a partial skill when byte bounds are exceeded', async () => {
 		const skillDir = path.join(
 			packageRoot,
 			'.opencode',
@@ -216,7 +222,7 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 			'utf-8',
 		);
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
 		expect(
@@ -226,11 +232,11 @@ describe('syncBundledProjectSkillsIfMissing', () => {
 		).toBe(true);
 	});
 
-	test('caches a successful sync for the current process', () => {
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+	test('caches a successful sync for the current process', async () => {
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 		fs.rmSync(projectSkillPath(), { force: true });
 
-		syncBundledProjectSkillsIfMissing(projectDir, packageRoot);
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.existsSync(projectSkillPath())).toBe(false);
 	});

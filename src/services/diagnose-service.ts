@@ -13,7 +13,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
-import { deferredWarnings } from './warning-buffer.js';
+import { getDeferredWarnings } from './warning-buffer.js';
 
 const { version } = packageJson;
 
@@ -34,6 +34,7 @@ export interface DiagnoseData {
 	passCount: number;
 	totalCount: number;
 	allPassed: boolean;
+	deferredWarnings: readonly string[];
 }
 
 /**
@@ -1009,11 +1010,11 @@ export async function getDiagnoseData(
 	}
 
 	// Deferred Warnings check
-	if (deferredWarnings.length > 0) {
+	if (getDeferredWarnings().length > 0) {
 		checks.push({
 			name: 'Deferred Warnings',
 			status: '⚠️',
-			detail: `${deferredWarnings.length} warning(s) deferred from init (run with verbose logs for details)`,
+			detail: `${getDeferredWarnings().length} warning(s) deferred from init (run with verbose logs for details)`,
 		});
 	}
 
@@ -1066,6 +1067,7 @@ export async function getDiagnoseData(
 		passCount,
 		totalCount,
 		allPassed,
+		deferredWarnings: getDeferredWarnings(),
 	};
 }
 
@@ -1082,11 +1084,11 @@ export function formatDiagnoseMarkdown(diagnose: DiagnoseData): string {
 	];
 
 	// Add Deferred Warnings section if any
-	if (deferredWarnings.length > 0) {
+	if (diagnose.deferredWarnings.length > 0) {
 		lines.push('');
 		lines.push('## Deferred Warnings');
 		lines.push('');
-		for (const warning of deferredWarnings) {
+		for (const warning of diagnose.deferredWarnings) {
 			lines.push(`- ${warning}`);
 		}
 	}

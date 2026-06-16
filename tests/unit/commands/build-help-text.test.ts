@@ -60,6 +60,11 @@ describe('buildHelpText() — Task 2.2 changes', () => {
 			expect(coreSection).toContain('/swarm handoff');
 		});
 
+		test('consolidate appears in Utility category', () => {
+			const utilitySection = helpText.split('### Utility')[1].split('###')[0];
+			expect(utilitySection).toContain('/swarm consolidate');
+		});
+
 		test('commands in Diagnostics category appear under ### Diagnostics header', () => {
 			// diagnose, preflight, benchmark, dark-matter, simulate are diagnostics commands
 			// note: "doctor tools" is a compound command shown in second pass (after Utility)

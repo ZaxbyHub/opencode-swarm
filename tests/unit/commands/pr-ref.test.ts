@@ -7,20 +7,36 @@ import {
 	resolvePrCommandInput,
 } from '../../../src/commands/pr-ref';
 
-const realExecSync = _internals.execSync;
+const realSpawnSync = _internals.spawnSync;
 
 afterEach(() => {
-	// Restore the real subprocess after any seam override (no mock.module).
-	_internals.execSync = realExecSync;
+	_internals.spawnSync = realSpawnSync;
 });
+
+function makeSpawnSyncReturn(stdout: string) {
+	const fn = () => ({
+		status: 0,
+		stdout,
+		error: undefined,
+	});
+	return fn as typeof _internals.spawnSync;
+}
 
 describe('detectGitRemote — working directory (invariant #3)', () => {
 	test('threads the provided cwd into the subprocess call', () => {
 		let seenOpts: Record<string, unknown> | undefined;
-		_internals.execSync = ((_cmd: string, opts: Record<string, unknown>) => {
+		_internals.spawnSync = ((
+			_bin: string,
+			_args: string[],
+			opts: Record<string, unknown>,
+		) => {
 			seenOpts = opts;
-			return 'https://github.com/owner/repo.git\n';
-		}) as typeof _internals.execSync;
+			return {
+				status: 0,
+				stdout: 'https://github.com/owner/repo.git',
+				error: undefined,
+			} as ReturnType<typeof _internals.spawnSync>;
+		}) as typeof _internals.spawnSync;
 
 		const url = detectGitRemote('/project/root');
 
@@ -28,15 +44,23 @@ describe('detectGitRemote — working directory (invariant #3)', () => {
 		expect(seenOpts?.cwd).toBe('/project/root');
 		// Bounded, non-interactive subprocess invariants stay intact.
 		expect(seenOpts?.timeout).toBe(5000);
-		expect(seenOpts?.stdio).toEqual(['pipe', 'pipe', 'pipe']);
+		expect(seenOpts?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
 	});
 
 	test('omits cwd when none is provided (process.cwd fallback)', () => {
 		let seenOpts: Record<string, unknown> | undefined;
-		_internals.execSync = ((_cmd: string, opts: Record<string, unknown>) => {
+		_internals.spawnSync = ((
+			_bin: string,
+			_args: string[],
+			opts: Record<string, unknown>,
+		) => {
 			seenOpts = opts;
-			return 'git@github.com:owner/repo.git\n';
-		}) as typeof _internals.execSync;
+			return {
+				status: 0,
+				stdout: 'git@github.com:owner/repo.git',
+				error: undefined,
+			} as ReturnType<typeof _internals.spawnSync>;
+		}) as typeof _internals.spawnSync;
 
 		detectGitRemote();
 
@@ -44,9 +68,10 @@ describe('detectGitRemote — working directory (invariant #3)', () => {
 	});
 
 	test('returns null when the subprocess throws (no origin / not a repo)', () => {
-		_internals.execSync = (() => {
+		const thrower = () => {
 			throw new Error('fatal: no such remote');
-		}) as typeof _internals.execSync;
+		};
+		_internals.spawnSync = thrower as typeof _internals.spawnSync;
 
 		expect(detectGitRemote('/nowhere')).toBeNull();
 	});
@@ -55,10 +80,18 @@ describe('detectGitRemote — working directory (invariant #3)', () => {
 describe('parsePrRef — cwd reaches bare-number resolution', () => {
 	test('resolves a bare number against the origin remote in cwd', () => {
 		let seenOpts: Record<string, unknown> | undefined;
-		_internals.execSync = ((_cmd: string, opts: Record<string, unknown>) => {
+		_internals.spawnSync = ((
+			_bin: string,
+			_args: string[],
+			opts: Record<string, unknown>,
+		) => {
 			seenOpts = opts;
-			return 'https://github.com/acme/widgets.git\n';
-		}) as typeof _internals.execSync;
+			return {
+				status: 0,
+				stdout: 'https://github.com/acme/widgets.git',
+				error: undefined,
+			} as ReturnType<typeof _internals.spawnSync>;
+		}) as typeof _internals.spawnSync;
 
 		const parsed = parsePrRef('155', '/repo/here');
 
@@ -67,9 +100,10 @@ describe('parsePrRef — cwd reaches bare-number resolution', () => {
 	});
 
 	test('returns null for a bare number when the remote is unavailable', () => {
-		_internals.execSync = (() => {
+		const thrower = () => {
 			throw new Error('no remote');
-		}) as typeof _internals.execSync;
+		};
+		_internals.spawnSync = thrower as typeof _internals.spawnSync;
 
 		expect(parsePrRef('155', '/repo/here')).toBeNull();
 	});
@@ -78,10 +112,18 @@ describe('parsePrRef — cwd reaches bare-number resolution', () => {
 describe('resolvePrCommandInput — cwd threading', () => {
 	test('passes cwd through to the bare-number remote lookup', () => {
 		let seenOpts: Record<string, unknown> | undefined;
-		_internals.execSync = ((_cmd: string, opts: Record<string, unknown>) => {
+		_internals.spawnSync = ((
+			_bin: string,
+			_args: string[],
+			opts: Record<string, unknown>,
+		) => {
 			seenOpts = opts;
-			return 'https://github.com/acme/widgets.git\n';
-		}) as typeof _internals.execSync;
+			return {
+				status: 0,
+				stdout: 'https://github.com/acme/widgets.git',
+				error: undefined,
+			} as ReturnType<typeof _internals.spawnSync>;
+		}) as typeof _internals.spawnSync;
 
 		const result = resolvePrCommandInput(['42'], '/work/dir');
 
@@ -93,9 +135,10 @@ describe('resolvePrCommandInput — cwd threading', () => {
 	});
 
 	test('returns an error for a bare number when remote resolution fails', () => {
-		_internals.execSync = (() => {
+		const thrower = () => {
 			throw new Error('no remote');
-		}) as typeof _internals.execSync;
+		};
+		_internals.spawnSync = thrower as typeof _internals.spawnSync;
 
 		const result = resolvePrCommandInput(['42'], '/work/dir');
 

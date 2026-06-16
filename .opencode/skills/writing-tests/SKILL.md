@@ -142,7 +142,7 @@ When test files pass individually but fail when run together, follow this protoc
 5. **Specific symptom — closure capture failure**: `vi.mock()` captures closures at **hoist time** (before `beforeEach` runs). Reassigning `mockFn.mockImplementation(newFn)` in the test body does **NOT** update the hoisted closure — the mock still calls the original function.
    - Symptom: `expect(mockFn).toHaveBeenCalledTimes(N)` fails with an unexpected count
    - Symptom: `expect(mockFn).not.toHaveBeenCalled()` fails because the real function was called
-6. **Fix path**: Migrate the affected test file to `_internals` DI seam pattern per the `mock-to-internals-migration` skill. This eliminates both the `vi.mock()` call and the closure capture surface area.
+6. **Fix path**: Migrate the affected test file to `_internals` DI seam pattern per the `mock-to-internals-migration` skill. This eliminates both the `vi.mock()` call and the closure capture surface area. **Exception — reference-captured functions**: if the source code passes a function as a direct argument or captures it in a closure at module scope (e.g., `transactFile(path, readKnowledge, ...)`), the reference bypasses `_internals` entirely — mutating `_internals.readKnowledge` changes only the object property, not the module-scope binding the source already holds. Migrating to `_internals` does not help. In that case, test via observable outcomes (e.g., run concurrent callers and assert on final persisted state).
 
 ## Two-Tier Mock Convention
 
@@ -230,6 +230,24 @@ test('mainFn uses mocked helper', () => {
 - Fast (no module re-parsing)
 - Works in batch test runs without isolation
 
+**Critical limitation — reference-captured functions:** `_internals` interception requires the source code to read `_internals.fn` at the call site. When a function is instead passed as a direct argument or captured in a closure at module definition time, replacing `_internals.fn` has no effect — the mock is silently ignored and the real function runs.
+
+```typescript
+// Source: readKnowledge is captured at definition time, NOT via _internals
+export async function transactKnowledge(filePath: string, mutate: Fn) {
+  return transactFile(filePath, readKnowledge, ...);  // direct ref, captured at definition time
+}
+export const _internals = { readKnowledge };  // mutating this does NOT affect the closure above
+
+// Test — mock is silently ignored; real readKnowledge still runs
+const orig = _internals.readKnowledge;
+_internals.readKnowledge = mock(() => []);  // only mutates the object property
+await transactKnowledge(path, mutate);      // still calls the real readKnowledge
+_internals.readKnowledge = orig;
+```
+
+When `_internals` interception cannot work, verify **observable outcomes** instead: run concurrent callers and assert on final persisted state. See `tests/unit/hooks/knowledge-application.test.ts` ("two concurrent bumpCountersBatch calls") for the pattern.
+
 ### Tier 2: mock.module (Cross-Module)
 
 When mocking dependencies from other modules (especially Node built-ins), use `mock.module` with proper cleanup:
@@ -253,7 +271,7 @@ afterEach(() => mock.restore());
 ### Choosing Between Tiers
 
 | Scenario | Pattern | Example |
-|----------|---------|---------|
+|----------|---------|--------|
 | Mocking a function in the same module you're testing | `_internals` seam | `src/state.ts` `_internals.loadSnapshot` |
 | Mocking a Node built-in (fs, child_process, etc.) | `mock.module` + spread real | `mock.module('node:fs/promises', () => ({ ...realFs, readFile: mockFn }))` |
 | Mocking another application module | `mock.module` + cleanup | `mock.module('../../../src/utils/logger', ...)` + `afterEach(mock.restore())` |
@@ -383,8 +401,83 @@ mockRealpathSync.mockImplementation((inputPath: string) => {
 - Use `os.tmpdir()` + `path.join()` for temp paths. **Never** hardcode `/tmp` or `C:\`.
 - Wrap `mkdtempSync` in `realpathSync` if the result is `chdir`'d on macOS (temp
   dirs are often symlinked to `/private/var/...`).
-- Clean up temp dirs in `afterEach` or `afterAll` using the `rm` utility with
-  `{ force: true, recursive: true }`.
+- Clean up temp dirs in `afterEach` or `afterAll` with a bounded helper that
+  verifies the resolved cleanup target is a child of `os.tmpdir()` before
+  calling recursive `rm`. Reuse `tests/helpers/safe-test-dir.ts` when possible.
+  Do not call recursive `rm` on a computed path unless the helper has rejected
+  empty strings, `os.tmpdir()` itself, and paths outside the temp root.
+
+### Platform-specific environment variable redirection
+
+When tests redirect `process.env.HOME` to isolate path-resolver-dependent code
+(functions like `resolveHiveKnowledgePath`, `resolveSwarmKnowledgePath`, or any
+function that reads `os.homedir()` / platform env vars), they MUST redirect ALL
+platform-specific env vars, not just `HOME`. A partial redirect silently falls
+back to the real user profile on some platforms, causing tests to read/write
+actual user data instead of the isolated temp directory.
+
+Per-platform requirements:
+
+- **Linux**: redirect `HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME`.
+- **macOS**: redirect `HOME` (macOS resolves `~/Library/Application Support` from
+  the home directory).
+- **Windows**: redirect `HOME`, `LOCALAPPDATA`, AND `APPDATA`. Windows path
+  resolvers read `LOCALAPPDATA` and `APPDATA`, neither of which is derived from
+  `HOME`. Redirecting only `HOME` silently fails on Windows, causing tests to
+  touch the real `%LOCALAPPDATA%` and `%APPDATA%` trees.
+
+> **⚠️ Bun caches `os.homedir()` on first call.** If a module calls `os.homedir()`
+> before the test sets `process.env.HOME`, the cached value persists for the
+> lifetime of the process and later env changes are silently ignored. Set
+> `process.env.HOME` (and other redirected vars) **before** importing any module
+> that calls `os.homedir()`. The source code documents this at
+> `src/hooks/knowledge-store.ts`: "Bun caches os.homedir(), so changing $HOME
+> after first call is ignored."
+
+Use per-variable save/restore rather than saving and replacing the entire
+`process.env` object — the latter discards process-level env state and can
+interfere with other test infrastructure:
+
+```typescript
+import { beforeEach, afterEach } from 'bun:test';
+import os from 'node:os';
+import path from 'node:path';
+
+const saved = {
+  HOME: process.env.HOME,
+  LOCALAPPDATA: process.env.LOCALAPPDATA,
+  APPDATA: process.env.APPDATA,
+  XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+};
+
+beforeEach(() => {
+  const isolatedDir = path.join(os.tmpdir(), 'test-home');
+  process.env.HOME = isolatedDir;
+  process.env.LOCALAPPDATA = isolatedDir;
+  process.env.APPDATA = isolatedDir;
+  process.env.XDG_CONFIG_HOME = isolatedDir;
+  process.env.XDG_DATA_HOME = isolatedDir;
+});
+
+afterEach(() => {
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+```
+
+For cross-file isolation (tests that must survive across multiple files in the
+same process, e.g. batch steps), use `beforeAll` / `afterAll` with the same
+per-var save/restore pattern. Never mutate `process.env` without restoring it in
+a matching teardown hook.
+
+**Preferred approach:** Use `createIsolatedTestEnv()` from
+`tests/helpers/isolated-test-env.ts`. It handles `XDG_CONFIG_HOME`, `APPDATA`,
+`LOCALAPPDATA`, and `HOME` with correct per-variable save/restore and returns a
+cleanup function that removes the temp directory. Use this helper unless your
+test has specific requirements it doesn't cover.
 
 ### Line ending normalization
 
@@ -457,6 +550,27 @@ Rules:
 - One regression test per finding. Do not pile unrelated assertions into a single regression block.
 
 Examples in-tree: `tests/unit/graph/graph-query.test.ts`, `tests/unit/graph/import-extractor.test.ts`, `tests/unit/graph/graph-store.test.ts`.
+
+### Guardrail Authority Tests
+
+When testing `src/hooks/guardrails/file-authority.ts` or similar ordered
+authority checks:
+
+- Test the specific allow/deny rule under review, not just the final denial. A
+  later deny rule such as `blockedPrefix` can mask a bad earlier allow match.
+- For case-sensitive glob behavior, place negative cases outside default blocked
+  prefixes or use a custom agent with no other deny rules and explicit
+  `allowedPrefix: []`. Include a positive case that the case-sensitive glob
+  allows, and for negative cases assert the denial reason is the allowlist
+  fallback (for example, `not in allowed list`) so the test proves the glob did
+  not match.
+- For generated-zone precedence, include at least one case where the filename
+  matches the newly allowed convention under `dist/` or `build/`.
+- For custom authority arrays, pin whether the array replaces or extends defaults
+  with tests for both an empty array and a custom non-empty array when the
+  semantics matter.
+- For matcher caches or other shared state, test both priming orders when the
+  selected behavior depends on mode, platform, or prior calls.
 
 ## Cross-Entry Invariants (config maps)
 

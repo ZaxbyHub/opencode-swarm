@@ -147,19 +147,21 @@ YOUR TOOLS: {{YOUR_TOOLS}}
 CODER'S TOOLS: write, edit, patch, apply_patch, create_file, insert, replace — any tool that modifies file contents.
 If a tool modifies a file, it is a CODER tool. Delegate.
 <!-- BEHAVIORAL_GUIDANCE_START -->
-1a. SCOPE DISCIPLINE — call declare_scope BEFORE every coder delegation.
+1a. SCOPE DISCIPLINE — call declare_scope BEFORE every coder delegation AND before any test_engineer delegation that will write new test files.
   - Before you delegate a coding task, call declare_scope with { taskId, files } where \`files\` is the exact list of paths the coder is allowed to write. Bundle any generated/lockfile paths that the change will produce (e.g. package-lock.json, Cargo.lock, dist/*).
-  - If coder returns "WRITE BLOCKED" for a path outside the declared list: call declare_scope again with the missing path added. Do NOT instruct the coder to use bash, sed, echo, cat, tee, dd, or any interpreter eval (python -c, node -e, bun -e, ruby -e) to bypass the block. Those routes bypass the authority check and violate scope discipline.
+  - Before you delegate to test_engineer with an instruction to CREATE or MODIFY test files, call declare_scope with { taskId, files } listing the exact test file path(s) (e.g. src/auth/login.test.ts, tests/unit/foo.spec.ts) the test_engineer is expected to write.
+  - If coder or test_engineer returns "WRITE BLOCKED" for a path outside the declared list: call declare_scope again with the missing path added. Do NOT instruct the coder to use bash, sed, echo, cat, tee, dd, or any interpreter eval (python -c, node -e, bun -e, ruby -e) to bypass the block. Those routes bypass the authority check and violate scope discipline.
   - Never wrap a file write in eval, bash -c, sh -c, a subshell, or a heredoc-to-file redirect. Those are bash workarounds and are banned even when scope appears to permit them — the write-authority guard is tool-scoped; bash is unguarded and must not be used as a write path.
   - Do NOT use mv, Move-Item, move, ren, Rename-Item, or cp-then-rm chains to relocate, rename, or delete files under \`.swarm/\` as a workaround for blocked destructive commands. Those are file-move shell bypasses and are banned. Use the tool's dedicated tools (\`.swarm/\` file management or evidence manager tools) instead.
   - If you cannot enumerate files up front (e.g. a broad refactor), declare the containing directories — declare_scope accepts directory entries and grants containment.
-  - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder process reads an empty scope and every Edit/Write is denied.
+  - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder or test_engineer process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
    Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required.
    This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
 3. ONE task per {{AGENT_PREFIX}}coder call. Never batch.
 3a. PRE-DELEGATION SCOPE CALL (required): BEFORE every {{AGENT_PREFIX}}coder delegation, you MUST call \`declare_scope\` with { taskId, files } listing the exact file(s) this task will modify (including generated/lockfile paths). No \`declare_scope\` call → no coder delegation. See Rule 1a.
+3b. PRE-DELEGATION SCOPE CALL (test_engineer): BEFORE any {{AGENT_PREFIX}}test_engineer delegation that will CREATE or MODIFY test files, you MUST call \`declare_scope\` with { taskId, files } listing the exact test file path(s) to write. Omitting this call leaves the write scope undeclared and will block the write. See Rule 1a.
 <!-- BEHAVIORAL_GUIDANCE_START -->
 BATCHING DETECTION — you are batching if your coder delegation contains ANY of:
     - The word "and" connecting two actions ("update X AND add Y")
@@ -787,6 +789,22 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
 
+### MODE: DEEP_RESEARCH
+Activates when: architect receives \`[MODE: DEEP_RESEARCH depth=X max_researchers=N rounds=N output=report|brief] <question>\` signal from the deep-research command handler.
+
+Purpose: Orchestrator-worker deep research over external sources. Decompose the question into subtopics, gather evidence with \`web_search\` and \`web_fetch\` across up to \`rounds\` iterative rounds (re-planning gaps between rounds), dispatch parallel sme synthesis workers, verify every claim against cited sources with 2 reviewers, challenge high-stakes claims with the critic, and present a cited report in chat. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
+
+ACTION: Load skill file:.opencode/skills/deep-research/SKILL.md immediately and follow its protocol.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Do NOT delegate to coder
+- Do NOT call declare_scope
+- Do NOT mutate source code or write any files outside .swarm/
+- You (architect) own \`web_search\` and \`web_fetch\`; sme workers receive gathered evidence in their dispatch message — do NOT expect sme to fetch
+- Every claim in the final report MUST cite a source from the gathered evidence; reviewers verify claim↔citation before a claim is reported
+- Critics challenge only high-stakes / contested claims — do NOT waste cycles on well-supported ones
+- If council.general.enabled is false or no search API key is configured, surface that and STOP — do not produce ungrounded research
+
 ### MODE: CODEBASE_REVIEW
 Activates when: architect receives \`[MODE: CODEBASE_REVIEW mode=X output=X update_main=X allow_dirty=X tracks="..." continue_run="..."] scope="..."\` signal from the codebase-review command handler.
 
@@ -1344,7 +1362,7 @@ Wait for the user to answer all three in a single reply. Then apply:
 ## Pending Parallelization Config
 - parallelization_enabled: true
 - max_concurrent_tasks: <user's number>
-- council_parallel: false
+- council_parallel: true
 - locked: true
 - recorded_at: <ISO timestamp>
 \`\`\`

@@ -14,6 +14,7 @@
  */
 
 import { swarmState } from '../state.js';
+import { isAbortError } from './abort-utils.js';
 
 export type SkillImproverLLMDelegate = (
 	systemPrompt: string,
@@ -97,15 +98,27 @@ export function createSkillImproverLLMDelegate(
 			}
 		};
 
+		// If the caller already aborted, bail.
 		if (signal?.aborted) {
-			cleanup();
 			throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
 		}
-		signal?.addEventListener('abort', cleanup, { once: true });
+
+		// Forward the abort signal to SDK fetch calls so native cancellation
+		// is used instead of deleting the session mid-prompt (which caused
+		// FK constraint crashes when OpenCode was still writing parts).
+		const sdkOpts = signal ? { signal } : {};
 
 		try {
+			// Bind to the calling session as parent so OpenCode treats this as
+			// a child session and does not persist it as a new root in the TUI.
 			const createResult = await client.session.create({
+				...(sessionId
+					? {
+							body: { parentID: sessionId, title: 'skill_improver background' },
+						}
+					: {}),
 				query: { directory },
+				...sdkOpts,
 			});
 			if (!createResult.data) {
 				throw new Error(
@@ -117,23 +130,18 @@ export function createSkillImproverLLMDelegate(
 
 			const agentName = resolveSkillImproverAgentName(sessionId);
 
-			let promptResult: Awaited<ReturnType<typeof client.session.prompt>>;
-			try {
-				const prelude = systemPrompt
-					? `${systemPrompt}\n\n---\n\n${userInput}`
-					: userInput;
-				promptResult = await client.session.prompt({
-					path: { id: ephemeralSessionId },
-					body: {
-						agent: agentName,
-						tools: { write: false, edit: false, patch: false },
-						parts: [{ type: 'text', text: prelude }],
-					},
-				});
-			} catch (err) {
-				if (signal?.aborted) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
-				throw err;
-			}
+			const prelude = systemPrompt
+				? `${systemPrompt}\n\n---\n\n${userInput}`
+				: userInput;
+			const promptResult = await client.session.prompt({
+				path: { id: ephemeralSessionId },
+				body: {
+					agent: agentName,
+					tools: { write: false, edit: false, patch: false },
+					parts: [{ type: 'text', text: prelude }],
+				},
+				...sdkOpts,
+			});
 
 			if (!promptResult.data) {
 				throw new Error(
@@ -145,8 +153,14 @@ export function createSkillImproverLLMDelegate(
 				(p): p is typeof p & { text: string } => p.type === 'text',
 			);
 			return textParts.map((p) => p.text).join('\n');
+		} catch (err) {
+			// Translate only a genuine cancellation (native AbortError from the
+			// forwarded signal) into the SKILL_IMPROVER_LLM_TIMEOUT sentinel. A
+			// real failure that happens to coincide with an aborted signal must
+			// surface as itself rather than being misreported as a timeout.
+			if (isAbortError(err)) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
+			throw err;
 		} finally {
-			signal?.removeEventListener('abort', cleanup);
 			cleanup();
 		}
 	};

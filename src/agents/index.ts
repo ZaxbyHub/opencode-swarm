@@ -31,6 +31,7 @@ import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
 import { createDocsAgent } from './docs';
 import { createExplorerAgent } from './explorer';
+import { createResearcherAgent } from './researcher';
 import { createReviewerAgent } from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
@@ -173,7 +174,9 @@ export function resolveFallbackModel(
 	// Only inherit if the curator agent does NOT have fallback_models key at all
 	if (
 		fallbackModels === undefined &&
-		(agentBaseName === 'curator_init' || agentBaseName === 'curator_phase')
+		(agentBaseName === 'curator_init' ||
+			agentBaseName === 'curator_phase' ||
+			agentBaseName === 'curator_postmortem')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
@@ -269,7 +272,15 @@ function getVariantOverride(
  */
 function applyOverrides(
 	agent: AgentDefinition,
-	swarmAgents?: Record<string, { temperature?: number; variant?: string }>,
+	swarmAgents?: Record<
+		string,
+		{
+			temperature?: number;
+			variant?: string;
+			reasoning?: { effort?: 'low' | 'medium' | 'high' | 'max' };
+			thinking?: { type?: 'enabled' | 'disabled'; budget_tokens?: number };
+		}
+	>,
 	swarmPrefix?: string,
 	quiet?: boolean,
 ): AgentDefinition {
@@ -322,6 +333,26 @@ function applyOverrides(
 		// the cast just satisfies the strict known-keys check.
 		(agent.config as { variant?: string }).variant = variantOverride;
 	}
+
+	// Plumb provider-native extended-reasoning / extended-thinking overrides
+	// (issue #1220). These were previously silently dropped at config parse
+	// time because `AgentOverrideConfigSchema` did not declare them. Now that
+	// the schema accepts them, we forward them to the SDK as-is. Like
+	// `variant` above, the cast satisfies the strict known-keys check on
+	// @opencode-ai/sdk's AgentConfig type; the SDK's open-ended index
+	// signature makes this structurally valid.
+	const baseAgentName = stripSwarmPrefix(agent.name, swarmPrefix);
+	const reasoningOverride = swarmAgents?.[baseAgentName]?.reasoning;
+	if (reasoningOverride !== undefined) {
+		(agent.config as { reasoning?: typeof reasoningOverride }).reasoning =
+			reasoningOverride;
+	}
+	const thinkingOverride = swarmAgents?.[baseAgentName]?.thinking;
+	if (thinkingOverride !== undefined) {
+		(agent.config as { thinking?: typeof thinkingOverride }).thinking =
+			thinkingOverride;
+	}
+
 	return agent;
 }
 
@@ -456,6 +487,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		agents.push(applyOverrides(sme, swarmAgents, swarmPrefix, quiet));
 	}
 
+	// 3b. Create Researcher agent — automated multi-source research specialist
+	if (!isAgentDisabled('researcher', swarmAgents, swarmPrefix)) {
+		const researcherPrompts = getPrompts('researcher');
+		const researcher = createResearcherAgent(
+			getModel('researcher'),
+			researcherPrompts.prompt,
+			researcherPrompts.appendPrompt,
+		);
+		researcher.name = prefixName('researcher');
+		agents.push(applyOverrides(researcher, swarmAgents, swarmPrefix, quiet));
+	}
+
 	// 4. Create pipeline agents
 	if (!isAgentDisabled('coder', swarmAgents, swarmPrefix)) {
 		const coderPrompts = getPrompts('coder');
@@ -577,6 +620,21 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		curatorPhase.name = prefixName('curator_phase');
 		agents.push(applyOverrides(curatorPhase, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5e. Create Curator Post-mortem agent
+	if (!isAgentDisabled('curator_postmortem', swarmAgents, swarmPrefix)) {
+		const curatorPostmortemPrompts = getPrompts('curator_postmortem');
+		const curatorPostmortem = createCuratorAgent(
+			swarmAgents?.curator_postmortem?.model ?? getModel('explorer'),
+			curatorPostmortemPrompts.prompt,
+			curatorPostmortemPrompts.appendPrompt,
+			'curator_postmortem' as CuratorRole,
+		);
+		curatorPostmortem.name = prefixName('curator_postmortem');
+		agents.push(
+			applyOverrides(curatorPostmortem, swarmAgents, swarmPrefix, quiet),
+		);
 	}
 
 	// 5f. v2: skill_improver — issue #629. Registered when enabled in config.
@@ -1191,6 +1249,7 @@ export { createCuratorAgent } from './curator-agent';
 export { createDesignerAgent } from './designer';
 export { createDocsAgent } from './docs';
 export { createExplorerAgent } from './explorer';
+export { createResearcherAgent } from './researcher';
 export {
 	createReviewerAgent,
 	SECURITY_CATEGORIES,

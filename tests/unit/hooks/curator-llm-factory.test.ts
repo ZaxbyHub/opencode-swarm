@@ -1,16 +1,12 @@
-import { beforeEach, describe, expect, test, vi } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { createCuratorLLMDelegate } from '../../../src/hooks/curator-llm-factory';
 import { swarmState } from '../../../src/state';
 
-// Mock swarmState so we can control opencodeClient and curator agent names
-vi.mock('../../../src/state', () => ({
-	swarmState: {
-		opencodeClient: null,
-		curatorInitAgentNames: [] as string[],
-		curatorPhaseAgentNames: [] as string[],
-		activeAgent: new Map<string, string>(),
-	},
-}));
+// NOTE: We deliberately do NOT vi.mock('../../../src/state'). Replacing the
+// shared state module leaks a stripped-down swarmState (missing fields such as
+// agentSessions) into every other test file in Bun's shared test-runner
+// process (AGENTS.md #7 — DI over mock.module). Instead we mutate the real
+// swarmState singleton and restore the touched fields in afterEach.
 
 const mockDelete = vi.fn().mockResolvedValue({ data: undefined });
 const mockPrompt = vi.fn();
@@ -24,14 +20,41 @@ const mockClient = {
 	},
 } as never;
 
+type CuratorStateFields = {
+	opencodeClient: unknown;
+	curatorInitAgentNames: string[];
+	curatorPhaseAgentNames: string[];
+	curatorPostmortemAgentNames: string[];
+	activeAgent: Map<string, string>;
+};
+
+let savedState: CuratorStateFields;
+
 beforeEach(() => {
 	vi.clearAllMocks();
-	(swarmState as { opencodeClient: unknown }).opencodeClient = null;
-	(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
-		[];
-	(swarmState as { curatorPhaseAgentNames: string[] }).curatorPhaseAgentNames =
-		[];
-	(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map();
+	const s = swarmState as unknown as CuratorStateFields;
+	// Snapshot the real fields this suite mutates so afterEach can restore them.
+	savedState = {
+		opencodeClient: s.opencodeClient,
+		curatorInitAgentNames: s.curatorInitAgentNames,
+		curatorPhaseAgentNames: s.curatorPhaseAgentNames,
+		curatorPostmortemAgentNames: s.curatorPostmortemAgentNames,
+		activeAgent: s.activeAgent,
+	};
+	s.opencodeClient = null;
+	s.curatorInitAgentNames = [];
+	s.curatorPhaseAgentNames = [];
+	s.curatorPostmortemAgentNames = [];
+	s.activeAgent = new Map();
+});
+
+afterEach(() => {
+	const s = swarmState as unknown as CuratorStateFields;
+	s.opencodeClient = savedState.opencodeClient;
+	s.curatorInitAgentNames = savedState.curatorInitAgentNames;
+	s.curatorPhaseAgentNames = savedState.curatorPhaseAgentNames;
+	s.curatorPostmortemAgentNames = savedState.curatorPostmortemAgentNames;
+	s.activeAgent = savedState.activeAgent;
 });
 
 describe('createCuratorLLMDelegate', () => {
@@ -47,7 +70,7 @@ describe('createCuratorLLMDelegate', () => {
 		expect(typeof delegate).toBe('function');
 	});
 
-	// ─── Single-swarm resolution ─────────────────────────────────────────────
+	// ─── Single-swarm resolution ────────────────────────────────────
 
 	test('single default swarm: uses curator_init', async () => {
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
@@ -85,7 +108,7 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
-	// ─── Multi-swarm active-agent resolution ─────────────────────────────────
+	// ─── Multi-swarm active-agent resolution ─────────────────────────
 
 	test('multi-swarm: picks curator for active swarm via prefix matching', async () => {
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
@@ -135,6 +158,31 @@ describe('createCuratorLLMDelegate', () => {
 		expect(mockPrompt).toHaveBeenCalledWith({
 			path: { id: 'sess-y' },
 			body: expect.objectContaining({ agent: 'beta_curator_phase' }),
+		});
+	});
+
+	test('multi-swarm: postmortem mode picks correct swarm curator_postmortem', async () => {
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(
+			swarmState as { curatorPostmortemAgentNames: string[] }
+		).curatorPostmortemAgentNames = [
+			'alpha_curator_postmortem',
+			'beta_curator_postmortem',
+		];
+		(swarmState as { activeAgent: Map<string, string> }).activeAgent = new Map([
+			['sess-a', 'alpha_reviewer'],
+		]);
+		mockCreate.mockResolvedValue({ data: { id: 'sess-pm' } });
+		mockPrompt.mockResolvedValue({
+			data: { info: {}, parts: [{ type: 'text', text: 'ok' }] },
+		});
+
+		const delegate = createCuratorLLMDelegate('/tmp/test', 'postmortem')!;
+		await delegate('SYS', 'input');
+
+		expect(mockPrompt).toHaveBeenCalledWith({
+			path: { id: 'sess-pm' },
+			body: expect.objectContaining({ agent: 'alpha_curator_postmortem' }),
 		});
 	});
 
@@ -205,7 +253,7 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
-	// ─── Direct sessionId lookup ─────────────────────────────────────────────
+	// ─── Direct sessionId lookup ────────────────────────────────────
 
 	test('sessionId direct lookup: ignores other active sessions, picks calling swarm', async () => {
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
@@ -262,7 +310,7 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
-	// ─── Finding 1 fix: default-swarm sessionId hole ─────────────────────────
+	// ─── Finding 1 fix: default-swarm sessionId hole ──────────────────────
 
 	test('default-swarm session uses curator_init even when named swarms also registered', async () => {
 		// Finding 1 fix: direct lookup must return default-swarm curator (empty prefix)
@@ -299,7 +347,7 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
-	// ─── Prefix collision (longest-match) ────────────────────────────────────
+	// ─── Prefix collision (longest-match) ────────────────────────────
 
 	test('prefix collision: alpha_extended_ beats alpha_ for alpha_extended_architect', async () => {
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
@@ -349,7 +397,7 @@ describe('createCuratorLLMDelegate', () => {
 		});
 	});
 
-	// ─── Session lifecycle ────────────────────────────────────────────────────
+	// ─── Session lifecycle ───────────────────────────────────────
 
 	test('system prompt parameter is NOT forwarded — registered agent uses its own baked-in prompt', async () => {
 		// Finding 3 fix: removing system: override allows registered custom prompts to take effect.
@@ -457,37 +505,118 @@ describe('createCuratorLLMDelegate', () => {
 		expect(result).toBe('final answer');
 	});
 
-	test('NotFoundError from prompt is converted to CURATOR_LLM_TIMEOUT when signal aborts during prompt', async () => {
-		// Regression test: when an AbortController fires (timeout) while
-		// session.prompt() is in flight, the abort handler deletes the
-		// ephemeral session and session.prompt() throws NotFoundError.
-		// Without the fix this becomes an unhandled rejection rather than a
-		// clean CURATOR_LLM_TIMEOUT. This test exercises the NEW catch block
-		// added around session.prompt(), not the existing pre-abort early check.
+	test('aborted signal during prompt is forwarded to the SDK and mapped to CURATOR_LLM_TIMEOUT', async () => {
+		// Fix C: the AbortSignal is forwarded to session.create AND
+		// session.prompt so the SDK cancels natively (instead of the old
+		// abort-handler-deletes-session path). A native AbortError surfaced by
+		// the SDK is then translated into the CURATOR_LLM_TIMEOUT sentinel.
 		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
 		(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
 			['curator_init'];
 		mockCreate.mockResolvedValue({ data: { id: 'sess-abort' } });
 
 		const ac = new AbortController();
-		// Simulate: the abort fires DURING prompt execution, then the SDK
-		// throws NotFoundError because the session was deleted by cleanup.
+		// The forwarded signal fires mid-flight; the SDK surfaces an AbortError.
 		mockPrompt.mockImplementation(async () => {
-			// Abort happens mid-flight (abort handler fires, deletes session)
 			ac.abort();
-			const err = new Error('Session not found: sess-abort');
-			err.name = 'NotFoundError';
+			const err = new Error('The operation was aborted');
+			err.name = 'AbortError';
 			throw err;
 		});
 
-		// Signal is NOT pre-aborted; it aborts inside mockPrompt above.
 		const delegate = createCuratorLLMDelegate('/tmp/test')!;
 		await expect(delegate('SYS', 'input', ac.signal)).rejects.toThrow(
 			'CURATOR_LLM_TIMEOUT',
 		);
-		// session.create() and session.prompt() must both have been called
-		expect(mockCreate).toHaveBeenCalledTimes(1);
-		expect(mockPrompt).toHaveBeenCalledTimes(1);
+
+		// Fix C: signal must be forwarded to BOTH SDK calls (native cancellation).
+		expect(mockCreate).toHaveBeenCalledWith(
+			expect.objectContaining({ signal: ac.signal }),
+		);
+		expect(mockPrompt).toHaveBeenCalledWith(
+			expect.objectContaining({ signal: ac.signal }),
+		);
+	});
+
+	test('pre-aborted signal bails before any SDK call (CURATOR_LLM_TIMEOUT)', async () => {
+		// F-003: the early `if (signal?.aborted)` guard must short-circuit
+		// before session.create is invoked.
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
+			['curator_init'];
+
+		const ac = new AbortController();
+		ac.abort();
+
+		const delegate = createCuratorLLMDelegate('/tmp/test')!;
+		await expect(delegate('SYS', 'input', ac.signal)).rejects.toThrow(
+			'CURATOR_LLM_TIMEOUT',
+		);
+		expect(mockCreate).not.toHaveBeenCalled();
+	});
+
+	test('real prompt failure that coincides with an aborted signal is NOT mislabeled as timeout', async () => {
+		// cubic P2: only a genuine AbortError maps to the sentinel. A real
+		// failure must surface as itself even if the signal happens to be aborted.
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
+			['curator_init'];
+		mockCreate.mockResolvedValue({ data: { id: 'sess-realfail' } });
+
+		const ac = new AbortController();
+		mockPrompt.mockImplementation(async () => {
+			ac.abort(); // signal becomes aborted, but the error below is the real cause
+			throw new Error('UPSTREAM_500');
+		});
+
+		const delegate = createCuratorLLMDelegate('/tmp/test')!;
+		await expect(delegate('SYS', 'input', ac.signal)).rejects.toThrow(
+			'UPSTREAM_500',
+		);
+	});
+
+	// ─── Background session parenting (Fix A) ────────────────────────
+
+	test('forwards parentID + descriptive title when sessionId is provided', async () => {
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
+			['curator_init'];
+		mockCreate.mockResolvedValue({ data: { id: 'sess-parent' } });
+		mockPrompt.mockResolvedValue({
+			data: { info: {}, parts: [{ type: 'text', text: 'ok' }] },
+		});
+
+		const delegate = createCuratorLLMDelegate(
+			'/tmp/test',
+			'phase',
+			'parent-sess',
+		)!;
+		await delegate('SYS', 'input');
+
+		expect(mockCreate).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: {
+					parentID: 'parent-sess',
+					title: expect.stringContaining('background'),
+				},
+			}),
+		);
+	});
+
+	test('omits body (root session fallback) when no sessionId is provided', async () => {
+		(swarmState as { opencodeClient: unknown }).opencodeClient = mockClient;
+		(swarmState as { curatorInitAgentNames: string[] }).curatorInitAgentNames =
+			['curator_init'];
+		mockCreate.mockResolvedValue({ data: { id: 'sess-root' } });
+		mockPrompt.mockResolvedValue({
+			data: { info: {}, parts: [{ type: 'text', text: 'ok' }] },
+		});
+
+		const delegate = createCuratorLLMDelegate('/tmp/test', 'init')!;
+		await delegate('SYS', 'input');
+
+		const createArg = mockCreate.mock.calls[0][0] as { body?: unknown };
+		expect(createArg.body).toBeUndefined();
 	});
 
 	test('non-abort NotFoundError from prompt is re-thrown unchanged', async () => {

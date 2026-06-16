@@ -32,6 +32,7 @@ import type {
 	KnowledgeRetrievalContext,
 	MessageWithParts,
 } from './knowledge-types.js';
+import { extractModelInfo, resolveModelLimit } from './model-limits.js';
 import { searchKnowledge } from './search-knowledge.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
 
@@ -582,6 +583,7 @@ function injectKnowledgeMessage(
 export function createKnowledgeInjectorHook(
 	directory: string,
 	config: KnowledgeConfig,
+	modelLimitOverrides: Record<string, number> = {},
 ): (
 	input: Record<string, never>,
 	output: { messages?: MessageWithParts[] },
@@ -619,7 +621,13 @@ export function createKnowledgeInjectorHook(
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
 			const CHARS_PER_TOKEN = 1 / 0.33;
-			const MODEL_LIMIT_CHARS = Math.floor(128_000 * CHARS_PER_TOKEN); // ~387,878
+			const { modelID, providerID } = extractModelInfo(output.messages);
+			const modelLimitTokens = resolveModelLimit(
+				modelID,
+				providerID,
+				modelLimitOverrides,
+			);
+			const MODEL_LIMIT_CHARS = Math.floor(modelLimitTokens * CHARS_PER_TOKEN);
 			const existingChars = output.messages.reduce((sum, msg) => {
 				return (
 					sum + (msg.parts?.reduce((s, p) => s + (p.text?.length ?? 0), 0) ?? 0)

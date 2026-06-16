@@ -1,6 +1,6 @@
 /**
  * Macro-reflector trajectory clustering (Swarm Learning System, Change 6 /
- * Task 5.3).
+ * Task 5.3, extended by #1234 Part 4).
  *
  * On the skill-improver's scheduled (quota-gated) cadence, scan the last N task
  * trajectories (`.swarm/evidence/<taskId>/trajectory.jsonl`), cluster repeated
@@ -8,6 +8,10 @@
  * recurring motif to `.swarm/skills/proposals/`. Each proposal carries full
  * provenance: a draft SKILL.md body, the cluster of source task ids (and any
  * source knowledge ids), a verification predicate, and `applies_to_agents`.
+ *
+ * #1234 Part 4: also mines SUCCESS motifs — recurring multi-step tool sequences
+ * that completed successfully across multiple tasks — and emits them as
+ * `workflow`-type skill proposals tagged `skill_type: workflow`.
  *
  * Read-only over the knowledge store; writes only proposal markdown (never
  * active skills). Fail-open.
@@ -232,6 +236,227 @@ export async function writeMotifProposals(
 	} catch (err) {
 		warn(
 			`[trajectory-cluster] proposal write failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return result;
+	}
+}
+
+// ============================================================================
+// Success motif mining (#1234 Part 4)
+// ============================================================================
+
+/** Minimum number of steps in a trajectory for it to qualify as a workflow. */
+export const SUCCESS_SEQUENCE_MIN_STEPS = 3;
+
+export interface SuccessMotif {
+	signature: string;
+	sequence: Array<{ tool: string; action: string }>;
+	agent: string;
+	taskIds: string[];
+	gatesPassed: string[];
+}
+
+export interface SuccessMotifProposalResult {
+	motifs: number;
+	proposalsWritten: string[];
+}
+
+/**
+ * Extract the ordered tool sequence from a task's trajectory. Returns the
+ * sequence only if the trajectory has >= SUCCESS_SEQUENCE_MIN_STEPS steps AND
+ * every step's `result` is exactly `'success'`. Any non-`'success'` result
+ * disqualifies the whole trajectory — that includes `'failure'` and the
+ * `'pending'` bucket that trajectory-logger `mapResult` assigns to verdicts
+ * like `needs_revision`/`concerns`/`blocked`. The code does not distinguish
+ * among non-success values; they are all rejected, so non-successful patterns
+ * never contaminate success-motif proposals.
+ */
+function extractSuccessSequence(
+	trajectory: TrajectoryEntry[],
+	minSteps: number = SUCCESS_SEQUENCE_MIN_STEPS,
+): Array<{ tool: string; action: string }> | null {
+	if (trajectory.length < minSteps) return null;
+	if (trajectory.some((e) => e.result !== 'success')) return null;
+	return trajectory.map((e) => ({
+		tool: (e.tool ?? 'unknown').toLowerCase(),
+		action: (e.action ?? 'run').toLowerCase(),
+	}));
+}
+
+function sequenceSignature(
+	seq: Array<{ tool: string; action: string }>,
+): string {
+	return seq.map((s) => `${s.tool}:${s.action}`).join('→');
+}
+
+function detectGatesPassed(trajectory: TrajectoryEntry[]): string[] {
+	const gates = new Set<string>();
+	for (const e of trajectory) {
+		if (e.result !== 'success') continue;
+		const tool = (e.tool ?? '').toLowerCase();
+		const ctx = `${e.action ?? ''} ${e.verdict ?? ''}`.toLowerCase();
+		if (tool.includes('test') || /\btest\b/.test(ctx)) gates.add('test');
+		if (
+			tool.includes('lint') ||
+			tool.includes('sast') ||
+			/lint|typecheck|tsc/.test(ctx)
+		)
+			gates.add('lint');
+		if (/review|approve/.test(ctx)) gates.add('review');
+	}
+	return [...gates];
+}
+
+export async function gatherSuccessMotifs(
+	directory: string,
+	opts: { window?: number; minTasks?: number; minSteps?: number } = {},
+): Promise<SuccessMotif[]> {
+	const window = opts.window ?? MACRO_TRAJECTORY_WINDOW;
+	const minTasks = opts.minTasks ?? MOTIF_MIN_TASKS;
+	const minSteps = opts.minSteps ?? SUCCESS_SEQUENCE_MIN_STEPS;
+	try {
+		const allTaskIds = await listEvidenceTaskIds(directory);
+		const taskIds = allTaskIds.slice(-window);
+		const clusters = new Map<
+			string,
+			{
+				sequence: Array<{ tool: string; action: string }>;
+				agents: Map<string, number>;
+				taskIds: Set<string>;
+				gatesPassed: Set<string>;
+			}
+		>();
+
+		for (const taskId of taskIds) {
+			const trajectory = await readTaskTrajectory(directory, taskId);
+			const seq = extractSuccessSequence(trajectory, minSteps);
+			if (!seq) continue;
+			const sig = sequenceSignature(seq);
+			let c = clusters.get(sig);
+			if (!c) {
+				c = {
+					sequence: seq,
+					agents: new Map(),
+					taskIds: new Set(),
+					gatesPassed: new Set(),
+				};
+				clusters.set(sig, c);
+			}
+			c.taskIds.add(taskId);
+			const agent = (trajectory[0]?.agent ?? 'unknown').toLowerCase();
+			c.agents.set(agent, (c.agents.get(agent) ?? 0) + 1);
+			for (const g of detectGatesPassed(trajectory)) {
+				c.gatesPassed.add(g);
+			}
+		}
+
+		const motifs: SuccessMotif[] = [];
+		for (const [signature, c] of clusters) {
+			if (c.taskIds.size < minTasks) continue;
+			const agent =
+				[...c.agents.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+				'unknown';
+			motifs.push({
+				signature,
+				sequence: c.sequence,
+				agent,
+				taskIds: [...c.taskIds],
+				gatesPassed: [...c.gatesPassed],
+			});
+		}
+		motifs.sort((a, b) => b.taskIds.length - a.taskIds.length);
+		return motifs;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] success motif scan failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return [];
+	}
+}
+
+/**
+ * Deterministic slug for a success-motif workflow proposal. Single source of
+ * truth so the proposal frontmatter and the on-disk filename always agree.
+ */
+function workflowSlug(signature: string): string {
+	return `workflow-${slugify(signature.slice(0, 48))}`;
+}
+
+export function buildWorkflowProposal(motif: SuccessMotif): string {
+	const seqStr = motif.sequence.map((s) => s.tool).join(' → ');
+	const slug = workflowSlug(motif.signature);
+	const lines = [
+		'---',
+		`slug: ${slug}`,
+		`title: "Successful workflow: ${seqStr}"`,
+		`status: proposal`,
+		`skill_type: workflow`,
+		`applies_to_agents: [${slugify(motif.agent)}]`,
+		`source_task_ids: [${motif.taskIds.map(slugify).join(', ')}]`,
+		`generated_by: macro_reflector_success`,
+		`generated_at: ${new Date().toISOString()}`,
+		'---',
+		'',
+		`# Successful workflow pattern: ${seqStr}`,
+		'',
+		`Observed across ${motif.taskIds.length} task(s) for the **${motif.agent}** role. All steps completed successfully.`,
+		'',
+		'## Workflow sequence',
+		...motif.sequence.map((s, i) => `${i + 1}. \`${s.tool}\` (${s.action})`),
+		'',
+		'## Gates passed',
+		...(motif.gatesPassed.length > 0
+			? motif.gatesPassed.map((g) => `- ${g}`)
+			: ['- (no explicit gate steps detected)']),
+		'',
+		'## Evidence (source trajectories)',
+		...motif.taskIds.map((id) => `- ${id}`),
+		'',
+		'## Recommended usage',
+		`When starting a task matching this pattern, the ${motif.agent} should follow this proven sequence rather than re-deriving the approach.`,
+		'',
+		'_Auto-generated workflow proposal — review before activating as a skill._',
+	];
+	return lines.join('\n');
+}
+
+export async function writeSuccessMotifProposals(
+	directory: string,
+	opts: {
+		window?: number;
+		minTasks?: number;
+		minSteps?: number;
+		maxProposals?: number;
+	} = {},
+): Promise<SuccessMotifProposalResult> {
+	const result: SuccessMotifProposalResult = {
+		motifs: 0,
+		proposalsWritten: [],
+	};
+	try {
+		const motifs = await gatherSuccessMotifs(directory, opts);
+		result.motifs = motifs.length;
+		if (motifs.length === 0) return result;
+		const max = opts.maxProposals ?? 10;
+		const proposalsDir = validateSwarmPath(
+			directory,
+			path.join('skills', 'proposals'),
+		);
+		await mkdir(proposalsDir, { recursive: true });
+		for (const motif of motifs.slice(0, max)) {
+			const slug = workflowSlug(motif.signature);
+			const filePath = path.join(proposalsDir, `${slug}.md`);
+			await writeFile(filePath, buildWorkflowProposal(motif), 'utf-8');
+			result.proposalsWritten.push(filePath);
+		}
+		return result;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] success proposal write failed (non-fatal): ${
 				err instanceof Error ? err.message : String(err)
 			}`,
 		);

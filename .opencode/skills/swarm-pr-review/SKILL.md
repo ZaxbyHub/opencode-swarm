@@ -238,6 +238,75 @@ When the PR has merge conflicts:
 - ✗ Pushing resolution without running tests on the merged result
 - ✗ Reviewing a conflicted PR without resolving first — review effort is wasted if the merge changes the code
 
+## Phase 0B-bis: Pre-Fix Parallel Work Check
+
+When the review surfaces findings that need fixes, and before dispatching
+coder for fix work, re-check for **parallel work** since the last fetch. The PR
+author, the bot reviewer, or another swarm may have pushed commits while you
+were reviewing.
+
+### Step 1 — Refetch and compare
+
+```bash
+git fetch origin <pr-branch>
+git log HEAD..origin/<pr-branch> --oneline
+```
+
+### Step 2 — Evaluate new commits
+
+For each new commit on the remote:
+
+1. **Read the commit message and diff.** Use `git show <commit> --stat` to see
+   file scope, then `git show <commit> -- <file>` to see the actual changes.
+2. **Compare against your planned fixes:**
+   - Does the remote commit touch the same files your coder delegation is about to
+     modify?
+   - Does the remote commit apply a different approach to the same finding?
+   - Does the remote commit include more comprehensive fixes (more tests, better
+     edge coverage, cleaner error handling)?
+3. **Default stance: prefer the parallel work if it supersedes your plan.** Run
+   the [`parallel-work-check`](../generated/parallel-work-check/SKILL.md)
+   protocol for the formal decision template.
+
+### Step 3 — Three outcomes
+
+- **Parallel work supersedes:** Abort your rebase. First verify the working tree
+  is clean (`git status --porcelain`); stash or discard any uncommitted changes
+  before proceeding. Then `git reset --hard origin/<pr-branch>` to take the
+  remote state, then re-verify that all your findings are addressed. If the
+  remote missed any, add minor improvements on top. Do NOT waste effort redoing
+  work the parallel agent already did better.
+- **Parallel work complements:** Cherry-pick or merge the remote commits into
+  your local branch, then continue with your fix.
+- **Parallel work unrelated:** Continue with your planned fix.
+
+### Anti-patterns
+
+- ✗ Pushing your fix without checking if the remote already fixed it — causes
+  duplicate work and may even fail the push if the commits conflict
+- ✗ Force-pushing over parallel work because "I started this first" — the
+  parallel agent may have access to context you don't (different swarm
+  configuration, different model, different time budget)
+- ✗ Blindly taking remote work without verifying it's actually better — the
+  parallel work may be incomplete or take a different approach that doesn't
+  match the original finding's intent
+
+### Example: parallel swarm superseded local fix work
+
+```
+PARALLEL WORK CHECK (pre-fix):
+- Branch: copilot/fix-legacy-hive-data-migration
+- Local HEAD: 3c04997c fix: resolve PR #1238 review findings
+- Remote HEAD: 79d7ec64 fix(knowledge-migrator): harden legacy migration loop
+- Diverged: yes (remote is 2 commits ahead with more comprehensive fix)
+- New commits on remote: 2
+- Parallel swarm work detected: yes (different author)
+- Decision: abandon-use-remote
+- Rationale: Remote added 17 unit tests + try/catch error handling that
+  surpassed my planned batch-rewrite. Verified by re-running the test suite:
+  remote has 25/25 passing, my local plan would have produced 9/9.
+```
+
 ---
 
 # Default Review Workflow
@@ -399,14 +468,11 @@ Tool candidate rules:
 
 ## Phase 3: Parallel Base Explorer Lanes
 
-Launch all base lanes in parallel in a single message with multiple Agent tool calls when the environment supports it (`run_in_background: true`). Use `Explore` subagents for exploration.
+Launch all base lanes with the `dispatch_lanes` tool in one call. Pass the six lane specs together, set `max_concurrent` to `6`, and treat the returned `lane_results` as the join barrier before synthesis. Use read-only explorer/reviewer-style agents; do not rely on model-emitted background Agent calls or native background flags for base-lane parallelism.
 
-If the Agent tool is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane.
+If `dispatch_lanes` is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record that deterministic dispatch was unavailable in the validation gate.
 
-**task_id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, apply these rules:
-- For Agent tools that require caller-supplied `task_id` values, every parallel explorer lane invocation and retry MUST use a unique ID across the review session, including lane and attempt suffix (e.g. `pr_review_explore_lane1_attempt2`). Never reuse a prior `task_id` unless intentionally resuming that exact lane.
-- If the runtime auto-generates `task_id` values (resume mode), omit the `task_id` parameter rather than fabricating one.
-- Do not use the same `task_id` across concurrent lane dispatches — schema validation rejects duplicate `task_id` values.
+**lane id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, every `dispatch_lanes` lane `id` MUST be unique within that dispatch batch and should include lane and attempt suffixes (e.g. `pr_review_explore_lane1_attempt2`). Never reuse an id in the same batch unless intentionally replacing that exact lane before dispatch.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
@@ -444,7 +510,7 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After base lanes start, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only. Do not launch irrelevant micro-lanes.
+After `dispatch_lanes` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes` again when more than one read-only micro-lane is needed. Do not launch irrelevant micro-lanes.
 
 Each micro-lane receives:
 
@@ -727,7 +793,7 @@ Council mode is opt-in only and adversarial.
 When triggered:
 
 1. Build the same context pack as default mode.
-2. Launch all council agents in a single message with multiple Agent tool calls when supported (`run_in_background: true`).
+2. Launch all council agents with one `dispatch_lanes` call when available; use the returned `lane_results` as the join barrier before reviewer classification.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
 5. Agents return evidence states only: `EVIDENCE_FOUND`, `SUSPICIOUS`, or `CLEAN`.
@@ -803,6 +869,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] obligation count: ___
 [VALIDATION] repo graph / impact cone source: ___
 [VALIDATION] deterministic signals ingested: ___
+[VALIDATION] deterministic lane dispatcher used: YES/NO — ___
 [VALIDATION] base explorer lanes dispatched: ___ / 6
 [VALIDATION] base explorer lanes returned: ___ / 6
 [VALIDATION] triggered micro-lanes: ___

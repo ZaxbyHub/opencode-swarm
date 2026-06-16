@@ -19,6 +19,7 @@ import {
 	upsertNode,
 } from './builder';
 import { getCachedMtime } from './cache';
+import { resetQueryCache } from './query';
 import { getGraphPath, loadGraph, saveGraph } from './storage';
 import type { RepoGraph } from './types';
 import { normalizeGraphPath, updateGraphMetadata } from './types';
@@ -158,6 +159,7 @@ export async function updateGraphForFiles(
 
 	// Update metadata and save
 	updateGraphMetadata(graph);
+	resetQueryCache();
 	await saveGraph(workspaceRoot, graph);
 
 	return graph;

@@ -14,6 +14,16 @@ Codex-specific execution notes:
 - Use `update_plan` for visible task tracking on substantial work.
 - Add independent review pressure through `$qa-sweep`, `$swarm-pr-review`, or self-critic checks when subagents are unavailable.
 - Keep the user looped in with short progress updates during longer work.
+- For any task that edits code, tests, docs, package metadata, release notes, or skill files, final completion requires:
+  1. objective validation evidence,
+  2. independent implementation reviewer approval on the actual latest diff,
+  3. separate critic approval after reviewer approval,
+  4. no unresolved `NEEDS_REVISION`/`BLOCKED` items, and
+  5. no edits after those approvals.
+- Record reviewer and critic verdicts in durable task artifacts. For issue-tracer
+  work, use `08b-implementation-review.md` and `09-final-critic.md`; otherwise
+  use task-local review artifacts unless the repo forbids artifacts.
+- Explorer subagents, a plan critic, passing tests, or self-review do not satisfy the final implementation-review gate when subagent delegation is available and swarm work is authorized.
 
 For implementation tasks, prefer `$swarm-implement`; for fresh PR review, prefer
 `$swarm-pr-review`; for known PR feedback closure, prefer

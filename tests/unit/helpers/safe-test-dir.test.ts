@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	createSafeTestDir,
+	safeRmRecursive,
 	withSafeTestDir,
 } from '../../helpers/safe-test-dir';
 
@@ -83,6 +84,48 @@ describe('createSafeTestDir', () => {
 			cleanup();
 		}
 	});
+});
+
+describe('safeRmRecursive', () => {
+	it('removes nested paths under os.tmpdir()', () => {
+		const { dir, cleanup } = createSafeTestDir('safe-rm-');
+		const nested = path.join(dir, 'nested');
+		fs.mkdirSync(nested, { recursive: true });
+		fs.writeFileSync(path.join(nested, 'file.txt'), 'data');
+
+		safeRmRecursive(nested);
+		expect(fs.existsSync(nested)).toBe(false);
+		cleanup();
+	});
+
+	it('rejects empty paths before recursive removal', () => {
+		expect(() => safeRmRecursive('')).toThrow('non-empty string');
+	});
+
+	it('rejects paths outside os.tmpdir()', () => {
+		const outside = path.parse(os.tmpdir()).root;
+		expect(() => safeRmRecursive(outside)).toThrow('not under os.tmpdir');
+	});
+
+	it.skipIf(process.platform === 'win32')(
+		'rejects symlinks inside os.tmpdir() that resolve outside os.tmpdir()',
+		() => {
+			// Windows directory symlinks are junction-like and require different
+			// privileges/semantics; non-Windows CI exercises the symlink escape path,
+			// while the helper still uses realpath containment on every platform.
+			const { dir, cleanup } = createSafeTestDir('safe-rm-symlink-');
+			const linkPath = path.join(dir, 'outside-link');
+			fs.symlinkSync(process.cwd(), linkPath, 'dir');
+
+			try {
+				expect(() => safeRmRecursive(linkPath)).toThrow('escapes os.tmpdir');
+				expect(fs.existsSync(process.cwd())).toBe(true);
+				expect(fs.existsSync(linkPath)).toBe(true);
+			} finally {
+				cleanup();
+			}
+		},
+	);
 });
 
 describe('withSafeTestDir', () => {

@@ -427,17 +427,49 @@ describe('scanUnsafeInstructions — pattern detection', () => {
 		);
 	});
 
-	it('detects backtick execution in skill_body → fail', () => {
+	it('ignores inline code spans in skill_body unsafe-instruction scanning', () => {
 		const result = scanUnsafeInstructions(
 			makeCandidate({ skill_body: 'execute `whoami` to check identity' }),
+		);
+		expect(result.verdict).toBe('pass');
+		expect(result.findings).not.toContainEqual(
+			expect.objectContaining({
+				pattern: 'backtick_execution',
+			}),
+		);
+	});
+
+	it('detects backtick execution in metadata fields → fail for low trust', () => {
+		const result = scanUnsafeInstructions(
+			makeCandidate({
+				skill_description: 'execute `whoami` to check identity',
+			}),
 		);
 		expect(result.verdict).toBe('fail');
 		expect(result.findings).toContainEqual(
 			expect.objectContaining({
 				pattern: 'backtick_execution',
 				severity: 'error',
+				field: 'skill_description',
 			}),
 		);
+	});
+
+	it('allows markdown code fences in medium-trust skill bodies', () => {
+		const result = scanUnsafeInstructions(
+			makeCandidate({
+				skill_body: [
+					'Use the formatter before committing.',
+					'```sh',
+					'rm -rf /tmp/example',
+					'```',
+					'Run `bun format` after editing TypeScript files.',
+				].join('\n'),
+			}),
+			'medium',
+		);
+		expect(result.verdict).toBe('pass');
+		expect(result.findings).toEqual([]);
 	});
 
 	it('detects shell command substitution $() in skill_body → fail', () => {
@@ -449,6 +481,20 @@ describe('scanUnsafeInstructions — pattern detection', () => {
 			expect.objectContaining({
 				pattern: 'shell_substitution',
 				severity: 'error',
+			}),
+		);
+	});
+
+	it('warns for shell command substitution in medium-trust prose', () => {
+		const result = scanUnsafeInstructions(
+			makeCandidate({ skill_body: 'run $(cat /etc/hostname) for info' }),
+			'medium',
+		);
+		expect(result.verdict).toBe('warn');
+		expect(result.findings).toContainEqual(
+			expect.objectContaining({
+				pattern: 'shell_substitution',
+				severity: 'warning',
 			}),
 		);
 	});

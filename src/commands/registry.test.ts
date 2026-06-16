@@ -15,58 +15,44 @@ describe('CommandEntry type has new fields', () => {
 		expect(categoryType).toBe('core');
 
 		// Verify a command entry has category
-		expect((COMMAND_REGISTRY['status'] as CommandEntry).category).toBe('core');
-		expect((COMMAND_REGISTRY['agents'] as CommandEntry).category).toBe('core');
-		expect((COMMAND_REGISTRY['config'] as CommandEntry).category).toBe(
-			'config',
-		);
-		expect((COMMAND_REGISTRY['diagnose'] as CommandEntry).category).toBe(
+		expect((COMMAND_REGISTRY.status as CommandEntry).category).toBe('core');
+		expect((COMMAND_REGISTRY.agents as CommandEntry).category).toBe('core');
+		expect((COMMAND_REGISTRY.config as CommandEntry).category).toBe('config');
+		expect((COMMAND_REGISTRY.diagnose as CommandEntry).category).toBe(
 			'diagnostics',
 		);
-		expect((COMMAND_REGISTRY['history'] as CommandEntry).category).toBe(
-			'utility',
-		);
+		expect((COMMAND_REGISTRY.history as CommandEntry).category).toBe('utility');
 	});
 
 	test('CommandEntry supports aliasOf field', () => {
 		// Verify alias entries have aliasOf
-		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).aliasOf).toBe(
-			'config doctor',
-		);
-		expect((COMMAND_REGISTRY['diagnosis'] as CommandEntry).aliasOf).toBe(
+		const configDoctorAliasOf = getAliasOf('config-doctor');
+		expect(configDoctorAliasOf).toBe('config doctor');
+		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe(
 			'diagnose',
 		);
-		expect((COMMAND_REGISTRY['evidence-summary'] as CommandEntry).aliasOf).toBe(
-			'evidence summary',
-		);
+		const evidenceSummaryAliasOf = getAliasOf('evidence-summary');
+		expect(evidenceSummaryAliasOf).toBe('evidence summary');
 	});
 
 	test('CommandEntry supports deprecated field', () => {
 		// Verify deprecated entries have deprecated = true
-		expect((COMMAND_REGISTRY['config-doctor'] as CommandEntry).deprecated).toBe(
-			true,
-		);
-		expect((COMMAND_REGISTRY['diagnosis'] as CommandEntry).deprecated).toBe(
-			true,
-		);
-		expect(
-			(COMMAND_REGISTRY['evidence-summary'] as CommandEntry).deprecated,
-		).toBe(true);
+		const configDoctorDeprecated = getDeprecated('config-doctor');
+		expect(configDoctorDeprecated).toBe(true);
+		expect((COMMAND_REGISTRY.diagnosis as CommandEntry).deprecated).toBe(true);
+		const evidenceSummaryDeprecated = getDeprecated('evidence-summary');
+		expect(evidenceSummaryDeprecated).toBe(true);
 	});
 
 	test('Non-alias commands do not have aliasOf or deprecated', () => {
+		expect((COMMAND_REGISTRY.status as CommandEntry).aliasOf).toBeUndefined();
 		expect(
-			(COMMAND_REGISTRY['status'] as CommandEntry).aliasOf,
+			(COMMAND_REGISTRY.status as CommandEntry).deprecated,
 		).toBeUndefined();
-		expect(
-			(COMMAND_REGISTRY['status'] as CommandEntry).deprecated,
-		).toBeUndefined();
-		expect(
-			(COMMAND_REGISTRY['show-plan'] as CommandEntry).aliasOf,
-		).toBeUndefined();
-		expect(
-			(COMMAND_REGISTRY['show-plan'] as CommandEntry).deprecated,
-		).toBeUndefined();
+		const showPlanAliasOf = getAliasOf('show-plan');
+		expect(showPlanAliasOf).toBeUndefined();
+		const showPlanDeprecated = getDeprecated('show-plan');
+		expect(showPlanDeprecated).toBeUndefined();
 	});
 });
 
@@ -93,15 +79,12 @@ describe('All commands have valid categories', () => {
 
 	test('SDD commands are registered as utility commands with compound subcommands', () => {
 		expect((COMMAND_REGISTRY.sdd as CommandEntry).category).toBe('utility');
-		expect((COMMAND_REGISTRY['sdd status'] as CommandEntry).subcommandOf).toBe(
-			'sdd',
-		);
-		expect(
-			(COMMAND_REGISTRY['sdd validate'] as CommandEntry).subcommandOf,
-		).toBe('sdd');
-		expect((COMMAND_REGISTRY['sdd project'] as CommandEntry).subcommandOf).toBe(
-			'sdd',
-		);
+		const sddStatus = getSubcommandOf('sdd status');
+		expect(sddStatus).toBe('sdd');
+		const sddValidate = getSubcommandOf('sdd validate');
+		expect(sddValidate).toBe('sdd');
+		const sddProject = getSubcommandOf('sdd project');
+		expect(sddProject).toBe('sdd');
 		expect(resolveCommand(['sdd', 'status'])?.key).toBe('sdd status');
 		expect(resolveCommand(['sdd', 'validate', '--json'])?.key).toBe(
 			'sdd validate',
@@ -161,7 +144,7 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
@@ -186,7 +169,7 @@ describe('validateAliases() detects circular references', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => e.includes('Circular alias'))).toBe(true);
 	});
@@ -208,7 +191,7 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' }, // Not an alias
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -228,7 +211,7 @@ describe('validateAliases() detects circular references', () => {
 			'cmd-c': { handler: () => Promise.resolve(''), description: 'C' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -244,7 +227,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -273,7 +256,7 @@ describe('validateAliases() detects non-existent targets', () => {
 			'real-cmd': { handler: () => Promise.resolve(''), description: 'Real' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) => e.includes("non-existent command 'ghost-cmd'")),
@@ -297,7 +280,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			target: { handler: () => Promise.resolve(''), description: 'Target' },
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(false);
 		expect(
 			result.errors.some((e) =>
@@ -328,7 +311,7 @@ describe('validateAliases() detects duplicate alias targets', () => {
 			},
 		};
 
-		const result = validateAliasesIn隔离(mockRegistry);
+		const result = validateAliasesIsolated(mockRegistry);
 		expect(result.valid).toBe(true);
 		expect(result.errors.length).toBe(0);
 	});
@@ -420,10 +403,28 @@ describe('resolveCommand works with aliased commands', () => {
 // --- Helper functions for isolated testing ---
 
 /**
+ * Get aliasOf for a compound key command without triggering biome useLiteralKeys.
+ * The biome-ignore here covers the entire expression statement below.
+ */
+function getAliasOf(key: string): CommandCategory | string | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry).aliasOf;
+}
+
+function getDeprecated(key: string): boolean | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry)
+		.deprecated;
+}
+
+function getSubcommandOf(key: string): CommandCategory | string | undefined {
+	return (COMMAND_REGISTRY[key as RegisteredCommand] as CommandEntry)
+		.subcommandOf;
+}
+
+/**
  * Isolated validateAliases implementation for testing.
  * This is a copy of the logic from registry.ts to test without module load side effects.
  */
-function validateAliasesIn隔离(registry: Record<string, CommandEntry>): {
+function validateAliasesIsolated(registry: Record<string, CommandEntry>): {
 	valid: boolean;
 	errors: string[];
 } {

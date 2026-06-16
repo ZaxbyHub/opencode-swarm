@@ -77,8 +77,12 @@ export interface PhaseReviewerResult {
  * Uses the `{swarmId}_reviewer` pattern for named swarms and bare `reviewer`
  * for the default swarm. Follows the same suffix-based resolution used by
  * `getCanonicalAgentRole` so that arbitrary swarm prefixes are handled correctly.
+ *
+ * Exported for reuse by the auto-review hook (src/hooks/auto-review.ts).
  */
-function resolveDefaultReviewerAgent(generatedAgentNames: string[]): string {
+export function resolveDefaultReviewerAgent(
+	generatedAgentNames: string[],
+): string {
 	if (generatedAgentNames.length === 0) {
 		return 'reviewer';
 	}
@@ -355,6 +359,7 @@ async function defaultDispatchReviewerAgent(
 	reviewPackage: ReviewPackage,
 	agentName: string,
 	timeoutMs: number,
+	parentSessionId?: string,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -363,6 +368,14 @@ async function defaultDispatchReviewerAgent(
 
 	// Create an ephemeral session for the reviewer
 	const sessionResult = await client.session.create({
+		...(parentSessionId
+			? {
+					body: {
+						parentID: parentSessionId,
+						title: 'lean_turbo_reviewer background',
+					},
+				}
+			: {}),
 		query: { directory },
 	});
 
@@ -476,6 +489,7 @@ export const _internals: {
 		pkg: ReviewPackage,
 		agentName: string,
 		timeoutMs: number,
+		parentSessionId?: string,
 	) => Promise<string>;
 	resolveDefaultReviewerAgent: typeof resolveDefaultReviewerAgent;
 	listLaneEvidence: typeof listLaneEvidence;
@@ -546,6 +560,7 @@ export async function dispatchPhaseReviewer(
 			pkg,
 			agentName,
 			mergedConfig.timeoutMs,
+			sessionID,
 		);
 	} catch (error) {
 		// Fail-closed: dispatch failure → write REJECTED verdict

@@ -5,16 +5,20 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { handleFullAutoCommand } from '../commands/full-auto';
+import { loadFullAutoRunState } from '../full-auto/state';
 import { getAgentSession, swarmState } from '../state';
 
 describe('handleFullAutoCommand', () => {
 	let testSessionId: string;
+	let tmpDir: string;
 
 	beforeEach(() => {
 		testSessionId = `full-auto-test-${Date.now()}`;
-		// Enable config-level full-auto so command activation succeeds
-		swarmState.fullAutoEnabledInConfig = true;
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-cmd-'));
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
 			lastToolCallTime: Date.now(),
@@ -65,6 +69,11 @@ describe('handleFullAutoCommand', () => {
 
 	afterEach(() => {
 		swarmState.agentSessions.delete(testSessionId);
+		try {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
 	});
 
 	function getSession() {
@@ -76,7 +85,7 @@ describe('handleFullAutoCommand', () => {
 	describe('Error Path - No Active Session', () => {
 		it('returns error message when no session exists', async () => {
 			const result = await handleFullAutoCommand(
-				'/project',
+				tmpDir,
 				[],
 				'non-existent-session',
 			);
@@ -88,22 +97,14 @@ describe('handleFullAutoCommand', () => {
 
 	describe('Happy Path - Enable Full-Auto Mode', () => {
 		it('enables full-auto mode when arg is "on"', async () => {
-			const result = await handleFullAutoCommand(
-				'/project',
-				['on'],
-				testSessionId,
-			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getSession().fullAutoMode).toBe(true);
 		});
 
 		it('enables full-auto mode when arg is "ON" (case insensitive)', async () => {
-			const result = await handleFullAutoCommand(
-				'/project',
-				['ON'],
-				testSessionId,
-			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, ['ON'], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getSession().fullAutoMode).toBe(true);
 		});
 	});
@@ -112,22 +113,22 @@ describe('handleFullAutoCommand', () => {
 		it('disables full-auto mode when arg is "off"', async () => {
 			getSession().fullAutoMode = true;
 			const result = await handleFullAutoCommand(
-				'/project',
+				tmpDir,
 				['off'],
 				testSessionId,
 			);
-			expect(result).toBe('Full-Auto Mode disabled');
+			expect(result).toContain('Full-Auto Mode disabled');
 			expect(getSession().fullAutoMode).toBe(false);
 		});
 
 		it('disables full-auto mode when arg is "OFF" (case insensitive)', async () => {
 			getSession().fullAutoMode = true;
 			const result = await handleFullAutoCommand(
-				'/project',
+				tmpDir,
 				['OFF'],
 				testSessionId,
 			);
-			expect(result).toBe('Full-Auto Mode disabled');
+			expect(result).toContain('Full-Auto Mode disabled');
 			expect(getSession().fullAutoMode).toBe(false);
 		});
 	});
@@ -135,50 +136,47 @@ describe('handleFullAutoCommand', () => {
 	describe('Happy Path - Toggle Behavior', () => {
 		it('toggles full-auto mode from off to on when no argument provided', async () => {
 			getSession().fullAutoMode = false;
-			const result = await handleFullAutoCommand('/project', [], testSessionId);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, [], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getSession().fullAutoMode).toBe(true);
 		});
 
 		it('toggles full-auto mode from on to off when no argument provided', async () => {
 			getSession().fullAutoMode = true;
-			const result = await handleFullAutoCommand('/project', [], testSessionId);
-			expect(result).toBe('Full-Auto Mode disabled');
+			const result = await handleFullAutoCommand(tmpDir, [], testSessionId);
+			expect(result).toContain('Full-Auto Mode disabled');
 			expect(getSession().fullAutoMode).toBe(false);
 		});
 
 		it('toggles full-auto mode when arg is empty string', async () => {
 			getSession().fullAutoMode = false;
-			const result = await handleFullAutoCommand(
-				'/project',
-				[''],
-				testSessionId,
-			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, [''], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getSession().fullAutoMode).toBe(true);
 		});
 	});
 
 	describe('Edge Cases', () => {
-		it('ignores extra arguments and uses only the first one', async () => {
+		it('rejects an invalid mode token after "on"', async () => {
 			getSession().fullAutoMode = false;
 			const result = await handleFullAutoCommand(
-				'/project',
+				tmpDir,
 				['on', 'extra', 'ignored'],
 				testSessionId,
 			);
-			expect(result).toBe('Full-Auto Mode enabled');
-			expect(getSession().fullAutoMode).toBe(true);
+			expect(result).toContain('invalid Full-Auto mode');
+			expect(result).toContain('assisted, supervised, strict');
+			expect(getSession().fullAutoMode).toBe(false);
 		});
 
 		it('treats unknown arguments as toggle', async () => {
 			getSession().fullAutoMode = false;
 			const result = await handleFullAutoCommand(
-				'/project',
+				tmpDir,
 				['invalid'],
 				testSessionId,
 			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			expect(result).toContain('Full-Auto Mode enabled');
 			expect(getSession().fullAutoMode).toBe(true);
 		});
 
@@ -189,7 +187,7 @@ describe('handleFullAutoCommand', () => {
 			const originalLastToolCallTime = session.lastToolCallTime;
 			const originalTurboMode = session.turboMode;
 
-			await handleFullAutoCommand('/project', ['on'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
 
 			expect(session.agentName).toBe(originalAgentName);
 			expect(session.delegationActive).toBe(originalDelegationActive);
@@ -202,22 +200,133 @@ describe('handleFullAutoCommand', () => {
 		it('persists fullAutoMode change across multiple calls', async () => {
 			expect(getSession().fullAutoMode).toBe(false);
 
-			await handleFullAutoCommand('/project', [], testSessionId);
+			await handleFullAutoCommand(tmpDir, [], testSessionId);
 			expect(getSession().fullAutoMode).toBe(true);
 
-			await handleFullAutoCommand('/project', [], testSessionId);
+			await handleFullAutoCommand(tmpDir, [], testSessionId);
 			expect(getSession().fullAutoMode).toBe(false);
 		});
 
 		it('maintains state after multiple enable/disable calls', async () => {
-			await handleFullAutoCommand('/project', ['on'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
 			expect(getSession().fullAutoMode).toBe(true);
 
-			await handleFullAutoCommand('/project', ['off'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['off'], testSessionId);
 			expect(getSession().fullAutoMode).toBe(false);
 
-			await handleFullAutoCommand('/project', ['on'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
 			expect(getSession().fullAutoMode).toBe(true);
+		});
+	});
+
+	describe('First-class mode argument', () => {
+		it('activates with an explicit strict mode and persists it to the durable run state', async () => {
+			const result = await handleFullAutoCommand(
+				tmpDir,
+				['on', 'strict'],
+				testSessionId,
+			);
+			expect(result).toContain('Full-Auto Mode enabled');
+			expect(result).toContain('mode=strict');
+			expect(getSession().fullAutoMode).toBe(true);
+			const runState = loadFullAutoRunState(tmpDir, testSessionId);
+			expect(runState?.status).toBe('running');
+			expect(runState?.mode).toBe('strict');
+		});
+
+		it('activates with assisted mode (case insensitive)', async () => {
+			const result = await handleFullAutoCommand(
+				tmpDir,
+				['on', 'ASSISTED'],
+				testSessionId,
+			);
+			expect(result).toContain('mode=assisted');
+			expect(loadFullAutoRunState(tmpDir, testSessionId)?.mode).toBe(
+				'assisted',
+			);
+		});
+
+		it('defaults to supervised when no mode is given', async () => {
+			const result = await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
+			expect(result).toContain('mode=supervised');
+			expect(loadFullAutoRunState(tmpDir, testSessionId)?.mode).toBe(
+				'supervised',
+			);
+		});
+	});
+
+	describe('Status subcommand', () => {
+		it('reports no durable run when full-auto was never activated', async () => {
+			const result = await handleFullAutoCommand(
+				tmpDir,
+				['status'],
+				testSessionId,
+			);
+			expect(result).toContain('Full-Auto session flag: off');
+			expect(result).toContain('Durable run-state: none');
+		});
+
+		it('reports a running durable run after activation, and idle (disarmed) after off', async () => {
+			await handleFullAutoCommand(tmpDir, ['on', 'strict'], testSessionId);
+			const running = await handleFullAutoCommand(
+				tmpDir,
+				['status'],
+				testSessionId,
+			);
+			expect(running).toContain('Full-Auto session flag: on');
+			expect(running).toContain('Durable run-state: running (mode=strict)');
+
+			await handleFullAutoCommand(tmpDir, ['off'], testSessionId);
+			const disarmed = await handleFullAutoCommand(
+				tmpDir,
+				['status'],
+				testSessionId,
+			);
+			expect(disarmed).toContain('Full-Auto session flag: off');
+			expect(disarmed).toContain('Durable run-state: idle');
+		});
+
+		it('status is read-only — it does not flip the session flag', async () => {
+			getSession().fullAutoMode = false;
+			await handleFullAutoCommand(tmpDir, ['status'], testSessionId);
+			expect(getSession().fullAutoMode).toBe(false);
+		});
+
+		it('regression F4: status reports an UNREADABLE state file instead of "none"', async () => {
+			// Previous behavior: loadFullAutoRunState swallowed corruption and
+			// status printed "none" while the permission hook was blocking every
+			// non-read-only tool project-wide with FULL_AUTO_STATE_UNREADABLE.
+			fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, '.swarm', 'full-auto-state.json'),
+				'{ this is not json',
+				'utf-8',
+			);
+			const result = await handleFullAutoCommand(
+				tmpDir,
+				['status'],
+				testSessionId,
+			);
+			expect(result).toContain('UNREADABLE');
+			expect(result).not.toContain('Durable run-state: none');
+		});
+	});
+
+	describe('Bare mode token (regression F10)', () => {
+		it('treats `/swarm full-auto strict` as `on strict`, never as a toggle-off', async () => {
+			// Previous behavior: a bare mode token hit the toggle branch, so a
+			// user trying to switch modes while ON would silently turn Full-Auto
+			// OFF instead.
+			getSession().fullAutoMode = true;
+			const result = await handleFullAutoCommand(
+				tmpDir,
+				['strict'],
+				testSessionId,
+			);
+			expect(result).toContain('Full-Auto Mode enabled');
+			expect(result).toContain('mode=strict');
+			expect(getSession().fullAutoMode).toBe(true);
+			expect(loadFullAutoRunState(tmpDir, testSessionId)?.mode).toBe('strict');
 		});
 	});
 
@@ -229,7 +338,7 @@ describe('handleFullAutoCommand', () => {
 			session.fullAutoDeadlockCount = 2;
 			session.fullAutoLastQuestionHash = 'abc123hash';
 
-			await handleFullAutoCommand('/project', ['off'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['off'], testSessionId);
 
 			expect(session.fullAutoInteractionCount).toBe(0);
 			expect(session.fullAutoDeadlockCount).toBe(0);
@@ -243,7 +352,7 @@ describe('handleFullAutoCommand', () => {
 			session.fullAutoDeadlockCount = 1;
 			session.fullAutoLastQuestionHash = 'hashxyz';
 
-			await handleFullAutoCommand('/project', [], testSessionId);
+			await handleFullAutoCommand(tmpDir, [], testSessionId);
 
 			expect(session.fullAutoMode).toBe(false);
 			expect(session.fullAutoInteractionCount).toBe(0);
@@ -259,7 +368,7 @@ describe('handleFullAutoCommand', () => {
 			session.fullAutoDeadlockCount = 1;
 			session.fullAutoLastQuestionHash = 'stale-hash';
 
-			await handleFullAutoCommand('/project', ['on'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
 
 			expect(session.fullAutoMode).toBe(true);
 			// Counters are preserved — only reset on disable
@@ -275,7 +384,7 @@ describe('handleFullAutoCommand', () => {
 			session.fullAutoDeadlockCount = 0;
 			session.fullAutoLastQuestionHash = 'some-hash';
 
-			await handleFullAutoCommand('/project', [], testSessionId);
+			await handleFullAutoCommand(tmpDir, [], testSessionId);
 
 			expect(session.fullAutoMode).toBe(true);
 			expect(session.fullAutoInteractionCount).toBe(4);
@@ -291,7 +400,7 @@ describe('handleFullAutoCommand', () => {
 			session.fullAutoLastQuestionHash = 'orphan-hash';
 
 			// Calling off on already-disabled session still resets counters
-			await handleFullAutoCommand('/project', ['off'], testSessionId);
+			await handleFullAutoCommand(tmpDir, ['off'], testSessionId);
 
 			expect(session.fullAutoMode).toBe(false);
 			expect(session.fullAutoInteractionCount).toBe(0);

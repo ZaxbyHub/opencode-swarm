@@ -32,6 +32,7 @@ import { createSwarmTool } from './create-tool.js';
 
 const MODES = ['archive', 'quarantine', 'purge'] as const;
 type ArchiveMode = (typeof MODES)[number];
+
 const TIERS = ['swarm', 'hive'] as const;
 type ArchiveTier = (typeof TIERS)[number];
 
@@ -118,6 +119,9 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 						previousStatus = target.status;
 
 						if (mode === 'purge') {
+							// Defense-in-depth: hard-delete is irreversible. Emit a prominent
+							// warning even though allow_purge:true was already required. The
+							// archived event below is the audit trail.
 							warn(
 								`[knowledge_archive] PURGE: hard-deleting ${tier} entry id=${id} actor=${
 									ctx?.agent ?? 'unknown'

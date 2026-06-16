@@ -1,5 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
-import { syncBundledProjectSkillsIfMissing } from '../config/bundled-skills.js';
+import { syncBundledProjectSkillsIfMissingAsync } from '../config/bundled-skills.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
@@ -13,10 +13,12 @@ import { handleCloseCommand } from './close.js';
 import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
+import { handleConsolidateCommand } from './consolidate.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
 import { handleDeepDiveCommand } from './deep-dive.js';
+import { handleDeepResearchCommand } from './deep-research.js';
 import { handleDesignDocsCommand } from './design-docs.js';
 import { handleDiagnoseCommand } from './diagnose.js';
 import { handleDoctorCommand, handleDoctorToolsCommand } from './doctor.js';
@@ -34,6 +36,8 @@ import {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
 import { handleLearningCommand } from './learning.js';
 import {
@@ -49,6 +53,7 @@ import {
 	handleMemoryStatusCommand,
 } from './memory.js';
 import { handlePlanCommand } from './plan.js';
+import { handlePostMortemCommand } from './post-mortem.js';
 import { handlePrFeedbackCommand } from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
@@ -236,7 +241,13 @@ async function handleModeCommandWithBundledSkills(
 	handler: (directory: string, args: string[]) => string | CommandResult,
 ): CommandResult {
 	if (ctx.packageRoot) {
-		syncBundledProjectSkillsIfMissing(ctx.directory, ctx.packageRoot);
+		// Backstop for projects that predate init-time materialization (the
+		// primary sync now runs at plugin init; see src/index.ts). Missing-only
+		// and fail-open, so it self-heals legacy projects without regression.
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+		);
 	}
 	return Promise.resolve(handler(ctx.directory, ctx.args));
 }
@@ -273,6 +284,21 @@ export type CommandEntry = {
 	deprecated?: boolean;
 	/** If set, this command shares a name with a Claude Code built-in slash command */
 	clashesWithNativeCcCommand?: string;
+	/**
+	 * How the swarm_command chat tool treats this command.
+	 * - 'agent' — agent-callable: in the tool allowlist AND the z.enum schema (agent runs it).
+	 * - 'human-only' — in the z.enum AND HUMAN_ONLY set: agent may attempt via the tool and receives an "ask the user" refusal.
+	 * - 'restricted' — in HUMAN_ONLY set only, NOT in the z.enum: Zod rejects the input before classifySwarmCommandToolUse runs (most safety-sensitive human-only commands).
+	 * - 'none' (or absent) — not in any tool surface; must be run via CLI or chat.
+	 * This field is the single source of truth from which SWARM_COMMAND_TOOL_ALLOWLIST, HUMAN_ONLY_SWARM_COMMANDS, and the SWARM_COMMAND_TOOL_COMMANDS z.enum are derived (see src/commands/tool-policy.ts).
+	 */
+	toolPolicy?: 'agent' | 'human-only' | 'restricted' | 'none';
+	/**
+	 * When true, the swarm_command tool rejects any arguments passed to this command
+	 * (replaces membership in the hand-maintained NO_ARGS set in tool-policy.ts).
+	 * Only meaningful for toolPolicy: 'agent' or 'human-only' commands.
+	 */
+	toolNoArgs?: boolean;
 };
 
 // The registry is the single source of truth.
@@ -294,18 +320,22 @@ export const COMMAND_REGISTRY = {
 			'Acknowledge that the spec has drifted from the plan and suppress further warnings',
 		args: '',
 		category: 'diagnostics',
+		toolPolicy: 'restricted',
 	},
 	status: {
 		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
 		description: 'Show current swarm state',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'show-plan': {
 		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
 		description: 'Show current plan (optionally filter by phase number)',
 		category: 'core',
 		args: '[phase-number]',
+		toolPolicy: 'agent',
 	},
 	plan: {
 		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
@@ -322,6 +352,8 @@ export const COMMAND_REGISTRY = {
 		description: 'List registered agents',
 		category: 'core',
 		clashesWithNativeCcCommand: '/agents',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	help: {
 		handler: (ctx) => _internals.handleHelpCommand(ctx),
@@ -330,24 +362,31 @@ export const COMMAND_REGISTRY = {
 		args: '[command]',
 		details:
 			'Without argument, shows full command listing. With argument, shows detailed help for a specific command.',
+		toolPolicy: 'agent',
 	},
 	history: {
 		handler: (ctx) => handleHistoryCommand(ctx.directory, ctx.args),
 		description: 'Show completed phases summary',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/history',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	config: {
 		handler: (ctx) => handleConfigCommand(ctx.directory, ctx.args),
 		description: 'Show current resolved configuration',
 		category: 'config',
 		clashesWithNativeCcCommand: '/config',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'config doctor': {
 		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		subcommandOf: 'config',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	// Alias for TUI shortcut 'swarm-config-doctor' which extracts subcommand as 'config-doctor' (dash).
 	// Without this alias the shortcut resolves to null and shows help text instead of running the command.
@@ -363,11 +402,27 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
 		description: 'Run tool registration coherence check',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	// Alias for the hyphenated form '/swarm doctor-tools'. Without it,
+	// resolveCommand(['doctor-tools']) returns null and the TUI shows
+	// "command not found". NOTE: aliasOf is warning text only — resolveCommand
+	// invokes this entry's OWN handler, so the handler must be set here (mirrors
+	// the 'config-doctor' alias above).
+	'doctor-tools': {
+		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
+		description: 'Run tool registration coherence check',
+		category: 'diagnostics',
+		aliasOf: 'doctor tools',
+		deprecated: true,
 	},
 	diagnose: {
 		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	// Alias: users commonly type 'diagnosis' — route to the same handler as 'diagnose'.
 	diagnosis: {
@@ -381,18 +436,23 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handlePreflightCommand(ctx.directory, ctx.args),
 		description: 'Run preflight automation checks',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'sync-plan': {
 		handler: (ctx) => handleSyncPlanCommand(ctx.directory, ctx.args),
 		description: 'Ensure plan.json and plan.md are synced',
 		args: '',
 		category: 'config',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	benchmark: {
 		handler: (ctx) => handleBenchmarkCommand(ctx.directory, ctx.args),
 		description: 'Show performance metrics [--cumulative] [--ci-gate]',
 		args: '--cumulative, --ci-gate',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	learning: {
 		handler: (ctx) => handleLearningCommand(ctx.directory, ctx.args),
@@ -401,6 +461,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Computes aggregate learning metrics from knowledge events: violation-rate trends, directive application rates, escalation frequency, per-entry ROI, and never-applied entries. Surfaces a learning summary for the curator digest.',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	export: {
 		handler: (ctx) => handleExportCommand(ctx.directory, ctx.args),
@@ -410,6 +471,8 @@ export const COMMAND_REGISTRY = {
 			'Exports the current plan and context as JSON to stdout. Useful for piping to external tools or debugging swarm state.',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/export',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	evidence: {
 		handler: (ctx) => handleEvidenceCommand(ctx.directory, ctx.args),
@@ -418,6 +481,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Displays review results, test verdicts, and other evidence bundles for the given task ID (e.g., "2.1").',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	'evidence summary': {
 		handler: (ctx) => handleEvidenceSummaryCommand(ctx.directory),
@@ -427,6 +491,8 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Generates a summary showing completion ratio across all tasks, lists blockers, and identifies missing evidence.',
 		category: 'utility',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	// Alias for TUI shortcut 'swarm-evidence-summary' which extracts subcommand as 'evidence-summary' (dash).
 	// Without this alias the shortcut resolves to null and shows help text instead of running the command.
@@ -494,18 +560,34 @@ export const COMMAND_REGISTRY = {
 			'Archives evidence bundles older than max_age_days (config, default 90) or beyond max_bundles cap (config, default 1000). --dry-run previews which bundles would be archived without deleting them. Applies two-tier retention: age-based first, then count-based on oldest remaining.',
 		args: '--dry-run',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	curate: {
 		handler: (ctx) => handleCurateCommand(ctx.directory, ctx.args),
 		description: 'Run knowledge curation and hive promotion review',
 		args: '',
 		category: 'utility',
+		toolPolicy: 'none',
+	},
+	consolidate: {
+		handler: (ctx) =>
+			handleConsolidateCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run quota-bounded skill-improver consolidation and stage skill proposals',
+		details:
+			'Runs the same consolidation pass used by scheduled skill_improver trigger points: queue hardening, skill-improver proposal writing, and optional draft-skill generation. It never auto-activates skills. Use --respect-interval to obey the configured cadence instead of forcing a run.',
+		args: '--force, --respect-interval, --evaluate',
+		category: 'utility',
+		toolPolicy: 'restricted',
 	},
 	'dark-matter': {
 		handler: (ctx) => handleDarkMatterCommand(ctx.directory, ctx.args),
 		description: 'Detect hidden file couplings via co-change NPMI analysis',
 		args: '--threshold <number>, --min-commits <number>',
 		category: 'diagnostics',
+		toolPolicy: 'none',
 	},
 	finalize: {
 		handler: (ctx) =>
@@ -518,6 +600,7 @@ export const COMMAND_REGISTRY = {
 			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs safe git ff-only to main. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode.',
 		args: '--prune-branches, --skill-review',
 		category: 'core',
+		toolPolicy: 'none',
 	},
 	close: {
 		handler: (ctx) =>
@@ -532,6 +615,19 @@ export const COMMAND_REGISTRY = {
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,
+	},
+	'post-mortem': {
+		handler: (ctx) =>
+			handlePostMortemCommand(ctx.directory, ctx.args, {
+				sessionID: ctx.sessionID,
+			}),
+		description:
+			'Run the post-mortem agent: project-end synthesis, queue triage, and final curation pass',
+		details:
+			'Reads .swarm/ evidence (knowledge entries, events, curator digests, proposals, retrospectives, drift reports) and produces a post-mortem report at .swarm/post-mortem-{planId}.md. Idempotent: re-runs skip if report exists unless --force is passed.',
+		args: '--force',
+		category: 'core',
+		toolPolicy: 'agent',
 	},
 	concurrency: {
 		handler: (ctx) =>
@@ -552,6 +648,7 @@ export const COMMAND_REGISTRY = {
 			'\n' +
 			'Session-scoped — resets on new session.',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	simulate: {
 		handler: (ctx) => handleSimulateCommand(ctx.directory, ctx.args),
@@ -559,6 +656,7 @@ export const COMMAND_REGISTRY = {
 			'Dry-run hidden coupling analysis with configurable thresholds',
 		args: '--threshold <number>, --min-commits <number>',
 		category: 'diagnostics',
+		toolPolicy: 'none',
 	},
 	sdd: {
 		handler: (ctx) => handleSddCommand(ctx.directory, ctx.args),
@@ -568,6 +666,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning.',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	'sdd status': {
 		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
@@ -576,6 +675,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'sdd',
 		args: '[--json]',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	'sdd validate': {
 		handler: (ctx) => handleSddValidateCommand(ctx.directory, ctx.args),
@@ -584,6 +684,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'sdd',
 		args: '[--json] [--change <id>]',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	'sdd project': {
 		handler: (ctx) => handleSddProjectCommand(ctx.directory, ctx.args),
@@ -592,12 +693,14 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'sdd',
 		args: '[--dry-run] [--json] [--change <id>]',
 		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	analyze: {
 		handler: (ctx) => handleAnalyzeCommand(ctx.directory, ctx.args),
 		description: 'Analyze spec.md vs plan.md for requirement coverage gaps',
 		args: '',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	clarify: {
 		handler: (ctx) =>
@@ -605,6 +708,7 @@ export const COMMAND_REGISTRY = {
 		description: 'Clarify and refine an existing feature specification',
 		args: '[description-text]',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	specify: {
 		handler: (ctx) =>
@@ -612,6 +716,7 @@ export const COMMAND_REGISTRY = {
 		description: 'Generate or import a feature specification [description]',
 		args: '[description-text]',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	brainstorm: {
 		handler: (ctx) =>
@@ -622,6 +727,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Triggers the architect to run the brainstorm workflow: CONTEXT SCAN, single-question DIALOGUE, APPROACHES, DESIGN SECTIONS, SPEC WRITE + SELF-REVIEW, QA GATE SELECTION, TRANSITION. Use for new plans where requirements need to be drawn out before writing spec.md / plan.md.',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	council: {
 		handler: (ctx) =>
@@ -641,6 +747,7 @@ export const COMMAND_REGISTRY = {
 			'--spec-review switches to single-pass advisory mode for spec review. ' +
 			'Requires council.general.enabled: true and a search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'pr-review': {
 		handler: (ctx) =>
@@ -649,8 +756,9 @@ export const COMMAND_REGISTRY = {
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
-			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, runs 6 parallel explorer lanes through the deterministic dispatch_lanes join barrier (correctness, security, dependencies, docs-intent-vs-actual, tests, performance-architecture), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, synthesizes structured report. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'pr-feedback': {
 		handler: (ctx) =>
@@ -661,6 +769,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'pr subscribe': {
 		handler: (ctx) =>
@@ -671,6 +780,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Subscribes the current session to receive advisory notifications for the specified PR. When pr_monitor.enabled is true, the background polling worker will detect CI failures, new comments, merge conflicts, review state changes, and merge/close events. Notifications are delivered as session-scoped advisories with dedup tokens. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin). Requires pr_monitor.enabled: true in config.',
 		category: 'agent',
+		toolPolicy: 'human-only',
 	},
 	'pr unsubscribe': {
 		handler: (ctx) =>
@@ -681,6 +791,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Unsubscribes the current session from receiving advisory notifications for the specified PR. Removes the active subscription record. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
+		toolPolicy: 'human-only',
 	},
 	'pr status': {
 		handler: (ctx) =>
@@ -690,6 +801,8 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Displays all active PR subscriptions for the current session. Shows PR URL, last checked time, watching status, and error count per subscription. Also shows total active subscriptions across all sessions.',
 		category: 'agent',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'deep-dive': {
 		handler: (ctx) =>
@@ -700,6 +813,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Runs a read-only deep audit of the specified scope using parallel explorer waves (8-file cap per mission, ~3500 line guardrail), always 2 parallel reviewers for verification, and sequential critic challenge on HIGH/CRITICAL findings. Profiles select explorer lanes: standard (5 lanes), security, ux, architecture, full (all 8 lanes). Emits a structured findings report without mutating source code.',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'deep dive': {
 		handler: (ctx) =>
@@ -708,6 +822,26 @@ export const COMMAND_REGISTRY = {
 		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
 		category: 'agent',
 		aliasOf: 'deep-dive',
+	},
+	'deep-research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Launch a multi-source, fact-checked deep research pass and synthesize a cited report [question]',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		details:
+			'Runs the orchestrator-worker deep-research protocol: the architect decomposes the question into subtopics, gathers evidence with web_search and web_fetch across up to N iterative rounds, dispatches parallel sme synthesis workers, verifies every claim against cited sources with dual reviewers, challenges high-stakes claims with the critic, and presents a cited report in chat. Read-only — does not mutate source code, delegate to coder, or call declare_scope. Requires council.general.enabled and a search API key.',
+		category: 'agent',
+		toolPolicy: 'none',
+	},
+	'deep research': {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
+		description:
+			'Alias for /swarm deep-research — launch a cited deep research pass',
+		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		category: 'agent',
+		aliasOf: 'deep-research',
 	},
 	'codebase-review': {
 		handler: (ctx) =>
@@ -718,6 +852,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Runs the codebase-review-swarm workflow: Phase 0 inventory, selected-track depth planning, non-diluting review passes, coverage closure, reviewer validation, critic challenge, and .swarm/review-v8 artifacts. Materializes the bundled skill package if missing, then emits a MODE signal; the architect workflow must not mutate source files.',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'codebase review': {
 		handler: (ctx) =>
@@ -737,6 +872,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Triggers the architect to enter MODE: DESIGN_DOCS — delegates to the docs_design agent to author/sync docs/domain.md, docs/technical-spec.md, docs/behavior-spec.md, and docs/reference/* (plus reference/traceability.json and design-changelog.md). Normative docs are 100% language-agnostic; all framework-specific material is quarantined under reference/. --update syncs existing docs to current code/spec instead of generating fresh. Requires design_docs.enabled: true.',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'design docs': {
 		handler: (ctx) =>
@@ -755,6 +891,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Triggers the architect to enter MODE: ISSUE_INGEST — ingests a GitHub issue, restructures it into a normalized intake note, localizes root cause through hypothesis-driven tracing, and outputs a resolution spec. --plan transitions to plan creation after spec generation. --trace runs the full fix-and-PR workflow (implies --plan). --no-repro skips the reproduction step. Supports full GitHub URL, owner/repo#N shorthand, or bare issue number (resolves against origin remote).',
 		category: 'agent',
+		toolPolicy: 'none',
 	},
 	'qa-gates': {
 		handler: (ctx) =>
@@ -765,6 +902,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'show: display spec-level, session-override, and effective QA gates for the current plan. enable: persist gate(s) into the locked-once profile (architect; rejected after critic approval lock). override: session-only ratchet-tighter enable. Valid gates: reviewer, test_engineer, council_mode, sme_enabled, critic_pre_plan, hallucination_guard, sast_enabled, mutation_test, phase_council, drift_check, final_council.',
 		category: 'config',
+		toolPolicy: 'none',
 	},
 	promote: {
 		handler: (ctx) => handlePromoteCommand(ctx.directory, ctx.args),
@@ -773,6 +911,7 @@ export const COMMAND_REGISTRY = {
 			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Validates lesson text before promotion. Either direct text or --from-swarm ID is required.',
 		args: '--category <category>, --from-swarm <lesson-id>, <lesson-text>',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	reset: {
 		handler: (ctx) => handleResetCommand(ctx.directory, ctx.args),
@@ -782,6 +921,7 @@ export const COMMAND_REGISTRY = {
 		args: '--confirm (required)',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/reset',
+		toolPolicy: 'restricted',
 	},
 	'reset-session': {
 		handler: (ctx) => handleResetSessionCommand(ctx.directory, ctx.args),
@@ -791,6 +931,7 @@ export const COMMAND_REGISTRY = {
 			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions and delegation chains. Preserves plan, evidence, and knowledge for cross-session continuity.',
 		args: '',
 		category: 'utility',
+		toolPolicy: 'restricted',
 	},
 	rollback: {
 		handler: (ctx) => handleRollbackCommand(ctx.directory, ctx.args),
@@ -799,6 +940,7 @@ export const COMMAND_REGISTRY = {
 			'Restores .swarm/ state by directly overwriting files from a checkpoint directory (checkpoints/phase-<N>). Writes rollback event to events.jsonl. Without phase argument, lists available checkpoints. Partial failures are reported but processing continues.',
 		args: '<phase-number>',
 		category: 'utility',
+		toolPolicy: 'restricted',
 	},
 	retrieve: {
 		handler: (ctx) => handleRetrieveCommand(ctx.directory, ctx.args),
@@ -807,6 +949,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Loads the full tool output that was previously summarized (referenced by IDs like S1, S2). Use when you need the complete output instead of the truncated summary.',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	handoff: {
 		handler: (ctx) => handleHandoffCommand(ctx.directory, ctx.args),
@@ -815,6 +958,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Generates handoff.md with full session state snapshot, including plan progress, recent decisions, and agent delegation history. Prepended to the next session prompt for seamless model switches.',
 		category: 'core',
+		toolPolicy: 'none',
 	},
 	turbo: {
 		handler: (ctx) =>
@@ -840,15 +984,21 @@ export const COMMAND_REGISTRY = {
 			'\n' +
 			'Session-scoped — resets on new session.',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	'full-auto': {
 		handler: (ctx) =>
 			handleFullAutoCommand(ctx.directory, ctx.args, ctx.sessionID),
-		description: 'Toggle Full-Auto Mode for the active session [on|off]',
-		args: 'on, off',
+		description:
+			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
+		args: 'on [assisted|supervised|strict], off, status',
 		details:
-			'Toggles Full-Auto Mode which enables autonomous execution without confirmation prompts. When enabled, the architect proceeds through implementation steps automatically. Session-scoped — resets on new session. Use "on" or "off" to set explicitly, or toggle with no argument.',
+			'First-class toggle for Full-Auto Mode — autonomous execution with the critic reviewing escalations on your behalf. No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
+			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	'auto-proceed': {
 		handler: (ctx: CommandContext) =>
@@ -858,6 +1008,7 @@ export const COMMAND_REGISTRY = {
 		category: 'config',
 		details:
 			'Without argument, toggles auto-proceed mode. With "on" or "off", sets the state explicitly.',
+		toolPolicy: 'agent',
 	},
 	'write-retro': {
 		handler: (ctx) => handleWriteRetroCommand(ctx.directory, ctx.args),
@@ -867,6 +1018,7 @@ export const COMMAND_REGISTRY = {
 			'Writes retrospective evidence bundle to .swarm/evidence/retro-{phase}/evidence.json. Required JSON: phase, summary, task_count, task_complexity, total_tool_calls, coder_revisions, reviewer_rejections, test_failures, security_findings, integration_issues. Optional: lessons_learned (max 5), top_rejection_reasons, task_id, metadata.',
 		args: '<json: {phase, summary, task_count, task_complexity, ...}>',
 		category: 'utility',
+		toolPolicy: 'none',
 	},
 	'knowledge migrate': {
 		handler: (ctx) => handleKnowledgeMigrateCommand(ctx.directory, ctx.args),
@@ -895,15 +1047,37 @@ export const COMMAND_REGISTRY = {
 		args: '<entry-id>',
 		category: 'utility',
 	},
+	'knowledge unactionable': {
+		handler: (ctx) =>
+			handleKnowledgeUnactionableCommand(ctx.directory, ctx.args),
+		description: 'List unactionable knowledge entries pending hardening',
+		subcommandOf: 'knowledge',
+		details:
+			'Lists entries from .swarm/knowledge-unactionable.jsonl that failed the actionability gate. Shows pending entries (awaiting next hardening pass) and retire candidates (hardening failed). Use `/swarm knowledge retry-hardening` to reset retire candidates.',
+		category: 'utility',
+	},
+	'knowledge retry-hardening': {
+		handler: (ctx) =>
+			handleKnowledgeRetryHardeningCommand(ctx.directory, ctx.args),
+		description: 'Reset retire candidates for re-hardening [id]',
+		subcommandOf: 'knowledge',
+		details:
+			'Resets the retire_candidate flag on unactionable entries so the next scheduled hardening pass re-attempts LLM enrichment. Without arguments, resets all retire candidates. With an ID prefix, resets only the matching entry.',
+		args: '[entry-id]',
+		category: 'utility',
+	},
 	knowledge: {
 		handler: (ctx) => handleKnowledgeListCommand(ctx.directory, ctx.args),
 		description: 'List knowledge entries',
 		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	memory: {
 		handler: (ctx) => handleMemoryCommand(ctx.directory, ctx.args),
 		description: 'Show Swarm memory commands',
 		category: 'utility',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'memory status': {
 		handler: (ctx) => handleMemoryStatusCommand(ctx.directory, ctx.args),
@@ -911,6 +1085,8 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'memory pending': {
 		handler: (ctx) => handleMemoryPendingCommand(ctx.directory, ctx.args),
@@ -918,6 +1094,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--limit <n>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	'memory recall-log': {
 		handler: (ctx) => handleMemoryRecallLogCommand(ctx.directory, ctx.args),
@@ -925,6 +1102,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--limit <n>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	'memory compact': {
 		handler: (ctx) => handleMemoryCompactCommand(ctx.directory, ctx.args),
@@ -932,6 +1110,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--confirm',
 		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	'memory stale': {
 		handler: (ctx) => handleMemoryStaleCommand(ctx.directory, ctx.args),
@@ -939,6 +1118,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--limit <n>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	'memory export': {
 		handler: (ctx) => handleMemoryExportCommand(ctx.directory, ctx.args),
@@ -946,6 +1126,8 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '',
 		category: 'utility',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
 	},
 	'memory evaluate': {
 		handler: (ctx) => handleMemoryEvaluateCommand(ctx.directory, ctx.args),
@@ -953,6 +1135,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '--json, --fixtures <directory>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	'memory import': {
 		handler: (ctx) => handleMemoryImportCommand(ctx.directory, ctx.args),
@@ -960,6 +1143,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '',
 		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	'memory migrate': {
 		handler: (ctx) => handleMemoryMigrateCommand(ctx.directory, ctx.args),
@@ -967,6 +1151,7 @@ export const COMMAND_REGISTRY = {
 		subcommandOf: 'memory',
 		args: '',
 		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	checkpoint: {
 		handler: (ctx) => handleCheckpointCommand(ctx.directory, ctx.args),
@@ -977,6 +1162,7 @@ export const COMMAND_REGISTRY = {
 		args: '<save|restore|delete|list> <label>',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/checkpoint',
+		toolPolicy: 'restricted',
 	},
 } as const satisfies Record<string, CommandEntry>;
 
@@ -1063,12 +1249,41 @@ export function validateAliases(): {
 }
 
 /**
+ * Validates that every standalone command (no aliasOf, no subcommandOf) has
+ * a toolPolicy field. Warns for any that are missing — the module still loads
+ * successfully (fail-open per AGENTS.md invariant #1).
+ *
+ * Subcommands inherit their parent's tool policy and are not checked here.
+ */
+export function validateToolPolicy(): {
+	valid: boolean;
+	warnings: string[];
+} {
+	const warnings: string[] = [];
+
+	for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
+		const cmdEntry = entry as CommandEntry;
+		// Skip aliases and subcommands — they inherit from their parent
+		if (cmdEntry.aliasOf || cmdEntry.subcommandOf) continue;
+
+		if (cmdEntry.toolPolicy === undefined) {
+			warnings.push(
+				`Command '${name}' has no toolPolicy field — it will not be available through the swarm_command tool. Add toolPolicy: 'agent' | 'human-only' | 'restricted' | 'none'.`,
+			);
+		}
+	}
+
+	return { valid: warnings.length === 0, warnings };
+}
+
+/**
  * DI seam for testability. Contains all test-mocked exports.
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
 export const _internals: {
 	handleHelpCommand: typeof handleHelpCommand;
 	validateAliases: typeof validateAliases;
+	validateToolPolicy: typeof validateToolPolicy;
 	resolveCommand: typeof resolveCommand;
 	levenshteinDistance: typeof levenshteinDistance;
 	findSimilarCommands: typeof findSimilarCommands;
@@ -1076,6 +1291,7 @@ export const _internals: {
 } = {
 	handleHelpCommand,
 	validateAliases,
+	validateToolPolicy,
 	resolveCommand,
 	levenshteinDistance,
 	findSimilarCommands,
@@ -1092,6 +1308,22 @@ if (!validation.valid) {
 if (validation.warnings.length > 0) {
 	console.warn(
 		`COMMAND_REGISTRY alias warnings:\n${validation.warnings.join('\n')}`,
+	);
+}
+
+// Non-fatal toolPolicy validation: warn for any standalone command missing toolPolicy,
+// but do NOT throw — fail-open per AGENTS.md invariant #1.
+try {
+	const toolPolicyValidation = _internals.validateToolPolicy();
+	if (toolPolicyValidation.warnings.length > 0) {
+		console.warn(
+			`COMMAND_REGISTRY toolPolicy warnings:\n${toolPolicyValidation.warnings.join('\n')}`,
+		);
+	}
+} catch (e) {
+	// Validation itself must not block module load; log and continue.
+	console.warn(
+		`COMMAND_REGISTRY toolPolicy validation failed (non-fatal): ${(e as Error).message}`,
 	);
 }
 

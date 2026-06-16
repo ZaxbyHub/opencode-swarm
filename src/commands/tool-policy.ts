@@ -3,75 +3,74 @@ import type {
 	SwarmCommandPolicyResult,
 } from './command-dispatch.js';
 import { canonicalCommandKey } from './command-dispatch.js';
+import {
+	COMMAND_REGISTRY,
+	type CommandEntry,
+	VALID_COMMANDS,
+} from './registry.js';
 
-export const SWARM_COMMAND_TOOL_COMMANDS = [
-	'agents',
-	'config',
-	'config doctor',
-	'doctor tools',
-	'status',
-	'show-plan',
-	'help',
-	'history',
-	'evidence',
-	'evidence summary',
-	'retrieve',
-	'diagnose',
-	'preflight',
-	'benchmark',
-	'knowledge',
-	'memory',
-	'memory status',
-	'memory pending',
-	'memory recall-log',
-	'memory compact',
-	'memory stale',
-	'memory export',
-	'memory evaluate',
-	'memory import',
-	'memory migrate',
-	'sdd',
-	'sdd status',
-	'sdd validate',
-	'sdd project',
-	'sync-plan',
-	'export',
-	'auto-proceed',
-] as const;
+/**
+ * Creates a lazily-initialized Set that computes its contents on first access.
+ * This defers the VALID_COMMANDS.filter() call until after all modules are
+ * initialized, breaking the circular dependency
+ * (tool-before.ts → tool-policy.ts → registry.ts).
+ */
+function lazySet(getValues: () => Iterable<string>): Set<string> {
+	let cached: Set<string> | null = null;
+	const ensure = (): Set<string> => {
+		if (cached === null) cached = new Set(getValues());
+		return cached;
+	};
+	// Proxy that delegates all Set operations to the lazily-created Set.
+	return new Proxy({} as Set<string>, {
+		get(_target, prop: string | symbol) {
+			const set = ensure();
+			const value = Reflect.get(set, prop);
+			return typeof value === 'function' ? value.bind(set) : value;
+		},
+	});
+}
 
-export type SwarmCommandToolInputCommand =
-	(typeof SWARM_COMMAND_TOOL_COMMANDS)[number];
+/**
+ * Creates a lazily-initialized readonly array that computes its contents on
+ * first access. Used for SWARM_COMMAND_TOOL_COMMANDS which is consumed by
+ * z.enum and needs array-like behavior.
+ */
+function lazyArray(getValues: () => string[]): readonly string[] {
+	let cached: string[] | null = null;
+	const ensure = (): string[] => {
+		if (cached === null) cached = getValues();
+		return cached;
+	};
+	return new Proxy([] as string[], {
+		get(_target, prop: string | symbol) {
+			const arr = ensure();
+			const value = Reflect.get(arr, prop);
+			return typeof value === 'function' ? value.bind(arr) : value;
+		},
+	}) as readonly string[];
+}
 
-export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
-	'agents',
-	'config',
-	'config doctor',
-	'doctor tools',
-	'status',
-	'show-plan',
-	'help',
-	'history',
-	'evidence',
-	'evidence summary',
-	'retrieve',
-	'diagnose',
-	'preflight',
-	'benchmark',
-	'knowledge',
-	'memory',
-	'memory status',
-	'memory pending',
-	'memory recall-log',
-	'memory stale',
-	'memory export',
-	'memory evaluate',
-	'sdd',
-	'sdd status',
-	'sdd validate',
-	'sync-plan',
-	'export',
-	'auto-proceed',
-]);
+// Derived from COMMAND_REGISTRY toolPolicy/toolNoArgs fields.
+// Sorted alphabetically for deterministic TypeScript type inference and stable z.enum ordering.
+// LAZY INITIALIZATION: computed on first access to break circular dependency with registry.ts.
+export const SWARM_COMMAND_TOOL_COMMANDS = lazyArray(() =>
+	VALID_COMMANDS.filter((cmd) => {
+		const policy = (COMMAND_REGISTRY[cmd] as CommandEntry)?.toolPolicy;
+		return policy === 'agent' || policy === 'human-only';
+	}).sort(),
+);
+
+// Runtime validation via z.enum handles the actual constraint.
+// The type needs to be string-compatible for tool input since lazyArray returns
+// a Proxy that cannot satisfy the literal union type derivation.
+export type SwarmCommandToolInputCommand = string;
+
+export const SWARM_COMMAND_TOOL_ALLOWLIST = lazySet(() =>
+	VALID_COMMANDS.filter(
+		(cmd) => (COMMAND_REGISTRY[cmd] as CommandEntry)?.toolPolicy === 'agent',
+	),
+);
 
 /**
  * Issue #890: subcommands that must be invoked by a human user, not by the
@@ -81,34 +80,18 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = new Set<string>([
  * chat-tool refusal message so the agent is told to surface to the user
  * instead of being pointed at the CLI bypass it just attempted.
  */
-export const HUMAN_ONLY_SWARM_COMMANDS = new Set<string>([
-	'acknowledge-spec-drift',
-	'reset',
-	'reset-session',
-	'rollback',
-	'checkpoint',
-	'memory import',
-	'memory migrate',
-	'memory compact',
-	'sdd project',
-]);
+export const HUMAN_ONLY_SWARM_COMMANDS = lazySet(() =>
+	VALID_COMMANDS.filter((cmd) => {
+		const policy = (COMMAND_REGISTRY[cmd] as CommandEntry)?.toolPolicy;
+		return policy === 'human-only' || policy === 'restricted';
+	}),
+);
 
-const NO_ARGS = new Set([
-	'agents',
-	'config',
-	'config doctor',
-	'doctor tools',
-	'status',
-	'history',
-	'evidence summary',
-	'diagnose',
-	'preflight',
-	'sync-plan',
-	'export',
-	'memory',
-	'memory status',
-	'memory export',
-]);
+const NO_ARGS = lazySet(() =>
+	VALID_COMMANDS.filter(
+		(cmd) => (COMMAND_REGISTRY[cmd] as CommandEntry)?.toolNoArgs === true,
+	),
+);
 
 const SUMMARY_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const TASK_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -140,6 +123,9 @@ export function classifySwarmCommandToolUse(
 		};
 	}
 
+	// The --fix flag is blocked for agent-initiated commands (via swarm_command tool)
+	// because auto-fixing config from agent context is a privileged operation.
+	// Human-initiated chat commands bypass this gate — see src/commands/doctor.ts.
 	if (
 		canonicalKey === 'config doctor' &&
 		args.some((arg) => arg === '--fix' || arg === '-f')
@@ -160,11 +146,12 @@ export function classifySwarmCommandToolUse(
 
 	if (canonicalKey === 'knowledge') {
 		if (args.length === 0) return { allowed: true };
-		if (args.length === 1 && args[0] === 'list') return { allowed: true };
+		if (args.length === 1 && (args[0] === 'list' || args[0] === 'unactionable'))
+			return { allowed: true };
 		return {
 			allowed: false,
 			message:
-				'Only `/swarm knowledge` and `/swarm knowledge list` are available through swarm_command. Knowledge migrate/quarantine/restore are intentionally excluded.',
+				'Only `/swarm knowledge`, `/swarm knowledge list`, and `/swarm knowledge unactionable` are available through swarm_command. Knowledge migrate/quarantine/restore/retry-hardening are intentionally excluded.',
 		};
 	}
 

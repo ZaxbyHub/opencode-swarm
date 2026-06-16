@@ -47,6 +47,7 @@ export interface RankedEntry extends KnowledgeEntryBase {
 		keywords: number;
 	};
 	finalScore: number;
+	coldStartBoost?: number;
 }
 
 // ============================================================================

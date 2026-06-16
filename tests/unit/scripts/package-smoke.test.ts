@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 // @ts-expect-error - .mjs script exports runtime helpers without declarations.
 import { validatePackageFiles } from '../../../scripts/package-smoke.mjs';
 
@@ -18,6 +20,7 @@ const requiredProjectSkillSlugs = [
 	'pre-phase-briefing',
 	'council',
 	'deep-dive',
+	'deep-research',
 	'codebase-review-swarm',
 	'design-docs',
 	'swarm-pr-review',
@@ -50,6 +53,20 @@ const baseFiles = [
 ].map((path) => ({ path }));
 
 describe('package-smoke validatePackageFiles', () => {
+	test('package export map preserves the root plugin boundary without exporting the Bun-targeted CLI', () => {
+		const pkg = JSON.parse(
+			fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'),
+		) as {
+			exports: Record<string, unknown>;
+		};
+		expect(pkg.exports['.']).toEqual({
+			types: './dist/index.d.ts',
+			default: './dist/index.js',
+		});
+		expect(pkg.exports['./cli']).toBeUndefined();
+		expect(pkg.exports['./package.json']).toBe('./package.json');
+	});
+
 	test('accepts a package with runtime files, declarations, and grammar assets', () => {
 		const result = validatePackageFiles(
 			baseFiles,

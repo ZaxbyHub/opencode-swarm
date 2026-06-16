@@ -6,7 +6,7 @@
  * cache. Symlink resolution guards against workspace-escape attacks.
  */
 
-import { constants, existsSync } from 'node:fs';
+import { constants, existsSync, readFileSync, statSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../../hooks/utils';
@@ -32,30 +32,105 @@ import {
 	validateWorkspace,
 } from './validation';
 
+// ============ Constants ============
+
+/**
+ * Maximum total rename attempts (initial + retries) for transient file-lock
+ * errors (EEXIST, EPERM, EBUSY). Windows holds files open briefly during
+ * handle release and during AV on-access scanning of newly written files.
+ */
+const WINDOWS_RENAME_MAX_RETRIES = 5;
+
+/**
+ * Delay between rename attempts (ms). 5 attempts → 4 sleeps → 400 ms total
+ * worst-case wait. Intentionally higher than bun-compat.ts (3 attempts / 50 ms)
+ * because saveGraph uses its own DI seam (_internals.fsRename / retryDelayMs)
+ * rather than bunWrite, and this file requires the longer AV-scan window.
+ *
+ * No process.platform guard: EPERM from rename(2) can also arise on NFS/CIFS
+ * mounts on Linux and macOS (not only on Windows AV). Unconditional retry
+ * matches the existing bun-compat.ts pattern.
+ */
+const WINDOWS_RENAME_RETRY_DELAY_MS = 100;
+
 // ============ DI Seam for Testability ============
 
 /**
  * Internal function references for testability.
  * Replace _internals.safeRealpathSync in tests to mock symlink resolution.
+ * Replace _internals.fsRename to exercise the rename retry path (e.g. EPERM).
+ * Set _internals.retryDelayMs = 0 in tests to skip real sleeps while still
+ * exercising multi-retry paths.
+ * Restore each entry in afterEach via the saved original reference.
  */
 export const _internals: {
 	safeRealpathSync: typeof safeRealpathSync;
+	fsRename: typeof fsPromises.rename;
+	retryDelayMs: number;
 } = {
 	safeRealpathSync,
-} as const;
+	fsRename: fsPromises.rename.bind(fsPromises),
+	retryDelayMs: WINDOWS_RENAME_RETRY_DELAY_MS,
+};
 
-// ============ Constants ============
-
-/**
- * Maximum number of rename retries on Windows EEXIST errors.
- * Windows may hold the file open briefly during handle release.
- */
-const WINDOWS_RENAME_MAX_RETRIES = 3;
-
-/**
- * Delay between rename retries on Windows (ms).
- */
-const WINDOWS_RENAME_RETRY_DELAY_MS = 50;
+function validateLoadedGraph(parsed: RepoGraph): void {
+	if (!parsed.schema_version) {
+		throw Object.assign(new Error('repo-graph.json missing schema_version'), {
+			code: 'CORRUPTION',
+		});
+	}
+	if (!parsed.nodes || typeof parsed.nodes !== 'object') {
+		throw Object.assign(new Error('repo-graph.json missing or invalid nodes'), {
+			code: 'CORRUPTION',
+		});
+	}
+	if (!Array.isArray(parsed.edges)) {
+		throw Object.assign(new Error('repo-graph.json missing or invalid edges'), {
+			code: 'CORRUPTION',
+		});
+	}
+	for (const [key, node] of Object.entries(parsed.nodes)) {
+		if (!key || typeof key !== 'string') {
+			throw Object.assign(
+				new Error('repo-graph.json contains invalid node key'),
+				{ code: 'CORRUPTION' },
+			);
+		}
+		try {
+			validateGraphNode(node);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Invalid node structure';
+			throw Object.assign(
+				new Error(`repo-graph.json node validation failed: ${msg}`),
+				{ code: 'CORRUPTION' },
+			);
+		}
+	}
+	for (const edge of parsed.edges) {
+		try {
+			validateGraphEdge(edge);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Invalid edge structure';
+			throw Object.assign(
+				new Error(`repo-graph.json edge validation failed: ${msg}`),
+				{ code: 'CORRUPTION' },
+			);
+		}
+	}
+	if (
+		!parsed.metadata ||
+		typeof parsed.metadata !== 'object' ||
+		typeof parsed.metadata.generatedAt !== 'string' ||
+		typeof parsed.metadata.generator !== 'string' ||
+		typeof parsed.metadata.nodeCount !== 'number' ||
+		typeof parsed.metadata.edgeCount !== 'number'
+	) {
+		throw Object.assign(
+			new Error('repo-graph.json missing or invalid metadata'),
+			{ code: 'CORRUPTION' },
+		);
+	}
+}
 
 // ============ Safe Load/Save Operations ============
 
@@ -142,74 +217,7 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 				code: 'CORRUPTION',
 			});
 		}
-
-		// Validate structure
-		if (!parsed.schema_version) {
-			throw Object.assign(new Error('repo-graph.json missing schema_version'), {
-				code: 'CORRUPTION',
-			});
-		}
-		if (!parsed.nodes || typeof parsed.nodes !== 'object') {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid nodes'),
-				{ code: 'CORRUPTION' },
-			);
-		}
-		if (!Array.isArray(parsed.edges)) {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid edges'),
-				{ code: 'CORRUPTION' },
-			);
-		}
-
-		// Validate nodes
-		for (const [key, node] of Object.entries(parsed.nodes)) {
-			if (!key || typeof key !== 'string') {
-				throw Object.assign(
-					new Error('repo-graph.json contains invalid node key'),
-					{ code: 'CORRUPTION' },
-				);
-			}
-			try {
-				validateGraphNode(node);
-			} catch (err) {
-				const msg =
-					err instanceof Error ? err.message : 'Invalid node structure';
-				throw Object.assign(
-					new Error(`repo-graph.json node validation failed: ${msg}`),
-					{ code: 'CORRUPTION' },
-				);
-			}
-		}
-
-		// Validate edges
-		for (const edge of parsed.edges) {
-			try {
-				validateGraphEdge(edge);
-			} catch (err) {
-				const msg =
-					err instanceof Error ? err.message : 'Invalid edge structure';
-				throw Object.assign(
-					new Error(`repo-graph.json edge validation failed: ${msg}`),
-					{ code: 'CORRUPTION' },
-				);
-			}
-		}
-
-		// Validate metadata
-		if (
-			!parsed.metadata ||
-			typeof parsed.metadata !== 'object' ||
-			typeof parsed.metadata.generatedAt !== 'string' ||
-			typeof parsed.metadata.generator !== 'string' ||
-			typeof parsed.metadata.nodeCount !== 'number' ||
-			typeof parsed.metadata.edgeCount !== 'number'
-		) {
-			throw Object.assign(
-				new Error('repo-graph.json missing or invalid metadata'),
-				{ code: 'CORRUPTION' },
-			);
-		}
+		validateLoadedGraph(parsed);
 
 		// Update cache with current file mtime
 		setCachedGraph(normalized, parsed, stats.mtimeMs);
@@ -225,6 +233,49 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 			throw error;
 		}
 		// Only return null for ENOENT (file not found); rethrow other I/O errors
+		if (
+			error instanceof Error &&
+			'code' in error &&
+			(error as { code: string }).code === 'ENOENT'
+		) {
+			return null;
+		}
+		throw error;
+	}
+}
+
+/**
+ * Synchronous graph loader for prompt-injection hooks.
+ *
+ * Mirrors loadGraph validation but avoids async file I/O in system prompt
+ * construction. Returns null only when the graph file is absent.
+ */
+export function loadGraphSync(workspace: string): RepoGraph | null {
+	validateWorkspace(workspace);
+	const normalized = path.normalize(workspace);
+	try {
+		const graphPath = getGraphPath(workspace);
+		if (!existsSync(graphPath)) return null;
+		const stats = statSync(graphPath);
+		const content = readFileSync(graphPath, 'utf-8');
+		if (content.includes('\0') || content.includes('\uFFFD')) {
+			throw Object.assign(
+				new Error('repo-graph.json contains null bytes or invalid encoding'),
+				{ code: 'CORRUPTION' },
+			);
+		}
+		let parsed: RepoGraph;
+		try {
+			parsed = JSON.parse(content) as RepoGraph;
+		} catch {
+			throw Object.assign(new Error('repo-graph.json contains invalid JSON'), {
+				code: 'CORRUPTION',
+			});
+		}
+		validateLoadedGraph(parsed);
+		setCachedGraph(normalized, parsed, stats.mtimeMs);
+		return parsed;
+	} catch (error: unknown) {
 		if (
 			error instanceof Error &&
 			'code' in error &&
@@ -348,41 +399,43 @@ export async function saveGraph(
 				throw lastError;
 			}
 		} else {
-			// On Windows, rename may fail if target exists and is open.
-			// Retry the rename without deleting the target (no delete-then-rename
-			// fallback) to eliminate the TOCTOU window where an attacker could
-			// create a malicious file at graphPath between delete and rename.
-			let retries = 0;
-			while (retries < WINDOWS_RENAME_MAX_RETRIES) {
+			// Retry rename on transient file-lock errors (EEXIST, EPERM, EBUSY).
+			// No delete-then-rename fallback — retrying without delete eliminates
+			// the TOCTOU window where a malicious file could be inserted between
+			// unlink and rename. On Windows, rename over a locked target returns
+			// EPERM (e.g. AV on-access scan) or EEXIST; EBUSY is also retried for
+			// consistency with the rest of the codebase (bun-compat.ts).
+			// _internals.retryDelayMs can be set to 0 in tests for instant retries.
+			for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
 				try {
-					await fsPromises.rename(tempPath, graphPath);
+					await _internals.fsRename(tempPath, graphPath);
+					lastError = null;
 					break;
 				} catch (error: unknown) {
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Only retry on Windows EEXIST error
-					if (
-						lastError instanceof Error &&
-						'code' in lastError &&
-						(lastError as { code: string }).code === 'EEXIST' &&
-						retries < WINDOWS_RENAME_MAX_RETRIES - 1
-					) {
-						retries++;
-						// Wait before retry to allow handle release
-						await new Promise((resolve) =>
-							setTimeout(resolve, WINDOWS_RENAME_RETRY_DELAY_MS),
-						);
-						continue;
+					const code = (lastError as NodeJS.ErrnoException).code;
+					if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
+						break;
 					}
-					// Not an EEXIST error or max retries reached - throw
-					throw lastError;
+					if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
+						await new Promise((resolve) =>
+							setTimeout(resolve, _internals.retryDelayMs),
+						);
+					}
 				}
+			}
+			if (lastError) {
+				throw lastError;
 			}
 		}
 	} finally {
 		// Clean up temp file.
-		// For rename path: temp is gone after successful rename, so unlink fails with
-		// ENOENT which is ignored. For copy path (createAtomic): temp still exists and
-		// must be explicitly removed.
+		// Rename success: temp was moved to graphPath, so unlink throws ENOENT — ignored.
+		// Rename exhausted retries (e.g. persistent Windows EPERM): temp still exists.
+		//   If AV also holds the temp file, unlink throws EPERM — logged but not thrown.
+		//   Orphaned files are unique-named (Date.now() + random), so they do not
+		//   accumulate pathologically and are cleaned up on the next successful save.
+		// createAtomic path: temp still exists after copyFile and must be removed.
 		try {
 			await fsPromises.unlink(tempPath);
 		} catch (error: unknown) {

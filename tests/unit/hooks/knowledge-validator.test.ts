@@ -303,7 +303,7 @@ describe('knowledge-validator', () => {
 			});
 		});
 
-		it('blocks "format C:" (Windows disk format)', () => {
+		it('warns on "format C:" command mentions without blocking storage', () => {
 			const lesson = 'Never run format C: on a production machine';
 			const result = validateLesson(lesson, [], {
 				category: 'tooling',
@@ -311,10 +311,25 @@ describe('knowledge-validator', () => {
 				confidence: 0.9,
 			});
 			expect(result).toEqual({
-				valid: false,
+				valid: true,
 				layer: 2,
-				reason: 'dangerous command pattern detected',
-				severity: 'error',
+				reason: 'potentially dangerous command pattern queued for review',
+				severity: 'warning',
+			});
+		});
+
+		it('stores benign inline-code command lessons with a warning', () => {
+			const lesson = 'Run `bun format` before committing TypeScript changes';
+			const result = validateLesson(lesson, [], {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result).toEqual({
+				valid: true,
+				layer: 2,
+				reason: 'potentially dangerous command pattern queued for review',
+				severity: 'warning',
 			});
 		});
 
@@ -510,7 +525,7 @@ describe('knowledge-validator', () => {
 	// =========================================================================
 
 	describe('Layer 3 - Semantic Quality', () => {
-		it('detects contradiction with shared tags (blocks)', () => {
+		it('flags contradiction with shared tags as a warning', () => {
 			const candidate = 'always use typescript';
 			const existingLessons = ['never use typescript'];
 			const result = validateLesson(candidate, existingLessons, {
@@ -519,11 +534,24 @@ describe('knowledge-validator', () => {
 				confidence: 0.9,
 			});
 			expect(result).toEqual({
-				valid: false,
+				valid: true,
 				layer: 3,
-				reason: 'lesson contradicts an existing lesson with shared tags',
-				severity: 'error',
+				reason:
+					'possible contradiction with an existing lesson with shared tags',
+				severity: 'warning',
 			});
+		});
+
+		it('keeps agreeing negation pairs storable with warning at most', () => {
+			const candidate = 'Always run tests before commit';
+			const existingLessons = ['Never commit without running tests'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'testing',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.severity).not.toBe('error');
 		});
 
 		it('passes contradiction without shared tags', () => {

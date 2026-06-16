@@ -256,6 +256,11 @@ export async function appendRetractionRecord(
 // ============================================================================
 
 // Append a single entry to a JSONL file, creating the directory if needed.
+// Acquires the same directory-level lock as enforceKnowledgeCap and rewriteKnowledge
+// to prevent TOCTOU races: a concurrent cap enforcement must not interleave with
+// appends, and vice versa. The lock is on the directory (not the file) because
+// proper-lockfile requires the target to exist; the directory is guaranteed to
+// exist after mkdir.
 export async function appendKnowledge<T>(
 	filePath: string,
 	entry: T,
@@ -281,6 +286,11 @@ export async function appendKnowledge<T>(
 	}
 }
 
+// Rewrite the entire JSONL file with a new array of entries.
+// Uses proper-lockfile on the directory for concurrent-access safety.
+// The file write itself uses atomic temp-file + rename so readers never observe a torn file.
+// The lock is acquired on the DIRECTORY (not the file) because proper-lockfile requires
+// the target to exist. The directory is guaranteed to exist after mkdir.
 export async function rewriteKnowledge<T>(
 	filePath: string,
 	entries: T[],
@@ -309,6 +319,9 @@ export async function rewriteKnowledge<T>(
 	}
 }
 
+// Generic atomic locked read-modify-write for any file type.
+// Acquires a directory lock, reads data via `read`, calls `mutate()`, and if
+// mutate returns non-null, writes via `write`. Returns true if a write occurred.
 export async function transactFile<T>(
 	filePath: string,
 	read: (filePath: string) => Promise<T>,
@@ -319,6 +332,8 @@ export async function transactFile<T>(
 	try {
 		await mkdir(dir, { recursive: true });
 	} catch {
+		// Directory creation failed (path traversal, null byte, permissions, etc.)
+		// Safe fallback: treat as no-op.
 		return false;
 	}
 
@@ -344,6 +359,20 @@ export async function transactFile<T>(
 	}
 }
 
+// Perform an atomic locked read-modify-write on a JSONL file.
+// Acquires a directory lock, reads all entries, calls mutate() with them,
+// and if mutate returns a non-null array, writes the result crash-atomically
+// via temp-file + rename (atomicWriteFile). Returns true if the file was
+// rewritten, false if mutate returned null (no-op).
+//
+// All callers that need a lock-before-read pattern (TOCTOU prevention) or
+// crash-atomic writes (MF-5 prevention) MUST use this function.
+// NOTE: Directory-level locking means all JSONL files in .swarm/ (knowledge.jsonl,
+// knowledge-rejected.jsonl, knowledge-retractions.jsonl, etc.) share the same lock.
+// This is an intentional correctness trade-off: it prevents TOCTOU races between
+// concurrent operations on different files in the same directory, at the cost of
+// serializing operations that could theoretically run in parallel. In practice,
+// knowledge operations are infrequent enough that contention is not a concern.
 export async function transactKnowledge<T>(
 	filePath: string,
 	mutate: (entries: T[]) => T[] | null,
@@ -361,89 +390,44 @@ export async function transactKnowledge<T>(
 	);
 }
 
+// Append a knowledge entry and enforce the cap in a single atomic transaction.
+// This prevents the race condition where entry is appended but cap enforcement fails.
+// Returns true if entry was appended and cap enforced, false if entry was not appended
+// (e.g., would exceed cap even as a single entry - should not happen with normal configs).
 export async function appendKnowledgeWithCapEnforcement<T>(
 	filePath: string,
 	entry: T,
 	maxEntries: number,
 ): Promise<boolean> {
 	return transactKnowledge<T>(filePath, (entries) => {
+		// Add the new entry
 		const updated = [...entries, entry as T];
+
+		// Enforce the cap if needed
 		if (updated.length > maxEntries) {
-			return selectKnowledgeCapSurvivors(updated, maxEntries);
+			return updated.slice(updated.length - maxEntries);
 		}
 		return updated;
 	});
 }
 
+// Enforce a FIFO max-entries cap on a JSONL file.
+// If the file exceeds `maxEntries`, the oldest entries are dropped.
+// No-op when the file has fewer entries than the cap.
+// The full read-modify-write cycle is atomic under a directory lock to
+// prevent concurrent appendKnowledge from inserting entries that get
+// silently dropped by the rewrite (TOCTOU race condition).
 export async function enforceKnowledgeCap<T>(
 	filePath: string,
 	maxEntries: number,
 ): Promise<void> {
 	await transactKnowledge<T>(filePath, (entries) => {
 		if (entries.length <= maxEntries) return null;
-		return selectKnowledgeCapSurvivors(entries, maxEntries);
+		return entries.slice(entries.length - maxEntries);
 	});
 }
 
-interface KnowledgeCapCandidate<T> {
-	entry: T;
-	index: number;
-	status?: KnowledgeEntryBase['status'];
-	outcomeSignal: number;
-}
-
-function selectKnowledgeCapSurvivors<T>(entries: T[], maxEntries: number): T[] {
-	if (entries.length <= maxEntries) return entries;
-	if (maxEntries <= 0) return [];
-
-	const candidates = entries.map((entry, index): KnowledgeCapCandidate<T> => {
-		const maybeKnowledge = entry as Partial<KnowledgeEntryBase>;
-		return {
-			entry,
-			index,
-			status: maybeKnowledge.status,
-			outcomeSignal: computeOutcomeSignal(maybeKnowledge.retrieval_outcomes),
-		};
-	});
-	const allPromoted = candidates.every((c) => c.status === 'promoted');
-	const evictable = allPromoted
-		? candidates
-		: candidates.filter((c) => c.status !== 'promoted');
-	const targetDropCount = entries.length - maxEntries;
-	const dropCount = Math.min(targetDropCount, evictable.length);
-	if (dropCount <= 0) return entries;
-
-	const drop = new Set(
-		[...evictable]
-			.sort((a, b) => {
-				const inactiveDelta =
-					getKnowledgeCapStatusPriority(a.status) -
-					getKnowledgeCapStatusPriority(b.status);
-				if (inactiveDelta !== 0) return inactiveDelta;
-				const signalDelta = a.outcomeSignal - b.outcomeSignal;
-				if (signalDelta !== 0) return signalDelta;
-				return a.index - b.index;
-			})
-			.slice(0, dropCount)
-			.map((c) => c.index),
-	);
-
-	return candidates.filter((c) => !drop.has(c.index)).map((c) => c.entry);
-}
-
-function getKnowledgeCapStatusPriority(
-	status?: KnowledgeEntryBase['status'],
-): number {
-	if (
-		status === 'archived' ||
-		status === 'quarantined' ||
-		status === 'quarantined_unactionable'
-	) {
-		return 0;
-	}
-	return 1;
-}
-
+// Results from a sweep operation (aging or TODO removal)
 export interface SweepResult {
 	scanned: number;
 	aged: number;
@@ -452,6 +436,10 @@ export interface SweepResult {
 	skipped_promoted: number;
 }
 
+// Increment phases_alive on all non-archived, non-promoted entries and archive
+// those exceeding their TTL. Archives entries by setting status='archived' and
+// updated_at timestamp; does not remove them from the JSONL (FIFO cap removes later).
+// Promoted entries are TTL-exempt but still skipped (no age bumping for promoted).
 export async function sweepAgedEntries<T extends KnowledgeEntryBase>(
 	filePath: string,
 	defaultMaxPhases: number,
@@ -471,27 +459,38 @@ export async function sweepAgedEntries<T extends KnowledgeEntryBase>(
 		const now = new Date().toISOString();
 		let mutated = false;
 		for (const entry of entries) {
+			// Skip age bumps for archived entries (already dead, no churn)
 			if (entry.status === 'archived') continue;
+
+			// Skip promoted entries: do not increment age and do not archive them
+			// (promoted entries have unlimited TTL per feature design).
 			if (entry.status === 'promoted') {
 				result.skipped_promoted++;
 				continue;
 			}
+
+			// Bump age and test against TTL. Any age change must persist.
 			entry.phases_alive = (entry.phases_alive ?? 0) + 1;
 			result.aged++;
 			mutated = true;
+
 			const ttl = entry.max_phases ?? defaultMaxPhases;
+			// max_phases=N means entry can live N complete phases; archive on N+1.
 			if (entry.phases_alive > ttl) {
 				entry.status = 'archived';
 				entry.updated_at = now;
 				result.archived++;
 			}
 		}
+
 		return mutated ? entries : null;
 	});
 
 	return result;
 }
 
+// Hard-remove todo-category entries that have aged past todoMaxPhases.
+// Other entry categories are untouched; general aging is handled by sweepAgedEntries.
 export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 	filePath: string,
 	todoMaxPhases: number,
@@ -509,6 +508,7 @@ export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 		if (entries.length === 0) return null;
 
 		const kept = entries.filter((e) => {
+			// Promoted entries are TTL-exempt per design, even for TODO category.
 			if (e.category !== 'todo' || e.status === 'promoted') return true;
 			const age = e.phases_alive ?? 0;
 			if (age > todoMaxPhases) {
@@ -524,6 +524,10 @@ export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 	return result;
 }
 
+// Append a RejectedLesson, enforcing a FIFO max cap.
+// The full read-check-write is atomic under a directory lock (transactKnowledge)
+// to prevent concurrent callers from both reading below the cap and both appending,
+// ending up with more than MAX entries or silently losing a lesson (CF-2 TOCTOU fix).
 export async function appendRejectedLesson(
 	directory: string,
 	lesson: RejectedLesson,
@@ -543,7 +547,11 @@ export async function appendRejectedLesson(
 // Utility Functions (pure — no I/O)
 // ============================================================================
 
+// Normalize a string for comparison: lowercase, collapse whitespace, strip punctuation
 export function normalize(text: string): string {
+	// Tolerate non-string input (a malformed on-disk lesson) without throwing,
+	// so a single corrupt entry can't fail an entire read. The stored entry is
+	// left untouched — only this derived form is coerced.
 	const s = typeof text === 'string' ? text : String(text ?? '');
 	return s
 		.toLowerCase()
@@ -552,6 +560,7 @@ export function normalize(text: string): string {
 		.trim();
 }
 
+// Generate word bigrams from a string
 export function wordBigrams(text: string): Set<string> {
 	const words = normalize(text).split(' ').filter(Boolean);
 	const bigrams = new Set<string>();
@@ -561,6 +570,7 @@ export function wordBigrams(text: string): Set<string> {
 	return bigrams;
 }
 
+// Compute Jaccard similarity between two bigram sets
 export function jaccardBigram(a: Set<string>, b: Set<string>): number {
 	if (a.size === 0 && b.size === 0) return 1.0;
 	const aArr = Array.from(a);
@@ -569,6 +579,8 @@ export function jaccardBigram(a: Set<string>, b: Set<string>): number {
 	return intersection.size / union.size;
 }
 
+// Find a near-duplicate entry in an array. Returns the first entry with
+// Jaccard bigram similarity >= threshold (default 0.6) or undefined if none found.
 export function findNearDuplicate<T extends { lesson: string }>(
 	candidate: string,
 	entries: T[],
@@ -581,6 +593,10 @@ export function findNearDuplicate<T extends { lesson: string }>(
 	});
 }
 
+// Compute a confidence score for a new swarm entry based on initial metadata.
+// Starting confidence: 0.5 (unconfirmed candidate). Boosted by:
+// +0.1 for each non-null confirmed_by record (up to 3 boosts = 0.8 max from this)
+// +0.1 if auto_generated is false (human-originated)
 export function computeConfidence(
 	confirmedByCount: number,
 	autoGenerated: boolean,
@@ -591,8 +607,17 @@ export function computeConfidence(
 	return Math.min(score, 1.0);
 }
 
+// Laplace smoothing constant for computeOutcomeSignal. Pulls low-evidence entries
+// toward 0 so a single applied/contradicted event can't dominate ranking or block
+// promotion — meaningful influence needs a few corroborating outcomes.
 export const OUTCOME_SIGNAL_SMOOTHING = 4;
 
+// Event-sourced track-record signal in (-1, 1) derived from an entry's accumulated
+// retrieval outcomes. Positive when the entry was applied / succeeded after being
+// shown; negative when it was ignored / violated / contradicted / failed after.
+// Returns 0 (neutral) when there is no outcome evidence, so entries that have never
+// been acted on are neither boosted nor penalized. Reads only the v2/v3 outcome
+// counters (NOT the frozen v1 applied_count), per the RetrievalOutcome contract.
 export function computeOutcomeSignal(outcomes?: RetrievalOutcome): number {
 	if (!outcomes) return 0;
 	const positives =
@@ -608,13 +633,18 @@ export function computeOutcomeSignal(outcomes?: RetrievalOutcome): number {
 	return (positives - negatives) / (total + OUTCOME_SIGNAL_SMOOTHING);
 }
 
+// Infer tags from a lesson string. Returns lowercase tag strings.
+// inferTags lives in knowledge-store.ts (NOT curator) to avoid circular dependency:
+// curator imports validator, validator would need inferTags — so it lives here.
 export function inferTags(lesson: string): string[] {
 	const lower = lesson.toLowerCase();
 	const tags: string[] = [];
 
+	// Category + tag detection
 	if (/(^|\s)(?:todo|remember|don't?(?:\s+)?forget)(?:\s|:|,|$)/i.test(lesson))
 		tags.push('todo');
 
+	// Tech/tool detection
 	if (/\b(?:typescript|ts)\b/.test(lower)) tags.push('typescript');
 	if (/\b(?:javascript|js)\b/.test(lower)) tags.push('javascript');
 	if (/\b(?:python)\b/.test(lower)) tags.push('python');
@@ -633,16 +663,35 @@ export function inferTags(lesson: string): string[] {
 	if (/\b(?:swarm|architect|agent|hook|plan)\b/.test(lower))
 		tags.push('opencode-swarm');
 
-	return Array.from(new Set(tags));
+	return Array.from(new Set(tags)); // deduplicate
 }
 
 // ============================================================================
 // Feedback Bridge — Confidence Bumping
 // ============================================================================
 
+/** Confidence floor (below this, entries are considered unreliable). */
 const CONFIDENCE_FLOOR = 0.1;
+
+/** Confidence ceiling (maximum possible value). */
 const CONFIDENCE_CEILING = 1.0;
 
+/**
+ * Batch-update confidence scores on knowledge entries identified by their UUIDs.
+ *
+ * For each delta, the function:
+ * 1. Searches the swarm knowledge file for an entry with the given `id`.
+ * 2. Falls back to the hive knowledge file if not found in swarm.
+ * 3. Clamps the resulting confidence to [0.1, 1.0].
+ * 4. Updates `confidence` and `updated_at`, then rewrites the file.
+ *
+ * The full read-modify-write cycle is atomic under a directory lock
+ * (same pattern as `enforceKnowledgeCap`). Errors are logged but never
+ * thrown — the function is fail-open.
+ *
+ * @param directory - Project root directory (used to resolve `.swarm/knowledge.jsonl`).
+ * @param deltas    - Array of {id, delta} tuples. Delta may be positive (boost) or negative (decay).
+ */
 export async function bumpKnowledgeConfidenceBatch(
 	directory: string,
 	deltas: Array<{ id: string; delta: number }>,
@@ -653,8 +702,10 @@ export async function bumpKnowledgeConfidenceBatch(
 	const hivePath = resolveHiveKnowledgePath();
 
 	try {
+		// --- Swarm pass ---
 		await applyConfidenceDeltas(swarmPath, deltas);
 
+		// --- Hive pass (only for IDs not found in swarm) ---
 		const swarmEntries = await readKnowledge<KnowledgeEntryBase>(swarmPath);
 		const swarmIds = new Set(swarmEntries.map((e) => e.id));
 		const hiveOnly = deltas.filter((d) => !swarmIds.has(d.id));
@@ -669,6 +720,10 @@ export async function bumpKnowledgeConfidenceBatch(
 	}
 }
 
+/**
+ * Internal helper: apply a set of confidence deltas to a single JSONL file.
+ * Acquires a directory lock for the full read-modify-write cycle.
+ */
 async function applyConfidenceDeltas(
 	filePath: string,
 	deltas: Array<{ id: string; delta: number }>,
@@ -754,7 +809,6 @@ export const _internals: {
 	findNearDuplicate: typeof findNearDuplicate;
 	computeConfidence: typeof computeConfidence;
 	computeOutcomeSignal: typeof computeOutcomeSignal;
-	selectKnowledgeCapSurvivors: typeof selectKnowledgeCapSurvivors;
 	inferTags: typeof inferTags;
 	bumpKnowledgeConfidenceBatch: typeof bumpKnowledgeConfidenceBatch;
 } = {
@@ -779,7 +833,6 @@ export const _internals: {
 	findNearDuplicate,
 	computeConfidence,
 	computeOutcomeSignal,
-	selectKnowledgeCapSurvivors,
 	inferTags,
 	bumpKnowledgeConfidenceBatch,
 };

@@ -233,6 +233,7 @@ SKILL COMPLIANCE REVIEW: When SKILLS_USED_BY_CODER is provided and not "none":
 - For each skill rule, verify the coder's changes comply
 - Flag violations at the same severity as logic errors
 - Report the overall compliance verdict in SKILL_COMPLIANCE field of your output
+- Report TASK: <task id> immediately before SKILL_COMPLIANCE when a task id is available
 - If you cannot load a skill (SKILL_LOAD_FAILED), report SKILL_COMPLIANCE: PARTIAL — [skill path] could not be loaded
 
 PROCESSING: If GATES is provided and includes passing results for lint, SAST, placeholder-scan, or secret-scan: skip the corresponding Tier 2 checks that those gates already cover. Focus Tier 2 time on checks NOT covered by automated gates.
@@ -244,6 +245,7 @@ VERDICT: APPROVED | REJECTED
 REUSE_RE_VERIFICATION: [VERIFIED | DUPLICATION_DETECTED | SKIPPED] — DUPLICATION_DETECTED is only valid when VERDICT is REJECTED
 RISK: LOW | MEDIUM | HIGH | CRITICAL
 ISSUES: list with line numbers, grouped by CHECK dimension
+TASK: [task id being reviewed, or "unknown"]
 SKILL_COMPLIANCE: COMPLIANT | PARTIAL | VIOLATED — [list of violations or "all rules followed"]
 DIRECTIVE_COMPLIANCE: one line per knowledge directive shown during this phase (IDs listed in the DIRECTIVES TO VERIFY block of your prompt, when present). Use exactly one of:
   VERIFIED:<id> evidence=<file:line | predicate_passed>

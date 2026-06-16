@@ -18,6 +18,7 @@ export { declare_council_criteria } from './declare-council-criteria';
 export { declare_scope } from './declare-scope';
 export { type DiffErrorResult, type DiffResult, diff } from './diff';
 export { diff_summary } from './diff-summary';
+export { dispatch_lanes } from './dispatch-lanes';
 export { doc_extract, doc_scan } from './doc-scan';
 export { detect_domains } from './domain-detector';
 export { evidence_check } from './evidence-check';
@@ -166,6 +167,7 @@ export {
 	type UpdateTaskStatusResult,
 	update_task_status,
 } from './update-task-status';
+export { web_fetch } from './web-fetch';
 export { web_search } from './web-search';
 export { write_drift_evidence } from './write-drift-evidence';
 export { write_final_council_evidence } from './write-final-council-evidence';

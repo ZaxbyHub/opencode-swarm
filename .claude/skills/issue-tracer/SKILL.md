@@ -56,7 +56,8 @@ Create a trace directory before meaningful investigation:
 ├── 07-approved-plan.md
 ├── 08-test-results.md
 ├── 08b-implementation-review.md
-├── 09-pr-body.md
+├── 09-final-critic.md
+├── 10-pr-body.md
 └── state.md
 ```
 
@@ -321,7 +322,8 @@ This is distinct from the Phase 3 plan critic: Phase 3 challenges the *plan*; Ph
 2. The reviewer's mandate is adversarial: find a concrete input, environment, caller, or sequence for which the patch is wrong, incomplete, overfits the regression test, leaves a runtime path unwired, or regresses a contract. It must verify claims against the actual code and command output, not trust the summary.
 3. The reviewer returns `APPROVE`, `NEEDS_REVISION`, or `BLOCKED` and writes `08b-implementation-review.md`.
 4. Resolve every `NEEDS_REVISION`/`BLOCKED` item by changing code or evidence, then re-review. Do not downgrade a blocker by rewording it.
-5. For high-risk work (security, isolation, IPC, auth, payments, migrations, data integrity), an independent implementation review is mandatory before closure, consistent with `../commit-pr/SKILL.md` Step 9.
+5. If subagent delegation is available and the user/session has authorized issue-tracer or swarm work, independent implementation review is mandatory for any code, test, docs, package metadata, release note, or skill-file edit. Fallback self-review is allowed only when no independent context is available, and that limitation must be disclosed in the artifact and final response.
+6. Any edit after reviewer approval invalidates that approval. Re-run the implementation review on the latest diff and evidence before closure.
 
 ### Phase 4.5 Gate
 
@@ -331,6 +333,29 @@ Proceed only when:
 - the review ran on the real diff and the captured validation evidence
 - every blocker is resolved with a code or evidence change, or explicitly escalated to the user
 - if the independent reviewer was unavailable, that limitation is disclosed in the artifact and to the user
+- the latest edit happened before the latest reviewer approval
+
+## Phase 4.6: Final Critic Gate
+
+Goal: have a context distinct from the implementation reviewer challenge the entire completion claim after implementation review approval.
+
+This gate catches drift between code, tests, docs, release notes, package metadata, and the trace evidence.
+
+1. Run the critic after Phase 4.5 approval:
+   - If subagent delegation is available, launch a separate critic with `references/critic-gate.md` (Final Critic section), given the current diff, `08-test-results.md`, `08b-implementation-review.md`, and the trace artifacts.
+   - If no independent critic is available, run the fallback adversarial critic pass and label it "Fallback final critic: independent critic unavailable."
+2. The critic returns `APPROVE`, `NEEDS_REVISION`, or `BLOCKED` and writes `09-final-critic.md`.
+3. Resolve every `NEEDS_REVISION`/`BLOCKED` item by changing code, docs, tests, or evidence, then re-run implementation review when the fix changes the diff and re-run the final critic.
+4. Any edit after final critic approval invalidates that approval. Re-run the critic on the latest diff and evidence.
+
+### Phase 4.6 Gate
+
+Proceed only when:
+
+- `09-final-critic.md` exists with verdict `APPROVE`
+- the critic reviewed the latest diff after implementation reviewer approval
+- every reviewer/critic blocker is resolved and re-reviewed
+- the latest edit happened before the latest reviewer and critic approvals
 
 ## Phase 5: Closure and PR-Ready Output
 
@@ -341,7 +366,7 @@ Goal: leave the issue ready for human review or PR creation.
    - `git diff`
    - `git diff --check`
 2. Verify no unrelated files changed.
-3. Write `09-pr-body.md` as a draft using `assets/pr-template.md`.
+3. Write `10-pr-body.md` as a draft using `assets/pr-template.md`.
 4. Prepare a conventional commit message:
    - `fix(<scope>): <short issue-specific description>`
 5. Publication is governed by the single source of truth, `../commit-pr/SKILL.md`. When the user asks you to commit, push, or open/update a PR — and only after confirming there are no unrelated changes — switch to that skill and follow it for the PR title, the PR body contract (`Closes #<issue>`, `## Summary`, `## Invariant audit`, `## Test plan`), the release fragment, the invariant audit, the issue comment, and CI closeout. `assets/pr-template.md` is a drafting aid; the published PR body must satisfy the `commit-pr` contract (the `pr-standards` check enforces it). Do not invent a parallel PR format.
@@ -391,6 +416,8 @@ Before declaring the issue ready:
 - [ ] Independent critic review of the plan completed before user approval.
 - [ ] User approval obtained before implementation.
 - [ ] Independent implementation review (Phase 4.5) completed on the real diff and evidence; blockers resolved.
+- [ ] Final critic review (Phase 4.6) approved the latest diff and evidence after implementation review.
+- [ ] No edit occurred after the latest reviewer and critic approvals.
 - [ ] A written correctness justification distinguishes "tests green" from "root cause fixed."
 - [ ] Every "passed"/"validated" claim cites the exact command and its captured output.
 - [ ] Publication (commit/push/PR) followed `../commit-pr/SKILL.md` (the single source of truth).

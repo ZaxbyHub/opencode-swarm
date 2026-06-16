@@ -5,11 +5,11 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import {
 	readKnowledge,
-	resolveSwarmKnowledgePath,
 	sweepAgedEntries,
 	sweepStaleTodos,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 let tmpDir: string;
 let knowledgePath: string;
@@ -20,7 +20,7 @@ beforeEach(() => {
 		`sweep-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 	);
 	fs.mkdirSync(tmpDir, { recursive: true });
-	knowledgePath = resolveSwarmKnowledgePath(tmpDir);
+	knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
 	// Create .swarm directory for knowledge JSONL
 	fs.mkdirSync(path.dirname(knowledgePath), { recursive: true });
 });
@@ -50,7 +50,7 @@ afterEach(async () => {
 	// Give time for lock filesystem to settle
 	await new Promise((resolve) => setTimeout(resolve, 100));
 
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	safeRmRecursive(tmpDir);
 });
 
 function makeEntry(
@@ -346,7 +346,7 @@ describe('sweep regression tests', () => {
 
 	test('sweep succeeds on fresh directory (mkdir before lock)', async () => {
 		// Delete .swarm dir entirely to simulate fresh install
-		fs.rmSync(path.dirname(knowledgePath), { recursive: true, force: true });
+		safeRmRecursive(path.dirname(knowledgePath));
 
 		// Under the bug (no mkdir), lock on non-existent dir crashes.
 		// After fix, mkdir precedes lock so this succeeds.

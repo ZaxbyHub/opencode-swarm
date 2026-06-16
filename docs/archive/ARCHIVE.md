@@ -23,6 +23,12 @@ Analysis reports that captured the state of the codebase at a specific moment. E
 - `tech-debt-report.md` — CI/test-suite tech debt snapshot (2026-04-01)
 - `knowledge-system-verification-report.md` — knowledge-system verification (2026-03-31)
 
+### `/docs/archive/knowledge-system-audit.md` - root audit snapshot
+
+Former root-level knowledge audit from 2026-04-26. It is retained for
+provenance only; the maintained knowledge-system behavior is documented in
+`/docs/knowledge.md` and `/docs/skills.md`.
+
 ## Why archive instead of delete?
 
 Git preserves history, but references across docs sometimes outlive their sources. Archiving in place keeps the files reachable at stable paths while signalling that they are no longer maintained. Two live docs still link into this archive:

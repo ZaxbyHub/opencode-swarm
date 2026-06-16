@@ -506,14 +506,8 @@ export async function writeCuratorSummary(
 	summary: CuratorSummary,
 ): Promise<void> {
 	const resolvedPath = validateSwarmPath(directory, 'curator-summary.json');
-
-	// Ensure .swarm/ directory exists
 	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
-	// Atomic write: write to temp file then rename
-	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-	await bunWrite(tempPath, JSON.stringify(summary, null, 2));
-	fs.renameSync(tempPath, resolvedPath);
+	await bunWrite(resolvedPath, JSON.stringify(summary, null, 2));
 }
 
 /**
@@ -1191,12 +1185,10 @@ export async function runCuratorPhase(
 				);
 				fs.mkdirSync(evidenceDir, { recursive: true });
 				const findingsPath = path.join(evidenceDir, 'curator-findings.json');
-				const tmpPath = `${findingsPath}.tmp.${Date.now()}`;
-				fs.writeFileSync(
-					tmpPath,
+				await bunWrite(
+					findingsPath,
 					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
 				);
-				fs.renameSync(tmpPath, findingsPath);
 			} catch (err) {
 				logger.warn(
 					`[curator] failed to persist application findings: ${err instanceof Error ? err.message : String(err)}`,

@@ -1,16 +1,16 @@
 /**
  * Event-sourced knowledge lifecycle for opencode-swarm.
  *
- * `.swarm/knowledge-events.jsonl` records meaningful knowledge interactions
- * (retrieval, receipt, outcome, archival). Recent lines stay in the event log;
- * old lines are folded into `.swarm/knowledge-counter-baseline.json` when the
- * log exceeds the cap. The event log plus baseline are the authoritative
- * history for derived per-entry counters (`retrieval_outcomes.*`).
+ * `.swarm/knowledge-events.jsonl` is an append-only, immutable log of every
+ * meaningful knowledge interaction (retrieval, receipt, outcome, archival).
+ * It is the authoritative history: per-entry counters
+ * (`retrieval_outcomes.*`) become *derived rollups* recomputed deterministically
+ * from this log via {@link recomputeCounters}.
  *
  * Design contracts:
- * - Append-first, bounded retention. New events use OS-level atomic append; trim
- *   rewrites only after folding evicted counters into the baseline so aggregate
- *   counters survive log rotation.
+ * - Append-only. We never rewrite or delete lines. OS-level atomic append is
+ *   used (same pattern as `appendKnowledge` in knowledge-store.ts) — no lock is
+ *   needed for append-only writes.
  * - Fail-open. Event recording is telemetry; it must never break tool or hook
  *   execution. Use {@link recordKnowledgeEvent} (swallows + warns) on hot paths;
  *   {@link appendKnowledgeEvent} throws and is intended for tests / callers that
@@ -22,10 +22,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
-import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import { resolveHiveEventsPath } from './knowledge-store.js';
 import type {
@@ -43,14 +42,6 @@ export const KNOWLEDGE_EVENT_SCHEMA_VERSION = 1;
  */
 export const MAX_EVENT_LOG_ENTRIES = 5000;
 
-interface CounterRollupCacheEntry {
-	key: string;
-	rollups: Map<string, CounterRollup>;
-}
-
-const counterRollupCache = new Map<string, CounterRollupCacheEntry>();
-const MAX_COUNTER_ROLLUP_CACHE_DIRS = 32;
-
 // ============================================================================
 // Event schema
 // ============================================================================
@@ -62,6 +53,9 @@ export type RetrievalEventMode =
 	| 'coder_context'
 	| 'review_context'
 	| 'curator'
+	/** Per-delegate directive injection (Change 1): a delegated subagent
+	 *  (coder/reviewer/test_engineer/sme/docs/designer/critic/curator) was shown
+	 *  the subset of directives scoped to its role + expected tools. */
 	| 'delegate_inject';
 
 /** A retrieval: a query returned a ranked set of knowledge entries. */
@@ -93,7 +87,11 @@ export interface ReceiptEvent {
 		| 'ignored'
 		| 'contradicted'
 		| 'violated'
+		/** Delegate decided a shown directive did not apply to its task (Change 1).
+		 *  Recorded for auditability; never penalizes the entry's outcome signal. */
 		| 'n_a'
+		/** Architect explicitly accepted an unresolved critical violation at
+		 *  phase_complete (Change 2, Task 2.4). Audit-only; never affects rollups. */
 		| 'override';
 	schema_version?: number;
 	event_id: string;
@@ -105,7 +103,14 @@ export interface ReceiptEvent {
 	task_id?: string;
 	agent: string;
 	reason?: string;
+	/**
+	 * Origin discriminator (Change 2). Distinguishes reviewer-issued verdicts
+	 * (`'reviewer'`) from delegate self-acks (`'delegate'`) without changing the
+	 * `type`, so existing counter rollups (which switch on `type`) stay intact.
+	 * A reviewer VERIFIED maps to type:'applied' with source:'reviewer'.
+	 */
 	source?: 'delegate' | 'reviewer' | string;
+	/** Result of executing a directive's verification_predicate (Change 2). */
 	predicate_check?: {
 		predicate: string;
 		result: 'pass' | 'fail' | 'error';
@@ -140,12 +145,12 @@ export interface ArchivedEvent {
 	event_id: string;
 	timestamp: string;
 	entry_id: string;
-	tier?: 'swarm' | 'hive';
 	actor: string;
 	reason: string;
 	mode: 'archive' | 'quarantine' | 'purge';
 	evidence?: string;
 	previous_status?: string;
+	tier?: 'swarm' | 'hive';
 }
 
 /** An escalation: a directive was auto-promoted by the repeat-mistake escalator. */
@@ -170,6 +175,12 @@ export type KnowledgeEvent =
 
 export type KnowledgeEventType = KnowledgeEvent['type'];
 
+/**
+ * Event shape accepted by {@link appendKnowledgeEvent} / {@link recordKnowledgeEvent}.
+ * `event_id` and `timestamp` are optional on input — they are filled in on write.
+ * Distributes over the union so each variant keeps its required discriminant
+ * fields.
+ */
 export type KnowledgeEventInput = KnowledgeEvent extends infer T
 	? T extends KnowledgeEvent
 		? Omit<T, 'event_id' | 'timestamp'> & {
@@ -199,20 +210,15 @@ export function resolveKnowledgeEventsPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-events.jsonl');
 }
 
-/** Returns `.swarm/knowledge-counter-baseline.json` for folded event counters. */
-export function resolveKnowledgeCounterBaselinePath(directory: string): string {
-	return path.join(directory, '.swarm', 'knowledge-counter-baseline.json');
-}
+// Re-export so callers can reach the shared hive events log via this module
+// alongside the project-local resolver. The resolver itself lives in
+// knowledge-store.ts next to the other hive path resolvers.
+export { resolveHiveEventsPath };
 
 /** Returns `.swarm/knowledge-application.jsonl` for legacy v2 audit records. */
 export function resolveLegacyApplicationLogPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-application.jsonl');
 }
-
-// Re-export so callers can reach the shared hive events log via this module
-// alongside the project-local resolver. The resolver itself lives in
-// knowledge-store.ts next to the other hive path resolvers.
-export { resolveHiveEventsPath };
 
 // ============================================================================
 // ID / timestamp helpers
@@ -243,18 +249,16 @@ function withDefaults(event: KnowledgeEventInput): KnowledgeEvent {
 // ============================================================================
 
 /**
- * Append one event to the log, filling in event_id / timestamp if absent.
- * Returns the fully-populated event that was written.
- *
- * Throws on I/O failure — callers on hot paths should prefer
- * {@link recordKnowledgeEvent}, which swallows errors.
+ * Append one populated event to a specific JSONL events file, locking the
+ * containing directory and enforcing the FIFO cap. Shared core for both the
+ * project-local ({@link appendKnowledgeEvent}) and shared-hive
+ * ({@link appendHiveKnowledgeEvent}) logs.
  */
-export async function appendKnowledgeEvent(
-	directory: string,
+async function appendEventToPath(
+	filePath: string,
 	event: KnowledgeEventInput,
 ): Promise<KnowledgeEvent> {
 	const populated = withDefaults(event);
-	const filePath = resolveKnowledgeEventsPath(directory);
 	const dirPath = path.dirname(filePath);
 	await mkdir(dirPath, { recursive: true });
 	let release: (() => Promise<void>) | undefined;
@@ -263,20 +267,21 @@ export async function appendKnowledgeEvent(
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 		});
 		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
+		// Best-effort FIFO trim once the log exceeds MAX_EVENT_LOG_ENTRIES.
+		// Done under the same lock as append so we avoid lock nesting and keep
+		// append+trim race-free for concurrent writers.
 		try {
 			const content = await readFile(filePath, 'utf-8');
 			const lines = content
 				.split('\n')
 				.filter((line) => line.trim().length > 0);
 			if (lines.length > MAX_EVENT_LOG_ENTRIES) {
-				const evicted = lines.slice(0, lines.length - MAX_EVENT_LOG_ENTRIES);
 				const trimmed = lines.slice(lines.length - MAX_EVENT_LOG_ENTRIES);
-				await foldEvictedEventsIntoBaseline(directory, evicted, filePath);
-				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
+				await writeFile(filePath, `${trimmed.join('\n')}\n`, 'utf-8');
 			}
 		} catch (err) {
 			warn(
-				`[knowledge-events] local cap trim failed (non-fatal): ${
+				`[knowledge-events] cap trim failed (non-fatal) for ${filePath}: ${
 					err instanceof Error ? err.message : String(err)
 				}`,
 			);
@@ -285,6 +290,32 @@ export async function appendKnowledgeEvent(
 		if (release) await release().catch(() => {});
 	}
 	return populated;
+}
+
+/**
+ * Append one event to the project-local log, filling in event_id / timestamp if
+ * absent. Returns the fully-populated event that was written.
+ *
+ * Throws on I/O failure — callers on hot paths should prefer
+ * {@link recordKnowledgeEvent}, which swallows errors.
+ */
+export async function appendKnowledgeEvent(
+	directory: string,
+	event: KnowledgeEventInput,
+): Promise<KnowledgeEvent> {
+	return appendEventToPath(resolveKnowledgeEventsPath(directory), event);
+}
+
+/**
+ * Append one event to the shared, cross-project hive events log. Use for audit
+ * tombstones of mutations to the hive store so any project can read why a hive
+ * entry was archived/quarantined/purged. Throws on I/O failure; hot paths should
+ * prefer {@link recordHiveKnowledgeEvent}.
+ */
+export async function appendHiveKnowledgeEvent(
+	event: KnowledgeEventInput,
+): Promise<KnowledgeEvent> {
+	return appendEventToPath(resolveHiveEventsPath(), event);
 }
 
 /**
@@ -305,49 +336,6 @@ export async function recordKnowledgeEvent(
 		);
 		return null;
 	}
-}
-
-/**
- * Append one event to the shared, cross-project hive events log. Use for audit
- * tombstones of mutations to the hive store so any project can read why a hive
- * entry was archived/quarantined/purged. Throws on I/O failure; hot paths should
- * prefer {@link recordHiveKnowledgeEvent}.
- */
-export async function appendHiveKnowledgeEvent(
-	event: KnowledgeEventInput,
-): Promise<KnowledgeEvent> {
-	const populated = withDefaults(event);
-	const filePath = resolveHiveEventsPath();
-	const dirPath = path.dirname(filePath);
-	await mkdir(dirPath, { recursive: true });
-	let release: (() => Promise<void>) | undefined;
-	try {
-		release = await lockfile.lock(dirPath, {
-			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
-		});
-		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
-		// Best-effort FIFO trim. Hive events don't participate in the counter
-		// rollup baseline (archival events are audit-only), so no baseline folding.
-		try {
-			const content = await readFile(filePath, 'utf-8');
-			const lines = content
-				.split('\n')
-				.filter((line) => line.trim().length > 0);
-			if (lines.length > MAX_EVENT_LOG_ENTRIES) {
-				const trimmed = lines.slice(lines.length - MAX_EVENT_LOG_ENTRIES);
-				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
-			}
-		} catch (err) {
-			warn(
-				`[knowledge-events] hive cap trim failed (non-fatal): ${
-					err instanceof Error ? err.message : String(err)
-				}`,
-			);
-		}
-	} finally {
-		if (release) await release().catch(() => {});
-	}
-	return populated;
 }
 
 /**
@@ -373,13 +361,41 @@ export async function recordHiveKnowledgeEvent(
 // Read
 // ============================================================================
 
+/**
+ * Read all events from a specific JSONL events file. Skips corrupted lines
+ * (logging a warning for each) and returns an empty array when the file does not
+ * exist — mirrors `readKnowledge` in knowledge-store.ts. Shared core for the
+ * project-local and shared-hive readers.
+ */
+async function readEventsFromPath(filePath: string): Promise<KnowledgeEvent[]> {
+	if (!existsSync(filePath)) return [];
+	const content = await readFile(filePath, 'utf-8');
+	const out: KnowledgeEvent[] = [];
+	for (const line of content.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			out.push(JSON.parse(trimmed) as KnowledgeEvent);
+		} catch {
+			warn(
+				`[knowledge-events] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
+					0,
+					80,
+				)}`,
+			);
+		}
+	}
+	return out;
+}
+
+/**
+ * Read all events from the project-local log. Skips corrupted JSONL lines and
+ * returns an empty array when the file does not exist.
+ */
 export async function readKnowledgeEvents(
 	directory: string,
 ): Promise<KnowledgeEvent[]> {
-	const filePath = resolveKnowledgeEventsPath(directory);
-	if (!existsSync(filePath)) return [];
-	const content = await readFile(filePath, 'utf-8');
-	return parseEventLines(content.split('\n'), filePath);
+	return readEventsFromPath(resolveKnowledgeEventsPath(directory));
 }
 
 /**
@@ -387,12 +403,13 @@ export async function readKnowledgeEvents(
  * corrupted JSONL lines and returns an empty array when the file does not exist.
  */
 export async function readHiveKnowledgeEvents(): Promise<KnowledgeEvent[]> {
-	const filePath = resolveHiveEventsPath();
-	if (!existsSync(filePath)) return [];
-	const content = await readFile(filePath, 'utf-8');
-	return parseEventLines(content.split('\n'), filePath);
+	return readEventsFromPath(resolveHiveEventsPath());
 }
 
+/**
+ * Read legacy knowledge-application audit records. Corrupt lines are skipped so
+ * stale telemetry cannot break search, promotion, or manual recall.
+ */
 export async function readLegacyApplicationRecords(
 	directory: string,
 ): Promise<KnowledgeApplicationRecord[]> {
@@ -421,6 +438,11 @@ export async function readLegacyApplicationRecords(
 // Deterministic counter rollup
 // ============================================================================
 
+/**
+ * Derived per-entry counters. This is the rollup shape recomputed from the
+ * event log; it maps onto the v2 `RetrievalOutcome` counter fields plus the v3
+ * `contradicted_count`.
+ */
 export interface CounterRollup {
 	shown_count: number;
 	acknowledged_count: number;
@@ -428,15 +450,28 @@ export interface CounterRollup {
 	ignored_count: number;
 	violated_count: number;
 	contradicted_count: number;
+	/** Count of explicit not-applicable decisions (Change 1). Auditable, neutral:
+	 *  never contributes to the outcome ranking signal. */
 	n_a_count: number;
 	succeeded_after_shown_count: number;
 	failed_after_shown_count: number;
+	/**
+	 * Count of partial outcomes. Tracked separately so it surfaces in
+	 * diagnostics but never contributes to `computeOutcomeSignal` (partial is
+	 * deliberately ambiguous — it neither rewards nor penalizes).
+	 */
 	partial_after_shown_count: number;
 	last_applied_at?: string;
 	last_acknowledged_at?: string;
+	/**
+	 * The most recent violation timestamps for this entry (ISO 8601, newest
+	 * first, capped at the last {@link MAX_VIOLATION_TIMESTAMPS}). Feeds the
+	 * repeat-mistake escalator (Change 3).
+	 */
 	violation_timestamps: string[];
 }
 
+/** Cap on retained per-entry violation timestamps. */
 export const MAX_VIOLATION_TIMESTAMPS = 10;
 
 function emptyRollup(): CounterRollup {
@@ -455,64 +490,6 @@ function emptyRollup(): CounterRollup {
 	};
 }
 
-function cloneRollup(input: CounterRollup): CounterRollup {
-	return {
-		...emptyRollup(),
-		...input,
-		violation_timestamps: [...(input.violation_timestamps ?? [])],
-	};
-}
-
-function cloneRollupMap(
-	input: Map<string, CounterRollup>,
-): Map<string, CounterRollup> {
-	const out = new Map<string, CounterRollup>();
-	for (const [id, rollup] of input) {
-		out.set(id, cloneRollup(rollup));
-	}
-	return out;
-}
-
-function normalizeRollupTimestamps(rollup: CounterRollup): CounterRollup {
-	if (rollup.violation_timestamps.length > 1) {
-		rollup.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-	}
-	if (rollup.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
-		rollup.violation_timestamps = rollup.violation_timestamps.slice(
-			0,
-			MAX_VIOLATION_TIMESTAMPS,
-		);
-	}
-	return rollup;
-}
-
-function mergeRollupInto(target: CounterRollup, source: CounterRollup): void {
-	target.shown_count += source.shown_count ?? 0;
-	target.acknowledged_count += source.acknowledged_count ?? 0;
-	target.applied_explicit_count += source.applied_explicit_count ?? 0;
-	target.ignored_count += source.ignored_count ?? 0;
-	target.violated_count += source.violated_count ?? 0;
-	target.contradicted_count += source.contradicted_count ?? 0;
-	target.n_a_count += source.n_a_count ?? 0;
-	target.succeeded_after_shown_count += source.succeeded_after_shown_count ?? 0;
-	target.failed_after_shown_count += source.failed_after_shown_count ?? 0;
-	target.partial_after_shown_count += source.partial_after_shown_count ?? 0;
-	if (source.last_applied_at) {
-		target.last_applied_at = maxIso(
-			target.last_applied_at,
-			source.last_applied_at,
-		);
-	}
-	if (source.last_acknowledged_at) {
-		target.last_acknowledged_at = maxIso(
-			target.last_acknowledged_at,
-			source.last_acknowledged_at,
-		);
-	}
-	target.violation_timestamps.push(...(source.violation_timestamps ?? []));
-	normalizeRollupTimestamps(target);
-}
-
 function get(map: Map<string, CounterRollup>, id: string): CounterRollup {
 	let r = map.get(id);
 	if (!r) {
@@ -522,123 +499,41 @@ function get(map: Map<string, CounterRollup>, id: string): CounterRollup {
 	return r;
 }
 
+/** Track the maximum (latest) ISO timestamp seen for a field. */
 function maxIso(current: string | undefined, candidate: string): string {
 	if (!current) return candidate;
 	return candidate > current ? candidate : current;
 }
 
-async function readCounterBaseline(
-	directory: string,
-): Promise<Map<string, CounterRollup>> {
-	const filePath = resolveKnowledgeCounterBaselinePath(directory);
-	if (!existsSync(filePath)) return new Map();
-	const raw = JSON.parse(await readFile(filePath, 'utf-8')) as Record<
-		string,
-		CounterRollup
-	>;
-	const map = new Map<string, CounterRollup>();
-	for (const [id, rollup] of Object.entries(raw)) {
-		map.set(id, normalizeRollupTimestamps(cloneRollup(rollup)));
-	}
-	return map;
-}
-
-async function writeCounterBaseline(
-	directory: string,
-	baseline: Map<string, CounterRollup>,
-): Promise<void> {
-	const filePath = resolveKnowledgeCounterBaselinePath(directory);
-	const out: Record<string, CounterRollup> = {};
-	for (const [id, rollup] of [...baseline.entries()].sort(([a], [b]) =>
-		a.localeCompare(b),
-	)) {
-		out[id] = normalizeRollupTimestamps(cloneRollup(rollup));
-	}
-	await atomicWriteFile(filePath, `${JSON.stringify(out, null, 2)}\n`);
-}
-
-async function statCacheKey(filePath: string): Promise<string> {
-	try {
-		const fileStat = await stat(filePath);
-		return `${fileStat.mtimeMs}:${fileStat.ctimeMs}:${fileStat.size}`;
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'missing';
-		throw err;
-	}
-}
-
-async function buildCounterRollupCacheKey(directory: string): Promise<string> {
-	const [eventsKey, legacyKey, baselineKey] = await Promise.all([
-		statCacheKey(resolveKnowledgeEventsPath(directory)),
-		statCacheKey(resolveLegacyApplicationLogPath(directory)),
-		statCacheKey(resolveKnowledgeCounterBaselinePath(directory)),
-	]);
-	return `${eventsKey}|${legacyKey}|${baselineKey}`;
-}
-
-function setCounterRollupCache(
-	directory: string,
-	key: string,
-	rollups: Map<string, CounterRollup>,
-): void {
-	if (counterRollupCache.has(directory)) {
-		counterRollupCache.delete(directory);
-	}
-	counterRollupCache.set(directory, {
-		key,
-		rollups: cloneRollupMap(rollups),
-	});
-	while (counterRollupCache.size > MAX_COUNTER_ROLLUP_CACHE_DIRS) {
-		const oldestKey = counterRollupCache.keys().next().value;
-		if (oldestKey === undefined) break;
-		counterRollupCache.delete(oldestKey);
-	}
-}
-
-function parseEventLines(lines: string[], filePath: string): KnowledgeEvent[] {
-	const out: KnowledgeEvent[] = [];
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			out.push(JSON.parse(trimmed) as KnowledgeEvent);
-		} catch {
-			warn(
-				`[knowledge-events] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
-					0,
-					80,
-				)}`,
-			);
-		}
-	}
-	return out;
-}
-
-async function foldEvictedEventsIntoBaseline(
-	directory: string,
-	evictedLines: string[],
-	filePath: string,
-): Promise<void> {
-	const evictedEvents = parseEventLines(evictedLines, filePath);
-	if (evictedEvents.length === 0) return;
-	const baseline = await readCounterBaseline(directory);
-	for (const [id, rollup] of recomputeCounters(evictedEvents)) {
-		mergeRollupInto(get(baseline, id), rollup);
-	}
-	await writeCounterBaseline(directory, baseline);
-}
-
+/**
+ * Recompute per-entry counters deterministically from the immutable event log,
+ * optionally folding in legacy `knowledge-application.jsonl` records.
+ *
+ * Determinism & double-counting: the ONLY outcome our code writes to both logs
+ * is "shown" — the injector emits both a legacy `recordKnowledgeShown` record
+ * AND a `retrieved` event for the same injection. Every other legacy verb
+ * (`applied`/`ignored`/`violated`/`acknowledged`) originates from `knowledge_ack`
+ * and has no event-log counterpart; the event-sourced equivalents come from the
+ * separate `knowledge_receipt` tool. So the race-free rule is:
+ *
+ *   - legacy `shown`: folded ONLY when the event log contains no `retrieved`
+ *     event (i.e. a pure pre-migration install). Once any `retrieved` event
+ *     exists, `shown_count` is derived from events alone, eliminating the
+ *     timestamp-race double-count.
+ *   - legacy non-`shown` verbs: always folded (no event counterpart, so no
+ *     double count), preserving pre-migration history.
+ *
+ * The result depends only on the input arrays, not on wall-clock time or order.
+ *
+ * @param events Events from {@link readKnowledgeEvents}.
+ * @param legacyRecords Optional legacy application records (any order).
+ */
 export function recomputeCounters(
 	events: KnowledgeEvent[],
 	legacyRecords: KnowledgeApplicationRecord[] = [],
-	baseline: Map<string, CounterRollup> = new Map(),
 ): Map<string, CounterRollup> {
 	const map = new Map<string, CounterRollup>();
 	const retrievedIds = new Set<string>();
-	for (const [id, rollup] of baseline) {
-		map.set(id, cloneRollup(rollup));
-		if ((rollup.shown_count ?? 0) > 0) retrievedIds.add(id);
-	}
 
 	for (const e of events) {
 		switch (e.type) {
@@ -674,6 +569,7 @@ export function recomputeCounters(
 				get(map, e.knowledge_id).contradicted_count += 1;
 				break;
 			case 'n_a':
+				// Recorded for auditability; intentionally neutral (no penalty).
 				get(map, e.knowledge_id).n_a_count += 1;
 				break;
 			case 'outcome': {
@@ -688,6 +584,9 @@ export function recomputeCounters(
 		}
 	}
 
+	// Fold legacy records. `shown` is folded per entry only when that entry has
+	// no `retrieved` event (otherwise events are authoritative for shown_count);
+	// every other verb is folded unconditionally (no event-log counterpart).
 	for (const rec of legacyRecords) {
 		const r = get(map, rec.knowledgeId);
 		switch (rec.result) {
@@ -712,13 +611,27 @@ export function recomputeCounters(
 		}
 	}
 
+	// Normalize violation timestamps: newest first, capped at the retention limit.
 	for (const r of map.values()) {
-		normalizeRollupTimestamps(r);
+		if (r.violation_timestamps.length > 1) {
+			r.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+		}
+		if (r.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
+			r.violation_timestamps = r.violation_timestamps.slice(
+				0,
+				MAX_VIOLATION_TIMESTAMPS,
+			);
+		}
 	}
 
 	return map;
 }
 
+/**
+ * Count how many of the given violation timestamps fall within `windowDays` of
+ * `now` (inclusive). Pure helper — deterministic given its inputs. Malformed
+ * timestamps are ignored.
+ */
 export function countViolationsInWindow(
 	timestamps: string[],
 	windowDays: number,
@@ -733,6 +646,13 @@ export function countViolationsInWindow(
 	return count;
 }
 
+/**
+ * Async convenience: count an entry's violations within a day-window. Counts
+ * directly from the event log + legacy application records so the result is
+ * INDEPENDENT of the {@link MAX_VIOLATION_TIMESTAMPS} display cap (the rollup's
+ * `violation_timestamps` keeps only the newest 10 and would undercount an entry
+ * with more in-window violations). Fail-open: returns 0 on error.
+ */
 export async function countEntryViolationsInWindow(
 	directory: string,
 	entryId: string,
@@ -751,6 +671,9 @@ export async function countEntryViolationsInWindow(
 			const t = Date.parse(e.timestamp);
 			if (!Number.isNaN(t) && t >= cutoff) count += 1;
 		}
+		// Legacy `violated` records originate from the old knowledge_ack tool and
+		// have no event-log counterpart, so they are folded unconditionally (same
+		// rule recomputeCounters uses) — no double counting.
 		for (const rec of legacyRecords) {
 			if (rec.result !== 'violated' || rec.knowledgeId !== entryId) continue;
 			const t = Date.parse(rec.timestamp);
@@ -762,25 +685,20 @@ export async function countEntryViolationsInWindow(
 	}
 }
 
+/**
+ * Fail-open rollup reader for hot paths. Search and promotion use this instead
+ * of stale persisted counters so `knowledge_receipt` feedback affects ranking
+ * and safety gates immediately.
+ */
 export async function readKnowledgeCounterRollups(
 	directory: string,
 ): Promise<Map<string, CounterRollup>> {
 	try {
-		const cacheKey = await buildCounterRollupCacheKey(directory);
-		const cached = counterRollupCache.get(directory);
-		if (cached?.key === cacheKey) {
-			counterRollupCache.delete(directory);
-			counterRollupCache.set(directory, cached);
-			return cloneRollupMap(cached.rollups);
-		}
-		const [events, legacyRecords, baseline] = await Promise.all([
+		const [events, legacyRecords] = await Promise.all([
 			readKnowledgeEvents(directory),
 			readLegacyApplicationRecords(directory),
-			readCounterBaseline(directory),
 		]);
-		const rollups = recomputeCounters(events, legacyRecords, baseline);
-		setCounterRollupCache(directory, cacheKey, rollups);
-		return cloneRollupMap(rollups);
+		return recomputeCounters(events, legacyRecords);
 	} catch (err) {
 		warn(
 			`[knowledge-events] readKnowledgeCounterRollups failed: ${
@@ -791,6 +709,7 @@ export async function readKnowledgeCounterRollups(
 	}
 }
 
+/** Merge event-derived rollups over stored outcome counters for scoring only. */
 export function effectiveRetrievalOutcomes(
 	stored: RetrievalOutcome | undefined,
 	rollup: CounterRollup | undefined,
@@ -808,91 +727,11 @@ export function effectiveRetrievalOutcomes(
 }
 
 // ============================================================================
-// Feedback bridge — Knowledge verdict → confidence bumps
-// ============================================================================
-
-const VERDICT_CONFIDENCE_BOOST = 0.03;
-const VERDICT_CONFIDENCE_DECAY = 0.05;
-
-export async function applyKnowledgeVerdictFeedback(
-	directory: string,
-	options?: { sinceTimestamp?: string },
-): Promise<{ processed: number; bumps: number }> {
-	try {
-		const events = await readKnowledgeEvents(directory);
-
-		const actionable = events.filter((e): e is ReceiptEvent => {
-			if (
-				e.type !== 'applied' &&
-				e.type !== 'violated' &&
-				e.type !== 'ignored'
-			) {
-				return false;
-			}
-			if (
-				options?.sinceTimestamp &&
-				(e as ReceiptEvent).timestamp <= options.sinceTimestamp
-			) {
-				return false;
-			}
-			return true;
-		});
-
-		if (actionable.length === 0) {
-			return { processed: 0, bumps: 0 };
-		}
-
-		const groups = new Map<
-			string,
-			{ applied: number; violated: number; ignored: number }
-		>();
-		for (const event of actionable) {
-			const kid = event.knowledge_id;
-			if (!kid) continue;
-			const g = groups.get(kid) ?? { applied: 0, violated: 0, ignored: 0 };
-			if (event.type === 'applied') g.applied++;
-			else if (event.type === 'violated') g.violated++;
-			else if (event.type === 'ignored') g.ignored++;
-			groups.set(kid, g);
-		}
-
-		const deltas: Array<{ id: string; delta: number }> = [];
-		for (const [id, counts] of groups) {
-			const positives = counts.applied;
-			const negatives = counts.violated + counts.ignored;
-			if (positives === 0 && negatives === 0) continue;
-			const delta =
-				positives > negatives
-					? VERDICT_CONFIDENCE_BOOST
-					: -VERDICT_CONFIDENCE_DECAY;
-			deltas.push({ id, delta });
-		}
-
-		if (deltas.length > 0) {
-			const { bumpKnowledgeConfidenceBatch } = await import(
-				'./knowledge-store.js'
-			);
-			await bumpKnowledgeConfidenceBatch(directory, deltas);
-		}
-
-		return { processed: groups.size, bumps: deltas.length };
-	} catch (err) {
-		warn(
-			`[knowledge-events] applyKnowledgeVerdictFeedback failed (fail-open): ${
-				err instanceof Error ? err.message : String(err)
-			}`,
-		);
-		return { processed: 0, bumps: 0 };
-	}
-}
-
-// ============================================================================
 // DI seam
 // ============================================================================
 
 export const _internals: {
 	resolveKnowledgeEventsPath: typeof resolveKnowledgeEventsPath;
-	resolveKnowledgeCounterBaselinePath: typeof resolveKnowledgeCounterBaselinePath;
 	resolveHiveEventsPath: typeof resolveHiveEventsPath;
 	appendKnowledgeEvent: typeof appendKnowledgeEvent;
 	appendHiveKnowledgeEvent: typeof appendHiveKnowledgeEvent;
@@ -900,17 +739,14 @@ export const _internals: {
 	recordHiveKnowledgeEvent: typeof recordHiveKnowledgeEvent;
 	readKnowledgeEvents: typeof readKnowledgeEvents;
 	readHiveKnowledgeEvents: typeof readHiveKnowledgeEvents;
-	readCounterBaseline: typeof readCounterBaseline;
 	readLegacyApplicationRecords: typeof readLegacyApplicationRecords;
 	readKnowledgeCounterRollups: typeof readKnowledgeCounterRollups;
 	effectiveRetrievalOutcomes: typeof effectiveRetrievalOutcomes;
 	recomputeCounters: typeof recomputeCounters;
-	applyKnowledgeVerdictFeedback: typeof applyKnowledgeVerdictFeedback;
 	newTraceId: typeof newTraceId;
 	newEventId: typeof newEventId;
 } = {
 	resolveKnowledgeEventsPath,
-	resolveKnowledgeCounterBaselinePath,
 	resolveHiveEventsPath,
 	appendKnowledgeEvent,
 	appendHiveKnowledgeEvent,
@@ -918,12 +754,10 @@ export const _internals: {
 	recordHiveKnowledgeEvent,
 	readKnowledgeEvents,
 	readHiveKnowledgeEvents,
-	readCounterBaseline,
 	readLegacyApplicationRecords,
 	readKnowledgeCounterRollups,
 	effectiveRetrievalOutcomes,
 	recomputeCounters,
-	applyKnowledgeVerdictFeedback,
 	newTraceId,
 	newEventId,
 };
