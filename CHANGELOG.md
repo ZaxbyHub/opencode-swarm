@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.78.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.4...v7.78.5) (2026-06-16)
+
+
+### Bug Fixes
+
+* **skill-compliance:** unify verdict vocabulary from 'violation' to 'violated' ([#1325](https://github.com/zaxbysauce/opencode-swarm/issues/1325)) ([8870463](https://github.com/zaxbysauce/opencode-swarm/commit/8870463e7155e2e7dd0b4d01b5d309a43308e8bb))
+* **turbo/lean:** address post-merge architectural concerns ([#1246](https://github.com/zaxbysauce/opencode-swarm/issues/1246)) ([021461c](https://github.com/zaxbysauce/opencode-swarm/commit/021461c5d35e5165fc2d0ce8b4dd84e5b8e22e8b))
+
 ## [7.78.4](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.3...v7.78.4) (2026-06-16)
 
 
