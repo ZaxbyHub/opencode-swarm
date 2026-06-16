@@ -397,14 +397,15 @@ export async function loadEvidence(
 
 	// Construct relative path
 	const relativePath = path.join('evidence', sanitizedTaskId, 'evidence.json');
-	const evidencePath = validateSwarmPath(directory, relativePath);
 
 	// Path length guard: reject paths that exceed common OS limits (e.g. Linux 4096 bytes)
 	// before attempting any filesystem access. This prevents unhandled errors on
 	// adversarial inputs like extremely long task IDs that would produce paths > 4096 chars.
-	if (evidencePath.length > 4096) {
+	if (relativePath.length > 4096) {
 		return { status: 'not_found' };
 	}
+
+	const evidencePath = validateSwarmPath(directory, relativePath);
 
 	// Read file
 	const content = await readSwarmFileAsync(directory, relativePath);
