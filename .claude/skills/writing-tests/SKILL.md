@@ -436,6 +436,84 @@ if (isWindows) test.skip('reason', () => {});
 - Use `.cmd` extension on Windows for npm/bun binaries: `process.platform === 'win32' ? 'bun.cmd' : 'bun'`.
 - Use array-form `spawn`/`spawnSync`, never shell string commands.
 
+### macOS rename-visibility race (write-then-read atomic files)
+
+On macOS/APFS, `fs.renameSync` can complete before the data is visible to
+subsequent reads. Tests that write-then-read atomic files may fail on
+`macos-latest` but pass on `ubuntu-latest` and `windows-latest`.
+
+**Symptom:** Test fails only on macOS with `result === null` or
+`result === undefined` immediately after a write that should have made the
+file visible.
+
+**Root cause:** macOS filesystem updates the directory entry asynchronously
+after `fs.renameSync`. Immediately-following reads may see ENOENT or stale
+data.
+
+**Fix — three layers (use all three for production code):**
+
+**Layer 1: Use `bunWrite` for atomic writes.** The `bunWrite` function in
+`src/utils/bun-compat.ts` already handles temp file creation, fsync,
+atomic rename, and parent directory fsync correctly across platforms.
+Do NOT reimplement this pattern.
+
+**Layer 2: Add ENOENT retry in the read path.** Wrap `validateSwarmPath` and
+the file read in a try/catch with a bounded retry loop for ENOENT:
+
+```typescript
+// CORRECT — retry on ENOENT only (not other errors), bounded
+const maxAttempts = 5;
+const retryDelayMs = 10;
+for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  try {
+    const resolvedPath = _internals.validateSwarmPath(directory, filename);
+    const file = bunFile(resolvedPath);
+    const content = await file.text();
+    return content;
+  } catch (err) {
+    const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+    if (!isNotFound || attempt === maxAttempts - 1) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+}
+return null;
+```
+
+CRITICAL: `validateSwarmPath` must be INSIDE the try block so that throws
+(for path traversal attempts) are caught and return null. Security tests
+expect `readSwarmFileAsync` to return null for traversal attempts.
+
+**Layer 3: Don't add arbitrary delays.** `setTimeout` should be bounded
+(5-10ms, max 5 attempts). Do not add `await new Promise(r => setTimeout(r, 100))`
+"just in case" — that's a code smell. The retry loop handles it.
+
+### Node FileHandle API
+
+Node's `FileHandle` uses `.sync()`, NOT `.fsync()`:
+
+```typescript
+// CORRECT
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.sync();
+} finally {
+  await fd.close();
+}
+
+// WRONG — TypeScript error: Property 'fsync' does not exist on type 'FileHandle'
+const fd = await fsPromises.open(dir, 'r');
+try {
+  await fd.fsync();
+} finally {
+  await fd.close();
+}
+```
+
+See [`.claude/skills/engineering-conventions/SKILL.md`](../engineering-conventions/SKILL.md)
+for the evidence file flow that triggers this retry pattern in QA gates.
+
 ## Running Tests
 
 ### bash (Linux / macOS)

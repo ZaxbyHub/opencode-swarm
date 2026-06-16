@@ -89,3 +89,55 @@ Use \\\`bun:test\\\` for all tests.  // renders as: Use \`bun:test\` (backslashe
 Every PR that touches a relevant area must include an `## Invariant audit` section in its description. The format is in `AGENTS.md` ("Invariant audit required in PRs"). The `commit-pr` skill enforces this gate before push/PR — load it before committing.
 
 If you cannot prove a touched invariant from source and test output, **do not push**.
+
+## Evidence file flow (`.swarm/evidence/{taskId}.json`)
+
+**Agents NEVER write these files directly.** The `delegation-gate` hook
+writes them automatically after each reviewer/test_engineer Task
+delegation returns. The schema is defined in `src/gate-evidence.ts`:
+
+```typescript
+export interface GateEvidence {
+  sessionId: string;  // actual session ID from the Task delegation
+  timestamp: string;  // ISO 8601
+  agent: string;     // 'reviewer' | 'test_engineer' | 'sme' | etc.
+}
+
+export interface TaskEvidence {
+  taskId: string;
+  required_gates: string[];
+  gates: Record<string, GateEvidence>;
+  turbo?: boolean;
+}
+```
+
+**How to verify the flow is working:**
+
+1. After dispatching a reviewer/test_engineer Task, the `delegation-gate`
+   toolAfter hook should automatically write/update
+   `.swarm/evidence/{taskId}.json`.
+2. When you call `update_task_status(completed)`, the tool reads the
+   evidence file and verifies the `required_gates` are all present.
+3. If `update_task_status` fails with "required QA gates not yet satisfied"
+   or "Evidence file is corrupt or unreadable," inspect the evidence
+   file with `cat .swarm/evidence/{taskId}.json` to diagnose.
+
+**Do NOT manually write or fabricate evidence files.** This bypasses the
+gate enforcement and can cause downstream tool failures when the real
+session IDs are looked up.
+
+**When to suspect the flow is broken:**
+
+- The evidence file doesn't exist after a reviewer/test_engineer Task
+  delegation returns
+- The evidence file exists but has wrong `agent` or `sessionId` values
+- The plan has newly-added task IDs that the hook may not recognize
+
+**Workaround for broken flow:** If the hook consistently fails to write
+the evidence file, escalate to the user — do NOT silently fabricate
+evidence with placeholder session IDs. The gate check exists to enforce
+that a real review/test run happened.
+
+See [`.claude/skills/writing-tests/SKILL.md`](../writing-tests/SKILL.md)
+§ Cross-Platform Requirements → "macOS rename-visibility race" for the
+ENONENT retry pattern that this gate flow triggers on macOS CI.
