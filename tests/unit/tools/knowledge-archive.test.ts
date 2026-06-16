@@ -13,7 +13,10 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
-import type { HiveKnowledgeEntry, SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import type {
+	HiveKnowledgeEntry,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
 import { knowledge_archive } from '../../../src/tools/knowledge-archive';
 
 function makeSwarmEntry(id: string): SwarmKnowledgeEntry {
@@ -249,7 +252,12 @@ describe('knowledge_archive', () => {
 
 		it('quarantines hive entry when tier=hive and mode=quarantine', async () => {
 			const raw = await knowledge_archive.execute(
-				{ id: 'hive-1', reason: 'suspect hive lesson', tier: 'hive', mode: 'quarantine' },
+				{
+					id: 'hive-1',
+					reason: 'suspect hive lesson',
+					tier: 'hive',
+					mode: 'quarantine',
+				},
 				ctx(dir),
 			);
 			const parsed = JSON.parse(raw);
@@ -268,7 +276,13 @@ describe('knowledge_archive', () => {
 
 		it('purges hive entry with allow_purge:true when tier=hive', async () => {
 			const raw = await knowledge_archive.execute(
-				{ id: 'hive-1', reason: 'purge bad hive', tier: 'hive', mode: 'purge', allow_purge: true },
+				{
+					id: 'hive-1',
+					reason: 'purge bad hive',
+					tier: 'hive',
+					mode: 'purge',
+					allow_purge: true,
+				},
 				ctx(dir),
 			);
 			const parsed = JSON.parse(raw);
