@@ -55,8 +55,60 @@ and stop.
 | **lint/quality: lint** | Lint rule violations (noExplicitAny, etc.) | `bunx biome check --write <files>` or fix manually |
 | **unit test** | Test failures | Read log, fix code, commit |
 | **integration** | Integration failures | Read log, check if pre-existing on main |
+| **macOS unit test** | Cross-platform file I/O race (atomic write-then-read returns null on macOS) | See "macOS file I/O fixes" below |
 | **security** | SAST/secret findings | Read log, fix or suppress with justification |
 | **smoke** | Smoke test failures | Read log, check if environment-specific |
+
+## macOS file I/O fixes (cross-platform atomic write)
+
+macOS/APFS has different filesystem timing than Linux ext4. `fs.renameSync` can
+complete before the data is visible to subsequent reads. The most common
+manifestation is `unit (macos-latest)` failing on tests that write-then-read
+atomic files (e.g., `curator atomic write > writeCuratorSummary > after write,
+readCuratorSummary reads file back successfully`), while the same tests pass
+on `ubuntu-latest` and `windows-latest`.
+
+**Three-layer fix pattern (use all three for production code):**
+
+1. **Use `bunWrite` for atomic writes.** The `bunWrite` function in
+   `src/utils/bun-compat.ts` already handles temp file creation, fsync,
+   atomic rename, and parent directory fsync correctly across platforms.
+   Do NOT reimplement this pattern in every call site.
+
+2. **Add ENOENT retry in the read path.** Wrap `validateSwarmPath` and the
+   file read in a try/catch with a bounded retry loop (5 attempts, 10ms
+   delay) for ENOENT errors only:
+
+   ```typescript
+   for (let attempt = 0; attempt < 5; attempt++) {
+     try {
+       const resolvedPath = _internals.validateSwarmPath(directory, filename);
+       const file = bunFile(resolvedPath);
+       const content = await file.text();
+       return content;
+     } catch (err) {
+       const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+       if (!isNotFound || attempt === 4) return null;
+       await new Promise((resolve) => setTimeout(resolve, 10));
+     }
+   }
+   return null;
+   ```
+
+   CRITICAL: `validateSwarmPath` must be INSIDE the try block so throws
+   (for path traversal) are caught and return null. Security tests expect
+   null for traversal attempts.
+
+3. **Node FileHandle uses `.sync()`, not `.fsync()`.** The TypeScript
+   error `Property 'fsync' does not exist on type 'FileHandle'` means
+   use `dirFd.sync()` not `dirFd.fsync()`.
+
+**Also check the related `.swarm/evidence/` test pattern if the failure
+involves a long task ID or path:** the security test
+`ADVERSARIAL: Command Services Attack Vectors > Attack Vector 1: Malformed
+Arguments > EVIDENCE: extremely long task ID (buffer overflow) - ACCEPTED
+by regex but no crash` requires a path length guard BEFORE
+`validateSwarmPath` in `src/evidence/manager.ts:loadEvidence`.
 
 ## Step 3 — Diagnose with logs
 
