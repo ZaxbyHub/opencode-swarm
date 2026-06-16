@@ -9,7 +9,15 @@
  * - TurboStateLockTimeoutError constructor properties
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -87,6 +95,8 @@ describe('withTurboStateLock', () => {
 	});
 
 	test('logs a warning when lock._release() throws but still returns fn() result', async () => {
+		const warnSpy = spyOn(console, 'warn');
+
 		// Inject a mock tryAcquireLock that returns a lock whose _release throws.
 		_internals.tryAcquireLock = mock(async () => ({
 			acquired: true as const,
@@ -109,7 +119,10 @@ describe('withTurboStateLock', () => {
 			async () => 'ok',
 		);
 		expect(result).toBe('ok');
-		// console.warn fires (visible in test output) but does not throw.
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain('state lock release failed');
+
+		warnSpy.mockRestore();
 	});
 
 	test('retries and eventually throws TurboStateLockTimeoutError when tryAcquireLock throws', async () => {
