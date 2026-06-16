@@ -255,6 +255,11 @@ Every listed directive ID MUST appear exactly once. If a directive carries a ver
 FIXES: required changes if rejected
 Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.
 
+## OUTPUT ORDER FOR SKILL COMPLIANCE (when applicable)
+When SKILLS_USED_BY_CODER is provided, output TASK: immediately followed by SKILL_COMPLIANCE to ensure proper attribution:
+TASK: <task-id-or-unknown>
+SKILL_COMPLIANCE: <verdict> — <details>
+
 ## RULES
 - Be specific with line numbers
 - Only flag real issues, not theoretical

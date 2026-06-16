@@ -1059,35 +1059,10 @@ export async function executePhaseComplete(
 	}
 
 	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
-	// Uses a marker file to avoid reprocessing historical entries on every call.
+	// Idempotency is provided by feedback_applied markers in the skill-usage log itself.
 	// Errors never block phase_complete.
 	try {
-		const markerPath = validateSwarmPath(
-			dir,
-			'skill-usage-last-processed.json',
-		);
-		let sinceTimestamp: string | undefined;
-		try {
-			const markerData = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
-			sinceTimestamp = markerData.lastProcessedTimestamp;
-		} catch {
-			// marker doesn't exist yet — process all entries
-		}
-
-		const feedbackResult = await applySkillUsageFeedback(dir, {
-			sinceTimestamp,
-		});
-
-		// Write marker after successful feedback (best-effort)
-		try {
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({ lastProcessedTimestamp: new Date().toISOString() }),
-				'utf-8',
-			);
-		} catch {
-			// best-effort marker write — fail-open
-		}
+		const feedbackResult = await applySkillUsageFeedback(dir);
 
 		if (feedbackResult.processed > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
