@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.78.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.7...v7.78.0) (2026-06-16)
+
+
+### Features
+
+* **knowledge-archive:** Add hive-tier support for archiving cross-project lessons ([#1306](https://github.com/zaxbysauce/opencode-swarm/issues/1306)) ([a880658](https://github.com/zaxbysauce/opencode-swarm/commit/a8806582804c86696c7fb9635deeb0b20648ed5f))
+
 ## [7.77.7](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.6...v7.77.7) (2026-06-16)
 
 
