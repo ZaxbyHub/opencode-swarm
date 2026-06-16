@@ -280,9 +280,13 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			// Verify array is non-empty
 			expect(architectTools.length).toBeGreaterThan(0);
 			// Verify no undefined or null entries
-			expect(architectTools.every((t) => t !== undefined && t !== null)).toBe(true);
+			expect(architectTools.every((t) => t !== undefined && t !== null)).toBe(
+				true,
+			);
 			// Verify all entries are valid tool names
-			expect(architectTools.every((t) => TOOL_NAME_SET.has(t as ToolName))).toBe(true);
+			expect(
+				architectTools.every((t) => TOOL_NAME_SET.has(t as ToolName)),
+			).toBe(true);
 		});
 	});
 });
