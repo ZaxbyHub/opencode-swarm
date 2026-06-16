@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.77.7](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.6...v7.77.7) (2026-06-16)
+
+
+### Bug Fixes
+
+* **sessions:** abort in-flight prompt before session.delete() to prevent FK crashes ([#1374](https://github.com/zaxbysauce/opencode-swarm/issues/1374)) ([5e0c954](https://github.com/zaxbysauce/opencode-swarm/commit/5e0c95406c2b78c94853a9bac990fbee5efae883))
+
 ## [7.77.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.5...v7.77.6) (2026-06-16)
 
 
