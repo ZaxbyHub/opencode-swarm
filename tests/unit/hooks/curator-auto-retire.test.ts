@@ -83,17 +83,17 @@ describe('autoRetireSkills', () => {
 			{
 				skillPath:
 					'file:/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
@@ -337,11 +337,11 @@ describe('autoRetireSkills', () => {
 		const mockReadSkillUsageEntries = makeMockFn(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
@@ -392,7 +392,7 @@ describe('autoRetireSkills', () => {
 		const mockReadSkillUsageEntries = makeMockFn(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
@@ -459,7 +459,7 @@ describe('autoRetireSkills', () => {
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/violation-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
@@ -549,15 +549,15 @@ describe('autoRetireSkills', () => {
 		const mockReadSkillUsageEntries = makeMockFn(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 		]);
 

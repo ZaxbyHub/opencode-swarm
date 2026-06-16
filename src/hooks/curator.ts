@@ -156,10 +156,10 @@ async function autoRetireSkills(
 			});
 
 			const violations = skillUsage.filter(
-				(e) => e.complianceVerdict === 'violation',
-			).length;
-			const violationRate =
-				skillUsage.length > 0 ? violations / skillUsage.length : 0;
+					(e) => e.complianceVerdict === 'violated',
+				).length;
+				const violationRate =
+					skillUsage.length > 0 ? violations / skillUsage.length : 0;
 
 			// Check if all source knowledge is archived
 			let allArchived = false;
@@ -1268,7 +1268,7 @@ export async function runCuratorPhase(
 				if (skillUsage.length === 0) continue;
 
 				const violations = skillUsage.filter(
-					(e) => e.complianceVerdict === 'violation',
+					(e) => e.complianceVerdict === 'violated',
 				).length;
 				const violationRate = violations / skillUsage.length;
 
@@ -1282,7 +1282,7 @@ export async function runCuratorPhase(
 
 					const currentVersion = fm?.version ?? 1;
 					const violationContexts: ViolationContext[] = skillUsage
-						.filter((e) => e.complianceVerdict === 'violation')
+						.filter((e) => e.complianceVerdict === 'violated')
 						.slice(-10)
 						.map((e) => ({
 							taskId: e.taskID,
