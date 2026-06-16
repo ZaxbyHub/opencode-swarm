@@ -96,6 +96,10 @@ jobs:
           find tests/unit -name '*.test.ts' -type f | sort > "$tmpdir/all-tests.txt"
           num_shards=4
           awk -v s="$SHARD" -v n="$num_shards" '(NR - 1) % n == (s - 1)' "$tmpdir/all-tests.txt" > "$tmpdir/shard-tests.txt"
+          if [ ! -s "$tmpdir/shard-tests.txt" ]; then
+            echo "::error::No test files found for shard ${SHARD}"
+            exit 1
+          fi
           echo "Shard ${SHARD}/${num_shards}"
       - name: Run unit tests
         shell: bash
