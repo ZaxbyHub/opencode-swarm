@@ -506,28 +506,8 @@ export async function writeCuratorSummary(
 	summary: CuratorSummary,
 ): Promise<void> {
 	const resolvedPath = validateSwarmPath(directory, 'curator-summary.json');
-
-	// Ensure .swarm/ directory exists
 	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
-	// Atomic write: write to temp file then rename
-	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-	await bunWrite(tempPath, JSON.stringify(summary, null, 2));
-	// fsync the temp file so the rename below cannot leave us with an empty
-	// or partial canonical file on power-loss / kill -9, and to ensure the
-	// filesystem has flushed the write before the rename becomes visible.
-	try {
-		const fd = fs.openSync(tempPath, 'r+');
-		try {
-			fs.fsyncSync(fd);
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		// fsync is best-effort; OSes / filesystems that don't support it
-		// (e.g. some FUSE mounts) should not block the atomic write.
-	}
-	fs.renameSync(tempPath, resolvedPath);
+	await bunWrite(resolvedPath, JSON.stringify(summary, null, 2));
 }
 
 /**
@@ -1205,26 +1185,10 @@ export async function runCuratorPhase(
 				);
 				fs.mkdirSync(evidenceDir, { recursive: true });
 				const findingsPath = path.join(evidenceDir, 'curator-findings.json');
-				const tmpPath = `${findingsPath}.tmp.${Date.now()}`;
-				fs.writeFileSync(
-					tmpPath,
+				await bunWrite(
+					findingsPath,
 					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
 				);
-				// fsync the temp file so the rename below cannot leave us with an empty
-				// or partial canonical file on power-loss / kill -9, and to ensure the
-				// filesystem has flushed the write before the rename becomes visible.
-				try {
-					const fd = fs.openSync(tmpPath, 'r+');
-					try {
-						fs.fsyncSync(fd);
-					} finally {
-						fs.closeSync(fd);
-					}
-				} catch {
-					// fsync is best-effort; OSes / filesystems that don't support it
-					// should not block the atomic write.
-				}
-				fs.renameSync(tmpPath, findingsPath);
 			} catch (err) {
 				logger.warn(
 					`[curator] failed to persist application findings: ${err instanceof Error ? err.message : String(err)}`,

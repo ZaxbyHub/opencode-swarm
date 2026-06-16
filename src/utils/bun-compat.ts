@@ -186,6 +186,20 @@ export async function bunWrite(
 		throw lastError;
 	}
 
+	// fsync the parent directory so the rename is durable on macOS/APFS.
+	// On macOS the rename can complete before the directory entry is flushed;
+	// subsequent reads may see stale data or null without this.
+	try {
+		const dirFd = await fsPromises.open(dir, 'r');
+		try {
+			await dirFd.fsync();
+		} finally {
+			await dirFd.close();
+		}
+	} catch {
+		// fsync is best-effort; some filesystems/OSes don't support directory fsync.
+	}
+
 	const stats = await fsPromises.stat(filePath);
 	return stats.size;
 }
