@@ -25,7 +25,7 @@ Swarm mode is enabled for this session.
 - Passing tests, explorer output, plan critique, and self-review do not satisfy the final implementation reviewer or critic gates when independent subagents are available.
 - Any edit after reviewer or critic approval invalidates that approval; re-run the affected gate.
 - A `NEEDS_REVISION`, `REJECTED`, or `BLOCKED` verdict blocks final completion until fixed and re-reviewed.
-- If quality and speed confirm, quality wins.
+- If quality and speed conflict, quality wins.
 - Do not batch more aggressively or skip validation because the repo is large.
 - Premature completion is a failure state.
 
