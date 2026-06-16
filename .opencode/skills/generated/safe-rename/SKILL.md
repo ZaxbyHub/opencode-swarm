@@ -6,15 +6,15 @@ description: >
   build_check to ensure every consumer is updated and nothing breaks.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: []
+source_knowledge_ids: ['1eb9f867-5961-4df9-98b6-569726e63566']
 generated_at: 2026-06-14T16:50:00Z
-confidence: 0.5
+confidence: 0.8
 status: active
-version: 2
+version: 3
 skill_origin: generated
 provenance_note: >
-  Original source knowledge IDs could not be recovered from the knowledge base.
-  Metadata backfilled manually; body content preserved from the prior active revision.
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # Safe Rename Skill

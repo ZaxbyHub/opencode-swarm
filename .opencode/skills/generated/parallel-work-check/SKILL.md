@@ -6,15 +6,15 @@ description: >
   changes. Prevents wasted effort on stale branches.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: []
+source_knowledge_ids: ['b8fee776-9d6b-4af1-ae32-a26317a920f7']
 generated_at: 2026-06-14T16:50:00Z
-confidence: 0.5
+confidence: 0.8
 status: active
-version: 2
+version: 3
 skill_origin: generated
 provenance_note: >
-  Original source knowledge IDs could not be recovered from the knowledge base.
-  Metadata backfilled manually; body content preserved from the prior active revision.
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # Parallel Work Check Protocol
