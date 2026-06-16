@@ -18,6 +18,7 @@ import {
 	agentHasSwarmCommandTool,
 	createSwarmCommandHandler,
 } from './commands';
+import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
 import { loadPluginConfigWithMetaAsync } from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
@@ -1171,6 +1172,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 
 			// Register /swarm command
+			// Build a model-facing shortcut description from the registry entry (SSOT — can't drift).
+			const shortcutDescription = (cmd: string): string => {
+				const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as
+					| { description?: string }
+					| undefined;
+				if (!entry?.description) {
+					return `Use /swarm ${cmd}`; // fallback if registry entry is somehow missing
+				}
+				const desc =
+					entry.description.charAt(0).toLowerCase() +
+					entry.description.slice(1);
+				return `Use /swarm ${cmd} to ${desc}`;
+			};
 			opencodeConfig.command = {
 				...((opencodeConfig.command as Record<string, unknown>) || {}),
 				swarm: {
@@ -1178,8 +1192,21 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// Keep it minimal — instructional text confuses non-frontier models.
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
-					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|deep-research|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|consolidate|concurrency|turbo|full-auto|auto-proceed|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+					description: (() => {
+						// Derive the command list from the registry (single source of truth).
+						// Include standalone (non-alias, non-deprecated, non-subcommand) commands.
+						const standaloneCommands = VALID_COMMANDS.filter((cmd) => {
+							const entry = COMMAND_REGISTRY[
+								cmd as keyof typeof COMMAND_REGISTRY
+							] as {
+								aliasOf?: string;
+								deprecated?: boolean;
+								subcommandOf?: string;
+							};
+							return !entry.aliasOf && !entry.deprecated && !entry.subcommandOf;
+						});
+						return `Swarm management commands: /swarm [${standaloneCommands.join('|')}]`;
+					})(),
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1298,6 +1325,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm pr-feedback $ARGUMENTS',
 					description:
 						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
+				},
+				'swarm-pr-subscribe': {
+					template: '/swarm pr subscribe $ARGUMENTS',
+					description: shortcutDescription('pr subscribe'),
+				},
+				'swarm-pr-unsubscribe': {
+					template: '/swarm pr unsubscribe $ARGUMENTS',
+					description: shortcutDescription('pr unsubscribe'),
+				},
+				'swarm-pr-status': {
+					template: '/swarm pr status',
+					description: shortcutDescription('pr status'),
+				},
+				'swarm-learning': {
+					template: '/swarm learning',
+					description: shortcutDescription('learning'),
+				},
+				'swarm-post-mortem': {
+					template: '/swarm post-mortem $ARGUMENTS',
+					description: shortcutDescription('post-mortem'),
 				},
 				'swarm-deep-dive': {
 					template: '/swarm deep-dive $ARGUMENTS',
