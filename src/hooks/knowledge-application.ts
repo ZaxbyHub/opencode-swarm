@@ -93,22 +93,11 @@ async function appendAudit(
 			stale: 5000,
 		});
 		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
-		// Capping is best-effort: the audit line is already durably written above.
-		// A read/write failure here must not propagate and skip subsequent counter
-		// bumps in the caller's accounting path.
-		try {
-			const content = await readFile(filePath, 'utf-8');
-			const lines = content.split('\n').filter((line) => line.trim().length > 0);
-			if (lines.length > MAX_LEGACY_APPLICATION_LOG_ENTRIES) {
-				const trimmed = lines.slice(-MAX_LEGACY_APPLICATION_LOG_ENTRIES);
-				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
-			}
-		} catch (err) {
-			warn(
-				`[knowledge-application] appendAudit cap failed: ${
-					err instanceof Error ? err.message : String(err)
-				}`,
-			);
+		const content = await readFile(filePath, 'utf-8');
+		const lines = content.split('\n').filter((line) => line.trim().length > 0);
+		if (lines.length > MAX_LEGACY_APPLICATION_LOG_ENTRIES) {
+			const trimmed = lines.slice(-MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+			await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
 		}
 	} finally {
 		if (release) await release().catch(() => {});
@@ -501,6 +490,3 @@ export const _internals = {
 	resolveApplicationLogPath,
 	buildAckDedupKey,
 };
-
-// Suppress unused warning for lockfile when tests stub it elsewhere.
-void lockfile;
