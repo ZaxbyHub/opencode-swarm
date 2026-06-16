@@ -405,14 +405,16 @@ export async function appendKnowledgeWithCapEnforcement<T>(
 
 		// Enforce the cap if needed
 		if (updated.length > maxEntries) {
-			return updated.slice(updated.length - maxEntries);
+			return selectKnowledgeCapSurvivors(updated, maxEntries);
 		}
 		return updated;
 	});
 }
 
-// Enforce a FIFO max-entries cap on a JSONL file.
-// If the file exceeds `maxEntries`, the oldest entries are dropped.
+// Enforce a priority-aware max-entries cap on a JSONL file.
+// If the file exceeds `maxEntries`, inactive and low-outcome entries are
+// dropped first. Promoted entries are never evicted unless every entry is
+// promoted, because promoted knowledge has already escaped swarm-local TTL.
 // No-op when the file has fewer entries than the cap.
 // The full read-modify-write cycle is atomic under a directory lock to
 // prevent concurrent appendKnowledge from inserting entries that get
@@ -423,8 +425,67 @@ export async function enforceKnowledgeCap<T>(
 ): Promise<void> {
 	await transactKnowledge<T>(filePath, (entries) => {
 		if (entries.length <= maxEntries) return null;
-		return entries.slice(entries.length - maxEntries);
+		return selectKnowledgeCapSurvivors(entries, maxEntries);
 	});
+}
+
+interface KnowledgeCapCandidate<T> {
+	entry: T;
+	index: number;
+	status?: KnowledgeEntryBase['status'];
+	outcomeSignal: number;
+}
+
+function selectKnowledgeCapSurvivors<T>(entries: T[], maxEntries: number): T[] {
+	if (entries.length <= maxEntries) return entries;
+	if (maxEntries <= 0) return [];
+
+	const candidates = entries.map((entry, index): KnowledgeCapCandidate<T> => {
+		const maybeKnowledge = entry as Partial<KnowledgeEntryBase>;
+		return {
+			entry,
+			index,
+			status: maybeKnowledge.status,
+			outcomeSignal: computeOutcomeSignal(maybeKnowledge.retrieval_outcomes),
+		};
+	});
+	const allPromoted = candidates.every((c) => c.status === 'promoted');
+	const evictable = allPromoted
+		? candidates
+		: candidates.filter((c) => c.status !== 'promoted');
+	const targetDropCount = entries.length - maxEntries;
+	const dropCount = Math.min(targetDropCount, evictable.length);
+	if (dropCount <= 0) return entries;
+
+	const drop = new Set(
+		[...evictable]
+			.sort((a, b) => {
+				const inactiveDelta =
+					getKnowledgeCapStatusPriority(a.status) -
+					getKnowledgeCapStatusPriority(b.status);
+				if (inactiveDelta !== 0) return inactiveDelta;
+				const signalDelta = a.outcomeSignal - b.outcomeSignal;
+				if (signalDelta !== 0) return signalDelta;
+				return a.index - b.index;
+			})
+			.slice(0, dropCount)
+			.map((c) => c.index),
+	);
+
+	return candidates.filter((c) => !drop.has(c.index)).map((c) => c.entry);
+}
+
+function getKnowledgeCapStatusPriority(
+	status?: KnowledgeEntryBase['status'],
+): number {
+	if (
+		status === 'archived' ||
+		status === 'quarantined' ||
+		status === 'quarantined_unactionable'
+	) {
+		return 0;
+	}
+	return 1;
 }
 
 // Results from a sweep operation (aging or TODO removal)
@@ -809,6 +870,7 @@ export const _internals: {
 	findNearDuplicate: typeof findNearDuplicate;
 	computeConfidence: typeof computeConfidence;
 	computeOutcomeSignal: typeof computeOutcomeSignal;
+	selectKnowledgeCapSurvivors: typeof selectKnowledgeCapSurvivors;
 	inferTags: typeof inferTags;
 	bumpKnowledgeConfidenceBatch: typeof bumpKnowledgeConfidenceBatch;
 } = {
@@ -833,6 +895,7 @@ export const _internals: {
 	findNearDuplicate,
 	computeConfidence,
 	computeOutcomeSignal,
+	selectKnowledgeCapSurvivors,
 	inferTags,
 	bumpKnowledgeConfidenceBatch,
 };
