@@ -73,6 +73,7 @@ import type { SpecStaleDetectedEvent } from '../types/events';
 import { warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
 import { isSpecStale } from '../utils/spec-hash';
+import { readCachedParsedFile } from '../utils/swarm-artifact-cache';
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
@@ -100,6 +101,8 @@ const startupLedgerCheckedWorkspaces = new Set<string>();
 // Prevents two concurrent loadPlan calls from racing through the
 // approved-snapshot recovery and both calling savePlan (#444 item 6).
 const recoveryMutexes = new Map<string, Promise<void>>();
+
+const PLAN_JSON_CACHE_NAMESPACE = 'plan-json:validated:v1';
 
 /** Reset the startup ledger check flag. For testing only. */
 export function resetStartupLedgerCheck(): void {
@@ -202,24 +205,12 @@ export async function retryCasWithBackoff(
 export async function loadPlanJsonOnly(
 	directory: string,
 ): Promise<Plan | null> {
-	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
-	if (planJsonContent !== null) {
-		// SECURITY: Reject content with null bytes (injection) or invalid UTF-8 (corruption markers)
-		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
-			warn(
-				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
-			);
-			return null;
-		}
-		try {
-			const parsed = JSON.parse(planJsonContent);
-			const validated = PlanSchema.parse(parsed);
-			return validated;
-		} catch (error) {
-			warn(
-				`Plan validation failed for .swarm/plan.json: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
+	try {
+		return await parsePlanJsonCached(directory);
+	} catch (error) {
+		warn(
+			`Plan validation failed for .swarm/plan.json: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 	return null;
 }
@@ -256,6 +247,27 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
 	} catch {
 		return '';
 	}
+}
+
+async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
+	const planJsonPath = path.resolve(directory, '.swarm', 'plan.json');
+	return readCachedParsedFile<Plan>(
+		planJsonPath,
+		PLAN_JSON_CACHE_NAMESPACE,
+		() => readSwarmFileAsync(directory, 'plan.json'),
+		(planJsonContent) => {
+			if (
+				planJsonContent.includes('\0') ||
+				planJsonContent.includes('\uFFFD')
+			) {
+				throw new Error(
+					'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
+				);
+			}
+			const parsed = JSON.parse(planJsonContent);
+			return PlanSchema.parse(parsed);
+		},
+	);
 }
 
 /**
@@ -395,192 +407,200 @@ export async function loadPlan(directory: string): Promise<RuntimePlan | null> {
 	const planJsonContent = await readSwarmFileAsync(directory, 'plan.json');
 	if (planJsonContent !== null) {
 		// SECURITY: Reject content with null bytes or invalid UTF-8
-		if (planJsonContent.includes('\0') || planJsonContent.includes('�')) {
+		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
 			warn(
 				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
 			);
 			// Skip to plan.md migration path - don't parse tainted content
 		} else {
 			try {
-				const parsed = JSON.parse(planJsonContent);
-				const validated = PlanSchema.parse(parsed);
-
-				// Auto-heal case 1: Valid plan.json exists, check if plan.md needs regeneration
-				const inSync = await isPlanMdInSync(directory, validated);
-				if (!inSync) {
-					try {
-						await _internals.regeneratePlanMarkdown(directory, validated);
-					} catch (regenError) {
-						// Log warning but don't fail - plan.json is valid
-						warn(
-							`Failed to regenerate plan.md: ${regenError instanceof Error ? regenError.message : String(regenError)}. Proceeding with plan.json only.`,
-						);
+				const validated = await parsePlanJsonCached(directory);
+				if (validated === null) {
+					warn(
+						'[loadPlan] plan.json disappeared during cached parse. Falling back to plan.md migration or ledger recovery.',
+					);
+				} else {
+					// Auto-heal case 1: Valid plan.json exists, check if plan.md needs regeneration
+					const inSync = await isPlanMdInSync(directory, validated);
+					if (!inSync) {
+						try {
+							await _internals.regeneratePlanMarkdown(directory, validated);
+						} catch (regenError) {
+							// Log warning but don't fail - plan.json is valid
+							warn(
+								`Failed to regenerate plan.md: ${regenError instanceof Error ? regenError.message : String(regenError)}. Proceeding with plan.json only.`,
+							);
+						}
 					}
-				}
 
-				// Task 3.1: Ledger-aware rehydration guard
-				// If ledger exists and plan.json hash doesn't match latest ledger hash,
-				// the projection is stale — rebuild from ledger before returning.
-				// SCOPED TO STARTUP ONLY: Hash mismatches during active sessions are expected
-				// due to concurrent writes (save_plan + update_task_status). Only rebuild on
-				// first loadPlan() call per workspace per process lifetime.
-				if (await ledgerExists(directory)) {
-					const planHash = computePlanHash(validated);
-					const ledgerHash = await getLatestLedgerHash(directory);
-					const resolvedWorkspace = path.resolve(directory);
-					if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
-						startupLedgerCheckedWorkspaces.add(resolvedWorkspace);
-						if (ledgerHash !== '' && planHash !== ledgerHash) {
-							const currentPlanId = derivePlanId(validated);
-							const ledgerEvents = await readLedgerEvents(directory);
-							const firstEvent =
-								ledgerEvents.length > 0 ? ledgerEvents[0] : null;
-							if (firstEvent && firstEvent.plan_id !== currentPlanId) {
-								// Ledger is from a different plan identity — migration detected.
-								// Use the first event (plan_created anchor) as the authoritative identity,
-								// consistent with savePlan's archive guard which also uses events[0].
-								// Do not rebuild; plan.json is the authoritative post-migration state.
-								warn(
-									`[loadPlan] Ledger identity mismatch (ledger: ${firstEvent.plan_id}, plan: ${currentPlanId}) — skipping ledger rebuild (migration detected). Use /swarm reset-session to reinitialize the ledger.`,
-								);
-							} else {
-								warn(
-									'[loadPlan] plan.json is stale (hash mismatch with ledger) — rebuilding from ledger. If this recurs, run /swarm reset-session to clear stale session state.',
-								);
-								try {
-									const rebuilt = await replayFromLedger(directory);
-									if (rebuilt) {
-										await rebuildPlan(directory, rebuilt, {
-											reason: 'ledger_hash_mismatch_recovery',
-										});
-										warn(
-											'[loadPlan] Rebuilt plan from ledger. Checkpoint available at .swarm/SWARM_PLAN.md if it exists.',
-										);
-										return rebuilt;
-									}
-								} catch (replayError) {
-									// Ledger replay failed — try the critic-approved immutable
-									// snapshot as a last-resort fallback before returning stale state.
-									//
-									// Identity guard: pass the current workspace's plan identity
-									// (derived from the still-loaded plan.json above) to prevent
-									// resurrecting a foreign approved snapshot from a reused directory.
-									try {
-										const approved = await loadLastApprovedPlan(
-											directory,
-											currentPlanId,
-										);
-										if (approved) {
-											await rebuildPlan(directory, approved.plan, {
-												reason: 'approved_snapshot_fallback',
-											});
-											// Heal the ledger tail so subsequent loadPlan calls don't
-											// loop back into this recovery path. The recovered plan is
-											// now the authoritative state; tag it as a fresh snapshot
-											// so replayFromLedger's walk-backward picks it up before
-											// hitting whatever event (plan_reset, corruption, ...)
-											// caused the original replay to fail.
-											try {
-												await takeSnapshotEvent(directory, approved.plan, {
-													source: 'recovery_from_approved_snapshot',
-													approvalMetadata: approved.approval,
-												});
-											} catch (healError) {
-												warn(
-													`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
-												);
-											}
-											const approvedPhase =
-												approved.approval &&
-												typeof approved.approval === 'object' &&
-												'phase' in approved.approval
-													? (approved.approval as { phase?: unknown }).phase
-													: undefined;
-											warn(
-												`[loadPlan] Ledger replay failed (${replayError instanceof Error ? replayError.message : String(replayError)}) — recovered from critic-approved snapshot seq=${approved.seq} (approval phase=${approvedPhase ?? 'unknown'}, timestamp=${approved.timestamp}). This may roll the plan back to an earlier phase — verify before continuing.`,
-											);
-											return approved.plan;
-										}
-									} catch {
-										// Fall through to the stale-plan warning below
-									}
+					// Task 3.1: Ledger-aware rehydration guard
+					// If ledger exists and plan.json hash doesn't match latest ledger hash,
+					// the projection is stale — rebuild from ledger before returning.
+					// SCOPED TO STARTUP ONLY: Hash mismatches during active sessions are expected
+					// due to concurrent writes (save_plan + update_task_status). Only rebuild on
+					// first loadPlan() call per workspace per process lifetime.
+					if (await ledgerExists(directory)) {
+						const planHash = computePlanHash(validated);
+						const ledgerHash = await getLatestLedgerHash(directory);
+						const resolvedWorkspace = path.resolve(directory);
+						if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
+							startupLedgerCheckedWorkspaces.add(resolvedWorkspace);
+							if (ledgerHash !== '' && planHash !== ledgerHash) {
+								const currentPlanId = derivePlanId(validated);
+								const ledgerEvents = await readLedgerEvents(directory);
+								const firstEvent =
+									ledgerEvents.length > 0 ? ledgerEvents[0] : null;
+								if (firstEvent && firstEvent.plan_id !== currentPlanId) {
+									// Ledger is from a different plan identity — migration detected.
+									// Use the first event (plan_created anchor) as the authoritative identity,
+									// consistent with savePlan's archive guard which also uses events[0].
+									// Do not rebuild; plan.json is the authoritative post-migration state.
 									warn(
-										`[loadPlan] Ledger replay failed during hash-mismatch rebuild: ${replayError instanceof Error ? replayError.message : String(replayError)}. Returning stale plan.json. To recover: check .swarm/SWARM_PLAN.md for a checkpoint, or run /swarm reset-session.`,
+										`[loadPlan] Ledger identity mismatch (ledger: ${firstEvent.plan_id}, plan: ${currentPlanId}) — skipping ledger rebuild (migration detected). Use /swarm reset-session to reinitialize the ledger.`,
 									);
+								} else {
+									warn(
+										'[loadPlan] plan.json is stale (hash mismatch with ledger) — rebuilding from ledger. If this recurs, run /swarm reset-session to clear stale session state.',
+									);
+									try {
+										const rebuilt = await replayFromLedger(directory);
+										if (rebuilt) {
+											await rebuildPlan(directory, rebuilt, {
+												reason: 'ledger_hash_mismatch_recovery',
+											});
+											warn(
+												'[loadPlan] Rebuilt plan from ledger. Checkpoint available at .swarm/SWARM_PLAN.md if it exists.',
+											);
+											return rebuilt;
+										}
+									} catch (replayError) {
+										// Ledger replay failed — try the critic-approved immutable
+										// snapshot as a last-resort fallback before returning stale state.
+										//
+										// Identity guard: pass the current workspace's plan identity
+										// (derived from the still-loaded plan.json above) to prevent
+										// resurrecting a foreign approved snapshot from a reused directory.
+										try {
+											const approved = await loadLastApprovedPlan(
+												directory,
+												currentPlanId,
+											);
+											if (approved) {
+												await rebuildPlan(directory, approved.plan, {
+													reason: 'approved_snapshot_fallback',
+												});
+												// Heal the ledger tail so subsequent loadPlan calls don't
+												// loop back into this recovery path. The recovered plan is
+												// now the authoritative state; tag it as a fresh snapshot
+												// so replayFromLedger's walk-backward picks it up before
+												// hitting whatever event (plan_reset, corruption, ...)
+												// caused the original replay to fail.
+												try {
+													await takeSnapshotEvent(directory, approved.plan, {
+														source: 'recovery_from_approved_snapshot',
+														approvalMetadata: approved.approval,
+													});
+												} catch (healError) {
+													warn(
+														`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
+													);
+												}
+												const approvedPhase =
+													approved.approval &&
+													typeof approved.approval === 'object' &&
+													'phase' in approved.approval
+														? (approved.approval as { phase?: unknown }).phase
+														: undefined;
+												warn(
+													`[loadPlan] Ledger replay failed (${replayError instanceof Error ? replayError.message : String(replayError)}) — recovered from critic-approved snapshot seq=${approved.seq} (approval phase=${approvedPhase ?? 'unknown'}, timestamp=${approved.timestamp}). This may roll the plan back to an earlier phase — verify before continuing.`,
+												);
+												return approved.plan;
+											}
+										} catch {
+											// Fall through to the stale-plan warning below
+										}
+										warn(
+											`[loadPlan] Ledger replay failed during hash-mismatch rebuild: ${replayError instanceof Error ? replayError.message : String(replayError)}. Returning stale plan.json. To recover: check .swarm/SWARM_PLAN.md for a checkpoint, or run /swarm reset-session.`,
+										);
+									}
+									// Fall through and return the validated plan.json
 								}
-								// Fall through and return the validated plan.json
+							}
+						} else if (ledgerHash !== '' && planHash !== ledgerHash) {
+							// During active session: hash mismatch is expected due to concurrent writes.
+							if (process.env.DEBUG_SWARM) {
+								console.warn(
+									`[loadPlan] Ledger hash mismatch during active session for ${resolvedWorkspace} — skipping rebuild (startup check already performed).`,
+								);
 							}
 						}
-					} else if (ledgerHash !== '' && planHash !== ledgerHash) {
-						// During active session: hash mismatch is expected due to concurrent writes.
-						if (process.env.DEBUG_SWARM) {
-							console.warn(
-								`[loadPlan] Ledger hash mismatch during active session for ${resolvedWorkspace} — skipping rebuild (startup check already performed).`,
-							);
+					}
+					// Step 3: SPEC STALENESS CHECK
+					// Only check staleness if plan has a specHash (pre-feature plans are exempt)
+					if (validated.specHash) {
+						const staleResult = await isSpecStale(directory, validated);
+						if (staleResult.stale) {
+							// Cast to RuntimePlan to attach runtime staleness flags
+							const runtimePlan = validated as RuntimePlan;
+							runtimePlan._specStale = true;
+							runtimePlan._specStaleReason = staleResult.reason;
+
+							// Write spec-staleness.json
+							try {
+								const specStalenessPath = path.join(
+									directory,
+									'.swarm',
+									'spec-staleness.json',
+								);
+								await fsPromises.writeFile(
+									specStalenessPath,
+									JSON.stringify(
+										{
+											type: 'spec_stale_detected',
+											timestamp: new Date().toISOString(),
+											phase: validated.current_phase ?? 1,
+											specHash_plan: validated.specHash,
+											specHash_current: staleResult.currentHash ?? null,
+											reason: staleResult.reason,
+											planTitle: validated.title,
+										},
+										null,
+										2,
+									),
+									'utf-8',
+								);
+							} catch {
+								// Non-fatal: spec-staleness.json write failure does not block plan loading
+							}
+
+							// Emit spec_stale_detected to events.jsonl
+							try {
+								const eventsPath = path.join(
+									directory,
+									'.swarm',
+									'events.jsonl',
+								);
+								const event: SpecStaleDetectedEvent = {
+									type: 'spec_stale_detected',
+									timestamp: new Date().toISOString(),
+									phase: validated.current_phase ?? 1,
+									specHash_plan: validated.specHash,
+									specHash_current: staleResult.currentHash ?? null,
+									reason: staleResult.reason ?? 'unknown',
+									planTitle: validated.title,
+								};
+								await fsPromises.appendFile(
+									eventsPath,
+									`${JSON.stringify(event)}\n`,
+									'utf-8',
+								);
+							} catch {
+								// Non-fatal: event write failure does not block plan loading
+							}
 						}
 					}
+					return validated;
 				}
-				// Step 3: SPEC STALENESS CHECK
-				// Only check staleness if plan has a specHash (pre-feature plans are exempt)
-				if (validated.specHash) {
-					const staleResult = await isSpecStale(directory, validated);
-					if (staleResult.stale) {
-						// Cast to RuntimePlan to attach runtime staleness flags
-						const runtimePlan = validated as RuntimePlan;
-						runtimePlan._specStale = true;
-						runtimePlan._specStaleReason = staleResult.reason;
-
-						// Write spec-staleness.json
-						try {
-							const specStalenessPath = path.join(
-								directory,
-								'.swarm',
-								'spec-staleness.json',
-							);
-							await fsPromises.writeFile(
-								specStalenessPath,
-								JSON.stringify(
-									{
-										type: 'spec_stale_detected',
-										timestamp: new Date().toISOString(),
-										phase: validated.current_phase ?? 1,
-										specHash_plan: validated.specHash,
-										specHash_current: staleResult.currentHash ?? null,
-										reason: staleResult.reason,
-										planTitle: validated.title,
-									},
-									null,
-									2,
-								),
-								'utf-8',
-							);
-						} catch {
-							// Non-fatal: spec-staleness.json write failure does not block plan loading
-						}
-
-						// Emit spec_stale_detected to events.jsonl
-						try {
-							const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-							const event: SpecStaleDetectedEvent = {
-								type: 'spec_stale_detected',
-								timestamp: new Date().toISOString(),
-								phase: validated.current_phase ?? 1,
-								specHash_plan: validated.specHash,
-								specHash_current: staleResult.currentHash ?? null,
-								reason: staleResult.reason ?? 'unknown',
-								planTitle: validated.title,
-							};
-							await fsPromises.appendFile(
-								eventsPath,
-								`${JSON.stringify(event)}\n`,
-								'utf-8',
-							);
-						} catch {
-							// Non-fatal: event write failure does not block plan loading
-						}
-					}
-				}
-				return validated;
 			} catch (error) {
 				// Step 2: Validation failed, log warning and fall through to legacy
 				warn(

@@ -926,6 +926,13 @@ ACTION: Load skill file:.opencode/skills/critic-gate/SKILL.md immediately. Follo
 HARD CONSTRAINTS:
 - Do not begin implementation until the critic has reviewed and approved the plan.
 
+6k. SPEC-STALENESS GUARD:
+- If _specStale or .swarm/spec-staleness.json exists, stop and surface the drift to the user. The user must run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to acknowledge the drift and suppress warnings.
+- Do NOT run /swarm acknowledge-spec-drift yourself, including through swarm_command, chat fallback, shell, bunx, npx, node, bun, or equivalent dispatcher forms.
+- Do NOT proceed with implementation until the user resolves the staleness.
+- When re-saving a plan in response to spec drift, save_plan requires every prior task missing from the new args.phases to be listed in removed_task_ids with a removal_reason. Pending, in_progress, or blocked tasks must not be removed without explicit user confirmation.
+- While .swarm/spec-staleness.json exists, the runtime structurally blocks SPEC_DRIFT_BLOCKED_TOOLS: save_plan, update_task_status, phase_complete, lean_turbo_run_phase, and lean_turbo_acquire_locks. If a call returns SPEC_DRIFT_BLOCK, do not retry; surface the drift and wait for the user to run /swarm clarify or /swarm acknowledge-spec-drift.
+
 ### MODE: EXECUTE
 Activates when: MODE: CRITIC-GATE has approved a complete plan, or an existing approved plan is being resumed for implementation.
 

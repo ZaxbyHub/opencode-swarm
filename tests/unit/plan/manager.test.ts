@@ -13,6 +13,10 @@ import {
 	savePlan,
 	updateTaskStatus,
 } from '../../../src/plan/manager';
+import {
+	getSwarmArtifactCacheStats,
+	resetSwarmArtifactCache,
+} from '../../../src/utils/swarm-artifact-cache';
 
 function createTestPlan(overrides?: Partial<Plan>): Plan {
 	return {
@@ -58,10 +62,12 @@ describe('loadPlanJsonOnly', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
+		resetSwarmArtifactCache();
 		tempDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-test-'));
 	});
 
 	afterEach(async () => {
+		resetSwarmArtifactCache();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
 		}
@@ -108,16 +114,43 @@ describe('loadPlanJsonOnly', () => {
 		const result = await loadPlanJsonOnly(tempDir);
 		expect(result).toBeNull();
 	});
+
+	test('reuses parsed plan.json until mtime or size changes', async () => {
+		const testPlan = createTestPlan();
+		await writePlanJson(tempDir, testPlan);
+
+		const first = await loadPlanJsonOnly(tempDir);
+		const second = await loadPlanJsonOnly(tempDir);
+
+		expect(first).toEqual(testPlan);
+		expect(second).toEqual(testPlan);
+		let stats = getSwarmArtifactCacheStats();
+		expect(stats.parsedReadCount).toBe(1);
+		expect(stats.parseCount).toBe(1);
+		expect(stats.parsedCacheHitCount).toBe(1);
+
+		const rewrittenPlan = createTestPlan({ title: 'Rewritten Test Plan' });
+		await writePlanJson(tempDir, rewrittenPlan);
+
+		const third = await loadPlanJsonOnly(tempDir);
+
+		expect(third).toEqual(rewrittenPlan);
+		stats = getSwarmArtifactCacheStats();
+		expect(stats.parsedReadCount).toBe(2);
+		expect(stats.parseCount).toBe(2);
+	});
 });
 
 describe('loadPlan (auto-heal behavior)', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
+		resetSwarmArtifactCache();
 		tempDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-test-'));
 	});
 
 	afterEach(async () => {
+		resetSwarmArtifactCache();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
 		}
@@ -134,6 +167,22 @@ describe('loadPlan (auto-heal behavior)', () => {
 		const result = await loadPlan(tempDir);
 		expect(result).not.toBeNull();
 		expect(result).toEqual(testPlan);
+	});
+
+	test('shares parsed plan.json between loadPlanJsonOnly and loadPlan', async () => {
+		const testPlan = createTestPlan();
+		await writePlanJson(tempDir, testPlan);
+		await writePlanMd(tempDir, derivePlanMarkdown(testPlan));
+
+		const lightweight = await loadPlanJsonOnly(tempDir);
+		const full = await loadPlan(tempDir);
+
+		expect(lightweight).toEqual(testPlan);
+		expect(full).toEqual(testPlan);
+		const stats = getSwarmArtifactCacheStats();
+		expect(stats.parsedReadCount).toBe(1);
+		expect(stats.parseCount).toBe(1);
+		expect(stats.parsedCacheHitCount).toBeGreaterThanOrEqual(1);
 	});
 
 	// ====== Auto-heal tests (Task 5.1) ======
