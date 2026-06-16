@@ -170,7 +170,6 @@ export async function readSwarmFileAsync(
 	directory: string,
 	filename: string,
 ): Promise<string | null> {
-	const resolvedPath = _internals.validateSwarmPath(directory, filename);
 	// Retry loop to handle macOS/APFS rename-visibility race.
 	// After an atomic rename, the filesystem can take a few ms to update
 	// the directory entry. Immediately-following reads may see ENOENT.
@@ -179,6 +178,7 @@ export async function readSwarmFileAsync(
 	const retryDelayMs = 10;
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
 		try {
+			const resolvedPath = _internals.validateSwarmPath(directory, filename);
 			const file = bunFile(resolvedPath);
 			const content = await file.text();
 			return content;
