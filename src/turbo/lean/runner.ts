@@ -1300,14 +1300,18 @@ export class LeanTurboRunner {
 					this._sessionID,
 				);
 				const phase = runState?.phase;
-				if (phase !== undefined) {
-					await LeanTurboRunner._internals.writeLaneEvidence(
-						this._directory,
-						phase,
-						evidence,
+				if (phase === undefined) {
+					console.warn(
+						`[lean-turbo] evidence write skipped for lane ${lane.laneId}: phase not set in run state`,
 					);
-					return; // Success
+					return;
 				}
+				await LeanTurboRunner._internals.writeLaneEvidence(
+					this._directory,
+					phase,
+					evidence,
+				);
+				return; // Success
 			} catch (error) {
 				const errCode =
 					error instanceof Error

@@ -29,7 +29,7 @@
  * - turbo_state_lock_timeout (thrown as error)
  */
 
-import { tryAcquireLock } from '../../parallel/file-locks.js';
+import { tryAcquireLock } from '../../parallel/file-locks';
 
 export class TurboStateLockTimeoutError extends Error {
 	readonly directory: string;
