@@ -96,6 +96,14 @@ describe('renderSkillMarkdown mode', () => {
 		expect(md).toContain('source_knowledge_ids:');
 		expect(md).toMatch(/^generated_at:\s+\S+/m);
 	});
+
+	it('emits trigger frontmatter that round-trips through the draft parser', () => {
+		const md = renderSkillMarkdown(cluster, 'draft');
+		expect(md).toContain('triggers:');
+		expect(md).toContain('  - coder delegation');
+		const fm = parseDraftFrontmatter(md);
+		expect(fm?.triggers).toEqual(['coder delegation']);
+	});
 });
 
 describe('parseDraftFrontmatter', () => {
@@ -107,6 +115,7 @@ describe('parseDraftFrontmatter', () => {
 		expect(fm!.name).toBe(cluster.slug);
 		expect(fm!.status).toBe('draft');
 		expect(fm!.sourceKnowledgeIds.sort()).toEqual(['a1', 'a2']);
+		expect(fm!.triggers).toEqual(['coder delegation']);
 		expect(fm!.generatedAt).toBeString();
 	});
 
@@ -130,11 +139,12 @@ describe('parseDraftFrontmatter', () => {
 
 	it('accepts hand-authored pure-CRLF frontmatter directly', () => {
 		const crlf =
-			'---\r\nname: hand-authored\r\nstatus: draft\r\ngenerated_from_knowledge:\r\n  - id-a\r\n  - id-b\r\n---\r\n# body\r\n';
+			'---\r\nname: hand-authored\r\nstatus: draft\r\ntriggers:\r\n  - lint config\r\ngenerated_from_knowledge:\r\n  - id-a\r\n  - id-b\r\n---\r\n# body\r\n';
 		const fm = parseDraftFrontmatter(crlf);
 		expect(fm).not.toBeNull();
 		expect(fm!.name).toBe('hand-authored');
 		expect(fm!.status).toBe('draft');
+		expect(fm!.triggers).toEqual(['lint config']);
 		expect(fm!.sourceKnowledgeIds.sort()).toEqual(['id-a', 'id-b']);
 	});
 
@@ -259,6 +269,85 @@ describe('activateProposal stamps source knowledge entries', () => {
 			readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8').trim(),
 		);
 		expect(e.generated_skill_slug).toBeUndefined();
+	});
+
+	it('validation failure blocks activation before write, unlink, or stamping', async () => {
+		await seed([makeEntry('v1'), makeEntry('v2')]);
+		const draft = await generateSkills({ directory: tmp, mode: 'draft' });
+		expect(draft.written.length).toBeGreaterThan(0);
+		const slug = draft.written[0].slug;
+		const proposalPath = path.join(
+			tmp,
+			'.swarm',
+			'skills',
+			'proposals',
+			`${slug}.md`,
+		);
+		const evalDir = path.join(tmp, '.swarm', 'skills', 'evals', slug);
+		await mkdir(evalDir, { recursive: true });
+		await writeFile(
+			path.join(evalDir, 'cases.json'),
+			JSON.stringify({
+				required_phrases: ['must use apply_patch'],
+			}),
+			'utf-8',
+		);
+
+		const result = await activateProposal(tmp, slug, false, {
+			evaluate: true,
+		});
+
+		expect(result.activated).toBe(false);
+		expect(result.reason).toContain('validation_failed');
+		expect(existsSync(proposalPath)).toBe(true);
+		expect(
+			existsSync(
+				path.join(tmp, '.opencode', 'skills', 'generated', slug, 'SKILL.md'),
+			),
+		).toBe(false);
+		const entries = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n')
+			.map((l) => JSON.parse(l));
+		expect(entries[0].generated_skill_slug).toBeUndefined();
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skills', 'rejected-edits.jsonl')),
+		).toBe(true);
+	});
+
+	it('skips previously rejected equivalent generated content', async () => {
+		const entries = [makeEntry('r1'), makeEntry('r2')];
+		await seed(entries);
+		const slug = clusterEntries(entries)[0].slug;
+		const evalDir = path.join(tmp, '.swarm', 'skills', 'evals', slug);
+		await mkdir(evalDir, { recursive: true });
+		await writeFile(
+			path.join(evalDir, 'cases.json'),
+			JSON.stringify({
+				required_phrases: ['must use apply_patch'],
+			}),
+			'utf-8',
+		);
+
+		const first = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			evaluate: true,
+		});
+		expect(first.written).toHaveLength(0);
+		expect(first.skipped[0].reason).toContain('validation_failed');
+
+		const second = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+			evaluate: true,
+		});
+
+		expect(second.written).toHaveLength(0);
+		expect(second.skipped[0].reason).toContain('previously rejected');
+		expect(
+			existsSync(path.join(tmp, '.swarm', 'skills', 'proposals', `${slug}.md`)),
+		).toBe(false);
 	});
 });
 

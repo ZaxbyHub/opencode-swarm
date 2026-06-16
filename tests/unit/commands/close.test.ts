@@ -233,10 +233,26 @@ function mockResetSwarmState(): void {
 	mockSwarmState.skillImproverAgentNames = [];
 }
 
+function mockResetSwarmStatePreservingSingletons(): void {
+	// Mirror the real implementation: save the 5 preserved singletons, run
+	// the full reset (increments resetSwarmStateCallCount + clears collections),
+	// then restore the singletons so assertions that verify survival pass.
+	const saved = {
+		opencodeClient: mockSwarmState.opencodeClient,
+		fullAutoEnabledInConfig: mockSwarmState.fullAutoEnabledInConfig,
+		curatorInitAgentNames: [...(mockSwarmState.curatorInitAgentNames || [])],
+		curatorPhaseAgentNames: [...(mockSwarmState.curatorPhaseAgentNames || [])],
+		skillImproverAgentNames: [...(mockSwarmState.skillImproverAgentNames || [])],
+	};
+	mockResetSwarmState();
+	Object.assign(mockSwarmState, saved);
+}
+
 mock.module('../../../src/state.js', () => ({
 	swarmState: mockSwarmState,
 	endAgentSession: () => {},
 	resetSwarmState: mockResetSwarmState,
+	resetSwarmStatePreservingSingletons: mockResetSwarmStatePreservingSingletons,
 }));
 
 // Import after mock setup
@@ -404,6 +420,7 @@ describe('handleCloseCommand', () => {
 				'Test Project',
 				{ phase_number: 0 },
 				testDir,
+				expect.any(Object),
 				expect.any(Object),
 			);
 		});
@@ -1267,6 +1284,7 @@ describe('handleCloseCommand', () => {
 					{ phase_number: 0 },
 					testDir,
 					expect.any(Object),
+					expect.any(Object),
 				);
 			});
 
@@ -1290,6 +1308,7 @@ describe('handleCloseCommand', () => {
 					'Test Project',
 					{ phase_number: 0 },
 					testDir,
+					expect.any(Object),
 					expect.any(Object),
 				);
 			});
@@ -1320,6 +1339,7 @@ describe('handleCloseCommand', () => {
 					'Test Project',
 					{ phase_number: 0 },
 					testDir,
+					expect.any(Object),
 					expect.any(Object),
 				);
 			});
@@ -1434,6 +1454,7 @@ describe('handleCloseCommand', () => {
 					{ phase_number: 0 },
 					testDir,
 					expect.any(Object),
+					expect.any(Object),
 				);
 			});
 
@@ -1478,6 +1499,7 @@ describe('handleCloseCommand', () => {
 					'Test Project',
 					{ phase_number: 0 },
 					testDir,
+					expect.any(Object),
 					expect.any(Object),
 				);
 			});
@@ -1539,6 +1561,7 @@ describe('handleCloseCommand', () => {
 					{ phase_number: 0 },
 					testDir,
 					expect.any(Object),
+					expect.any(Object),
 				);
 			});
 
@@ -1578,6 +1601,7 @@ describe('handleCloseCommand', () => {
 					'Test Project',
 					{ phase_number: 0 },
 					testDir,
+					expect.any(Object),
 					expect.any(Object),
 				);
 			});

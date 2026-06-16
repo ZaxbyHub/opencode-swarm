@@ -5,7 +5,12 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
-import { inferTags, readKnowledge } from './knowledge-store.js';
+import {
+	findNearDuplicate,
+	inferTags,
+	readKnowledge,
+	transactKnowledge,
+} from './knowledge-store.js';
 import type {
 	ActionableDirectiveFields,
 	DirectivePriority,
@@ -29,21 +34,29 @@ export interface ValidationResult {
 // Layer 2 — Content Safety Constants
 // ============================================================================
 
-export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+export const DANGEROUS_COMMAND_ERROR_PATTERNS: RegExp[] = [
 	/\brm\s+-rf\b/,
 	/\bsudo\s+rm\b/,
-	/\bformat\b/,
 	/\bmkfs\b/,
 	/\bdd\s+if=/,
 	/:\(\)\s*\{/,
 	/\bchmod\s+-R\s+777\b/i,
 	/\bdeltree\b/,
 	/\brmdir\s+\/s\b/,
+];
+
+export const DANGEROUS_COMMAND_WARNING_PATTERNS: RegExp[] = [
+	/\bformat\b/,
 	/\bkill\s+-9\b/,
 	/\bpkill\b/,
 	/\bkillall\b/,
 	/`[^`]*`/,
 	/\$\([^)]*\)/,
+];
+
+export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+	...DANGEROUS_COMMAND_ERROR_PATTERNS,
+	...DANGEROUS_COMMAND_WARNING_PATTERNS,
 ];
 
 export const SECURITY_DEGRADING_PATTERNS: RegExp[] = [
@@ -285,13 +298,24 @@ export function validateLesson(
 		.replace(/\s+/g, ' ')
 		.toLowerCase();
 
-	for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+	for (const pattern of DANGEROUS_COMMAND_ERROR_PATTERNS) {
 		if (pattern.test(normalizedCandidate)) {
 			return {
 				valid: false,
 				layer: 2,
 				reason: 'dangerous command pattern detected',
 				severity: 'error',
+			};
+		}
+	}
+
+	for (const pattern of DANGEROUS_COMMAND_WARNING_PATTERNS) {
+		if (pattern.test(normalizedCandidate)) {
+			return {
+				valid: true,
+				layer: 2,
+				reason: 'potentially dangerous command pattern queued for review',
+				severity: 'warning',
 			};
 		}
 	}
@@ -320,13 +344,13 @@ export function validateLesson(
 	}
 
 	// Layer 3 — Semantic Quality Checks
-	// Contradiction detection (error)
+	// Contradiction detection is heuristic; store with warning for review.
 	if (detectContradiction(candidate, existingLessons)) {
 		return {
-			valid: false,
+			valid: true,
 			layer: 3,
-			reason: 'lesson contradicts an existing lesson with shared tags',
-			severity: 'error',
+			reason: 'possible contradiction with an existing lesson with shared tags',
+			severity: 'warning',
 		};
 	}
 
@@ -366,6 +390,7 @@ const SOURCE_REF_FORBIDDEN = /(\.\.\/|\.\.\\|\0|[\x00-\x1f\x7f])/;
 export const ALLOWED_SKILL_PATH_PREFIXES = [
 	'.opencode/skills/generated/',
 	'.swarm/skills/proposals/',
+	'.swarm/skills/candidates/',
 ];
 
 const VALID_DIRECTIVE_PRIORITIES = new Set<string>([
@@ -397,6 +422,25 @@ export function validateSkillPath(p: unknown): boolean {
 	if (p.includes('..')) return false;
 	const norm = p.replace(/\\/g, '/');
 	return ALLOWED_SKILL_PATH_PREFIXES.some((prefix) => norm.startsWith(prefix));
+}
+
+/**
+ * Validate that a path is a valid candidate storage path under `.swarm/skills/candidates/`.
+ * The filename must be a UUID v4 (canonical, no braces) with `.json` extension.
+ */
+export function validateSkillCandidatePath(p: unknown): boolean {
+	if (typeof p !== 'string') return false;
+	if (p.length === 0 || p.length > 256) return false;
+	if (p.includes('\0')) return false;
+	if (path.isAbsolute(p)) return false;
+	if (p.includes('..')) return false;
+	const norm = p.replace(/\\/g, '/');
+	if (!norm.startsWith('.swarm/skills/candidates/')) return false;
+	// Filename must be <uuid-v4>.json
+	const filename = norm.slice('.swarm/skills/candidates/'.length);
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i.test(
+		filename,
+	);
 }
 
 /** Validate the optional ActionableDirectiveFields block on a knowledge entry. */
@@ -507,6 +551,112 @@ export function validateActionableFields(
 }
 
 export type { ActionableDirectiveFields, DirectivePriority };
+
+// ============================================================================
+// Layer 5 — Actionability (Change 4)
+// ============================================================================
+
+export interface ActionabilityResult {
+	actionable: boolean;
+	/** Present only when not actionable. */
+	reason?:
+		| 'missing_predicate'
+		| 'missing_scope'
+		| 'missing_predicate_and_scope';
+}
+
+function hasNonEmptyList(v: unknown): boolean {
+	return Array.isArray(v) && v.length > 0;
+}
+
+/**
+ * Layer 5: an entry is actionable only when it carries at least one
+ * machine-checkable predicate AND at least one scope tag.
+ *
+ *   predicate := forbidden_actions | required_actions | verification_checks
+ *                | verification_predicate
+ *   scope     := applies_to_tools | applies_to_agents
+ *
+ * Plain-prose lessons (no predicate, no scope) are NOT actionable and must be
+ * quarantined rather than activated.
+ */
+export function validateActionability(
+	entry: Pick<
+		KnowledgeEntryBase,
+		| 'forbidden_actions'
+		| 'required_actions'
+		| 'verification_checks'
+		| 'verification_predicate'
+		| 'applies_to_tools'
+		| 'applies_to_agents'
+	>,
+): ActionabilityResult {
+	const hasPredicate =
+		hasNonEmptyList(entry.forbidden_actions) ||
+		hasNonEmptyList(entry.required_actions) ||
+		hasNonEmptyList(entry.verification_checks) ||
+		(typeof entry.verification_predicate === 'string' &&
+			entry.verification_predicate.trim().length > 0);
+	const hasScope =
+		hasNonEmptyList(entry.applies_to_tools) ||
+		hasNonEmptyList(entry.applies_to_agents);
+
+	if (hasPredicate && hasScope) return { actionable: true };
+	const reason: ActionabilityResult['reason'] =
+		!hasPredicate && !hasScope
+			? 'missing_predicate_and_scope'
+			: !hasPredicate
+				? 'missing_predicate'
+				: 'missing_scope';
+	return { actionable: false, reason };
+}
+
+/** Returns `.swarm/knowledge-unactionable.jsonl` for the given directory. */
+export function resolveUnactionablePath(directory: string): string {
+	return path.join(directory, '.swarm', 'knowledge-unactionable.jsonl');
+}
+
+/** One quarantined-unactionable record. */
+export interface UnactionableRecord extends KnowledgeEntryBase {
+	status: 'quarantined_unactionable';
+	unactionable_reason: string;
+	quarantined_at: string;
+}
+
+/**
+ * Persist an entry that failed the actionability layer to the unactionable
+ * queue (held out of the active store, pending hardening by the skill-improver).
+ * FIFO-capped at 200. Best-effort: throws only on lock failure for tests.
+ *
+ * Duplicate or near-duplicate prose lessons are deduped under the same lock used
+ * for the append/trim transaction. This keeps hook-first/phase_complete replay
+ * from filling the bounded queue with equivalent quarantines.
+ */
+export async function appendUnactionable(
+	directory: string,
+	entry: KnowledgeEntryBase,
+	reason: string,
+): Promise<void> {
+	const filePath = resolveUnactionablePath(directory);
+	const dirPath = path.dirname(filePath);
+	await mkdir(dirPath, { recursive: true });
+	await transactKnowledge<UnactionableRecord>(filePath, (existing) => {
+		const record: UnactionableRecord = {
+			...entry,
+			status: 'quarantined_unactionable',
+			unactionable_reason: reason,
+			quarantined_at: new Date().toISOString(),
+		};
+		const duplicate = findNearDuplicate(record.lesson, existing, 0.6);
+		if (duplicate?.unactionable_reason === reason) {
+			duplicate.quarantined_at = record.quarantined_at;
+			duplicate.updated_at = record.updated_at;
+			return existing;
+		}
+		const next = [...existing, record];
+		return next.length > 200 ? next.slice(-200) : next;
+	});
+}
 
 // ============================================================================
 // Quarantine Types

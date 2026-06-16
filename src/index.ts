@@ -10,13 +10,20 @@ import {
 	createAutomationManager,
 	PlanSyncWorker,
 	type PreflightTriggerManager,
+	PrMonitorWorker,
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
+import {
+	listActive as listActiveSubscriptions,
+	setOnSubscriptionCreated,
+} from './background/pr-subscriptions';
 import {
 	agentHasSwarmCommandTool,
 	createSwarmCommandHandler,
 } from './commands';
+import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
 import { loadPluginConfigWithMetaAsync } from './config';
+import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
 import {
 	writeProjectConfigIfNew,
@@ -25,11 +32,14 @@ import {
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
+	AutoReviewConfigSchema,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	SelfReviewConfigSchema,
+	SkillImproverConfigSchema,
 	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
@@ -62,10 +72,13 @@ import {
 	handleDebuggingSpiral,
 	recordToolCall,
 } from './hooks/adversarial-detector.js';
+import { createAutoReviewHook } from './hooks/auto-review.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { createContextCapsuleInjectHook } from './hooks/context-capsule-inject.js';
 import { createDarkMatterDetectorHook } from './hooks/dark-matter-detector.js';
+import { collectDelegateAcksAfter } from './hooks/delegate-ack-collector.js';
+import { injectDelegateDirectivesBefore } from './hooks/delegate-directive-injection.js';
 import { createDelegationLedgerHook } from './hooks/delegation-ledger.js';
 import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
@@ -79,7 +92,10 @@ import {
 } from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
 import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
+import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
+import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
+import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
 import {
@@ -102,7 +118,7 @@ import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import { ensureAgentSession, swarmState } from './state';
 import { initTelemetry, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
-import { log } from './utils';
+import { error, log, warn } from './utils';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -125,7 +141,7 @@ const _heartbeatTimers = new Map<string, number>();
 
 import {
 	addDeferredWarning,
-	deferredWarnings,
+	clearDeferredWarnings,
 } from './services/warning-buffer.js';
 
 const SWARM_COMMAND_SYSTEM_RULE_TAG = '[opencode-swarm:swarm-command-rule]';
@@ -133,6 +149,15 @@ const PACKAGE_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	'..',
 );
+// Upper bound for the DEFERRED bundled-skill materialization. The sync runs in a
+// queueMicrotask off the server()-resolution path, so this ceiling does not count
+// toward init latency (Invariant 1); it only protects the background task from
+// running unboundedly. The copy is missing-only and bounded to ≤64 small files
+// (<512KB total), so it completes in single-digit ms on a healthy FS and is a
+// no-op after first run. The generous 2s ceiling is belt-and-suspenders for
+// pathological filesystems (antivirus interception, NFS stalls) — on timeout we
+// fail open and the command-path sync remains a backstop.
+const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
 
 function createSwarmCommandSystemRuleHook(
 	agentDefinitions: Record<string, AgentDefinition>,
@@ -196,7 +221,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 
 	// Clear deferred warnings at session start for per-session isolation
-	deferredWarnings.length = 0;
+	clearDeferredWarnings();
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -348,6 +373,43 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// or `<ctx.directory>/.opencode/`, so none risks a home-tree scan.
 	writeSwarmConfigExampleIfNew(ctx.directory);
 	writeProjectConfigIfNew(ctx.directory, config.quiet);
+	// Materialize the bundled architect MODE skills into the project so the
+	// architect's first auto-entered mode (e.g. SPECIFY on a fresh project) can
+	// load its `.opencode/skills/<mode>/SKILL.md` without first running a /swarm
+	// command and restarting the session. Previously these were synced ONLY as a
+	// side effect of a subset of /swarm commands (commands/registry.ts), so a
+	// brand-new project's architect hit missing skill files on turn one and a
+	// weaker model would hallucinate the workflow instead of executing it.
+	//
+	// DEFERRED via queueMicrotask (NOT awaited on the server()-resolution path)
+	// per Invariant 1 / Issue #704 — see the repoGraphHook precedent above. The
+	// sync touches up to 20 skill directories; awaiting it inline added cold-FS
+	// latency that pushed server() past the 400ms repro-704 T1 deadline on
+	// Windows. Deferring keeps server() fast: the sync starts on the next
+	// microtask, runs in the background, and completes long before the architect
+	// reads any SKILL.md at runtime (the user must send a turn first). It is
+	// still HARD-BOUNDED + fail-open: the async variant yields between files so
+	// withTimeout (which unref's its timer) can bound it; missing-only,
+	// never-overwrite, symlink-guarded, byte/file-bounded. On timeout/error we
+	// fail open — the command-path sync remains as a backstop.
+	queueMicrotask(() => {
+		void withTimeout(
+			syncBundledProjectSkillsIfMissingAsync(
+				ctx.directory,
+				PACKAGE_ROOT,
+				config.quiet,
+			),
+			SYNC_BUNDLED_SKILLS_TIMEOUT_MS,
+			new Error(
+				`syncBundledProjectSkillsIfMissingAsync exceeded ${SYNC_BUNDLED_SKILLS_TIMEOUT_MS}ms budget; continuing without skill materialization (command-path sync remains a backstop)`,
+			),
+		).catch((err: unknown) => {
+			const msg = err instanceof Error ? err.message : String(err);
+			log('bundled skill materialization timed out or failed (non-fatal)', {
+				error: msg,
+			});
+		});
+	});
 	// Background staleness check against npm. Detached, never blocks init,
 	// throttled to 24h on disk. See services/version-check.ts (issue #675).
 	if (config.version_check !== false) {
@@ -410,6 +472,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	);
 	swarmState.curatorPhaseAgentNames = Object.keys(agents).filter(
 		(k) => k === 'curator_phase' || k.endsWith('_curator_phase'),
+	);
+	swarmState.curatorPostmortemAgentNames = Object.keys(agents).filter(
+		(k) => k === 'curator_postmortem' || k.endsWith('_curator_postmortem'),
 	);
 	// v2: skill_improver and spec_writer agent registries — same multi-swarm
 	// resolution pattern as curator. Used by skill-improver-llm-factory to
@@ -488,38 +553,29 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// SECURITY AUDIT: Emit explicit warning when guardrails are disabled via user config
 	// This is a security-relevant action that requires explicit acknowledgment
-	// INTENTIONALLY NOT gated behind config.quiet — security warnings must always be visible
+	// Warnings are emitted via debug logger only (OPENCODE_SWARM_DEBUG=1) to prevent
+	// TUI corruption. Users can enable debug mode to see the full warning.
 	if (loadedFromFile && guardrailsConfig.enabled === false) {
-		console.warn('');
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn(
-			'[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED',
-		);
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn(
-			'Guardrails have been explicitly disabled in user configuration.',
-		);
-		console.warn('This disables safety measures including:');
-		console.warn('  - Tool call limits');
-		console.warn('  - Duration limits');
-		console.warn('  - Repetition detection');
-		console.warn('  - Error rate limits');
-		console.warn('  - Idle timeouts');
-		console.warn('');
-		console.warn(
+		warn('');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('[opencode-swarm] 🔴 SECURITY WARNING: GUARDRAILS ARE DISABLED');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('Guardrails have been explicitly disabled in user configuration.');
+		warn('This disables safety measures including:');
+		warn('  - Tool call limits');
+		warn('  - Duration limits');
+		warn('  - Repetition detection');
+		warn('  - Error rate limits');
+		warn('  - Idle timeouts');
+		warn('');
+		warn(
 			'Only disable guardrails if you fully understand the security implications.',
 		);
-		console.warn(
+		warn(
 			'To re-enable guardrails, set "guardrails.enabled" to true in your config.',
 		);
-		console.warn(
-			'══════════════════════════════════════════════════════════════',
-		);
-		console.warn('');
+		warn('══════════════════════════════════════════════════════════════');
+		warn('');
 	}
 
 	const delegationHandler = createDelegationTrackerHook(
@@ -540,8 +596,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 	);
 
-	// Full-Auto v2 hooks: permission, input-probe, delegation. Each is a no-op
-	// when full_auto.enabled is false. Hook ordering (tool.execute.before):
+	// Full-Auto v2 hooks: permission, input-probe, delegation. Always armed
+	// (first-class toggle); each gates at runtime on the durable per-session
+	// run state, so they no-op for sessions that never ran
+	// `/swarm full-auto on`. Hook ordering (tool.execute.before):
 	//   1. guardrails (existing)
 	//   2. scope-guard (existing)
 	//   3. delegation-gate (existing)
@@ -604,6 +662,15 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		advisoryInjector,
 	);
 
+	// Auto-review hook (opt-in): dispatches the reviewer agent over an
+	// ephemeral session to review the execution diff at task/phase
+	// boundaries. Advisory + fire-and-forget — never blocks a tool call.
+	const autoReviewHook = createAutoReviewHook({
+		config: AutoReviewConfigSchema.parse(config.auto_review ?? {}),
+		directory: ctx.directory,
+		injectAdvisory: advisoryInjector,
+	});
+
 	const summaryConfig = SummaryConfigSchema.parse(config.summaries ?? {});
 	const toolSummarizerHook = createToolSummarizerHook(
 		summaryConfig,
@@ -612,18 +679,69 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 
 	// v6.17 Knowledge system hooks — fire-and-forget, wrapped in safeHook
 	const knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+	const skillImproverConfig = SkillImproverConfigSchema.parse(
+		config.skill_improver ?? {},
+	);
 	const skillPropagationConfig = SkillPropagationConfigSchema.parse(
 		config.skillPropagation ?? {},
 	);
+	if (
+		skillImproverConfig.enabled &&
+		skillImproverConfig.trigger === 'scheduled'
+	) {
+		queueMicrotask(() => {
+			import('./services/skill-consolidation.js')
+				.then(({ runSkillConsolidationFireAndForget }) => {
+					runSkillConsolidationFireAndForget(
+						{
+							directory: ctx.directory,
+							config: skillImproverConfig,
+							source: 'startup',
+							enrichmentQuota: {
+								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+								window: knowledgeConfig.enrichment.quota_window,
+							},
+							evaluateDrafts: true,
+						},
+						undefined,
+						(err) => {
+							const msg = err instanceof Error ? err.message : String(err);
+							log('scheduled skill consolidation failed (non-fatal)', {
+								error: msg,
+							});
+						},
+					);
+				})
+				.catch((err: unknown) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					log('failed to schedule skill consolidation (non-fatal)', {
+						error: msg,
+					});
+				});
+		});
+	}
+	// skill_improver keeps its own proposal quota; curator/micro-reflector
+	// enrichment uses knowledge.enrichment below.
 	const knowledgeCuratorHook = knowledgeConfig.enabled
-		? createKnowledgeCuratorHook(ctx.directory, knowledgeConfig)
+		? createKnowledgeCuratorHook(ctx.directory, knowledgeConfig, {
+				llmDelegateFactory: (sessionID) =>
+					createCuratorLLMDelegate(ctx.directory, 'phase', sessionID),
+				enrichmentQuota: {
+					maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+					window: knowledgeConfig.enrichment.quota_window,
+				},
+			})
 		: undefined;
 	const hivePromoterHook =
 		knowledgeConfig.enabled && knowledgeConfig.hive_enabled
 			? createHivePromoterHook(ctx.directory, knowledgeConfig)
 			: undefined;
 	const knowledgeInjectorHook = knowledgeConfig.enabled
-		? createKnowledgeInjectorHook(ctx.directory, knowledgeConfig)
+		? createKnowledgeInjectorHook(
+				ctx.directory,
+				knowledgeConfig,
+				config.context_budget?.model_limits ?? {},
+			)
 		: undefined;
 
 	// v6.18 Steering acknowledgment hook — auto-acknowledges unconsumed steering directives
@@ -705,6 +823,7 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	let automationManager: BackgroundAutomationManager | undefined;
 	let preflightTriggerManager: PreflightTriggerManager | undefined;
 	let statusArtifact: AutomationStatusArtifact | undefined;
+	let prMonitorWorker: PrMonitorWorker | null = null;
 
 	if (automationConfig.mode !== 'manual') {
 		automationManager = createAutomationManager(automationConfig);
@@ -779,14 +898,6 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 		}
 
-		// Cleanup: stop automation manager and workers on process exit
-		const cleanupAutomation = () => {
-			automationManager?.stop();
-		};
-		process.on('exit', cleanupAutomation);
-		process.on('SIGINT', cleanupAutomation);
-		process.on('SIGTERM', cleanupAutomation);
-
 		log('Automation framework initialized', {
 			mode: automationConfig.mode,
 			enabled: automationManager?.isEnabled(),
@@ -794,6 +905,88 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			preflightEnabled: preflightTriggerManager?.isEnabled(),
 		});
 	}
+
+	// PR Monitor Worker — starts when pr_monitor.enabled and subscriptions exist.
+	// Worker creation is idempotent: first call creates, subsequent calls no-op.
+	const prMonitorConfig = PrMonitorConfigSchema.parse(config.pr_monitor ?? {});
+
+	function ensurePrMonitorWorkerRunning(directory: string): void {
+		try {
+			if (!prMonitorConfig.enabled) return;
+			if (!prMonitorWorker) {
+				prMonitorWorker = new PrMonitorWorker({
+					directory,
+					config: prMonitorConfig,
+				});
+			}
+			if (!prMonitorWorker.isRunning()) {
+				prMonitorWorker.start();
+				log('PR Monitor Worker started', { directory });
+			}
+		} catch (err) {
+			error('[pr-monitor] Worker failed to start (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	// Wire the lazy-start callback into the subscription store so the
+	// worker starts automatically when a new PR is subscribed.
+	setOnSubscriptionCreated((directory: string, _record) => {
+		ensurePrMonitorWorkerRunning(directory);
+	});
+
+	// Register PR event subscribers for advisory delivery to active sessions
+	let prEventCleanup: (() => void) | null = null;
+	if (prMonitorConfig.enabled) {
+		try {
+			const { registerPrEventSubscribers } = await import(
+				'./background/pr-event-subscribers'
+			);
+			prEventCleanup = registerPrEventSubscribers({
+				directory: ctx.directory,
+				config: prMonitorConfig,
+			});
+		} catch (err) {
+			log('[pr-monitor] Failed to register PR event subscribers (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	// Startup scan: resume worker for existing subscriptions after plugin restart.
+	// Deferred via queueMicrotask so setup() returns promptly (fail-open).
+	if (prMonitorConfig.enabled) {
+		queueMicrotask(() => {
+			void listActiveSubscriptions(ctx.directory)
+				.then((active) => {
+					if (active.length > 0) {
+						ensurePrMonitorWorkerRunning(ctx.directory);
+					}
+				})
+				.catch((err) => {
+					error('[pr-monitor] Startup scan failed (non-fatal)', {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
+		});
+	}
+
+	// Cleanup: stop automation manager and workers on process exit
+	const cleanupAutomation = () => {
+		automationManager?.stop();
+		prMonitorWorker?.stop();
+		prEventCleanup?.();
+	};
+	process.on('exit', cleanupAutomation);
+	process.once('SIGINT', () => {
+		cleanupAutomation();
+		process.exit(130);
+	});
+	process.once('SIGTERM', () => {
+		cleanupAutomation();
+		process.exit(143);
+	});
 
 	// v6.7 Task 5.7: Config Doctor - run on startup if automation flags permit
 	// Runs in background-safe way (non-blocking, no errors propagate)
@@ -818,6 +1011,30 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 							appliedFixes: doctorResult.appliedFixes.length,
 							autofixEnabled: enableAutofix,
 						});
+
+						// Emit chat-visible advisory for auto-fixable findings.
+						// Uses console.warn (always visible, non-blocking).
+						// Wrapped in try/catch per AGENTS.md invariant #1 (fail-open).
+						try {
+							const autoFixableCount = doctorResult.result.findings.filter(
+								(f) => f.autoFixable,
+							).length;
+
+							if (!enableAutofix && autoFixableCount > 0) {
+								console.warn(
+									`[opencode-swarm] Config Doctor found ${autoFixableCount} auto-fixable issue(s). Run /swarm config doctor --fix to apply.`,
+								);
+							} else if (
+								enableAutofix &&
+								doctorResult.appliedFixes.length > 0
+							) {
+								console.warn(
+									`[opencode-swarm] Config Doctor applied ${doctorResult.appliedFixes.length} fix(es) automatically.`,
+								);
+							}
+						} catch {
+							// Advisory emission must never block startup
+						}
 					}
 				})
 				.catch((err) => {
@@ -858,8 +1075,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		// Register all agents
 		agent: agents,
 
-		// Register tools
-		tool: buildPluginToolObject(agentDefinitionMap),
+		// Register tools, respecting knowledge.enabled config
+		tool: buildPluginToolObject(agentDefinitionMap, config),
 
 		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
 		// ADVISORY/observer-only — safeHook-wrapped so it can never block event delivery or
@@ -968,6 +1185,19 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 
 			// Register /swarm command
+			// Build a model-facing shortcut description from the registry entry (SSOT — can't drift).
+			const shortcutDescription = (cmd: string): string => {
+				const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as
+					| { description?: string }
+					| undefined;
+				if (!entry?.description) {
+					return `Use /swarm ${cmd}`; // fallback if registry entry is somehow missing
+				}
+				const desc =
+					entry.description.charAt(0).toLowerCase() +
+					entry.description.slice(1);
+				return `Use /swarm ${cmd} to ${desc}`;
+			};
 			opencodeConfig.command = {
 				...((opencodeConfig.command as Record<string, unknown>) || {}),
 				swarm: {
@@ -975,8 +1205,21 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					// Keep it minimal — instructional text confuses non-frontier models.
 					// The actual command is handled by command.execute.before hook.
 					template: '/swarm $ARGUMENTS',
-					description:
-						'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|brainstorm|council|pr-review|pr-feedback|deep-dive|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|concurrency|turbo|full-auto|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+					description: (() => {
+						// Derive the command list from the registry (single source of truth).
+						// Include standalone (non-alias, non-deprecated, non-subcommand) commands.
+						const standaloneCommands = VALID_COMMANDS.filter((cmd) => {
+							const entry = COMMAND_REGISTRY[
+								cmd as keyof typeof COMMAND_REGISTRY
+							] as {
+								aliasOf?: string;
+								deprecated?: boolean;
+								subcommandOf?: string;
+							};
+							return !entry.aliasOf && !entry.deprecated && !entry.subcommandOf;
+						});
+						return `Swarm management commands: /swarm [${standaloneCommands.join('|')}]`;
+					})(),
 				},
 				// Individual subcommands for discoverability by weaker models (Haiku-class)
 				'swarm-status': {
@@ -1096,10 +1339,35 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
 				},
+				'swarm-pr-subscribe': {
+					template: '/swarm pr subscribe $ARGUMENTS',
+					description: shortcutDescription('pr subscribe'),
+				},
+				'swarm-pr-unsubscribe': {
+					template: '/swarm pr unsubscribe $ARGUMENTS',
+					description: shortcutDescription('pr unsubscribe'),
+				},
+				'swarm-pr-status': {
+					template: '/swarm pr status',
+					description: shortcutDescription('pr status'),
+				},
+				'swarm-learning': {
+					template: '/swarm learning',
+					description: shortcutDescription('learning'),
+				},
+				'swarm-post-mortem': {
+					template: '/swarm post-mortem $ARGUMENTS',
+					description: shortcutDescription('post-mortem'),
+				},
 				'swarm-deep-dive': {
 					template: '/swarm deep-dive $ARGUMENTS',
 					description:
 						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+				},
+				'swarm-deep-research': {
+					template: '/swarm deep-research $ARGUMENTS',
+					description:
+						'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
 				},
 				'swarm-codebase-review': {
 					template: '/swarm codebase-review $ARGUMENTS',
@@ -1110,6 +1378,26 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm design-docs $ARGUMENTS',
 					description:
 						'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
+				},
+				'swarm-sdd': {
+					template: '/swarm sdd $ARGUMENTS',
+					description:
+						'Use /swarm sdd to inspect OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-status': {
+					template: '/swarm sdd status',
+					description:
+						'Use /swarm sdd status to show effective spec and OpenSpec artifact status',
+				},
+				'swarm-sdd-validate': {
+					template: '/swarm sdd validate $ARGUMENTS',
+					description:
+						'Use /swarm sdd validate to validate OpenSpec-compatible SDD artifacts',
+				},
+				'swarm-sdd-project': {
+					template: '/swarm sdd project $ARGUMENTS',
+					description:
+						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
 				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
@@ -1160,6 +1448,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm curate to curate knowledge artifacts and entries',
 				},
+				'swarm-consolidate': {
+					template: '/swarm consolidate $ARGUMENTS',
+					description:
+						'Use /swarm consolidate to run quota-bounded skill-improver consolidation',
+				},
 				'swarm-concurrency': {
 					template: '/swarm concurrency $ARGUMENTS',
 					description:
@@ -1173,6 +1466,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				'swarm-full-auto': {
 					template: '/swarm full-auto $ARGUMENTS',
 					description: 'Toggle Full-Auto Mode for the active session [on|off]',
+				},
+				'swarm-auto-proceed': {
+					template: '/swarm auto-proceed $ARGUMENTS',
+					description:
+						'Toggle auto-proceed mode for automatic phase advancement',
 				},
 				'swarm-write-retro': {
 					template: '/swarm write-retro $ARGUMENTS',
@@ -1606,6 +1904,23 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 			}
 			// ---------------------------------------------------------------
 
+			// 9. Per-delegate knowledge directive injection (Change 1, Task 1.4).
+			//    ADVISORY: prepends the role-scoped <delegate_knowledge_directives>
+			//    block to a Task delegation's prompt so the subagent sees the
+			//    directives + ack contract. Internally fail-open; never blocks.
+			if (knowledgeConfig.enabled) {
+				await injectDelegateDirectivesBefore(
+					ctx.directory,
+					{
+						tool: input.tool,
+						agent: input.agent,
+						sessionID: input.sessionID,
+						args: input.args,
+					},
+					knowledgeConfig,
+				);
+			}
+
 			// v6.29: One-time 50% context pressure warning
 			if (swarmState.lastBudgetPct >= 50) {
 				const pressureSession = ensureAgentSession(
@@ -1651,6 +1966,43 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					console.error(
 						`[DIAG] toolAfter trajectoryLogger done tool=${_toolName}`,
 					);
+				// Per-delegate ack collection (Change 1, Task 1.5): reconcile the
+				// directives shown to a returning subagent against its ack markers.
+				// Fail-open; never blocks. Only acts on Task tool calls.
+				if (knowledgeConfig.enabled) {
+					await safeHook(() =>
+						collectDelegateAcksAfter(ctx.directory, input, output),
+					)(input, output);
+					// Reviewer DIRECTIVE_COMPLIANCE reconciliation (Change 2, Task 2.3):
+					// parse a returning reviewer's per-ID verdicts into knowledge events.
+					await safeHook(() =>
+						collectReviewerVerdictsAfter(ctx.directory, input, output),
+					)(input, output);
+					// Micro-reflector (Change 6, Task 5.1): on a delegate failure/partial
+					// return, emit 0-2 v3 insight candidates from the trajectory +
+					// transcript. Quota-gated; classification-only without an LLM client.
+					await safeHook(() =>
+						microReflectorAfter(
+							ctx.directory,
+							input,
+							output,
+							createCuratorLLMDelegate(ctx.directory, 'phase', input.sessionID),
+							{
+								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+								window: knowledgeConfig.enrichment.quota_window,
+							},
+						),
+					)(input, output);
+				}
+				// Reviewer receipt collection: persist a returning reviewer Task's
+				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;
+				// independent of the knowledge system.
+				await safeHook(async () => {
+					await collectReviewerReceiptAfter(ctx.directory, input, output);
+				})(input, output);
+				// Auto-review (opt-in): fire-and-forget execution-diff review by
+				// the reviewer model at task/phase boundaries.
+				await safeHook(autoReviewHook.toolAfter)(input, output);
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)
@@ -1940,11 +2292,10 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 				// no durable run state, so they short-circuit inside
 				// tickAndMaybeDispatchCadence and do NOT recurse.
 				try {
-					if (
-						config.full_auto?.enabled === true &&
-						input?.sessionID &&
-						input?.agent
-					) {
+					// First-class toggle: no config.full_auto.enabled gate — the
+					// tick short-circuits on the durable run state when Full-Auto
+					// was never activated for this session.
+					if (input?.sessionID && input?.agent) {
 						const stripped = stripKnownSwarmPrefix(String(input.agent));
 						if (stripped === 'architect') {
 							tickAndMaybeDispatchCadence(

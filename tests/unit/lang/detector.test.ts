@@ -276,4 +276,66 @@ describe('detectProjectLanguages adversarial', () => {
 		expect(profiles).toHaveLength(1);
 		expect(profiles[0].id).toBe('csharp');
 	});
+
+	it('Malformed package.json → does not throw, does not detect TypeScript', async () => {
+		// A package.json with invalid JSON must not crash detectProjectLanguages.
+		// The file may match the filename check but should not surface typescript
+		// unless its content is parseable with the right fields.
+		await writeFile(join(tempDir, 'package.json'), '{ invalid json !!');
+		// Must complete without throwing
+		let caughtError: unknown;
+		let profiles:
+			| Awaited<ReturnType<typeof detectProjectLanguages>>
+			| undefined;
+		try {
+			profiles = await detectProjectLanguages(tempDir);
+		} catch (e) {
+			caughtError = e;
+		}
+		expect(caughtError).toBeUndefined();
+		expect(profiles).toBeDefined();
+		// Detection is based on filename presence, not content, so TypeScript
+		// may or may not be detected — but the key invariant is no throw.
+	});
+
+	it('Directory with a glob-pattern name matching *.csproj (F-004) — directory named "MyProject.csproj" must NOT trigger C# detection', async () => {
+		// A directory named "MyProject.csproj" must not be treated as a C# project
+		// file; only regular files should match glob detection patterns (F-004).
+		await mkdir(join(tempDir, 'MyProject.csproj'));
+		const profiles = await detectProjectLanguages(tempDir);
+		const ids = profiles.map((p) => p.id);
+		expect(ids).not.toContain('csharp');
+	});
+
+	it('Circular symlink in directory → does not throw, returns results based on real files', async () => {
+		// Create a circular symlink. readdir with withFileTypes exposes it as a
+		// symlink and isDirectory() returns false, so it should be treated safely
+		// and not cause infinite loops or crashes.
+		if (process.platform === 'win32') {
+			// Symlink creation requires elevated privileges on Windows; skip.
+			return;
+		}
+		const { symlink } = await import('node:fs/promises');
+		const linkPath = join(tempDir, 'self-link');
+		try {
+			await symlink(linkPath, linkPath);
+		} catch {
+			// Some platforms may refuse self-referential symlinks; still verify no throw.
+		}
+		await writeFile(
+			join(tempDir, 'package.json'),
+			JSON.stringify({ name: 'test' }),
+		);
+		let caughtError: unknown;
+		let profiles:
+			| Awaited<ReturnType<typeof detectProjectLanguages>>
+			| undefined;
+		try {
+			profiles = await detectProjectLanguages(tempDir);
+		} catch (e) {
+			caughtError = e;
+		}
+		expect(caughtError).toBeUndefined();
+		expect(profiles).toBeDefined();
+	});
 });

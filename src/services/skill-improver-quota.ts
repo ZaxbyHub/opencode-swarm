@@ -1,8 +1,8 @@
 /**
- * Skill-improver daily-quota tracker.
+ * Named daily-quota tracker for low-frequency LLM work.
  *
- * State file: .swarm/skill-improver-quota.json
- * Counts every LLM-credentialed call by the skill_improver agent.
+ * Default state file: .swarm/skill-improver-quota.json
+ * Dedicated enrichment state file: .swarm/knowledge-enrichment-quota.json
  * The window is configurable: 'utc' (default) resets at 00:00 UTC; 'local'
  * resets at the host's local midnight.
  */
@@ -58,6 +58,7 @@ async function acquireLock(dir: string): Promise<() => Promise<void>> {
 }
 
 export type QuotaWindow = 'utc' | 'local';
+export type QuotaScope = 'skill-improver' | 'knowledge-enrichment';
 
 export interface QuotaState {
 	/** YYYY-MM-DD in the chosen window */
@@ -68,8 +69,15 @@ export interface QuotaState {
 	window: QuotaWindow;
 }
 
-export function resolveQuotaPath(directory: string): string {
-	return path.join(directory, '.swarm', 'skill-improver-quota.json');
+export function resolveQuotaPath(
+	directory: string,
+	scope: QuotaScope = 'skill-improver',
+): string {
+	const fileName =
+		scope === 'knowledge-enrichment'
+			? 'knowledge-enrichment-quota.json'
+			: 'skill-improver-quota.json';
+	return path.join(directory, '.swarm', fileName);
 }
 
 export function todayKey(window: QuotaWindow, now: Date = new Date()): string {
@@ -112,6 +120,7 @@ export interface QuotaCheckOptions {
 	maxCalls: number;
 	window: QuotaWindow;
 	now?: Date;
+	scope?: QuotaScope;
 }
 
 export interface QuotaCheckResult {
@@ -125,7 +134,7 @@ export async function getQuotaState(
 	directory: string,
 	opts: QuotaCheckOptions,
 ): Promise<QuotaState> {
-	const filePath = resolveQuotaPath(directory);
+	const filePath = resolveQuotaPath(directory, opts.scope);
 	const today = todayKey(opts.window, opts.now);
 	const existing = await readState(filePath);
 	if (!existing || existing.date !== today || existing.window !== opts.window) {
@@ -153,7 +162,7 @@ export async function reserveQuota(
 	directory: string,
 	opts: QuotaCheckOptions & { nCalls: number },
 ): Promise<QuotaCheckResult> {
-	const filePath = resolveQuotaPath(directory);
+	const filePath = resolveQuotaPath(directory, opts.scope);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	let release: (() => Promise<void>) | null = null;
 	try {
@@ -195,7 +204,7 @@ export async function releaseQuota(
 	directory: string,
 	opts: QuotaCheckOptions & { nCalls: number },
 ): Promise<QuotaState> {
-	const filePath = resolveQuotaPath(directory);
+	const filePath = resolveQuotaPath(directory, opts.scope);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	let release: (() => Promise<void>) | null = null;
 	try {

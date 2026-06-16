@@ -30,10 +30,45 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 	}
 
 	const cleanup = (): void => {
-		fs.rmSync(dir, { recursive: true, force: true });
+		safeRmRecursive(dir);
 	};
 
 	return { dir, cleanup };
+}
+
+/**
+ * Recursively remove a test path only after proving it is under os.tmpdir().
+ */
+export function safeRmRecursive(targetPath: string): void {
+	if (typeof targetPath !== 'string' || targetPath.trim() === '') {
+		throw new Error('safeRmRecursive: targetPath must be a non-empty string');
+	}
+
+	const lexicalTarget = path.resolve(targetPath);
+	const lexicalBase = path.resolve(os.tmpdir());
+	const realBase = fs.realpathSync(os.tmpdir());
+	if (lexicalTarget === lexicalBase) {
+		throw new Error('safeRmRecursive: refusing to remove os.tmpdir() itself');
+	}
+	if (!lexicalTarget.startsWith(lexicalBase + path.sep)) {
+		throw new Error(
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase}`,
+		);
+	}
+
+	if (fs.existsSync(lexicalTarget)) {
+		const realTarget = fs.realpathSync(lexicalTarget);
+		if (
+			realTarget === realBase ||
+			!realTarget.startsWith(realBase + path.sep)
+		) {
+			throw new Error(
+				`safeRmRecursive: refusing to remove ${lexicalTarget}; real path ${realTarget} escapes os.tmpdir() ${realBase}`,
+			);
+		}
+	}
+
+	fs.rmSync(lexicalTarget, { recursive: true, force: true });
 }
 
 /**

@@ -44,11 +44,18 @@ export function containsPathTraversal(str: string): boolean {
 }
 
 /**
- * Check if a string contains control characters that could be used
- * for injection attacks. Matches null byte, tab, carriage return, and newline.
+ * Check if a string contains control or directional-format characters that
+ * could be used for injection attacks.
  */
 export function containsControlChars(str: string): boolean {
-	return /[\0\t\r\n]/.test(str);
+	for (const ch of str) {
+		const code = ch.codePointAt(0);
+		if (code === undefined) continue;
+		if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return true;
+		if (code >= 0x202a && code <= 0x202e) return true;
+		if (code >= 0x2066 && code <= 0x2069) return true;
+	}
+	return false;
 }
 
 /**

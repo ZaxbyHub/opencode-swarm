@@ -6,9 +6,9 @@
  * replacing the previously hand-maintained lists.
  *
  * Covers:
- * 1. YOUR TOOLS contains all 39 AGENT_TOOL_MAP.architect tools
+ * 1. YOUR TOOLS contains all AGENT_TOOL_MAP.architect tools
  * 2. YOUR TOOLS starts with "Task (delegation),"
- * 3. Available Tools contains all 39 AGENT_TOOL_MAP.architect tools
+ * 3. Available Tools contains all AGENT_TOOL_MAP.architect tools
  * 4. Available Tools has descriptions (e.g. "build_check (build verification)")
  * 5. Both lists are sorted alphabetically (after "Task (delegation)" prefix for YOUR TOOLS)
  * 6. Tool count matches AGENT_TOOL_MAP.architect.length
@@ -16,7 +16,10 @@
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect.js';
-import { AGENT_TOOL_MAP } from '../../../src/config/constants.js';
+import {
+	AGENT_TOOL_MAP,
+	TOOL_DESCRIPTIONS,
+} from '../../../src/config/constants.js';
 
 const ARCHITECT_TOOL_COUNT = AGENT_TOOL_MAP['architect'].length;
 
@@ -72,7 +75,7 @@ beforeAll(() => {
 });
 
 describe('YOUR TOOLS generation from AGENT_TOOL_MAP', () => {
-	it('contains all 39 AGENT_TOOL_MAP.architect tools', () => {
+	it('contains all AGENT_TOOL_MAP.architect tools', () => {
 		for (const tool of AGENT_TOOL_MAP['architect']) {
 			expect(resolvedPrompt).toContain(tool);
 		}
@@ -125,19 +128,19 @@ describe('YOUR TOOLS generation from AGENT_TOOL_MAP', () => {
 });
 
 describe('Available Tools generation from AGENT_TOOL_MAP', () => {
-	it('contains all 39 AGENT_TOOL_MAP.architect tools', () => {
+	it('contains all AGENT_TOOL_MAP.architect tools', () => {
 		for (const tool of AGENT_TOOL_MAP['architect']) {
 			expect(resolvedPrompt).toContain(tool);
 		}
 	});
 
 	it('has descriptions for tools that have TOOL_DESCRIPTIONS entries', () => {
-		// build_check has description "build verification"
-		expect(resolvedPrompt).toContain('build_check (build verification)');
-		// checkpoint has description "state snapshots"
-		expect(resolvedPrompt).toContain('checkpoint (state snapshots)');
-		// secretscan has description "secret detection"
-		expect(resolvedPrompt).toContain('secretscan (secret detection)');
+		for (const tool of ['build_check', 'checkpoint', 'dispatch_lanes']) {
+			const description =
+				TOOL_DESCRIPTIONS[tool as keyof typeof TOOL_DESCRIPTIONS];
+			expect(description).toBeTruthy();
+			expect(resolvedPrompt).toContain(`${tool} (${description})`);
+		}
 	});
 
 	it('tool count matches AGENT_TOOL_MAP.architect.length', () => {

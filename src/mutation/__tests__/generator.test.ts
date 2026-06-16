@@ -172,6 +172,7 @@ describe('generateMutants', () => {
 		} as any);
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe('mut-123');
+		expect(result[0].mutationType).toBe('off-by-one');
 	});
 
 	// 10. Items with missing/non-string id get a generated fallback ID (THE BUG FIX TEST)

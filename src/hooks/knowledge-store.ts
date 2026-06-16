@@ -89,6 +89,16 @@ export function resolveHiveRejectedPath(): string {
 	return path.join(path.dirname(hivePath), 'shared-learnings-rejected.jsonl');
 }
 
+// Returns path to the hive-level knowledge events log (same directory as hive
+// knowledge). This is the shared, cross-project audit trail for mutations to the
+// hive store: it lives alongside the hive store so the store and its audit
+// history share one scope, and any project can read why a hive entry was
+// archived/quarantined/purged.
+export function resolveHiveEventsPath(): string {
+	const hivePath = resolveHiveKnowledgePath();
+	return path.join(path.dirname(hivePath), 'shared-knowledge-events.jsonl');
+}
+
 // ============================================================================
 // Read Functions
 // ============================================================================
@@ -380,8 +390,31 @@ export async function transactKnowledge<T>(
 	);
 }
 
-// Enforce a FIFO max-entries cap on a JSONL file.
-// If the file exceeds `maxEntries`, the oldest entries are dropped.
+// Append a knowledge entry and enforce the cap in a single atomic transaction.
+// This prevents the race condition where entry is appended but cap enforcement fails.
+// Returns true if entry was appended and cap enforced, false if entry was not appended
+// (e.g., would exceed cap even as a single entry - should not happen with normal configs).
+export async function appendKnowledgeWithCapEnforcement<T>(
+	filePath: string,
+	entry: T,
+	maxEntries: number,
+): Promise<boolean> {
+	return transactKnowledge<T>(filePath, (entries) => {
+		// Add the new entry
+		const updated = [...entries, entry as T];
+
+		// Enforce the cap if needed
+		if (updated.length > maxEntries) {
+			return selectKnowledgeCapSurvivors(updated, maxEntries);
+		}
+		return updated;
+	});
+}
+
+// Enforce a priority-aware max-entries cap on a JSONL file.
+// If the file exceeds `maxEntries`, inactive and low-outcome entries are
+// dropped first. Promoted entries are never evicted unless every entry is
+// promoted, because promoted knowledge has already escaped swarm-local TTL.
 // No-op when the file has fewer entries than the cap.
 // The full read-modify-write cycle is atomic under a directory lock to
 // prevent concurrent appendKnowledge from inserting entries that get
@@ -392,8 +425,67 @@ export async function enforceKnowledgeCap<T>(
 ): Promise<void> {
 	await transactKnowledge<T>(filePath, (entries) => {
 		if (entries.length <= maxEntries) return null;
-		return entries.slice(entries.length - maxEntries);
+		return selectKnowledgeCapSurvivors(entries, maxEntries);
 	});
+}
+
+interface KnowledgeCapCandidate<T> {
+	entry: T;
+	index: number;
+	status?: KnowledgeEntryBase['status'];
+	outcomeSignal: number;
+}
+
+function selectKnowledgeCapSurvivors<T>(entries: T[], maxEntries: number): T[] {
+	if (entries.length <= maxEntries) return entries;
+	if (maxEntries <= 0) return [];
+
+	const candidates = entries.map((entry, index): KnowledgeCapCandidate<T> => {
+		const maybeKnowledge = entry as Partial<KnowledgeEntryBase>;
+		return {
+			entry,
+			index,
+			status: maybeKnowledge.status,
+			outcomeSignal: computeOutcomeSignal(maybeKnowledge.retrieval_outcomes),
+		};
+	});
+	const allPromoted = candidates.every((c) => c.status === 'promoted');
+	const evictable = allPromoted
+		? candidates
+		: candidates.filter((c) => c.status !== 'promoted');
+	const targetDropCount = entries.length - maxEntries;
+	const dropCount = Math.min(targetDropCount, evictable.length);
+	if (dropCount <= 0) return entries;
+
+	const drop = new Set(
+		[...evictable]
+			.sort((a, b) => {
+				const inactiveDelta =
+					getKnowledgeCapStatusPriority(a.status) -
+					getKnowledgeCapStatusPriority(b.status);
+				if (inactiveDelta !== 0) return inactiveDelta;
+				const signalDelta = a.outcomeSignal - b.outcomeSignal;
+				if (signalDelta !== 0) return signalDelta;
+				return a.index - b.index;
+			})
+			.slice(0, dropCount)
+			.map((c) => c.index),
+	);
+
+	return candidates.filter((c) => !drop.has(c.index)).map((c) => c.entry);
+}
+
+function getKnowledgeCapStatusPriority(
+	status?: KnowledgeEntryBase['status'],
+): number {
+	if (
+		status === 'archived' ||
+		status === 'quarantined' ||
+		status === 'quarantined_unactionable'
+	) {
+		return 0;
+	}
+	return 1;
 }
 
 // Results from a sweep operation (aging or TODO removal)
@@ -493,20 +585,20 @@ export async function sweepStaleTodos<T extends KnowledgeEntryBase>(
 	return result;
 }
 
-// Append a RejectedLesson, enforcing a FIFO max-20 cap.
+// Append a RejectedLesson, enforcing a FIFO max cap.
 // The full read-check-write is atomic under a directory lock (transactKnowledge)
 // to prevent concurrent callers from both reading below the cap and both appending,
 // ending up with more than MAX entries or silently losing a lesson (CF-2 TOCTOU fix).
 export async function appendRejectedLesson(
 	directory: string,
 	lesson: RejectedLesson,
+	maxEntries = 20,
 ): Promise<void> {
 	const filePath = resolveSwarmRejectedPath(directory);
-	const MAX = 20;
 	await transactKnowledge<RejectedLesson>(filePath, (existing) => {
 		const updated = [...existing, lesson];
-		if (updated.length > MAX) {
-			return updated.slice(updated.length - MAX);
+		if (updated.length > maxEntries) {
+			return updated.slice(updated.length - maxEntries);
 		}
 		return updated;
 	});
@@ -762,6 +854,7 @@ export const _internals: {
 	resolveSwarmRejectedPath: typeof resolveSwarmRejectedPath;
 	resolveHiveKnowledgePath: typeof resolveHiveKnowledgePath;
 	resolveHiveRejectedPath: typeof resolveHiveRejectedPath;
+	resolveHiveEventsPath: typeof resolveHiveEventsPath;
 	readKnowledge: typeof readKnowledge;
 	readRejectedLessons: typeof readRejectedLessons;
 	appendKnowledge: typeof appendKnowledge;
@@ -777,6 +870,7 @@ export const _internals: {
 	findNearDuplicate: typeof findNearDuplicate;
 	computeConfidence: typeof computeConfidence;
 	computeOutcomeSignal: typeof computeOutcomeSignal;
+	selectKnowledgeCapSurvivors: typeof selectKnowledgeCapSurvivors;
 	inferTags: typeof inferTags;
 	bumpKnowledgeConfidenceBatch: typeof bumpKnowledgeConfidenceBatch;
 } = {
@@ -785,6 +879,7 @@ export const _internals: {
 	resolveSwarmRejectedPath,
 	resolveHiveKnowledgePath,
 	resolveHiveRejectedPath,
+	resolveHiveEventsPath,
 	readKnowledge,
 	readRejectedLessons,
 	appendKnowledge,
@@ -800,6 +895,7 @@ export const _internals: {
 	findNearDuplicate,
 	computeConfidence,
 	computeOutcomeSignal,
+	selectKnowledgeCapSurvivors,
 	inferTags,
 	bumpKnowledgeConfidenceBatch,
 };

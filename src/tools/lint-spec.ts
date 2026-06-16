@@ -1,6 +1,5 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { validateSpecContent } from '../config/spec-schema';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -18,10 +17,6 @@ interface ValidateSpecResult {
 	errors: string[];
 	warnings: string[];
 }
-
-// ============ Constants ============
-const SPEC_FILE_NAME = 'spec.md';
-const SWARM_DIR = '.swarm';
 
 // Obligation keywords to count
 const OBLIGATION_KEYWORDS = ['MUST', 'SHALL', 'SHOULD', 'MAY'] as const;
@@ -113,11 +108,8 @@ export const lint_spec: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		const errors: string[] = [];
 		const warnings: string[] = [];
 
-		// Construct path to spec file
-		const specPath = path.join(directory, SWARM_DIR, SPEC_FILE_NAME);
-
-		// Check if spec file exists
-		if (!fs.existsSync(specPath)) {
+		const spec = readEffectiveSpecSync(directory);
+		if (!spec) {
 			const result: ValidateSpecResult = {
 				valid: false,
 				specMtime: null,
@@ -129,44 +121,16 @@ export const lint_spec: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					total: 0,
 				},
 				scenarioCount: 0,
-				errors: ['spec.md not found'],
-				warnings: [],
-			};
-			return JSON.stringify(result, null, 2);
-		}
-
-		// Get file stats for mtime
-		let specMtime: string | null = null;
-		try {
-			const stats = fs.statSync(specPath);
-			specMtime = stats.mtime.toISOString();
-		} catch {
-			// If we can't get stats, continue without mtime
-		}
-
-		// Read spec content
-		let content: string;
-		try {
-			content = fs.readFileSync(specPath, 'utf-8');
-		} catch (e) {
-			const result: ValidateSpecResult = {
-				valid: false,
-				specMtime,
-				requirementCount: {
-					MUST: 0,
-					SHALL: 0,
-					SHOULD: 0,
-					MAY: 0,
-					total: 0,
-				},
-				scenarioCount: 0,
 				errors: [
-					`Failed to read spec.md: ${e instanceof Error ? e.message : String(e)}`,
+					'spec.md not found and no valid OpenSpec-compatible projection available',
 				],
 				warnings: [],
 			};
 			return JSON.stringify(result, null, 2);
 		}
+
+		const specMtime = spec.mtime;
+		const content = spec.content;
 
 		// Validate markdown-level content using validateSpecContent
 		const contentValidation = validateSpecContent(content);
@@ -196,7 +160,7 @@ export const lint_spec: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			},
 			scenarioCount,
 			errors,
-			warnings,
+			warnings: [...warnings, ...spec.warnings],
 		};
 
 		return JSON.stringify(result, null, 2);

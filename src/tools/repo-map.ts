@@ -2,23 +2,27 @@ import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import {
-	buildAndSaveGraph,
+	containsControlChars,
+	containsPathTraversal,
+} from '../utils/path-security';
+import { createSwarmTool } from './create-tool';
+import {
+	buildOntologyPreflightPacket,
+	buildWorkspaceGraphAsync,
 	getBlastRadius,
 	getDependencies,
+	getFileOntology,
 	getImporters,
 	getKeyFiles,
 	getLocalizationContext,
+	getPackageBoundaries,
 	getSymbolConsumers,
 	isGraphFresh,
 	loadGraph,
 	normalizeGraphPath,
 	type RepoGraph,
-} from '../graph';
-import {
-	containsControlChars,
-	containsPathTraversal,
-} from '../utils/path-security';
-import { createSwarmTool } from './create-tool';
+	saveGraph,
+} from './repo-graph';
 
 /**
  * repo_map: structural codebase awareness for swarm agents.
@@ -47,6 +51,9 @@ const VALID_ACTIONS = [
 	'blast_radius',
 	'localization',
 	'key_files',
+	'ontology',
+	'package_boundaries',
+	'preflight_packet',
 ] as const;
 
 type RepoMapAction = (typeof VALID_ACTIONS)[number];
@@ -110,21 +117,29 @@ function toRelativeGraphPath(input: string, workspaceRoot: string): string {
 	return normalizeGraphPath(normalized);
 }
 
-function loadOrError(
+async function loadOrError(
 	directory: string,
 	action: string,
-): { ok: true; graph: RepoGraph } | { ok: false; response: string } {
-	const graph = loadGraph(directory);
-	if (!graph) {
+): Promise<{ ok: true; graph: RepoGraph } | { ok: false; response: string }> {
+	try {
+		const graph = await loadGraph(directory);
+		if (!graph) {
+			return {
+				ok: false,
+				response: err(
+					action,
+					'No repo graph found at .swarm/repo-graph.json. Run repo_map with action="build" first.',
+				),
+			};
+		}
+		return { ok: true, graph };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
 		return {
 			ok: false,
-			response: err(
-				action,
-				'No repo graph found at .swarm/repo-graph.json. Run repo_map with action="build" first.',
-			),
+			response: err(action, `failed to load repo graph: ${message}`),
 		};
 	}
-	return { ok: true, graph };
 }
 
 export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
@@ -132,7 +147,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'Query the repository code graph for structural awareness before editing. ' +
 		'Actions: "build" (build/refresh .swarm/repo-graph.json), "importers" (who imports a file), ' +
 		'"dependencies" (what a file imports), "blast_radius" (transitive dependents + risk), ' +
-		'"localization" (compact context block for a target file), "key_files" (top-N most-imported files). ' +
+		'"localization" (compact context block for a target file), "key_files" (top-N most-imported files), ' +
+		'"ontology" (file roles/routes/data/security/findings), "package_boundaries" (inferred package/layer boundaries), ' +
+		'"preflight_packet" (bounded ontology packet for planning). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers.',
 	args: {
 		action: z
@@ -143,21 +160,24 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'blast_radius',
 				'localization',
 				'key_files',
+				'ontology',
+				'package_boundaries',
+				'preflight_packet',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet"',
 			),
 		file: z
 			.string()
 			.optional()
 			.describe(
-				'Target file (workspace-relative or absolute). Required for importers/dependencies/localization.',
+				'Target file (workspace-relative or absolute). Required for importers/dependencies/localization/ontology. Optional for preflight_packet.',
 			),
 		files: z
 			.array(z.string())
 			.optional()
 			.describe(
-				'Multiple target files for blast_radius. If omitted, falls back to `file`.',
+				'Multiple target files for blast_radius/preflight_packet. If omitted, falls back to `file`.',
 			),
 		symbol: z
 			.string()
@@ -172,7 +192,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.max(100)
 			.optional()
 			.describe(
-				'For action="key_files": number of files to return (default 10).',
+				'For action="key_files" or "package_boundaries": number of entries to return (default 10).',
 			),
 		max_depth: z
 			.number()
@@ -201,17 +221,19 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		if (action === 'build') {
 			try {
 				const start = Date.now();
-				const graph = await buildAndSaveGraph(directory);
+				const graph = await buildWorkspaceGraphAsync(directory);
+				await saveGraph(directory, graph);
 				const elapsedMs = Date.now() - start;
-				const fileCount = Object.keys(graph.files).length;
-				let edgeCount = 0;
-				for (const node of Object.values(graph.files)) {
-					edgeCount += node.imports.length;
-				}
+				const fileCount = Object.keys(graph.nodes).length;
+				const edgeCount = graph.edges.length;
+				const ontologyFileCount = Object.values(graph.nodes).filter(
+					(node) => node.ontology !== undefined,
+				).length;
 				return ok(action, {
 					fileCount,
 					edgeCount,
-					buildTimestamp: graph.buildTimestamp,
+					ontologyFileCount,
+					buildTimestamp: graph.metadata.generatedAt,
 					elapsedMs,
 					path: '.swarm/repo-graph.json',
 				});
@@ -222,7 +244,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		}
 
 		// All other actions need a loaded graph.
-		const loaded = loadOrError(directory, action);
+		const loaded = await loadOrError(directory, action);
 		if (!loaded.ok) return loaded.response;
 		const graph = loaded.graph;
 		const stale = !isGraphFresh(graph);
@@ -232,14 +254,43 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			const topN = a.top_n ?? 10;
 			const nodes = getKeyFiles(graph, topN);
 			const reverseCounts = nodes.map((n) => ({
-				file: n.path,
+				file: n.moduleName,
 				language: n.language,
 				exports: n.exports.length,
-				inDegree: getImporters(graph, n.path).length,
+				roles: n.ontology?.roles ?? [],
+				findings: n.ontology?.findings.length ?? 0,
+				inDegree: getImporters(graph, n.moduleName).length,
 			}));
 			return ok(action, {
 				count: reverseCounts.length,
 				files: reverseCounts,
+				stale,
+			});
+		}
+
+		if (action === 'package_boundaries') {
+			const topN = a.top_n ?? 10;
+			const boundaries = getPackageBoundaries(graph, topN);
+			return ok(action, {
+				count: boundaries.length,
+				boundaries,
+				stale,
+			});
+		}
+
+		if (action === 'preflight_packet') {
+			const inputs =
+				a.files && a.files.length > 0 ? a.files : a.file ? [a.file] : [];
+			for (const f of inputs) {
+				const v = validateFile(f);
+				if (v) return err(action, `invalid file: ${v}`);
+			}
+			const targets = inputs.map((f) => toRelativeGraphPath(f, directory));
+			return ok(action, {
+				packet: buildOntologyPreflightPacket(graph, targets, {
+					maxFiles: a.top_n ?? 12,
+					maxBoundaries: 10,
+				}),
 				stale,
 			});
 		}
@@ -304,6 +355,17 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				maxDepth: a.max_depth,
 			});
 			return ok(action, { ...ctx, stale });
+		}
+
+		if (action === 'ontology') {
+			const ontology = getFileOntology(graph, target);
+			if (!ontology) {
+				return err(
+					action,
+					`No ontology facts found for ${target}. Rebuild the graph if the file was recently added.`,
+				);
+			}
+			return ok(action, { target, ontology, stale });
 		}
 
 		// Should be unreachable due to enum validation above.

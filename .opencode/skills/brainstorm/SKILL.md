@@ -78,6 +78,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder 
 Additionally, present these two sub-items as part of the same exchange:
 - Parallel coders (default: 1, range: 1-4) -- how many coders should run in parallel.
 - Commit frequency (default: phase-level only) -- optional per-task checkpoint commit after each task completion.
+- auto_proceed (boolean, default: false) -- when true, auto-advance to the next phase without asking "Ready for Phase N+1?"; runtime toggle via /swarm auto-proceed on|off.
 
 The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
 

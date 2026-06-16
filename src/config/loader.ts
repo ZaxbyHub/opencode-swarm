@@ -2,7 +2,12 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { type PluginConfig, PluginConfigSchema } from './schema';
+import {
+	ExternalSkillsConfigSchema,
+	type PluginConfig,
+	PluginConfigSchema,
+	resolveExternalSkillsConfig,
+} from './schema';
 
 const CONFIG_FILENAME = 'opencode-swarm.json';
 const PROMPTS_DIR_NAME = 'opencode-swarm';
@@ -138,6 +143,34 @@ function migratePresetsConfig(
 }
 
 /**
+ * Preprocess the external_skills section of raw config.
+ * If the section is present but invalid, warn and strip it so the rest
+ * of the config loads cleanly (AGENTS.md #1 fail-open).
+ */
+function sanitizeExternalSkillsConfig(
+	raw: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!('external_skills' in raw) || raw.external_skills === undefined) {
+		return raw;
+	}
+	const esResult = ExternalSkillsConfigSchema.safeParse(raw.external_skills);
+	if (esResult.success) {
+		return {
+			...raw,
+			external_skills: resolveExternalSkillsConfig(esResult.data),
+		};
+	}
+	console.warn('[opencode-swarm] external_skills config validation failed:');
+	console.warn(esResult.error.format());
+	console.warn(
+		'[opencode-swarm] External skills curation disabled due to invalid config. Fix the external_skills section to enable it.',
+	);
+	const cleaned = { ...raw };
+	delete cleaned.external_skills;
+	return cleaned;
+}
+
+/**
  * Load plugin configuration from user and project config files.
  *
  * Config locations:
@@ -148,6 +181,16 @@ function migratePresetsConfig(
  * IMPORTANT: Raw configs are merged BEFORE Zod parsing so that
  * Zod defaults don't override explicit user values.
  */
+/** True when a raw (pre-Zod) config object sets `full_auto.locked: true`. */
+function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
+	if (!raw || typeof raw !== 'object') return false;
+	const fullAuto = raw.full_auto;
+	if (!fullAuto || typeof fullAuto !== 'object' || Array.isArray(fullAuto)) {
+		return false;
+	}
+	return (fullAuto as Record<string, unknown>).locked === true;
+}
+
 export function loadPluginConfig(directory: string): PluginConfig {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -179,8 +222,28 @@ export function loadPluginConfig(directory: string): PluginConfig {
 		>;
 	}
 
+	// `full_auto.locked` is an administrative hard-off and must OR across
+	// config levels: a project-level `locked: false` must NOT override a
+	// user-level `locked: true` (deep-merge alone would let a repo-controlled
+	// .opencode/opencode-swarm.json defeat the user's lock).
+	if (rawFullAutoLocked(rawUserConfig) || rawFullAutoLocked(rawProjectConfig)) {
+		const fullAutoRaw =
+			mergedRaw.full_auto &&
+			typeof mergedRaw.full_auto === 'object' &&
+			!Array.isArray(mergedRaw.full_auto)
+				? (mergedRaw.full_auto as Record<string, unknown>)
+				: {};
+		mergedRaw = {
+			...mergedRaw,
+			full_auto: { ...fullAutoRaw, locked: true },
+		};
+	}
+
 	// Migrate v6.12 presets format to v6.13+ agents format
 	mergedRaw = migratePresetsConfig(mergedRaw);
+
+	// Pre-validate external_skills so invalid config doesn't block plugin load
+	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
 
 	// Validate merged config with Zod (applies defaults ONCE).
 	// Nested optional schemas (e.g. council.general) surface automatically
@@ -191,7 +254,9 @@ export function loadPluginConfig(directory: string): PluginConfig {
 		// If merged config fails validation, try user config alone
 		// (project config may have invalid values that should be ignored)
 		if (rawUserConfig) {
-			const userParseResult = PluginConfigSchema.safeParse(rawUserConfig);
+			const userParseResult = PluginConfigSchema.safeParse(
+				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+			);
 			if (userParseResult.success) {
 				console.warn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
@@ -231,6 +296,11 @@ export function loadPluginConfig(directory: string): PluginConfig {
 export function loadPluginConfigWithMeta(directory: string): {
 	config: PluginConfig;
 	loadedFromFile: boolean;
+	/** True when a config file existed but could not be loaded (corrupt JSON,
+	 *  oversized, permission error). Consumers with fail-closed semantics —
+	 *  e.g. the Full-Auto `locked` activation guard — must treat this as
+	 *  "config unknown", not "config defaults". */
+	configHadErrors: boolean;
 } {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -242,8 +312,9 @@ export function loadPluginConfigWithMeta(directory: string): {
 	const projectResult = loadRawConfigFromPath(projectConfigPath);
 	// Use fileExisted to track if files existed (regardless of load success)
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
+	const configHadErrors = userResult.hadError || projectResult.hadError;
 	const config = loadPluginConfig(directory);
-	return { config, loadedFromFile };
+	return { config, loadedFromFile, configHadErrors };
 }
 
 /**
@@ -328,10 +399,13 @@ function reduceParsedConfig(
 		>;
 	}
 	mergedRaw = migratePresetsConfig(mergedRaw);
+	mergedRaw = sanitizeExternalSkillsConfig(mergedRaw);
 	const result = PluginConfigSchema.safeParse(mergedRaw);
 	if (!result.success) {
 		if (rawUserConfig) {
-			const userParseResult = PluginConfigSchema.safeParse(rawUserConfig);
+			const userParseResult = PluginConfigSchema.safeParse(
+				sanitizeExternalSkillsConfig(rawUserConfig ?? {}),
+			);
 			if (userParseResult.success) {
 				console.warn(
 					'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
@@ -364,6 +438,7 @@ export async function loadPluginConfigWithMetaAsync(
 ): Promise<{
 	config: PluginConfig;
 	loadedFromFile: boolean;
+	configHadErrors: boolean;
 }> {
 	const userConfigPath = path.join(
 		getUserConfigDir(),
@@ -383,7 +458,7 @@ export async function loadPluginConfigWithMetaAsync(
 		loadedFromFile,
 		configHadErrors,
 	);
-	return { config, loadedFromFile };
+	return { config, loadedFromFile, configHadErrors };
 }
 
 /**

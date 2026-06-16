@@ -211,4 +211,203 @@ declare module 'bash-parser' {
 
 	function parse(command: string, options?: ParseOptions): ScriptNode;
 	export default parse;
+
+	// ---------------------------------------------------------------------------
+	// Extended Bash AST types (from shell-write-detect)
+	// These types complement the strict *Node types above with looser shapes
+	// that match what bash-parser actually emits at runtime.
+	// ---------------------------------------------------------------------------
+
+	export type BashOperatorType =
+		| 'GREAT'
+		| 'DGREAT'
+		| 'CLOBBER'
+		| 'LESS'
+		| 'LESSAND'
+		| 'GREATAND'
+		| 'DLESS'
+		| 'DLESSDASH'
+		| 'LESSGREAT'
+		| string;
+
+	export interface BashOperator {
+		type: BashOperatorType;
+		text?: string;
+		loc?: unknown;
+	}
+
+	/** Type alias — BashWord is the same shape as WordNode. */
+	export type BashWord = WordNode;
+
+	export interface BashHereDocMarker {
+		type: 'dless' | 'dlessdash';
+		text: string;
+		loc?: unknown;
+	}
+
+	export interface BashRedirect {
+		type: 'Redirect';
+		op: BashOperator;
+		file: BashWord | BashHereDocMarker;
+		number?: number;
+		loc?: unknown;
+	}
+
+	export interface BashCommand {
+		type: 'Command' | 'SimpleCommand';
+		name?: BashWord | string;
+		prefix?: (BashWord | BashRedirect | BashHereDocMarker)[];
+		suffix?: (BashWord | BashRedirect | BashHereDocMarker)[];
+		redirections?: BashRedirect[];
+		loc?: unknown;
+		async?: boolean;
+		bang?: boolean;
+	}
+
+	export interface BashScript {
+		type: 'Script';
+		commands: BashNode[];
+		loc?: unknown;
+	}
+
+	export interface BashPipeline {
+		type: 'Pipeline';
+		commands: BashNode[];
+		loc?: unknown;
+		bang?: boolean;
+	}
+
+	export interface BashSequence {
+		type: 'Sequence';
+		commands: BashNode[];
+		loc?: unknown;
+	}
+
+	export interface BashList {
+		type: 'List';
+		commands: BashNode[];
+		type_andor?: string;
+		type_sep?: string;
+		loc?: unknown;
+	}
+
+	export interface BashCompoundList {
+		type: 'CompoundList';
+		commands: BashNode[];
+		redirections?: BashRedirect[];
+		loc?: unknown;
+	}
+
+	export interface BashLogicalExpression {
+		type: 'LogicalExpression';
+		op: 'and' | 'or';
+		left: BashNode;
+		right: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashAnd {
+		type: 'And';
+		left: BashNode;
+		right: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashOr {
+		type: 'Or';
+		left: BashNode;
+		right: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashSubshell {
+		type: 'Subshell';
+		list: BashNode;
+		redirections?: BashRedirect[];
+		loc?: unknown;
+	}
+
+	export interface BashProcessSubstitution {
+		type: 'ProcessSubstitution';
+		op: BashOperator;
+		command: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashIf {
+		type: 'If';
+		clause: BashNode;
+		then: BashNode;
+		else?: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashFor {
+		type: 'For';
+		name: BashWord | string;
+		wordlist?: BashWord[];
+		do: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashCase {
+		type: 'Case';
+		clause: BashWord;
+		cases?: BashCaseItem[];
+		loc?: unknown;
+	}
+
+	export interface BashCaseItem {
+		type: 'CaseItem';
+		pattern: BashWord[];
+		body: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashWhile {
+		type: 'While';
+		clause: BashNode;
+		do: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashUntil {
+		type: 'Until';
+		clause: BashNode;
+		do: BashNode;
+		loc?: unknown;
+	}
+
+	export interface BashFunction {
+		type: 'Function';
+		name: BashWord | string;
+		body: BashNode;
+		redirections?: BashRedirect[];
+		loc?: unknown;
+	}
+
+	/**
+	 * Union of all structural Bash AST node types.
+	 * Leaf token types (BashWord, BashRedirect, BashHereDocMarker, BashOperator)
+	 * are excluded — they appear as properties of structural nodes.
+	 */
+	export type BashNode =
+		| BashScript
+		| BashPipeline
+		| BashSequence
+		| BashList
+		| BashCompoundList
+		| BashLogicalExpression
+		| BashAnd
+		| BashOr
+		| BashSubshell
+		| BashProcessSubstitution
+		| BashCommand
+		| BashIf
+		| BashFor
+		| BashCase
+		| BashCaseItem
+		| BashWhile
+		| BashUntil
+		| BashFunction;
 }

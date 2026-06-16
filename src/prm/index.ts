@@ -59,6 +59,38 @@ import {
 import type { PatternType, PrmConfig } from './types';
 
 /**
+ * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`.
+ *
+ * Production code calls `_internals.fn(...)` so tests can replace each
+ * function on this object without touching the real module.  `vi.spyOn` from
+ * `bun:test` leaks across files in Bun's shared test-runner process, which
+ * would corrupt unrelated suites that import the same modules.
+ */
+export const _internals: {
+	getAgentSession: typeof getAgentSession;
+	readTrajectory: typeof readTrajectory;
+	getInMemoryTrajectory: typeof getInMemoryTrajectory;
+	detectPatterns: typeof detectPatterns;
+	generateCourseCorrection: typeof generateCourseCorrection;
+	formatCourseCorrectionForInjection: typeof formatCourseCorrectionForInjection;
+	cleanupOldTrajectoryFiles: typeof cleanupOldTrajectoryFiles;
+	recordReplayEntry: typeof recordReplayEntry;
+	startReplayRecording: typeof startReplayRecording;
+	telemetry: typeof telemetry;
+} = {
+	getAgentSession,
+	readTrajectory,
+	getInMemoryTrajectory,
+	detectPatterns,
+	generateCourseCorrection,
+	formatCourseCorrectionForInjection,
+	cleanupOldTrajectoryFiles,
+	recordReplayEntry,
+	startReplayRecording,
+	telemetry,
+};
+
+/**
  * Context passed to toolAfter handler
  */
 interface ToolAfterContext {
@@ -124,21 +156,21 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 		const { sessionID } = context;
 
 		// Get session from state
-		const session = getAgentSession(sessionID);
+		const session = _internals.getAgentSession(sessionID);
 		if (!session || !session.delegationActive) {
 			return;
 		}
 
 		try {
 			// Use in-memory cache (O(1)) with disk fallback on cold start (process restart)
-			const cachedTrajectory = getInMemoryTrajectory(sessionID);
+			const cachedTrajectory = _internals.getInMemoryTrajectory(sessionID);
 			const trajectory =
 				cachedTrajectory.length > 0
 					? cachedTrajectory
-					: await readTrajectory(sessionID, directory);
+					: await _internals.readTrajectory(sessionID, directory);
 
 			// Run pattern detection, filtering out historical matches already processed
-			const detectionResult = detectPatterns(
+			const detectionResult = _internals.detectPatterns(
 				trajectory,
 				config,
 				session.prmTrajectoryStep,
@@ -154,10 +186,8 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 
 			// Initialize replay recording on first use (lazy initialization)
 			if (!sessionPrmState.replayArtifactPath) {
-				sessionPrmState.replayArtifactPath = await startReplayRecording(
-					sessionID,
-					directory,
-				);
+				sessionPrmState.replayArtifactPath =
+					await _internals.startReplayRecording(sessionID, directory);
 			}
 
 			const artifactPath = sessionPrmState.replayArtifactPath;
@@ -165,7 +195,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 			// One-time per session: run file TTL cleanup (non-blocking, fire-and-forget)
 			if (!sessionPrmState.prmInitialized) {
 				sessionPrmState.prmInitialized = true;
-				cleanupOldTrajectoryFiles(directory).catch(() => {
+				_internals.cleanupOldTrajectoryFiles(directory).catch(() => {
 					/* non-blocking */
 				});
 			}
@@ -196,9 +226,12 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 			// Process each pattern match
 			for (const match of detectionResult.matches) {
 				// Generate course correction
-				const correction = generateCourseCorrection(match, trajectory);
+				const correction = _internals.generateCourseCorrection(
+					match,
+					trajectory,
+				);
 				const formattedCorrection =
-					formatCourseCorrectionForInjection(correction);
+					_internals.formatCourseCorrectionForInjection(correction);
 
 				// Add to session pending advisory messages for injection
 				if (!session.pendingAdvisoryMessages) {
@@ -228,7 +261,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 				session.prmHardStopPending = hardStopPending;
 
 				// Emit telemetry for pattern detection
-				telemetry.prmPatternDetected(
+				_internals.telemetry.prmPatternDetected(
 					sessionID,
 					match.pattern,
 					match.severity,
@@ -237,7 +270,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 				);
 
 				// Emit telemetry for course correction injection
-				telemetry.prmCourseCorrectionInjected(
+				_internals.telemetry.prmCourseCorrectionInjected(
 					sessionID,
 					match.pattern,
 					escalationLevel,
@@ -245,7 +278,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 
 				// Record pattern detected for replay (non-blocking, serialized)
 				if (artifactPath) {
-					await recordReplayEntry(artifactPath, sessionID, {
+					await _internals.recordReplayEntry(artifactPath, sessionID, {
 						type: 'pattern_detected',
 						data: {
 							pattern: match.pattern,
@@ -262,7 +295,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 
 				// Record course correction for replay (non-blocking, serialized)
 				if (artifactPath) {
-					await recordReplayEntry(artifactPath, sessionID, {
+					await _internals.recordReplayEntry(artifactPath, sessionID, {
 						type: 'course_correction',
 						data: {
 							pattern: correction.pattern,
@@ -282,7 +315,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 				artifactPath &&
 				session.prmEscalationLevel > previousEscalationLevel
 			) {
-				await recordReplayEntry(artifactPath, sessionID, {
+				await _internals.recordReplayEntry(artifactPath, sessionID, {
 					type: 'escalation',
 					data: {
 						previousLevel: previousEscalationLevel,
@@ -298,7 +331,7 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 				session.prmHardStopPending &&
 				previousEscalationLevel < 3
 			) {
-				await recordReplayEntry(artifactPath, sessionID, {
+				await _internals.recordReplayEntry(artifactPath, sessionID, {
 					type: 'hard_stop',
 					data: {
 						escalationLevel: session.prmEscalationLevel,

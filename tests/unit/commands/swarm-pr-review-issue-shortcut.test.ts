@@ -93,12 +93,12 @@ describe('swarm-pr-review and swarm-issue shortcut routing', () => {
 		sessionId = `pr-review-issue-test-${Date.now()}`;
 		swarmState.fullAutoEnabledInConfig = true;
 		makeSession(sessionId);
-		// Pre-create the first-run sentinel so the welcome message is not shown during tests
+		// Pre-create a marker file to ensure .swarm directory is non-empty
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(
-			path.join(swarmDir, '.first-run-complete'),
-			`first-run-complete: ${new Date().toISOString()}\n`,
+			path.join(swarmDir, '.test-marker'),
+			`test-marker: ${new Date().toISOString()}\n`,
 		);
 	});
 

@@ -238,3 +238,14 @@ APPROVE / NEEDS_REVISION / BLOCKED
 [Any stale tests found and how they were handled.]
 ```
 
+## `08b-implementation-review.md`
+
+Use `references/critic-gate.md` (Implementation Review section).
+
+## `09-final-critic.md`
+
+Use `references/critic-gate.md` (Final Critic section).
+
+## `10-pr-body.md`
+
+Use `assets/pr-template.md`.

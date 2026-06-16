@@ -1,6 +1,6 @@
 ---
 name: swarm-pr-review
-description: Run a swarm-like PR review using parallel exploration, independent reviewer validation, and critic challenge. Use for deep pull request review with low false-positive tolerance.
+description: Run a swarm-like PR review using parallel exploration, independent reviewer validation, and critic challenge. Ingests existing PR comments, detects and resolves merge conflicts, and validates bot/human review findings. Use for deep pull request review with low false-positive tolerance.
 disable-model-invocation: true
 ---
 
@@ -33,6 +33,130 @@ Determine review scope using this priority:
 3. staged changes
 4. latest commit
 
+## Phase 0A: Existing PR Comment Ingestion
+
+When reviewing a PR that already has comments, reviews, or bot findings,
+ingest and triage them BEFORE starting Phase 1. These are pre-existing signals
+that must be validated, not ignored.
+
+### Step 1 — Fetch all PR feedback surfaces
+
+```bash
+# Issue comments (general PR thread)
+gh pr view <PR_NUMBER> --json comments
+
+# Review comments (inline code comments)
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments
+
+# Review summaries (approve/request-changes/comment events)
+gh pr view <PR_NUMBER> --json reviews
+
+# Bot/automated reviews (Copilot, Codex, CodeRabbit, etc.)
+# Inline review comments — use REST API for reliable bot detection via user.type
+gh api repos/{owner}/{repo}/pulls/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+For general PR comments (not inline), use the issue comments endpoint:
+```bash
+gh api repos/{owner}/{repo}/issues/{PR_NUMBER}/comments --jq '.[] | select((.user.type // "") == "Bot" or (.user.login // "" | test("bot|copilot|coderabbit|codex"; "i")))'
+```
+
+### Step 2 — Classify each comment
+
+| Category | Action |
+|----------|--------|
+| **Human review with file:line evidence** | Add as candidate finding with `source: existing-review` — still needs reviewer validation |
+| **Bot/automated finding with specific code reference** | Add as candidate finding with `source: bot-review` — high false-positive rate, treat as unverified |
+| **General feedback / style preference** | Add as advisory obligation |
+| **Resolved/outdated comment** | Skip — note in report under "Ingested Resolved Comments" |
+| **Requested changes not yet addressed** | Add as HIGH-priority obligation |
+
+### Step 3 — Merge into review pipeline
+
+All ingested comments become candidate findings or obligations. They follow the
+same Phase 2-5 pipeline as freshly discovered findings. Ingested findings are
+NOT pre-confirmed — they still require independent reviewer validation per the
+Anti-Self-Review Rule.
+
+**Comment-ledger output:**
+```
+[INGESTED] | source | category | file:line (if applicable) | original_author | status: PENDING_VALIDATION / SKIPPED_OUTDATED / ADVISORY
+```
+
+### Anti-patterns
+- ✗ Ignoring bot reviews because "bots produce false positives" — they also catch real issues
+- ✗ Pre-confirming human review comments without independent validation — even senior reviewers make mistakes
+- ✗ Skipping inline review comments and only reading the summary — inline comments contain the evidence
+
+## Phase 0B: Merge Conflict Detection and Resolution
+
+Before investing effort in review lanes, verify the PR is mergeable. A
+conflicted PR cannot merge regardless of review quality.
+
+### Step 1 — Check merge state
+
+```bash
+gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
+```
+
+The response has two independent fields. Handle each:
+
+**`mergeable` field** — whether GitHub can compute mergeability:
+| Value | Meaning | Action |
+|-------|---------|--------|
+| `MERGEABLE` | No conflicts detected | Proceed — check `mergeStateStatus` below |
+| `CONFLICTING` | Merge conflicts exist | Resolve before reviewing |
+| `UNKNOWN` | GitHub still computing | Wait 30s, re-check |
+
+**`mergeStateStatus` field** — overall branch state:
+| Value | Action |
+|-------|--------|
+| `CLEAN` | All checks pass, no conflicts — proceed to Phase 1 |
+| `BEHIND` | Branch behind base — note in report; non-blocking if merge queue handles it |
+| `DIRTY` | Merge conflicts exist — resolve before reviewing |
+| `BLOCKED` | External blocker (branch protection, failing required check) — investigate |
+
+### Step 2 — Resolve conflicts (when CONFLICTING or DIRTY)
+
+When the PR has merge conflicts:
+
+1. **Determine the PR's base branch and fetch:**
+   ```bash
+   BASE_REF=$(gh pr view <PR_NUMBER> --json baseRefName --jq '.baseRefName')
+   git fetch origin $BASE_REF
+   git checkout <pr-branch>
+   git merge origin/$BASE_REF --no-commit --no-ff
+   git diff --name-only --diff-filter=U  # list conflicted files
+   ```
+
+2. **Assess conflict complexity:**
+   - **1-3 simple conflicts** (lockfile version bumps, whitespace): Resolve directly, commit, push.
+   - **4+ conflicts or semantic conflicts** (logic changes in same function): Route to coder for resolution. Do NOT guess at semantic merge resolutions.
+
+3. **Resolve and push:**
+   ```bash
+   # For simple conflicts (after resolving markers):
+   git add -A
+   git commit -m "merge: resolve conflicts with main"
+   git push origin <pr-branch>
+   ```
+
+4. **Post-resolution verification:**
+   ```bash
+   # Verify clean state
+   gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
+   # Run affected tests
+   bun test tests/unit/path/to/conflicted.test.ts --timeout 30000
+   ```
+
+5. **Document in report:** List all conflicted files, resolution approach, and whether semantic judgment was required.
+
+### Conflict resolution anti-patterns
+- ✗ Accepting "ours" or "theirs" for all conflicts without reading them
+- ✗ Resolving semantic conflicts without understanding both sides
+- ✗ Pushing resolution without running tests on the merged result
+- ✗ Reviewing a conflicted PR without resolving first — review effort is wasted if the merge changes the code
+
 ---
 
 ## 6-Phase Review Workflow
@@ -42,7 +166,7 @@ Determine review scope using this priority:
 
 When the user asks for a "council", "independent review", "N-agent review", or uses phrases like "assume all work is wrong", run the explorer lanes as a parallel **adversarial council**:
 
-1. Launch all council agents in a **single message with multiple Agent tool calls** so they run in parallel, in the background (`run_in_background: true`), using the `Explore` subagent type.
+1. In OpenCode, launch all council agents with one `dispatch_lanes` call and treat `lane_results` as the join barrier. In Claude Code, launch the council agents as parallel Agent calls in the same response, using the `Explore` subagent type.
 2. Each agent is told to **assume all work is WRONG until code evidence proves otherwise** and to hunt for bugs in its lane only.
 3. Default lane set for a 5-agent council:
    - correctness and edge cases
@@ -97,9 +221,9 @@ Common patterns to verify:
 
 ---
 
-### Phase 2: Parallel Explorer Lanes (6 lanes, launch in single message)
+### Phase 2: Parallel Explorer Lanes (6 lanes, one dispatch batch)
 
-Launch all 6 lanes in parallel in a **single message with multiple Agent tool calls** (`run_in_background: true`). Each lane produces candidate findings with exact file:line evidence — not final verdicts.
+In OpenCode, launch all 6 lanes with one `dispatch_lanes` call, `max_concurrent: 6`, and use the returned `lane_results` as the join barrier before synthesis. In Claude Code, launch all 6 lanes as parallel Agent calls in the same response. Each lane produces candidate findings with exact file:line evidence — not final verdicts.
 
 | Lane | Focus | Lane-Specific Checklist |
 |------|-------|----------------------|
@@ -159,7 +283,7 @@ Candidates not validated must be listed as UNVERIFIED with reason in the validat
 **Reviewer classifications:**
 
 | Classification | Meaning |
-|----------------|---------|
+|----------------|--------|
 | **CONFIRMED** | Evidence is real and the finding is valid |
 | **DISPROVED** | The candidate claim is incorrect or does not apply |
 | **UNVERIFIED** | Cannot determine validity from available evidence |
@@ -199,7 +323,7 @@ Run the **Runtime-Aware False-Positive Guard Checklist** (below) before confirmi
 **Obligation Assessment:**
 
 | Status | Meaning |
-|--------|---------|
+|--------|--------|
 | **MET** | All obligations from this source are fulfilled by the PR |
 | **PARTIALLY MET** | Some obligations fulfilled, some not |
 | **NOT MET** | Obligations unfulfilled or actively violated |
@@ -220,7 +344,7 @@ Run the **Runtime-Aware False-Positive Guard Checklist** (below) before confirmi
 
 When user requests council review or uses phrases like "independent review", "5-agent review", "assume all work is wrong":
 
-1. Launch all 6 explorer lanes as **adversarial council agents** in parallel (`run_in_background: true`)
+1. In OpenCode, launch all 6 explorer lanes as adversarial council agents with one `dispatch_lanes` call; in Claude Code, launch them as parallel Agent calls.
 2. Each agent assumes **all work is WRONG until code evidence proves otherwise**
 3. Each agent returns: `EVIDENCE_FOUND / SUSPICIOUS / CLEAN` with file:line evidence, capped at N words. Agents must not return CONFIRMED, DISPROVED, or final severity.
 4. Main thread acts as **independent reviewer** — re-reads file:line evidence directly and classifies candidates
@@ -276,7 +400,7 @@ When reviewing the opencode-swarm plugin codebase, apply domain expertise across
 8. **Config ratchet semantics** — once-enabled gates cannot be disabled, configuration drift, lock-state integrity
 9. **URL sanitization** — scheme allowlist enforcement, private IP blocking, credential stripping from user-supplied URLs
 10. **Git safety** — branch detection reliability, `reset --hard` safety checks, Windows path retry logic, .git directory protection
-11. **Test infrastructure** — bun:test usage, mock isolation correctness, cross-platform CI paths, `bun:test` vs `vitest` API compliance
+11. **Test infrastructure** — bun:test usage, mock isolation correctness, cross-platform CI paths, `bun:test` vs `vitest` API compliance, `_internals` reference-capture correctness: verify the source calls `_internals.fn()` at the call site — functions passed as direct references to other functions (e.g., `transactFile(path, readKnowledge, ...)`) are captured at definition time and NOT interceptable by replacing `_internals.fn` (the mock is silently ignored and the real function runs)
 
 ---
 
@@ -302,7 +426,7 @@ If **any** answer is yes and unaccounted for in the finding, the finding is down
 ## Merge Recommendation Table
 
 | Verdict | Condition |
-|---------|-----------|
+|---------|----------|
 | **APPROVE** | Zero CRITICAL findings, zero unresolved HIGH findings, all obligations MET |
 | **APPROVE_WITH_NOTES** | Zero CRITICAL findings, HIGH findings are confirmed ADVISORY only (not ship blockers) |
 | **REQUEST_CHANGES** | Any unresolved HIGH finding; or multiple MEDIUM findings in the same functional area |
@@ -338,6 +462,7 @@ parallel with explorer lanes to confirm candidate regressions are real.
 [TEST EXECUTION] result: ___ (N pass, N fail)
 [TEST EXECUTION] regression failures (PR-introduced): ___ (count)
 [TEST EXECUTION] pre-existing failures (base branch): ___ (count)
+[VALIDATION] deterministic lane dispatcher used: YES/NO — ___
 [VALIDATION] reviewer dispatched: ___ (agent type, task description)
 [VALIDATION] reviewer returned: ___ (APPROVED / REJECTED / CONCERNS — copy verdict text)
 [VALIDATION] critic dispatched: ___ (agent type, task description) OR "SKIPPED — no reviewer-confirmed HIGH or borderline-confidence findings"

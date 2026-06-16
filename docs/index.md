@@ -44,6 +44,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 | Document | Covers |
 |----------|--------|
 | [Knowledge System](knowledge.md) | Hive vs swarm knowledge, TTL decay, migration, quarantine workflows |
+| [Generated Skills](skills.md) | How knowledge becomes draft or active generated skills, and how to review them |
 | [Swarm Memory](memory.md) | SQLite-default memory, legacy JSONL migration, scoped recall, proposal-only writes, redaction policy |
 | [Evidence and Telemetry](evidence-and-telemetry.md) | Evidence bundle schema, JSONL event stream, how to analyze results |
 | [Work Complete Council](council/README.md) | Optional consensus gate for verifying phase completion |
@@ -93,6 +94,7 @@ See [Archive](archive/ARCHIVE.md) for:
 - v6.9.0 phase planning documents (phase0-*, stages 1–8)
 - Historical tech debt reviews and closure plans
 - Archived issue-specific planning documents
+- Point-in-time knowledge-system audits that are no longer maintained
 
 ---
 
@@ -114,4 +116,4 @@ See [Archive](archive/ARCHIVE.md) for:
 
 ---
 
-*Last updated: 2026-06-06. Current package metadata was verified from `package.json` and `CHANGELOG.md`.*
+*Last updated: 2026-06-14. Current package metadata was verified from `package.json` and `CHANGELOG.md`.*

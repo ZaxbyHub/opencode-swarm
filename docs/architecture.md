@@ -62,6 +62,33 @@ The protocol executes in the following stages:
 
 This mode is strictly **read-only**: it does NOT mutate source code, delegate to the coder, or call `declare_scope`.
 
+### Repo Graph Ontology
+
+`repo_map` is the shared structural-awareness surface for planning and review.
+It persists `.swarm/repo-graph.json` using the same bounded async graph builder
+that runs after plugin registration, so on-demand `repo_map action="build"` and
+startup graph injection now read/write the same graph schema.
+The published package exposes only the root plugin entry and `./package.json`
+through `package.json#exports`; the Bun-targeted CLI remains available via
+`bin` and is intentionally not exported as a package subpath.
+
+The graph stores imports, exports, inferred file roles, route facts, data
+operations, security-related facts, conventions, and ontology findings. Query
+actions include:
+
+- `importers`, `dependencies`, `blast_radius`, `localization`, and `key_files`
+  for dependency and impact analysis.
+- `ontology` for one file's roles, routes, data/security facts, conventions,
+  and findings.
+- `package_boundaries` for inferred package/layer summaries across the graph.
+- `preflight_packet` for a bounded agent packet covering target files,
+  ontology facts, findings, and a target-local package-boundary summary.
+
+The ontology extractor is intentionally conservative. It records detected facts
+and "detected missing guard" findings; it does not claim formal security proofs.
+Tree-sitter remains the syntax and AST-diff engine, while repo graph startup
+continues to use bounded source scanning to preserve plugin-init invariants.
+
 ### Signal-Triggered Modes (On-Demand Skills)
 
 `DEEP_DIVE` is one of several **signal-triggered modes**. A `/swarm <command>` handler emits a `[MODE: X ...]` activation signal; the architect recognizes it and loads the matching `### MODE: X` section + skill on demand. This keeps the core prompt lean while supporting deep specialized workflows.
@@ -73,7 +100,7 @@ Discovery is deliberate and robust:
 Current signal-triggered modes: `DEEP_DIVE`, `PR_REVIEW`, `PR_FEEDBACK`, `DESIGN_DOCS`, `COUNCIL`, `ISSUE_INGEST` (and the spec-workflow modes `SPECIFY`, `BRAINSTORM`, `CLARIFY-SPEC`).
 
 #### PR_REVIEW Protocol
-Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction → 6 parallel explorer lanes → independent reviewer confirmation → critic challenge on HIGH/CRITICAL → synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder.
+Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction → 6 parallel explorer lanes via the `dispatch_lanes` join barrier → independent reviewer confirmation → critic challenge on HIGH/CRITICAL → synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder.
 
 #### PR_FEEDBACK Protocol
 Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / DISPROVED / PRE_EXISTING / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. GitHub review threads are resolved only on explicit user instruction.
@@ -574,7 +601,7 @@ Canonical helper for stripping namespace prefixes from tool names (e.g. `mega:se
 | `normalizeToolName(name)` | Returns the bare tool name string |
 | `normalizeToolNameLowerCase(name)` | Returns the bare tool name in lowercase |
 
-Replaces 13 inline `replace(/^[^:]+[:.]/, '')` regex patterns that were duplicated across guardrails.ts, scope-guard.ts, index.ts, delegation-gate.ts, self-review.ts, and delegation-ledger.ts. Test-file sites are excluded — they validate the raw pattern behavior directly.
+Replaces 13 inline `replace(/^[^:]+[:.]/, '')` regex patterns that were duplicated across `guardrails/index.ts`, `guardrails/tool-before.ts`, scope-guard.ts, index.ts, delegation-gate.ts, self-review.ts, and delegation-ledger.ts. Test-file sites are excluded — they validate the raw pattern behavior directly.
 
 ### Mode Detection (v6.13)
 
@@ -723,7 +750,7 @@ project/
 │       ├── index.ts       # Barrel exports
 │       └── manager.ts     # CRUD: save/load/list/delete/archive evidence
 │
-├── tests/unit/            # 1211 tests across 54+ files (bun test)
+├── tests/unit/            # 1214 tests across 54+ files (bun test)
 │   ├── agents/            # creation (64), factory (20), architect-v6-prompt (15),
 │   │                      # security-categories (12)
 │   ├── config/            # constants (14), schema (35), loader (17), plan-schema (40),
@@ -921,7 +948,7 @@ Agent times out or errors:
 
 When an agent encounters a transient model error (rate limit, 429, 503, timeout, overloaded, model not found), the guardrails hook detects the failure and triggers fallback behavior:
 
-**Detection:** The `toolAfter` hook in `guardrails.ts` checks for null/undefined tool output combined with error messages matching `TRANSIENT_MODEL_ERROR_PATTERN`:
+**Detection:** The `toolAfter` hook in `guardrails/index.ts` checks for null/undefined tool output combined with error messages matching `TRANSIENT_MODEL_ERROR_PATTERN`:
 
 ```typescript
 const TRANSIENT_MODEL_ERROR_PATTERN =
@@ -956,10 +983,10 @@ When a task requires multiple coder attempts (e.g., reviewer rejections), the gu
 - `session.coderRevisions` — Number of times the coder has been re-delegated for the current task
 - `session.revisionLimitHit` — Boolean flag set when `coderRevisions >= max_coder_revisions`
 
-**Detection:** The `toolAfter` hook in `guardrails.ts` increments `session.coderRevisions` when a coder delegation completes:
+**Detection:** The `toolAfter` hook in `guardrails/index.ts` increments `session.coderRevisions` when a coder delegation completes:
 
 ```typescript
-// In guardrails.ts toolAfter handler
+// In guardrails/index.ts toolAfter handler
 if (delegation.isDelegation && delegation.targetAgent === 'coder') {
   if (!session.revisionLimitHit) {
     session.coderRevisions++;
@@ -1521,7 +1548,7 @@ The command handler uses a factory pattern: `createSwarmCommandHandler(directory
 
 ## Context Engineering (v6.21 Phase 4)
 
-Four features added to `delegation-gate.ts` and `guardrails.ts` reduce context waste and improve model decision quality.
+Four features added to `delegation-gate.ts` and the `guardrails/` submodule suite (`tool-before.ts`, `messages-transform.ts`, `file-authority.ts`) reduce context waste and improve model decision quality.
 
 ### Progressive Task Disclosure
 
@@ -1556,7 +1583,7 @@ Three `<!-- BEHAVIORAL_GUIDANCE_START --> … <!-- BEHAVIORAL_GUIDANCE_END -->` 
 2. The ARCHITECT CODING BOUNDARIES section
 3. The QA gate behavioral description paragraphs
 
-When `isLowCapabilityModel(session.activeModel)` returns `true`, `guardrails.ts messagesTransform` strips all text between every marker pair (inclusive) and replaces each removed block with `[Enforcement: programmatic gates active]`. If `session.activeModel` is null or undefined, the prompt is left unchanged.
+When `isLowCapabilityModel(session.activeModel)` returns `true`, `guardrails/messages-transform.ts messagesTransform` strips all text between every marker pair (inclusive) and replaces each removed block with `[Enforcement: programmatic gates active]`. If `session.activeModel` is null or undefined, the prompt is left unchanged.
 
 **Rationale:** Smaller models benefit from shorter, more directive prompts. The programmatic enforcement mechanisms (state machine, hard blocks, scope containment) provide equivalent safety guarantees without verbose behavioral instructions consuming context.
 
@@ -1592,16 +1619,16 @@ Architect-only tool that pre-declares which files a coder delegation is allowed 
 
 ### Scope Containment Enforcement
 
-**Tracking (`guardrails.ts toolBefore`):**
+**Tracking (`guardrails/tool-before.ts`):**
 - When the architect uses any file-modifying tool (write, edit, patch, create_file, insert, replace), the target file path is appended to `session.modifiedFilesThisCoderTask`.
 - When a coder Task delegation is dispatched, `modifiedFilesThisCoderTask` resets to `[]`.
 
-**Checking (`guardrails.ts toolAfter`):**
+**Checking (`guardrails/index.ts` toolAfter):**
 - After a coder Task delegation completes, `modifiedFilesThisCoderTask` is compared against `declaredCoderScope`.
 - If `declaredCoderScope` is non-null and more than 2 files in `modifiedFilesThisCoderTask` are outside the declared scope: `session.lastScopeViolation` is set to a message listing the undeclared file paths.
 - `modifiedFilesThisCoderTask` resets to `[]` after the check.
 
-**Warning injection (`guardrails.ts messagesTransform`):**
+**Warning injection (`guardrails/messages-transform.ts`):**
 - If `session.scopeViolationDetected` is set, a scope violation warning is injected into the next architect message.
 - The flag clears immediately (before nested conditionals) to prevent stale state across turns.
 
@@ -1618,7 +1645,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 - `agentSessions: Map<sessionId, AgentSessionState>` — Per-session guardrail tracking. Key fields:
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
   - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Per-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'complete'`. Transitions are forward-only; `complete` can only be reached from `tests_run`.
-  - `lastGateOutcome: { gate, taskId, passed, timestamp } | null` — Most recent gate result, populated by `guardrails.ts` toolAfter. Used for deliberation preamble injection in Phase 4 context engineering.
+  - `lastGateOutcome: { gate, taskId, passed, timestamp } | null` — Most recent gate result, populated by `guardrails/index.ts` toolAfter. Used for deliberation preamble injection in Phase 4 context engineering.
   - `declaredCoderScope: string[] | null` — File paths from the coder delegation FILE: directives or explicit `declare_scope` tool call (Phase 5). Null means no scope has been declared.
   - `lastScopeViolation: string | null` — Last scope containment violation message (Phase 5). Set when coder modifies >2 files outside declared scope; cleared after warning is injected.
   - `modifiedFilesThisCoderTask: string[]` — File paths the architect has written during the current coder task (Phase 5). Reset to `[]` when the next coder delegation starts.
@@ -1631,7 +1658,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 
 State machine helpers: `advanceTaskState(session, taskId, newState)` enforces forward-only transitions (throws `INVALID_TASK_STATE_TRANSITION` on illegal transitions); `getTaskState(session, taskId)` returns `'idle'` for unknown tasks.
 
-Scope containment helper: `isInDeclaredScope(filePath, scopeEntries)` in `guardrails.ts` resolves both the candidate path and each scope entry with `path.resolve()` then checks containment with `path.relative()`. This handles directory entries correctly (a scope entry of `src/` covers all files below it) without brittle string `includes()` matching.
+Scope containment helper: `isInDeclaredScope(filePath, scopeEntries)` in `guardrails/tool-before.ts` resolves both the candidate path and each scope entry with `path.resolve()` then checks containment with `path.relative()`. This handles directory entries correctly (a scope entry of `src/` covers all files below it) without brittle string `includes()` matching.
 
 The module has **zero imports** — it's pure TypeScript with no project dependencies.
 
@@ -1811,14 +1838,21 @@ Validates project state before agent execution:
 #### Config Doctor
 
 Startup service that validates and fixes configuration:
-- Validates config schema and types
-- Detects stale/invalid settings
+- **Extended validation coverage** — validates all 62+ top-level schema keys with type checks for strings, booleans, numbers, and objects
+- **Unknown key detection** — warns on typos with Levenshtein-based suggestions (edit distance ≤ 2)
+- **Swarms hardening** — warns on empty `swarms` configuration (INFO), rejects path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) as HIGH/ERROR
+- **Deprecated field flagging** — emits INFO findings for legacy `skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models` with replacement guidance
+- **Auto-fix inventory** — 156 range-bounded numeric keys (e.g. `max_iterations`, `qa_retry_limit`) are auto-clampable
 - Classifies findings by severity (info/warn/error)
 - Proposes safe auto-fixes
 
 **Security:** Defaults to scan-only mode. Autofix requires explicit `automation.capabilities.config_doctor_autofix = true`.
 
 **Backups:** Creates encrypted backups in `.swarm/` before auto-fix. Supports restore via `/swarm config doctor --restore <backup-id>`.
+
+**Startup advisory:** When the doctor runs on startup (via `config_doctor_on_startup`) and finds auto-fixable issues without autofix enabled, it emits a console-visible advisory to the user suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown instead.
+
+**Last-run summary:** The `/swarm config doctor` command (without `--fix`) reads the previous run artifact from `.swarm/config-doctor.json` and displays a compact summary line showing the last run timestamp, findings count, and auto-fixable count before the current findings.
 
 #### Decision Drift Analyzer
 

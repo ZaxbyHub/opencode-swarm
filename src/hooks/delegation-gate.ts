@@ -9,8 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
 
-import type { PluginConfig, WorktreeIsolationConfig } from '../config';
-import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../config/constants';
+import type { PluginConfig } from '../config';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
@@ -38,14 +37,17 @@ import type {
 } from '../types/delegation.js';
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
-import type { WorktreeHandle } from '../worktree';
 import {
-	attemptMergeBackFromDirty,
-	getMergeStrategy,
-	postMergeCleanup,
-	provisionWorktree,
-	removeWorktree,
-} from '../worktree';
+	finishStandardWorktreeDispatch,
+	precreateStandardWorktreeSession,
+	resetStandardWorktreeIsolationState,
+	sanitizeWorktreeTaskId,
+	standardWorktreeByCallID,
+	standardWorktreeSerializationSessions,
+} from './delegation-gate/worktree-isolation';
+export { resetStandardWorktreeIsolationState };
+
+import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import { deleteStoredInputArgs, getStoredInputArgs } from './guardrails';
 import { normalizeToolName } from './normalize-tool-name';
 import { validateSwarmPath } from './utils';
@@ -439,208 +441,6 @@ const ACTIVE_PARALLEL_TASK_STATES = new Set([
 	'tests_run',
 ]);
 
-const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
-
-interface StandardWorktreeDispatch {
-	callID: string;
-	parentSessionID: string;
-	taskId: string;
-	planTaskId?: string;
-	handle: WorktreeHandle;
-	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
-}
-
-const standardWorktreeByCallID = new Map<string, StandardWorktreeDispatch>();
-const standardWorktreeSerializationSessions = new Set<string>();
-let standardWorktreeMergeQueue: Promise<unknown> = Promise.resolve();
-
-function rememberStandardWorktreeDispatch(
-	dispatch: StandardWorktreeDispatch,
-): void {
-	standardWorktreeByCallID.set(dispatch.callID, dispatch);
-}
-
-function hasStandardWorktreeDispatchCapacity(): boolean {
-	return standardWorktreeByCallID.size < MAX_TRACKED_STANDARD_WORKTREE_CALLS;
-}
-
-function serializeStandardWorktreeDispatches(
-	sessionID: string,
-	message: string,
-): void {
-	rememberStandardWorktreeSerializationSession(sessionID);
-	const session = ensureAgentSession(sessionID);
-	session.maxConcurrencyOverride = 1;
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(
-		`${message} Serializing standard coder dispatches for this session.`,
-	);
-}
-
-export function resetStandardWorktreeIsolationState(): void {
-	standardWorktreeByCallID.clear();
-	standardWorktreeSerializationSessions.clear();
-	standardWorktreeMergeQueue = Promise.resolve();
-}
-
-function rememberStandardWorktreeSerializationSession(sessionID: string): void {
-	if (
-		standardWorktreeSerializationSessions.size >=
-		MAX_TRACKED_STANDARD_WORKTREE_CALLS
-	) {
-		const oldest = standardWorktreeSerializationSessions.values().next()
-			.value as string | undefined;
-		if (oldest) standardWorktreeSerializationSessions.delete(oldest);
-	}
-	standardWorktreeSerializationSessions.add(sessionID);
-}
-
-function sanitizeWorktreeTaskId(raw: string): string {
-	const sanitized = raw.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
-	return sanitized || 'task';
-}
-
-function resolveWorktreeIsolationConfig(
-	config: PluginConfig,
-): WorktreeIsolationConfig {
-	if (config.worktree) {
-		return { ...DEFAULT_WORKTREE_ISOLATION_CONFIG, ...config.worktree };
-	}
-	const lean =
-		config.turbo?.strategy === 'lean' ? config.turbo.lean : undefined;
-	if (lean?.worktree_isolation) {
-		return {
-			...DEFAULT_WORKTREE_ISOLATION_CONFIG,
-			policy: 'auto',
-			merge_strategy: lean.merge_strategy ?? 'merge',
-			worktree_dir: lean.worktree_dir,
-		};
-	}
-	return DEFAULT_WORKTREE_ISOLATION_CONFIG;
-}
-
-async function precreateStandardWorktreeSession(args: {
-	config: PluginConfig;
-	directory: string;
-	parentSessionID: string;
-	callID: string;
-	taskId: string;
-	planTaskId?: string;
-	description?: string;
-	outputArgs: Record<string, unknown>;
-}): Promise<void> {
-	const worktreeConfig = resolveWorktreeIsolationConfig(args.config);
-	if (worktreeConfig.policy === 'disabled') return;
-
-	if (!hasStandardWorktreeDispatchCapacity()) {
-		const message =
-			'STANDARD_WORKTREE_TRACKING_CAP_EXCEEDED: too many standard worktree coder dispatches are already awaiting merge-back.';
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, message);
-		return;
-	}
-
-	const client = swarmState.opencodeClient;
-	if (!client) {
-		const message =
-			'STANDARD_WORKTREE_ISOLATION_UNAVAILABLE: OpenCode SDK client is unavailable; standard parallel coder work cannot be isolated.';
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, message);
-		return;
-	}
-
-	const provisionResult = await _internals.provisionWorktree(
-		args.directory,
-		args.taskId,
-		args.parentSessionID,
-		{
-			purpose: 'lane',
-			worktreeDir: worktreeConfig.worktree_dir,
-			mergeStrategy: worktreeConfig.merge_strategy,
-		},
-	);
-	if ('error' in provisionResult) {
-		const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}`;
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, `${message}.`);
-		return;
-	}
-
-	const createResult = await client.session.create({
-		body: {
-			parentID: args.parentSessionID,
-			title: `${args.description ?? args.taskId} (worktree lane)`,
-		},
-		query: { directory: provisionResult.worktreePath },
-	});
-	if (!createResult.data?.id) {
-		await _internals
-			.removeWorktree(provisionResult.worktreePath, args.directory)
-			.catch(() => {});
-		const createError = (createResult as { error?: unknown }).error;
-		const detail =
-			typeof createError === 'string'
-				? createError
-				: JSON.stringify(createError ?? 'missing session id');
-		const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}`;
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, `${message}.`);
-		return;
-	}
-
-	args.outputArgs.task_id = createResult.data.id;
-	rememberStandardWorktreeDispatch({
-		callID: args.callID,
-		parentSessionID: args.parentSessionID,
-		taskId: args.taskId,
-		planTaskId: args.planTaskId,
-		handle: provisionResult,
-		mergeStrategy: worktreeConfig.merge_strategy,
-	});
-}
-
-async function finishStandardWorktreeDispatch(
-	directory: string,
-	dispatch: StandardWorktreeDispatch,
-): Promise<void> {
-	const run = async () => {
-		const mergeResult = await _internals.attemptMergeBackFromDirty(
-			dispatch.handle.worktreePath,
-			dispatch.handle.branchName,
-			directory,
-			getMergeStrategy({ merge_strategy: dispatch.mergeStrategy }),
-		);
-		if ('merged' in mergeResult && mergeResult.merged) {
-			await _internals
-				.removeWorktree(dispatch.handle.worktreePath, directory)
-				.catch(() => {});
-			await _internals
-				.postMergeCleanup(directory, dispatch.handle.branchName)
-				.catch(() => {});
-			return;
-		}
-		if ('partial' in mergeResult) {
-			const session = ensureAgentSession(dispatch.parentSessionID);
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
-				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
-			);
-			return;
-		}
-
-		if ('failed' in mergeResult) {
-			const session = ensureAgentSession(dispatch.parentSessionID);
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
-				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
-			);
-		}
-	};
-
-	standardWorktreeMergeQueue = standardWorktreeMergeQueue.then(run, run);
-	await standardWorktreeMergeQueue;
-}
-
 function isTaskCompletedForParallelGuidance(task: Task): boolean {
 	const status = task.status ?? 'pending';
 	return status === 'completed' || status === 'closed';
@@ -768,11 +568,54 @@ async function buildParallelExecutionGuidance(
 
 	const profile = plan.execution_profile;
 	const enabled = profile?.parallelization_enabled === true;
-	const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+	const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 	// Check for session-scoped concurrency override (Issue #761)
 	// Override only applies in standard mode — Lean Turbo short-circuits above.
-	const effectiveMaxConcurrent =
-		session?.maxConcurrencyOverride ?? maxConcurrent;
+	let effectiveMaxConcurrent = session?.maxConcurrencyOverride ?? maxConcurrent;
+
+	// Adaptive backoff on errors: detect failures and reduce concurrency.
+	// Only count tasks explicitly blocked by a failure, not normal dependency
+	// ordering. `blocked_reason` is set by the execution engine when a task
+	// fails; absent or non-failure reasons (e.g. "waiting on dependency")
+	// are NOT treated as backoff-worthy failures.
+	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
+	const blockedTasks = allTasks.filter((task) => {
+		if (task.status !== 'blocked') return false;
+		const reason = (task.blocked_reason ?? '').toLowerCase();
+		// Treat as a failure only when the reason explicitly indicates
+		// execution failure. Falls back to conservative "count nothing"
+		// when the reason is absent to avoid false-positive throttling.
+		return (
+			reason.includes('fail') ||
+			reason.includes('error') ||
+			reason.includes('exception')
+		);
+	});
+	const totalTasks = allTasks.length;
+	let backoffTriggered = false;
+
+	if (totalTasks > 0 && blockedTasks.length > 0) {
+		const failureRate = blockedTasks.length / totalTasks;
+		// If failure rate exceeds 20%, reduce concurrency by 50%
+		const FAILURE_RATE_THRESHOLD = 0.2;
+		const BACKOFF_MULTIPLIER = 0.5;
+
+		// Require at least 2 blocked tasks to avoid throttling on single-task
+		// flakiness in small plans (e.g. 1/4 = 25% should not auto-reduce).
+		if (failureRate > FAILURE_RATE_THRESHOLD && blockedTasks.length >= 2) {
+			const newConcurrency = Math.max(
+				1,
+				Math.floor(effectiveMaxConcurrent * BACKOFF_MULTIPLIER),
+			);
+			if (newConcurrency < effectiveMaxConcurrent) {
+				// Auto-reduce the effective concurrency due to high failure rate
+				effectiveMaxConcurrent = newConcurrency;
+				session.maxConcurrencyOverride = newConcurrency;
+				backoffTriggered = true;
+			}
+		}
+	}
+
 	if (!enabled || effectiveMaxConcurrent <= 1) return null;
 
 	if (hasActiveLeanTurbo(sessionID)) {
@@ -788,7 +631,6 @@ async function buildParallelExecutionGuidance(
 	const tasks = currentPhase.tasks;
 	if (tasks.length === 0) return null;
 
-	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
 	const completed = new Set<string>();
 	for (const task of allTasks) {
 		const taskId = task.id;
@@ -826,7 +668,11 @@ async function buildParallelExecutionGuidance(
 		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
 	}
 
-	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
+	const failureWarning = backoffTriggered
+		? ` (${blockedTasks.length} blocked task(s) detected — concurrency auto-reduced due to failures)`
+		: '';
+
+	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.${failureWarning}`;
 }
 
 function isParallelGuidancePhaseComplete(phase: Phase): boolean {
@@ -979,17 +825,41 @@ async function resolveEvidenceTaskId(
  * _internals export for testing — do not use in production code.
  * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId, and
  * buildParallelExecutionGuidance for unit testing.
+ *
+ * Worktree operation entries (provisionWorktree, removeWorktree, etc.) proxy
+ * to delegation-gate/worktree-isolation._internals via getters/setters so
+ * that test mutations on this object propagate to the extracted module.
  */
 export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
-	provisionWorktree,
-	removeWorktree,
-	attemptMergeBackFromDirty,
-	postMergeCleanup,
 	resetStandardWorktreeIsolationState,
+	get provisionWorktree() {
+		return _wtiInternals.provisionWorktree;
+	},
+	set provisionWorktree(v: typeof _wtiInternals.provisionWorktree) {
+		_wtiInternals.provisionWorktree = v;
+	},
+	get removeWorktree() {
+		return _wtiInternals.removeWorktree;
+	},
+	set removeWorktree(v: typeof _wtiInternals.removeWorktree) {
+		_wtiInternals.removeWorktree = v;
+	},
+	get attemptMergeBackFromDirty() {
+		return _wtiInternals.attemptMergeBackFromDirty;
+	},
+	set attemptMergeBackFromDirty(v: typeof _wtiInternals.attemptMergeBackFromDirty,) {
+		_wtiInternals.attemptMergeBackFromDirty = v;
+	},
+	get postMergeCleanup() {
+		return _wtiInternals.postMergeCleanup;
+	},
+	set postMergeCleanup(v: typeof _wtiInternals.postMergeCleanup) {
+		_wtiInternals.postMergeCleanup = v;
+	},
 };
 
 /**
@@ -1238,7 +1108,7 @@ export function createDelegationGateHook(
 		if (!plan) return;
 		const profile = plan.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
-		const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =
 			session.maxConcurrencyOverride ?? maxConcurrent;
 		if (!parallelEnabled || effectiveMaxConcurrent <= 1) return;

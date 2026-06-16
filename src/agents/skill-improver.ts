@@ -47,6 +47,16 @@ A useful proposal contains:
 3. Concrete recommendations the architect or a human can act on.
 4. Optional cluster suggestions for new draft skills (slug, title, source
    knowledge ids, target agents).
+
+UNACTIONABLE-KNOWLEDGE HARDENING (Change 4)
+Each improver run also processes a bounded batch of entries from
+.swarm/knowledge-unactionable.jsonl (lessons quarantined by the Layer-5
+actionability gate). When asked to "Convert this prose lesson into an
+actionable knowledge directive", output ONLY a single JSON object with at
+least one non-empty scope field (applies_to_agents / applies_to_tools) AND at
+least one non-empty predicate field (forbidden_actions / required_actions /
+verification_checks). Hardened entries return to the active store; entries
+that cannot be hardened are flagged retire_candidate for human review.
 `;
 
 export function createSkillImproverAgent(

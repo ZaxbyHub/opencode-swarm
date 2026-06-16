@@ -11,19 +11,116 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ALL_AGENT_NAMES } from '../config/constants';
 import type { PluginConfig } from '../config/schema';
-import { stripKnownSwarmPrefix } from '../config/schema';
+import { PluginConfigSchema, stripKnownSwarmPrefix } from '../config/schema';
 import { log } from '../utils';
 
 /**
- * Valid config paths for opencode-swarm
- * These are the only allowed restore targets for security
+ * Cached set of all top-level keys from PluginConfigSchema.
+ * Used by validateConfigKey default case to distinguish known vs unknown keys.
  */
-const VALID_CONFIG_PATTERNS = [
-	// User config: ~/.config/opencode/opencode-swarm.json
-	/^\.config[\\/]opencode[\\/]opencode-swarm\.json$/,
-	// Project config: <project>/.opencode/opencode-swarm.json
-	/\.opencode[\\/]opencode-swarm\.json$/,
-];
+const KNOWN_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(
+	Object.keys(PluginConfigSchema.shape),
+);
+
+/**
+ * Map of deprecated config fields that should emit INFO findings
+ * when set to non-default values.
+ */
+const DEPRECATED_FIELDS: ReadonlyMap<
+	string,
+	{
+		message: string;
+		replacement: string;
+		isDefaultValue: (v: unknown) => boolean;
+	}
+> = new Map([
+	[
+		'skill_improver.model',
+		{
+			message: 'deprecated',
+			replacement: 'agents.skill_improver.model',
+			isDefaultValue: (v: unknown) => v === null,
+		},
+	],
+	[
+		'skill_improver.fallback_models',
+		{
+			message: 'deprecated',
+			replacement: 'agents.skill_improver.fallback_models',
+			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+		},
+	],
+	[
+		'spec_writer.model',
+		{
+			message: 'deprecated',
+			replacement: 'agents.spec_writer.model',
+			isDefaultValue: (v: unknown) => v === null,
+		},
+	],
+	[
+		'spec_writer.fallback_models',
+		{
+			message: 'deprecated',
+			replacement: 'agents.spec_writer.fallback_models',
+			isDefaultValue: (v: unknown) => Array.isArray(v) && v.length === 0,
+		},
+	],
+]);
+
+/**
+ * Compute Levenshtein distance between two strings.
+ * Callers must lowercase inputs for case-insensitive matching.
+ */
+function levenshteinDistance(a: string, b: string): number {
+	const al = a.length;
+	const bl = b.length;
+	const matrix: number[][] = [];
+
+	for (let i = 0; i <= al; i++) {
+		matrix[i] = [i];
+	}
+	for (let j = 0; j <= bl; j++) {
+		matrix[0]![j] = j;
+	}
+
+	for (let i = 1; i <= al; i++) {
+		for (let j = 1; j <= bl; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			matrix[i]![j] = Math.min(
+				matrix[i - 1]![j]! + 1,
+				matrix[i]![j - 1]! + 1,
+				matrix[i - 1]![j - 1]! + cost,
+			);
+		}
+	}
+
+	return matrix[al]![bl]!;
+}
+
+/**
+ * Emit a type-mismatch finding for object-type config keys.
+ */
+function emitObjectTypeMismatch(
+	key: string,
+	value: unknown,
+	findings: ConfigFinding[],
+): void {
+	if (
+		value !== undefined &&
+		(typeof value !== 'object' || Array.isArray(value) || value === null)
+	) {
+		findings.push({
+			id: `invalid-${key}-type`,
+			title: `Invalid ${key} type`,
+			description: `"${key}" must be an object, got ${typeof value}`,
+			severity: 'error',
+			path: key,
+			currentValue: value,
+			autoFixable: false,
+		});
+	}
+}
 
 /** Severity levels for config findings */
 export type FindingSeverity = 'info' | 'warn' | 'error';
@@ -147,30 +244,58 @@ function isValidConfigPath(configPath: string, directory: string): boolean {
 		}
 	}
 
-	// Check if path matches valid patterns
-	for (const pattern of VALID_CONFIG_PATTERNS) {
-		if (pattern.test(normalizedPath)) {
-			return true;
-		}
-	}
-
-	// Also allow exact match with project config path (most common case)
+	// Use resolved paths for exact-match validation only
 	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
-	const normalizedUser = userConfigPath.replace(/\\/g, '/');
-	const normalizedProject = projectConfigPath.replace(/\\/g, '/');
 
-	// Use resolved paths to prevent symlink attacks
 	try {
 		const resolvedConfig = path.resolve(configPath);
-		const resolvedUser = path.resolve(normalizedUser);
-		const resolvedProject = path.resolve(normalizedProject);
+		const resolvedUser = path.resolve(userConfigPath);
+		const resolvedProject = path.resolve(projectConfigPath);
 
-		// Must be one of the known config paths
-		return (
-			resolvedConfig === resolvedUser || resolvedConfig === resolvedProject
-		);
+		// Must exactly match one of the two known config paths
+		if (resolvedConfig !== resolvedUser && resolvedConfig !== resolvedProject) {
+			return false;
+		}
+
+		// Symlink rejection: if the config file exists, verify its realpath
+		// matches the resolved path. A symlink at the allowed location that
+		// points elsewhere is a write-through attack vector.
+		try {
+			if (fs.existsSync(resolvedConfig)) {
+				const realConfig = fs.realpathSync(resolvedConfig);
+				if (realConfig !== resolvedConfig) {
+					return false;
+				}
+			}
+		} catch {
+			// realpathSync fails if file doesn't exist yet (first run) — allow
+		}
+
+		return true;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Atomic file write: writes to a temp file then renames.
+ * Prevents corrupt config files on crash mid-write.
+ * On Windows, fs.renameSync can fail if the target already exists;
+ * the try/catch handles this by unlinking the target before renaming.
+ */
+function atomicWriteFileSync(filePath: string, content: string): void {
+	const tmpPath = `${filePath}.tmp.${process.pid}`;
+	fs.writeFileSync(tmpPath, content, 'utf-8');
+	try {
+		fs.renameSync(tmpPath, filePath);
+	} catch {
+		// Windows: target may exist — unlink first, then rename
+		try {
+			fs.unlinkSync(filePath);
+		} catch {
+			// Ignore unlink failure — best effort
+		}
+		fs.renameSync(tmpPath, filePath);
 	}
 }
 
@@ -247,7 +372,7 @@ export function writeBackupArtifact(
 			(backup.content.length > 500 ? '...' : ''),
 	};
 
-	fs.writeFileSync(backupPath, JSON.stringify(artifact, null, 2), 'utf-8');
+	atomicWriteFileSync(backupPath, JSON.stringify(artifact, null, 2));
 	return backupPath;
 }
 
@@ -263,6 +388,16 @@ export function restoreFromBackup(
 ): string | null {
 	if (!fs.existsSync(backupPath)) {
 		return null;
+	}
+
+	// Validate backupPath is within .swarm/ directory
+	const swarmDir = path.resolve(path.join(directory, '.swarm'));
+	const resolvedBackup = path.resolve(backupPath);
+	if (
+		!resolvedBackup.startsWith(swarmDir + path.sep) &&
+		resolvedBackup !== swarmDir
+	) {
+		return null; // backupPath is outside .swarm/ — reject
 	}
 
 	try {
@@ -293,6 +428,10 @@ export function restoreFromBackup(
 		}
 		// For legacy hashes, log a warning but allow restore (backward compat)
 		// In production, consider migrating to SHA-256 on next write
+		log(
+			'[ConfigDoctor] Warning: restoring from backup with legacy numeric hash (pre-SHA-256). Consider re-backing up.',
+			{},
+		);
 
 		// Determine where to write restored config
 		const targetPath = artifact.configPath;
@@ -304,7 +443,7 @@ export function restoreFromBackup(
 		}
 
 		// Write restored content
-		fs.writeFileSync(targetPath, artifact.content, 'utf-8');
+		atomicWriteFileSync(targetPath, artifact.content);
 		return targetPath;
 	} catch {
 		// Failed to parse or restore
@@ -339,7 +478,10 @@ function readConfigFromFile(directory: string): {
 	try {
 		const config = JSON.parse(configContent);
 		return { config: config as Record<string, unknown>, configPath };
-	} catch {
+	} catch (error) {
+		log(`[ConfigDoctor] Failed to parse config file: ${configPath}`, {
+			error: error instanceof Error ? error.message : String(error),
+		});
 		return null;
 	}
 }
@@ -347,14 +489,27 @@ function readConfigFromFile(directory: string): {
 /**
  * Validate config key safety and detect stale/invalid settings
  */
-function validateConfigKey(
-	path: string,
-	value: unknown,
-	_config: PluginConfig,
-): ConfigFinding[] {
+function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 	const findings: ConfigFinding[] = [];
 
+	// ── DEPRECATED FIELDS PRE-CHECK (before switch) ──
+	for (const [depPath, depInfo] of DEPRECATED_FIELDS) {
+		if (path === depPath && !depInfo.isDefaultValue(value)) {
+			findings.push({
+				id: 'deprecated-field',
+				title: `Deprecated config field: ${depPath}`,
+				description: `Config field "${depPath}" is deprecated. Replacement: ${depInfo.replacement}.`,
+				severity: 'info',
+				path: depPath,
+				currentValue: value,
+				autoFixable: false,
+			});
+		}
+	}
+
 	switch (path) {
+		// ── EXISTING SPECIFIC VALIDATION CASES ──
+
 		// Check deprecated fields
 		case 'agents': {
 			if (value !== undefined) {
@@ -485,8 +640,14 @@ function validateConfigKey(
 
 		// Check hooks configuration
 		case 'hooks': {
-			const hooks = value as Record<string, unknown> | undefined;
-			if (hooks) {
+			emitObjectTypeMismatch('hooks', value, findings);
+			if (
+				value !== undefined &&
+				typeof value === 'object' &&
+				!Array.isArray(value) &&
+				value !== null
+			) {
+				const hooks = value as Record<string, unknown>;
 				// Check for deprecated/unknown hook fields
 				const validHooks = [
 					'system_enhancer',
@@ -572,10 +733,60 @@ function validateConfigKey(
 			break;
 		}
 
-		// Check swarms for valid structure
+		// Check swarms for valid structure (with type guard, empty, path-traversal)
 		case 'swarms': {
-			const swarms = value as Record<string, unknown> | undefined;
-			if (swarms && typeof swarms === 'object') {
+			if (value !== undefined) {
+				if (
+					typeof value !== 'object' ||
+					Array.isArray(value) ||
+					value === null
+				) {
+					findings.push({
+						id: 'invalid-swarms-type',
+						title: 'Invalid swarms type',
+						description: `"swarms" must be an object, got ${typeof value}`,
+						severity: 'error',
+						path: 'swarms',
+						currentValue: value,
+						autoFixable: false,
+					});
+					break;
+				}
+				const swarms = value as Record<string, unknown>;
+
+				// Empty swarms check
+				if (Object.keys(swarms).length === 0) {
+					findings.push({
+						id: 'empty-swarms',
+						title: 'Empty swarms configuration',
+						description:
+							'The "swarms" field is an empty object. No swarm configurations are defined.',
+						severity: 'info',
+						path: 'swarms',
+						autoFixable: false,
+					});
+				}
+
+				// Path-traversal check on swarm IDs
+				for (const swarmId of Object.keys(swarms)) {
+					if (
+						swarmId.includes('..') ||
+						swarmId.includes('/') ||
+						swarmId.includes('\\') ||
+						swarmId.includes('\0')
+					) {
+						findings.push({
+							id: 'swarm-id-path-traversal',
+							title: 'Path traversal in swarm ID',
+							description: `Swarm ID "${swarmId}" contains path traversal characters.`,
+							severity: 'error',
+							path: `swarms.${swarmId}`,
+							autoFixable: false,
+						});
+					}
+				}
+
+				// Existing agent validation
 				const validAgents = new Set(ALL_AGENT_NAMES as readonly string[]);
 				for (const [swarmId, swarmConfig] of Object.entries(swarms)) {
 					const swarm = swarmConfig as Record<string, unknown>;
@@ -622,19 +833,412 @@ function validateConfigKey(
 			}
 			break;
 		}
+
+		// ── NEW TYPE-CHECK CASES FOR ALL REMAINING TOP-LEVEL KEYS ──
+
+		case 'default_agent': {
+			if (value !== undefined && typeof value !== 'string') {
+				findings.push({
+					id: 'invalid-default_agent-type',
+					title: 'Invalid default_agent type',
+					description: `"default_agent" must be a string, got ${typeof value}`,
+					severity: 'error',
+					path: 'default_agent',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'auto_select_architect': {
+			if (
+				value !== undefined &&
+				typeof value !== 'boolean' &&
+				typeof value !== 'string'
+			) {
+				findings.push({
+					id: 'invalid-auto_select_architect-type',
+					title: 'Invalid auto_select_architect type',
+					description: `"auto_select_architect" must be a boolean or string, got ${typeof value}`,
+					severity: 'error',
+					path: 'auto_select_architect',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'pipeline': {
+			emitObjectTypeMismatch('pipeline', value, findings);
+			break;
+		}
+
+		case 'phase_complete': {
+			emitObjectTypeMismatch('phase_complete', value, findings);
+			break;
+		}
+
+		case 'execution_mode': {
+			const validModes = ['strict', 'balanced', 'fast'];
+			if (value !== undefined && !validModes.includes(value as string)) {
+				findings.push({
+					id: 'invalid-execution_mode-type',
+					title: 'Invalid execution_mode',
+					description: `"execution_mode" must be one of: ${validModes.join(', ')}, got "${value}"`,
+					severity: 'error',
+					path: 'execution_mode',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'inject_phase_reminders': {
+			if (value !== undefined && typeof value !== 'boolean') {
+				findings.push({
+					id: 'invalid-inject_phase_reminders-type',
+					title: 'Invalid inject_phase_reminders type',
+					description: `"inject_phase_reminders" must be a boolean, got ${typeof value}`,
+					severity: 'error',
+					path: 'inject_phase_reminders',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'gates': {
+			emitObjectTypeMismatch('gates', value, findings);
+			break;
+		}
+
+		case 'context_budget': {
+			emitObjectTypeMismatch('context_budget', value, findings);
+			break;
+		}
+
+		case 'guardrails': {
+			emitObjectTypeMismatch('guardrails', value, findings);
+			break;
+		}
+
+		case 'watchdog': {
+			emitObjectTypeMismatch('watchdog', value, findings);
+			break;
+		}
+
+		case 'self_review': {
+			emitObjectTypeMismatch('self_review', value, findings);
+			break;
+		}
+
+		case 'tool_filter': {
+			emitObjectTypeMismatch('tool_filter', value, findings);
+			break;
+		}
+
+		case 'authority': {
+			emitObjectTypeMismatch('authority', value, findings);
+			break;
+		}
+
+		case 'plan_cursor': {
+			emitObjectTypeMismatch('plan_cursor', value, findings);
+			break;
+		}
+
+		case 'context_map': {
+			emitObjectTypeMismatch('context_map', value, findings);
+			break;
+		}
+
+		case 'evidence': {
+			emitObjectTypeMismatch('evidence', value, findings);
+			break;
+		}
+
+		case 'summaries': {
+			emitObjectTypeMismatch('summaries', value, findings);
+			break;
+		}
+
+		case 'review_passes': {
+			emitObjectTypeMismatch('review_passes', value, findings);
+			break;
+		}
+
+		case 'adversarial_detection': {
+			emitObjectTypeMismatch('adversarial_detection', value, findings);
+			break;
+		}
+
+		case 'adversarial_testing': {
+			emitObjectTypeMismatch('adversarial_testing', value, findings);
+			break;
+		}
+
+		case 'integration_analysis': {
+			emitObjectTypeMismatch('integration_analysis', value, findings);
+			break;
+		}
+
+		case 'docs': {
+			emitObjectTypeMismatch('docs', value, findings);
+			break;
+		}
+
+		case 'design_docs': {
+			emitObjectTypeMismatch('design_docs', value, findings);
+			break;
+		}
+
+		case 'ui_review': {
+			emitObjectTypeMismatch('ui_review', value, findings);
+			break;
+		}
+
+		case 'compaction_advisory': {
+			emitObjectTypeMismatch('compaction_advisory', value, findings);
+			break;
+		}
+
+		case 'lint': {
+			emitObjectTypeMismatch('lint', value, findings);
+			break;
+		}
+
+		case 'secretscan': {
+			emitObjectTypeMismatch('secretscan', value, findings);
+			break;
+		}
+
+		case 'checkpoint': {
+			emitObjectTypeMismatch('checkpoint', value, findings);
+			break;
+		}
+
+		case 'automation': {
+			emitObjectTypeMismatch('automation', value, findings);
+			break;
+		}
+
+		case 'knowledge': {
+			emitObjectTypeMismatch('knowledge', value, findings);
+			break;
+		}
+
+		case 'memory': {
+			emitObjectTypeMismatch('memory', value, findings);
+			break;
+		}
+
+		case 'curator': {
+			emitObjectTypeMismatch('curator', value, findings);
+			break;
+		}
+
+		case 'architectural_supervision': {
+			emitObjectTypeMismatch('architectural_supervision', value, findings);
+			break;
+		}
+
+		case 'knowledge_application': {
+			emitObjectTypeMismatch('knowledge_application', value, findings);
+			break;
+		}
+
+		case 'skillPropagation': {
+			emitObjectTypeMismatch('skillPropagation', value, findings);
+			break;
+		}
+
+		case 'skill_improver': {
+			emitObjectTypeMismatch('skill_improver', value, findings);
+			break;
+		}
+
+		case 'spec_writer': {
+			emitObjectTypeMismatch('spec_writer', value, findings);
+			break;
+		}
+
+		case 'tool_output': {
+			emitObjectTypeMismatch('tool_output', value, findings);
+			break;
+		}
+
+		case 'slop_detector': {
+			emitObjectTypeMismatch('slop_detector', value, findings);
+			break;
+		}
+
+		case 'todo_gate': {
+			emitObjectTypeMismatch('todo_gate', value, findings);
+			break;
+		}
+
+		case 'incremental_verify': {
+			emitObjectTypeMismatch('incremental_verify', value, findings);
+			break;
+		}
+
+		case 'compaction_service': {
+			emitObjectTypeMismatch('compaction_service', value, findings);
+			break;
+		}
+
+		case 'prm': {
+			emitObjectTypeMismatch('prm', value, findings);
+			break;
+		}
+
+		case 'council': {
+			emitObjectTypeMismatch('council', value, findings);
+			break;
+		}
+
+		case 'parallelization': {
+			emitObjectTypeMismatch('parallelization', value, findings);
+			break;
+		}
+
+		case 'worktree': {
+			emitObjectTypeMismatch('worktree', value, findings);
+			break;
+		}
+
+		case 'turbo': {
+			emitObjectTypeMismatch('turbo', value, findings);
+			break;
+		}
+
+		case 'turbo_mode': {
+			if (value !== undefined && typeof value !== 'boolean') {
+				findings.push({
+					id: 'invalid-turbo_mode-type',
+					title: 'Invalid turbo_mode type',
+					description: `"turbo_mode" must be a boolean, got ${typeof value}`,
+					severity: 'error',
+					path: 'turbo_mode',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'quiet': {
+			if (value !== undefined && typeof value !== 'boolean') {
+				findings.push({
+					id: 'invalid-quiet-type',
+					title: 'Invalid quiet type',
+					description: `"quiet" must be a boolean, got ${typeof value}`,
+					severity: 'error',
+					path: 'quiet',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'version_check': {
+			if (value !== undefined && typeof value !== 'boolean') {
+				findings.push({
+					id: 'invalid-version_check-type',
+					title: 'Invalid version_check type',
+					description: `"version_check" must be a boolean, got ${typeof value}`,
+					severity: 'error',
+					path: 'version_check',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
+		case 'full_auto': {
+			emitObjectTypeMismatch('full_auto', value, findings);
+			break;
+		}
+
+		case 'pr_monitor': {
+			emitObjectTypeMismatch('pr_monitor', value, findings);
+			break;
+		}
+
+		case 'external_skills': {
+			emitObjectTypeMismatch('external_skills', value, findings);
+			break;
+		}
+
+		// ── DEFAULT CASE: Unknown config key detection + Levenshtein suggestion ──
+		default: {
+			// Extract top-level segment from the path
+			const topLevel = path.split('.')[0];
+			if (KNOWN_TOP_LEVEL_KEYS.has(topLevel)) {
+				break; // Nested key under a valid parent — silently accept
+			}
+
+			// Top-level is unknown — find closest match via Levenshtein
+			// Skip Levenshtein computation for unreasonably long keys to prevent
+			// O(n²) CPU/memory allocation during plugin init (invariant #1).
+			const MAX_SUGGESTION_KEY_LENGTH = 100;
+			const lowerTopLevel = topLevel.toLowerCase();
+			let suggestion: string | undefined;
+			let matchCount = 0;
+			if (lowerTopLevel.length <= MAX_SUGGESTION_KEY_LENGTH) {
+				for (const knownKey of KNOWN_TOP_LEVEL_KEYS) {
+					if (levenshteinDistance(lowerTopLevel, knownKey.toLowerCase()) <= 2) {
+						matchCount++;
+						if (matchCount === 1) {
+							suggestion = knownKey;
+						}
+					}
+				}
+			}
+
+			if (matchCount === 1 && suggestion) {
+				findings.push({
+					id: 'unknown-config-key',
+					title: `Unknown config key: ${topLevel}`,
+					description: `Unknown config key "${path}" is not in the schema. Did you mean "${suggestion}"?`,
+					severity: 'warn',
+					path,
+					currentValue: value,
+					autoFixable: false,
+				});
+			} else {
+				findings.push({
+					id: 'unknown-config-key',
+					title: `Unknown config key: ${topLevel}`,
+					description: `Unknown config key "${path}" is not in the schema.`,
+					severity: 'warn',
+					path,
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
 	}
 
 	return findings;
 }
 
 /**
- * Recursively walk a config object and validate all keys
+ * Recursively walk a config object and validate all keys.
+ * Uses a WeakSet to detect circular references and prevent stack overflow.
  */
 function walkConfigAndValidate(
 	obj: unknown,
 	path: string,
-	config: PluginConfig,
 	findings: ConfigFinding[],
+	visited: WeakSet<object> = new WeakSet(),
 ): void {
 	if (obj === null || obj === undefined) {
 		return;
@@ -642,21 +1246,40 @@ function walkConfigAndValidate(
 
 	// First validate at this path level (for object-level checks)
 	if (path && typeof obj === 'object' && !Array.isArray(obj)) {
-		const keyFindings = validateConfigKey(path, obj, config);
+		const keyFindings = validateConfigKey(path, obj);
 		findings.push(...keyFindings);
 	}
 
 	if (typeof obj !== 'object') {
 		// Leaf value - validate based on path
-		const keyFindings = validateConfigKey(path, obj, config);
+		const keyFindings = validateConfigKey(path, obj);
 		findings.push(...keyFindings);
 		return;
 	}
 
+	// Circular reference check — covers BOTH arrays and plain objects.
+	// Must run before Array.isArray branching so self-referential arrays are caught.
+	if (visited.has(obj as object)) {
+		findings.push({
+			id: 'circular-reference',
+			title: `Circular reference detected at ${path}`,
+			description: `Config value at "${path}" contains a circular reference. Validation stopped at this path to prevent stack overflow.`,
+			severity: 'error',
+			path,
+			currentValue: '[circular]',
+			autoFixable: false,
+		});
+		return;
+	}
+	visited.add(obj as object);
+
 	if (Array.isArray(obj)) {
+		// Validate the array itself at this path level before recursing into elements
+		const arrayFindings = validateConfigKey(path, obj);
+		findings.push(...arrayFindings);
 		// Arrays - check each element
 		obj.forEach((item, index) => {
-			walkConfigAndValidate(item, `${path}[${index}]`, config, findings);
+			walkConfigAndValidate(item, `${path}[${index}]`, findings, visited);
 		});
 		return;
 	}
@@ -664,7 +1287,7 @@ function walkConfigAndValidate(
 	// Objects - walk each property
 	for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
 		const newPath = path ? `${path}.${key}` : key;
-		walkConfigAndValidate(value, newPath, config, findings);
+		walkConfigAndValidate(value, newPath, findings, visited);
 	}
 }
 
@@ -678,7 +1301,7 @@ export function runConfigDoctor(
 	const findings: ConfigFinding[] = [];
 
 	// Walk the config and validate
-	walkConfigAndValidate(config, '', config, findings);
+	walkConfigAndValidate(config, '', findings);
 
 	// Count by severity
 	const summary = {
@@ -888,11 +1511,82 @@ export function applySafeAutoFixes(
 		}
 
 		// Write updated config
-		fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+		atomicWriteFileSync(configPath, JSON.stringify(config, null, 2));
 		updatedConfigPath = configPath;
 	}
 
 	return { appliedFixes, updatedConfigPath };
+}
+
+/** Summary data from a previous config-doctor artifact */
+export interface DoctorArtifactSummary {
+	/** ISO 8601 timestamp of the previous run */
+	timestamp: string;
+	/** Total number of findings in the previous run */
+	findingsCount: number;
+	/** Number of auto-fixable findings in the previous run */
+	autoFixableCount: number;
+}
+
+/**
+ * Read the last-run config-doctor artifact from .swarm/config-doctor.json.
+ * Returns a compact summary or null if the artifact does not exist or cannot be parsed.
+ * Fail-open: any I/O or parse error silently returns null.
+ */
+export function readDoctorArtifact(
+	directory: string,
+): DoctorArtifactSummary | null {
+	try {
+		const artifactPath = path.join(directory, '.swarm', 'config-doctor.json');
+		if (!fs.existsSync(artifactPath)) {
+			return null;
+		}
+
+		const content = fs.readFileSync(artifactPath, 'utf-8');
+		const artifact = JSON.parse(content) as Record<string, unknown>;
+		const summary = artifact.summary as Record<string, number> | undefined;
+
+		if (!summary || typeof summary !== 'object') {
+			return null;
+		}
+
+		// Validate summary fields are finite numbers; fail-open on corrupt data
+		const infoVal = summary.info;
+		const warnVal = summary.warn;
+		const errorVal = summary.error;
+		if (
+			typeof infoVal !== 'number' ||
+			!Number.isFinite(infoVal) ||
+			typeof warnVal !== 'number' ||
+			!Number.isFinite(warnVal) ||
+			typeof errorVal !== 'number' ||
+			!Number.isFinite(errorVal)
+		) {
+			return null;
+		}
+
+		// Validate timestamp is a finite number before constructing Date
+		const ts = artifact.timestamp;
+		if (typeof ts !== 'number' || !Number.isFinite(ts)) {
+			return null;
+		}
+
+		const findingsCount = infoVal + warnVal + errorVal;
+		const findings = artifact.findings as
+			| Array<{ autoFixable?: boolean }>
+			| undefined;
+		const autoFixableCount = Array.isArray(findings)
+			? findings.filter((f) => f.autoFixable === true).length
+			: 0;
+
+		return {
+			timestamp: new Date(ts).toISOString(),
+			findingsCount,
+			autoFixableCount,
+		};
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -934,7 +1628,7 @@ export function writeDoctorArtifact(
 		})),
 	};
 
-	fs.writeFileSync(artifactPath, JSON.stringify(guiOutput, null, 2), 'utf-8');
+	atomicWriteFileSync(artifactPath, JSON.stringify(guiOutput, null, 2));
 	return artifactPath;
 }
 

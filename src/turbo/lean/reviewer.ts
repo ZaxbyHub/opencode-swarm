@@ -77,8 +77,12 @@ export interface PhaseReviewerResult {
  * Uses the `{swarmId}_reviewer` pattern for named swarms and bare `reviewer`
  * for the default swarm. Follows the same suffix-based resolution used by
  * `getCanonicalAgentRole` so that arbitrary swarm prefixes are handled correctly.
+ *
+ * Exported for reuse by the auto-review hook (src/hooks/auto-review.ts).
  */
-function resolveDefaultReviewerAgent(generatedAgentNames: string[]): string {
+export function resolveDefaultReviewerAgent(
+	generatedAgentNames: string[],
+): string {
 	if (generatedAgentNames.length === 0) {
 		return 'reviewer';
 	}
@@ -355,6 +359,7 @@ async function defaultDispatchReviewerAgent(
 	reviewPackage: ReviewPackage,
 	agentName: string,
 	timeoutMs: number,
+	parentSessionId?: string,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -363,6 +368,14 @@ async function defaultDispatchReviewerAgent(
 
 	// Create an ephemeral session for the reviewer
 	const sessionResult = await client.session.create({
+		...(parentSessionId
+			? {
+					body: {
+						parentID: parentSessionId,
+						title: 'lean_turbo_reviewer background',
+					},
+				}
+			: {}),
 		query: { directory },
 	});
 
@@ -371,6 +384,8 @@ async function defaultDispatchReviewerAgent(
 	}
 
 	const sessionId = sessionResult.data.id;
+	const promptController = new AbortController();
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
 	try {
 		const promptText = `You are a read-only phase reviewer for Lean Turbo execution.
@@ -422,18 +437,16 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 								tools: { write: false, edit: false, patch: false },
 								parts: [{ type: 'text', text: promptText }],
 							},
+							signal: promptController.signal,
 						}),
-						new Promise<never>((_, reject) =>
-							setTimeout(
-								() =>
-									reject(
-										new Error(
-											`Reviewer dispatch timed out after ${timeoutMs}ms`,
-										),
-									),
-								timeoutMs,
-							),
-						),
+						new Promise<never>((_, reject) => {
+							timeoutHandle = setTimeout(() => {
+								promptController.abort();
+								reject(
+									new Error(`Reviewer dispatch timed out after ${timeoutMs}ms`),
+								);
+							}, timeoutMs);
+						}),
 					])
 				: await client.session.prompt({
 						path: { id: sessionId },
@@ -442,6 +455,7 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 							tools: { write: false, edit: false, patch: false },
 							parts: [{ type: 'text', text: promptText }],
 						},
+						signal: promptController.signal,
 					});
 
 		if (!response.data) {
@@ -456,7 +470,8 @@ Be specific and evidence-based. Do not approve a phase with unresolved degraded 
 
 		return textParts;
 	} finally {
-		// Clean up the ephemeral session
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		promptController.abort();
 		client.session.delete({ path: { id: sessionId } }).catch(() => {});
 	}
 }
@@ -476,6 +491,7 @@ export const _internals: {
 		pkg: ReviewPackage,
 		agentName: string,
 		timeoutMs: number,
+		parentSessionId?: string,
 	) => Promise<string>;
 	resolveDefaultReviewerAgent: typeof resolveDefaultReviewerAgent;
 	listLaneEvidence: typeof listLaneEvidence;
@@ -546,6 +562,7 @@ export async function dispatchPhaseReviewer(
 			pkg,
 			agentName,
 			mergedConfig.timeoutMs,
+			sessionID,
 		);
 	} catch (error) {
 		// Fail-closed: dispatch failure → write REJECTED verdict

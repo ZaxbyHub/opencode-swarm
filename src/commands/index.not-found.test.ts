@@ -87,12 +87,12 @@ describe('Command-not-found UX', () => {
 		sessionId = `cmd-not-found-test-${Date.now()}`;
 		makeSession(sessionId);
 
-		// Pre-create sentinel to ensure this test is NOT first-run
+		// Pre-create a marker file to ensure .swarm directory is non-empty
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(
-			path.join(swarmDir, '.first-run-complete'),
-			`first-run-complete: ${new Date().toISOString()}\n`,
+			path.join(swarmDir, '.test-marker'),
+			`test-marker: ${new Date().toISOString()}\n`,
 		);
 	});
 

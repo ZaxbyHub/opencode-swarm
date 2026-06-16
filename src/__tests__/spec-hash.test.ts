@@ -3,7 +3,9 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../config/plan-schema';
-import { computeSpecHash, isSpecStale } from '../utils/spec-hash';
+import { _internals, computeSpecHash, isSpecStale } from '../utils/spec-hash';
+
+const originalReadEffectiveSpecSync = _internals.readEffectiveSpecSync;
 
 describe('computeSpecHash', () => {
 	let tempDir: string;
@@ -64,6 +66,7 @@ describe('isSpecStale', () => {
 	});
 
 	afterEach(async () => {
+		_internals.readEffectiveSpecSync = originalReadEffectiveSpecSync;
 		try {
 			await rm(tempDir, { force: true, recursive: true });
 		} catch {
@@ -148,25 +151,12 @@ describe('computeSpecHash error handling', () => {
 	});
 
 	test('re-throws on unexpected errors (non-ENOENT)', async () => {
-		// We need to mock fs/promises.readFile to throw a non-ENOENT error
-		// Since the source uses named import, we use mock.module
-		const _originalReadFile = (await import('node:fs/promises')).readFile;
-		const mockReadFile = mock(() => {
+		_internals.readEffectiveSpecSync = mock(() => {
 			const error = new Error('Random error') as NodeJS.ErrnoException;
 			error.code = 'EACCES'; // Not ENOENT
 			throw error;
 		});
 
-		mock.module('fs/promises', () => ({
-			...{ readFile: mockReadFile, mkdir, writeFile, rm },
-			mkdir,
-			writeFile,
-			rm,
-		}));
-
-		// Re-import to get mocked version
-		const { computeSpecHash: mockedFn } = await import('../utils/spec-hash');
-
-		await expect(mockedFn(tempDir)).rejects.toThrow('Random error');
+		await expect(computeSpecHash(tempDir)).rejects.toThrow('Random error');
 	});
 });

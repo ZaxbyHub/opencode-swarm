@@ -36,10 +36,21 @@ import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
+	computeLearningMetrics,
+	formatLearningSummary,
+} from '../services/learning-metrics.js';
+import {
 	listSkills,
 	parseDraftFrontmatter,
 	retireSkill,
 } from '../services/skill-generator.js';
+import {
+	getSkillVersion,
+	MAX_REVISION_CALLS_PER_PHASE,
+	REVISION_VIOLATION_THRESHOLD,
+	reviseSkill,
+	type ViolationContext,
+} from '../services/skill-reviser.js';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
@@ -64,7 +75,11 @@ import type {
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
-import { validateLesson } from './knowledge-validator.js';
+import {
+	appendUnactionable,
+	validateActionability,
+	validateLesson,
+} from './knowledge-validator.js';
 import { readSkillUsageEntries } from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
@@ -104,6 +119,8 @@ export const _internals = {
 			fs.readFile(filePath, encoding as BufferEncoding),
 		),
 	readKnowledge,
+	reviseSkill,
+	getSkillVersion,
 };
 
 /**
@@ -116,6 +133,7 @@ export const _internals = {
 async function autoRetireSkills(
 	directory: string,
 	curatorKnowledgePath: string,
+	excludeSlugs?: ReadonlySet<string>,
 ): Promise<string[]> {
 	const observations: string[] = [];
 	try {
@@ -123,6 +141,7 @@ async function autoRetireSkills(
 		const usageEntries = _internals.readSkillUsageEntries(directory);
 
 		for (const active of skillListResult.active) {
+			if (excludeSlugs?.has(active.slug)) continue;
 			const skillUsage = usageEntries.filter((e) => {
 				let p = e.skillPath;
 				if (p.startsWith('file:')) p = p.slice(5);
@@ -487,14 +506,8 @@ export async function writeCuratorSummary(
 	summary: CuratorSummary,
 ): Promise<void> {
 	const resolvedPath = validateSwarmPath(directory, 'curator-summary.json');
-
-	// Ensure .swarm/ directory exists
 	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
-	// Atomic write: write to temp file then rename
-	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-	await bunWrite(tempPath, JSON.stringify(summary, null, 2));
-	fs.renameSync(tempPath, resolvedPath);
+	await bunWrite(resolvedPath, JSON.stringify(summary, null, 2));
 }
 
 /**
@@ -1172,12 +1185,10 @@ export async function runCuratorPhase(
 				);
 				fs.mkdirSync(evidenceDir, { recursive: true });
 				const findingsPath = path.join(evidenceDir, 'curator-findings.json');
-				const tmpPath = `${findingsPath}.tmp.${Date.now()}`;
-				fs.writeFileSync(
-					tmpPath,
+				await bunWrite(
+					findingsPath,
 					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
 				);
-				fs.renameSync(tmpPath, findingsPath);
 			} catch (err) {
 				logger.warn(
 					`[curator] failed to persist application findings: ${err instanceof Error ? err.message : String(err)}`,
@@ -1231,6 +1242,78 @@ export async function runCuratorPhase(
 			}
 		}
 
+		// 8b. Skill revision: revise skills with violation rate in the
+		// 15-30% range (soft threshold). Runs BEFORE auto-retire so
+		// revised skills are not immediately retired. Non-blocking.
+		const revisedSlugs = new Set<string>();
+		try {
+			const skillListResult = await _internals.listSkills(directory);
+			const usageEntries = _internals.readSkillUsageEntries(directory);
+			let revisionCallsThisPhase = 0;
+
+			for (const active of skillListResult.active) {
+				if (revisionCallsThisPhase >= MAX_REVISION_CALLS_PER_PHASE) break;
+
+				const skillUsage = usageEntries.filter((e) => {
+					let p = e.skillPath;
+					if (p.startsWith('file:')) p = p.slice(5);
+					const normalizedUsage = p.replace(/\\/g, '/');
+					const normalizedActive = active.path.replace(/\\/g, '/');
+					if (normalizedUsage === normalizedActive) return true;
+					if (normalizedActive.endsWith(`/${normalizedUsage}`)) return true;
+					if (normalizedUsage.endsWith(`/${normalizedActive}`)) return true;
+					return false;
+				});
+
+				if (skillUsage.length === 0) continue;
+
+				const violations = skillUsage.filter(
+					(e) => e.complianceVerdict === 'violation',
+				).length;
+				const violationRate = violations / skillUsage.length;
+
+				if (
+					violationRate > REVISION_VIOLATION_THRESHOLD &&
+					violationRate <= 0.3
+				) {
+					const content = await _internals.readFileAsync(active.path, 'utf-8');
+					const fm = _internals.parseDraftFrontmatter(content);
+					if (fm && fm.skillOrigin === 'promoted_external') continue;
+
+					const currentVersion = fm?.version ?? 1;
+					const violationContexts: ViolationContext[] = skillUsage
+						.filter((e) => e.complianceVerdict === 'violation')
+						.slice(-10)
+						.map((e) => ({
+							taskId: e.taskID,
+							agent: e.agentName,
+							verdict: e.complianceVerdict,
+							reviewerNotes: e.reviewerNotes,
+							timestamp: e.timestamp,
+						}));
+
+					const result = await _internals.reviseSkill({
+						directory,
+						slug: active.slug,
+						skillPath: active.path,
+						violationContexts,
+						currentContent: content,
+						currentVersion,
+					});
+
+					if (result.revised) {
+						revisedSlugs.add(active.slug);
+						phaseDigest.summary += ` [skill '${active.slug}' revised to v${result.newVersion}]`;
+					}
+					if (result.quotaConsumed) revisionCallsThisPhase++;
+				}
+			}
+		} catch (revisionErr) {
+			logger.warn(
+				`[curator] skill revision check failed: ${revisionErr instanceof Error ? revisionErr.message : String(revisionErr)}`,
+			);
+		}
+
 		// 9. Auto-retire health check for generated skills.
 		// Retires skills whose violation rate exceeds 30% or whose source
 		// knowledge entries are all archived. Non-blocking: errors are
@@ -1238,11 +1321,27 @@ export async function runCuratorPhase(
 		const autoRetireObservations = await _internals.autoRetireSkills(
 			directory,
 			curatorKnowledgePath,
+			revisedSlugs,
 		);
 		if (autoRetireObservations.length > 0) {
-			// Append auto-retire observations to the phase digest summary
 			const retireNote = ` [${autoRetireObservations.length} skill(s) auto-retired]`;
 			phaseDigest.summary += retireNote;
+		}
+
+		// 9b. Learning summary: compute lightweight learning metrics and
+		// append a 3-line summary to the phase digest. Non-blocking.
+		try {
+			const metrics = await computeLearningMetrics(directory, {
+				currentPhase: phase,
+			});
+			const summary = formatLearningSummary(metrics);
+			if (summary && summary !== 'No learning data yet') {
+				phaseDigest.summary += `\n\n--- Learning ---\n${summary}`;
+			}
+		} catch (learningErr) {
+			logger.warn(
+				`[curator] learning summary failed: ${learningErr instanceof Error ? learningErr.message : String(learningErr)}`,
+			);
 		}
 
 		const result: CuratorPhaseResult = {
@@ -1472,6 +1571,23 @@ export async function applyCuratorKnowledgeUpdates(
 			auto_generated: true,
 			project_name: path.basename(directory),
 		};
+		// Layer-5 actionability gate (Change 4): prose "new candidate"
+		// recommendations carry no predicate/scope fields, so they are routed to
+		// the unactionable queue (recoverable by the hardening loop) instead of
+		// the active store. No LLM delegate is available in this path.
+		if (!validateActionability(newEntry).actionable) {
+			try {
+				await appendUnactionable(
+					directory,
+					newEntry,
+					'curator_recommendation_unactionable',
+				);
+			} catch {
+				// queue write is best-effort; the entry is still withheld
+			}
+			skipped++;
+			continue;
+		}
 		await appendKnowledge(knowledgePath, newEntry);
 		applied++;
 		currentLessons.push(lesson);

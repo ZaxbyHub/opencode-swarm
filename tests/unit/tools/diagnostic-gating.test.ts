@@ -65,16 +65,22 @@ describe('DEBUG_SWARM diagnostic gating', () => {
 				'utf-8',
 			);
 
-			// Verify the gating pattern exists - the console.warn is inside the if block
-			// Find the line with 'Failed to parse curator-summary.json' and check preceding lines
+			// PR #327-style migration: curator replaced inline
+			// `process.env.DEBUG_SWARM && console.warn` with `logger.warn()` from
+			// utils/logger, which is gated by OPENCODE_SWARM_DEBUG. Verify the
+			// 'Failed to parse curator-summary.json' diagnostic still goes through a
+			// gated path (the logger, or the legacy DEBUG_SWARM check).
 			const lines = curatorSource.split('\n');
 			let foundGatedWarn = false;
 
 			for (let i = 0; i < lines.length; i++) {
 				if (lines[i].includes("'Failed to parse curator-summary.json")) {
-					// Check if there's an process.env.DEBUG_SWARM within 5 lines before
+					// Check for a gated diagnostic on the line or within 5 lines before.
 					for (let j = i; j >= Math.max(0, i - 5); j--) {
-						if (lines[j].includes('process.env.DEBUG_SWARM')) {
+						if (
+							lines[j].includes('logger.warn') ||
+							lines[j].includes('process.env.DEBUG_SWARM')
+						) {
 							foundGatedWarn = true;
 							break;
 						}
@@ -255,12 +261,13 @@ describe('DEBUG_SWARM diagnostic gating', () => {
 			// uses the DEBUG_SWARM pattern, so isGated() does not apply here.
 			// expect(isGated(snapshotWriterSource, "console.warn", "[snapshot-writer]")).toBe(true);
 
-			// Location 4: src/hooks/curator.ts — console.warn('Failed to parse curator-summary.json...)
+			// Location 4: src/hooks/curator.ts — migrated to logger.warn() (gated by
+			// OPENCODE_SWARM_DEBUG, PR #327-style), so the inline
+			// process.env.DEBUG_SWARM + console.warn pattern no longer applies.
+			// Verify the diagnostic goes through the gated logger instead.
 			expect(
-				isGated(
-					curatorSource,
-					'console.warn',
-					'Failed to parse curator-summary.json',
+				curatorSource.includes(
+					"logger.warn('Failed to parse curator-summary.json",
 				),
 			).toBe(true);
 		});
@@ -287,10 +294,12 @@ describe('DEBUG_SWARM diagnostic gating', () => {
 			const bareDebugSwarm = /(?<!process\.env\.)DEBUG_SWARM/;
 			expect(allSources).not.toMatch(bareDebugSwarm);
 
-			// Count the DEBUG_SWARM env var checks - snapshot-writer now uses log() (PR #327),
-			// so the count is 10 (down from 11 before that change).
+			// Count the DEBUG_SWARM env var checks. Both snapshot-writer (PR #327) and
+			// curator have since migrated their diagnostics to the gated logger
+			// (utils/logger, OPENCODE_SWARM_DEBUG), leaving only src/index.ts's inline
+			// process.env.DEBUG_SWARM checks.
 			const debugSwarmChecks = allSources.match(/process\.env\.DEBUG_SWARM/g);
-			expect(debugSwarmChecks).toHaveLength(10);
+			expect(debugSwarmChecks).toHaveLength(8);
 		});
 	});
 

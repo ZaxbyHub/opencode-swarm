@@ -82,6 +82,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	computeConfidence: mockComputeConfidence,
 	inferTags: mockInferTags,
 	normalize: mockNormalize,
+	transactFile: async () => false,
 	enforceKnowledgeCap: mockEnforceKnowledgeCap,
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -104,6 +105,11 @@ const mockUpdateRetrievalOutcome = mock(async () => {});
 mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: mockValidateLesson,
 	quarantineEntry: mockQuarantineEntry,
+	// Layer-5 stubs (Change 4): suite tests output counts of layers 1-3, not the
+	// actionability gate (dedicated suites exist). Keep the gate open.
+	validateActionability: () => ({ actionable: true }),
+	validateActionableFields: () => ({ valid: true, errors: [] }),
+	appendUnactionable: async () => {},
 }));
 
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
@@ -187,7 +193,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 	// =========================================================================
 	// Test 1: Empty lessons array → returns { 0, 0, 0 }
 	// =========================================================================
-	test('empty lessons array returns { stored: 0, skipped: 0, rejected: 0 }', async () => {
+	test('empty lessons array returns { stored: 0, skipped: 0, rejected: 0, quarantined: 0 }', async () => {
 		const result = await curateAndStoreSwarm(
 			[],
 			'test-project',
@@ -196,7 +202,14 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 			defaultConfig,
 		);
 
-		expect(result).toEqual({ stored: 0, skipped: 0, rejected: 0 });
+		// Realigned (Change 4): the result gained a `quarantined` count.
+		expect(result).toEqual({
+			stored: 0,
+			reinforced: 0,
+			skipped: 0,
+			rejected: 0,
+			quarantined: 0,
+		});
 		expect(mockTransactKnowledge).not.toHaveBeenCalled();
 		expect(mockAppendRejectedLesson).not.toHaveBeenCalled();
 	});
@@ -228,6 +241,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(3);
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(0);
 		expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
@@ -266,6 +280,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(2);
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(1);
 		expect(result.rejected).toBe(0);
 		expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
@@ -311,6 +326,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(2);
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(1);
 		expect(mockAppendRejectedLesson).toHaveBeenCalledTimes(1);
@@ -377,6 +393,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(3); // Valid 1, Valid 2, Valid 3
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(1); // Duplicate
 		expect(result.rejected).toBe(1); // Rejected
 	});
@@ -403,6 +420,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(0);
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(0);
 		expect(result.rejected).toBe(3);
 		expect(mockTransactKnowledge).not.toHaveBeenCalled();
@@ -438,6 +456,7 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 		);
 
 		expect(result.stored).toBe(0);
+		expect(result.reinforced).toBe(0);
 		expect(result.skipped).toBe(3);
 		expect(result.rejected).toBe(0);
 	});
@@ -456,16 +475,25 @@ describe('curateAndStoreSwarm return value verification (Task 3.1)', () => {
 
 		// Verify exact shape
 		expect(result).toHaveProperty('stored');
+		expect(result).toHaveProperty('reinforced');
 		expect(result).toHaveProperty('skipped');
 		expect(result).toHaveProperty('rejected');
 
 		// Verify types are numbers
 		expect(typeof result.stored).toBe('number');
+		expect(typeof result.reinforced).toBe('number');
 		expect(typeof result.skipped).toBe('number');
 		expect(typeof result.rejected).toBe('number');
 
-		// Verify no extra properties
+		// Verify no extra properties (Change 4 added `quarantined`)
+		expect(typeof result.quarantined).toBe('number');
 		const keys = Object.keys(result);
-		expect(keys).toEqual(['stored', 'skipped', 'rejected']);
+		expect(keys).toEqual([
+			'stored',
+			'reinforced',
+			'skipped',
+			'rejected',
+			'quarantined',
+		]);
 	});
 });

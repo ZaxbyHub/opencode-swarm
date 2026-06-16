@@ -876,8 +876,10 @@ describe('full-auto-intercept detectEscalation via messagesTransform', () => {
 		});
 	});
 
-	describe('full-auto disabled behavior', () => {
-		it('returns no-op handler when full_auto.enabled is false', async () => {
+	describe('full-auto inactive behavior (first-class toggle)', () => {
+		it('no-ops when the session has no active full-auto run, even with enabled: false config', async () => {
+			// First-class toggle: the hook is always armed; the runtime gate is
+			// hasActiveFullAuto(sessionID) (mocked false here), not config.enabled.
 			const config = createFullAutoConfig({ enabled: false });
 			const hooks = createFullAutoInterceptHook(config, testDir);
 

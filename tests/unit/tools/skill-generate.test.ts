@@ -64,6 +64,7 @@ describe('skill_generate tool', () => {
 				directory: tmp,
 				mode: 'draft',
 				force: false,
+				evaluate: false,
 			}),
 		);
 	});
@@ -90,6 +91,12 @@ describe('skill_generate tool', () => {
 		await skill_generate.execute({ force: true }, tmp);
 		const callArgs = mockGenerateSkills.mock.calls[0][0];
 		expect(callArgs.force).toBe(true);
+	});
+
+	it('passes evaluate=true when specified', async () => {
+		await skill_generate.execute({ evaluate: true }, tmp);
+		const callArgs = mockGenerateSkills.mock.calls[0][0];
+		expect(callArgs.evaluate).toBe(true);
 	});
 
 	it('passes slug when specified', async () => {

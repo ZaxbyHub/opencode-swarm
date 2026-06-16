@@ -49,14 +49,17 @@ describe('handleFullAutoCommand — durable-first / fail-closed', () => {
 		expect(isFullAutoRunActive(tmpDir, SESSION_ID)).toBe(true);
 	});
 
-	test('successful disable pauses durable state and clears legacy counters', async () => {
+	test('successful disable disarms durable state (idle) and clears legacy counters', async () => {
 		await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
 		const out = await handleFullAutoCommand(tmpDir, ['off'], SESSION_ID);
 		expect(out).toContain('Full-Auto Mode disabled');
 		const session = swarmState.agentSessions.get(SESSION_ID);
 		expect(session?.fullAutoMode).toBe(false);
-		// Durable record exists and is paused.
-		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
+		// Adversarial review F3: user `off` must DISARM (idle), not pause —
+		// a paused record write-blocks every non-read-only tool until the
+		// next `on`, making `off` a one-way door.
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('idle');
+		expect(isFullAutoRunActive(tmpDir, SESSION_ID)).toBe(false);
 	});
 
 	test('durable write failure causes enable to return an error and NOT flip session.fullAutoMode', async () => {
@@ -75,11 +78,15 @@ describe('handleFullAutoCommand — durable-first / fail-closed', () => {
 		expect(session?.fullAutoMode).toBe(false);
 	});
 
-	test('blocks enable when full_auto.enabled config is not set', async () => {
+	test('first-class toggle: enables even when full_auto.enabled config is not set', async () => {
+		// Previous behavior blocked activation with a config error when
+		// fullAutoEnabledInConfig was false. Full-Auto is now a first-class
+		// runtime toggle — only full_auto.locked refuses activation.
 		swarmState.fullAutoEnabledInConfig = false;
 		const out = await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
-		expect(out).toContain('Error');
+		expect(out).toContain('Full-Auto Mode enabled');
 		const session = swarmState.agentSessions.get(SESSION_ID);
-		expect(session?.fullAutoMode).toBe(false);
+		expect(session?.fullAutoMode).toBe(true);
+		expect(isFullAutoRunActive(tmpDir, SESSION_ID)).toBe(true);
 	});
 });

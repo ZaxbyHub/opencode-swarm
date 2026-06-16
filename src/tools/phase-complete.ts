@@ -14,6 +14,7 @@ import {
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
+	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
@@ -24,6 +25,7 @@ import {
 	runCuratorPhase,
 } from '../hooks/curator';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
+import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator.js';
 import { updateRetrievalOutcome } from '../hooks/knowledge-reader.js';
 import {
@@ -36,6 +38,11 @@ import type {
 	KnowledgeConfig,
 	KnowledgeEntryBase,
 } from '../hooks/knowledge-types.js';
+import {
+	evaluatePhaseCriticalDirectives,
+	formatDirectiveBlockMessage,
+	recordDirectiveOverrides,
+} from '../hooks/phase-complete-directive-gate.js';
 import {
 	buildApprovedReceipt,
 	buildRejectedReceipt,
@@ -58,6 +65,7 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
 	ensureAgentSession,
@@ -91,6 +99,16 @@ export interface PhaseCompleteArgs {
 	summary?: string;
 	/** Session ID to track state (optional, defaults to current session context) */
 	sessionID?: string;
+	/**
+	 * Architect-only (Change 2, Task 2.4): explicitly accept these unresolved
+	 * critical directive IDs. Requires acceptViolationsJustification. Each
+	 * accepted id is logged as an `override` knowledge event.
+	 */
+	acceptViolations?: string[];
+	/** Written justification required to use acceptViolations. */
+	acceptViolationsJustification?: string;
+	/** Calling agent identity (from tool ctx) — gates the override to the architect. */
+	callerAgent?: string;
 }
 
 /**
@@ -476,6 +494,89 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Critical knowledge-directive gate (Change 2, Task 2.4).
+	// A phase cannot complete while a CRITICAL directive shown during the phase
+	// lacks a terminal outcome or carries an unremediated violation. The architect
+	// may override specific IDs with a written justification; each override is
+	// logged as an `override` knowledge event. Fail-closed.
+	const knowledgeEnabled =
+		(config.knowledge as { enabled?: boolean } | undefined)?.enabled !== false;
+	if (knowledgeEnabled) {
+		const plan = await loadPlan(dir).catch(() => null);
+		const phaseLabel = plan
+			? (extractCurrentPhaseFromPlan(plan) ??
+				`Phase ${plan.current_phase ?? phase}`)
+			: `Phase ${phase}`;
+		const requestedAccept = Array.isArray(args.acceptViolations)
+			? args.acceptViolations.filter(
+					(s) => typeof s === 'string' && s.length > 0,
+				)
+			: [];
+		const justification =
+			typeof args.acceptViolationsJustification === 'string'
+				? args.acceptViolationsJustification.trim()
+				: '';
+		// Override is architect-only. Identity comes from the tool ctx (callerAgent),
+		// falling back to the session's active agent; default architect since
+		// phase_complete is an architect-only tool by the AGENT_TOOL_MAP.
+		const callerAgent =
+			args.callerAgent ?? swarmState.activeAgent.get(sessionID) ?? 'architect';
+		const isArchitect =
+			stripKnownSwarmPrefix(callerAgent).toLowerCase() === 'architect';
+
+		if (requestedAccept.length > 0 && !isArchitect) {
+			return blockedResult(phase, {
+				reason: 'override_denied_non_architect',
+				message:
+					'accept_violations is architect-only — this caller may not override critical directive violations.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+			});
+		}
+		if (requestedAccept.length > 0 && justification.length < 10) {
+			return blockedResult(phase, {
+				reason: 'override_requires_justification',
+				message:
+					'accept_violations requires accept_violations_justification (minimum 10 characters of substantive reasoning).',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+			});
+		}
+		const effectiveAccept =
+			requestedAccept.length > 0 && isArchitect && justification.length >= 10
+				? requestedAccept
+				: [];
+		const directiveGate = await evaluatePhaseCriticalDirectives({
+			directory: dir,
+			phaseLabel,
+			acceptViolations: effectiveAccept,
+		});
+		if (directiveGate.overridden.length > 0) {
+			await recordDirectiveOverrides(
+				dir,
+				directiveGate.overridden,
+				justification,
+				sessionID,
+			);
+		}
+		if (directiveGate.blocked) {
+			return blockedResult(phase, {
+				reason: directiveGate.failedClosed
+					? 'directive_gate_failed_closed'
+					: 'unresolved_critical_directives',
+				message: directiveGate.failedClosed
+					? 'Critical-directive gate could not read knowledge events; failing closed.'
+					: formatDirectiveBlockMessage(directiveGate.unresolved),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				unresolved_directives: directiveGate.unresolved,
+			});
+		}
+	}
+
 	// Retrospective gate: require a valid retro bundle for this phase
 	const retroResult = await loadEvidence(dir, `retro-${phase}`);
 	let retroFound = false;
@@ -601,7 +702,7 @@ export async function executePhaseComplete(
 	// check, so it is enforced even under lean turbo.
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
 		);
 	} else {
 		// Gate 1: Completion Verify
@@ -663,21 +764,20 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
-	if (!hasActiveTurboMode(sessionID)) {
-		const gateResult = await runFinalCouncilGate(gateCtx);
-		if (gateResult.blocked) {
-			return blockedResult(phase, gateResult);
-		}
-		warnings.push(...gateResult.warnings);
+	const gateResult = await runFinalCouncilGate(gateCtx);
+	if (gateResult.blocked) {
+		return blockedResult(phase, gateResult);
 	}
+	warnings.push(...gateResult.warnings);
 
 	// ── Post-gate logic ────────────────────────────────────────────────────────
 
 	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
 	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
 	// the autonomous-oversight approval — fail-closed by default. The gate is
-	// a no-op when full_auto.enabled is false or when no durable Full-Auto run
-	// is active for this session. Runs after Gate 6 (Final Council) so that
+	// a no-op when no durable Full-Auto run is active for this session
+	// (first-class toggle: config.full_auto.enabled no longer gates it).
+	// Runs after Gate 6 (Final Council) so that
 	// last-phase completions are gated by both council approval (when
 	// final_council is enabled) AND Full-Auto v2 approval (when active).
 	{
@@ -758,19 +858,29 @@ export async function executePhaseComplete(
 			// Infer project name from directory
 			const projectName = path.basename(dir);
 
+			// Change 4 (Task 4.2): provide the curator LLM delegate so plain-prose
+			// lessons are enriched with v3 actionability fields before the Layer-5
+			// gate; quota knobs come from the dedicated knowledge.enrichment budget.
 			const curationResult = await curateAndStoreSwarm(
 				retroEntry.lessons_learned,
 				projectName,
 				{ phase_number: phase },
 				dir,
 				knowledgeConfig,
+				{
+					llmDelegate: createCuratorLLMDelegate(dir, 'phase', sessionID),
+					enrichmentQuota: {
+						maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+						window: knowledgeConfig.enrichment.quota_window,
+					},
+				},
 			);
 			if (curationResult) {
 				const sessionState = swarmState.agentSessions.get(sessionID);
 				if (sessionState) {
 					sessionState.pendingAdvisoryMessages ??= [];
 					sessionState.pendingAdvisoryMessages.push(
-						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected.`,
+						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
 			}
@@ -1004,6 +1114,58 @@ export async function executePhaseComplete(
 		);
 	}
 
+	// Knowledge verdict feedback: bridge applied/violated/ignored events → confidence.
+	try {
+		const verdictMarkerPath = validateSwarmPath(
+			dir,
+			'verdict-feedback-last-processed.json',
+		);
+		let verdictSinceTimestamp: string | undefined;
+		try {
+			const markerData = JSON.parse(
+				fs.readFileSync(verdictMarkerPath, 'utf-8'),
+			);
+			verdictSinceTimestamp = markerData.lastProcessedTimestamp;
+		} catch {
+			// marker doesn't exist yet — process all entries
+		}
+
+		const verdictMarkerTimestamp = new Date().toISOString();
+		const { applyKnowledgeVerdictFeedback } = await import(
+			'../hooks/knowledge-events.js'
+		);
+		const verdictResult = await applyKnowledgeVerdictFeedback(dir, {
+			sinceTimestamp: verdictSinceTimestamp,
+		});
+
+		try {
+			fs.writeFileSync(
+				verdictMarkerPath,
+				JSON.stringify({
+					lastProcessedTimestamp: verdictMarkerTimestamp,
+				}),
+				'utf-8',
+			);
+		} catch {
+			// best-effort marker write
+		}
+
+		if (verdictResult.bumps > 0) {
+			const sessionState = swarmState.agentSessions.get(sessionID);
+			if (sessionState) {
+				sessionState.pendingAdvisoryMessages ??= [];
+				sessionState.pendingAdvisoryMessages.push(
+					`[FEEDBACK] Knowledge verdict feedback: ${verdictResult.processed} entries processed, ${verdictResult.bumps} confidence updates applied.`,
+				);
+			}
+		}
+	} catch (verdictError) {
+		safeWarn(
+			'[phase_complete] Knowledge verdict feedback error (non-blocking):',
+			verdictError,
+		);
+	}
+
 	// Build the effective required-agents list.
 	// If the phase defines its own required_agents, use those instead of the global config.
 	// This allows non-code phases (acceptance, docs) to skip coder/reviewer/test_engineer requirements.
@@ -1223,6 +1385,50 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
+		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
+		// It may call an LLM and write proposal files, so only launch it after the
+		// phase gates have accepted completion.
+		try {
+			const skillConfig = SkillImproverConfigSchema.parse(
+				config.skill_improver ?? {},
+			);
+			if (skillConfig.enabled && skillConfig.trigger === 'scheduled') {
+				runSkillConsolidationFireAndForget(
+					{
+						directory: dir,
+						config: skillConfig,
+						source: 'phase_complete',
+						sessionId: sessionID,
+						enrichmentQuota: {
+							maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+							window: knowledgeConfig.enrichment.quota_window,
+						},
+						evaluateDrafts: true,
+					},
+					(consolidationResult) => {
+						if (!consolidationResult.started) return;
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (!sessionState) return;
+						sessionState.pendingAdvisoryMessages ??= [];
+						sessionState.pendingAdvisoryMessages.push(
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						);
+					},
+					(err) => {
+						safeWarn(
+							'[phase_complete] Scheduled skill consolidation error (non-blocking):',
+							err,
+						);
+					},
+				);
+			}
+		} catch (skillConsolidationError) {
+			safeWarn(
+				'[phase_complete] Scheduled skill consolidation setup error (non-blocking):',
+				skillConsolidationError,
+			);
+		}
+
 		// Reset phase-tracking state for all contributor sessions
 		for (const contributorSessionId of crossSessionResult.contributorSessionIds) {
 			const contributorSession =
@@ -1425,6 +1631,38 @@ export async function executePhaseComplete(
 	// Write root-level checkpoint artifact (non-blocking)
 	await writeCheckpoint(dir).catch(() => {});
 
+	// Auto-fire post-mortem when all plan phases are now complete (WP7, #1234).
+	// Fail-open: post-mortem failures never affect phase_complete result.
+	try {
+		const curatorCfg = CuratorConfigSchema.parse(config.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const finalPlan = await loadPlan(dir);
+			if (finalPlan?.phases?.length) {
+				const allComplete = finalPlan.phases.every(
+					(p: { status?: string }) => p.status === 'complete',
+				);
+				if (allComplete) {
+					const { runCuratorPostMortem } = await import(
+						'../hooks/curator-postmortem.js'
+					);
+					const pmResult = await runCuratorPostMortem(dir, {
+						llmDelegate: createCuratorLLMDelegate(dir, 'postmortem', sessionID),
+					});
+					if (pmResult.success && pmResult.summary) {
+						warnings.push(`[POST-MORTEM] ${pmResult.summary}`);
+					}
+					if (pmResult.warnings.length > 0) {
+						for (const w of pmResult.warnings) {
+							warnings.push(`[POST-MORTEM] ${w}`);
+						}
+					}
+				}
+			}
+		}
+	} catch {
+		// fail-open: post-mortem never blocks phase completion
+	}
+
 	const outputData = {
 		...result,
 		timestamp: event.timestamp,
@@ -1498,6 +1736,18 @@ export const phase_complete: ToolDefinition = createSwarmTool({
 			.describe(
 				'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
 			),
+		accept_violations: z
+			.array(z.string())
+			.optional()
+			.describe(
+				'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
+			),
+		accept_violations_justification: z
+			.string()
+			.optional()
+			.describe(
+				'Written justification required when accept_violations is provided.',
+			),
 	},
 	execute: async (args, directory, ctx) => {
 		// Parse and validate arguments
@@ -1511,6 +1761,15 @@ export const phase_complete: ToolDefinition = createSwarmTool({
 				sessionID:
 					ctx?.sessionID ??
 					(args.sessionID !== undefined ? String(args.sessionID) : undefined),
+				acceptViolations: Array.isArray(args.accept_violations)
+					? (args.accept_violations as unknown[]).map((s) => String(s))
+					: undefined,
+				acceptViolationsJustification:
+					args.accept_violations_justification !== undefined
+						? String(args.accept_violations_justification)
+						: undefined,
+				// Caller identity for the architect-only override gate.
+				callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
 			};
 			workingDirInput =
 				args.working_directory !== undefined

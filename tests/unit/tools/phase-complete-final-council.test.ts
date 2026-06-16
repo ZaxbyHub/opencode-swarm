@@ -449,6 +449,86 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('FINAL_COUNCIL_INVALID_VERDICT');
 		});
+
+		test('emits warning but allows completion when evidence timestamp is older than 24 hours', async () => {
+			setupLastPhaseOnly(true);
+			// Manually write evidence with a timestamp 25 hours in the past so the
+			// stale-timestamp branch fires.  writeFinalCouncilEvidence does not accept
+			// a custom timestamp, so we bypass it here.
+			const staleTimestamp = new Date(
+				Date.now() - 25 * 60 * 60 * 1000,
+			).toISOString();
+			const evidencePath = join(
+				tempDir,
+				'.swarm',
+				'evidence',
+				'final-council.json',
+			);
+			mkdirSync(join(tempDir, '.swarm', 'evidence'), { recursive: true });
+			writeFileSync(
+				evidencePath,
+				JSON.stringify({
+					schema_version: '1.0.0',
+					task_id: 'final-council',
+					created_at: staleTimestamp,
+					updated_at: staleTimestamp,
+					entries: [
+						{
+							type: 'final-council',
+							timestamp: staleTimestamp,
+							plan_id: PLAN_ID,
+							verdict: 'approved',
+							summary: 'Stale final council evidence',
+							quorumSize: 5,
+							membersVoted: [
+								'critic',
+								'reviewer',
+								'sme',
+								'test_engineer',
+								'explorer',
+							],
+							membersAbsent: [],
+						},
+					],
+				}),
+			);
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(parsed.status).toBe('success');
+			expect(parsed.warnings).toBeDefined();
+			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
+			expect(
+				parsed.warnings.some((w: string) => w.includes('older than 24 hours')),
+			).toBe(true);
+		});
+
+		test('fail-open when plan is missing: returns blocked:false with warning', async () => {
+			// Enable final_council but do NOT write a plan.json — the gate should
+			// fail-open (non-blocking) with a warning instead of throwing.
+			mkdirSync(join(tempDir, '.swarm'), { recursive: true });
+			writePluginConfig();
+			writeRetro(3);
+			enableFinalCouncil();
+
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(true);
+			expect(parsed.status).not.toBe('blocked');
+			expect(parsed.warnings).toBeDefined();
+			expect(parsed.warnings.length).toBeGreaterThanOrEqual(1);
+			expect(
+				parsed.warnings.some((w: string) => w.includes('plan.json is missing')),
+			).toBe(true);
+		});
 	});
 
 	describe('final_council enabled but phase is not last phase', () => {
@@ -568,15 +648,25 @@ describe('final_council gate (Gate 6)', () => {
 		});
 	});
 
-	describe('turbo mode skips final_council gate', () => {
-		test('turbo mode skips final_council gate even when enabled', async () => {
-			// This test verifies the turbo mode skip message includes 'final-council'
-			// We can't easily test turbo mode directly without more setup, but we can
-			// verify the console.warn message contains the right gates listed
-			// This is more of a code verification - the message at line ~495 includes 'final-council'
-			const turboModeMessage =
-				'[phase_complete] Turbo mode active — skipping completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase';
-			expect(turboModeMessage).toContain('final-council');
+	describe('turbo mode does NOT skip final_council gate (Gate 6 always runs)', () => {
+		test('final_council gate blocks with FINAL_COUNCIL_REQUIRED when evidence is missing', async () => {
+			// Gate 6 (final_council) is NOT turbo-bypassed — it always runs for
+			// the last phase regardless of turbo mode. When evidence is missing,
+			// it blocks with FINAL_COUNCIL_REQUIRED.
+			setupLastPhaseOnly(true);
+			// No final-council.json written - should block
+			const result = await executePhaseComplete(
+				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
+				tempDir,
+				tempDir,
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('FINAL_COUNCIL_REQUIRED');
+			expect(parsed.final_council_required).toBe(true);
+			expect(parsed.message).toContain('final_council is enabled');
+			expect(parsed.message).toContain('final-council.json');
 		});
 	});
 });

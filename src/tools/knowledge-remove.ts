@@ -9,7 +9,7 @@ import { createSwarmTool } from './create-tool.js';
 export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Delete an outdated swarm knowledge entry by ID (swarm tier only — does not affect hive). Double-deletion is idempotent — removing a non-existent entry returns a clear message without error.',
+			'Delete an outdated swarm knowledge entry by ID (swarm tier only — does not affect hive). Promoted entries cannot be deleted. Double-deletion is idempotent — removing a non-existent entry returns a clear message without error.',
 		args: {
 			id: z.string().min(1).describe('UUID of the knowledge entry to remove'),
 		},
@@ -37,13 +37,23 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 
 			const swarmPath = resolveSwarmKnowledgePath(directory);
 
-			// Atomically read, filter, and rewrite in one locked transaction to
+			// Atomically read, check status, filter, and rewrite in one locked transaction to
 			// prevent concurrent appendKnowledge calls from inserting entries that
 			// are silently dropped by the rewrite (CF-2 TOCTOU fix).
 			let found = false;
 			let remaining = 0;
+			let isPromoted = false;
 			try {
 				await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, (entries) => {
+					const entryToDelete = entries.find((entry) => entry.id === id);
+					if (!entryToDelete) return null; // not found, no write
+
+					// Guard: prevent deletion of promoted entries by default
+					if (entryToDelete.status === 'promoted') {
+						isPromoted = true;
+						return null; // no write
+					}
+
 					const filtered = entries.filter((entry) => entry.id !== id);
 					if (filtered.length === entries.length) return null; // not found, no write
 					found = true;
@@ -55,6 +65,14 @@ export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 				return JSON.stringify({
 					success: false,
 					error: message,
+				});
+			}
+
+			if (isPromoted) {
+				return JSON.stringify({
+					success: false,
+					message:
+						'cannot delete promoted entry — this entry has been promoted to cross-project consensus',
 				});
 			}
 

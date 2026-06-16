@@ -1,11 +1,16 @@
 import * as fsSync from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
 } from '../hooks/extractors';
-import { readSwarmFileAsync } from '../hooks/utils';
+import {
+	type RecentEscalation,
+	readRecentEscalations,
+} from '../hooks/knowledge-escalator';
+import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import {
 	hasActiveFullAuto,
@@ -71,6 +76,14 @@ export interface StatusData {
 	specStaleStoredHash?: string;
 	/** Current spec.md hash on disk (null when spec.md is missing) */
 	specStaleCurrentHash?: string | null;
+	/** Directives auto-escalated in the last 7 days (Change 3). */
+	recentEscalations?: RecentEscalation[];
+	/** #1234 Part 3: pending skill/motif proposals in .swarm/skills/proposals/ */
+	pendingProposals?: number;
+	/** #1234 Part 3: entries in the unactionable-knowledge queue */
+	unactionableQueueDepth?: number;
+	/** #1234 Part 3: pending insight candidates awaiting phase boundary consumption */
+	insightCandidatesPending?: number;
 }
 
 /**
@@ -204,6 +217,18 @@ export async function getStatusData(
 			plan as { _specStaleReason?: string }
 		)._specStaleReason;
 	}
+
+	// Surface recently-escalated directives (Change 3).
+	status.recentEscalations = await readRecentEscalations(directory);
+
+	// #1234 Part 3: surface learning-loop queue depths in /swarm status.
+	status.pendingProposals = await countProposals(directory);
+	status.unactionableQueueDepth = await safeLineCount(
+		validateSwarmPath(directory, 'knowledge-unactionable.jsonl'),
+	);
+	status.insightCandidatesPending = await safeLineCount(
+		validateSwarmPath(directory, 'insight-candidates.jsonl'),
+	);
 
 	// Enrich with Lean Turbo data if active
 	return enrichWithLeanTurbo(status, directory);
@@ -371,6 +396,32 @@ export function formatStatusMarkdown(status: StatusData): string {
 		}
 	}
 
+	// Recently-escalated directives (Change 3).
+	if (status.recentEscalations && status.recentEscalations.length > 0) {
+		lines.push('', '**Recently Escalated (last 7 days)**:');
+		for (const e of status.recentEscalations) {
+			lines.push(`  - ${e.entry_id} (${e.from}→${e.to}) reason=${e.reason}`);
+		}
+	}
+
+	// #1234 Part 3: learning-loop queue depths.
+	const proposals = status.pendingProposals ?? 0;
+	const unactionable = status.unactionableQueueDepth ?? 0;
+	const insights = status.insightCandidatesPending ?? 0;
+	if (proposals > 0 || unactionable > 0 || insights > 0) {
+		lines.push('', '**Learning Queues**:');
+		if (proposals > 0)
+			lines.push(
+				`  - Pending proposals: ${proposals} (review with \`/swarm skill list\`)`,
+			);
+		if (unactionable > 0)
+			lines.push(
+				`  - Unactionable queue: ${unactionable} (inspect with \`/swarm knowledge unactionable\`)`,
+			);
+		if (insights > 0)
+			lines.push(`  - Insight candidates: ${insights} (consumed at phase end)`);
+	}
+
 	return lines.join('\n');
 }
 
@@ -403,4 +454,30 @@ export async function handleStatusCommand(
 	}
 
 	return formatStatusMarkdown(statusData);
+}
+
+async function safeLineCount(filePath: string): Promise<number> {
+	try {
+		if (!fsSync.existsSync(filePath)) return 0;
+		const content = await readFile(filePath, 'utf-8');
+		let n = 0;
+		for (const line of content.split('\n')) {
+			if (line.trim()) n++;
+		}
+		return n;
+	} catch {
+		return 0;
+	}
+}
+
+async function countProposals(directory: string): Promise<number> {
+	try {
+		const proposalsDir = validateSwarmPath(directory, 'skills/proposals');
+		if (!fsSync.existsSync(proposalsDir)) return 0;
+		const { readdir } = await import('node:fs/promises');
+		const entries = await readdir(proposalsDir);
+		return entries.filter((f) => f.endsWith('.md')).length;
+	} catch {
+		return 0;
+	}
 }

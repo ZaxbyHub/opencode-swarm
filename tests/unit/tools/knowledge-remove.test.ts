@@ -11,6 +11,12 @@ import * as path from 'node:path';
 import { knowledge_add } from '../../../src/tools/knowledge-add';
 import { knowledge_remove } from '../../../src/tools/knowledge-remove';
 
+// The two filesystem-permission tests below simulate denial via chmod, which
+// cannot work when the process runs as root (uid 0 bypasses permission bits).
+// CI runners and sandboxes often run as root, so skip those cases there — their
+// premise is unsatisfiable, not broken.
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
 describe('knowledge_remove tool verification tests', () => {
 	let tmpDir: string;
 	let originalCwd: string;
@@ -62,6 +68,10 @@ describe('knowledge_remove tool verification tests', () => {
 					lesson: 'This lesson should be removed successfully',
 					category: 'process',
 					tags: ['test', 'removal'],
+					// v3 actionability fields required to pass knowledge_add's
+					// Layer-5 gate so the entry activates (instead of quarantine).
+					applies_to_agents: ['coder'],
+					required_actions: ['remove the entry when it is stale'],
 				},
 				tmpDir,
 			);
@@ -97,6 +107,8 @@ describe('knowledge_remove tool verification tests', () => {
 					lesson: 'First lesson that should remain after removal',
 					category: 'process',
 					tags: ['test'],
+					applies_to_agents: ['coder'],
+					required_actions: ['keep this entry available for recall'],
 				},
 				tmpDir,
 			);
@@ -106,6 +118,8 @@ describe('knowledge_remove tool verification tests', () => {
 					lesson: 'Second lesson that should be removed',
 					category: 'tooling',
 					tags: ['test'],
+					applies_to_tools: ['bash'],
+					required_actions: ['remove this entry during cleanup'],
 				},
 				tmpDir,
 			);
@@ -175,6 +189,8 @@ describe('knowledge_remove tool verification tests', () => {
 					lesson: 'This entry will be deleted twice to test idempotency',
 					category: 'process',
 					tags: ['test', 'idempotency'],
+					applies_to_agents: ['coder'],
+					required_actions: ['delete this entry to test idempotency'],
 				},
 				tmpDir,
 			);
@@ -279,87 +295,105 @@ describe('knowledge_remove tool verification tests', () => {
 			expect(parsed.message).toBe('entry not found');
 		});
 
-		it('Returns write error when file permissions prevent rewriting', async () => {
-			// Add an entry first so we have something to remove
-			const addResult = await knowledge_add.execute(
-				{
-					lesson: 'This entry will trigger a write error when removed',
-					category: 'process',
+		it.skipIf(isRoot)(
+			'Returns write error when file permissions prevent rewriting',
+			async () => {
+				// Add an entry first so we have something to remove
+				const addResult = await knowledge_add.execute(
+					{
+						lesson: 'This entry will trigger a write error when removed',
+						category: 'process',
+						tags: ['test'],
+						applies_to_agents: ['coder'],
+						required_actions: ['remove this entry to exercise the write path'],
+					},
+					tmpDir,
+				);
+				const addParsed = JSON.parse(addResult);
+				const entryId = addParsed.id;
+
+				// Make the knowledge file read-only so rewriteKnowledge fails
+				const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
+
+				// On Windows, use chmod to make file read-only
+				// 0o444 = read-only
+				await fs.chmod(knowledgePath, 0o444);
+
+				try {
+					const result = await knowledge_remove.execute(
+						{ id: entryId },
+						tmpDir,
+					);
+
+					const parsed = JSON.parse(result);
+					expect(parsed.success).toBe(false);
+					expect(parsed.error).toBeDefined();
+					expect(typeof parsed.error).toBe('string');
+					expect(parsed.error.length).toBeGreaterThan(0);
+				} finally {
+					// Restore write permissions before cleanup
+					await fs.chmod(knowledgePath, 0o644).catch(() => {});
+				}
+			},
+		);
+
+		it.skipIf(isRoot)(
+			'Returns read error when file permissions prevent reading',
+			async () => {
+				// Create knowledge file with an entry
+				const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
+				const entry = {
+					id: '44444444-4444-4444-4444-444444444444',
+					tier: 'swarm' as const,
+					lesson: 'Test entry for read error',
+					category: 'process' as const,
 					tags: ['test'],
-				},
-				tmpDir,
-			);
-			const addParsed = JSON.parse(addResult);
-			const entryId = addParsed.id;
+					scope: 'global',
+					confidence: 0.5,
+					status: 'candidate' as const,
+					confirmed_by: [],
+					project_name: '',
+					retrieval_outcomes: {
+						shown_count: 0,
+						acknowledged_count: 0,
+						applied_explicit_count: 0,
+						ignored_count: 0,
+						violated_count: 0,
+						succeeded_after_shown_count: 0,
+						failed_after_shown_count: 0,
+					},
+					schema_version: 1,
+					created_at: new Date().toISOString(),
+					updated_at: new Date().toISOString(),
+					auto_generated: false,
+					hive_eligible: false,
+				};
+				await fs.writeFile(
+					knowledgePath,
+					JSON.stringify(entry) + '\n',
+					'utf-8',
+				);
 
-			// Make the knowledge file read-only so rewriteKnowledge fails
-			const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
+				// Make the file unreadable by removing read permissions
+				await fs.chmod(knowledgePath, 0o000);
 
-			// On Windows, use chmod to make file read-only
-			// 0o444 = read-only
-			await fs.chmod(knowledgePath, 0o444);
+				try {
+					const result = await knowledge_remove.execute(
+						{ id: entry.id },
+						tmpDir,
+					);
 
-			try {
-				const result = await knowledge_remove.execute({ id: entryId }, tmpDir);
-
-				const parsed = JSON.parse(result);
-				expect(parsed.success).toBe(false);
-				expect(parsed.error).toBeDefined();
-				expect(typeof parsed.error).toBe('string');
-				expect(parsed.error.length).toBeGreaterThan(0);
-			} finally {
-				// Restore write permissions before cleanup
-				await fs.chmod(knowledgePath, 0o644).catch(() => {});
-			}
-		});
-
-		it('Returns read error when file permissions prevent reading', async () => {
-			// Create knowledge file with an entry
-			const knowledgePath = path.join(tmpDir, '.swarm', 'knowledge.jsonl');
-			const entry = {
-				id: '44444444-4444-4444-4444-444444444444',
-				tier: 'swarm' as const,
-				lesson: 'Test entry for read error',
-				category: 'process' as const,
-				tags: ['test'],
-				scope: 'global',
-				confidence: 0.5,
-				status: 'candidate' as const,
-				confirmed_by: [],
-				project_name: '',
-				retrieval_outcomes: {
-					shown_count: 0,
-					acknowledged_count: 0,
-					applied_explicit_count: 0,
-					ignored_count: 0,
-					violated_count: 0,
-					succeeded_after_shown_count: 0,
-					failed_after_shown_count: 0,
-				},
-				schema_version: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				auto_generated: false,
-				hive_eligible: false,
-			};
-			await fs.writeFile(knowledgePath, JSON.stringify(entry) + '\n', 'utf-8');
-
-			// Make the file unreadable by removing read permissions
-			await fs.chmod(knowledgePath, 0o000);
-
-			try {
-				const result = await knowledge_remove.execute({ id: entry.id }, tmpDir);
-
-				const parsed = JSON.parse(result);
-				expect(parsed.success).toBe(false);
-				expect(parsed.error).toBeDefined();
-				expect(typeof parsed.error).toBe('string');
-				expect(parsed.error.length).toBeGreaterThan(0);
-			} finally {
-				// Restore read permissions before cleanup
-				await fs.chmod(knowledgePath, 0o644).catch(() => {});
-			}
-		});
+					const parsed = JSON.parse(result);
+					expect(parsed.success).toBe(false);
+					expect(parsed.error).toBeDefined();
+					expect(typeof parsed.error).toBe('string');
+					expect(parsed.error.length).toBeGreaterThan(0);
+				} finally {
+					// Restore read permissions before cleanup
+					await fs.chmod(knowledgePath, 0o644).catch(() => {});
+				}
+			},
+		);
 	});
 
 	// ========== Test 5: Malicious getter defense ==========
@@ -453,6 +487,8 @@ describe('knowledge_remove tool verification tests', () => {
 					lesson: 'This is a swarm tier lesson that will be removed',
 					category: 'process',
 					tags: ['test', 'swarm-tier'],
+					applies_to_agents: ['coder'],
+					required_actions: ['remove this swarm-tier entry'],
 				},
 				tmpDir,
 			);

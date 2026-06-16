@@ -42,12 +42,28 @@ Session-scoped. Resets when you start a new session.
 
 Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which bypasses Stage B for non-Tier-3 files), Full-Auto adds a *new* decision layer on top of every existing guardrail.
 
-**Config-gated.** You cannot enable Full-Auto via `/swarm full-auto on` alone. It requires:
+**First-class toggle.** Full-Auto is enabled and disabled at will from the session — no config-level enablement is required:
+
+```text
+/swarm full-auto on              # activate (supervised mode by default)
+/swarm full-auto on strict       # activate with a mode override for this run
+/swarm full-auto off             # pause the run
+/swarm full-auto status          # report the durable run state
+/swarm full-auto                 # bare toggle
+```
+
+While active, the critic reviews escalations, phase boundaries, delegations, and architect questions on your behalf; only an `ESCALATE_TO_HUMAN` verdict (or a pause/terminate condition) hands control back to you. `off` **disarms** the run (durable status `idle`) and returns the session to normal interactive operation; paused/terminated states are reserved for system-initiated halts (denial limits, critic verdicts) and fail-closed-block non-read-only tools until you re-enable. An optional mode after `on` (or a bare mode token) overrides `full_auto.mode` for the run and is what the permission classifier enforces.
+
+Administrators can refuse runtime activation entirely with `full_auto.locked: true`. `locked` ORs across config levels — a repo's project config cannot override a user-level lock — and activation also fails closed when a config file exists but cannot be parsed (an unreadable lock is treated as "unknown", not "unlocked"). `off` and `status` always work. Note the difference from the old gate: `enabled: false` used to make the hooks permanent no-ops, while `locked` keeps them armed — a corrupt `.swarm/full-auto-state.json` still fail-closed-blocks non-read-only tools project-wide until restored or deleted (`/swarm full-auto status` reports this as `UNREADABLE`).
+
+The legacy `full_auto.enabled` flag is deprecated as a gate — it no longer arms or disarms anything. The v2 hooks (permission, delegation, input probe, cadence, phase approval) are gated by the durable per-session run state; the legacy reactive intercept is gated by the in-memory session flag (with a deliberate any-session fallback for messages without a session ID).
+
+All tuning still lives in config (every field optional):
 
 ```json
 {
   "full_auto": {
-    "enabled": true,
+    "locked": false,
     "mode": "supervised",
     "fail_closed": true,
     "max_interactions_per_phase": 50,
@@ -79,7 +95,7 @@ Full-Auto is opencode-swarm's autonomy control plane. It reduces approval fricti
 }
 ```
 
-> **Defaults note:** `enabled` defaults to `false` — the example above shows an explicit enable. `permission_policy.protected_paths` has 20 defaults including `.github/workflows`, `.swarm/`, lockfiles, `CHANGELOG.md`, and guardrail paths; the two shown above are the minimal override.
+> **Defaults note:** `locked` defaults to `false` (runtime toggle available). `permission_policy.protected_paths` has 20 defaults including `.github/workflows`, `.swarm/`, lockfiles, `CHANGELOG.md`, and guardrail paths; the two shown above are the minimal override.
 
 #### Modes
 

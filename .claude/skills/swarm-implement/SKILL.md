@@ -1,6 +1,6 @@
 ---
 name: swarm-implement
-description: Execute complex implementation work with a swarm-like Claude Code workflow: parallel exploration, scoped planning, selective deep validation, and independent reviewer/critic checks where risk justifies them. Use for feature work, bug fixes, refactors, and multi-file changes.
+description: Execute complex implementation work with a swarm-like Claude Code workflow: parallel exploration, scoped planning, objective validation, mandatory independent implementation review for changed work, and final critic approval. Use for feature work, bug fixes, refactors, and multi-file changes.
 disable-model-invocation: true
 ---
 
@@ -17,8 +17,8 @@ Use this execution ladder:
 2. Build a scoped plan.
 3. Implement in small, coherent units.
 4. Run objective validation.
-5. Use independent reviewer validation where the risk justifies it.
-6. Use critic challenge only for high-impact or still-ambiguous results.
+5. For any worktree edit, use independent reviewer validation on the latest diff and evidence.
+6. For any worktree edit, use a separate final critic after reviewer approval.
 7. Synthesize and report what changed, what was verified, and what remains risky.
 
 This is not a slow full-swarm recreation.
@@ -118,13 +118,11 @@ Always run the strongest objective checks available for the task:
 If you cannot verify it, do not claim it is done.
 
 ### Phase 5 — Independent reviewer validation
-Use an independent reviewer subagent when the task is:
-- high-risk
-- cross-file
-- behavior-sensitive
-- likely to hide edge-case bugs
-- security-sensitive
-- likely to produce false confidence from the implementation context
+Use an independent reviewer subagent when the task edits code, tests, docs, package metadata, release notes, or skill files. For read-only or answer-only tasks, scale this gate to the actual risk.
+
+For changed-work tasks, this gate is mandatory when subagent delegation is available and swarm work is authorized. It is not satisfied by explorer output, plan critique, passing tests, or the implementation context reviewing its own work.
+
+The reviewer must inspect the actual current diff and validation evidence after implementation. Any later edit invalidates the approval and requires re-review.
 
 Reviewer responsibilities:
 - inspect the implementation with fresh context
@@ -132,18 +130,29 @@ Reviewer responsibilities:
 - be hyper-critical and suspicious
 - default to disbelief until evidence supports the change
 - identify whether issues are CONFIRMED, DISPROVED, UNVERIFIED, or PRE_EXISTING when useful
+- return `APPROVE`, `NEEDS_REVISION`, or `BLOCKED`
+
+`NEEDS_REVISION` or `BLOCKED` blocks completion until fixed and re-reviewed.
+
+This gate is especially important when the task is:
+- high-risk
+- cross-file
+- behavior-sensitive
+- likely to hide edge-case bugs
+- security-sensitive
+- likely to produce false confidence from the implementation context
 
 ### Phase 6 — Critic challenge
-Use a critic subagent only when needed:
-- reviewer found high-impact issues
-- confidence is still borderline
-- the change touches high-risk systems
-- the implementation appears polished but may hide requirement drift or false confidence
+Use a critic subagent after independent reviewer approval for any task that edits code, tests, docs, package metadata, release notes, or skill files. For read-only or answer-only tasks, use a critic only when risk justifies it.
+
+The critic must challenge the reviewer-approved current diff and evidence, not the original plan. Any later edit invalidates the critic approval and requires another critic pass.
 
 Critic responsibilities:
-- challenge reviewer-confirmed findings
-- look for severity inflation, weak evidence, missing sibling-file checks, and poor actionability
-- prefer removing weak claims over adding noise
+- challenge reviewer conclusions and the final completion claim
+- look for requirement drift, weak evidence, missing sibling-file checks, package/docs/release drift, stale approvals, and poor actionability
+- return `APPROVE`, `NEEDS_REVISION`, or `BLOCKED`
+
+`NEEDS_REVISION` or `BLOCKED` blocks completion until fixed and re-reviewed.
 
 ### Phase 7 — Final synthesis
 In the main thread, summarize:
@@ -153,6 +162,20 @@ In the main thread, summarize:
 - what critic challenged
 - final remaining risks
 - whether the task is actually complete
+
+Before final synthesis for changed-work tasks, record this gate in durable review artifacts. For issue-tracer work, use `08b-implementation-review.md` and `09-final-critic.md`. For other swarm implementation work, create or update task-local review artifacts with the reviewer verdict, critic verdict, commands reviewed, and responses to every blocker. If the repo forbids such artifacts, stop and disclose that limitation instead of claiming full swarm validation.
+
+```text
+SWARM FINAL GATE
+- Objective validation recorded: yes/no
+- Independent implementation reviewer verdict on latest diff: APPROVE/...
+- Final critic verdict on latest diff after reviewer approval: APPROVE/...
+- Every NEEDS_REVISION/BLOCKED item fixed and re-reviewed: yes/no
+- Latest edit occurred before final reviewer and critic approval: yes/no
+- Fallback self-review used: no, or disclosed reason
+```
+
+If any answer is not satisfactory, do not claim completion.
 
 Before declaring completion, run a no-unwired/no-deferred gate:
 

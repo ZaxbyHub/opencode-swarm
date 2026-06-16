@@ -21,13 +21,22 @@ export const skill_regenerate: ReturnType<typeof createSwarmTool> =
 				.string()
 				.min(1)
 				.describe('Slug of the active skill to regenerate.'),
+			evaluate: z
+				.boolean()
+				.optional()
+				.default(false)
+				.describe(
+					'Validate regenerated content against .swarm/skills/evals/<slug> before writing. Default false.',
+				),
 		},
 		execute: async (args: unknown, directory): Promise<string> => {
-			const a = (args ?? {}) as { slug?: string };
+			const a = (args ?? {}) as { slug?: string; evaluate?: boolean };
 			if (!a.slug || typeof a.slug !== 'string') {
 				return JSON.stringify({ regenerated: false, reason: 'slug required' });
 			}
-			const result = await regenerateSkill(directory, a.slug);
+			const result = await regenerateSkill(directory, a.slug, {
+				evaluate: a.evaluate ?? false,
+			});
 			return JSON.stringify(result, null, 2);
 		},
 	});

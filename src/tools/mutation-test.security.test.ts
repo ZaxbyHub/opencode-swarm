@@ -61,7 +61,7 @@ describe('mutation_test security tests', () => {
 				},
 			],
 			files: ['test.test.ts'] as string[],
-			test_command: ['echo', 'test'] as string[],
+			test_command: ['bun', 'test'] as string[],
 		};
 	}
 
@@ -304,7 +304,7 @@ describe('mutation_test security tests', () => {
 		const args = {
 			patches: largeNumberOfPatches,
 			files: ['test.test.ts'] as string[],
-			test_command: ['echo', 'test'] as string[],
+			test_command: ['bun', 'test'] as string[],
 		};
 
 		mockReadFileSync.mockReturnValue('const x = 1;');

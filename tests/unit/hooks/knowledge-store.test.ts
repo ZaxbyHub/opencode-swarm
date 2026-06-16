@@ -11,10 +11,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	findActiveSwarmNearDuplicate,
+	reinforceSwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-reinforcement.js';
+import {
 	appendKnowledge,
 	appendRejectedLesson,
 	computeConfidence,
 	computeOutcomeSignal,
+	enforceKnowledgeCap,
 	findNearDuplicate,
 	inferTags,
 	jaccardBigram,
@@ -29,7 +34,45 @@ import {
 	rewriteKnowledge,
 	wordBigrams,
 } from '../../../src/hooks/knowledge-store.js';
-import type { RejectedLesson } from '../../../src/hooks/knowledge-types.js';
+import type {
+	RejectedLesson,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
+
+function makeSwarmEntry(
+	overrides: Partial<SwarmKnowledgeEntry> = {},
+): SwarmKnowledgeEntry {
+	return {
+		id: 'entry-1',
+		tier: 'swarm',
+		lesson: 'always run the focused regression test before claiming done',
+		category: 'testing',
+		tags: ['testing'],
+		scope: 'global',
+		confidence: 0.6,
+		status: 'candidate',
+		confirmed_by: [
+			{
+				phase_number: 1,
+				confirmed_at: '2026-01-01T00:00:00.000Z',
+				project_name: 'proj',
+			},
+		],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2,
+		created_at: '2026-01-01T00:00:00.000Z',
+		updated_at: '2026-01-01T00:00:00.000Z',
+		project_name: 'proj',
+		auto_generated: true,
+		phases_alive: 4,
+		...overrides,
+	};
+}
 
 describe('knowledge-store', () => {
 	describe('Path resolvers', () => {
@@ -301,6 +344,95 @@ describe('knowledge-store', () => {
 		});
 	});
 
+	describe('reinforceSwarmKnowledgeEntry', () => {
+		it('findActiveSwarmNearDuplicate ignores inactive entries', () => {
+			const archived = makeSwarmEntry({ id: 'archived', status: 'archived' });
+			const quarantined = makeSwarmEntry({
+				id: 'quarantined',
+				status: 'quarantined',
+			});
+			const active = makeSwarmEntry({
+				id: 'active',
+				lesson: 'always run focused regression tests before claiming done',
+			});
+
+			expect(
+				findActiveSwarmNearDuplicate(
+					archived.lesson,
+					[archived, quarantined],
+					0.6,
+				),
+			).toBeUndefined();
+			expect(
+				findActiveSwarmNearDuplicate(active.lesson, [archived, active], 0.6)
+					?.id,
+			).toBe('active');
+		});
+
+		it('adds a distinct phase confirmation, refreshes confidence, and resets TTL age', () => {
+			const entry = makeSwarmEntry();
+
+			const result = reinforceSwarmKnowledgeEntry(entry, {
+				phase_number: 2,
+				confirmed_at: '2026-01-02T00:00:00.000Z',
+				project_name: 'proj',
+			});
+
+			expect(result).toEqual({
+				entryId: 'entry-1',
+				reinforced: true,
+				reason: 'reinforced',
+			});
+			expect(entry.confirmed_by.map((record) => record.phase_number)).toEqual([
+				1, 2,
+			]);
+			expect(entry.updated_at).toBe('2026-01-02T00:00:00.000Z');
+			expect(entry.phases_alive).toBe(0);
+			expect(entry.confidence).toBe(0.7);
+		});
+
+		it('is idempotent for confirmations from the same phase', () => {
+			const entry = makeSwarmEntry({
+				updated_at: '2026-01-01T00:00:00.000Z',
+				phases_alive: 3,
+			});
+
+			const result = reinforceSwarmKnowledgeEntry(entry, {
+				phase_number: 1,
+				confirmed_at: '2026-01-02T00:00:00.000Z',
+				project_name: 'proj',
+			});
+
+			expect(result).toEqual({
+				entryId: 'entry-1',
+				reinforced: false,
+				reason: 'already_confirmed_phase',
+			});
+			expect(entry.confirmed_by).toHaveLength(1);
+			expect(entry.updated_at).toBe('2026-01-01T00:00:00.000Z');
+			expect(entry.phases_alive).toBe(3);
+			expect(entry.confidence).toBe(0.6);
+		});
+
+		it('does not revive archived entries', () => {
+			const entry = makeSwarmEntry({ status: 'archived', phases_alive: 12 });
+
+			const result = reinforceSwarmKnowledgeEntry(entry, {
+				phase_number: 2,
+				confirmed_at: '2026-01-02T00:00:00.000Z',
+				project_name: 'proj',
+			});
+
+			expect(result).toEqual({
+				entryId: 'entry-1',
+				reinforced: false,
+				reason: 'inactive',
+			});
+			expect(entry.confirmed_by).toHaveLength(1);
+			expect(entry.phases_alive).toBe(12);
+		});
+	});
+
 	describe('computeOutcomeSignal', () => {
 		it('returns 0 (neutral) when there are no outcomes or no evidence', () => {
 			expect(computeOutcomeSignal(undefined)).toBe(0);
@@ -367,6 +499,65 @@ describe('knowledge-store', () => {
 				applied_explicit_count: 20,
 			});
 			expect(manyPositive).toBeGreaterThan(onePositive);
+		});
+	});
+
+	describe('enforceKnowledgeCap priority eviction', () => {
+		it('preserves promoted entries and evicts low-signal non-promoted entries first', async () => {
+			const tempDir = path.join(
+				os.tmpdir(),
+				`knowledge-cap-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			);
+			const tempPath = path.join(tempDir, 'knowledge.jsonl');
+			try {
+				await fs.promises.mkdir(tempDir, { recursive: true });
+				const entries: SwarmKnowledgeEntry[] = [
+					makeSwarmEntry({
+						id: 'promoted-old',
+						status: 'promoted',
+						retrieval_outcomes: {
+							applied_count: 0,
+							succeeded_after_count: 0,
+							failed_after_count: 0,
+						},
+					}),
+					makeSwarmEntry({
+						id: 'low-signal',
+						status: 'established',
+						retrieval_outcomes: {
+							applied_count: 0,
+							succeeded_after_count: 0,
+							failed_after_count: 0,
+							contradicted_count: 4,
+						},
+					}),
+					makeSwarmEntry({
+						id: 'positive',
+						status: 'established',
+						retrieval_outcomes: {
+							applied_count: 0,
+							succeeded_after_count: 0,
+							failed_after_count: 0,
+							applied_explicit_count: 4,
+						},
+					}),
+				];
+				await fs.promises.writeFile(
+					tempPath,
+					entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n',
+					'utf-8',
+				);
+
+				await enforceKnowledgeCap<SwarmKnowledgeEntry>(tempPath, 2);
+
+				const survivors = await readKnowledge<SwarmKnowledgeEntry>(tempPath);
+				expect(survivors.map((entry) => entry.id)).toEqual([
+					'promoted-old',
+					'positive',
+				]);
+			} finally {
+				safeRmRecursive(tempDir);
+			}
 		});
 	});
 

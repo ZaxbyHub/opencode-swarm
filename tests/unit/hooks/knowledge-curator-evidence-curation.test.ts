@@ -69,6 +69,11 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 		mockQuarantineEntry(
 			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
 		),
+	// Layer-5 stubs (Change 4): suite tests evidence-curation mechanics, not the
+	// actionability gate (dedicated suites exist). Keep the gate open.
+	validateActionability: () => ({ actionable: true }),
+	validateActionableFields: () => ({ valid: true, errors: [] }),
+	appendUnactionable: async () => {},
 }));
 
 mock.module('../../../src/hooks/knowledge-reader.js', () => ({
@@ -109,6 +114,7 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 			return result !== null;
 		},
 	),
+	transactFile: async () => false,
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -144,6 +150,11 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 		mockQuarantineEntry(
 			...(args as [string, string, string, 'architect' | 'user' | 'auto']),
 		),
+	// Layer-5 stubs (Change 4): suite tests evidence-curation mechanics, not the
+	// actionability gate (dedicated suites exist). Keep the gate open.
+	validateActionability: () => ({ actionable: true }),
+	validateActionableFields: () => ({ valid: true, errors: [] }),
+	appendUnactionable: async () => {},
 }));
 
 // Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)

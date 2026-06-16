@@ -25,6 +25,7 @@ import type { MessageWithParts } from './knowledge-types.js';
 import {
 	computeSkillRelevanceScore,
 	formatSkillIndexWithContext,
+	readSkillMetadata,
 } from './skill-scoring.js';
 import {
 	appendSkillUsageEntry,
@@ -277,6 +278,7 @@ export const _internals: {
 	extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
 	extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
 	computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
+	readSkillMetadata: typeof readSkillMetadata;
 	formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
 	loadRoutingSkills: typeof loadRoutingSkills;
 } = {
@@ -305,6 +307,7 @@ export const _internals: {
 	extractSkillsFieldFromPrompt:
 		null as unknown as typeof extractSkillsFieldFromPrompt,
 	computeSkillRelevanceScore,
+	readSkillMetadata,
 	formatSkillIndexWithContext,
 	loadRoutingSkills: null as unknown as typeof loadRoutingSkills,
 };
@@ -556,8 +559,9 @@ export function extractTaskIdFromPrompt(prompt: string): string {
  * SKILLS field.
  *
  * @returns { blocked: boolean; reason: string | null; recommendedSkills?: Array<{ skillPath: string; score: number; usageCount: number }> }
- *          When scoring has computed results, includes `recommendedSkills` with ranked skill recommendations.
- *          When scoring was skipped or errored, `recommendedSkills` is undefined.
+ *          `recommendedSkills` is populated (possibly `[]`) on both the happy path (SKILLS present)
+ *          and the warn path (SKILLS missing or 'none'). It is `undefined` only on early-exit returns
+ *          (unsupported tool/agent/target, no available skills in project, or enforce-blocked).
  */
 export async function skillPropagationGateBefore(
 	directory: string,
@@ -656,11 +660,7 @@ export async function skillPropagationGateBefore(
 	let scoringSkipped = false;
 	let scored: Array<{ skillPath: string; score: number; usageCount: number }> =
 		[];
-	if (
-		skillsValue &&
-		skillsValue.toLowerCase() !== 'none' &&
-		availableSkills.length > 0
-	) {
+	if (skillsValue.toLowerCase() !== 'none' && availableSkills.length > 0) {
 		try {
 			const sessionEntries = _internals.readSkillUsageEntriesTail(directory, {
 				sessionID,
@@ -681,10 +681,12 @@ export async function skillPropagationGateBefore(
 						const skillEntries = sessionEntries.filter(
 							(e) => e.skillPath === skillPath,
 						);
+						const metadata = _internals.readSkillMetadata(skillPath, directory);
 						const score = _internals.computeSkillRelevanceScore(
 							skillPath,
 							prompt,
 							skillEntries,
+							metadata,
 						);
 						return { skillPath, score, usageCount: skillEntries.length };
 					})
@@ -797,9 +799,9 @@ export async function skillPropagationGateBefore(
 				// Ensure .swarm/ directory exists
 				const swarmDir = path.dirname(contextPath);
 				if (!_internals.existsSync(swarmDir)) {
-					_internals.mkdirSync(swarmDir, { recursive: true });
+					_internals.mkdirSync(swarmDir, { recursive: true }); // drift-test:exempt — context.md is in PRESERVED_SWARM_PATHS, variable resolution prevents static match
 				}
-				_internals.writeFileSync(contextPath, updatedContent, 'utf-8');
+				_internals.writeFileSync(contextPath, updatedContent, 'utf-8'); // drift-test:exempt
 			}
 		} catch (err) {
 			warn(
@@ -878,7 +880,7 @@ export async function skillPropagationGateBefore(
 		return { blocked: true, reason: blockedMsg, recommendedSkills: undefined };
 	}
 
-	return { blocked: false, reason: warningMsg, recommendedSkills: undefined };
+	return { blocked: false, reason: warningMsg, recommendedSkills: scored };
 }
 
 // ============================================================================
@@ -891,6 +893,9 @@ const COMPLIANCE_PATTERN =
 
 /** Skill path pattern: SKILLS_USED_BY_CODER: <path> */
 const CODER_SKILLS_PATTERN = /SKILLS_USED_BY_CODER\s*:\s*(.+)/i;
+
+/** Explicit reviewer attribution pattern: TASK: <task-id> */
+const REVIEWER_TASK_PATTERN = /TASK\s*:\s*(\S+)/i;
 
 /**
  * Chat messages transform hook. Scans reviewer output for SKILL_COMPLIANCE
@@ -966,8 +971,14 @@ export async function skillPropagationTransformScan(
 
 		// Extract SKILLS_USED_BY_CODER paths from the reviewer text
 		const skillPaths: string[] = [];
+		let explicitReviewerTaskID: string | undefined;
 		for (const line of text.split('\n')) {
-			const coderMatch = line.trim().match(CODER_SKILLS_PATTERN);
+			const trimmed = line.trim();
+			const taskMatch = trimmed.match(REVIEWER_TASK_PATTERN);
+			if (taskMatch) {
+				explicitReviewerTaskID = taskMatch[1];
+			}
+			const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
 			if (coderMatch) {
 				const parsed = _internals.parseSkillPaths(coderMatch[1]);
 				skillPaths.push(...parsed);
@@ -978,29 +989,31 @@ export async function skillPropagationTransformScan(
 		// compliance attribution. TaskID is always resolved when a delegation
 		// exists; skill paths are only populated as fallback when the reviewer
 		// didn't include SKILLS_USED_BY_CODER.
-		let resolvedTaskID = 'unknown';
+		let resolvedTaskID = explicitReviewerTaskID ?? 'unknown';
 		if (existingEntries.length > 0) {
-			const latestDelegation = [...existingEntries]
-				.reverse()
-				.find(
-					(e) => e.agentName !== 'reviewer' && e.skillPath !== '__overall__',
-				);
-			if (latestDelegation) {
-				resolvedTaskID = latestDelegation.taskID;
-				// Only populate skillPaths as fallback when reviewer didn't echo
-				// SKILLS_USED_BY_CODER
-				if (skillPaths.length === 0) {
-					const delegatedPaths = existingEntries
-						.filter(
-							(e) =>
-								e.agentName !== 'reviewer' &&
-								e.skillPath !== '__overall__' &&
-								e.taskID === resolvedTaskID,
-						)
-						.map((e) => e.skillPath);
-					if (delegatedPaths.length > 0) {
-						skillPaths.push(...new Set(delegatedPaths));
-					}
+			if (!explicitReviewerTaskID) {
+				const latestDelegation = [...existingEntries]
+					.reverse()
+					.find(
+						(e) => e.agentName !== 'reviewer' && e.skillPath !== '__overall__',
+					);
+				if (latestDelegation) {
+					resolvedTaskID = latestDelegation.taskID;
+				}
+			}
+			// Only populate skillPaths as fallback when reviewer didn't echo
+			// SKILLS_USED_BY_CODER. Prefer explicit TASK attribution when present.
+			if (skillPaths.length === 0 && resolvedTaskID !== 'unknown') {
+				const delegatedPaths = existingEntries
+					.filter(
+						(e) =>
+							e.agentName !== 'reviewer' &&
+							e.skillPath !== '__overall__' &&
+							e.taskID === resolvedTaskID,
+					)
+					.map((e) => e.skillPath);
+				if (delegatedPaths.length > 0) {
+					skillPaths.push(...new Set(delegatedPaths));
 				}
 			}
 		}

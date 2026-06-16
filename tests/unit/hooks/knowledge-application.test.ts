@@ -13,13 +13,17 @@ import {
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
 	gateKnowledgeApplication,
 	getShownButNotAcknowledged,
+	MAX_LEGACY_APPLICATION_LOG_ENTRIES,
 	parseAcknowledgments,
 	processArchitectText,
 	recordAcknowledgment,
 	recordKnowledgeShown,
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
-import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
+import {
+	appendKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 
 let tmp: string;
@@ -164,6 +168,30 @@ describe('recordKnowledgeShown vs recordAcknowledgment', () => {
 		expect(lines.some((l) => l.includes('"shown"'))).toBe(true);
 		expect(lines.some((l) => l.includes('"applied"'))).toBe(true);
 	});
+
+	it('caps the legacy application audit log after appending', async () => {
+		const logPath = resolveApplicationLogPath(tmp);
+		await mkdir(path.dirname(logPath), { recursive: true });
+		const lines = Array.from(
+			{ length: MAX_LEGACY_APPLICATION_LOG_ENTRIES + 5 },
+			(_, i) =>
+				JSON.stringify({
+					timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+					knowledgeId: `old-${i}`,
+					result: 'shown',
+				}),
+		);
+		await writeFile(logPath, `${lines.join('\n')}\n`, 'utf-8');
+
+		await recordKnowledgeShown(tmp, ['newest'], { phase: 'Phase 1' });
+
+		const capped = readFileSync(logPath, 'utf-8').trim().split('\n');
+		expect(capped).toHaveLength(MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+		expect(capped.some((line) => line.includes('"knowledgeId":"old-0"'))).toBe(
+			false,
+		);
+		expect(capped[capped.length - 1]).toContain('"knowledgeId":"newest"');
+	});
 });
 
 describe('gateKnowledgeApplication', () => {
@@ -229,6 +257,109 @@ describe('getShownButNotAcknowledged', () => {
 			knowledgeIds: [a, b],
 		});
 		expect(remaining).toEqual([b]);
+	});
+});
+
+// ============================================================================
+// recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)
+// ============================================================================
+
+describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)', () => {
+	it('recordAcknowledgment re-reads after an interleaved append instead of rewriting a stale snapshot', async () => {
+		const id = '99999999-9999-4999-9999-999999999999';
+		await seedEntry(id);
+
+		const secondId = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const secondEntry: SwarmKnowledgeEntry = {
+			id: secondId,
+			tier: 'swarm',
+			lesson: 'second entry for concurrency test',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.8,
+			status: 'candidate',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: 'test',
+		};
+
+		const knowledgePath = resolveSwarmKnowledgePath(tmp);
+		const staleSnapshot = readFileSync(knowledgePath, 'utf-8')
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		expect(staleSnapshot.map((entry: any) => entry.id)).toEqual([id]);
+
+		// Previous code read before acquiring the rewrite lock. This fixed
+		// interleaving models that stale snapshot, appends a second entry, then
+		// performs the counter update. The fixed path must re-read under
+		// transactKnowledge and preserve the append.
+		await appendKnowledge(knowledgePath, secondEntry);
+		await recordAcknowledgment(
+			tmp,
+			{ id, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
+
+		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
+		const allEntries = lines.map((line) => JSON.parse(line));
+
+		expect(allEntries).toHaveLength(2);
+
+		const originalEntry = allEntries.find((e: any) => e.id === id);
+		expect(originalEntry).toBeDefined();
+		expect(originalEntry.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(originalEntry.retrieval_outcomes.acknowledged_count).toBe(1);
+
+		const appendedEntry = allEntries.find((e: any) => e.id === secondId);
+		expect(appendedEntry).toBeDefined();
+		expect(appendedEntry.id).toBe(secondId);
+	});
+
+	it('concurrent bumpCountersBatch calls do not clobber each other', async () => {
+		const id1 = 'cccccccc-1111-4ccc-9ccc-cccccccccccc';
+		const id2 = 'dddddddd-2222-4ddd-9ddd-dddddddddddd';
+		const knowledgePath = resolveSwarmKnowledgePath(tmp);
+		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
+		await writeFile(
+			knowledgePath,
+			[JSON.stringify(baseEntry(id1)), JSON.stringify(baseEntry(id2))].join(
+				'\n',
+			) + '\n',
+			'utf-8',
+		);
+
+		await Promise.all([
+			recordAcknowledgment(
+				tmp,
+				{ id: id1, result: 'applied' },
+				{ phase: 'P1' },
+			),
+			recordAcknowledgment(
+				tmp,
+				{ id: id2, result: 'applied' },
+				{ phase: 'P1' },
+			),
+		]);
+
+		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
+		const all = lines.map((l) => JSON.parse(l));
+		expect(all).toHaveLength(2);
+
+		const e1 = all.find((e: any) => e.id === id1);
+		const e2 = all.find((e: any) => e.id === id2);
+		expect(e1?.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(e1?.retrieval_outcomes.acknowledged_count).toBe(1);
+		expect(e2?.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(e2?.retrieval_outcomes.acknowledged_count).toBe(1);
 	});
 });
 
@@ -417,3 +548,26 @@ describe('filterHighConfidenceKnowledge', () => {
 		expect(entries).toHaveLength(2); // original unchanged
 	});
 });
+
+function baseEntry(id: string): SwarmKnowledgeEntry {
+	return {
+		id,
+		tier: 'swarm',
+		lesson: 'concurrency test entry',
+		category: 'process',
+		tags: [],
+		scope: 'global',
+		confidence: 0.8,
+		status: 'candidate',
+		confirmed_by: [],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2,
+		created_at: new Date().toISOString(),
+		updated_at: new Date().toISOString(),
+		project_name: 'test',
+	};
+}

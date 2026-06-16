@@ -97,7 +97,7 @@ function formatEvidenceEntry(
 		type: entry.type,
 		verdict: entry.verdict,
 		verdictIcon: getVerdictEmoji(entry.verdict),
-		agent: entry.agent,
+		agent: entry.agent ?? '',
 		summary: entry.summary,
 		timestamp: entry.timestamp,
 		details,

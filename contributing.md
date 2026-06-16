@@ -264,6 +264,10 @@ If your code change alters the behavior of an existing function (new error messa
 - Changing error handling from silent skip to structured error → tests asserting no output must assert the error
 - Adding a new default field to a config schema → tests using `toEqual({...})` on config objects must include the new field
 
+### Opt-in tool maps
+
+Some tools are gated behind feature flags and use **opt-in tool maps** (e.g., `MEMORY_AGENT_TOOL_MAP` when `memory.enabled === true`, `EXTERNAL_SKILL_AGENT_TOOL_MAP` when `external_skills.curation_enabled === true`). These tools must still be fully registered (export, `TOOL_NAMES`, `tool-metadata`, manifest entry), but are merged into agent configs conditionally at build time. See AGENTS.md invariant #11 (Tool registration + agent-map coherence) for the complete checklist.
+
 ---
 
 ## Release notes (mandatory — no exceptions)

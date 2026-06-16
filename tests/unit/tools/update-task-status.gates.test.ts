@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { recordGateEvidence } from '../../../src/gate-evidence';
+import {
+	recordAgentDispatch,
+	recordGateEvidence,
+} from '../../../src/gate-evidence';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import {
 	checkReviewerGate,
@@ -108,11 +111,12 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 	// -----------------------------------------------------------------------
 
 	it('gate check blocks when seed evidence exists but only reviewer gate recorded (test_engineer missing)', async () => {
-		// Seed evidence file sets required_gates: ['reviewer', 'test_engineer'] with empty gates
+		// Seed evidence starts empty; coder dispatch establishes the code-task requirements.
 		await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
 		);
+		await recordAgentDispatch(tmpDir, '1.1', 'coder');
 		// Record only reviewer — test_engineer is still absent from gates
 		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-reviewer');
 		resetSwarmState();
@@ -134,6 +138,7 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
 		);
+		await recordAgentDispatch(tmpDir, '1.1', 'coder');
 		// Record only test_engineer — reviewer is still absent from gates
 		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-te');
 		resetSwarmState();
@@ -197,6 +202,7 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 	});
 
 	it('executeUpdateTaskStatus does not recover completion from unscoped delegation chains', async () => {
+		await recordAgentDispatch(tmpDir, '1.1', 'coder');
 		resetSwarmState();
 		swarmState.agentSessions.set('test-session', {
 			id: 'test-session',
@@ -238,8 +244,7 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		);
 		expect(evidence.taskId).toBe('1.1');
 		expect(Array.isArray(evidence.required_gates)).toBe(true);
-		expect(evidence.required_gates).toContain('reviewer');
-		expect(evidence.required_gates).toContain('test_engineer');
+		expect(evidence.required_gates).toEqual([]);
 	});
 
 	it('seed evidence file has empty gates object (no gates recorded yet)', async () => {

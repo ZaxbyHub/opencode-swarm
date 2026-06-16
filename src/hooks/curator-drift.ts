@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { getGlobalEventBus } from '../background/event-bus.js';
+import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger';
 import type {
 	CriticDriftResult,
@@ -135,8 +136,8 @@ export async function runDeterministicDriftCheck(
 		// 1. Read plan.md
 		const planMd = await readSwarmFileAsync(directory, 'plan.md');
 
-		// 2. Read spec.md (may not exist)
-		const specMd = await readSwarmFileAsync(directory, 'spec.md');
+		// 2. Read effective spec (may not exist)
+		const specMd = readEffectiveSpecSync(directory)?.content ?? null;
 
 		// 3. Read prior drift reports
 		const priorReports = await _internals.readPriorDriftReports(directory);

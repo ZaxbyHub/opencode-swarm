@@ -2,6 +2,7 @@ import { loadPluginConfig } from '../config/loader';
 import {
 	type ConfigDoctorResult,
 	detectStraySwarmDirs,
+	readDoctorArtifact,
 	removeStraySwarmDir,
 	runConfigDoctor,
 } from '../services/config-doctor';
@@ -132,6 +133,10 @@ export async function handleDoctorCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
+	// The --fix flag is accepted here because this handler serves human-initiated
+	// chat commands, which have broader access than agent-initiated commands.
+	// The tool-policy layer (src/commands/tool-policy.ts) blocks --fix for
+	// agent-initiated commands.
 	const enableAutoFix = args.includes('--fix') || args.includes('-f');
 
 	const config = loadPluginConfig(directory);
@@ -149,7 +154,14 @@ export async function handleDoctorCommand(
 		const fixResult = await runConfigDoctorWithFixes(directory, config, true);
 		output = formatDoctorMarkdown(fixResult.result);
 	} else {
-		output = formatDoctorMarkdown(result);
+		const lastRun = readDoctorArtifact(directory);
+		let markdown = formatDoctorMarkdown(result);
+		if (lastRun) {
+			markdown =
+				`Last run: ${lastRun.timestamp}, ${lastRun.findingsCount} findings (${lastRun.autoFixableCount} auto-fixable)\n\n` +
+				markdown;
+		}
+		output = markdown;
 	}
 
 	// Check for stray .swarm directories

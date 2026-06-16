@@ -11,51 +11,21 @@
  * placed back into a signal string.
  */
 
-import { execSync } from 'node:child_process';
+import {
+	_internals,
+	containsControlCharacters,
+	detectGitRemote,
+	parseGitRemoteUrl,
+	sanitizeErrorEcho,
+	sanitizeUrl,
+	type ValidationResult,
+	validateAndSanitizeGithubUrl,
+} from './_shared/url-security.js';
 
-/**
- * File-scoped indirection seam for the subprocess call. Tests override
- * `_internals.execSync` (no `mock.module`) to assert the working directory is
- * threaded through and to simulate a missing `origin` remote.
- */
-export const _internals = { execSync };
+export { _internals, detectGitRemote, parseGitRemoteUrl, sanitizeUrl };
 
-const MAX_URL_LEN = 2048;
 /** Upper bound on forwarded free-text instructions (post-sanitization). */
 const MAX_INSTRUCTIONS_LEN = 1000;
-
-/**
- * Strip query strings, fragments, injected MODE headers, and credentials from
- * a URL string.
- */
-export function sanitizeUrl(raw: string): string {
-	let urlStr = raw.trim();
-
-	// Strip [MODE: ...] sequences (case-insensitive)
-	urlStr = urlStr.replace(/\[\s*MODE\s*:[^\]]*\]/gi, '');
-
-	// Strip fragment identifiers
-	const fragmentIdx = urlStr.indexOf('#');
-	if (fragmentIdx !== -1) {
-		urlStr = urlStr.slice(0, fragmentIdx);
-	}
-
-	// Strip query strings
-	const queryIdx = urlStr.indexOf('?');
-	if (queryIdx !== -1) {
-		urlStr = urlStr.slice(0, queryIdx);
-	}
-
-	// Strip credentials (user:pass@)
-	urlStr = urlStr.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^@/]+@/, 'https://');
-
-	// Enforce max length
-	if (urlStr.length > MAX_URL_LEN) {
-		urlStr = urlStr.slice(0, MAX_URL_LEN);
-	}
-
-	return urlStr.trim();
-}
 
 /**
  * Sanitize free-text instructions so they cannot forge a competing MODE
@@ -71,114 +41,8 @@ export function sanitizeInstructions(raw: string): string {
 	return `${normalized.slice(0, MAX_INSTRUCTIONS_LEN)}…`;
 }
 
-/**
- * Returns true if the hostname contains any non-ASCII code point (IDN
- * homograph protection). Implemented as an explicit code-point scan to avoid
- * embedding control characters or fragile escape ranges in source.
- */
-function hasNonAsciiHostname(hostname: string): boolean {
-	for (const ch of hostname) {
-		const cp = ch.codePointAt(0);
-		if (cp !== undefined && cp > 0x7f) return true;
-	}
-	return false;
-}
-
-/**
- * Blocklist of private/localhost hostnames and IP ranges.
- */
-export function isPrivateHost(url: URL): boolean {
-	const host = url.hostname.toLowerCase();
-
-	// Block localhost variants
-	if (
-		host === 'localhost' ||
-		host === '127.0.0.1' ||
-		host === '::1' ||
-		host === '0.0.0.0'
-	) {
-		return true;
-	}
-
-	// Block local hosts
-	if (host.startsWith('localhost') || host === 'localhost.com') {
-		return true;
-	}
-
-	// Block private IP ranges
-	// IPv4 private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-	// IPv6 private: fc00::/7, fe80::/10
-	const ipv4Private = /^10\./;
-	const ipv4172 = /^172\.(1[6-9]|2\d|3[0-1])\./;
-	const ipv4192 = /^192\.168\./;
-	const ipv6Private = /^fe80:/i;
-	const ipv6Unique = /^f[cd][0-9a-f]{2}:/i;
-
-	if (
-		ipv4Private.test(host) ||
-		ipv4172.test(host) ||
-		ipv4192.test(host) ||
-		ipv6Private.test(host) ||
-		ipv6Unique.test(host)
-	) {
-		return true;
-	}
-
-	// Block IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
-	if (host.startsWith('::ffff:')) {
-		const inner = host.slice(7);
-		if (ipv4Private.test(inner) || ipv4172.test(inner) || ipv4192.test(inner)) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
-/**
- * Validate and sanitize a GitHub PR URL.
- * Returns the sanitized URL on success, or an error message on failure.
- */
-export type ValidationResult = { sanitized: string } | { error: string };
-
 export function validateAndSanitizeUrl(rawUrl: string): ValidationResult {
-	const sanitized = sanitizeUrl(rawUrl);
-
-	if (!sanitized) {
-		return { error: 'Empty URL' };
-	}
-
-	if (!sanitized.startsWith('https://')) {
-		return { error: 'URL must use HTTPS scheme' };
-	}
-
-	// Reject non-ASCII hostnames (IDN homograph protection)
-	try {
-		const url = new URL(sanitized);
-
-		if (hasNonAsciiHostname(url.hostname)) {
-			return { error: 'Non-ASCII hostnames are not allowed' };
-		}
-
-		// Block private/localhost
-		if (isPrivateHost(url)) {
-			return { error: 'Private or localhost URLs are not allowed' };
-		}
-
-		// Validate GitHub PR URL format
-		const githubPrPattern =
-			/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([0-9]+)\/?$/;
-		if (!githubPrPattern.test(sanitized)) {
-			return {
-				error:
-					'URL must be a GitHub pull request URL (https://github.com/owner/repo/pull/N)',
-			};
-		}
-
-		return { sanitized };
-	} catch {
-		return { error: 'Invalid URL format' };
-	}
+	return validateAndSanitizeGithubUrl(rawUrl, 'pull');
 }
 
 export interface ParsedPr {
@@ -199,6 +63,12 @@ export function parsePrRef(input: string, cwd?: string): ParsedPr | null {
 		/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i,
 	);
 	if (urlMatch) {
+		if (
+			containsControlCharacters(urlMatch[1]) ||
+			containsControlCharacters(urlMatch[2])
+		) {
+			return null;
+		}
 		return {
 			owner: urlMatch[1],
 			repo: urlMatch[2],
@@ -209,6 +79,12 @@ export function parsePrRef(input: string, cwd?: string): ParsedPr | null {
 	// Format 2: Shorthand owner/repo#N
 	const shorthandMatch = input.match(/^([^/]+)\/([^#]+)#(\d+)$/);
 	if (shorthandMatch) {
+		if (
+			containsControlCharacters(shorthandMatch[1]) ||
+			containsControlCharacters(shorthandMatch[2])
+		) {
+			return null;
+		}
 		return {
 			owner: shorthandMatch[1],
 			repo: shorthandMatch[2],
@@ -234,75 +110,6 @@ export function parsePrRef(input: string, cwd?: string): ParsedPr | null {
 			owner: parsed.owner,
 			repo: parsed.repo,
 			number: prNumber,
-		};
-	}
-
-	return null;
-}
-
-/**
- * Detect the `origin` remote URL from git config.
- *
- * `cwd` should be the project directory the command was invoked for. Without it
- * the lookup runs in `process.cwd()`, which in a plugin host is frequently not
- * the repository root — so bare-number PR resolution would silently fail or
- * resolve against the wrong repo (invariant #3: subprocesses run in an explicit
- * working directory).
- */
-export function detectGitRemote(cwd?: string): string | null {
-	try {
-		const remoteUrl = _internals
-			.execSync('git remote get-url origin', {
-				encoding: 'utf-8',
-				stdio: ['pipe', 'pipe', 'pipe'],
-				timeout: 5000,
-				...(cwd ? { cwd } : {}),
-			})
-			.trim();
-
-		return remoteUrl || null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Parse owner/repo from a git remote URL.
- * Supports HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git).
- */
-export function parseGitRemoteUrl(
-	remoteUrl: string,
-): { owner: string; repo: string } | null {
-	// HTTPS format: https://github.com/owner/repo.git
-	const httpsMatch = remoteUrl.match(
-		/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
-	);
-	if (httpsMatch) {
-		return {
-			owner: httpsMatch[1],
-			repo: httpsMatch[2].replace(/\.git$/, ''),
-		};
-	}
-
-	// SSH format: git@github.com:owner/repo.git
-	const sshMatch = remoteUrl.match(
-		/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i,
-	);
-	if (sshMatch) {
-		return {
-			owner: sshMatch[1],
-			repo: sshMatch[2].replace(/\.git$/, ''),
-		};
-	}
-
-	// Generic fallback: extract the last two path segments as owner/repo.
-	// Handles proxy remotes (http://proxy/git/owner/repo) and GitHub Enterprise
-	// instances whose host doesn't match github.com.
-	const pathMatch = remoteUrl.match(/\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-	if (pathMatch) {
-		return {
-			owner: pathMatch[1],
-			repo: pathMatch[2].replace(/\.git$/, ''),
 		};
 	}
 
@@ -358,7 +165,9 @@ export function resolvePrCommandInput(
 	const isFullUrl = /^https?:\/\//i.test(refToken);
 	const prInfo = parsePrRef(isFullUrl ? sanitizeUrl(refToken) : refToken, cwd);
 	if (!prInfo) {
-		return { error: `Could not parse PR reference from "${refToken}"` };
+		return {
+			error: `Could not parse PR reference from "${sanitizeErrorEcho(refToken)}"`,
+		};
 	}
 
 	const prUrl = `https://github.com/${prInfo.owner}/${prInfo.repo}/pull/${prInfo.number}`;

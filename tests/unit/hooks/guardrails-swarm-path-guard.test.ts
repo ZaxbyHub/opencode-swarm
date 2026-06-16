@@ -649,7 +649,177 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 	});
 
 	// ============================================================
-	// block_destructive_commands: false bypass
+	// Section 23: Swarm CLI bypass — human-only `/swarm` subcommands
+	// ============================================================
+	describe('Section 23: Swarm CLI bypass guard', () => {
+		test('bunx opencode-swarm run reset → BLOCKED (single-token restricted)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run reset',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run reset');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run pr subscribe → BLOCKED (compound human-only)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run pr subscribe',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run pr subscribe');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run pr unsubscribe → BLOCKED (compound human-only)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run pr unsubscribe',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run pr unsubscribe');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('opencode-swarm run memory import → BLOCKED (bare binary compound)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'opencode-swarm run memory import',
+			);
+			const output = makeBashOutput('opencode-swarm run memory import');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run status → ALLOWED (agent-callable command)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run status',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run status');
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('bunx some-other-package run something → ALLOWED (not opencode-swarm)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx some-other-package run something',
+			);
+			const output = makeBashOutput('bunx some-other-package run something');
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('bunx opencode-swarm run reset --force → BLOCKED (captures reset, not --force)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run reset --force',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run reset --force');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run sdd project → BLOCKED (compound sdd)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run sdd project',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run sdd project');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run rollback 2 → BLOCKED (positional arg bypass)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run rollback 2',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run rollback 2');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run checkpoint mylabel → BLOCKED (positional arg bypass)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run checkpoint mylabel',
+			);
+			const output = makeBashOutput(
+				'bunx opencode-swarm run checkpoint mylabel',
+			);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run status 42 → ALLOWED (agent-callable with positional arg)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run status 42',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run status 42');
+			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+		});
+
+		test('bunx opencode-swarm run rollback\t2 → BLOCKED (tab-separated positional arg, normalize then firstToken)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run rollback\t2',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run rollback\t2');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+
+		test('bunx opencode-swarm run pr\tsubscribe → BLOCKED (tab-separated compound, normalize then full-form lookup)', async () => {
+			const config = defaultConfig();
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+			const input = makeBashInput(
+				'test-session',
+				'bunx opencode-swarm run pr\tsubscribe',
+			);
+			const output = makeBashOutput('bunx opencode-swarm run pr\tsubscribe');
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/human-only swarm command/,
+			);
+		});
+	});
+
+	// ============================================================
+	// block_destructive_commands: false bypasses new .swarm guards
 	// ============================================================
 	describe('block_destructive_commands: false bypasses new .swarm guards', () => {
 		test('mv .swarm/file /tmp/ allowed when block_destructive_commands is false', async () => {

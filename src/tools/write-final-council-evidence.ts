@@ -45,7 +45,7 @@ const VerdictSchema = z.object({
 });
 
 export const ArgsSchema = z.object({
-	phase: z.number().int().min(1),
+	phase: z.number().int().min(1).max(1000),
 	projectSummary: z.string().min(1),
 	roundNumber: z.number().int().min(1).max(10).optional(),
 	verdicts: z.array(VerdictSchema).min(1).max(5),
@@ -160,7 +160,21 @@ export async function executeWriteFinalCouncilEvidence(
 	}
 
 	const plan = await loadPlan(directory);
-	const planId = plan ? derivePlanId(plan) : 'unknown';
+	if (!plan) {
+		return JSON.stringify(
+			{
+				success: false,
+				reason: 'plan_not_found',
+				message:
+					'Cannot write final council evidence: plan.json not found. The plan must be loaded and available before writing final council evidence.',
+				phase: input.phase,
+				plan_id: 'unknown',
+			},
+			null,
+			2,
+		);
+	}
+	const planId = derivePlanId(plan);
 	const normalizedVerdict = normalizeFinalVerdict(
 		synthesis.overallVerdict,
 		synthesis.requiredFixes.length,

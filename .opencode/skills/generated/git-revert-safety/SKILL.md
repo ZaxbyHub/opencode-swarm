@@ -17,6 +17,15 @@ triggers:
   - cherry-pick recovery
   - release-please duplicate tag
 generated_from_knowledge: []
+source_knowledge_ids: ['11f0e8cb-6e65-4310-8b56-6e6d56769d4c']
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.8
+status: active
+version: 3
+skill_origin: generated
+provenance_note: >
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # Git Revert Safety Protocol

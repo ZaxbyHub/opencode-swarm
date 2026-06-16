@@ -18,6 +18,59 @@ export type MutationOutcome =
 	| 'equivalent'
 	| 'skipped';
 
+/**
+ * Known test runner executables permitted as the first element of testCommand.
+ * Validated as the basename (without extension) to support platform-specific
+ * variants like `bun.exe` on Windows or full paths like `/usr/local/bin/jest`.
+ */
+export const ALLOWED_TEST_RUNNERS = new Set([
+	'bun',
+	'bunx',
+	'node',
+	'npx',
+	'npm',
+	'yarn',
+	'pnpm',
+	'vitest',
+	'jest',
+	'mocha',
+	'jasmine',
+	'ava',
+	'tap',
+	'pytest',
+	'python',
+	'python3',
+	'cargo',
+	'go',
+	'deno',
+	'ruby',
+	'rspec',
+	'php',
+	'phpunit',
+	'gradle',
+	'gradlew',
+	'mvn',
+	'dotnet',
+	'swift',
+]);
+
+/**
+ * Validate that testCommand[0] is a known test runner.
+ * Returns an error string if invalid, or null if valid.
+ */
+export function validateTestCommand(testCommand: string[]): string | null {
+	if (!testCommand || testCommand.length === 0) {
+		return 'testCommand must not be empty';
+	}
+	const exe = testCommand[0];
+	// Extract basename and strip any platform-specific extension (.exe, .cmd)
+	const base = path.basename(exe).replace(/\.(exe|cmd|bat)$/i, '');
+	if (!ALLOWED_TEST_RUNNERS.has(base)) {
+		return `testCommand executable '${exe}' is not in the allowed test runner list. Permitted runners: ${[...ALLOWED_TEST_RUNNERS].join(', ')}`;
+	}
+	return null;
+}
+
 export interface MutationPatch {
 	id: string;
 	filePath: string;
@@ -86,7 +139,7 @@ export const _internals: {
 export async function executeMutation(
 	patch: MutationPatch,
 	testCommand: string[],
-	_testFiles: string[],
+	testFiles: string[],
 	workingDir: string,
 ): Promise<MutationResult> {
 	const startTime = Date.now();
@@ -152,15 +205,19 @@ export async function executeMutation(
 
 		let testPassed = false;
 		try {
-			const spawnResult = _internals.spawnSync(
-				testCommand[0],
-				testCommand.slice(1),
-				{
-					cwd: workingDir,
-					timeout: MUTATION_TIMEOUT_MS,
-					stdio: 'pipe',
-				},
-			);
+			// Append specific test files when provided for scoped test execution.
+			// Filter out any entries that look like flags (start with '-') to prevent
+			// test file paths from being misinterpreted as command-line options.
+			const safeTestFiles = testFiles.filter((f) => !f.startsWith('-'));
+			const testArgs =
+				safeTestFiles.length > 0
+					? [...testCommand.slice(1), ...safeTestFiles]
+					: testCommand.slice(1);
+			const spawnResult = _internals.spawnSync(testCommand[0], testArgs, {
+				cwd: workingDir,
+				timeout: MUTATION_TIMEOUT_MS,
+				stdio: 'pipe',
+			});
 			if (spawnResult.error) {
 				if ((spawnResult.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
 					outcome = 'timeout';
@@ -362,6 +419,16 @@ export async function executeMutationSuite(
 ): Promise<MutationReport> {
 	const startTime = Date.now();
 	const effectiveBudget = budgetMs ?? TOTAL_BUDGET_MS;
+
+	// Validate testCommand[0] against the known-runner allowlist before executing
+	// any mutations. This prevents arbitrary binaries from being invoked even when
+	// args are sanitised (array-form spawn does not expand shell metacharacters but
+	// an attacker controlling tool arguments could still run unexpected programs).
+	const cmdError = validateTestCommand(testCommand);
+	if (cmdError) {
+		return computeReport([], 0, effectiveBudget);
+	}
+
 	const results: MutationResult[] = [];
 	let _skippedCount = 0;
 

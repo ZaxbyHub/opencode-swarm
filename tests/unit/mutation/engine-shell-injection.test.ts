@@ -1,40 +1,49 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	test,
+	vi,
+} from 'bun:test';
 import type { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import { unlinkSync, writeFileSync } from 'node:fs';
-import * as path from 'node:path';
+import * as realFs from 'node:fs';
 
-// Mock the modules BEFORE importing the module under test
+// Mock the modules BEFORE importing the module under test.
+//
+// `spawnSync` is intercepted via the engine's `_internals` DI seam (see
+// AGENTS.md invariant 7 — DI over `mock.module`). The engine binds
+// `spawnSync` into `_internals.spawnSync` at module-load time, so a
+// `mock.module('node:child_process', ...)` cannot intercept those calls; the
+// seam is the supported interception point (mirrors the pattern in
+// src/tools/__tests__/mutation-test.adversarial.test.ts). The fs writes are
+// stubbed via `mock.module` so the test never touches the filesystem.
 const mockSpawnSync = vi.fn<
 	[string, string[], unknown?],
 	ReturnType<typeof spawnSync>
 >();
 const mockWriteFileSync = vi.fn<[string, string], void>();
 const mockUnlinkSync = vi.fn<[string], void>();
-const mockPathJoin = vi.fn<[string, string], string>();
 
-vi.mock('node:child_process', () => ({
-	spawnSync: (...args: unknown[]) =>
-		mockSpawnSync(...(args as [string, string[], unknown?])),
-}));
-
-vi.mock('node:fs', () => ({
+mock.module('node:fs', () => ({
+	...realFs,
 	unlinkSync: (...args: unknown[]) => mockUnlinkSync(...(args as [string])),
 	writeFileSync: (...args: unknown[]) =>
 		mockWriteFileSync(...(args as [string, string])),
 }));
 
-vi.mock('node:path', () => ({
-	default: {
-		join: (...args: unknown[]) => mockPathJoin(...(args as [string, string])),
-	},
-}));
-
 // Import after mocks are set up
 import {
+	_internals as engineInternals,
 	executeMutation,
 	type MutationPatch,
 } from '../../../src/mutation/engine';
+
+// Saved real spawnSync so it can be restored after each test, keeping the
+// seam injection isolated from other test files.
+let originalSpawnSync: typeof engineInternals.spawnSync;
 
 describe('executeMutation - shell injection mitigation', () => {
 	const workingDir = '/fake/workdir';
@@ -45,7 +54,12 @@ describe('executeMutation - shell injection mitigation', () => {
 
 		mockWriteFileSync.mockReturnValue(undefined as unknown as undefined);
 		mockUnlinkSync.mockReturnValue(undefined as unknown as undefined);
-		mockPathJoin.mockImplementation((...args: string[]) => args.join('/'));
+
+		// Inject the spawnSync spy through the engine's DI seam, saving the
+		// real binding for restoration in afterEach.
+		originalSpawnSync = engineInternals.spawnSync;
+		engineInternals.spawnSync =
+			mockSpawnSync as unknown as typeof engineInternals.spawnSync;
 
 		// Default: successful git apply and revert
 		mockSpawnSync.mockImplementation(
@@ -68,7 +82,11 @@ describe('executeMutation - shell injection mitigation', () => {
 	});
 
 	afterEach(() => {
+		// Restore the real spawnSync binding so the seam injection does not
+		// leak into other tests/files.
+		engineInternals.spawnSync = originalSpawnSync;
 		vi.restoreAllMocks();
+		mock.restore();
 	});
 
 	describe('patch.id sanitization', () => {

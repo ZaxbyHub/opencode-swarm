@@ -194,6 +194,9 @@ const ALWAYS_PROTECTED_PREFIXES = ['.git/', '.git\\'];
 const PROTECTED_PATH_DEFAULTS = [
 	'.git',
 	'.github/workflows',
+	// Plugin config — a full-auto agent must not edit the config that
+	// controls full-auto itself (e.g. clearing `full_auto.locked`).
+	'.opencode',
 	'.swarm',
 	'package.json',
 	'package-lock.json',

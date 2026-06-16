@@ -60,6 +60,8 @@ Each entry under `agents` accepts the following optional fields:
 | `temperature` | `0–2` | Sampling temperature override. |
 | `disabled` | `boolean` | Skip this agent entirely (it will not be registered). |
 | `fallback_models` | `string[]` (max 3) | Models to retry on transient errors (429/503/timeout). |
+| `reasoning` | `{ effort?: "low" \| "medium" \| "high" \| "max" }` | Provider-native extended-reasoning block. Forwarded to the OpenCode SDK's `AgentConfig` as-is. See [Why `reasoning` is separate from `variant`](#why-reasoning-and-thinking-are-separate-from-variant) below. |
+| `thinking` | `{ type?: "enabled" \| "disabled"; budget_tokens?: number (positive int) }` | Provider-native extended-thinking block. Forwarded to the OpenCode SDK's `AgentConfig` as-is. See [Why `reasoning` is separate from `variant`](#why-reasoning-and-thinking-are-separate-from-variant) below. |
 
 ### Why `variant` is its own field
 
@@ -108,6 +110,25 @@ If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medi
   }
 }
 ```
+
+### Why `reasoning` and `thinking` are separate from `variant`
+
+`variant` is the swarm plugin's own reasoning-effort field. It is forwarded to the OpenCode SDK as `variant` (a generic OpenCode hook) and is interpreted by OpenCode's agent loader. `reasoning` and `thinking` are **provider-native** extended-reasoning / extended-thinking blocks (e.g. Anthropic Claude's `reasoning.effort` and `thinking.budget_tokens`). They are passed through to the OpenCode SDK's `AgentConfig` and consumed by the provider's native API. The two mechanisms are independent and can be set on the same agent — users control how their provider interprets each:
+
+```json
+{
+  "agents": {
+    "critic": {
+      "model": "anthropic/claude-opus-4-6",
+      "variant": "high",
+      "reasoning": { "effort": "high" },
+      "thinking": { "type": "enabled", "budget_tokens": 10000 }
+    }
+  }
+}
+```
+
+Invalid `reasoning.effort` values (anything outside `low | medium | high | max`) and non-positive `thinking.budget_tokens` values will produce a Zod parse error at config load. Unknown fields (typos, future provider-specific options) are stripped by Zod's default behavior — they will not reach the agent factory.
 
 ## `default_agent` — selecting which agents are exposed as primary
 
@@ -191,6 +212,78 @@ Runs a type-checking or linting command after the coder agent completes.
 {
   "incremental_verify": {
     "command": ["python", "-m", "mypy", "--config-file", "mypy.ini"]
+  }
+}
+```
+
+### full_auto
+
+Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through a `critic_oversight` review pass before they execute. As of the first-class toggle, runtime activation is decoupled from config enablement: a user activates Full-Auto per session via `/swarm full-auto on [mode]`, and `/swarm full-auto off` disarms (returns to normal interactive operation).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | **Deprecated as a gate.** Retained for backward compatibility with v1 configs. When `true`, fires the legacy init-time critic-model advisory; does NOT arm or disarm the v2 hooks. Use `locked` for a hard-off. |
+| `locked` | boolean | `false` | Administrative hard-off. When `true`, `/swarm full-auto on` is refused at runtime (with an explicit error). `off` and `status` still work. The lock ORs across config levels: a repo-controlled project config cannot override a user-level `locked: true`. |
+| `mode` | `assisted` \| `supervised` \| `strict` | `supervised` | Determines the classifier's escalation profile. `assisted` consults the critic only on deterministic policy escalations. `supervised` (default) routes risky/high-impact actions through the critic. `strict` routes ALL plan mutations through the critic. |
+| `critic_model` | string | _(unset)_ | Optional override for the critic's model. Defaults to `agents.critic.model`. When both this and `agents.architect.model` are explicitly set to the same string, an advisory warns that independent judgment is weakened. |
+| `max_interactions_per_phase` | number | `50` | Hard cap on architect interactions per phase. |
+| `deadlock_threshold` | number | `3` | Consecutive `escalate_critic` verdicts before the run is paused. |
+| `escalation_mode` | `pause` \| `terminate` | `pause` | What to do when denial or deadlock thresholds are hit. |
+| `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
+| `denials.max_total` | number | `20` | Pause after N total denials in the session. |
+| `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+
+**Fail-closed semantics:**
+- Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
+- A `paused` or `terminated` run state blocks every non-read-only tool for the session until `/swarm full-auto on` (resume) or `/swarm full-auto off` (disarm).
+- A corrupt `.swarm/full-auto-state.json` fail-closed-blocks non-read-only tools project-wide; `/swarm full-auto status` reports this as `UNREADABLE` with the restore instructions.
+
+**Example — refuse runtime activation entirely:**
+```json
+{
+  "full_auto": {
+    "locked": true
+  }
+}
+```
+
+**Example — change default mode to strict for all sessions:**
+```json
+{
+  "full_auto": {
+    "mode": "strict"
+  }
+}
+```
+
+### auto_review
+
+Opt-in automatic review of the execution diff by the reviewer agent — its own configured model (`agents.reviewer.model`), in a fresh ephemeral session, with write/edit/patch disabled. This is the "second model reviews the work in a clean context" pattern used by Claude Code's auto-review and Codex's review model.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable automatic execution-diff review |
+| `trigger` | `"task_completion" \| "phase_boundary" \| "both"` | `"phase_boundary"` | When to dispatch: after `update_task_status` → `completed`, at `phase_complete`, or both |
+| `timeout_ms` | number | `300000` | Reviewer dispatch timeout (10s–30min) |
+| `max_diff_kb` | number | `256` | Maximum diff size included in the review prompt (16–2048 KiB). Larger diffs are truncated to this size; if the raw diff exceeds twice this cap, collection aborts and the pass is skipped with an `error` event. |
+
+Behavior:
+
+- **Advisory and fire-and-forget** — the tool call that triggered the review is never delayed; dispatches are deduplicated per session with a 60-second cooldown (repeated `phase_complete` retries do not spam review sessions).
+- Verdicts are persisted as **durable review receipts** under `.swarm/review-receipts/` (scope-fingerprinted over the reviewed diff) and an `auto_review` event is appended to `.swarm/events.jsonl`.
+- A **REJECTED** verdict injects an `[AUTO-REVIEW]` advisory (top findings + required fixes) into the architect's next prompt; an unparseable response injects an UNVERIFIED advisory; APPROVED stays silent.
+- A clean working tree or missing git skips the pass with a `skipped` event.
+
+Independently of `auto_review`, every returning reviewer Task delegation now has its `VERDICT`/`RISK`/`ISSUES`/`FIXES` block parsed and persisted as a review receipt — a durable machine-readable record of prior judgments that future re-review and drift-verification consumers can build on (the parser is fail-safe: ambiguous or missing verdict lines persist nothing).
+
+```json
+{
+  "auto_review": {
+    "enabled": true,
+    "trigger": "both"
+  },
+  "agents": {
+    "reviewer": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": ["opencode/big-pickle"] }
   }
 }
 ```
@@ -291,6 +384,86 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `maintenance.lowUtilityMinAgeDays` | number | `30` | Age threshold used by `/swarm memory stale` low-utility reporting |
 
 Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+
+### PR Monitor
+
+GitHub PR subscription and background polling infrastructure (FR-001). When enabled, the architect can subscribe to GitHub PRs and receive real-time status updates via the AutomationEventBus. Uses the `gh` CLI for all GitHub API calls; requires `gh` to be authenticated (`gh auth login`).
+
+**Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately.
+
+**Durable store**: subscription state is persisted to `.swarm/pr-monitor/subscriptions.jsonl` (append-only JSONL), folded by `correlationId` (sessionID + repoFullName + prNumber). Multiple sessions may independently subscribe to the same PR using a composite key.
+
+**Event types**: all PR events flow through the AutomationEventBus with types:
+- `pr.subscribed`, `pr.unsubscribed`, `pr.status.updated`
+- `pr.ci.failed`, `pr.ci.passed`
+- `pr.new.comment`, `pr.merge.conflict`, `pr.merge.conflict_resolved`
+- `pr.merged`, `pr.closed`
+- `pr.review.approved`, `pr.review.changes_requested`
+- `pr.subscription.expired`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master feature flag — enables PR monitoring |
+| `poll_interval_seconds` | number | `60` | Seconds between poll cycles (30–300) |
+| `max_subscriptions` | number | `20` | Maximum concurrent PR subscriptions (1–100) |
+| `max_prs_per_cycle` | number | `5` | Maximum PRs polled per cycle (1–20) |
+| `max_concurrent_pr_polls` | number | `3` | Maximum concurrent PR polls (1–10) |
+| `poll_timeout_ms` | number | `30000` | Per-poll timeout in milliseconds (5000–120000) |
+| `failure_threshold` | number | `5` | Consecutive failures before circuit breaker trips (1–20) |
+| `cooldown_seconds` | number | `30` | Circuit breaker cooldown in seconds (5–600) |
+| `max_cooldown_seconds` | number | `300` | Maximum cooldown with exponential backoff in seconds (30–3600) |
+| `cleanup_ttl_days` | number | `7` | TTL in days for stale subscription cleanup (1–90) |
+| `auto_unsubscribe_on_merge` | boolean | `true` | Automatically unsubscribe when PR is merged |
+| `auto_unsubscribe_on_close` | boolean | `true` | Automatically unsubscribe when PR is closed (without merge) |
+| `notify_ci_failure` | boolean | `true` | Emit notification on CI failure |
+| `notify_new_comments` | boolean | `true` | Emit notification on new comments |
+| `notify_merge_conflict` | boolean | `true` | Emit notification on merge conflict detection |
+| `auto_pr_feedback` | boolean | `false` | When enabled, injects `[MODE: PR_FEEDBACK pr="URL"]` signal on CI failure and merge conflict events |
+
+**Example** — enable PR Monitor with defaults:
+
+```json
+{
+  "pr_monitor": {
+    "enabled": true
+  }
+}
+```
+
+**Example** — customize polling parameters:
+
+```json
+{
+  "pr_monitor": {
+    "enabled": true,
+    "poll_interval_seconds": 30,
+    "max_subscriptions": 50,
+    "max_concurrent_pr_polls": 5,
+    "failure_threshold": 3,
+    "auto_unsubscribe_on_merge": true
+  }
+}
+```
+
+**GH CLI wrappers** (`src/git/pr.ts`): the PR monitor infrastructure uses five `gh`-based wrapper functions exported for use by the polling engine:
+- `getPRStatus(prNumber, repoFullName, cwd)` — fetches PR state, mergeability, and status check rollup via `gh pr view --json`
+- `getPRChecks(prNumber, repoFullName, cwd)` — fetches CI check results via `gh pr checks --json`
+- `getPRComments(prNumber, repoFullName, cwd, since?)` — fetches issue and review comments via `gh api` (merged, deduplicated)
+- `getMergeState(prNumber, repoFullName, cwd)` — fetches mergeable state and mergeStateStatus via `gh pr view --json`
+- `getPRReviewState(prNumber, repoFullName, cwd)` — fetches review decision and pending reviewer count via `gh pr view --json`; returns `ReviewStateResult` (`reviewDecision`, `reviewRequestCount`)
+
+All five wrappers (`getPRStatus`, `getPRChecks`, `getPRComments`, `getMergeState`, `getPRReviewState`) use `_internals.ghExecAsync` — they share the same DI seam pattern (see `gitignore-warning.ts:_internals`). No synchronous `ghExec`-based wrappers are currently exposed for PR monitoring.
+
+**Polling worker** (`src/background/pr-monitor-worker.ts`): `PrMonitorWorker` is a standalone background class with start/stop/dispose lifecycle. It implements **two-phase change detection**:
+1. `computeChanges()` — fetches current PR state (status, comments, merge, review) via async gh wrappers, then diffs against the last stored snapshot to produce a list of events and snapshot updates
+2. `applyChanges()` — atomically emits events and persists snapshot updates
+
+The worker is **lazily started** on first subscription (gated by `pr_monitor.enabled` + `gh` availability check). It is **cooperative** — each poll cycle is interruptible at 6 guard points via a `CancellationToken`. Plugin wiring in `src/index.ts` registers signal handlers (SIGTERM/SIGINT) and ensures the worker is stopped on shutdown. Stale subscriptions are removed via `sweepStale()` on each cycle.
+
+**Event subscribers** (`src/background/pr-event-subscribers.ts`): three subscribers attach to the AutomationEventBus and deliver PR advisories to subscribed sessions:
+- CI failure/passed notifications
+- New comment alerts
+- Merge conflict detection
 
 ### todo_gate
 
@@ -484,6 +657,107 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
 
+## Skill Improver Consolidation
+
+`skill_improver` can run manually or at safe scheduled cadence points.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables the skill-improver service and consolidation command. |
+| `trigger` | `"manual" \| "scheduled"` | `"manual"` | `scheduled` allows opportunistic startup and phase-complete consolidation. |
+| `max_calls_per_day` | number | `10` | Hard daily quota for skill-improver proposal calls. |
+| `consolidation_interval_hours` | number | `24` | Minimum hours between scheduled consolidation runs. |
+| `consolidation_max_calls_per_run` | number | `1` | Per-run reservation for scheduled consolidation, capped by `max_calls_per_day`. |
+| `write_mode` | `"proposal" \| "draft_skills"` | `"proposal"` | Whether consolidation only writes improver proposals or also drafts generated skill proposals. |
+
+Scheduled consolidation is fire-and-forget, validates drafted skills against
+matching eval fixtures, and never auto-activates skills. Use `/swarm
+consolidate` for an explicit pass.
+
+## External Skills Curation Pipeline
+
+Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.
+
+**Requires `curation_enabled: true`** to activate. When disabled, all 7 external skill tools return a disabled message.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `curation_enabled` | boolean | `false` | Master switch for the external skill curation pipeline |
+| `max_candidates` | number | `500` | Maximum candidates in the quarantine store (1–10000) |
+| `max_bytes_per_candidate` | number | `1048576` | Max file size per candidate in bytes (1024–10485760) |
+| `eviction_policy` | `"fifo"` | `"fifo"` | Eviction strategy when `max_candidates` is reached |
+| `ttl_days` | number | `90` | Candidate TTL in days before automatic eviction (1–3650) |
+| `evaluation_enabled` | boolean | `false` | Enable SME evaluation workflow for candidates |
+| `sources` | array | `[]` | Discovery source configurations (see DiscoverySource schema) |
+| `max_candidates_per_discovery` | number | `50` | Max candidates per discovery run (1–1000) |
+| `max_concurrent_fetches` | number | `5` | Max concurrent source fetches (1–20) |
+| `fetch_timeout_ms` | number | `30000` | Per-fetch timeout in milliseconds (1000–300000) |
+
+### Discovery sources
+
+Each source in `sources` must match `DiscoverySourceSchema`:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | `"github" \| "url" \| "collection" \| "manual_import"` | Yes | — | Source type |
+| `location` | string | Yes | — | Source URL, file path, or identifier |
+| `enabled` | boolean | No | `true` | Whether this source is active |
+| `trust_level` | `"low" \| "medium" \| "high"` | No | `"low"` | Trust level for gate modulation |
+
+### Available tools
+
+When `curation_enabled: true`, the architect agent gains access to 7 tools:
+
+| Tool | Description |
+|------|-------------|
+| `external_skill_discover` | Discover external skill candidates from configured sources |
+| `external_skill_list` | List candidates in the quarantine store |
+| `external_skill_inspect` | Inspect a specific candidate by ID |
+| `external_skill_promote` | Promote a validated candidate to an active generated skill |
+| `external_skill_reject` | Reject a candidate after evaluation |
+| `external_skill_delete` | Delete a candidate from the quarantine store |
+| `external_skill_revoke` | Revoke a previously promoted skill |
+
+**Example** — Enable external skill curation with a URL source:
+
+```json
+{
+  "external_skills": {
+    "curation_enabled": true,
+    "max_candidates": 500,
+    "ttl_days": 90,
+    "sources": [
+      {
+        "type": "url",
+        "location": "https://example.com/skills/",
+        "enabled": true,
+        "trust_level": "medium"
+      }
+    ]
+  }
+}
+```
+
+### Troubleshooting
+
+**"All tools return disabled message"**
+→ Check `external_skills.curation_enabled: true` is set in your config. The pipeline is disabled by default.
+
+**"Discover says source not in configured sources"**
+→ The `location` field in your source config must match the URL passed to discover. URLs are validated against configured sources before fetching.
+
+**"Candidate fails validation but content looks safe"**
+→ Check the `trust_level` setting. With `low` trust, warning-level findings are promoted to errors. Try `medium` or `high` trust for less strict gating.
+
+**"Promote fails with 'file already exists'"**
+→ A skill with the same slug already exists in the target directory. Revoke the existing skill first, or choose a different candidate.
+
+**"Promote fails with 'content hash mismatch'"**
+→ The candidate was modified after discovery (TOCTOU detection). Re-discover the candidate to get a fresh evaluation.
+
+**"Revoke fails with 'cannot extract skill slug from history'"**
+→ The candidate's promotion history may be corrupted or missing. The revoke tool needs the slug from the original promotion record to locate the SKILL.md file. If the history was tampered with, delete the candidate and manually remove the SKILL.md file.
+
 ## Turbo Configuration
 
 Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced).
@@ -533,6 +807,19 @@ Lean Turbo is a lane-planning execution strategy that partitions phase tasks int
 ```
 
 See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Turbo lane planning algorithm and conflict resolution rules.
+
+## Execution Profile
+
+The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`) controls phase-level execution preferences. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `parallelization_enabled` | boolean | `false` | Enable parallel task execution within phases (composes with Lean Turbo) |
+| `max_concurrent_tasks` | number | `1` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–6) |
+| `council_parallel` | boolean | `false` | Allow council review phases to run council members in parallel |
+| `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
+
+**Auto-proceed:** When `true`, the swarm advances from one phase to the next without asking for confirmation. The session override (`/swarm auto-proceed on|off`) always takes precedence over the plan default. The architect sees the effective value via an injected `AUTO PROCEED STATUS` banner. The first-boundary nudge offers to enable it once per session when the plan default is `false` and no session override is set.
 
 ## QA gates reference
 

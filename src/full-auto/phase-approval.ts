@@ -101,8 +101,8 @@ export function verifyFullAutoPhaseApproval(
 	config: PluginConfig,
 ): PhaseApprovalDecision {
 	const fullAutoConfig = config.full_auto;
-	const enabled = fullAutoConfig?.enabled === true;
-	if (!enabled) return { ok: true, reason: 'full_auto disabled' };
+	// First-class toggle: no config.full_auto.enabled gate — the active
+	// per-session run state (checked below) is the sole runtime authority.
 	if (!sessionID) return { ok: true, reason: 'no sessionID — gate skipped' };
 	if (!isFullAutoRunActive(directory, sessionID)) {
 		return { ok: true, reason: 'no active Full-Auto run' };

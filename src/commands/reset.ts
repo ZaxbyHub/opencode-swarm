@@ -13,6 +13,10 @@ export async function handleResetCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
+	// NOTE: Uses synchronous fs calls (existsSync, unlinkSync, rmSync) intentionally.
+	// reset is a single-pass synchronous cleanup path — no stage coordination needed.
+	// close.ts uses async fs/promises for its multi-stage pipeline.
+
 	const hasConfirm = args.includes('--confirm');
 
 	if (!hasConfirm) {

@@ -312,4 +312,41 @@ describe('syntax_check tool', () => {
 			expect(result.summary).toContain('Syntax errors found');
 		});
 	});
+
+	// ============ Deep-nesting stack traversal (DD-C018) ============
+
+	describe('deep-nesting stack traversal (DD-C018)', () => {
+		it('handles pathologically deeply nested JSON without stack overflow (10,000 levels)', async () => {
+			// Build a deeply nested JSON object: [[[[...(10,000 levels)...]]]]
+			// This would overflow the JS call stack with a recursive walker but
+			// must succeed with the explicit stack-based traversal in
+			// syntax-check.ts (DD-C018).
+			const DEPTH = 10_000;
+			const nested = '['.repeat(DEPTH) + '1' + ']'.repeat(DEPTH);
+			const testFile = path.join(tmpDir, 'deep.js');
+			// Wrap in a JS variable assignment so it parses as a JS expression
+			fs.writeFileSync(testFile, `const x = ${nested};`);
+
+			const input: SyntaxCheckInput = {
+				changed_files: [{ path: testFile, additions: 1 }],
+				mode: 'changed',
+			};
+
+			// Must complete without throwing (no stack overflow) and without
+			// hanging. We allow the verdict to be pass or fail depending on
+			// whether the parser treats extreme nesting as a syntax error, but
+			// it MUST not throw.
+			let caughtError: unknown;
+			let result: Awaited<ReturnType<typeof syntaxCheck>> | undefined;
+			try {
+				result = await syntaxCheck(input, tmpDir);
+			} catch (e) {
+				caughtError = e;
+			}
+			expect(caughtError).toBeUndefined();
+			expect(result).toBeDefined();
+			// verdict must be a valid value (no uncaught exception from traversal)
+			expect(['pass', 'fail', 'skipped']).toContain(result?.verdict);
+		});
+	});
 });

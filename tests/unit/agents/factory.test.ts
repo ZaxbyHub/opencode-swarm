@@ -147,6 +147,59 @@ describe('createAgents', () => {
 			).toBeUndefined();
 		});
 
+		it('reasoning override is preserved through parsing and applied to agent config (issue #1220)', () => {
+			const config = {
+				agents: {
+					critic: {
+						model: 'anthropic/claude-opus-4-6',
+						reasoning: { effort: 'high' },
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const critic = agents.find((a) => a.name === 'critic');
+			expect(critic?.config.model).toBe('anthropic/claude-opus-4-6');
+			expect(
+				(critic?.config as { reasoning?: unknown } | undefined)?.reasoning,
+			).toEqual({ effort: 'high' });
+		});
+
+		it('thinking override is preserved through parsing and applied to agent config (issue #1220)', () => {
+			const config = {
+				agents: {
+					reviewer: {
+						model: 'anthropic/claude-sonnet-4-6',
+						thinking: { type: 'enabled', budget_tokens: 10000 },
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+			expect(reviewer?.config.model).toBe('anthropic/claude-sonnet-4-6');
+			expect(
+				(reviewer?.config as { thinking?: unknown } | undefined)?.thinking,
+			).toEqual({ type: 'enabled', budget_tokens: 10000 });
+		});
+
+		it('reasoning and thinking are omitted when not configured (issue #1220)', () => {
+			const config = {
+				agents: {
+					coder: { model: 'custom/model' },
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			expect(
+				(coder?.config as { reasoning?: unknown } | undefined)?.reasoning,
+			).toBeUndefined();
+			expect(
+				(coder?.config as { thinking?: unknown } | undefined)?.thinking,
+			).toBeUndefined();
+		});
+
 		it('auto-splits variant from 3-segment model string', () => {
 			const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 			const config = {
@@ -434,6 +487,124 @@ describe('createAgents', () => {
 			expect(prompt).not.toContain(
 				"the active swarm's coder agent = @{{AGENT_PREFIX}}coder",
 			);
+		});
+
+		it('merges top-level agents with default swarm agents config (swarm-specific takes precedence)', () => {
+			// Regression test for issue: models configured for agents aren't respected when both
+			// top-level agents and swarms are configured. The fix ensures that:
+			// 1. Top-level agents are merged into the default swarm
+			// 2. Swarm-specific agents take precedence over top-level agents
+			const config = {
+				agents: {
+					coder: {
+						model: 'top-level/model',
+					},
+					explorer: {
+						model: 'top-level/explorer',
+						temperature: 0.3,
+					},
+				},
+				swarms: {
+					default: {
+						agents: {
+							coder: {
+								// This swarm-specific config overrides top-level
+								model: 'swarm-specific/model',
+								temperature: 0.8,
+							},
+						},
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			const explorer = agents.find((a) => a.name === 'explorer');
+
+			// Swarm-specific coder model takes precedence
+			expect(coder?.config.model).toBe('swarm-specific/model');
+			expect(coder?.config.temperature).toBe(0.8);
+
+			// Top-level explorer is still respected
+			expect(explorer?.config.model).toBe('top-level/explorer');
+			expect(explorer?.config.temperature).toBe(0.3);
+		});
+
+		it('top-level agents are respected when swarms config exists with default swarm', () => {
+			// Another regression test: users expect top-level agents to work even when
+			// swarms are configured, as long as the default swarm exists
+			const config = {
+				agents: {
+					coder: {
+						model: 'custom/coder-model',
+					},
+					reviewer: {
+						model: 'custom/reviewer-model',
+						temperature: 0.5,
+					},
+				},
+				swarms: {
+					default: {
+						name: 'Default',
+						// No agents specified in the swarm itself
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+			const coder = agents.find((a) => a.name === 'coder');
+			const reviewer = agents.find((a) => a.name === 'reviewer');
+
+			// Top-level agent configs should be respected
+			expect(coder?.config.model).toBe('custom/coder-model');
+			expect(reviewer?.config.model).toBe('custom/reviewer-model');
+			expect(reviewer?.config.temperature).toBe(0.5);
+		});
+
+		it('merges top-level agents with non-default swarms (e.g., custom swarm names)', () => {
+			// Regression test: users with non-default swarm names like "fast", "precise", "local"
+			// should also get top-level agents merged. Previously, the merge only worked
+			// for swarms named "default".
+			const config = {
+				agents: {
+					coder: {
+						model: 'top-level/coder',
+						temperature: 0.3,
+					},
+					reviewer: {
+						model: 'top-level/reviewer',
+					},
+				},
+				swarms: {
+					fast: {
+						agents: {
+							coder: {
+								// Swarm-specific override for coder
+								model: 'fast-swarm/coder',
+							},
+						},
+					},
+					precise: {
+						// No agents specified - should inherit from top-level
+						agents: undefined,
+					},
+				},
+			};
+
+			const agents = createAgents(config as unknown as PluginConfig);
+
+			// For the "fast" swarm: coder should use fast-swarm override, reviewer from top-level
+			const fastCoder = agents.find((a) => a.name === 'fast_coder');
+			const fastReviewer = agents.find((a) => a.name === 'fast_reviewer');
+			expect(fastCoder?.config.model).toBe('fast-swarm/coder');
+			expect(fastReviewer?.config.model).toBe('top-level/reviewer');
+
+			// For the "precise" swarm: both should use top-level configs
+			const preciseCoder = agents.find((a) => a.name === 'precise_coder');
+			const preciseReviewer = agents.find((a) => a.name === 'precise_reviewer');
+			expect(preciseCoder?.config.model).toBe('top-level/coder');
+			expect(preciseCoder?.config.temperature).toBe(0.3);
+			expect(preciseReviewer?.config.model).toBe('top-level/reviewer');
 		});
 	});
 

@@ -77,7 +77,7 @@ describe('handleHelpCommand() — Task 2.3 changes', () => {
 			const ctx: CommandContext = { ...baseCtx, args: ['plan'] };
 			const result = await handleHelpCommand(ctx);
 			expect(result).toContain('## /swarm plan');
-			expect(result).toContain('Show plan');
+			expect(result).toContain('Show current plan');
 		});
 
 		test('returns detailed help for "agents" command', async () => {

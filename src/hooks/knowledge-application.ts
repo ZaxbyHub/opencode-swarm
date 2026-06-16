@@ -10,12 +10,12 @@ import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import {
-	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
-	rewriteKnowledge,
+	transactKnowledge,
 } from './knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -32,25 +32,28 @@ export function resolveApplicationLogPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-application.jsonl');
 }
 
+export const MAX_LEGACY_APPLICATION_LOG_ENTRIES = 5000;
+
 // ============================================================================
 // Acknowledgment parser
 // ============================================================================
 
 /**
- * Parse explicit knowledge-acknowledgment markers from architect text.
+ * Parse explicit knowledge-acknowledgment markers from architect/delegate text.
  * Recognised forms (case-insensitive, line-anchored or inline):
  *   KNOWLEDGE_APPLIED: <id>
  *   KNOWLEDGE_IGNORED: <id> reason=<reason>
  *   KNOWLEDGE_VIOLATED: <id> reason=<reason>
+ *   KNOWLEDGE_N_A: <id> reason=<reason>   (delegate contract, Change 1)
  */
 export interface ParsedAcknowledgment {
 	id: string;
-	result: 'applied' | 'ignored' | 'violated';
+	result: 'applied' | 'ignored' | 'violated' | 'n_a';
 	reason?: string;
 }
 
 const ACK_PATTERN =
-	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+KNOWLEDGE_)/g;
+	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+KNOWLEDGE_)/g;
 
 export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 	if (!text || typeof text !== 'string') return [];
@@ -64,7 +67,9 @@ export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 				? 'applied'
 				: verb === 'ignored'
 					? 'ignored'
-					: 'violated';
+					: verb === 'n_a'
+						? 'n_a'
+						: 'violated';
 		out.push({ id, result, reason });
 	}
 	return out;
@@ -79,8 +84,35 @@ async function appendAudit(
 	record: KnowledgeApplicationRecord,
 ): Promise<void> {
 	const filePath = resolveApplicationLogPath(directory);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	const dirPath = path.dirname(filePath);
+	await mkdir(dirPath, { recursive: true });
+	let release: (() => Promise<void>) | undefined;
+	try {
+		release = await lockfile.lock(dirPath, {
+			retries: { retries: 50, minTimeout: 10, maxTimeout: 100 },
+			stale: 5000,
+		});
+		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		// Capping is best-effort: the audit line is already durably written above.
+		// A read/write failure here must not propagate and skip subsequent counter
+		// bumps in the caller's accounting path.
+		try {
+			const content = await readFile(filePath, 'utf-8');
+			const lines = content
+				.split('\n')
+				.filter((line) => line.trim().length > 0);
+			if (lines.length > MAX_LEGACY_APPLICATION_LOG_ENTRIES) {
+				const trimmed = lines.slice(-MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
+			}
+		} catch (err) {
+			warn(
+				`[knowledge-application] appendAudit cap failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	} finally {
+		if (release) await release().catch(() => {});
+	}
 }
 
 // ============================================================================
@@ -132,7 +164,7 @@ async function bumpCountersBatch(
 	const now = new Date().toISOString();
 	const applyOne = <T extends SwarmKnowledgeEntry | HiveKnowledgeEntry>(
 		entries: T[],
-	): boolean => {
+	): T[] | null => {
 		let updated = false;
 		for (const e of entries) {
 			const fields = idToFields.get(e.id);
@@ -149,17 +181,17 @@ async function bumpCountersBatch(
 				updated = true;
 			}
 		}
-		return updated;
+		return updated ? entries : null;
 	};
 
+	// Atomically bump counters in swarm knowledge (lock-before-read prevents TOCTOU)
 	const swarmPath = resolveSwarmKnowledgePath(directory);
-	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
-	if (applyOne(swarm)) await rewriteKnowledge(swarmPath, swarm);
+	await transactKnowledge<SwarmKnowledgeEntry>(swarmPath, applyOne);
 
+	// Atomically bump counters in hive knowledge if it exists
 	const hivePath = resolveHiveKnowledgePath();
 	if (existsSync(hivePath)) {
-		const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-		if (applyOne(hive)) await rewriteKnowledge(hivePath, hive);
+		await transactKnowledge<HiveKnowledgeEntry>(hivePath, applyOne);
 	}
 }
 
@@ -227,7 +259,13 @@ export async function recordAcknowledgment(
 	ctx: RecordContext,
 ): Promise<void> {
 	try {
-		const result: KnowledgeApplicationResult = ack.result;
+		// `n_a` (not-applicable) is a valid terminal delegate decision: it must be
+		// recorded as an explicit acknowledgment but MUST NOT be penalized as a
+		// violation. The legacy audit log has no 'n_a' result value, so it is
+		// stored as 'acknowledged' there; the authoritative `n_a` distinction
+		// lives in the event log (knowledge-events.jsonl).
+		const result: KnowledgeApplicationResult =
+			ack.result === 'n_a' ? 'acknowledged' : ack.result;
 		await appendAudit(directory, {
 			timestamp: new Date().toISOString(),
 			phase: ctx.phase,
@@ -240,18 +278,17 @@ export async function recordAcknowledgment(
 			result,
 			reason: ack.reason,
 		});
-		const field: CounterField =
-			result === 'applied'
-				? 'applied_explicit_count'
-				: result === 'ignored'
-					? 'ignored_count'
-					: 'violated_count';
-		// Coalesce the result-field bump and the acknowledged_count bump into
-		// a single read+write per file (F-008).
-		await bumpCountersBatch(directory, [
-			{ ids: [ack.id], field },
-			{ ids: [ack.id], field: 'acknowledged_count' },
-		]);
+		// Always bump acknowledged_count. For applied/ignored/violated also bump
+		// the matching outcome counter; `n_a` bumps acknowledged_count only.
+		const bumps: FieldBump[] = [{ ids: [ack.id], field: 'acknowledged_count' }];
+		if (ack.result === 'applied')
+			bumps.push({ ids: [ack.id], field: 'applied_explicit_count' });
+		else if (ack.result === 'ignored')
+			bumps.push({ ids: [ack.id], field: 'ignored_count' });
+		else if (ack.result === 'violated')
+			bumps.push({ ids: [ack.id], field: 'violated_count' });
+		// Coalesce into a single read+write per file (F-008).
+		await bumpCountersBatch(directory, bumps);
 	} catch (err) {
 		warn(
 			`[knowledge-application] recordAcknowledgment failed: ${
@@ -271,7 +308,7 @@ function utcDayKey(d: Date = new Date()): string {
 export function buildAckDedupKey(
 	sessionId: string,
 	id: string,
-	result: KnowledgeApplicationResult,
+	result: KnowledgeApplicationResult | 'n_a',
 	now: Date = new Date(),
 ): string {
 	return `${sessionId}|${id}|${result}|${utcDayKey(now)}`;
@@ -464,6 +501,3 @@ export const _internals = {
 	resolveApplicationLogPath,
 	buildAckDedupKey,
 };
-
-// Suppress unused warning for lockfile when tests stub it elsewhere.
-void lockfile;

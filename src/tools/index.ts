@@ -18,9 +18,17 @@ export { declare_council_criteria } from './declare-council-criteria';
 export { declare_scope } from './declare-scope';
 export { type DiffErrorResult, type DiffResult, diff } from './diff';
 export { diff_summary } from './diff-summary';
+export { dispatch_lanes } from './dispatch-lanes';
 export { doc_extract, doc_scan } from './doc-scan';
 export { detect_domains } from './domain-detector';
 export { evidence_check } from './evidence-check';
+export { external_skill_delete } from './external-skill-delete';
+export { external_skill_discover } from './external-skill-discover';
+export { external_skill_inspect } from './external-skill-inspect';
+export { external_skill_list } from './external-skill-list';
+export { external_skill_promote } from './external-skill-promote';
+export { external_skill_reject } from './external-skill-reject';
+export { external_skill_revoke } from './external-skill-revoke';
 export { extract_code_blocks } from './file-extractor';
 export { get_approved_plan } from './get-approved-plan';
 export { get_qa_gate_profile } from './get-qa-gate-profile';
@@ -159,6 +167,7 @@ export {
 	type UpdateTaskStatusResult,
 	update_task_status,
 } from './update-task-status';
+export { web_fetch } from './web-fetch';
 export { web_search } from './web-search';
 export { write_drift_evidence } from './write-drift-evidence';
 export { write_final_council_evidence } from './write-final-council-evidence';

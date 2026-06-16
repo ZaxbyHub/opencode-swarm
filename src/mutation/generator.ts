@@ -15,6 +15,17 @@ function slugify(str: string): string {
 }
 
 /**
+ * Strip control characters and quotes from a filename before inserting into
+ * an LLM prompt. This is a defence-in-depth measure against prompt injection
+ * via attacker-controlled filenames.
+ */
+function sanitizeFilename(filename: string): string {
+	// Remove ASCII control characters (0x00–0x1F, 0x7F) and common quote chars
+	// that could be used to break out of the prompt context.
+	return filename.replace(/[\p{Cc}"'`]/gu, '_');
+}
+
+/**
  * Extract a JSON array substring from an LLM response that may include
  * markdown code fences or natural-language preamble/postamble text.
  *
@@ -67,9 +78,13 @@ export async function generateMutants(
 
 	const directory = ctx.directory ?? process.cwd();
 	let ephemeralSessionId: string | undefined;
+	const promptController = new AbortController();
 
-	/** Best-effort session cleanup — never throws. */
+	/** Best-effort session cleanup — never throws.
+	 *  Aborts any in-flight prompt before deleting the session so OpenCode
+	 *  stops writing message rows before the session row is removed. */
 	const cleanup = () => {
+		promptController.abort();
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
 			ephemeralSessionId = undefined;
@@ -78,8 +93,18 @@ export async function generateMutants(
 	};
 
 	try {
-		// 1. Create ephemeral session scoped to project directory
+		// 1. Create ephemeral session scoped to project directory.
+		// Bind to the calling session as parent so OpenCode treats this as
+		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
+			...(ctx?.sessionID
+				? {
+						body: {
+							parentID: ctx.sessionID,
+							title: 'mutation_generator background',
+						},
+					}
+				: {}),
 			query: { directory },
 		});
 		if (!createResult.data) {
@@ -100,7 +125,7 @@ export async function generateMutants(
 			'side-effect-deletion',
 		].join(', ');
 
-		const promptText = `Generate mutation testing patches for the following files: ${files.join(', ')}
+		const promptText = `Generate mutation testing patches for the following files: ${files.map(sanitizeFilename).join(', ')}
 
 Return a JSON array where each element has:
 { id, filePath, functionName, mutationType, patch, lineNumber }
@@ -120,6 +145,7 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 				tools: { write: false, edit: false, patch: false },
 				parts: [{ type: 'text', text: promptText }],
 			},
+			signal: promptController.signal,
 		});
 
 		if (!promptResult.data) {

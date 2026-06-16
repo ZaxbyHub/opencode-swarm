@@ -149,7 +149,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 
 			const report = await executeMutationSuite(
 				[patch],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				undefined,
@@ -193,7 +193,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 
 			const report = await executeMutationSuite(
 				[patch],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				undefined,
@@ -218,7 +218,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 			// NO sourceFiles provided
 			const report = await executeMutationSuite(
 				[patch],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 			);
@@ -257,7 +257,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 
 			const report = await executeMutationSuite(
 				[patch],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				undefined,
@@ -309,7 +309,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 			// Use a small budget (100ms) — equivalent mutant should be skipped so fast that second mutant still gets to run
 			const report = await executeMutationSuite(
 				[patch1, patch2],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				100, // 100ms budget
@@ -370,7 +370,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 			// But mutant 1 should be skipped (no spawnSync for it)
 			const report = await executeMutationSuite(
 				[patch1, patch2, patch3],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				1000, // plenty of budget
@@ -447,7 +447,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 
 			const report = await executeMutationSuite(
 				[patch1, patch2],
-				['echo', 'test'],
+				['bun', 'test'],
 				['test.ts'],
 				tempDir,
 				20, // 20ms budget - should be exceeded by the 50ms delay

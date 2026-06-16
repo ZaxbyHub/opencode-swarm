@@ -18,6 +18,7 @@ export const ORCHESTRATOR_NAME = 'architect' as const;
 
 export const ALL_SUBAGENT_NAMES = [
 	'sme',
+	'researcher',
 	'docs',
 	'docs_design',
 	'designer',
@@ -27,6 +28,7 @@ export const ALL_SUBAGENT_NAMES = [
 	'critic_architecture_supervisor',
 	'curator_init',
 	'curator_phase',
+	'curator_postmortem',
 	'council_generalist',
 	'council_skeptic',
 	'council_domain_expert',

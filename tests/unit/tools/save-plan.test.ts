@@ -492,6 +492,50 @@ describe('save-plan tool verification tests', () => {
 			expect(content).toContain('My Awesome Project');
 		});
 
+		it('Uses OpenSpec-compatible artifacts as the effective spec when .swarm/spec.md is absent', async () => {
+			await fs.rm(path.join(tmpDir, '.swarm', 'spec.md'), { force: true });
+			const specDir = path.join(tmpDir, 'openspec', 'specs', 'checkout');
+			await fs.mkdir(specDir, { recursive: true });
+			await fs.writeFile(
+				path.join(specDir, 'spec.md'),
+				[
+					'# Checkout',
+					'',
+					'### Requirement: Signed-in checkout',
+					'',
+					'Customers MUST be able to complete checkout after authentication.',
+					'',
+					'#### Scenario: Successful checkout',
+					'- **WHEN** an authenticated customer submits checkout',
+					'- **THEN** the system completes the order.',
+					'',
+				].join('\n'),
+			);
+
+			const result = await executeSavePlan({
+				title: 'OpenSpec Plan',
+				swarm_id: 'mega',
+				phases: [
+					{
+						id: 1,
+						name: 'Implementation',
+						tasks: [{ id: '1.1', description: 'Implement checkout flow' }],
+					},
+				],
+				working_directory: tmpDir,
+			});
+
+			expect(result.success).toBe(true);
+			await expect(
+				fs.access(path.join(tmpDir, '.swarm', 'spec.md')),
+			).rejects.toThrow();
+
+			const planJsonPath = path.join(tmpDir, '.swarm', 'plan.json');
+			const plan = JSON.parse(await fs.readFile(planJsonPath, 'utf-8'));
+			expect(plan.specHash).toMatch(/^[a-f0-9]{64}$/);
+			expect(plan.specMtime).toBeString();
+		});
+
 		it('Save plan with multiple phases and tasks', async () => {
 			const args: SavePlanArgs = {
 				title: 'Multi-Phase Project',

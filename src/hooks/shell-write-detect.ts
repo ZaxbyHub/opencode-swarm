@@ -10,6 +10,16 @@
  */
 
 import * as path from 'node:path';
+import type {
+	BashCommand,
+	BashCompoundList,
+	BashHereDocMarker,
+	BashNode,
+	BashOperator,
+	BashRedirect,
+	BashSubshell,
+	BashWord,
+} from 'bash-parser';
 import parse from 'bash-parser';
 
 /**
@@ -216,11 +226,20 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 /** Extract the text value from an AST Word node. */
 function wordText(node: unknown): string | null {
 	if (!node || typeof node !== 'object') return null;
-	const n = node as Record<string, unknown>;
-	if (n.type === 'Word' && typeof n.text === 'string') {
-		return n.text;
+	if (isBashWord(node)) {
+		return node.text;
 	}
 	return null;
+}
+
+/** Type guard: check if a node is a BashWord. */
+function isBashWord(node: unknown): node is BashWord {
+	return (
+		!!node &&
+		typeof node === 'object' &&
+		(node as BashWord).type === 'Word' &&
+		typeof (node as BashWord).text === 'string'
+	);
 }
 
 /**
@@ -230,16 +249,13 @@ function wordText(node: unknown): string | null {
  * CompoundList (from brace groups) is pushed as a node because it can carry redirections.
  * Subshell is pushed so detectRedirects can see its redirections.
  */
-function collectLeafCommands(node: unknown, out: unknown[]): void {
+function collectLeafCommands(node: BashNode, out: BashNode[]): void {
 	if (!node || typeof node !== 'object') return;
-	const n = node as Record<string, unknown>;
 
-	const type = n.type as string | undefined;
-
-	switch (type) {
+	switch (node.type) {
 		case 'Script':
-			if (Array.isArray(n.commands)) {
-				for (const cmd of n.commands) {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
 					collectLeafCommands(cmd, out);
 				}
 			}
@@ -247,8 +263,8 @@ function collectLeafCommands(node: unknown, out: unknown[]): void {
 
 		case 'Pipeline':
 		case 'Sequence':
-			if (Array.isArray(n.commands)) {
-				for (const cmd of n.commands) {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
 					collectLeafCommands(cmd, out);
 				}
 			}
@@ -257,28 +273,28 @@ function collectLeafCommands(node: unknown, out: unknown[]): void {
 		case 'CompoundList':
 			// CompoundList can carry redirections; push it then recurse into commands.
 			out.push(node);
-			if (Array.isArray(n.commands)) {
-				for (const cmd of n.commands) {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
 					collectLeafCommands(cmd, out);
 				}
 			}
 			break;
 
 		case 'LogicalExpression':
-			if (n.left) collectLeafCommands(n.left, out);
-			if (n.right) collectLeafCommands(n.right, out);
+			if (node.left) collectLeafCommands(node.left, out);
+			if (node.right) collectLeafCommands(node.right, out);
 			break;
 
 		case 'And':
 		case 'Or':
-			if (n.left) collectLeafCommands(n.left, out);
-			if (n.right) collectLeafCommands(n.right, out);
+			if (node.left) collectLeafCommands(node.left, out);
+			if (node.right) collectLeafCommands(node.right, out);
 			break;
 
 		case 'Subshell':
 			// Push subshell so its redirections are detected, then recurse into list.
 			out.push(node);
-			if (n.list) collectLeafCommands(n.list, out);
+			if (node.list) collectLeafCommands(node.list, out);
 			break;
 
 		case 'ProcessSubstitution':
@@ -290,13 +306,13 @@ function collectLeafCommands(node: unknown, out: unknown[]): void {
 			// Only >(...) (Great operator) is a potential write — recurse into inner command.
 			// Skip <(...) (Less operator) since it is read-only.
 			{
-				const op = n.op as Record<string, unknown> | undefined;
-				if (op && typeof op === 'object') {
-					const opType = (op.type as string | undefined)?.toUpperCase();
+				const opNode = node.op;
+				if (opNode && typeof opNode === 'object') {
+					const opType = opNode.type?.toUpperCase();
 					if (opType === 'GREAT') {
 						// >(...) is a write — recurse into the inner command
-						if (n.command) {
-							collectLeafCommands(n.command, out);
+						if (node.command) {
+							collectLeafCommands(node.command, out);
 						}
 					}
 					// LESS operator (<) is read-only — skip entirely
@@ -312,7 +328,7 @@ function collectLeafCommands(node: unknown, out: unknown[]): void {
 /** Extract the command name from a Command/SimpleCommand AST node. */
 function getCommandName(cmd: unknown): string | null {
 	if (!cmd || typeof cmd !== 'object') return null;
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand;
 	if (typeof c.name === 'string') return c.name;
 	return wordText(c.name);
 }
@@ -320,7 +336,7 @@ function getCommandName(cmd: unknown): string | null {
 /** Get the suffix (arguments after command name) from a command node. Returns array of word texts. */
 function getSuffixWords(cmd: unknown): string[] {
 	if (!cmd || typeof cmd !== 'object') return [];
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand;
 	const suffix = c.suffix;
 	if (!Array.isArray(suffix)) return [];
 	return suffix.map((s) => wordText(s) ?? '');
@@ -329,7 +345,7 @@ function getSuffixWords(cmd: unknown): string[] {
 /** Get the prefix from a command node. */
 function _getPrefixWords(cmd: unknown): string[] {
 	if (!cmd || typeof cmd !== 'object') return [];
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand;
 	const prefix = c.prefix;
 	if (!Array.isArray(prefix)) return [];
 	return prefix.map((p) => wordText(p) ?? '');
@@ -342,19 +358,19 @@ function _getPrefixWords(cmd: unknown): string[] {
  *  2. Inline in `suffix` array (simple commands like `echo foo > bar`)
  *  3. Inline in `prefix` array
  */
-function getRedirections(cmd: unknown): unknown[] {
+function getRedirections(cmd: unknown): BashRedirect[] {
 	if (!cmd || typeof cmd !== 'object') return [];
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand | BashCompoundList | BashSubshell;
 
 	// Dedicated redirections array (compound commands)
 	if (Array.isArray(c.redirections)) {
-		return c.redirections as unknown[];
+		return c.redirections as BashRedirect[];
 	}
 
 	// Collect Redirect nodes from suffix and prefix arrays (simple commands)
-	const results: unknown[] = [];
-	const suffix = c.suffix;
-	const prefix = c.prefix;
+	const results: BashRedirect[] = [];
+	const suffix = (c as BashCommand).suffix;
+	const prefix = (c as BashCommand).prefix;
 
 	if (Array.isArray(suffix)) {
 		for (const item of suffix) {
@@ -371,11 +387,11 @@ function getRedirections(cmd: unknown): unknown[] {
 }
 
 /** Check if a node is a Redirect node. */
-function isRedirectNode(node: unknown): boolean {
+function isRedirectNode(node: unknown): node is BashRedirect {
 	return !!(
 		node &&
 		typeof node === 'object' &&
-		(node as Record<string, unknown>).type === 'Redirect'
+		(node as BashRedirect).type === 'Redirect'
 	);
 }
 
@@ -385,8 +401,8 @@ function isRedirectNode(node: unknown): boolean {
  */
 function operatorLabel(op: unknown): string {
 	if (!op || typeof op !== 'object') return 'unknown';
-	const o = op as Record<string, unknown>;
-	const opType = (o.type as string | undefined)?.toUpperCase();
+	const o = op as BashOperator;
+	const opType = o.type?.toUpperCase();
 	switch (opType) {
 		case 'GREAT':
 			return '>';
@@ -452,13 +468,11 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 
 	for (const redirect of redirections) {
 		if (!redirect || typeof redirect !== 'object') continue;
-		const r = redirect as Record<string, unknown>;
+		const r = redirect as BashRedirect;
 		const opNode = r.op;
 		if (!opNode || typeof opNode !== 'object') continue;
 
-		const opType = (
-			(opNode as Record<string, unknown>).type as string | undefined
-		)?.toUpperCase();
+		const opType = opNode.type?.toUpperCase();
 
 		if (!opType || !REDIRECT_ALL_WRITE_TOKENS.has(opType)) continue;
 
@@ -483,27 +497,32 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 function detectHereDocMarkers(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
 	if (!cmd || typeof cmd !== 'object') return results;
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand;
 
 	const suffix = c.suffix;
 	if (!Array.isArray(suffix)) return results;
 
 	for (const item of suffix) {
 		if (!item || typeof item !== 'object') continue;
-		const n = item as Record<string, unknown>;
 		// Here-doc marker: type is 'dless' or 'dlessdash', text is '<<' or '<<-'
-		const type = (n.type as string | undefined)?.toLowerCase();
-		if (type === 'dless' || type === 'dlessdash') {
-			const text = n.text as string | undefined;
+		if (isHereDocMarker(item)) {
 			results.push({
 				category: 'here_doc',
-				operator: text === '<<-' ? '<<-' : '<<',
+				operator: item.text === '<<-' ? '<<-' : '<<',
 				path: null, // marker is not a file path
 			});
 		}
 	}
 
 	return results;
+}
+
+/** Type guard: check if a node is a here-doc marker. */
+function isHereDocMarker(node: unknown): node is BashHereDocMarker {
+	if (!node || typeof node !== 'object') return false;
+	const n = node as BashHereDocMarker;
+	const type = n.type?.toLowerCase();
+	return type === 'dless' || type === 'dlessdash';
 }
 
 /** Detect builtin write commands: cp, mv, install, ln, truncate, dd. */
@@ -1547,8 +1566,8 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	const allWrites: WriteTarget[] = [];
 
 	if (!parseFailed && ast && typeof ast === 'object') {
-		const leafCommands: unknown[] = [];
-		collectLeafCommands(ast, leafCommands);
+		const leafCommands: BashNode[] = [];
+		collectLeafCommands(ast as BashNode, leafCommands);
 
 		for (const cmd of leafCommands) {
 			// Redirections (>, >>, <<, etc.) on any command
@@ -1691,23 +1710,22 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
  */
 function getCdTarget(cmd: unknown): string | null {
 	if (!cmd || typeof cmd !== 'object') return null;
-	const c = cmd as Record<string, unknown>;
-	const nodeType = c.type as string;
-	if (nodeType !== 'SimpleCommand' && nodeType !== 'Command') return null;
+	const c = cmd as BashCommand;
+	if (c.type !== 'SimpleCommand' && c.type !== 'Command') return null;
 	const name = c.name;
 	if (!name || typeof name !== 'object') return null;
-	const n = name as Record<string, unknown>;
-	if ((n.type as string) !== 'Word') return null;
-	const text = n.text as string;
+	const n = name as BashWord;
+	if (n.type !== 'Word') return null;
+	const text = n.text;
 	if (text !== 'cd') return null;
 	// Get the first suffix word (the directory target)
-	const suffix = c.suffix as unknown[] | undefined;
+	const suffix = c.suffix;
 	if (!Array.isArray(suffix) || suffix.length === 0) return null;
 	const first = suffix[0];
 	if (!first || typeof first !== 'object') return null;
-	const firstWord = first as Record<string, unknown>;
-	if ((firstWord.type as string) !== 'Word') return null;
-	const target = firstWord.text as string;
+	const firstWord = first as BashWord;
+	if (firstWord.type !== 'Word') return null;
+	const target = firstWord.text;
 	// Ignore special cd targets
 	if (target === '-' || target === '~' || target === '~' + '/') return null;
 	return target;
@@ -1729,19 +1747,17 @@ interface WriteWithNode {
  * as `collectLeafCommands` so we can match writes by position.
  */
 function collectWritesWithNodes(
-	node: unknown,
+	node: BashNode,
 	out: WriteWithNode[],
 	cwdStack: string[],
 ): void {
 	if (!node || typeof node !== 'object') return;
-	const n = node as Record<string, unknown>;
-	const type = n.type as string | undefined;
 
-	switch (type) {
+	switch (node.type) {
 		case 'Script': {
 			const _globalCwd = cwdStack[0] ?? '/';
-			if (Array.isArray(n.commands)) {
-				for (const cmd of n.commands) {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
 					collectWritesWithNodes(cmd, out, cwdStack);
 				}
 			}
@@ -1754,7 +1770,7 @@ function collectWritesWithNodes(
 			const effectiveCwd = cwdStack[0] ?? '/';
 
 			// Collect writes from the subshell's redirections (if redirect is ON the subshell)
-			const subshellRedirs = n.redirections as unknown[] | undefined;
+			const subshellRedirs = node.redirections;
 			if (Array.isArray(subshellRedirs)) {
 				for (const redirect of subshellRedirs) {
 					const writesFromRedirect = getWritesFromRedirectNode(
@@ -1769,20 +1785,20 @@ function collectWritesWithNodes(
 
 			// Recurse into the subshell's list with a COPY of the stack so
 			// cd mutations inside the subshell do not leak to the parent.
-			if (n.list) {
+			if (node.list) {
 				const subStack = [...cwdStack];
-				collectWritesWithNodes(n.list, out, subStack);
+				collectWritesWithNodes(node.list, out, subStack);
 			}
 			break;
 		}
 
 		case 'CompoundList': {
 			// Process each command in sequence, updating context as we go
-			if (Array.isArray(n.commands)) {
+			if (Array.isArray(node.commands)) {
 				// Track the current stack across iterations; starts as cwdStack,
 				// but after a cd mutation, subsequent commands must use the mutated stack
 				const currentStack = cwdStack;
-				for (const cmd of n.commands) {
+				for (const cmd of node.commands) {
 					// Check for cd command to update context
 					const cdTarget = getCdTarget(cmd);
 					if (cdTarget) {
@@ -1803,8 +1819,8 @@ function collectWritesWithNodes(
 
 		case 'Pipeline':
 		case 'Sequence': {
-			if (Array.isArray(n.commands)) {
-				for (const cmd of n.commands) {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
 					collectWritesWithNodes(cmd, out, cwdStack);
 				}
 			}
@@ -1815,15 +1831,15 @@ function collectWritesWithNodes(
 			// LogicalExpression (&& or ||) — same semantics as And/Or
 			// Process left first (may modify cwd via cd)
 			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
-			if (n.left) {
-				collectWritesWithNodes(n.left, out, cwdStack);
+			if (node.left) {
+				collectWritesWithNodes(node.left, out, cwdStack);
 				// Capture the context AFTER left has been processed (cd may have modified it)
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
-				if (n.right) {
+				if (node.right) {
 					// Use a single-element stack for right; leftContext is the only cwd needed
 					const rightStack = [leftContext];
-					collectWritesWithNodes(n.right, out, rightStack);
+					collectWritesWithNodes(node.right, out, rightStack);
 				}
 			}
 			break;
@@ -1833,14 +1849,14 @@ function collectWritesWithNodes(
 		case 'Or': {
 			// Process left first (may modify cwd via cd)
 			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
-			if (n.left) {
-				collectWritesWithNodes(n.left, out, cwdStack);
+			if (node.left) {
+				collectWritesWithNodes(node.left, out, cwdStack);
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
-				if (n.right) {
+				if (node.right) {
 					// Use a single-element stack for right; leftContext is the only cwd needed
 					const rightStack = [leftContext];
-					collectWritesWithNodes(n.right, out, rightStack);
+					collectWritesWithNodes(node.right, out, rightStack);
 				}
 			}
 			break;
@@ -1908,13 +1924,11 @@ function getWritesFromRedirectNode(
 	_context: string,
 ): WriteTarget[] {
 	if (!redirect || typeof redirect !== 'object') return [];
-	const r = redirect as Record<string, unknown>;
+	const r = redirect as BashRedirect;
 	const opNode = r.op;
 	if (!opNode || typeof opNode !== 'object') return [];
 
-	const opType = (
-		(opNode as Record<string, unknown>).type as string | undefined
-	)?.toUpperCase();
+	const opType = opNode.type?.toUpperCase();
 	if (!opType || !REDIRECT_ALL_WRITE_TOKENS.has(opType)) return [];
 
 	const fileNode = r.file;
@@ -1937,7 +1951,7 @@ function getWritesFromCommandRedirs(
 	context: string,
 ): WriteTarget[] {
 	if (!cmd || typeof cmd !== 'object') return [];
-	const c = cmd as Record<string, unknown>;
+	const c = cmd as BashCommand;
 	const results: WriteTarget[] = [];
 
 	// Also detect here-doc markers first
@@ -2008,7 +2022,7 @@ export function resolveWriteTargets(
 	// Walk the AST and collect writes WITH their context nodes, in order
 	const cwdStack = [cwd];
 	const writesWithNodes: WriteWithNode[] = [];
-	collectWritesWithNodes(ast, writesWithNodes, cwdStack);
+	collectWritesWithNodes(ast as BashNode, writesWithNodes, cwdStack);
 
 	// Deduplicate writes the same way detectPosixWrites does
 	const seen = new Set<string>();

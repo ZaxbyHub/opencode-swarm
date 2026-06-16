@@ -21,6 +21,9 @@ const {
 	darkMatterToKnowledgeEntries,
 	detectDarkMatter,
 } = await import('../../../src/tools/co-change-analyzer');
+const { validateActionability } = await import(
+	'../../../src/hooks/knowledge-validator'
+);
 
 describe('buildCoChangeMatrix', () => {
 	beforeEach(() => {
@@ -622,6 +625,32 @@ describe('darkMatterToKnowledgeEntries', () => {
 		expect(typeof entry.id).toBe('string');
 		expect(typeof entry.created_at).toBe('string');
 		expect(typeof entry.updated_at).toBe('string');
+	});
+
+	it('emits Layer-5 actionable entries (Change 4): scope + predicate fields from the structured pair', () => {
+		// Dark-matter findings know the exact file pair, so the v3 fields are
+		// emitted deterministically — these entries must pass the actionability
+		// gate without LLM enrichment.
+		const pairs = [
+			{
+				fileA: 'src/alpha.ts',
+				fileB: 'src/beta.ts',
+				coChangeCount: 10,
+				npmi: 0.75,
+				lift: 2.5,
+				hasStaticEdge: false,
+				totalCommits: 100,
+				commitsA: 20,
+				commitsB: 15,
+			},
+		];
+		const [entry] = darkMatterToKnowledgeEntries(pairs, 'test-project');
+		expect(entry.applies_to_agents).toEqual(['coder', 'reviewer']);
+		expect(entry.required_actions?.[0]).toContain('alpha.ts');
+		expect(entry.required_actions?.[0]).toContain('beta.ts');
+		expect(entry.verification_checks?.length).toBeGreaterThan(0);
+		expect(entry.triggers).toEqual(['alpha.ts', 'beta.ts']);
+		expect(validateActionability(entry).actionable).toBe(true);
 	});
 
 	it('generates valid confidence in range [0.3, 0.5]', () => {

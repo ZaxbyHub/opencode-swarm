@@ -4,6 +4,7 @@
  */
 
 import { renameSync } from 'node:fs';
+import { loadFullAutoRunState } from '../full-auto/state';
 import { validateSwarmPath } from '../hooks/utils';
 import type { AgentSessionState, TaskWorkflowState } from '../state';
 import {
@@ -37,6 +38,8 @@ export const TRANSIENT_SESSION_FIELDS: ReadonlyArray<{
 	{ name: 'modelFallbackExhausted', resetValue: false },
 	{ name: 'scopeViolationDetected', resetValue: false },
 	{ name: 'delegationActive', resetValue: false },
+	{ name: 'autoProceedOverride', resetValue: undefined },
+	{ name: 'autoProceedNudgeDone', resetValue: undefined },
 ] as const;
 
 const VALID_TASK_WORKFLOW_STATES: TaskWorkflowState[] = [
@@ -182,6 +185,8 @@ export function deserializeAgentSession(
 			typeof s.maxConcurrencyOverride === 'number'
 				? Math.min(64, Math.max(1, s.maxConcurrencyOverride))
 				: undefined,
+		autoProceedOverride: s.autoProceedOverride,
+		autoProceedNudgeDone: s.autoProceedNudgeDone,
 		prmPatternCounts: new Map(),
 		prmEscalationLevel: 0,
 		prmLastPatternDetected: null,
@@ -189,6 +194,7 @@ export function deserializeAgentSession(
 		prmHardStopPending: false,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
+		prSubscriptions: new Map(),
 	};
 }
 
@@ -244,7 +250,10 @@ export async function readSnapshot(
  * Clears existing maps first, then populates from snapshot.
  * Does NOT touch activeToolCalls or pendingEvents (remain at defaults).
  */
-export async function rehydrateState(snapshot: SnapshotData): Promise<void> {
+export async function rehydrateState(
+	snapshot: SnapshotData,
+	directory?: string,
+): Promise<void> {
 	// Await any in-flight rehydrations before clearing agentSessions.
 	// This prevents a race where startAgentSession fires rehydrateSessionFromDisk
 	// and rehydrateState clears the map before it completes.
@@ -345,14 +354,28 @@ export async function rehydrateState(snapshot: SnapshotData): Promise<void> {
 					field.resetValue;
 			}
 
-			// ── Full-auto config reconciliation ──────────────────────────
-			// A snapshot may have fullAutoMode: true from a previous session
-			// where full-auto was enabled in config. If the current config
-			// has full_auto.enabled=false, we must clear the flag to prevent
-			// a false-enabled state where the session thinks full-auto is on
-			// but the intercept hook is disabled.
-			if (session.fullAutoMode && !swarmState.fullAutoEnabledInConfig) {
-				session.fullAutoMode = false;
+			// ── Full-auto run-state reconciliation ────────────────────────
+			// A snapshot may have fullAutoMode: true from a previous process.
+			// Full-Auto is now a first-class runtime toggle, so the durable
+			// per-session run state (.swarm/full-auto-state.json) is the
+			// authority: keep the flag only when that session's run is still
+			// 'running'. Anything else (no run, paused, terminated, no
+			// directory to consult, unreadable state) clears the flag —
+			// fail-closed toward OFF, requiring an explicit
+			// `/swarm full-auto on` to re-engage.
+			if (session.fullAutoMode) {
+				let runStillActive = false;
+				if (directory) {
+					try {
+						const runState = loadFullAutoRunState(directory, sessionId);
+						runStillActive = runState?.status === 'running';
+					} catch {
+						runStillActive = false;
+					}
+				}
+				if (!runStillActive) {
+					session.fullAutoMode = false;
+				}
 			}
 
 			swarmState.agentSessions.set(sessionId, session);
@@ -375,7 +398,7 @@ export async function loadSnapshot(directory: string): Promise<void> {
 
 		const snapshot = await readSnapshot(directory);
 		if (snapshot !== null) {
-			await rehydrateState(snapshot);
+			await rehydrateState(snapshot, directory);
 			// Apply cached plan+evidence to every restored session before the
 			// plugin begins accepting tool calls.
 			for (const session of swarmState.agentSessions.values()) {

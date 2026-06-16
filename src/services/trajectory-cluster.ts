@@ -1,0 +1,465 @@
+/**
+ * Macro-reflector trajectory clustering (Swarm Learning System, Change 6 /
+ * Task 5.3, extended by #1234 Part 4).
+ *
+ * On the skill-improver's scheduled (quota-gated) cadence, scan the last N task
+ * trajectories (`.swarm/evidence/<taskId>/trajectory.jsonl`), cluster repeated
+ * FAILURE motifs by a (tool, kind) signature, and emit one skill PROPOSAL per
+ * recurring motif to `.swarm/skills/proposals/`. Each proposal carries full
+ * provenance: a draft SKILL.md body, the cluster of source task ids (and any
+ * source knowledge ids), a verification predicate, and `applies_to_agents`.
+ *
+ * #1234 Part 4: also mines SUCCESS motifs — recurring multi-step tool sequences
+ * that completed successfully across multiple tasks — and emits them as
+ * `workflow`-type skill proposals tagged `skill_type: workflow`.
+ *
+ * Read-only over the knowledge store; writes only proposal markdown (never
+ * active skills). Fail-open.
+ */
+
+import { mkdir, writeFile } from 'node:fs/promises';
+import * as path from 'node:path';
+import { listEvidenceTaskIds } from '../evidence/manager.js';
+import { readTaskTrajectory } from '../hooks/micro-reflector.js';
+import type { TrajectoryEntry } from '../hooks/trajectory-logger.js';
+import { validateSwarmPath } from '../hooks/utils.js';
+import { warn } from '../utils/logger.js';
+
+/** Trajectories scanned per macro pass (the plan's N=200 window). */
+export const MACRO_TRAJECTORY_WINDOW = 200;
+/** A motif must recur across at least this many distinct tasks to propose. */
+export const MOTIF_MIN_TASKS = 2;
+
+export interface FailureMotif {
+	signature: string;
+	tool: string;
+	kind: string;
+	agent: string;
+	taskIds: string[];
+	sampleVerdicts: string[];
+}
+
+/** Map a failing trajectory step to a coarse failure "kind". */
+function failureKind(e: TrajectoryEntry): string {
+	const tool = (e.tool ?? '').toLowerCase();
+	const ctx = `${e.action ?? ''} ${e.verdict ?? ''}`.toLowerCase();
+	if (tool.includes('test') || /\btest\b/.test(ctx)) return 'test';
+	if (
+		tool.includes('lint') ||
+		tool.includes('sast') ||
+		/lint|typecheck|tsc|type error/.test(ctx)
+	)
+		return 'lint';
+	if (/revert|rollback|checkpoint/.test(ctx)) return 'revert';
+	if (tool === 'edit' || tool === 'write' || tool === 'patch') return 'write';
+	if (tool === 'bash') return 'command';
+	return 'other';
+}
+
+function slugify(s: string): string {
+	return (
+		s
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '-')
+			.replace(/^-+|-+$/g, '')
+			.slice(0, 48) || 'motif'
+	);
+}
+
+/**
+ * Cluster failure motifs across the recent trajectory window. Returns motifs
+ * that recur across >= MOTIF_MIN_TASKS distinct tasks, most-frequent first.
+ */
+export async function gatherFailureMotifs(
+	directory: string,
+	opts: { window?: number; minTasks?: number } = {},
+): Promise<FailureMotif[]> {
+	const window = opts.window ?? MACRO_TRAJECTORY_WINDOW;
+	const minTasks = opts.minTasks ?? MOTIF_MIN_TASKS;
+	try {
+		const allTaskIds = await listEvidenceTaskIds(directory);
+		const taskIds = allTaskIds.slice(-window);
+		const clusters = new Map<
+			string,
+			{
+				tool: string;
+				kind: string;
+				agents: Map<string, number>;
+				taskIds: Set<string>;
+				verdicts: string[];
+			}
+		>();
+
+		for (const taskId of taskIds) {
+			const trajectory = await readTaskTrajectory(directory, taskId);
+			// One signature per task counts once toward that task's contribution,
+			// so a single task spamming retries cannot manufacture a motif.
+			const seenInTask = new Set<string>();
+			for (const e of trajectory) {
+				if (e.result !== 'failure') continue;
+				const tool = (e.tool ?? 'unknown').toLowerCase();
+				const kind = failureKind(e);
+				const signature = `${tool}:${kind}`;
+				let c = clusters.get(signature);
+				if (!c) {
+					c = {
+						tool,
+						kind,
+						agents: new Map(),
+						taskIds: new Set(),
+						verdicts: [],
+					};
+					clusters.set(signature, c);
+				}
+				c.taskIds.add(taskId);
+				const agent = (e.agent ?? 'unknown').toLowerCase();
+				c.agents.set(agent, (c.agents.get(agent) ?? 0) + 1);
+				if (!seenInTask.has(signature) && e.verdict) {
+					c.verdicts.push(e.verdict.slice(0, 80));
+				}
+				seenInTask.add(signature);
+			}
+		}
+
+		const motifs: FailureMotif[] = [];
+		for (const [signature, c] of clusters) {
+			if (c.taskIds.size < minTasks) continue;
+			const agent =
+				[...c.agents.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+				'unknown';
+			motifs.push({
+				signature,
+				tool: c.tool,
+				kind: c.kind,
+				agent,
+				taskIds: [...c.taskIds],
+				sampleVerdicts: c.verdicts.slice(0, 3),
+			});
+		}
+		motifs.sort((a, b) => b.taskIds.length - a.taskIds.length);
+		return motifs;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] motif scan failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return [];
+	}
+}
+
+/** Suggest a verification predicate for a motif kind. */
+function motifPredicate(motif: FailureMotif): string {
+	switch (motif.kind) {
+		case 'test':
+			return 'tool:bun test';
+		case 'lint':
+			return 'tool:biome check';
+		default:
+			// A generic guard the reviewer can specialise; never auto-executed
+			// without a directive author opting in.
+			return `grep:TODO:src/**/*.ts`;
+	}
+}
+
+/** Render a draft SKILL.md proposal body for a motif (with full provenance). */
+export function buildMotifProposal(motif: FailureMotif): string {
+	const lines = [
+		'---',
+		`slug: motif-${slugify(motif.signature)}`,
+		`title: "Avoid recurring ${motif.kind} failures (${motif.tool})"`,
+		`status: proposal`,
+		`applies_to_agents: [${slugify(motif.agent)}]`,
+		`source_task_ids: [${motif.taskIds.map(slugify).join(', ')}]`,
+		`verification_predicate: "${motifPredicate(motif)}"`,
+		`generated_by: macro_reflector`,
+		`generated_at: ${new Date().toISOString()}`,
+		'---',
+		'',
+		`# Recurring ${motif.kind} failure motif: \`${motif.signature}\``,
+		'',
+		`Observed across ${motif.taskIds.length} task(s) for the **${motif.agent}** role.`,
+		'',
+		'## Evidence (source trajectories)',
+		...motif.taskIds.map((id) => `- ${id}`),
+		'',
+		'## Sample failures',
+		...(motif.sampleVerdicts.length > 0
+			? motif.sampleVerdicts.map((v) => `- ${v}`)
+			: ['- (no verdict text recorded)']),
+		'',
+		'## Proposed guard',
+		`Before completing work, the ${motif.agent} should verify via:`,
+		'',
+		'```',
+		motifPredicate(motif),
+		'```',
+		'',
+		'_Auto-generated proposal — review before activating as a skill._',
+	];
+	return lines.join('\n');
+}
+
+export interface MotifProposalResult {
+	motifs: number;
+	proposalsWritten: string[];
+}
+
+/**
+ * Run the macro motif pass and write one proposal per recurring motif. Returns
+ * the written proposal paths. Fail-open; never throws.
+ */
+export async function writeMotifProposals(
+	directory: string,
+	opts: { window?: number; minTasks?: number; maxProposals?: number } = {},
+): Promise<MotifProposalResult> {
+	const result: MotifProposalResult = { motifs: 0, proposalsWritten: [] };
+	try {
+		const motifs = await gatherFailureMotifs(directory, opts);
+		result.motifs = motifs.length;
+		// Nothing to write → do not create the proposals directory (some callers
+		// assert its absence when no drafts/proposals are produced).
+		if (motifs.length === 0) return result;
+		const max = opts.maxProposals ?? 10;
+		const proposalsDir = validateSwarmPath(
+			directory,
+			path.join('skills', 'proposals'),
+		);
+		await mkdir(proposalsDir, { recursive: true });
+		for (const motif of motifs.slice(0, max)) {
+			const slug = `motif-${slugify(motif.signature)}`;
+			const filePath = path.join(proposalsDir, `${slug}.md`);
+			await writeFile(filePath, buildMotifProposal(motif), 'utf-8');
+			result.proposalsWritten.push(filePath);
+		}
+		return result;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] proposal write failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return result;
+	}
+}
+
+// ============================================================================
+// Success motif mining (#1234 Part 4)
+// ============================================================================
+
+/** Minimum number of steps in a trajectory for it to qualify as a workflow. */
+export const SUCCESS_SEQUENCE_MIN_STEPS = 3;
+
+export interface SuccessMotif {
+	signature: string;
+	sequence: Array<{ tool: string; action: string }>;
+	agent: string;
+	taskIds: string[];
+	gatesPassed: string[];
+}
+
+export interface SuccessMotifProposalResult {
+	motifs: number;
+	proposalsWritten: string[];
+}
+
+/**
+ * Extract the ordered tool sequence from a task's trajectory. Returns the
+ * sequence only if the trajectory has >= SUCCESS_SEQUENCE_MIN_STEPS steps AND
+ * every step's `result` is exactly `'success'`. Any non-`'success'` result
+ * disqualifies the whole trajectory — that includes `'failure'` and the
+ * `'pending'` bucket that trajectory-logger `mapResult` assigns to verdicts
+ * like `needs_revision`/`concerns`/`blocked`. The code does not distinguish
+ * among non-success values; they are all rejected, so non-successful patterns
+ * never contaminate success-motif proposals.
+ */
+function extractSuccessSequence(
+	trajectory: TrajectoryEntry[],
+	minSteps: number = SUCCESS_SEQUENCE_MIN_STEPS,
+): Array<{ tool: string; action: string }> | null {
+	if (trajectory.length < minSteps) return null;
+	if (trajectory.some((e) => e.result !== 'success')) return null;
+	return trajectory.map((e) => ({
+		tool: (e.tool ?? 'unknown').toLowerCase(),
+		action: (e.action ?? 'run').toLowerCase(),
+	}));
+}
+
+function sequenceSignature(
+	seq: Array<{ tool: string; action: string }>,
+): string {
+	return seq.map((s) => `${s.tool}:${s.action}`).join('→');
+}
+
+function detectGatesPassed(trajectory: TrajectoryEntry[]): string[] {
+	const gates = new Set<string>();
+	for (const e of trajectory) {
+		if (e.result !== 'success') continue;
+		const tool = (e.tool ?? '').toLowerCase();
+		const ctx = `${e.action ?? ''} ${e.verdict ?? ''}`.toLowerCase();
+		if (tool.includes('test') || /\btest\b/.test(ctx)) gates.add('test');
+		if (
+			tool.includes('lint') ||
+			tool.includes('sast') ||
+			/lint|typecheck|tsc/.test(ctx)
+		)
+			gates.add('lint');
+		if (/review|approve/.test(ctx)) gates.add('review');
+	}
+	return [...gates];
+}
+
+export async function gatherSuccessMotifs(
+	directory: string,
+	opts: { window?: number; minTasks?: number; minSteps?: number } = {},
+): Promise<SuccessMotif[]> {
+	const window = opts.window ?? MACRO_TRAJECTORY_WINDOW;
+	const minTasks = opts.minTasks ?? MOTIF_MIN_TASKS;
+	const minSteps = opts.minSteps ?? SUCCESS_SEQUENCE_MIN_STEPS;
+	try {
+		const allTaskIds = await listEvidenceTaskIds(directory);
+		const taskIds = allTaskIds.slice(-window);
+		const clusters = new Map<
+			string,
+			{
+				sequence: Array<{ tool: string; action: string }>;
+				agents: Map<string, number>;
+				taskIds: Set<string>;
+				gatesPassed: Set<string>;
+			}
+		>();
+
+		for (const taskId of taskIds) {
+			const trajectory = await readTaskTrajectory(directory, taskId);
+			const seq = extractSuccessSequence(trajectory, minSteps);
+			if (!seq) continue;
+			const sig = sequenceSignature(seq);
+			let c = clusters.get(sig);
+			if (!c) {
+				c = {
+					sequence: seq,
+					agents: new Map(),
+					taskIds: new Set(),
+					gatesPassed: new Set(),
+				};
+				clusters.set(sig, c);
+			}
+			c.taskIds.add(taskId);
+			const agent = (trajectory[0]?.agent ?? 'unknown').toLowerCase();
+			c.agents.set(agent, (c.agents.get(agent) ?? 0) + 1);
+			for (const g of detectGatesPassed(trajectory)) {
+				c.gatesPassed.add(g);
+			}
+		}
+
+		const motifs: SuccessMotif[] = [];
+		for (const [signature, c] of clusters) {
+			if (c.taskIds.size < minTasks) continue;
+			const agent =
+				[...c.agents.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+				'unknown';
+			motifs.push({
+				signature,
+				sequence: c.sequence,
+				agent,
+				taskIds: [...c.taskIds],
+				gatesPassed: [...c.gatesPassed],
+			});
+		}
+		motifs.sort((a, b) => b.taskIds.length - a.taskIds.length);
+		return motifs;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] success motif scan failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return [];
+	}
+}
+
+/**
+ * Deterministic slug for a success-motif workflow proposal. Single source of
+ * truth so the proposal frontmatter and the on-disk filename always agree.
+ */
+function workflowSlug(signature: string): string {
+	return `workflow-${slugify(signature.slice(0, 48))}`;
+}
+
+export function buildWorkflowProposal(motif: SuccessMotif): string {
+	const seqStr = motif.sequence.map((s) => s.tool).join(' → ');
+	const slug = workflowSlug(motif.signature);
+	const lines = [
+		'---',
+		`slug: ${slug}`,
+		`title: "Successful workflow: ${seqStr}"`,
+		`status: proposal`,
+		`skill_type: workflow`,
+		`applies_to_agents: [${slugify(motif.agent)}]`,
+		`source_task_ids: [${motif.taskIds.map(slugify).join(', ')}]`,
+		`generated_by: macro_reflector_success`,
+		`generated_at: ${new Date().toISOString()}`,
+		'---',
+		'',
+		`# Successful workflow pattern: ${seqStr}`,
+		'',
+		`Observed across ${motif.taskIds.length} task(s) for the **${motif.agent}** role. All steps completed successfully.`,
+		'',
+		'## Workflow sequence',
+		...motif.sequence.map((s, i) => `${i + 1}. \`${s.tool}\` (${s.action})`),
+		'',
+		'## Gates passed',
+		...(motif.gatesPassed.length > 0
+			? motif.gatesPassed.map((g) => `- ${g}`)
+			: ['- (no explicit gate steps detected)']),
+		'',
+		'## Evidence (source trajectories)',
+		...motif.taskIds.map((id) => `- ${id}`),
+		'',
+		'## Recommended usage',
+		`When starting a task matching this pattern, the ${motif.agent} should follow this proven sequence rather than re-deriving the approach.`,
+		'',
+		'_Auto-generated workflow proposal — review before activating as a skill._',
+	];
+	return lines.join('\n');
+}
+
+export async function writeSuccessMotifProposals(
+	directory: string,
+	opts: {
+		window?: number;
+		minTasks?: number;
+		minSteps?: number;
+		maxProposals?: number;
+	} = {},
+): Promise<SuccessMotifProposalResult> {
+	const result: SuccessMotifProposalResult = {
+		motifs: 0,
+		proposalsWritten: [],
+	};
+	try {
+		const motifs = await gatherSuccessMotifs(directory, opts);
+		result.motifs = motifs.length;
+		if (motifs.length === 0) return result;
+		const max = opts.maxProposals ?? 10;
+		const proposalsDir = validateSwarmPath(
+			directory,
+			path.join('skills', 'proposals'),
+		);
+		await mkdir(proposalsDir, { recursive: true });
+		for (const motif of motifs.slice(0, max)) {
+			const slug = workflowSlug(motif.signature);
+			const filePath = path.join(proposalsDir, `${slug}.md`);
+			await writeFile(filePath, buildWorkflowProposal(motif), 'utf-8');
+			result.proposalsWritten.push(filePath);
+		}
+		return result;
+	} catch (err) {
+		warn(
+			`[trajectory-cluster] success proposal write failed (non-fatal): ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return result;
+	}
+}

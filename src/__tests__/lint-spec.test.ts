@@ -54,7 +54,9 @@ describe('lint_spec tool', () => {
 			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.valid).toBe(false);
-			expect(parsed.errors).toContain('spec.md not found');
+			expect(parsed.errors).toContain(
+				'spec.md not found and no valid OpenSpec-compatible projection available',
+			);
 			expect(parsed.specMtime).toBe(null);
 			expect(parsed.requirementCount.total).toBe(0);
 			expect(parsed.scenarioCount).toBe(0);
@@ -68,7 +70,9 @@ describe('lint_spec tool', () => {
 			const parsed = JSON.parse(resultToString(result));
 
 			expect(parsed.valid).toBe(false);
-			expect(parsed.errors).toContain('spec.md not found');
+			expect(parsed.errors).toContain(
+				'spec.md not found and no valid OpenSpec-compatible projection available',
+			);
 		});
 	});
 

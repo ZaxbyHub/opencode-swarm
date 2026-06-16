@@ -21,13 +21,26 @@ export const skill_apply: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.describe(
 				'Overwrite an existing active SKILL.md even if it lacks the generator stamp. Default false.',
 			),
+		evaluate: z
+			.boolean()
+			.optional()
+			.default(false)
+			.describe(
+				'Validate the proposal against .swarm/skills/evals/<slug> before activation. Default false.',
+			),
 	},
 	execute: async (args: unknown, directory): Promise<string> => {
-		const a = (args ?? {}) as { slug?: string; force?: boolean };
+		const a = (args ?? {}) as {
+			slug?: string;
+			force?: boolean;
+			evaluate?: boolean;
+		};
 		if (!a.slug || typeof a.slug !== 'string') {
 			return JSON.stringify({ activated: false, reason: 'slug required' });
 		}
-		const result = await activateProposal(directory, a.slug, a.force ?? false);
+		const result = await activateProposal(directory, a.slug, a.force ?? false, {
+			evaluate: a.evaluate ?? false,
+		});
 		return JSON.stringify(result, null, 2);
 	},
 });

@@ -14,6 +14,7 @@ describe('AGENT_TOOL_MAP', () => {
 		'designer',
 		'docs',
 		'explorer',
+		'researcher',
 		'reviewer',
 		'sme',
 		'test_engineer',
@@ -67,6 +68,37 @@ describe('AGENT_TOOL_MAP', () => {
 		expect(smeTools).toContain('web_search');
 		expect(smeTools).not.toContain('knowledge_add');
 		expect(smeTools).not.toContain('apply_patch');
+	});
+
+	it('researcher has all 8 assigned tools and remains read-only', () => {
+		const researcherTools = AGENT_TOOL_MAP.researcher;
+		// All 8 tools assigned to researcher in tool-metadata.ts
+		const expectedTools = [
+			'imports',
+			'symbols',
+			'complexity_hotspots',
+			'schema_drift',
+			'todo_extract',
+			'web_search',
+			'swarm_command',
+			'summarize_work',
+		];
+		for (const tool of expectedTools) {
+			expect(researcherTools).toContain(tool);
+		}
+		// Read-only invariant: no write tools
+		const writeTools = [
+			'apply_patch',
+			'knowledge_add',
+			'save_plan',
+			'update_task_status',
+			'spec_write',
+			'phase_complete',
+			'checkpoint',
+		];
+		for (const tool of writeTools) {
+			expect(researcherTools).not.toContain(tool);
+		}
 	});
 
 	it('architect has all critical tools', () => {

@@ -96,8 +96,8 @@ describe('Critic Agent Registration', () => {
 			expect(DEFAULT_MODELS).toHaveProperty('critic_sounding_board');
 		});
 
-		test('critic_sounding_board uses big-pickle model', () => {
-			expect(DEFAULT_MODELS.critic_sounding_board).toBe('opencode/big-pickle');
+		test('critic_sounding_board uses gpt-5-nano model', () => {
+			expect(DEFAULT_MODELS.critic_sounding_board).toBe('opencode/gpt-5-nano');
 		});
 	});
 

@@ -820,6 +820,10 @@ export function createCriticAutonomousOversightAgent(
 				edit: false,
 				patch: false,
 			},
+			// Oversight is a verdict/classification task; extended thinking generates
+			// large reasoning parts that flood OpenCode's session log. Disabled by
+			// default; override via agents.critic_oversight.thinking in config.
+			thinking: { type: 'disabled' },
 		},
 	};
 }

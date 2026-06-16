@@ -102,6 +102,17 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established (THIS PR):** every awaited operation on the init path must be bounded by `withTimeout` (or equivalent) AND fail open. Every subprocess on the init path must have explicit `cwd`, `stdin: 'ignore'`, `timeout`, bounded stdout/stderr, and `proc.kill()` in `finally`. The same hardening applies to the secondary defect site `validateDiffScope` even though it is not on the init path. Tests use a file-scoped `_internals` DI seam — not `mock.module` — to avoid Bun's cross-file mock leakage.
 - **Maps to AGENTS.md:** invariants 1 (plugin init), 3 (subprocesses), 7 (test writing).
 
+### PR #1356 — `withTimeout`-bounded work is still on the critical path if you `await` it
+
+- **Context:** PR #1356 added an init-time step that materializes up to 20 bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The merged form is the **correct** pattern — deferred via `queueMicrotask`, `withTimeout`-bounded, fail-open, missing-only, byte/file-bounded (`src/index.ts` ~line 392). It is cited here as an exemplar, not a regression.
+- **The lesson (recorded in the in-code comment at `src/index.ts`, ~line 381):** during development an earlier revision **`await`ed the sync inline** on the `server()`-resolution path. That version was still `withTimeout`-bounded and fail-open, yet the ~20 sequential `fsp.*` calls' real latency on a **cold Windows filesystem pushed `server()` past the `repro-704` T1 deadline** (`TIMING_DEADLINE_MS = 400` in `scripts/repro-704.mjs:42`). It was corrected to `queueMicrotask` deferral before merge; deferred, `server()` resolves in single-digit ms and the copy runs in the background. (No separate broken commit exists — the inline-await form was fixed pre-merge; the authority for this lesson is the in-code comment, not a CI artifact. Exact failing/passing millisecond figures were not recorded.)
+- **Root cause of the inline-await misstep:** treating `withTimeout` as if it makes work free. `withTimeout` is `Promise.race` against an (unref'd) timer (`src/utils/timeout.ts`) — it only protects against an *unbounded* await; it does nothing to remove the awaited work's actual latency from the `server()`-resolution path. The repo-graph scan (v7.0.3) established the deferral pattern via `queueMicrotask`; the skill sync now follows it.
+- **Invariants established:** **Bounded ≠ free.** Decide await-vs-defer explicitly for every init step:
+  - **Defer (`queueMicrotask` + the existing `withTimeout`/`.catch`)** when the work does non-trivial I/O and **nothing downstream in `initializeOpenCodeSwarm` depends on its completion before `server()` resolves**. The deferred task starts on the next microtask tick — before any user turn — so runtime consumers (e.g. the architect reading `SKILL.md` as an LLM tool action) still observe the result; only the *latency* leaves the critical path. This is the `repoGraphHook` precedent (`src/index.ts:323`) and what the merged skill sync does (`src/index.ts:392`).
+  - **`await` (still `withTimeout`-bounded + fail-open)** only when the work is genuinely fast (<~50 ms typical) **and** must complete before a later init step — e.g. `ensureSwarmGitExcluded` (`src/index.ts:356`) must run before `.swarm/` artifacts are written.
+  - **Cross-platform proof is mandatory.** Linux/macOS `repro-704` passing does **not** prove Windows; cold-FS op latency is several× higher there. The T1 400 ms assertion (`scripts/repro-704.mjs:42`) runs on the Windows runner in the `smoke` matrix (`.github/workflows/ci.yml`); the CI step's summary comment mentions the looser 10 s `BUDGET_MS` (T2/T3), but T1 is the tight bound that catches this class of regression. Green locally is necessary, not sufficient.
+- **Maps to AGENTS.md:** invariant 1 (plugin init).
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### 1. Plugin initialization
@@ -135,10 +146,39 @@ await withTimeout(
 });
 ```
 
+`await` is correct *here* because the exclude write must finish before `.swarm/`
+artifacts are created and the git calls are fast (<~50 ms). It is **wrong** for
+I/O-heavy work with no such ordering dependency — see below.
+
+**Required pattern (deferred — when nothing downstream needs the result before `server()` resolves):**
+
+```ts
+// src/index.ts inside initializeOpenCodeSwarm — see the repoGraphHook precedent.
+// `withTimeout` only bounds a HANG; an awaited copy of 20 skill dirs still adds
+// its real latency to server(). An inline-await revision of this sync (corrected
+// before PR #1356 merged) pushed server() past the 400ms repro-704 T1 deadline on
+// a cold Windows FS; deferring moves the latency off the critical path while the
+// work still completes before any user turn / runtime read.
+queueMicrotask(() => {
+  void withTimeout(
+    syncBundledProjectSkillsIfMissingAsync(ctx.directory, PACKAGE_ROOT, config.quiet),
+    SYNC_BUNDLED_SKILLS_TIMEOUT_MS,
+    new Error('skill sync exceeded budget; command-path sync remains a backstop'),
+  ).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    log('bundled skill materialization timed out or failed (non-fatal)', { error: msg });
+  });
+});
+```
+
+**Decision rule:** `await` init work only when it is fast (<~50 ms) *and* a later
+init step depends on it; otherwise defer with `queueMicrotask`. `withTimeout`
+wraps both — it bounds hangs, it does not erase latency.
+
 **Verification:**
 
 - `bun run build` then `node --input-type=module -e "await import('./dist/index.js'); console.log('dist import OK')"` exits 0.
-- `node scripts/repro-704.mjs` passes on every supported platform — the harness asserts the plugin entry resolves under a deadline.
+- `node scripts/repro-704.mjs` passes on every supported platform — T1 asserts `server()` resolves within `TIMING_DEADLINE_MS = 400` (`scripts/repro-704.mjs:42`). **Linux/macOS green does not prove Windows**; the `smoke` job runs `repro-704` on the Windows runner, where cold-FS op latency is several× higher — exactly the gap that caught an inline-await revision of the bundled-skill sync during PR #1356's development before it was deferred.
 - A regression test (or dedicated harness) exercises the failing-environmental-call path and asserts plugin init still resolves bounded.
 
 ### 2. Runtime portability

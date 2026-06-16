@@ -88,6 +88,7 @@ import { execFileSync } from 'node:child_process';
 - Use `path.join()`, never string concatenation with `/`
 - Use `os.tmpdir()`, never hardcoded `/tmp`
 - Mock `validateDirectory` from `path-security.ts` when tests use Windows temp paths
+- On Windows, if `%USERPROFILE%` (or another ancestor of `%TEMP%`) already contains both `.swarm/` and a project indicator such as `.opencode/`, evidence-writing tests can fail the `.swarm` containment guard before they reach your temp project root. For per-file `tests/unit/tools/*.test.ts` publication evidence, either clear the parent `.swarm/` contamination first or run the temp-root setup from a directory tree that is outside that contaminated ancestor chain.
 
 ### Full Details
 

@@ -38,9 +38,17 @@ import { declare_council_criteria } from './declare-council-criteria';
 import { declare_scope } from './declare-scope';
 import { diff } from './diff';
 import { diff_summary } from './diff-summary';
+import { dispatch_lanes } from './dispatch-lanes';
 import { doc_extract, doc_scan } from './doc-scan';
 import { detect_domains } from './domain-detector';
 import { evidence_check } from './evidence-check';
+import { external_skill_delete } from './external-skill-delete';
+import { external_skill_discover } from './external-skill-discover';
+import { external_skill_inspect } from './external-skill-inspect';
+import { external_skill_list } from './external-skill-list';
+import { external_skill_promote } from './external-skill-promote';
+import { external_skill_reject } from './external-skill-reject';
+import { external_skill_revoke } from './external-skill-revoke';
 import { extract_code_blocks } from './file-extractor';
 import { generate_mutants } from './generate-mutants';
 import { get_approved_plan } from './get-approved-plan';
@@ -100,6 +108,7 @@ import { test_runner } from './test-runner';
 import { todo_extract } from './todo-extract';
 import type { ToolName } from './tool-metadata';
 import { update_task_status } from './update-task-status';
+import { web_fetch } from './web-fetch';
 import { web_search } from './web-search';
 import { write_architecture_supervisor_evidence } from './write-architecture-supervisor-evidence';
 import { write_drift_evidence } from './write-drift-evidence';
@@ -182,6 +191,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	get_qa_gate_profile: () => get_qa_gate_profile,
 	set_qa_gates: () => set_qa_gates,
 	web_search: () => web_search,
+	web_fetch: () => web_fetch,
 	convene_general_council: () => convene_general_council,
 	write_final_council_evidence: () => write_final_council_evidence,
 	skill_generate: () => skill_generate,
@@ -198,6 +208,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,
 	swarm_command: () => swarm_command,
+	dispatch_lanes: () => dispatch_lanes,
 	summarize_work: () => summarize_work,
 	write_architecture_supervisor_evidence: () =>
 		write_architecture_supervisor_evidence,
@@ -208,4 +219,11 @@ export const TOOL_MANIFEST = defineHandlers({
 	lean_turbo_run_phase: () => lean_turbo_run_phase,
 	lean_turbo_status: () => lean_turbo_status,
 	apply_patch: () => applyPatch,
+	external_skill_discover: () => external_skill_discover,
+	external_skill_list: () => external_skill_list,
+	external_skill_inspect: () => external_skill_inspect,
+	external_skill_promote: () => external_skill_promote,
+	external_skill_reject: () => external_skill_reject,
+	external_skill_delete: () => external_skill_delete,
+	external_skill_revoke: () => external_skill_revoke,
 });

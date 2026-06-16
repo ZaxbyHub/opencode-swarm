@@ -102,6 +102,7 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				false,
+				{ evaluate: false },
 			);
 		});
 
@@ -111,6 +112,7 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				true,
+				{ evaluate: false },
 			);
 		});
 
@@ -120,6 +122,17 @@ describe('skill_apply tool', () => {
 				tmp,
 				'test-skill',
 				false,
+				{ evaluate: false },
+			);
+		});
+
+		it('passes evaluate=true to activateProposal', async () => {
+			await skill_apply.execute({ slug: 'test-skill', evaluate: true }, tmp);
+			expect(mockActivateProposal).toHaveBeenCalledWith(
+				tmp,
+				'test-skill',
+				false,
+				{ evaluate: true },
 			);
 		});
 	});

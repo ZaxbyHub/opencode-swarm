@@ -20,6 +20,7 @@ import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 import { yieldToEventLoop } from '../../utils/timeout';
 import { extractPythonSymbols, extractTSSymbols } from '../symbols';
+import { extractFileOntology } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
 import type {
 	BuildWorkspaceGraphOptions,
@@ -49,11 +50,13 @@ export const _internals: {
 	extractTSSymbols: typeof extractTSSymbols;
 	extractPythonSymbols: typeof extractPythonSymbols;
 	parseFileImports: typeof parseFileImports;
+	extractFileOntology: typeof extractFileOntology;
 } = {
 	safeRealpathSync,
 	extractTSSymbols,
 	extractPythonSymbols,
 	parseFileImports,
+	extractFileOntology,
 } as const;
 
 // ============ Constants ============
@@ -387,6 +390,8 @@ interface ParsedImport {
 	specifier: string;
 	/** The type of import */
 	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
+	/** Named imported symbols when statically detectable */
+	importedSymbols: string[];
 }
 
 /**
@@ -584,10 +589,42 @@ function parseFileImports(rawContent: string): ParsedImport[] {
 			importType = 'require';
 		}
 
-		imports.push({ specifier: modulePath, importType });
+		imports.push({
+			specifier: modulePath,
+			importType,
+			importedSymbols: parseImportedSymbols(matchedString, importType),
+		});
 	}
 
 	return imports;
+}
+
+function parseImportedSymbols(
+	matchedString: string,
+	importType: ParsedImport['importType'],
+): string[] {
+	if (importType === 'namespace') return ['*'];
+	if (importType === 'default') {
+		const defaultMatch = matchedString.match(/^import\s+(\w+)\s+from\s+['"`]/);
+		return defaultMatch ? ['default'] : [];
+	}
+	if (importType !== 'named') return [];
+
+	const braceMatch = matchedString.match(/\{\s*([\s\S]*?)\s*\}/);
+	if (!braceMatch) return [];
+	const symbols = new Set<string>();
+	for (const rawPart of braceMatch[1].split(',')) {
+		const part = rawPart.trim();
+		if (!part) continue;
+		const cleaned = part
+			.replace(/^type\s+/, '')
+			.split(/\s+as\s+/i)[0]
+			.trim();
+		if (/^[A-Za-z_$][\w$]*$/.test(cleaned)) {
+			symbols.add(cleaned);
+		}
+	}
+	return [...symbols].sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -918,14 +955,23 @@ export function scanFile(
 		// Parse imports to get specifiers with types
 		const parsedImports = _internals.parseFileImports(content);
 
+		const moduleName = toModuleName(filePath, absoluteRoot);
 		// Create the graph node
 		const node: GraphNode = {
 			filePath,
-			moduleName: toModuleName(filePath, absoluteRoot),
+			moduleName,
 			exports,
 			imports: parsedImports.map((p) => p.specifier),
 			language: getLanguage(filePath),
 			mtime: fileStats.mtime.toISOString(),
+			ontology: _internals.extractFileOntology({
+				moduleName,
+				filePath,
+				content,
+				language: getLanguage(filePath),
+				exports,
+				imports: parsedImports.map((p) => p.specifier),
+			}),
 		};
 
 		// Process imports to create edges
@@ -947,6 +993,7 @@ export function scanFile(
 					target: resolvedTarget,
 					importSpecifier: parsed.specifier,
 					importType: parsed.importType,
+					importedSymbols: parsed.importedSymbols,
 				});
 			}
 		}
@@ -1081,13 +1128,23 @@ export function buildWorkspaceGraph(
 			continue;
 		}
 
+		const moduleName = toModuleName(filePath, absoluteRoot);
+		const language = getLanguage(filePath);
 		const node: GraphNode = {
 			filePath,
-			moduleName: toModuleName(filePath, absoluteRoot),
+			moduleName,
 			exports,
 			imports: parsedImports.map((p) => p.specifier),
-			language: getLanguage(filePath),
+			language,
 			mtime: fileStats.mtime.toISOString(),
+			ontology: _internals.extractFileOntology({
+				moduleName,
+				filePath,
+				content,
+				language,
+				exports,
+				imports: parsedImports.map((p) => p.specifier),
+			}),
 		};
 
 		appendNodeFast(graph, node);
@@ -1110,6 +1167,7 @@ export function buildWorkspaceGraph(
 					target: resolvedTarget,
 					importSpecifier: parsed.specifier,
 					importType: parsed.importType,
+					importedSymbols: parsed.importedSymbols,
 				};
 				appendEdgeFast(graph, edge, seenEdges);
 			}

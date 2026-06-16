@@ -93,7 +93,7 @@ Three independent layers surface `.swarm/spec-staleness.json` proactively:
   `experimental.chat.system.transform`. Survives the single-system-
   message collapse. Discloses any `_midLoadRemovals` attached by recovery
   paths.
-- **Layer B** (`src/hooks/guardrails.ts`, `enforceSpecDriftGate`):
+- **Layer B** (`src/hooks/guardrails/index.ts`, `enforceSpecDriftGate`):
   structurally blocks the `SPEC_DRIFT_BLOCKED_TOOLS` set (`save_plan`,
   `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
   `lean_turbo_acquire_locks`) while the staleness file exists. No cache

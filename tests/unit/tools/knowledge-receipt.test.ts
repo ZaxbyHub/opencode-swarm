@@ -127,6 +127,13 @@ describe('knowledge_receipt', () => {
 						lesson: 'Bound every subprocess with an explicit timeout and kill',
 						category: 'process',
 						evidence: 'observed a hung child in CI',
+						// v3 actionability fields are required for the lesson to pass
+						// knowledge_add's Layer-5 gate and persist to the active store
+						// rather than being quarantined to the unactionable queue.
+						applies_to_tools: ['bash'],
+						required_actions: [
+							'pass an explicit timeout and call proc.kill() in finally',
+						],
 					},
 				],
 			} as never,

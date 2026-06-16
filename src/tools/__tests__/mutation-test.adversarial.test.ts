@@ -1,3 +1,11 @@
+/**
+ * Adversarial tests for the mutation-test tool.
+ *
+ * FR-010: This file has an intentionally high test-to-source ratio because
+ * it tests a security-sensitive wrapper around external test runner subprocesses.
+ * The extensive coverage exercising error paths, boundary conditions, and malicious
+ * inputs is necessary and justified. See .swarm/spec.md FR-010.
+ */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fsSync from 'node:fs';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';

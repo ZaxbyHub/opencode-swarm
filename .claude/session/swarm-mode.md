@@ -21,6 +21,10 @@ Swarm mode is enabled for this session.
 - Candidate findings should be validated by an independent reviewer context before being treated as confirmed whenever the task is important enough to justify it.
 - Reviewer should default to DISPROVED or UNVERIFIED unless the finding is actually supported by code evidence and, when relevant, runtime-aware verification.
 - Critic should challenge reviewer-confirmed findings in small batches.
+- For any task that edits code, tests, docs, package metadata, release notes, or skill files, final completion requires an independent implementation reviewer approval and a separate critic approval on the latest diff and evidence.
+- Passing tests, explorer output, plan critique, and self-review do not satisfy the final implementation reviewer or critic gates when independent subagents are available.
+- Any edit after reviewer or critic approval invalidates that approval; re-run the affected gate.
+- A `NEEDS_REVISION`, `REJECTED`, or `BLOCKED` verdict blocks final completion until fixed and re-reviewed.
 - If quality and speed conflict, quality wins.
 - Do not batch more aggressively or skip validation because the repo is large.
 - Premature completion is a failure state.
@@ -48,7 +52,7 @@ Serial work is for synthesis, conflict-prone edits, and final high-confidence va
 2. Build a plan.
 3. Implement in scoped units.
 4. Validate with independent reviewer context.
-5. Challenge with critic context when needed.
+5. Challenge changed-work completion with a separate critic context.
 6. Synthesize only validated results.
 
 ## Anti-rationalization rules

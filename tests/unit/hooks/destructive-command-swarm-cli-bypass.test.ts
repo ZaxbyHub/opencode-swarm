@@ -211,6 +211,9 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 		test('checkpoint save (also blocked — agent must ask user)', async () => {
 			await expectBlocked('bunx opencode-swarm run checkpoint save mylabel');
 		});
+		test('consolidate', async () => {
+			await expectBlocked('bunx opencode-swarm run consolidate --evaluate');
+		});
 	});
 
 	describe('negative cases — read-only and unrelated commands MUST NOT block', () => {
@@ -644,6 +647,11 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 		test('write tmp.sh invoking reset — BLOCKED', async () => {
 			await expectWriteContentBlocked(
 				'bunx opencode-swarm run reset --confirm',
+			);
+		});
+		test('write tmp.sh invoking consolidate - BLOCKED', async () => {
+			await expectWriteContentBlocked(
+				'bunx opencode-swarm run consolidate --evaluate',
 			);
 		});
 		test('write under cwd with unrelated content — does NOT trigger script-indirection guard', async () => {

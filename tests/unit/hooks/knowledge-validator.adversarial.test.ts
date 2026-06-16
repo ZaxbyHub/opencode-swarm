@@ -275,9 +275,10 @@ describe('knowledge-validator (adversarial)', () => {
 				scope: 'global',
 				confidence: 0.9,
 			});
-			expect(result.valid).toBe(false);
+			expect(result.valid).toBe(true);
 			expect(result.layer).toBe(2);
 			expect(result.reason).toContain('dangerous command');
+			expect(result.severity).toBe('warning');
 		});
 	});
 

@@ -16,6 +16,7 @@ describe('KnowledgeConfigSchema', () => {
 				hive_max_entries: 200,
 				auto_promote_days: 90,
 				max_inject_count: 5,
+				delegate_max_inject_count: 8,
 				inject_char_budget: 2_000,
 				max_lesson_display_chars: 120,
 				dedup_threshold: 0.6,
@@ -41,6 +42,10 @@ describe('KnowledgeConfigSchema', () => {
 				sweep_enabled: true,
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
+				enrichment: {
+					max_calls_per_day: 30,
+					quota_window: 'utc',
+				},
 			});
 		});
 
@@ -65,6 +70,7 @@ describe('KnowledgeConfigSchema', () => {
 				hive_max_entries: 1000,
 				auto_promote_days: 30,
 				max_inject_count: 10,
+				delegate_max_inject_count: 6,
 				inject_char_budget: 3_000,
 				max_lesson_display_chars: 200,
 				dedup_threshold: 0.8,
@@ -90,6 +96,10 @@ describe('KnowledgeConfigSchema', () => {
 				sweep_enabled: true,
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
+				enrichment: {
+					max_calls_per_day: 30,
+					quota_window: 'utc',
+				},
 			};
 
 			const result = KnowledgeConfigSchema.parse(fullConfig);
@@ -180,6 +190,7 @@ describe('KnowledgeConfigSchema', () => {
 					hive_max_entries: 1000,
 					auto_promote_days: 30,
 					max_inject_count: 10,
+					delegate_max_inject_count: 6,
 					inject_char_budget: 3_000,
 					max_lesson_display_chars: 200,
 					dedup_threshold: 0.8,
@@ -205,6 +216,10 @@ describe('KnowledgeConfigSchema', () => {
 					sweep_enabled: true,
 					// v7.10.0+ directive retrieval threshold
 					directive_min_confidence: 0.75,
+					enrichment: {
+						max_calls_per_day: 30,
+						quota_window: 'utc',
+					},
 				},
 			};
 

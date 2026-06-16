@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import * as realChildProcess from 'node:child_process';
+import * as realFs from 'node:fs';
 import * as path from 'node:path';
 import type { ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
+import * as realRepoGraph from '../../tools/repo-graph.js';
 
 // Top-level mock function references (same pattern as diff-summary.test.ts)
 let mockExecFileSync: ReturnType<typeof vi.fn>;
@@ -14,7 +17,6 @@ let mockGenerateSummary: ReturnType<typeof vi.fn>;
 let mockGenerateSummaryMarkdown: ReturnType<typeof vi.fn>;
 let mockGetCachedGraph: ReturnType<typeof vi.fn>;
 let mockGetImporters: ReturnType<typeof vi.fn>;
-let mockNormalizeGraphPath: ReturnType<typeof vi.fn>;
 
 describe('buildSemanticDiffBlock', () => {
 	beforeEach(async () => {
@@ -31,12 +33,10 @@ describe('buildSemanticDiffBlock', () => {
 		mockGenerateSummaryMarkdown = vi.fn();
 		mockGetCachedGraph = vi.fn();
 		mockGetImporters = vi.fn();
-		mockNormalizeGraphPath = vi.fn((p: string) =>
-			p.replace(/\\/g, '/').replace(/^\.\/+/, ''),
-		);
 
 		// Mock the modules
 		vi.mock('node:child_process', () => ({
+			...realChildProcess,
 			execFileSync: mockExecFileSync,
 			execFile: (
 				command: string,
@@ -54,6 +54,7 @@ describe('buildSemanticDiffBlock', () => {
 		}));
 
 		vi.mock('node:fs', () => ({
+			...realFs,
 			readFileSync: mockReadFileSync,
 			realpathSync: mockRealpathSync,
 			promises: {
@@ -84,9 +85,9 @@ describe('buildSemanticDiffBlock', () => {
 			getCachedGraph: mockGetCachedGraph,
 		}));
 
-		vi.mock('../../graph/graph-query.js', () => ({
+		vi.mock('../../tools/repo-graph.js', () => ({
+			...realRepoGraph,
 			getImporters: mockGetImporters,
-			normalizeGraphPath: mockNormalizeGraphPath,
 		}));
 	});
 

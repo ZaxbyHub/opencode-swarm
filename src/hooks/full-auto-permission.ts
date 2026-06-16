@@ -71,13 +71,10 @@ export function createFullAutoPermissionHook(
 	const { config, directory } = options;
 	const fullAutoConfig = config.full_auto;
 
-	if (!fullAutoConfig?.enabled) {
-		// Full-Auto disabled — return no-op.
-		return {
-			toolBefore: async () => {},
-		};
-	}
-
+	// First-class toggle: the hook is always armed. Every enforcement path
+	// below is gated at runtime by the durable per-session run state (no run
+	// or status 'idle' → no-op), so sessions that never ran
+	// `/swarm full-auto on` pay only a cheap state lookup per tool call.
 	return {
 		toolBefore: async (input, output) => {
 			const toolName = normalizeToolName(input.tool) ?? input.tool;
@@ -163,6 +160,23 @@ export function createFullAutoPermissionHook(
 			}
 			const effectivePhase = phaseFromArgs ?? runState.currentPhase;
 
+			// The durable run state's mode (set by `/swarm full-auto on [mode]`)
+			// overrides the init-time config mode — otherwise the command's mode
+			// argument would be cosmetic (adversarial review F1: the classifier
+			// must enforce the mode the run was actually started with).
+			// Validate mode from durable state: a hand-edited state file could
+			// contain an arbitrary string — fail-safe to 'strict' on unknown values.
+			const VALID_MODES = ['assisted', 'supervised', 'strict'] as const;
+			type ValidMode = (typeof VALID_MODES)[number];
+			const safeMode: ValidMode = (VALID_MODES as readonly string[]).includes(
+				runState.mode,
+			)
+				? (runState.mode as ValidMode)
+				: 'strict';
+			const effectiveFullAutoConfig = fullAutoConfig
+				? { ...fullAutoConfig, mode: safeMode }
+				: { mode: safeMode };
+
 			const classifierInput: FullAutoClassifierInput = {
 				sessionID,
 				agentName: activeAgent,
@@ -175,7 +189,7 @@ export function createFullAutoPermissionHook(
 				currentPhase: effectivePhase,
 				planSummary: undefined,
 				changedFiles: session?.modifiedFilesThisCoderTask,
-				fullAutoConfig,
+				fullAutoConfig: effectiveFullAutoConfig,
 			};
 
 			let decision = classifyFullAutoToolAction(classifierInput);

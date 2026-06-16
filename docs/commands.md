@@ -48,6 +48,24 @@ Tasks: 3/5 complete
 Agents: 11 registered
 ```
 
+### `/swarm learning [--json] [--phase N]`
+
+Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:
+
+- **Violation trends** — per-directive violation rates over 7-day and 30-day windows with trend direction (improving/worsening/stable)
+- **Application rates by priority** — how often directives are applied when shown, grouped by priority level
+- **Escalation activity** — auto-escalation frequency over recent windows
+- **Entry ROI** — per-entry applied/shown/succeeded/failed counts with ROI classification (high/medium/low/unused)
+- **Never-applied entries** — directives that have never been applied despite being alive for multiple phases
+- **Time to first application** — median/min/max days from directive creation to first application
+
+A 3-line learning summary is automatically injected into the curator phase digest after each phase.
+
+| Flag | Effect |
+|------|--------|
+| `--json` | Output metrics as structured JSON in a `[LEARNING_JSON]...[/LEARNING_JSON]` envelope |
+| `--phase N` | Set the current phase number for never-applied threshold calculations |
+
 ### `/swarm diagnose`
 
 Run a health check on `.swarm/` files, plan structure, and evidence completeness. Reports missing files, schema mismatches, and recovery steps.
@@ -91,6 +109,21 @@ Refine an existing `spec.md` by clarifying ambiguous requirements.
 
 Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful before running a phase — identifies requirements not covered by any task.
 
+### `/swarm sdd ...`
+
+Inspect and project OpenSpec-compatible spec-driven development artifacts into the Swarm planning contract. `.swarm/spec.md` remains the preferred source when it exists. If it is absent, Swarm builds an effective spec from checked-in `openspec/specs/**/spec.md` and active `openspec/changes/*/specs/**/spec.md` files.
+
+```text
+/swarm sdd status             # show .swarm/spec.md plus openspec/ artifact status
+/swarm sdd status --json      # machine-readable status
+/swarm sdd validate           # validate the OpenSpec projection
+/swarm sdd validate --change add-login
+/swarm sdd project --dry-run  # preview .swarm/spec.md materialization
+/swarm sdd project            # write .swarm/spec.md from OpenSpec artifacts
+```
+
+`openspec/changes/*/tasks.md` is proposal input only. Execution state still lives in `.swarm/plan-ledger.jsonl`; never hand-edit `.swarm/plan.json` or `.swarm/plan.md`.
+
 ### `/swarm brainstorm [topic]`
 
 Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN → DIALOGUE → APPROACHES → DESIGN → SPEC → SELF-REVIEW → GATE SELECTION → TRANSITION.
@@ -123,12 +156,12 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 
 **Workflow:**
 1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
-2. **Parallel Explorer Lanes** — 6 lanes: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+2. **Parallel Explorer Lanes** — 6 lanes dispatched through the deterministic `dispatch_lanes` join barrier: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
 3. **Independent Reviewer Confirmation** — Validate each finding with file:line evidence
 4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** — Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically — you no longer need to ask for these by hand.
+The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes` for read-only lane fan-out so local models do not need to emit background Agent calls by hand.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -356,6 +389,23 @@ See [Modes Guide](modes.md) for tradeoffs.
 
 Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
 
+### `/swarm auto-proceed [on|off]`
+
+Toggle auto-proceed for phase transitions. When enabled, the swarm skips the "Ready for Phase N+1?" confirmation prompt and advances automatically. Session-scoped — resets to the plan's `execution_profile.auto_proceed` default on new sessions.
+
+The effective value is shown to the architect via an injected `AUTO PROCEED STATUS` banner at every phase boundary.
+
+```text
+/swarm auto-proceed on    # enable auto-proceed for this session
+/swarm auto-proceed off   # disable auto-proceed for this session
+```
+
+**Resolution order:** Session override always wins over the plan default. If no session override is set, the plan's `execution_profile.auto_proceed` (default `false`) is used.
+
+**First-boundary nudge:** When auto-proceed is `false` and no session override is set, the architect offers to enable it once per session at the first phase boundary.
+
+**Architect-only:** Only the architect session can call this command. Subagents receive an error.
+
 ---
 
 ## Configuration
@@ -368,8 +418,16 @@ Show the current resolved plugin configuration (merged global + project + CLI ov
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
-- `--fix`: auto-repair issues where safe. Creates encrypted backup first.
+The doctor validates all 62+ top-level schema keys with type checks (string, boolean, number, object). Unknown keys produce warnings with Levenshtein-based typo suggestions. Swarms configuration is hardened: empty `swarms` emits an INFO finding, and path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) emit HIGH/ERROR findings. Deprecated config fields (`skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models`) emit INFO findings with migration guidance.
+
+- `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
+
+**Last-run summary:** When run without `--fix`, the command displays a summary of the previous run (if available) showing the timestamp, total findings count, and auto-fixable count before the current findings.
+
+**Startup auto-fix advisory:** On plugin initialization, if `automation.capabilities.config_doctor_on_startup` is enabled, the config doctor runs automatically. If auto-fixable issues are found and `config_doctor_autofix` capability is not enabled, a chat-visible advisory is emitted suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown.
+
+> **Agent vs. human context:** The `--fix` flag is accepted for human-initiated chat commands. For agent-initiated commands, the `tool-policy` layer blocks `--fix` — auto-fixing config from agent context is a privileged operation requiring explicit user initiation.
 
 ### `/swarm doctor tools`
 
@@ -491,6 +549,18 @@ Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson 
 
 Run knowledge curation and review hive promotion candidates. Identifies evergreen lessons for cross-project reuse.
 
+### `/swarm consolidate [--force] [--respect-interval] [--evaluate]`
+
+Run quota-bounded skill-improver consolidation. This drains the same bounded
+skill/knowledge maintenance passes used by scheduled consolidation, writes a
+skill-improver proposal, and may draft generated skill proposals when
+`skill_improver.write_mode` is `draft_skills`. It never auto-activates skills.
+
+By default the command forces a run while still respecting
+`skill_improver.enabled` and daily quota. Use `--respect-interval` to obey
+`skill_improver.consolidation_interval_hours`; use `--evaluate` to validate any
+drafted skills against `.swarm/skills/evals/<slug>/*.json` before writing them.
+
 ### `/swarm concurrency <set|status|reset>`
 
 Manage the session-scoped runtime concurrency override for plan execution. This requires an active OpenCode session.
@@ -538,6 +608,7 @@ Idempotent 4-stage project finalization:
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
 Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode for skills and knowledge; failures are advisory and do not block finalization.
+Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
 cycles — cumulative project knowledge survives and is not deleted. Deleted files

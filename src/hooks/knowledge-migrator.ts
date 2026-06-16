@@ -3,18 +3,22 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import * as logger from '../utils/logger';
 import {
+	appendKnowledge,
 	findNearDuplicate,
 	inferTags,
 	normalize,
 	readKnowledge,
+	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
 } from './knowledge-store.js';
 import type {
+	HiveKnowledgeEntry,
 	KnowledgeCategory,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
@@ -31,6 +35,7 @@ export interface MigrationResult {
 	entriesMigrated: number;
 	entriesDropped: number;
 	entriesTotal: number;
+	entryErrors?: string[];
 	skippedReason?:
 		| 'sentinel-exists'
 		| 'no-context-file'
@@ -72,8 +77,10 @@ interface Section {
 // ============================================================================
 
 export const _internals = {
+	appendKnowledge,
 	migrateContextToKnowledge,
 	migrateKnowledgeToExternal,
+	migrateHiveKnowledgeLegacy,
 	parseContextMd,
 	splitIntoSections,
 	extractBullets,
@@ -81,6 +88,7 @@ export const _internals = {
 	truncateLesson,
 	inferProjectName,
 	writeSentinel,
+	resolveLegacyHiveKnowledgePath,
 };
 
 // ============================================================================
@@ -230,6 +238,199 @@ export async function migrateContextToKnowledge(
 		entriesMigrated: migrated,
 		entriesDropped: dropped,
 		entriesTotal: rawEntries.length,
+	};
+}
+
+/**
+ * Migrate legacy hive knowledge from {platform-data-dir}/hive-knowledge.jsonl
+ * to {platform-data-dir}/shared-learnings.jsonl with HiveKnowledgeEntry schema.
+ *
+ * This handles data that was created before the dual-hive-promoter consolidation (v7.63.0).
+ * Legacy entries were in a flat schema; this converts them to the current HiveKnowledgeEntry format
+ * and deduplicates against existing hive entries.
+ *
+ * @param config - Knowledge configuration
+ * @returns Migration result with counts and status
+ */
+export async function migrateHiveKnowledgeLegacy(
+	config: KnowledgeConfig,
+): Promise<MigrationResult> {
+	// Compute paths
+	const legacyHivePath = _internals.resolveLegacyHiveKnowledgePath();
+	const canonicalHivePath = resolveHiveKnowledgePath();
+	const sentinelPath = path.join(
+		path.dirname(canonicalHivePath),
+		'.hive-knowledge-migrated',
+	);
+
+	// Gate 1: Check if migration already happened
+	if (existsSync(sentinelPath)) {
+		return {
+			migrated: false,
+			entriesMigrated: 0,
+			entriesDropped: 0,
+			entriesTotal: 0,
+			skippedReason: 'sentinel-exists',
+		};
+	}
+
+	// Gate 2: Check if legacy file exists
+	if (!existsSync(legacyHivePath)) {
+		return {
+			migrated: false,
+			entriesMigrated: 0,
+			entriesDropped: 0,
+			entriesTotal: 0,
+			skippedReason: 'no-context-file',
+		};
+	}
+
+	// Read legacy entries
+	const legacyEntries =
+		await readKnowledge<Record<string, unknown>>(legacyHivePath);
+
+	if (legacyEntries.length === 0) {
+		await _internals.writeSentinel(sentinelPath, 0, 0);
+		return {
+			migrated: true,
+			entriesMigrated: 0,
+			entriesDropped: 0,
+			entriesTotal: 0,
+		};
+	}
+
+	// Read existing canonical hive entries for deduplication
+	const existingHiveEntries =
+		await readKnowledge<HiveKnowledgeEntry>(canonicalHivePath);
+
+	let migrated = 0;
+	let dropped = 0;
+	const entryErrors: string[] = [];
+
+	// Process each legacy entry
+	for (const legacyEntry of legacyEntries) {
+		try {
+			const lesson = (legacyEntry as Record<string, unknown>).lesson as string;
+			if (!lesson || typeof lesson !== 'string' || lesson.length < 15) {
+				dropped++;
+				continue;
+			}
+
+			// Check for near-duplicate against existing hive entries
+			const dup = findNearDuplicate(
+				lesson,
+				existingHiveEntries,
+				config.dedup_threshold ?? 0.6,
+			);
+			if (dup) {
+				dropped++;
+				continue;
+			}
+
+			// Validate lesson
+			const category =
+				((legacyEntry as Record<string, unknown>).category as string) ||
+				'process';
+			const validationResult = validateLesson(
+				lesson,
+				existingHiveEntries.map((e) => e.lesson),
+				{
+					category: category as KnowledgeCategory,
+					scope: 'global',
+					confidence: 0.3,
+				},
+			);
+			if (!validationResult.valid) {
+				const errorMsg = `Validation failed for legacy entry: ${validationResult.reason}`;
+				entryErrors.push(errorMsg);
+				logger.warn(`[knowledge-migrator] ${errorMsg}`);
+				dropped++;
+				continue;
+			}
+
+			// Convert legacy entry to HiveKnowledgeEntry format
+			const confidence =
+				((legacyEntry as Record<string, unknown>).confidence as
+					| number
+					| null
+					| undefined) ?? 0.8;
+			const scopeTag =
+				((legacyEntry as Record<string, unknown>).scope_tag as string) ||
+				'global';
+
+			// ID collision check: if legacy ID already exists in canonical store, generate new UUID
+			const legacyId = (legacyEntry as Record<string, unknown>).id as
+				| string
+				| undefined;
+			const existingIds = new Set(existingHiveEntries.map((e) => e.id));
+			const resolvedId =
+				legacyId && existingIds.has(legacyId)
+					? randomUUID()
+					: legacyId || randomUUID();
+			if (legacyId && existingIds.has(legacyId)) {
+				logger.warn(
+					`[knowledge-migrator] Legacy entry ID collision for "${legacyId}", generating new UUID`,
+				);
+			}
+
+			const newHiveEntry: HiveKnowledgeEntry = {
+				id: resolvedId,
+				tier: 'hive',
+				lesson: _internals.truncateLesson(lesson),
+				category: category as KnowledgeCategory,
+				tags: ['migration:legacy-hive'],
+				scope: scopeTag,
+				confidence: Math.min(Math.max(confidence, 0), 1),
+				status: 'established',
+				confirmed_by: [],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: KNOWLEDGE_SCHEMA_VERSION,
+				created_at:
+					((legacyEntry as Record<string, unknown>).created_at as string) ||
+					new Date().toISOString(),
+				updated_at:
+					((legacyEntry as Record<string, unknown>).updated_at as string) ||
+					new Date().toISOString(),
+				source_project: 'legacy-promotion',
+				encounter_score: 1.0,
+			};
+
+			try {
+				await _internals.appendKnowledge(canonicalHivePath, newHiveEntry);
+				existingHiveEntries.push(newHiveEntry);
+				migrated++;
+			} catch (appendError) {
+				const errorMsg = `Failed to append entry: ${appendError instanceof Error ? appendError.message : String(appendError)}`;
+				entryErrors.push(errorMsg);
+				logger.warn(`[knowledge-migrator] ${errorMsg}`);
+				dropped++;
+			}
+		} catch (entryError) {
+			const errorMsg = `Unexpected error processing legacy entry: ${entryError instanceof Error ? entryError.message : String(entryError)}`;
+			entryErrors.push(errorMsg);
+			logger.warn(`[knowledge-migrator] ${errorMsg}`);
+			dropped++;
+		}
+	}
+
+	// Write sentinel file
+	await _internals.writeSentinel(sentinelPath, migrated, dropped);
+
+	// Log migration result
+	logger.log(
+		`[knowledge-migrator] Migrated ${migrated} legacy hive entries, dropped ${dropped}`,
+	);
+
+	return {
+		migrated: true,
+		entriesMigrated: migrated,
+		entriesDropped: dropped,
+		entriesTotal: legacyEntries.length,
+		...(entryErrors.length > 0 && { entryErrors }),
 	};
 }
 
@@ -408,4 +609,37 @@ async function writeSentinel(
 
 	await mkdir(path.dirname(sentinelPath), { recursive: true });
 	await writeFile(sentinelPath, JSON.stringify(sentinel, null, 2), 'utf-8');
+}
+
+/**
+ * Resolve the legacy hive knowledge file path.
+ * Legacy data was stored in {platform-data-dir}/hive-knowledge.jsonl before consolidation.
+ * This matches the resolveHiveKnowledgePath() pattern but returns the old path.
+ */
+function resolveLegacyHiveKnowledgePath(): string {
+	const platform = process.platform;
+	const home = process.env.HOME || os.homedir();
+	let dataDir: string;
+
+	if (platform === 'win32') {
+		dataDir = path.join(
+			process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
+			'opencode-swarm',
+			'Data',
+		);
+	} else if (platform === 'darwin') {
+		dataDir = path.join(
+			home,
+			'Library',
+			'Application Support',
+			'opencode-swarm',
+		);
+	} else {
+		dataDir = path.join(
+			process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'),
+			'opencode-swarm',
+		);
+	}
+
+	return path.join(dataDir, 'hive-knowledge.jsonl');
 }

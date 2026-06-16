@@ -42,6 +42,17 @@ export {
 	type PlanSyncWorkerOptions,
 	type PlanSyncWorkerStatus,
 } from './plan-sync-worker';
+// PR Event Subscribers for advisory notification delivery
+export {
+	type PrEventSubscriberOptions,
+	registerPrEventSubscribers,
+} from './pr-event-subscribers';
+// PR Monitor Worker for background PR status polling (lazy-started)
+export {
+	PrMonitorWorker,
+	type PrMonitorWorkerOptions,
+	type PrMonitorWorkerStatus,
+} from './pr-monitor-worker';
 export {
 	AutomationQueue,
 	type QueueItem,

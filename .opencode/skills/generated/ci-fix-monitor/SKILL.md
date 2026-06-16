@@ -4,6 +4,17 @@ description: >
   Monitor CI on a PR, diagnose failures, fix them, and re-push until green.
   Covers reading CI logs, classifying failure types (check-title, package-check,
   test failures, lint), determining the correct fix, and re-pushing.
+effort: small
+generated_from_knowledge: []
+source_knowledge_ids: ['35eefd00-6f79-495b-8b86-8b95ba9800ce']
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.8
+status: active
+version: 3
+skill_origin: generated
+provenance_note: >
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # CI Fix & Monitor Protocol
@@ -44,8 +55,34 @@ and stop.
 | **lint/quality: lint** | Lint rule violations (noExplicitAny, etc.) | `bunx biome check --write <files>` or fix manually |
 | **unit test** | Test failures | Read log, fix code, commit |
 | **integration** | Integration failures | Read log, check if pre-existing on main |
+| **macOS unit test** | Cross-platform file I/O race (atomic write-then-read returns null on macOS) | See "macOS file I/O fixes" below |
 | **security** | SAST/secret findings | Read log, fix or suppress with justification |
 | **smoke** | Smoke test failures | Read log, check if environment-specific |
+
+## macOS file I/O fixes (cross-platform atomic write)
+
+macOS/APFS has different filesystem timing than Linux ext4. `fs.renameSync` can
+complete before the data is visible to subsequent reads. The most common
+manifestation is `unit (macos-latest)` failing on tests that write-then-read
+atomic files (e.g., `curator atomic write > writeCuratorSummary > after write,
+readCuratorSummary reads file back successfully`), while the same tests pass
+on `ubuntu-latest` and `windows-latest`.
+
+**Canonical patterns:** See
+[`.claude/skills/writing-tests/SKILL.md`](../../../claude/skills/writing-tests/SKILL.md)
+§ Cross-Platform Requirements → "macOS rename-visibility race" for the
+full three-layer fix pattern (bunWrite + ENOENT retry + Node FileHandle.sync()
+not fsync()). This skill is a triage pointer; the canonical technical
+reference lives in `writing-tests` so it survives any regeneration of this
+`generated/` file.
+
+**Related security test pattern:** if the CI failure involves a long task ID
+or path, the security test `ADVERSARIAL: Command Services Attack Vectors >
+Attack Vector 1: Malformed Arguments > EVIDENCE: extremely long task ID
+(buffer overflow) - ACCEPTED by regex but no crash` requires a path length
+guard BEFORE `validateSwarmPath` in `src/evidence/manager.ts:loadEvidence`.
+See [`.claude/skills/engineering-conventions/SKILL.md`](../../../claude/skills/engineering-conventions/SKILL.md)
+for the evidence file flow that this gate check triggers on macOS CI.
 
 ## Step 3 — Diagnose with logs
 

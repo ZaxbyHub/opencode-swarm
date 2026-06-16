@@ -361,7 +361,9 @@ export async function dispatchFullAutoOversight(
 	);
 
 	let ephemeralSessionId: string | undefined;
+	const promptController = new AbortController();
 	const cleanup = () => {
+		promptController.abort();
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
 			ephemeralSessionId = undefined;
@@ -372,7 +374,17 @@ export async function dispatchFullAutoOversight(
 	let criticResponse = '';
 	let dispatchError: unknown;
 	try {
+		// Bind to the calling session as parent so OpenCode treats this as
+		// a child session and does not persist it as a new root in the TUI.
 		const createResult = await client.session.create({
+			...(input.sessionID
+				? {
+						body: {
+							parentID: input.sessionID,
+							title: 'full_auto_oversight background',
+						},
+					}
+				: {}),
 			query: { directory: input.directory },
 		});
 		if (!createResult.data) {
@@ -389,6 +401,7 @@ export async function dispatchFullAutoOversight(
 				tools: { write: false, edit: false, patch: false },
 				parts: [{ type: 'text', text: buildOversightPrompt(input) }],
 			},
+			signal: promptController.signal,
 		});
 
 		if (!promptResult.data) {

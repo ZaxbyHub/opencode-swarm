@@ -1,3 +1,4 @@
+import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { loadPluginConfigWithMeta } from '../config';
@@ -12,6 +13,7 @@ import {
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 } from '../git/branch';
+import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { isHiveEligible, promoteToHive } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import {
@@ -27,7 +29,7 @@ import {
 	type SkillImproveRequest,
 	type SkillImproveResult,
 } from '../services/skill-improver';
-import { resetSwarmState, swarmState } from '../state';
+import { resetSwarmStatePreservingSingletons, swarmState } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
 interface PlanPhase {
@@ -55,6 +57,7 @@ interface CurationCounts {
 	stored: number;
 	skipped: number;
 	rejected: number;
+	quarantined: number;
 }
 
 interface CloseKnowledgeEntry {
@@ -101,6 +104,35 @@ function countSessionKnowledgeEntries(
 		const createdAtMs = Date.parse(entry.created_at);
 		return Number.isFinite(createdAtMs) && createdAtMs >= sessionStartMs;
 	}).length;
+}
+
+async function copyDirRecursive(src: string, dest: string): Promise<number> {
+	let count = 0;
+	const entries = await fs.readdir(src);
+	await fs.mkdir(dest, { recursive: true });
+	for (const entry of entries) {
+		const srcEntry = path.join(src, entry);
+		const destEntry = path.join(dest, entry);
+		try {
+			const stat = await fs.stat(srcEntry);
+			if (stat.isDirectory()) {
+				const subCount = await copyDirRecursive(srcEntry, destEntry).catch(
+					() => 0,
+				);
+				count += subCount;
+			} else {
+				try {
+					await fs.copyFile(srcEntry, destEntry);
+					count++;
+				} catch {
+					// Per-file copy failure is non-blocking; not counted
+				}
+			}
+		} catch {
+			// Per-entry failure is non-blocking (matches prior inline behavior)
+		}
+	}
+	return count;
 }
 
 /**
@@ -250,8 +282,23 @@ export async function handleCloseCommand(
 	args: string[],
 	options: CloseCommandOptions = {},
 ): Promise<string> {
-	const planPath = validateSwarmPath(directory, 'plan.json');
 	const swarmDir = path.join(directory, '.swarm');
+	try {
+		const stat = fsSync.lstatSync(swarmDir);
+		// isSymbolicLink() correctly detects both symlinks and Windows junction
+		// points on modern Node/Bun (Node 20+, Bun 1.0+). No additional check
+		// needed — `isReparsePoint()` is not available in the Bun type system.
+		if (stat.isSymbolicLink()) {
+			return `❌ Refused: .swarm/ is a symlink or junction. Refusing to operate on a redirected directory for safety.`;
+		}
+	} catch (err) {
+		// ENOENT means .swarm/ doesn't exist yet — fine, proceed
+		if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+			throw err;
+		}
+	}
+
+	const planPath = validateSwarmPath(directory, 'plan.json');
 
 	let planExists = false;
 	let planData: PlanData = {
@@ -472,12 +519,25 @@ export async function handleCloseCommand(
 	let curationSucceeded = false;
 	let curationResult: CurationCounts | undefined;
 	try {
+		// Change 4 (Task 4.2): close-time lessons also pass the Layer-5
+		// actionability gate — enrich via the curator LLM when available.
 		curationResult = await curateAndStoreSwarm(
 			allLessons,
 			projectName,
 			{ phase_number: 0 },
 			directory,
 			config,
+			{
+				llmDelegate: createCuratorLLMDelegate(
+					directory,
+					'phase',
+					options.sessionID,
+				),
+				enrichmentQuota: {
+					maxCalls: config.enrichment.max_calls_per_day,
+					window: config.enrichment.quota_window,
+				},
+			},
 		);
 		curationSucceeded = true;
 	} catch (error) {
@@ -578,6 +638,10 @@ export async function handleCloseCommand(
 					targets: ['skills', 'knowledge'],
 					mode: 'proposal',
 					sessionId: options.sessionID,
+					enrichmentQuota: {
+						maxCalls: config.enrichment.max_calls_per_day,
+						window: config.enrichment.quota_window,
+					},
 				},
 				options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 			);
@@ -650,6 +714,36 @@ export async function handleCloseCommand(
 		}
 	}
 
+	// ─── POST-MORTEM (WP7, #1234) ──────────────────────────────────
+	// Run the post-mortem agent as part of finalize. Idempotent: if
+	// phase_complete already produced a report, this is a no-op.
+	let postMortemSummary = '';
+	try {
+		const { CuratorConfigSchema: CCS } = await import('../config/schema.js');
+		const { config: pmLoadedConfig } = loadPluginConfigWithMeta(directory);
+		const curatorCfg = CCS.parse(pmLoadedConfig.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const { runCuratorPostMortem } = await import(
+				'../hooks/curator-postmortem.js'
+			);
+			const pmResult = await runCuratorPostMortem(directory, {
+				llmDelegate: createCuratorLLMDelegate(
+					directory,
+					'postmortem',
+					options.sessionID,
+				),
+			});
+			if (pmResult.success && pmResult.summary) {
+				postMortemSummary = pmResult.summary;
+			}
+			for (const w of pmResult.warnings) {
+				warnings.push(`[POST-MORTEM] ${w}`);
+			}
+		}
+	} catch {
+		// fail-open: post-mortem never blocks finalize
+	}
+
 	// ─── STAGE 2: ARCHIVE ────────────────────────────────────────────
 	const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 	const suffix = Math.random().toString(36).slice(2, 8);
@@ -690,41 +784,15 @@ export async function handleCloseCommand(
 			const srcDir = path.join(swarmDir, dirName);
 			const destDir = path.join(archiveDir, dirName);
 			try {
-				const entries = await fs.readdir(srcDir);
-				if (entries.length > 0) {
-					await fs.mkdir(destDir, { recursive: true });
-					for (const entry of entries) {
-						const srcEntry = path.join(srcDir, entry);
-						const destEntry = path.join(destDir, entry);
-						try {
-							const stat = await fs.stat(srcEntry);
-							if (stat.isDirectory()) {
-								await fs.mkdir(destEntry, { recursive: true });
-								const subEntries = await fs.readdir(srcEntry);
-								for (const sub of subEntries) {
-									await fs
-										.copyFile(
-											path.join(srcEntry, sub),
-											path.join(destEntry, sub),
-										)
-										.catch(() => {});
-								}
-							} else {
-								await fs.copyFile(srcEntry, destEntry);
-							}
-							archivedFileCount++;
-						} catch {
-							// Per-entry failure is non-blocking
-						}
-					}
-				}
+				const copied = await copyDirRecursive(srcDir, destDir);
+				archivedFileCount += copied;
 				archivedActiveStateDirs.add(dirName);
 			} catch {
 				// Directory may not exist — skip silently
 			}
 		}
 
-		archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}/`;
+		archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}-${suffix}/`;
 	} catch (archiveError) {
 		warnings.push(
 			`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`,
@@ -847,6 +915,29 @@ export async function handleCloseCommand(
 				);
 			}
 		}
+	}
+
+	// Remove stale .tmp.* files that were left behind by interrupted handoff
+	// writes or other transient operations. These are safe to delete because
+	// they are recreated on next session init and must be removed to avoid
+	// stale-state pollution in the archive bundle.
+	let tmpFilesRemoved = 0;
+	try {
+		const swarmFiles = await fs.readdir(swarmDir);
+		const tmpFiles = swarmFiles.filter((f) => f.startsWith('.tmp.'));
+		for (const tmp of tmpFiles) {
+			try {
+				await fs.unlink(path.join(swarmDir, tmp));
+				tmpFilesRemoved++;
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+	} catch {
+		// readdir failure is non-blocking
+	}
+	if (tmpFilesRemoved > 0) {
+		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
 	}
 
 	// #519 (v6.71.1): clear persisted declare_scope files so the next session
@@ -1018,30 +1109,8 @@ export async function handleCloseCommand(
 	// .swarm/archive/) and should not be written to the .swarm/ directory during close.
 	// Stage 3 cleanup removes any pre-existing SWARM_PLAN artifacts from prior sessions.
 
-	// Full session reset so subsequent /swarm invocations start from a clean slate.
-	// Preserve plugin-init singletons that have no re-init path within the same
-	// plugin lifetime:
-	//   - opencodeClient: set once in src/index.ts at plugin init. Clearing it
-	//     would leave downstream hooks (curator, full-auto-intercept) unable to
-	//     reach the OpenCode client until the plugin reloads.
-	//   - fullAutoEnabledInConfig: read from config at plugin init.
-	//   - curatorInitAgentNames / curatorPhaseAgentNames: populated at plugin
-	//     init from the built agent map. curator-llm-factory.ts depends on
-	//     them at every curator call; clearing them would silently break the
-	//     curator path until the plugin reloads.
-	//   - skillImproverAgentNames: same plugin-init registry contract as the
-	//     curator names, used to route prefixed multi-swarm skill reviews.
-	const preservedClient = swarmState.opencodeClient;
-	const preservedFullAutoFlag = swarmState.fullAutoEnabledInConfig;
-	const preservedCuratorInitNames = swarmState.curatorInitAgentNames;
-	const preservedCuratorPhaseNames = swarmState.curatorPhaseAgentNames;
-	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
-	resetSwarmState();
-	swarmState.opencodeClient = preservedClient;
-	swarmState.fullAutoEnabledInConfig = preservedFullAutoFlag;
-	swarmState.curatorInitAgentNames = preservedCuratorInitNames;
-	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseNames;
-	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
+	// Preserve plugin-init singletons through state reset
+	resetSwarmStatePreservingSingletons();
 
 	// Separate retro-specific warnings for prominent display
 	const retroWarnings = warnings.filter(
@@ -1074,11 +1143,14 @@ export async function handleCloseCommand(
 	const skillReviewOutput = skillReviewSummary
 		? `\n\n**Skill Review:** ${skillReviewSummary}`
 		: '';
+	const postMortemOutput = postMortemSummary
+		? `\n\n**Post-Mortem:** ${postMortemSummary}`
+		: '';
 
 	if (planAlreadyDone) {
-		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
+		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
 	}
-	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${warningMsg}`;
+	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
 }
 
 export const _internals = {
@@ -1088,4 +1160,5 @@ export const _internals = {
 	getGitRepositoryStatus,
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
+	copyDirRecursive,
 };

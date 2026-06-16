@@ -54,6 +54,20 @@ test('classifyAndCluster with empty history still returns empty clusters for fai
 	expect(result.clusters).toHaveLength(1);
 });
 
+test('classifyAndCluster with empty history classifies first-time infrastructure failures', () => {
+	const failingResult = makeRecord({
+		result: 'fail',
+		errorMessage:
+			'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+	});
+	const result = classifyAndCluster([failingResult], []);
+	expect(result.classified).toHaveLength(1);
+	expect(result.classified[0].classification).toBe('infrastructure_failure');
+	expect(result.classified[0].confidence).toBe(0.1);
+	expect(result.clusters).toHaveLength(1);
+	expect(result.clusters[0].classification).toBe('infrastructure_failure');
+});
+
 test('clusterFailures with empty array returns empty array', () => {
 	const result = clusterFailures([]);
 	expect(result).toEqual([]);
@@ -96,7 +110,7 @@ test('classifyFailure handles large history (1000 entries) without hanging', () 
 	const elapsed = Date.now() - start;
 
 	expect(elapsed).toBeLessThan(1000); // Should complete in under 1 second
-	expect(result.classification).toBeDefined();
+	expect(result.classification).toBe('flaky');
 });
 
 test('classifyAndCluster handles large testResults array (500 failing results)', () => {
@@ -592,6 +606,34 @@ test('classifyFailure accepts result=pass without error — does not validate re
 	// Should not throw, should return a classified failure
 	expect(result.testFile).toBe('test.spec.ts');
 	expect(result.testName).toBe('test case');
+	expect(result.classification).toBe('unknown');
+});
+
+test('classifyFailure infrastructure detection runs before result-based classification checks', () => {
+	const current = makeRecord({
+		result: 'pass',
+		errorMessage: 'Broken pipe',
+	});
+	const result = classifyFailure(current, []);
+	expect(result.classification).toBe('infrastructure_failure');
+});
+
+test('classifyFailure can match infrastructure signals that only appear in stackPrefix', () => {
+	const current = makeRecord({
+		errorMessage: 'Error: generic worker failure',
+		stackPrefix: 'SIGBUS at shared-worker',
+	});
+	const result = classifyFailure(current, []);
+	expect(result.classification).toBe('infrastructure_failure');
+});
+
+test('classifyFailure assertion guard ignores stackPrefix when suppressing infra false positives', () => {
+	const current = makeRecord({
+		errorMessage: 'AssertionError: expected crash banner to mention SIGSEGV',
+		stackPrefix: 'SIGSEGV at shared-worker',
+		changedFiles: [],
+	});
+	const result = classifyFailure(current, []);
 	expect(result.classification).toBe('unknown');
 });
 

@@ -59,6 +59,14 @@ const newLessonItem = z.object({
 	lesson: z.string().min(15).max(280),
 	category: z.string().min(1),
 	evidence: z.string().max(500).optional(),
+	// v3 actionability fields — forwarded to knowledge_add so a receipt can file
+	// an actionable lesson. Without at least one predicate AND one scope field,
+	// knowledge_add's Layer-5 gate quarantines the lesson instead of activating it.
+	applies_to_agents: z.array(z.string()).optional(),
+	applies_to_tools: z.array(z.string()).optional(),
+	required_actions: z.array(z.string()).optional(),
+	forbidden_actions: z.array(z.string()).optional(),
+	verification_checks: z.array(z.string()).optional(),
 });
 
 export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
@@ -176,7 +184,15 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			const newLessonResults: Array<Record<string, unknown>> = [];
 			for (const item of newLessons) {
 				const raw = await knowledge_add.execute(
-					{ lesson: item.lesson, category: item.category },
+					{
+						lesson: item.lesson,
+						category: item.category,
+						applies_to_agents: item.applies_to_agents,
+						applies_to_tools: item.applies_to_tools,
+						required_actions: item.required_actions,
+						forbidden_actions: item.forbidden_actions,
+						verification_checks: item.verification_checks,
+					},
 					ctx as Parameters<typeof knowledge_add.execute>[1],
 				);
 				try {

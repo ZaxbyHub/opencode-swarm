@@ -13,6 +13,7 @@ import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { KnowledgeConfigSchema } from '../config/schema';
+import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import { generateSkills } from '../services/skill-generator';
 import {
@@ -46,6 +47,8 @@ const ArgsSchema = z.object({
 	findings: z.array(FindingSchema).default([]),
 	knowledge_recommendations: z.array(KnowledgeRecommendationSchema).default([]),
 	working_directory: z.string().optional(),
+	provenance_agent_name: z.string().min(1).optional(),
+	provenance_session_id: z.string().min(1).optional(),
 });
 
 export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
@@ -76,6 +79,20 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 				.optional()
 				.describe('Durable lessons proposed by the supervisor.'),
 			working_directory: z.string().optional(),
+			provenance_agent_name: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(
+					'Agent name that produced this evidence (optional provenance).',
+				),
+			provenance_session_id: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(
+					'Session ID of the agent that produced this evidence (optional provenance).',
+				),
 		},
 		execute: async (rawArgs: unknown, directory: string): Promise<string> => {
 			const parsed = ArgsSchema.safeParse(rawArgs);
@@ -106,6 +123,16 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 				);
 			}
 
+			// Capture provenance from args or context
+			const provenance =
+				args.provenance_agent_name || args.provenance_session_id
+					? {
+							agent_name: args.provenance_agent_name,
+							session_id: args.provenance_session_id,
+							captured_at: new Date().toISOString(),
+						}
+					: undefined;
+
 			const report: ArchitectureSupervisorReport = {
 				schema_version: SUMMARY_SCHEMA_VERSION,
 				phase: args.phase,
@@ -113,6 +140,7 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 				findings: args.findings,
 				knowledge_recommendations: args.knowledge_recommendations,
 				created_at: new Date().toISOString(),
+				...(provenance ? { provenance } : {}),
 			};
 
 			const evidencePath = writeSupervisorReport(dirResult.directory, report);
@@ -122,6 +150,8 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 			// candidates — WITHOUT auto-promotion, so this never promotes unrelated
 			// pre-existing candidates as a side effect.
 			let knowledgeProposed = 0;
+			let knowledgeReinforced = 0;
+			let knowledgeQuarantined = 0;
 			try {
 				const config = loadPluginConfig(dirResult.directory);
 				if (
@@ -132,15 +162,31 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 						config.knowledge ?? {},
 					);
 					const lessons = args.knowledge_recommendations.map((r) => r.lesson);
+					// Change 4 (Task 4.2): proposals must pass the Layer-5 actionability
+					// gate. Provide the curator LLM delegate to enrich prose lessons with
+					// v3 fields; lessons that cannot be enriched are quarantined to the
+					// unactionable queue (recoverable by the hardening loop), not stored.
 					const result = await curateAndStoreSwarm(
 						lessons,
 						path.basename(dirResult.directory),
 						{ phase_number: args.phase },
 						dirResult.directory,
 						knowledgeConfig,
-						{ skipAutoPromotion: true },
+						{
+							skipAutoPromotion: true,
+							llmDelegate: createCuratorLLMDelegate(
+								dirResult.directory,
+								'phase',
+							),
+							enrichmentQuota: {
+								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+								window: knowledgeConfig.enrichment.quota_window,
+							},
+						},
 					);
 					knowledgeProposed = result.stored;
+					knowledgeReinforced = result.reinforced;
+					knowledgeQuarantined = result.quarantined;
 				}
 			} catch {
 				// knowledge feedback is best-effort; never fail the evidence write
@@ -181,6 +227,8 @@ export const write_architecture_supervisor_evidence: ReturnType<typeof tool> =
 					verdict: args.verdict,
 					findings_count: args.findings.length,
 					knowledge_proposed: knowledgeProposed,
+					knowledge_reinforced: knowledgeReinforced,
+					knowledge_quarantined: knowledgeQuarantined,
 					skills_proposed: skillsProposed,
 					evidence_path: evidencePath,
 				},

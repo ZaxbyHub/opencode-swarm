@@ -59,7 +59,8 @@ For deep issue tracing, create a resumable trace directory:
 |-- 07-approved-plan.md
 |-- 08-test-results.md
 |-- 08b-implementation-review.md
-|-- 09-pr-body.md
+|-- 09-final-critic.md
+|-- 10-pr-body.md
 `-- state.md
 ```
 
@@ -149,8 +150,22 @@ Have a fresh, independent context try to refute the implemented patch before it 
 2. Otherwise run the fallback adversarial self-review in a clean pass and label it: `Fallback self-review: independent reviewer unavailable.`
 3. The reviewer's mandate is adversarial: find a concrete input/environment/caller/sequence where the patch is wrong, incomplete, overfits the regression test, leaves a runtime path unwired, or regresses a contract — verifying against real code and captured output, not the implementer's narrative.
 4. Record the verdict (`APPROVE`/`NEEDS_REVISION`/`BLOCKED`) and responses in `08b-implementation-review.md`; resolve every blocker with a code or evidence change, then re-review. For high-risk work (security, isolation, IPC, auth, payments, migrations, data integrity), this review is mandatory before closure, consistent with `../commit-pr/SKILL.md` Step 9.
+5. If subagent delegation is available and the user/session has authorized issue-tracer or swarm work, independent implementation review is mandatory for any code, test, docs, package metadata, release note, or skill-file edit. Fallback self-review is allowed only when no independent context is available, and that limitation must be disclosed.
+6. Any edit after reviewer approval invalidates that approval. Re-run the review on the latest diff and evidence.
 
-Gate: `08b-implementation-review.md` exists with a verdict; the review ran on the real diff and captured evidence; every blocker is resolved or explicitly escalated; reviewer unavailability is disclosed if it occurred.
+Gate: `08b-implementation-review.md` exists with a verdict; the review ran on the real diff and captured evidence; every blocker is resolved or explicitly escalated; reviewer unavailability is disclosed if it occurred; the latest edit happened before the latest reviewer approval.
+
+## Phase 4.6: Final Critic Gate
+
+After implementation review approval, have a separate critic challenge the whole completion claim: current diff, validation evidence, implementation-review artifact, docs/release/package claims, and no-gap checklist.
+
+1. If subagent delegation is available, launch a critic with `references/critic-gate.md` (Final Critic section), giving it the current diff, `08-test-results.md`, `08b-implementation-review.md`, and trace artifacts.
+2. If no independent critic is available, run the fallback adversarial critic pass and label it `Fallback final critic: independent critic unavailable.`
+3. Write `09-final-critic.md` with verdict `APPROVE`, `NEEDS_REVISION`, or `BLOCKED`.
+4. Resolve every `NEEDS_REVISION`/`BLOCKED` item by changing code, docs, tests, or evidence, then re-run implementation review when the fix changes the diff and re-run final critic.
+5. Any edit after final critic approval invalidates that approval.
+
+Gate: `09-final-critic.md` exists with verdict `APPROVE`; the critic reviewed the latest diff after implementation reviewer approval; every reviewer/critic blocker is resolved and re-reviewed; no edit occurred after the latest reviewer and critic approvals.
 
 ## Phase 5: Closure
 
@@ -174,6 +189,8 @@ Gate: `08b-implementation-review.md` exists with a verdict; the review ran on th
 - Suspected pre-existing or host-specific failures are compared against clean `origin/main` or explicitly documented as unverified.
 - Plan critic review completed before approval or implementation gate.
 - Independent implementation review (Phase 4.5) completed on the real diff and evidence; blockers resolved.
+- Final critic review (Phase 4.6) approved the latest diff and evidence after implementation review.
+- No edit occurred after the latest reviewer and critic approvals.
 - A written correctness justification distinguishes "tests green" from "root cause fixed."
 - Every "passed"/"validated" claim cites the exact command and its captured output.
 - Publication (commit/push/PR) followed `.claude/skills/commit-pr/SKILL.md` (the single source of truth).

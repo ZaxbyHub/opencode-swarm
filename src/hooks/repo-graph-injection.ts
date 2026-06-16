@@ -19,11 +19,12 @@
 import * as fs from 'node:fs';
 import {
 	getBlastRadius,
+	getGraphNode,
 	getGraphPath,
 	getLocalizationContext,
-	loadGraph,
+	loadGraphSync,
 	type RepoGraph,
-} from '../graph';
+} from '../tools/repo-graph';
 
 interface CachedGraph {
 	graph: RepoGraph;
@@ -53,7 +54,13 @@ export function getCachedGraph(directory: string): RepoGraph | null {
 	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
 		return cached.graph;
 	}
-	const graph = loadGraph(directory);
+	let graph: RepoGraph | null;
+	try {
+		graph = loadGraphSync(directory);
+	} catch {
+		cache.delete(directory);
+		return null;
+	}
 	if (!graph) {
 		cache.delete(directory);
 		return null;
@@ -83,7 +90,8 @@ export function buildCoderLocalizationBlock(
 	const graph = getCachedGraph(directory);
 	if (!graph) return null;
 	const normalized = targetFile.replace(/\\/g, '/').replace(/^\.\/+/, '');
-	if (!graph.files[normalized]) return null;
+	const targetNode = getGraphNode(graph, normalized);
+	if (!targetNode) return null;
 	const ctx = getLocalizationContext(graph, normalized, {
 		maxImporters: 5,
 		maxDeps: 5,
@@ -113,7 +121,7 @@ export function buildReviewerBlastRadiusBlock(
 	if (!graph) return null;
 	const normalized = changedFiles
 		.map((f) => f.replace(/\\/g, '/').replace(/^\.\/+/, ''))
-		.filter((f) => graph.files[f]);
+		.filter((f) => getGraphNode(graph, f) !== undefined);
 	if (normalized.length === 0) return null;
 
 	const blast = getBlastRadius(graph, normalized, 3);

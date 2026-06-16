@@ -141,6 +141,27 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+// Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
+// `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
+// This is distinct from the swarm-plugin's own `variant` field: `variant` is
+// passed through to the SDK as `variant` (a generic OpenCode hook), while
+// `reasoning` is passed through as-is and consumed by provider-native APIs.
+// Both may be set on the same agent; users control how their provider
+// interprets each.
+export const AgentReasoningConfigSchema = z.object({
+	effort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+});
+export type AgentReasoningConfig = z.infer<typeof AgentReasoningConfigSchema>;
+
+// Per-agent extended-thinking block. Mirrors the OpenCode SDK's `thinking`
+// field on AgentConfig (e.g. Anthropic Claude extended thinking with
+// `type: "enabled"` and `budget_tokens`). Passed through as-is to the SDK.
+export const AgentThinkingConfigSchema = z.object({
+	type: z.enum(['enabled', 'disabled']).optional(),
+	budget_tokens: z.number().int().positive().optional(),
+});
+export type AgentThinkingConfig = z.infer<typeof AgentThinkingConfigSchema>;
+
 // Agent override configuration
 export const AgentOverrideConfigSchema = z.object({
 	model: z.string().optional(),
@@ -160,6 +181,12 @@ export const AgentOverrideConfigSchema = z.object({
 	temperature: z.number().min(0).max(2).optional(),
 	disabled: z.boolean().optional(),
 	fallback_models: z.array(z.string()).max(3).optional(),
+	// Provider-native extended-reasoning / extended-thinking blocks. These
+	// were previously silently stripped by Zod's default strip behavior;
+	// they are now first-class fields. See AgentReasoningConfigSchema /
+	// AgentThinkingConfigSchema above for shape. Issue #1220.
+	reasoning: AgentReasoningConfigSchema.optional(),
+	thinking: AgentThinkingConfigSchema.optional(),
 });
 
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
@@ -416,6 +443,25 @@ export const ReviewPassesConfigSchema = z.object({
 });
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
+
+// Auto-review configuration (opt-in): automatic review of the execution diff
+// by the reviewer agent (its own configured model) in a fresh ephemeral
+// session at task/phase boundaries. Advisory-only: verdicts are persisted as
+// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
+export const AutoReviewConfigSchema = z.object({
+	/** Enable automatic execution-diff review. Default: false (opt-in). */
+	enabled: z.boolean().default(false),
+	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
+	trigger: z
+		.enum(['task_completion', 'phase_boundary', 'both'])
+		.default('phase_boundary'),
+	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+});
+
+export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 
 // Adversarial detection configuration (same-model adversarial detection)
 export const AdversarialDetectionConfigSchema = z.object({
@@ -759,7 +805,7 @@ export const GuardrailsConfigSchema = z.object({
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
 
-// ─── Watchdog configuration ───────────────────────────────────────────────
+// ─── Watchdog configuration ───────────────────────────────────────────────────────
 export const WatchdogConfigSchema = z.object({
 	/** Enable scope-guard hook. Blocks non-architect agents writing outside declared scope. Default: true */
 	scope_guard: z.boolean().default(true),
@@ -771,7 +817,7 @@ export const WatchdogConfigSchema = z.object({
 
 export type WatchdogConfig = z.infer<typeof WatchdogConfigSchema>;
 
-// ─── Self-review configuration ────────────────────────────────────────────
+// ─── Self-review configuration ──────────────────────────────────────────────
 export const SelfReviewConfigSchema = z.object({
 	/** Enable self-review advisory after task marked in_progress. Default: true */
 	enabled: z.boolean().default(true),
@@ -966,6 +1012,8 @@ export const KnowledgeConfigSchema = z.object({
 	auto_promote_days: z.number().min(1).max(3650).default(90),
 	/** Maximum number of knowledge entries to inject into context per phase */
 	max_inject_count: z.number().min(0).max(50).default(5),
+	/** Maximum number of knowledge directives injected into a delegated subagent's prompt. Default: 8 */
+	delegate_max_inject_count: z.number().min(0).max(50).default(8),
 	/** Maximum total chars for the entire injection block (preamble + lessons + run memory + rejected warnings). Default: 2000 */
 	inject_char_budget: z.number().min(200).max(10_000).default(2_000),
 	context_budget_threshold: z.number().int().positive().optional(),
@@ -1011,6 +1059,28 @@ export const KnowledgeConfigSchema = z.object({
 	todo_max_phases: z.number().int().positive().default(3),
 	/** Enable age-based sweep of stale knowledge entries */
 	sweep_enabled: z.boolean().default(true),
+	/** Change 5: retrieval-upgrade tuning (MMR diversity, cold-start, synonyms). */
+	retrieval: z
+		.object({
+			/** MMR diversity trade-off: 1 = pure relevance, 0 = pure diversity. */
+			mmr_lambda: z.number().min(0).max(1).default(0.5),
+			/** Additive exploration bonus for brand-new, never-applied entries. */
+			cold_start_bonus: z.number().min(0).max(0.5).default(0.08),
+			/** Max age (in phases) for an entry to still earn the cold-start bonus. */
+			cold_start_max_age_phases: z.number().int().min(0).max(100).default(3),
+			/** Tag co-occurrence count at/above which a pair is treated as synonyms. */
+			synonym_min_cooccurrence: z.number().int().min(1).max(100).default(3),
+			/** Hard cap on retained synonym pairs (LRU-evicted by recency). */
+			synonym_map_max_pairs: z.number().int().min(1).max(10000).default(500),
+		})
+		.optional(),
+	/** Dedicated quota for LLM enrichment of plain-prose lessons into v3 directives. */
+	enrichment: z
+		.object({
+			max_calls_per_day: z.number().int().min(0).max(1000).default(30),
+			quota_window: z.enum(['utc', 'local']).default('utc'),
+		})
+		.default({ max_calls_per_day: 30, quota_window: 'utc' }),
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
@@ -1095,6 +1165,8 @@ export const CuratorConfigSchema = z.object({
 	init_enabled: z.boolean().default(true),
 	/** Run CURATOR_PHASE at phase boundaries. Default: true (when curator enabled) */
 	phase_enabled: z.boolean().default(true),
+	/** Run CURATOR_POSTMORTEM at project end / finalize. Default: true (when curator enabled) */
+	postmortem_enabled: z.boolean().default(true),
 	/** Maximum tokens for curator summary. Default: 2000 */
 	max_summary_tokens: z.number().min(500).max(8000).default(2000),
 	/** Minimum confidence for knowledge entries to include in curator context. Default: 0.7 */
@@ -1113,8 +1185,8 @@ export const CuratorConfigSchema = z.object({
 	skill_generation_enabled: z.boolean().default(true),
 	/** v2: Skill generation mode: 'draft' writes only proposals; 'active' compiles directly into .opencode/skills/generated. Default: 'draft' */
 	skill_generation_mode: z.enum(['draft', 'active']).default('draft'),
-	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.85 */
-	min_skill_confidence: z.number().min(0).max(1).default(0.85),
+	/** v2: Minimum confidence for an entry to be a skill candidate. Default: 0.7 */
+	min_skill_confidence: z.number().min(0).max(1).default(0.7),
 	/** v2: Minimum number of phase confirmations for a skill candidate cluster. Default: 2 */
 	min_skill_confirmations: z.number().int().min(1).max(50).default(2),
 });
@@ -1146,6 +1218,8 @@ export const ArchitecturalSupervisionConfigSchema = z.object({
 	allow_concerns_to_complete: z.boolean().default(true),
 	/** Propose supervisor knowledge recommendations as candidate knowledge. Default: false. [Chunk E: consumed by the feedback path] */
 	persist_knowledge_recommendations: z.boolean().default(false),
+	/** Reject evidence lacking provenance (agent_name or session_id) when in gate mode. Default: false (advisory only). */
+	provenance_verify: z.boolean().default(false),
 });
 
 export type ArchitecturalSupervisionConfig = z.infer<
@@ -1205,8 +1279,17 @@ export const SkillImproverConfigSchema = z.object({
 	fallback_models: z.array(z.string()).default([]),
 	/** Hard daily quota. Default: 10. */
 	max_calls_per_day: z.number().int().min(1).max(1000).default(10),
-	/** 'manual' is the only supported trigger today; 'scheduled' is reserved. */
+	/** 'manual' runs only on explicit request; 'scheduled' enables bounded consolidation at safe cadence points. */
 	trigger: z.enum(['manual', 'scheduled']).default('manual'),
+	/** Minimum hours between opportunistic scheduled consolidation runs. */
+	consolidation_interval_hours: z
+		.number()
+		.int()
+		.min(1)
+		.max(24 * 30)
+		.default(24),
+	/** Per-run reservation for scheduled consolidation, still capped by max_calls_per_day. */
+	consolidation_max_calls_per_run: z.number().int().min(1).max(100).default(1),
 	/** Targets the skill_improver may inspect/improve. */
 	targets: z
 		.array(z.enum(['skills', 'spec', 'architect_prompt', 'knowledge']))
@@ -1320,6 +1403,7 @@ export const AgentAuthorityRuleSchema = z.object({
 		.optional(),
 	blockedGlobs: z.array(z.string()).optional(),
 	allowedGlobs: z.array(z.string()).optional(),
+	allowedCaseSensitiveGlobs: z.array(z.string()).optional(),
 });
 
 export type AgentAuthorityRule = z.infer<typeof AgentAuthorityRuleSchema>;
@@ -1442,6 +1526,49 @@ export const CouncilConfigSchema = z
 
 export type CouncilConfig = z.infer<typeof CouncilConfigSchema>;
 
+// PR Monitor configuration (FR-001 — GitHub PR subscription and polling)
+// Off by default. When enabled, the architect can subscribe to PRs and
+// receive real-time status updates (CI, reviews, merge conflicts, comments)
+// via background gh CLI polling.
+export const PrMonitorConfigSchema = z
+	.object({
+		/** Master feature flag. Defaults to false — no PR polling when omitted. */
+		enabled: z.boolean().default(false),
+		/** Seconds between poll cycles. Clamped to 30–300. */
+		poll_interval_seconds: z.number().int().min(30).max(300).default(60),
+		/** Maximum concurrent PR subscriptions. Clamped to 1–100. */
+		max_subscriptions: z.number().int().min(1).max(100).default(20),
+		/** Maximum PRs polled per cycle. Clamped to 1–20. */
+		max_prs_per_cycle: z.number().int().min(1).max(20).default(5),
+		/** Maximum concurrent PR polls per cycle. Clamped to 1–10. */
+		max_concurrent_pr_polls: z.number().int().min(1).max(10).default(3),
+		/** Per-poll timeout in milliseconds. Clamped to 5 000–120 000. */
+		poll_timeout_ms: z.number().int().min(5_000).max(120_000).default(30_000),
+		/** Consecutive failures before circuit breaker trips. Clamped to 1–20. */
+		failure_threshold: z.number().int().min(1).max(20).default(5),
+		/** Circuit breaker cooldown in seconds. Clamped to 5–600. */
+		cooldown_seconds: z.number().int().min(5).max(600).default(30),
+		/** Maximum cooldown with exponential backoff in seconds. Clamped to 30–3600. */
+		max_cooldown_seconds: z.number().int().min(30).max(3_600).default(300),
+		/** TTL in days for stale subscription cleanup. Clamped to 1–90. */
+		cleanup_ttl_days: z.number().int().min(1).max(90).default(7),
+		/** Automatically unsubscribe when PR is merged. */
+		auto_unsubscribe_on_merge: z.boolean().default(true),
+		/** Automatically unsubscribe when PR is closed (without merge). */
+		auto_unsubscribe_on_close: z.boolean().default(true),
+		/** Emit notification on CI failure. */
+		notify_ci_failure: z.boolean().default(true),
+		/** Emit notification on new comments. */
+		notify_new_comments: z.boolean().default(true),
+		/** Emit notification on merge conflict detection. */
+		notify_merge_conflict: z.boolean().default(true),
+		/** Automatically trigger PR_FEEDBACK mode on CI failure or merge conflict. */
+		auto_pr_feedback: z.boolean().default(false),
+	})
+	.strict();
+
+export type PrMonitorConfig = z.infer<typeof PrMonitorConfigSchema>;
+
 // Parallelization configuration (PR 1 — dark foundation, disabled by default)
 // All fields default to single-run-equivalent values so no production path
 // activates parallel execution while this config exists.
@@ -1532,6 +1659,208 @@ export const TurboConfigSchema = z.discriminatedUnion('strategy', [
 
 export type TurboConfig = z.infer<typeof TurboConfigSchema>;
 
+// ---------------------------------------------------------------------------
+// External skills — candidate model, discovery sources, and quarantine config
+// (FR-001, FR-002, FR-009, FR-011 — disabled by default)
+// ---------------------------------------------------------------------------
+
+/** Where an external skill candidate was discovered. */
+export const ExternalSkillCandidateSourceTypeSchema = z.enum([
+	'github',
+	'url',
+	'collection',
+	'manual_import',
+]);
+
+export type ExternalSkillCandidateSourceType = z.infer<
+	typeof ExternalSkillCandidateSourceTypeSchema
+>;
+
+/** Evaluation verdict for an external skill candidate. */
+export const ExternalSkillCandidateEvaluationVerdictSchema = z.enum([
+	'pending',
+	'in_review',
+	'quarantined',
+	'passed',
+	'rejected',
+	'promoted',
+	'revoked',
+]);
+
+export type ExternalSkillCandidateEvaluationVerdict = z.infer<
+	typeof ExternalSkillCandidateEvaluationVerdictSchema
+>;
+
+/** A single discovery source that feeds candidates into the quarantine store. */
+export const DiscoverySourceSchema = z.object({
+	type: ExternalSkillCandidateSourceTypeSchema,
+	location: z.string().min(1),
+	enabled: z.boolean().default(true),
+	trust_level: z.enum(['low', 'medium', 'high']).default('low').optional(),
+});
+
+export type DiscoverySource = z.infer<typeof DiscoverySourceSchema>;
+
+/**
+ * A quarantined or evaluated external skill candidate awaiting promotion.
+ * Stored in `.swarm/external-skills/` with content-addressable naming.
+ */
+export const ExternalSkillCandidateSchema = z.object({
+	id: z.string().uuid(),
+	source_url: z.string().url(),
+	source_type: ExternalSkillCandidateSourceTypeSchema,
+	publisher: z.string().min(1),
+	sha256: z.string().regex(/^[a-f0-9]{64}$/),
+	fetched_at: z.string().datetime(),
+	skill_name: z.string().optional(),
+	skill_description: z.string().optional(),
+	skill_body: z.string(),
+	risk_flags: z.array(z.string()).default([]),
+	evaluation_verdict:
+		ExternalSkillCandidateEvaluationVerdictSchema.default('pending'),
+	evaluation_history: z
+		.array(
+			z.object({
+				verdict: ExternalSkillCandidateEvaluationVerdictSchema,
+				timestamp: z.string().datetime(),
+				actor: z.string(),
+				reason: z.string().optional(),
+				candidate_id: z.string().optional(),
+				original_verdict:
+					ExternalSkillCandidateEvaluationVerdictSchema.optional(),
+				gate_results: z
+					.array(
+						z.object({
+							gate: z.string(),
+							verdict: z.string(),
+						}),
+					)
+					.optional(),
+				risk_assessment: z
+					.object({
+						total_flags: z.number().int().nonnegative(),
+						findings: z.array(
+							z.object({
+								severity: z.enum(['error', 'warning']),
+								category: z.string(),
+							}),
+						),
+					})
+					.optional(),
+				risk_flags_count: z.number().int().nonnegative().optional(),
+				provenance_snapshot: z
+					.object({
+						sha256: z.string(),
+						source_url: z.string(),
+						publisher: z.string(),
+						fetched_at: z.string().datetime().optional(),
+					})
+					.optional(),
+				target_path: z.string().optional(),
+				promoted_content_hash: z
+					.string()
+					.regex(/^[a-f0-9]{64}$/)
+					.optional(),
+				original_evaluation: z.record(z.string(), z.unknown()).optional(),
+			}),
+		)
+		.default([]),
+});
+
+export type ExternalSkillCandidate = z.infer<
+	typeof ExternalSkillCandidateSchema
+>;
+
+/** Top-level configuration block for the external skills subsystem. */
+export const ExternalSkillsConfigSchema = z.object({
+	curation_enabled: z.boolean().default(false),
+	max_candidates: z.number().int().min(1).max(10000).default(500),
+	max_bytes_per_candidate: z
+		.number()
+		.int()
+		.min(1024)
+		.max(10485760)
+		.default(1048576),
+	eviction_policy: z.enum(['fifo']).default('fifo'),
+	ttl_days: z.number().int().min(1).max(3650).default(90),
+	evaluation_enabled: z.boolean().default(false),
+	sources: z.array(DiscoverySourceSchema).default([]),
+	max_candidates_per_discovery: z.number().int().min(1).max(1000).default(50),
+	max_concurrent_fetches: z.number().int().min(1).max(20).default(5),
+	fetch_timeout_ms: z.number().int().min(1000).max(300000).default(30000),
+});
+
+export type ExternalSkillsConfig = z.infer<typeof ExternalSkillsConfigSchema>;
+
+/** Default external skills configuration (all subsystems disabled). */
+export const DEFAULT_EXTERNAL_SKILLS_CONFIG: ExternalSkillsConfig = {
+	curation_enabled: false,
+	max_candidates: 500,
+	max_bytes_per_candidate: 1048576,
+	eviction_policy: 'fifo',
+	ttl_days: 90,
+	evaluation_enabled: false,
+	sources: [],
+	max_candidates_per_discovery: 50,
+	max_concurrent_fetches: 5,
+	fetch_timeout_ms: 30000,
+};
+
+/**
+ * Resolve the external_skills config section, merging user-provided values
+ * over defaults.  Returns the default (all-disabled) config when
+ * `external_skills` is absent or undefined, ensuring callers never need
+ * null checks.
+ *
+ * Invalid source configs produce warnings via the logger but do NOT block
+ * plugin load (AGENTS.md #1 — fail-open, bounded init).
+ */
+export function resolveExternalSkillsConfig(
+	input: unknown,
+): ExternalSkillsConfig {
+	// Fail-open: return safe defaults for any non-object or null input (AGENTS.md #1).
+	if (
+		input === undefined ||
+		input === null ||
+		typeof input !== 'object' ||
+		Array.isArray(input)
+	) {
+		return { ...DEFAULT_EXTERNAL_SKILLS_CONFIG };
+	}
+
+	const config = input as Partial<ExternalSkillsConfig>;
+
+	// Deep merge: sources come from user config only (no default sources).
+	const merged: ExternalSkillsConfig = {
+		curation_enabled:
+			config.curation_enabled ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.curation_enabled,
+		max_candidates:
+			config.max_candidates ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.max_candidates,
+		max_bytes_per_candidate:
+			config.max_bytes_per_candidate ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_bytes_per_candidate,
+		eviction_policy:
+			config.eviction_policy ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.eviction_policy,
+		ttl_days: config.ttl_days ?? DEFAULT_EXTERNAL_SKILLS_CONFIG.ttl_days,
+		evaluation_enabled:
+			config.evaluation_enabled ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.evaluation_enabled,
+		sources: Array.isArray(config.sources) ? config.sources : [],
+		max_candidates_per_discovery:
+			config.max_candidates_per_discovery ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_candidates_per_discovery,
+		max_concurrent_fetches:
+			config.max_concurrent_fetches ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.max_concurrent_fetches,
+		fetch_timeout_ms:
+			config.fetch_timeout_ms ??
+			DEFAULT_EXTERNAL_SKILLS_CONFIG.fetch_timeout_ms,
+	};
+
+	return merged;
+}
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	// Legacy: Per-agent overrides (default swarm)
@@ -1596,7 +1925,12 @@ export const PluginConfigSchema = z.object({
 	// Multiple swarms support
 	// Keys are swarm IDs (e.g., "cloud", "local", "fast")
 	// First swarm or one named "default" becomes the primary architect
-	swarms: z.record(z.string(), SwarmConfigSchema).optional(),
+	swarms: z
+		.record(
+			z.string().regex(/^[^_]+$/, 'Swarm ID must not contain underscores'),
+			SwarmConfigSchema,
+		)
+		.optional(),
 
 	// Pipeline settings
 	max_iterations: z.number().min(1).max(10).default(5),
@@ -1631,6 +1965,10 @@ export const PluginConfigSchema = z.object({
 
 	// Self-review configuration (advisory after coder delegation)
 	self_review: SelfReviewConfigSchema.optional(),
+
+	// Auto-review configuration (opt-in execution-diff review by the reviewer
+	// model in a fresh ephemeral session at task/phase boundaries)
+	auto_review: AutoReviewConfigSchema.optional(),
 
 	// Tool filter configuration - controls which tools each agent is allowed to use
 	tool_filter: ToolFilterConfigSchema.optional(),
@@ -1796,7 +2134,19 @@ export const PluginConfigSchema = z.object({
 	// escalation_mode, critic_model) so existing configs continue to load unchanged.
 	full_auto: z
 		.object({
+			/** @deprecated Full-Auto is now a first-class session toggle
+			 *  (`/swarm full-auto on|off`) and no longer requires config-level
+			 *  enablement. The hooks are always armed and gated at runtime by
+			 *  the durable per-session run state. This flag is retained so
+			 *  existing configs continue to parse; it only controls the
+			 *  init-time critic-model advisory. Use `locked: true` to prevent
+			 *  runtime activation entirely. */
 			enabled: z.boolean().default(false),
+			/** When true, `/swarm full-auto on` is refused — Full-Auto cannot be
+			 *  activated at runtime in this project. `off` and `status` still
+			 *  work. Use this as an administrative hard-off (the pre-v8 behavior
+			 *  of `enabled: false`). Default: false (toggle available). */
+			locked: z.boolean().default(false),
 			critic_model: z.string().optional(),
 			max_interactions_per_phase: z.number().int().min(5).max(200).default(50),
 			deadlock_threshold: z.number().int().min(2).max(10).default(3),
@@ -1814,6 +2164,7 @@ export const PluginConfigSchema = z.object({
 						.default([
 							'.git',
 							'.github/workflows',
+							'.opencode',
 							'.swarm',
 							'package.json',
 							'package-lock.json',
@@ -1842,6 +2193,7 @@ export const PluginConfigSchema = z.object({
 					protected_paths: [
 						'.git',
 						'.github/workflows',
+						'.opencode',
 						'.swarm',
 						'package.json',
 						'package-lock.json',
@@ -1901,6 +2253,7 @@ export const PluginConfigSchema = z.object({
 		.optional()
 		.default(() => ({
 			enabled: false,
+			locked: false,
 			max_interactions_per_phase: 50,
 			deadlock_threshold: 3,
 			escalation_mode: 'pause' as const,
@@ -1913,6 +2266,7 @@ export const PluginConfigSchema = z.object({
 				protected_paths: [
 					'.git',
 					'.github/workflows',
+					'.opencode',
 					'.swarm',
 					'package.json',
 					'package-lock.json',
@@ -1950,6 +2304,14 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 			},
 		})),
+
+	// PR Monitor — GitHub PR subscription and polling (FR-001)
+	// Disabled by default; opt-in for real-time PR status updates.
+	pr_monitor: PrMonitorConfigSchema.optional(),
+
+	// External skills — candidate model, discovery, and quarantine store (FR-001)
+	// Disabled by default; all subsystems are opt-in.
+	external_skills: ExternalSkillsConfigSchema.optional(),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

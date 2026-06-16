@@ -483,6 +483,23 @@ export function darkMatterToKnowledgeEntries(
 			updated_at: now,
 			auto_generated: true,
 			project_name: projectName,
+			// Change 4 (Layer-5 actionability): dark-matter findings are structured
+			// (we know the exact file pair), so emit the predicate + scope fields
+			// deterministically — no LLM enrichment needed for this source.
+			applies_to_agents: ['coder', 'reviewer'],
+			required_actions: [
+				`when modifying ${baseA}, check whether ${baseB} needs a matching change (and vice versa)`.slice(
+					0,
+					200,
+				),
+			],
+			verification_checks: [
+				`coupled file ${baseB} was considered when ${baseA} changed`.slice(
+					0,
+					200,
+				),
+			],
+			triggers: [baseA, baseB].map((t) => t.slice(0, 80)),
 		});
 	}
 

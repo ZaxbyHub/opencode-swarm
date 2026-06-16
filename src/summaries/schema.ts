@@ -196,6 +196,17 @@ export type KnowledgeRecommendation = z.infer<
 	typeof KnowledgeRecommendationSchema
 >;
 
+/**
+ * Provenance metadata for evidence: agent identity, session binding, and capture timestamp.
+ * Optional for backwards compatibility; when present and in gate mode, gates verify these fields.
+ */
+export const EvidenceProvenanceSchema = z.object({
+	agent_name: z.string().min(1).optional(),
+	session_id: z.string().min(1).optional(),
+	captured_at: z.string().datetime().optional(),
+});
+export type EvidenceProvenance = z.infer<typeof EvidenceProvenanceSchema>;
+
 export const ArchitectureSupervisorReportSchema = z.object({
 	schema_version: z.literal(SUMMARY_SCHEMA_VERSION),
 	phase: z.number().int().min(0).max(999),
@@ -203,6 +214,7 @@ export const ArchitectureSupervisorReportSchema = z.object({
 	findings: z.array(SupervisorFindingSchema).default([]),
 	knowledge_recommendations: z.array(KnowledgeRecommendationSchema).default([]),
 	created_at: z.string().datetime(),
+	provenance: EvidenceProvenanceSchema.optional(),
 });
 export type ArchitectureSupervisorReport = z.infer<
 	typeof ArchitectureSupervisorReportSchema

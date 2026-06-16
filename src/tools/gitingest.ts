@@ -1,5 +1,6 @@
 import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { scanExternalContent } from '../services/external-content-scanner';
 import { createSwarmTool } from './create-tool';
 
 interface GitingestResponse {
@@ -73,7 +74,37 @@ export async function fetchGitingest(args: GitingestArgs): Promise<string> {
 				throw new Error('gitingest response too large');
 			}
 
-			const text = await response.text();
+			// Stream response with early abort on size limit to prevent unbounded buffering
+			// Fallback to text() if streaming is not available (e.g., in some test environments)
+			let text: string;
+			const reader = response.body?.getReader();
+			if (reader) {
+				// Use streaming approach for better memory efficiency
+				let buffer = '';
+				const decoder = new TextDecoder();
+				let totalBytes = 0;
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						totalBytes += value.byteLength;
+						if (totalBytes > GITINGEST_MAX_RESPONSE_BYTES) {
+							throw new Error('gitingest response too large');
+						}
+						buffer += decoder.decode(value, { stream: true });
+					}
+					buffer += decoder.decode(); // Flush decoder
+					text = buffer;
+				} finally {
+					reader.cancel().catch(() => {
+						// Best-effort cancellation; ignore if reader already closed
+					});
+				}
+			} else {
+				// Fallback: use response.text() if streaming is not available
+				text = await response.text();
+			}
+
 			if (Buffer.byteLength(text) > GITINGEST_MAX_RESPONSE_BYTES) {
 				throw new Error('gitingest response too large');
 			}
@@ -86,7 +117,22 @@ export async function fetchGitingest(args: GitingestArgs): Promise<string> {
 					`gitingest API returned non-JSON response (${text.length} chars, starts: ${text.slice(0, 80)})`,
 				);
 			}
-			return `${data.summary}\n\n${data.tree}\n\n${data.content}`;
+
+			// Scan fetched content for prompt-injection and unsafe-instruction threats
+			const combined = `${data.summary}\n\n${data.tree}\n\n${data.content}`;
+			const scanResult = scanExternalContent(combined, { trustLevel: 'low' });
+
+			// If threats detected, include a safety note in the response
+			let result = combined;
+			if (!scanResult.clean) {
+				const threatSummary = scanResult.findings
+					.filter((f) => f.severity === 'error')
+					.map((f) => `- ${f.pattern}: ${f.description}`)
+					.join('\n');
+				result = `[GITINGEST SECURITY NOTE: External repository content scanned and contains potential threat patterns]\n${threatSummary}\n\n[Content follows with threats marked for LLM awareness]\n\n${scanResult.neutralized}`;
+			}
+
+			return result;
 		} catch (error) {
 			// Timeout errors — convert to domain-specific error
 			if (

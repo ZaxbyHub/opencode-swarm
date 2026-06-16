@@ -42,9 +42,10 @@ export async function detectProjectLanguages(
 	const detected = new Set<string>();
 
 	async function scanDir(dir: string): Promise<void> {
+		let dirEntries: import('node:fs').Dirent[];
 		let entries: string[];
 		try {
-			const dirEntries = await readdir(dir, { withFileTypes: true });
+			dirEntries = await readdir(dir, { withFileTypes: true });
 			entries = dirEntries.map((e) => e.name);
 		} catch {
 			return;
@@ -60,13 +61,16 @@ export async function detectProjectLanguages(
 					// solution/workspace file would never be detected here. Uses
 					// the same simple glob→regex shape as default-backend's
 					// detectFileExists; detectFiles are controlled profile data.
+					// Only match files (not directories) to prevent a directory
+					// named e.g. "MyProject.csproj" from triggering false detection
+					// (F-004).
 					const regex = new RegExp(
 						`^${detectFile
 							.replace(/\./g, '\\.')
 							.replace(/\*/g, '.*')
 							.replace(/\?/g, '.')}$`,
 					);
-					if (entries.some((name) => regex.test(name))) {
+					if (dirEntries.some((e) => !e.isDirectory() && regex.test(e.name))) {
 						detected.add(profile.id);
 						break;
 					}

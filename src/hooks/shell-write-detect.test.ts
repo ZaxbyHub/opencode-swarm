@@ -3,6 +3,11 @@
  * @jest-environment node
  */
 
+// FR-011: This file contains 253 tests against a security-sensitive shell command
+// parser. The high test count is justified by the need to cover many shell syntax
+// variants, quoting modes, escape sequences, and cross-platform command patterns.
+// See .swarm/spec.md FR-011.
+
 import { describe, expect, test } from 'bun:test';
 import {
 	detectInteractiveSession,

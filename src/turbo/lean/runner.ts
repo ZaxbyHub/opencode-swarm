@@ -47,7 +47,10 @@ import {
  * requiring the full SDK type.
  */
 interface SessionClient {
-	create(options: { query: { directory: string } }): Promise<{
+	create(options: {
+		body?: { parentID?: string; title?: string };
+		query: { directory: string };
+	}): Promise<{
 		data: { id: string } | null;
 		error: unknown;
 	}>;
@@ -58,6 +61,7 @@ interface SessionClient {
 			tools: { write: boolean; edit: boolean; patch: boolean };
 			parts: Array<{ type: 'text'; text: string }>;
 		};
+		signal?: AbortSignal;
 	}): Promise<{
 		data: { parts: Array<{ type: string; text?: string }> } | null;
 		error: unknown;
@@ -65,7 +69,7 @@ interface SessionClient {
 	delete(options: { path: { id: string } }): Promise<void>;
 }
 
-// ─── Result Types ─────────────────────────────────────────────────────────────
+// ─── Result Types ───────────────────────────────────────────────────────────────────
 
 /**
  * Result of a single lane dispatch (session creation + prompt).
@@ -137,7 +141,7 @@ export interface LeanTurboPhaseResult {
  */
 type LaneLockMap = Record<string, string[]>;
 
-// ─── Transient Error Detection ─────────────────────────────────────────────
+// ─── Transient Error Detection ───────────────────────────────────────────────
 
 /**
  * Determines whether a worktree provisioning error is transient and worth retrying.
@@ -192,7 +196,7 @@ function isTransientProvisionError(errorMsg: string): boolean {
 	return false;
 }
 
-// ─── Runner Class ────────────────────────────────────────────────────────────
+// ─── Runner Class ───────────────────────────────────────────────────────────────
 
 /**
  * Orchestrates Lean Turbo lane execution.
@@ -337,7 +341,7 @@ export class LeanTurboRunner {
 		this._availableAgents = this._resolveCoderAgents(names);
 	}
 
-	// ─── Public Methods ─────────────────────────────────────────────────────────
+	// ─── Public Methods ─────────────────────────────────────────────────────────────
 
 	/**
 	 * Run a single phase: plan lanes, acquire locks, dispatch coders.
@@ -525,23 +529,25 @@ export class LeanTurboRunner {
 		}
 
 		// Build a promise that does the full dispatch
+		const promptController = new AbortController();
 		const dispatchPromise = this._doDispatch(
 			session,
 			lane,
 			agentName,
 			worktreeDirectory,
+			promptController,
 		);
 
 		// Apply timeout if configured via _internals
 		const timeoutMs = LeanTurboRunner._internals.laneDispatchTimeoutMs;
 		if (timeoutMs !== undefined && timeoutMs > 0) {
-			const timeoutPromise = new Promise<never>((_, reject) =>
-				setTimeout(
-					() =>
-						reject(new Error(`Lane dispatch timed out after ${timeoutMs}ms`)),
-					timeoutMs,
-				),
-			);
+			let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+			const timeoutPromise = new Promise<never>((_, reject) => {
+				timeoutHandle = setTimeout(() => {
+					promptController.abort();
+					reject(new Error(`Lane dispatch timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+			});
 			try {
 				return await Promise.race([dispatchPromise, timeoutPromise]);
 			} catch (err) {
@@ -577,6 +583,8 @@ export class LeanTurboRunner {
 					return { ok: false, error: err.message };
 				}
 				throw err;
+			} finally {
+				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 			}
 		}
 
@@ -591,12 +599,22 @@ export class LeanTurboRunner {
 		lane: LeanTurboLane,
 		agentName: string,
 		worktreeDirectory?: string,
+		abortController?: AbortController,
 	): Promise<LaneDispatchResult> {
+		let sessionId: string | undefined;
 		try {
 			// Use worktree directory when provided, otherwise use primary directory
 			const effectiveDirectory = worktreeDirectory ?? this._directory;
 			// Create ephemeral session
 			const createResult = await session.create({
+				...(this._sessionID
+					? {
+							body: {
+								parentID: this._sessionID,
+								title: `lean_turbo_lane_${lane.laneId} background`,
+							},
+						}
+					: {}),
 				query: { directory: effectiveDirectory },
 			});
 
@@ -607,7 +625,7 @@ export class LeanTurboRunner {
 				};
 			}
 
-			const sessionId = createResult.data.id;
+			sessionId = createResult.data.id;
 
 			// Build task prompt for this lane
 			const promptText = this._buildLanePrompt(lane);
@@ -620,10 +638,11 @@ export class LeanTurboRunner {
 					tools: { write: true, edit: true, patch: true },
 					parts: [{ type: 'text' as const, text: promptText }],
 				},
+				signal: abortController?.signal,
 			});
 
 			if (!promptResult.data) {
-				// Clean up the orphaned session
+				abortController?.abort();
 				session.delete({ path: { id: sessionId } }).catch(() => {});
 				return {
 					ok: false,
@@ -633,6 +652,10 @@ export class LeanTurboRunner {
 
 			return { ok: true, sessionId };
 		} catch (err) {
+			if (sessionId) {
+				abortController?.abort();
+				session.delete({ path: { id: sessionId } }).catch(() => {});
+			}
 			const msg = err instanceof Error ? err.message : String(err);
 			return { ok: false, error: msg };
 		}
@@ -1461,7 +1484,7 @@ export class LeanTurboRunner {
 	}
 }
 
-// ─── Exported Types ────────────────────────────────────────────────────────────
+// ─── Exported Types ───────────────────────────────────────────────────────────────
 
 /**
  * Current status of a lane (returned by waitForLanes).

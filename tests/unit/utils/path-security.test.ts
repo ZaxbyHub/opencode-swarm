@@ -74,9 +74,17 @@ describe('containsControlChars', () => {
 		expect(containsControlChars('foo\nbar')).toBe(true);
 	});
 
+	test('blocks C0/C1 and bidi formatting controls', () => {
+		expect(containsControlChars('foo\x1bbar')).toBe(true);
+		expect(containsControlChars('foo\x7fbar')).toBe(true);
+		expect(containsControlChars('safe\u202eunsafe')).toBe(true);
+		expect(containsControlChars('safe\u2066unsafe')).toBe(true);
+	});
+
 	test('allows normal strings', () => {
 		expect(containsControlChars('hello world')).toBe(false);
 		expect(containsControlChars('src/tools/lint.ts')).toBe(false);
+		expect(containsControlChars('日本語🔒')).toBe(false);
 		expect(containsControlChars('')).toBe(false);
 	});
 });
@@ -174,26 +182,29 @@ describe('validateSymlinkBoundary', () => {
 		fs.rmSync(tmpDir, { recursive: true });
 	});
 
-	test('throws for symlink escaping boundary', () => {
-		const tmpDir = fs.mkdtempSync(
-			path.join(fs.realpathSync(os.tmpdir()), 'symlink-test-'),
-		);
-		const linkTarget = fs.mkdtempSync(
-			path.join(fs.realpathSync(os.tmpdir()), 'symlink-target-'),
-		);
-		const linkPath = path.join(tmpDir, 'malicious_link');
+	test.skipIf(process.platform === 'win32')(
+		'throws for symlink escaping boundary',
+		() => {
+			const tmpDir = fs.mkdtempSync(
+				path.join(fs.realpathSync(os.tmpdir()), 'symlink-test-'),
+			);
+			const linkTarget = fs.mkdtempSync(
+				path.join(fs.realpathSync(os.tmpdir()), 'symlink-target-'),
+			);
+			const linkPath = path.join(tmpDir, 'malicious_link');
 
-		// Create symlink from linkPath to linkTarget
-		fs.symlinkSync(linkTarget, linkPath);
+			// Create symlink from linkPath to linkTarget
+			fs.symlinkSync(linkTarget, linkPath);
 
-		// linkPath -> linkTarget escapes tmpDir boundary
-		expect(() => validateSymlinkBoundary(linkPath, tmpDir)).toThrow(
-			'Symlink resolution escaped boundary',
-		);
+			// linkPath -> linkTarget escapes tmpDir boundary
+			expect(() => validateSymlinkBoundary(linkPath, tmpDir)).toThrow(
+				'Symlink resolution escaped boundary',
+			);
 
-		// Cleanup
-		fs.unlinkSync(linkPath);
-		fs.rmSync(linkTarget, { recursive: true });
-		fs.rmSync(tmpDir, { recursive: true });
-	});
+			// Cleanup
+			fs.unlinkSync(linkPath);
+			fs.rmSync(linkTarget, { recursive: true });
+			fs.rmSync(tmpDir, { recursive: true });
+		},
+	);
 });

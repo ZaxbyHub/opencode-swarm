@@ -59,7 +59,7 @@ export interface PhaseCriticResult {
 	evidencePath: string;
 }
 
-// ─── Internal Types ────────────────────────────────────────────────────────────
+// ─── Internal Types ───────────────────────────────────────────────────────────
 
 /**
  * Reviewer evidence record (lean-turbo-reviewer.json).
@@ -373,12 +373,14 @@ async function writeCriticEvidence(
  * @param criticPackage - Compiled boundary review package
  * @param agentName - Name of the critic agent to dispatch
  * @param timeoutMs - Timeout in milliseconds (0 for no timeout)
+ * @param parentSessionId - Parent session ID to attach as child session
  */
 async function defaultDispatchCriticAgent(
 	directory: string,
 	criticPackage: CriticPackage,
 	agentName: string,
 	timeoutMs: number,
+	parentSessionId?: string,
 ): Promise<string> {
 	const client = swarmState.opencodeClient;
 	if (!client) {
@@ -387,6 +389,14 @@ async function defaultDispatchCriticAgent(
 
 	// Create an ephemeral session for the critic, scoped to the project directory
 	const sessionResult = await client.session.create({
+		...(parentSessionId
+			? {
+					body: {
+						parentID: parentSessionId,
+						title: 'lean_turbo_critic background',
+					},
+				}
+			: {}),
 		query: { directory },
 	});
 
@@ -395,6 +405,8 @@ async function defaultDispatchCriticAgent(
 	}
 
 	const sessionId = sessionResult.data.id;
+	const promptController = new AbortController();
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
 	try {
 		const promptText = `You are a read-only phase critic performing boundary review for Lean Turbo execution.
@@ -451,16 +463,16 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 								tools: { write: false, edit: false, patch: false },
 								parts: [{ type: 'text', text: promptText }],
 							},
+							signal: promptController.signal,
 						}),
-						new Promise<never>((_, reject) =>
-							setTimeout(
-								() =>
-									reject(
-										new Error(`Critic dispatch timed out after ${timeoutMs}ms`),
-									),
-								timeoutMs,
-							),
-						),
+						new Promise<never>((_, reject) => {
+							timeoutHandle = setTimeout(() => {
+								promptController.abort();
+								reject(
+									new Error(`Critic dispatch timed out after ${timeoutMs}ms`),
+								);
+							}, timeoutMs);
+						}),
 					])
 				: await client.session.prompt({
 						path: { id: sessionId },
@@ -469,6 +481,7 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 							tools: { write: false, edit: false, patch: false },
 							parts: [{ type: 'text', text: promptText }],
 						},
+						signal: promptController.signal,
 					});
 
 		if (!response.data) {
@@ -483,7 +496,8 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 
 		return textParts;
 	} finally {
-		// Clean up the ephemeral session
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		promptController.abort();
 		client.session.delete({ path: { id: sessionId } }).catch(() => {});
 	}
 }
@@ -503,6 +517,7 @@ export const _internals: {
 		pkg: CriticPackage,
 		agentName: string,
 		timeoutMs: number,
+		parentSessionId?: string,
 	) => Promise<string>;
 	resolveDefaultCriticAgent: typeof resolveDefaultCriticAgent;
 	readReviewerEvidence: typeof readReviewerEvidence;
@@ -571,6 +586,7 @@ export async function dispatchPhaseCritic(
 			pkg,
 			agentName,
 			mergedConfig.timeoutMs,
+			sessionID,
 		);
 	} catch (error) {
 		// Fail-closed: dispatch failure → write REJECTED verdict

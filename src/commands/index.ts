@@ -29,6 +29,7 @@ export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
 export { handleArchiveCommand } from './archive';
+export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
@@ -44,10 +45,12 @@ export type { CommandName } from './command-names.js';
 export { COMMAND_NAME_SET, COMMAND_NAMES } from './command-names.js';
 export { handleConcurrencyCommand } from './concurrency';
 export { handleConfigCommand } from './config';
+export { handleConsolidateCommand } from './consolidate';
 export { handleCouncilCommand } from './council';
 export { handleCurateCommand } from './curate';
 export { handleDarkMatterCommand } from './dark-matter';
 export { handleDeepDiveCommand } from './deep-dive';
+export { handleDeepResearchCommand } from './deep-research';
 export { handleDiagnoseCommand } from './diagnose';
 export { handleDoctorCommand } from './doctor';
 export {
@@ -63,7 +66,10 @@ export {
 	handleKnowledgeMigrateCommand,
 	handleKnowledgeQuarantineCommand,
 	handleKnowledgeRestoreCommand,
+	handleKnowledgeRetryHardeningCommand,
+	handleKnowledgeUnactionableCommand,
 } from './knowledge';
+export { handleLearningCommand } from './learning';
 export {
 	handleMemoryCommand,
 	handleMemoryExportCommand,
@@ -91,6 +97,12 @@ export { handleResetCommand } from './reset';
 export { handleResetSessionCommand } from './reset-session';
 export { handleRetrieveCommand } from './retrieve';
 export { handleRollbackCommand } from './rollback';
+export {
+	handleSddCommand,
+	handleSddProjectCommand,
+	handleSddStatusCommand,
+	handleSddValidateCommand,
+} from './sdd';
 export { handleSimulateCommand } from './simulate';
 export { handleSpecifyCommand } from './specify';
 export { handleStatusCommand } from './status';
