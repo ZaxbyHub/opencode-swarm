@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.78.2](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.1...v7.78.2) (2026-06-16)
+
+
+### Bug Fixes
+
+* **pr-monitor:** start worker unconditionally and add startup scan ([#1381](https://github.com/zaxbysauce/opencode-swarm/issues/1381)) ([#1384](https://github.com/zaxbysauce/opencode-swarm/issues/1384)) ([0344425](https://github.com/zaxbysauce/opencode-swarm/commit/0344425006eb40adfc9814a2ad1af745e31d0483))
+
 ## [7.78.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.0...v7.78.1) (2026-06-16)
 
 
