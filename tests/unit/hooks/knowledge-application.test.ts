@@ -261,6 +261,85 @@ describe('getShownButNotAcknowledged', () => {
 });
 
 // ============================================================================
+// bumpCountersBatch — TOCTOU race condition fix
+// ============================================================================
+
+describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)', () => {
+	it('concurrent appendKnowledge is not lost when a counter bump runs in parallel', async () => {
+		// Pre-seed one entry that we will bump
+		const bumpId = '11111111-1111-4111-9111-111111111111';
+		await seedEntry(bumpId);
+
+		// Race: two appends + one counter bump. The appends must survive.
+		const appendA = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry('concurrent-a'),
+			id: '22222222-2222-4222-9222-222222222222',
+		} as SwarmKnowledgeEntry);
+		const bump = recordAcknowledgment(
+			tmp,
+			{ id: bumpId, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
+		const appendB = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry('concurrent-b'),
+			id: '33333333-3333-4333-9333-333333333333',
+		} as SwarmKnowledgeEntry);
+
+		await Promise.all([appendA, bump, appendB]);
+
+		// The file should contain all 3 entries: seeded + 2 concurrent appends.
+		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n');
+		const ids = lines.map((l) => JSON.parse(l).id);
+		expect(ids).toContain(bumpId);
+		expect(ids).toContain('22222222-2222-4222-9222-222222222222');
+		expect(ids).toContain('33333333-3333-4333-9333-333333333333');
+
+		// The bump must have applied: applied_explicit_count = 1 on the seed.
+		const seedLine = lines.find((l) => l.includes(bumpId));
+		const seed = JSON.parse(seedLine!);
+		expect(seed.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(seed.retrieval_outcomes.acknowledged_count).toBe(1);
+	});
+
+	it('two concurrent bumpCountersBatch calls on different entries both land under lock serialization', async () => {
+		// Two concurrent recordAcknowledgment calls on different entries in the
+		// same file. The transactKnowledge lock serializes the two transactions,
+		// so both counter bumps land with no lost-write.
+		const id1 = '44444444-4444-4444-9444-444444444444';
+		const id2 = '55555555-5555-4555-9555-555555555555';
+		await seedEntry(id1);
+		await appendKnowledge(resolveSwarmKnowledgePath(tmp), {
+			...baseEntry(id2),
+			id: id2,
+		} as SwarmKnowledgeEntry);
+
+		await Promise.all([
+			recordAcknowledgment(
+				tmp,
+				{ id: id1, result: 'applied' },
+				{ phase: 'Phase 1' },
+			),
+			recordAcknowledgment(
+				tmp,
+				{ id: id2, result: 'applied' },
+				{ phase: 'Phase 1' },
+			),
+		]);
+
+		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
+			.trim()
+			.split('\n');
+		expect(lines).toHaveLength(2);
+		const seed1 = JSON.parse(lines.find((l) => l.includes(id1))!);
+		const seed2 = JSON.parse(lines.find((l) => l.includes(id2))!);
+		expect(seed1.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(seed2.retrieval_outcomes.applied_explicit_count).toBe(1);
+	});
+});
+
+// ============================================================================
 // filterHighConfidenceKnowledge — unit tests
 // ============================================================================
 
@@ -443,95 +522,6 @@ describe('filterHighConfidenceKnowledge', () => {
 		const result = filterHighConfidenceKnowledge(entries, 0.8);
 		expect(result).not.toBe(entries);
 		expect(entries).toHaveLength(2); // original unchanged
-	});
-});
-
-// =============================================================================
-// TOCTOU Fix — bumpCountersBatch now wraps its read+rewrite in a single
-// transactKnowledge transaction (issue #1285). Previously it did an unlocked
-// readKnowledge followed by a locked rewriteKnowledge; a concurrent
-// appendKnowledge in between could be silently dropped by the rewrite.
-//
-// These tests verify the fix:
-//   1. A concurrent appendKnowledge interleaved with a counter bump
-//      survives — it is NOT lost when the counter-bump rewrite happens.
-//   2. Two concurrent bumpCountersBatch calls on different entries both
-//      land correctly — the lock serializes them, so neither drops the
-//      other's write.
-// =============================================================================
-
-describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)', () => {
-	it('concurrent appendKnowledge is not lost when a counter bump runs in parallel', async () => {
-		// Pre-seed one entry that we will bump
-		const bumpId = '11111111-1111-4111-9111-111111111111';
-		await seedEntry(bumpId);
-
-		// Race: two appends + one counter bump. The appends must survive.
-		const appendA = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
-			...baseEntry('concurrent-a'),
-			id: '22222222-2222-4222-9222-222222222222',
-		} as SwarmKnowledgeEntry);
-		const bump = recordAcknowledgment(
-			tmp,
-			{ id: bumpId, result: 'applied' },
-			{ phase: 'Phase 1' },
-		);
-		const appendB = appendKnowledge(resolveSwarmKnowledgePath(tmp), {
-			...baseEntry('concurrent-b'),
-			id: '33333333-3333-4333-9333-333333333333',
-		} as SwarmKnowledgeEntry);
-
-		await Promise.all([appendA, bump, appendB]);
-
-		// The file should contain all 3 entries: seeded + 2 concurrent appends.
-		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
-			.trim()
-			.split('\n');
-		const ids = lines.map((l) => JSON.parse(l).id);
-		expect(ids).toContain(bumpId);
-		expect(ids).toContain('22222222-2222-4222-9222-222222222222');
-		expect(ids).toContain('33333333-3333-4333-9333-333333333333');
-
-		// The bump must have applied: applied_explicit_count = 1 on the seed.
-		const seedLine = lines.find((l) => l.includes(bumpId));
-		const seed = JSON.parse(seedLine!);
-		expect(seed.retrieval_outcomes.applied_explicit_count).toBe(1);
-		expect(seed.retrieval_outcomes.acknowledged_count).toBe(1);
-	});
-
-	it('two concurrent bumpCountersBatch calls on different entries both land under lock serialization', async () => {
-		// Two concurrent recordAcknowledgment calls on different entries in the
-		// same file. The transactKnowledge lock serializes the two transactions,
-		// so both counter bumps land with no lost-write.
-		const id1 = '44444444-4444-4444-9444-444444444444';
-		const id2 = '55555555-5555-4555-9555-555555555555';
-		await seedEntry(id1);
-		await appendKnowledge(resolveSwarmKnowledgePath(tmp), {
-			...baseEntry(id2),
-			id: id2,
-		} as SwarmKnowledgeEntry);
-
-		await Promise.all([
-			recordAcknowledgment(
-				tmp,
-				{ id: id1, result: 'applied' },
-				{ phase: 'Phase 1' },
-			),
-			recordAcknowledgment(
-				tmp,
-				{ id: id2, result: 'applied' },
-				{ phase: 'Phase 1' },
-			),
-		]);
-
-		const lines = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8')
-			.trim()
-			.split('\n');
-		expect(lines).toHaveLength(2);
-		const seed1 = JSON.parse(lines.find((l) => l.includes(id1))!);
-		const seed2 = JSON.parse(lines.find((l) => l.includes(id2))!);
-		expect(seed1.retrieval_outcomes.applied_explicit_count).toBe(1);
-		expect(seed2.retrieval_outcomes.applied_explicit_count).toBe(1);
 	});
 });
 
