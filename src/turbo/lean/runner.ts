@@ -535,7 +535,7 @@ export class LeanTurboRunner {
 			lane,
 			agentName,
 			worktreeDirectory,
-			promptController.signal,
+			promptController,
 		);
 
 		// Apply timeout if configured via _internals
@@ -549,9 +549,7 @@ export class LeanTurboRunner {
 				}, timeoutMs);
 			});
 			try {
-				const result = await Promise.race([dispatchPromise, timeoutPromise]);
-				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-				return result;
+				return await Promise.race([dispatchPromise, timeoutPromise]);
 			} catch (err) {
 				if (err instanceof Error && err.message.includes('timed out')) {
 					// Timeout won the race. Track this lane so that when _doDispatch
@@ -585,6 +583,8 @@ export class LeanTurboRunner {
 					return { ok: false, error: err.message };
 				}
 				throw err;
+			} finally {
+				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 			}
 		}
 
@@ -599,7 +599,7 @@ export class LeanTurboRunner {
 		lane: LeanTurboLane,
 		agentName: string,
 		worktreeDirectory?: string,
-		abortSignal?: AbortSignal,
+		abortController?: AbortController,
 	): Promise<LaneDispatchResult> {
 		let sessionId: string | undefined;
 		try {
@@ -638,10 +638,11 @@ export class LeanTurboRunner {
 					tools: { write: true, edit: true, patch: true },
 					parts: [{ type: 'text' as const, text: promptText }],
 				},
-				signal: abortSignal,
+				signal: abortController?.signal,
 			});
 
 			if (!promptResult.data) {
+				abortController?.abort();
 				session.delete({ path: { id: sessionId } }).catch(() => {});
 				return {
 					ok: false,
@@ -652,6 +653,7 @@ export class LeanTurboRunner {
 			return { ok: true, sessionId };
 		} catch (err) {
 			if (sessionId) {
+				abortController?.abort();
 				session.delete({ path: { id: sessionId } }).catch(() => {});
 			}
 			const msg = err instanceof Error ? err.message : String(err);
