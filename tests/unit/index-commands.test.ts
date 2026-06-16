@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import {
+	COMMAND_REGISTRY,
+	VALID_COMMANDS,
+} from '../../src/commands/registry.js';
 import OpenCodeSwarm from '../../src/index';
 
 // Mock the @opencode-ai/plugin types
@@ -35,7 +39,7 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries.
-		expect(commandKeys.length).toBe(60);
+		expect(commandKeys.length).toBe(65);
 
 		// Verify catch-all exists
 		expect(commands.swarm).toBeDefined();
@@ -53,9 +57,21 @@ describe('Swarm subcommand registration', () => {
 
 		expect(commands.swarm).toBeDefined();
 		expect(commands.swarm.template).toBe('/swarm $ARGUMENTS');
-		expect(commands.swarm.description).toBe(
-			'Swarm management commands: /swarm [status|show-plan|plan|agents|history|config|help|evidence|handoff|archive|diagnose|diagnosis|preflight|sync-plan|benchmark|export|reset|rollback|retrieve|clarify|analyze|specify|sdd|brainstorm|council|pr-review|pr-feedback|deep-dive|deep-research|codebase-review|design-docs|issue|qa-gates|dark-matter|knowledge|memory|curate|consolidate|concurrency|turbo|full-auto|auto-proceed|write-retro|reset-session|simulate|promote|checkpoint|acknowledge-spec-drift|doctor tools|finalize|close]',
+		expect(commands.swarm.description).toMatch(
+			/^Swarm management commands: \/swarm \[.+\]$/,
 		);
+
+		// Verify the description contains every standalone (non-alias, non-deprecated, non-subcommand) command.
+		const standaloneCommands = VALID_COMMANDS.filter((cmd) => {
+			const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY];
+			return !entry.aliasOf && !entry.deprecated && !entry.subcommandOf;
+		});
+		for (const cmd of standaloneCommands) {
+			expect(commands.swarm.description).toContain(
+				cmd,
+				`standalone command "${cmd}" should appear in swarm description`,
+			);
+		}
 	});
 
 	it('should register all individual subcommands with correct keys', async () => {
@@ -98,6 +114,11 @@ describe('Swarm subcommand registration', () => {
 			'swarm-council',
 			'swarm-pr-review',
 			'swarm-pr-feedback',
+			'swarm-pr-subscribe',
+			'swarm-pr-unsubscribe',
+			'swarm-pr-status',
+			'swarm-learning',
+			'swarm-post-mortem',
 			'swarm-codebase-review',
 			'swarm-deep-research',
 			'swarm-design-docs',
@@ -279,6 +300,37 @@ describe('Swarm subcommand registration', () => {
 		expect(commands['swarm-reset'].description).toBe(
 			'Use /swarm reset --confirm to clear swarm state (requires --confirm)',
 		);
+	});
+
+	it('new shortcut descriptions derive from the registry', async () => {
+		const plugin = await OpenCodeSwarm.server(mockPluginInput);
+		const mockConfig: Record<string, unknown> = {};
+
+		await plugin.config?.(mockConfig);
+		const commands = mockConfig.command as Record<
+			string,
+			{ template: string; description: string }
+		>;
+
+		const checks: Array<[string, string]> = [
+			['swarm-pr-subscribe', 'pr subscribe'],
+			['swarm-pr-unsubscribe', 'pr unsubscribe'],
+			['swarm-pr-status', 'pr status'],
+			['swarm-learning', 'learning'],
+			['swarm-post-mortem', 'post-mortem'],
+		];
+		for (const [shortcutKey, cmd] of checks) {
+			const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as {
+				description: string;
+			};
+			const shortcut = (commands as Record<string, { description: string }>)[
+				shortcutKey
+			];
+			expect(shortcut.description).toContain('Use /swarm');
+			expect(shortcut.description.toLowerCase()).toContain(
+				entry.description.toLowerCase(),
+			);
+		}
 	});
 
 	it('should preserve existing commands when merging', async () => {

@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { HUMAN_ONLY_SWARM_COMMANDS } from '../../commands/tool-policy.js';
 import {
 	OPENCODE_NATIVE_AGENTS,
 	ORCHESTRATOR_NAME,
@@ -634,14 +635,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 			// Swarm CLI bypass — human-only `/swarm` subcommands
 			{
-				const HUMAN_ONLY_SWARM_SUBCOMMANDS = new Set<string>([
-					'acknowledge-spec-drift',
-					'reset',
-					'reset-session',
-					'rollback',
-					'checkpoint',
-					'consolidate',
-				]);
+				// Derived from COMMAND_REGISTRY via tool-policy.ts (single source of truth).
+				// Includes both 'human-only' (refusal) and 'restricted' (blocked) commands.
+				const HUMAN_ONLY_SWARM_SUBCOMMANDS = HUMAN_ONLY_SWARM_COMMANDS;
 
 				let probe = seg
 					.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '')
@@ -667,46 +663,79 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					if (probe === before) break;
 				}
 
-				// Form A: <runner> ... opencode-swarm ... run <subcmd>
+				// Form A: <runner> ... opencode-swarm ... run <subcmd> [subsubcmd]
 				const swarmCliBypassMatch = probe.match(
-					/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+					/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
 				);
-				if (
-					swarmCliBypassMatch &&
-					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliBypassMatch[1])
-				) {
-					throw new Error(
-						`BLOCKED: "${swarmCliBypassMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-							`Present the situation to the user and ask them to run \`/swarm ${swarmCliBypassMatch[1]}\` themselves.`,
-					);
+				if (swarmCliBypassMatch) {
+					const captured = swarmCliBypassMatch[1];
+					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
+					const normalized = captured.trim().split(/\s+/).join(' ');
+					const firstToken = normalized.includes(' ')
+						? normalized.split(' ')[0]
+						: normalized;
+					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
+						? normalized
+						: firstToken;
+					if (
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
+					) {
+						throw new Error(
+							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
+						);
+					}
 				}
 
 				// Form B: bare `opencode-swarm` on PATH
 				const swarmBareBinMatch = probe.match(
-					/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+					/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
 				);
-				if (
-					swarmBareBinMatch &&
-					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmBareBinMatch[1])
-				) {
-					throw new Error(
-						`BLOCKED: "${swarmBareBinMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-							`Present the situation to the user and ask them to run \`/swarm ${swarmBareBinMatch[1]}\` themselves.`,
-					);
+				if (swarmBareBinMatch) {
+					const captured = swarmBareBinMatch[1];
+					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
+					const normalized = captured.trim().split(/\s+/).join(' ');
+					const firstToken = normalized.includes(' ')
+						? normalized.split(' ')[0]
+						: normalized;
+					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
+						? normalized
+						: firstToken;
+					if (
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
+					) {
+						throw new Error(
+							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
+						);
+					}
 				}
 
 				// Secondary: dist-relative CLI path invocation
 				const swarmCliPathMatch = probe.match(
-					/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+)/i,
+					/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
 				);
-				if (
-					swarmCliPathMatch &&
-					HUMAN_ONLY_SWARM_SUBCOMMANDS.has(swarmCliPathMatch[1])
-				) {
-					throw new Error(
-						`BLOCKED: "${swarmCliPathMatch[1]}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-							`Present the situation to the user and ask them to run \`/swarm ${swarmCliPathMatch[1]}\` themselves.`,
-					);
+				if (swarmCliPathMatch) {
+					const captured = swarmCliPathMatch[1];
+					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
+					const normalized = captured.trim().split(/\s+/).join(' ');
+					const firstToken = normalized.includes(' ')
+						? normalized.split(' ')[0]
+						: normalized;
+					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
+						? normalized
+						: firstToken;
+					if (
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
+						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
+					) {
+						throw new Error(
+							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
+						);
+					}
 				}
 			}
 
@@ -1377,14 +1406,29 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	}
 
 	/**
+	 * Builds a regex alternation from the registry-derived human-only command
+	 * set. Longer alternatives are listed first to avoid partial prefix matches
+	 * (e.g. "acknowledge-spec-drift" before "acknowledge").
+	 */
+	function getHumanOnlyAlternation(): string {
+		return [...HUMAN_ONLY_SWARM_COMMANDS]
+			.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+			.sort((a, b) => b.length - a.length)
+			.join('|');
+	}
+
+	/**
 	 * Returns true if any of the apply_patch / patch payloads contain an
 	 * invocation of a human-only swarm CLI subcommand.
 	 */
 	function patchPayloadHasHumanOnlyInvocation(args: unknown): boolean {
 		const payloads = extractAllPatchPayloads(args);
 		if (payloads.length === 0) return false;
-		const re =
-			/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint|consolidate)\b/i;
+		const alternation = getHumanOnlyAlternation();
+		const re = new RegExp(
+			`\\bopencode-swarm\\b[\\s\\S]*?\\brun\\s+(${alternation})\\b`,
+			'i',
+		);
 		return payloads.some((p) => re.test(p));
 	}
 
@@ -1502,9 +1546,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				toolArgs?.newText;
 			if (
 				typeof content === 'string' &&
-				/\bopencode-swarm\b[\s\S]*?\brun\s+(?:acknowledge-spec-drift|reset|reset-session|rollback|checkpoint|consolidate)\b/i.test(
-					content,
-				)
+				new RegExp(
+					`\\bopencode-swarm\\b[\\s\\S]*?\\brun\\s+(${getHumanOnlyAlternation()})\\b`,
+					'i',
+				).test(content)
 			) {
 				throw new Error(
 					'BLOCKED: write/edit tool would create a script invoking a human-only swarm CLI subcommand. ' +
