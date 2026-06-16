@@ -89,8 +89,11 @@ export async function withTurboStateLock<T>(
 				if (lock._release) {
 					try {
 						await lock._release();
-					} catch {
-						// Release failure is non-fatal; proper-lockfile TTL will clean up.
+					} catch (releaseErr) {
+						// Non-fatal: proper-lockfile TTL will eventually clean up the stale lock.
+						console.warn(
+							`[lean-turbo] state lock release failed for ${sessionID}: ${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}`,
+						);
 					}
 				}
 			}

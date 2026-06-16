@@ -1140,8 +1140,9 @@ describe('AC-8: supplemental static source checks — no --force in worktree sou
 	});
 
 	test('removeWorktree function calls git worktree remove WITHOUT --force flag', () => {
+		// Implementation moved to src/worktree/core.ts; lean/worktree.ts is a thin re-export.
 		const source = fs.readFileSync(
-			path.resolve(__dirname, '../../../../src/turbo/lean/worktree.ts'),
+			path.resolve(__dirname, '../../../../src/worktree/core.ts'),
 			'utf-8',
 		);
 		expect(source).toContain("'worktree', 'remove'");

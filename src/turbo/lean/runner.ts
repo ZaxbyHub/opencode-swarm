@@ -1309,9 +1309,12 @@ export class LeanTurboRunner {
 					return; // Success
 				}
 			} catch (error) {
-				const errCode = (error as NodeJS.ErrnoException).code ?? '';
+				const errCode =
+					error instanceof Error
+						? ((error as NodeJS.ErrnoException).code ?? '')
+						: '';
 				const isTransient =
-					error instanceof Error &&
+					errCode.length > 0 &&
 					[
 						'ENOENT',
 						'EBUSY',
@@ -1363,21 +1366,15 @@ export class LeanTurboRunner {
 	 * - Promise chain: serializes writes within a single runner instance
 	 * - File-based lock: coordinates between multiple runners with the same sessionID
 	 *
-	 * Timeout is enforced inside withTurboStateLock using a deadline computed from
-	 * the moment this call is enqueued, so no zombie promises can escape.
+	 * Timeout budget starts when this call reaches the front of the queue (execution
+	 * time), not when it is enqueued. withTurboStateLock computes its deadline
+	 * internally on entry, so each caller gets a full 10-second window regardless
+	 * of how long it waited behind prior entries.
 	 */
 	private async _withStateLock<T>(fn: () => Promise<T>): Promise<T> {
-		const timeoutMs = 10_000;
-		const deadline = Date.now() + timeoutMs;
-		const chain = this._stateLock.then(() => {
-			const remaining = Math.max(500, deadline - Date.now());
-			return withTurboStateLock(
-				this._directory,
-				this._sessionID,
-				fn,
-				remaining,
-			);
-		});
+		const chain = this._stateLock.then(() =>
+			withTurboStateLock(this._directory, this._sessionID, fn, 10_000),
+		);
 		this._stateLock = chain.catch(() => {});
 		return chain;
 	}
