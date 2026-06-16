@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.78.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.0...v7.78.1) (2026-06-16)
+
+
+### Bug Fixes
+
+* **knowledge:** route bumpCountersBatch and knowledge_archive through transactKnowledge ([#1311](https://github.com/zaxbysauce/opencode-swarm/issues/1311)) ([5dd7285](https://github.com/zaxbysauce/opencode-swarm/commit/5dd72851d5e79b44986e1c6ecae9480b90c4dd33))
+
 ## [7.78.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.7...v7.78.0) (2026-06-16)
 
 
