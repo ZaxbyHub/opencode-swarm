@@ -182,4 +182,62 @@ describe('_writeLaneEvidenceSafely transient error retry', () => {
 
 		expect(callCount).toBe(1);
 	});
+
+	test('skips write and does not retry when phase is undefined in run state', async () => {
+		// phase === undefined is a configuration error, not a transient disk issue.
+		// The function should return immediately with a warn and never call writeLaneEvidence.
+		LeanTurboRunner._internals.loadLeanTurboRunState = mock(() => ({
+			sessionID: SESSION_ID,
+			status: 'running' as const,
+			strategy: 'lean' as const,
+			phase: undefined, // ← no phase set
+			maxParallelCoders: 2,
+			lanes: [],
+			serializedTasks: [],
+			degradedTasks: [],
+			counters: {
+				lanesPlanned: 0,
+				lanesStarted: 0,
+				lanesCompleted: 0,
+				lanesFailed: 0,
+				tasksSerialized: 0,
+				tasksDegraded: 0,
+			},
+		}));
+
+		let writeCallCount = 0;
+		LeanTurboRunner._internals.writeLaneEvidence = mock(async () => {
+			writeCallCount++;
+		});
+
+		const runner = new LeanTurboRunner({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+		});
+		await expect(
+			callWriteLaneEvidenceSafely(runner, makeLane()),
+		).resolves.toBeUndefined();
+
+		// writeLaneEvidence must never be called — phase missing is not retried
+		expect(writeCallCount).toBe(0);
+	});
+
+	test('skips write when loadLeanTurboRunState returns null', async () => {
+		LeanTurboRunner._internals.loadLeanTurboRunState = mock(() => null);
+
+		let writeCallCount = 0;
+		LeanTurboRunner._internals.writeLaneEvidence = mock(async () => {
+			writeCallCount++;
+		});
+
+		const runner = new LeanTurboRunner({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+		});
+		await expect(
+			callWriteLaneEvidenceSafely(runner, makeLane()),
+		).resolves.toBeUndefined();
+
+		expect(writeCallCount).toBe(0);
+	});
 });

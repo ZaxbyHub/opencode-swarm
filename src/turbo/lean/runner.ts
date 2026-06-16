@@ -1374,6 +1374,11 @@ export class LeanTurboRunner {
 	 * time), not when it is enqueued. withTurboStateLock computes its deadline
 	 * internally on entry, so each caller gets a full 10-second window regardless
 	 * of how long it waited behind prior entries.
+	 *
+	 * Timeout coverage: withTurboStateLock is tested directly in state-lock.test.ts
+	 * (test: "throws TurboStateLockTimeoutError when lock is held by another caller").
+	 * This wrapper delegates to it in a single line with no additional timeout logic,
+	 * so a separate wrapper-level timeout test would duplicate that coverage.
 	 */
 	private async _withStateLock<T>(fn: () => Promise<T>): Promise<T> {
 		const chain = this._stateLock.then(() =>
