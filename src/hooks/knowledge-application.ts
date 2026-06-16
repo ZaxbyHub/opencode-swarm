@@ -98,7 +98,9 @@ async function appendAudit(
 		// bumps in the caller's accounting path.
 		try {
 			const content = await readFile(filePath, 'utf-8');
-			const lines = content.split('\n').filter((line) => line.trim().length > 0);
+			const lines = content
+				.split('\n')
+				.filter((line) => line.trim().length > 0);
 			if (lines.length > MAX_LEGACY_APPLICATION_LOG_ENTRIES) {
 				const trimmed = lines.slice(-MAX_LEGACY_APPLICATION_LOG_ENTRIES);
 				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);

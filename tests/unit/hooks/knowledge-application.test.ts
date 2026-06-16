@@ -20,7 +20,10 @@ import {
 	recordKnowledgeShown,
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
-import { appendKnowledge, resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
+import {
+	appendKnowledge,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 
 let tmp: string;
@@ -328,13 +331,24 @@ describe('recordAcknowledgment / bumpCountersBatch — TOCTOU race fix (#1285)',
 		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
 		await writeFile(
 			knowledgePath,
-			[JSON.stringify(baseEntry(id1)), JSON.stringify(baseEntry(id2))].join('\n') + '\n',
+			[
+				JSON.stringify(baseEntry(id1)),
+				JSON.stringify(baseEntry(id2)),
+			].join('\n') + '\n',
 			'utf-8',
 		);
 
 		await Promise.all([
-			recordAcknowledgment(tmp, { id: id1, result: 'applied' }, { phase: 'P1' }),
-			recordAcknowledgment(tmp, { id: id2, result: 'applied' }, { phase: 'P1' }),
+			recordAcknowledgment(
+				tmp,
+				{ id: id1, result: 'applied' },
+				{ phase: 'P1' },
+			),
+			recordAcknowledgment(
+				tmp,
+				{ id: id2, result: 'applied' },
+				{ phase: 'P1' },
+			),
 		]);
 
 		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
