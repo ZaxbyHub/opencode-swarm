@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.77.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.5...v7.77.6) (2026-06-16)
+
+
+### Bug Fixes
+
+* **repo-graph:** retry rename on EPERM/EBUSY in saveGraph ([#1372](https://github.com/zaxbysauce/opencode-swarm/issues/1372)) ([a434dc2](https://github.com/zaxbysauce/opencode-swarm/commit/a434dc2ba312888a2a3e523c5dd6d895bb0d98a7))
+
 ## [7.77.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.77.4...v7.77.5) (2026-06-16)
 
 
