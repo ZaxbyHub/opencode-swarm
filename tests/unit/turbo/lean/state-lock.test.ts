@@ -112,6 +112,21 @@ describe('withTurboStateLock', () => {
 		// console.warn fires (visible in test output) but does not throw.
 	});
 
+	test('retries and eventually throws TurboStateLockTimeoutError when tryAcquireLock throws', async () => {
+		let callCount = 0;
+		_internals.tryAcquireLock = mock(async () => {
+			callCount++;
+			throw new Error('simulated filesystem error during lock acquisition');
+		});
+
+		await expect(
+			withTurboStateLock(tmpDir, SESSION_ID, async () => 'should-not-run', 150),
+		).rejects.toBeInstanceOf(TurboStateLockTimeoutError);
+
+		// Multiple retries should have been attempted before timing out.
+		expect(callCount).toBeGreaterThan(1);
+	});
+
 	test('throws TurboStateLockTimeoutError when lock is held by another caller', async () => {
 		// Hold the lock ourselves via the lower-level primitive.
 		const held = await tryAcquireLock(

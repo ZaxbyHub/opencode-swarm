@@ -88,14 +88,25 @@ export async function withTurboStateLock<T>(
 	let attempt = 0;
 
 	while (true) {
-		const result = await _internals.tryAcquireLock(
-			directory,
-			lockPath,
-			agent,
-			sessionID,
-		);
+		let result:
+			| Awaited<ReturnType<typeof _internals.tryAcquireLock>>
+			| undefined;
+		try {
+			result = await _internals.tryAcquireLock(
+				directory,
+				lockPath,
+				agent,
+				sessionID,
+			);
+		} catch (acquireErr) {
+			// tryAcquireLock threw (e.g. transient filesystem error during acquisition).
+			// Treat as a failed acquisition and fall through to deadline/backoff logic.
+			console.warn(
+				`[lean-turbo] state lock acquisition error for ${sessionID} (${lockPath}), will retry: ${acquireErr instanceof Error ? acquireErr.message : String(acquireErr)}`,
+			);
+		}
 
-		if (result.acquired) {
+		if (result && result.acquired) {
 			const lock = result.lock;
 			try {
 				return await fn();
@@ -113,7 +124,7 @@ export async function withTurboStateLock<T>(
 			}
 		}
 
-		// Lock is held by another writer — check deadline before backing off.
+		// Lock not acquired (or acquisition threw) — check deadline before backing off.
 		if (Date.now() >= deadline) {
 			throw new TurboStateLockTimeoutError(directory, sessionID, timeoutMs);
 		}
