@@ -9,15 +9,18 @@
  * - TurboStateLockTimeoutError constructor properties
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { tryAcquireLock } from '../../../../src/parallel/file-locks';
 import {
+	_internals,
 	TurboStateLockTimeoutError,
 	withTurboStateLock,
 } from '../../../../src/turbo/lean/state-lock';
+
+const savedTryAcquireLock = _internals.tryAcquireLock;
 
 let tmpDir: string;
 const SESSION_ID = 'sess-state-lock-test';
@@ -30,6 +33,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	_internals.tryAcquireLock = savedTryAcquireLock;
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -80,6 +84,32 @@ describe('withTurboStateLock', () => {
 			return 'recovered';
 		});
 		expect(result).toBe('recovered');
+	});
+
+	test('logs a warning when lock._release() throws but still returns fn() result', async () => {
+		// Inject a mock tryAcquireLock that returns a lock whose _release throws.
+		_internals.tryAcquireLock = mock(async () => ({
+			acquired: true as const,
+			lock: {
+				filePath: '.swarm/turbo-state.json',
+				agent: 'lean-turbo-runner',
+				taskId: SESSION_ID,
+				timestamp: new Date().toISOString(),
+				expiresAt: Date.now() + 60_000,
+				_release: async () => {
+					throw new Error('simulated release failure');
+				},
+			},
+		}));
+
+		// fn() should complete successfully even though release fails.
+		const result = await withTurboStateLock(
+			tmpDir,
+			SESSION_ID,
+			async () => 'ok',
+		);
+		expect(result).toBe('ok');
+		// console.warn fires (visible in test output) but does not throw.
 	});
 
 	test('throws TurboStateLockTimeoutError when lock is held by another caller', async () => {

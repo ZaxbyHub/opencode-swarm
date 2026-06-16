@@ -31,6 +31,9 @@
 
 import { tryAcquireLock } from '../../parallel/file-locks';
 
+/** Test-only seam — allows injecting a mock tryAcquireLock without mock.module. */
+export const _internals = { tryAcquireLock };
+
 export class TurboStateLockTimeoutError extends Error {
 	readonly directory: string;
 	readonly sessionID: string;
@@ -85,7 +88,12 @@ export async function withTurboStateLock<T>(
 	let attempt = 0;
 
 	while (true) {
-		const result = await tryAcquireLock(directory, lockPath, agent, sessionID);
+		const result = await _internals.tryAcquireLock(
+			directory,
+			lockPath,
+			agent,
+			sessionID,
+		);
 
 		if (result.acquired) {
 			const lock = result.lock;

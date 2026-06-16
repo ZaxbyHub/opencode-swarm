@@ -1319,12 +1319,14 @@ export class LeanTurboRunner {
 						: '';
 				const isTransient =
 					errCode.length > 0 &&
+					// EACCES omitted: permission denied on a swarm evidence path is a
+					// permanent misconfiguration — retrying wastes time without recovery.
+					// EROFS omitted: read-only filesystem is also permanent.
 					[
 						'ENOENT',
 						'EBUSY',
 						'EPERM',
 						'EIO',
-						'EACCES',
 						'EAGAIN',
 						'ETIMEDOUT',
 						'ENOSPC',
