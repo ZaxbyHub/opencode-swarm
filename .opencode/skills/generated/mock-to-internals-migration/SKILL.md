@@ -8,16 +8,15 @@ description: >
   and temp directory cleanup. Prevents mock.module and vi.spyOn leaks across Bun's shared test-runner process.
 effort: medium
 generated_from_knowledge: []
-source_knowledge_ids: []
+source_knowledge_ids: ['906f700a-d166-409c-aa64-717d5e56fd63']
 generated_at: 2026-06-14T16:50:00Z
-confidence: 0.5
+confidence: 0.8
 status: active
-version: 2
+version: 3
 skill_origin: generated
 provenance_note: >
-  Original source knowledge IDs could not be recovered from the knowledge base.
-  Metadata backfilled manually; body content preserved from the prior active revision and
-  updated with stdout/Buffer type-mismatch guidance.
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # mock.module / vi.spyOn → _internals DI Seam Migration Protocol
