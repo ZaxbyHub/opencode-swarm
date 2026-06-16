@@ -17,6 +17,11 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+	effectiveRetrievalOutcomes,
+	readKnowledgeCounterRollups,
+} from '../hooks/knowledge-events.js';
+import {
+	computeOutcomeSignal,
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
@@ -33,6 +38,12 @@ import {
 } from '../hooks/knowledge-validator.js';
 import { warn } from '../utils/logger.js';
 import { appendSkillChangelog } from './skill-changelog.js';
+import {
+	appendRejectedSkillEdit,
+	evaluateSkillChange,
+	isRejectedSkillContent,
+	type SkillEvaluationResult,
+} from './skill-evaluator.js';
 
 // ============================================================================
 // Slug & path helpers
@@ -80,6 +91,10 @@ export interface CandidateSelectionOptions {
 	minConfirmations: number;
 }
 
+export const DEFAULT_SKILL_MIN_CONFIDENCE = 0.7;
+export const DEFAULT_SKILL_MIN_CONFIRMATIONS = 2;
+export const STRONG_SKILL_OUTCOME_COUNT = 3;
+
 export interface KnowledgeCluster {
 	slug: string;
 	title: string;
@@ -104,22 +119,58 @@ export async function selectCandidateEntries(
 		? await readKnowledge<HiveKnowledgeEntry>(hivePath)
 		: [];
 	const all: KnowledgeEntryBase[] = [...swarm, ...hive];
-	return all.filter((e) => {
-		if (e.status === 'archived') return false;
-		if (e.confidence < opts.minConfidence) return false;
-		const confirmations = (e.confirmed_by ?? []).length;
-		if (confirmations < opts.minConfirmations) return false;
+	const counterRollups = await readKnowledgeCounterRollups(directory);
+	const selected: KnowledgeEntryBase[] = [];
+	for (const e of all) {
+		if (e.status === 'archived') continue;
 		// Already-compiled entries are not re-selected unless caller forces.
-		if (e.generated_skill_slug) return false;
-		return true;
-	});
+		if (e.generated_skill_slug) continue;
+		const outcomes = effectiveRetrievalOutcomes(
+			e.retrieval_outcomes,
+			counterRollups.get(e.id),
+		);
+		if (!isSkillMaturityEligible(e, opts, outcomes)) continue;
+		selected.push({ ...e, retrieval_outcomes: outcomes });
+	}
+	return selected;
+}
+
+function hasStrongSkillOutcomeRecord(
+	outcomes: KnowledgeEntryBase['retrieval_outcomes'] | undefined,
+): boolean {
+	return (
+		(outcomes?.applied_explicit_count ?? 0) >= STRONG_SKILL_OUTCOME_COUNT ||
+		(outcomes?.succeeded_after_shown_count ?? 0) >= STRONG_SKILL_OUTCOME_COUNT
+	);
+}
+
+function isHighPriorityDirective(entry: KnowledgeEntryBase): boolean {
+	return (
+		entry.directive_priority === 'critical' ||
+		entry.directive_priority === 'high'
+	);
+}
+
+export function isSkillMaturityEligible(
+	entry: KnowledgeEntryBase,
+	opts: CandidateSelectionOptions,
+	outcomes:
+		| KnowledgeEntryBase['retrieval_outcomes']
+		| undefined = entry.retrieval_outcomes,
+): boolean {
+	const outcomeSignal = computeOutcomeSignal(outcomes);
+	if (outcomeSignal < 0) return false;
+	const strongOutcomes = hasStrongSkillOutcomeRecord(outcomes);
+	if (entry.confidence < opts.minConfidence && !strongOutcomes) return false;
+	const confirmations = (entry.confirmed_by ?? []).length;
+	return confirmations >= opts.minConfirmations || strongOutcomes;
 }
 
 // ============================================================================
 // Clustering — Jaccard-based fuzzy tag clustering
 // ============================================================================
 
-/** Minimum cluster size: single-entry clusters are dropped. */
+/** Minimum cluster size for ordinary entries; strong/high-priority singletons pass. */
 const MIN_CLUSTER_SIZE = 2;
 
 /** Jaccard similarity threshold for merging entries into an existing cluster. */
@@ -177,7 +228,12 @@ export function clusterEntries(
 	// Build KnowledgeCluster objects, filtering out small clusters
 	const result: KnowledgeCluster[] = [];
 	for (const c of clusters) {
-		if (c.members.length < MIN_CLUSTER_SIZE) continue;
+		if (
+			c.members.length < MIN_CLUSTER_SIZE &&
+			!isSkillSingletonEligible(c.members[0])
+		) {
+			continue;
+		}
 		const arr = c.members;
 		const triggers = uniqueStrings(arr.flatMap((e) => e.triggers ?? []));
 		const required = uniqueStrings(
@@ -228,6 +284,16 @@ export function clusterEntries(
 	return result;
 }
 
+function isSkillSingletonEligible(
+	entry: KnowledgeEntryBase | undefined,
+): boolean {
+	if (!entry) return false;
+	return (
+		isHighPriorityDirective(entry) ||
+		hasStrongSkillOutcomeRecord(entry.retrieval_outcomes)
+	);
+}
+
 function uniqueStrings(arr: string[]): string[] {
 	return [...new Set(arr.filter((s) => typeof s === 'string' && s.length > 0))];
 }
@@ -260,6 +326,12 @@ export function renderSkillMarkdown(
 	lines.push('---');
 	lines.push(`name: ${cluster.slug}`);
 	lines.push(`description: ${escapeYaml(description)}`);
+	if (cluster.triggers.length > 0) {
+		lines.push('triggers:');
+		for (const trigger of cluster.triggers) {
+			lines.push(`  - ${escapeYaml(trigger)}`);
+		}
+	}
 	lines.push('generated_from_knowledge:');
 	lines.push(ids);
 	lines.push('source_knowledge_ids:');
@@ -378,6 +450,7 @@ export interface GenerateRequest {
 	slug?: string;
 	sourceKnowledgeIds?: string[];
 	force?: boolean;
+	evaluate?: boolean;
 	minConfidence?: number;
 	minConfirmations?: number;
 }
@@ -389,15 +462,21 @@ export interface GenerateResult {
 		mode: GenerateMode;
 		sourceKnowledgeIds: string[];
 		preserved: boolean;
+		evaluation?: SkillEvaluationResult;
 	}>;
-	skipped: Array<{ slug: string; reason: string }>;
+	skipped: Array<{
+		slug: string;
+		reason: string;
+		evaluation?: SkillEvaluationResult;
+	}>;
 }
 
 export async function generateSkills(
 	req: GenerateRequest,
 ): Promise<GenerateResult> {
-	const minConfidence = req.minConfidence ?? 0.85;
-	const minConfirmations = req.minConfirmations ?? 2;
+	const minConfidence = req.minConfidence ?? DEFAULT_SKILL_MIN_CONFIDENCE;
+	const minConfirmations =
+		req.minConfirmations ?? DEFAULT_SKILL_MIN_CONFIRMATIONS;
 	const candidates = await selectCandidateEntries(req.directory, {
 		minConfidence,
 		minConfirmations,
@@ -479,6 +558,50 @@ export async function generateSkills(
 		}
 
 		const content = renderSkillMarkdown(cluster, req.mode);
+		if (await isRejectedSkillContent(req.directory, cluster.slug, content)) {
+			result.skipped.push({
+				slug: cluster.slug,
+				reason: 'previously rejected equivalent content',
+			});
+			continue;
+		}
+		let evaluation: SkillEvaluationResult | undefined;
+		if (req.evaluate) {
+			let incumbentContent: string | undefined;
+			const existingActivePath = activePath(req.directory, cluster.slug);
+			if (existsSync(existingActivePath)) {
+				try {
+					incumbentContent = await readFile(existingActivePath, 'utf-8');
+				} catch {
+					incumbentContent = undefined;
+				}
+			}
+			evaluation = await evaluateSkillChange({
+				directory: req.directory,
+				slug: cluster.slug,
+				candidateContent: content,
+				incumbentContent,
+				operation: `skill_generate:${req.mode}`,
+			});
+			if (!evaluation.passed) {
+				await appendRejectedSkillEdit(
+					{
+						directory: req.directory,
+						slug: cluster.slug,
+						candidateContent: content,
+						incumbentContent,
+						operation: `skill_generate:${req.mode}`,
+					},
+					evaluation,
+				);
+				result.skipped.push({
+					slug: cluster.slug,
+					reason: `validation_failed: ${evaluation.reason}`,
+					evaluation,
+				});
+				continue;
+			}
+		}
 		await atomicWrite(targetPath, content);
 
 		// In active mode, stamp source entries with the generated_skill metadata.
@@ -496,6 +619,7 @@ export async function generateSkills(
 			mode: req.mode,
 			sourceKnowledgeIds: cluster.entries.map((e) => e.id),
 			preserved,
+			evaluation,
 		});
 	}
 
@@ -554,6 +678,7 @@ export function parseDraftFrontmatter(content: string): {
 	status?: string;
 	generatedAt?: string;
 	sourceKnowledgeIds: string[];
+	triggers: string[];
 	version?: number;
 	skillOrigin?: string;
 	skillType?: 'directive' | 'workflow';
@@ -580,20 +705,30 @@ export function parseDraftFrontmatter(content: string): {
 		status?: string;
 		generatedAt?: string;
 		sourceKnowledgeIds: string[];
+		triggers: string[];
 		version?: number;
 		skillOrigin?: string;
 		skillType?: 'directive' | 'workflow';
 	} = {
 		sourceKnowledgeIds: [],
+		triggers: [],
 	};
 	let inLegacyIdsList = false;
 	let inSourceIdsList = false;
+	let inTriggersList = false;
 	for (const raw of lines) {
 		const line = raw;
-		if (inLegacyIdsList || inSourceIdsList) {
+		if (inLegacyIdsList || inSourceIdsList || inTriggersList) {
 			// Accept any non-empty, non-whitespace token bounded to 64 chars.
 			// Generator emits UUID v4 ids; tests may use short synthetic ids.
-			const m = line.match(/^\s+-\s+(\S{1,64})\s*$/);
+			const m = inTriggersList
+				? line.match(/^\s+-\s+(.{1,120}?)\s*$/)
+				: line.match(/^\s+-\s+(\S{1,64})\s*$/);
+			if (m && inTriggersList) {
+				const trigger = stripGeneratedYamlQuotes(m[1]);
+				if (trigger) out.triggers.push(trigger);
+				continue;
+			}
 			if (m) {
 				out.sourceKnowledgeIds.push(m[1]);
 				continue;
@@ -601,6 +736,7 @@ export function parseDraftFrontmatter(content: string): {
 			// any non-list line ends the list
 			inLegacyIdsList = false;
 			inSourceIdsList = false;
+			inTriggersList = false;
 		}
 		const nm = line.match(/^name:\s*(\S+)\s*$/);
 		if (nm) {
@@ -632,6 +768,16 @@ export function parseDraftFrontmatter(content: string): {
 			out.skillType = stm[1];
 			continue;
 		}
+		const inlineTriggers = line.match(/^triggers:\s*(\[.*\])\s*$/);
+		if (inlineTriggers) {
+			out.triggers = parseGeneratedInlineStringList(inlineTriggers[1]);
+			continue;
+		}
+		if (/^triggers:\s*$/.test(line)) {
+			out.triggers = [];
+			inTriggersList = true;
+			continue;
+		}
 		if (/^generated_from_knowledge:\s*$/.test(line)) {
 			inLegacyIdsList = true;
 			continue;
@@ -644,6 +790,36 @@ export function parseDraftFrontmatter(content: string): {
 	return out;
 }
 
+function stripGeneratedYamlQuotes(value: string): string {
+	const trimmed = value.trim();
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		return trimmed.slice(1, -1).trim();
+	}
+	return trimmed;
+}
+
+function parseGeneratedInlineStringList(rawValue: string): string[] {
+	try {
+		const parsed = JSON.parse(rawValue);
+		if (Array.isArray(parsed)) {
+			return uniqueStrings(
+				parsed.filter((entry): entry is string => typeof entry === 'string'),
+			);
+		}
+	} catch {
+		// Fall back to comma splitting below.
+	}
+	return uniqueStrings(
+		rawValue
+			.slice(1, -1)
+			.split(',')
+			.map((entry) => stripGeneratedYamlQuotes(entry)),
+	);
+}
+
 // ============================================================================
 // Activate / list / inspect
 // ============================================================================
@@ -652,6 +828,7 @@ export async function activateProposal(
 	directory: string,
 	slug: string,
 	force = false,
+	options: { evaluate?: boolean; operation?: string } = {},
 ): Promise<{
 	activated: boolean;
 	from: string;
@@ -659,6 +836,7 @@ export async function activateProposal(
 	reason?: string;
 	stamped?: boolean;
 	stampedIds?: string[];
+	evaluation?: SkillEvaluationResult;
 }> {
 	const cleanSlug = sanitizeSlug(slug);
 	if (!isValidSlug(cleanSlug)) {
@@ -707,6 +885,43 @@ export async function activateProposal(
 		/^status:\s*draft\s*$/m,
 		'status: active',
 	);
+	let evaluation: SkillEvaluationResult | undefined;
+	if (options.evaluate) {
+		let incumbentContent: string | undefined;
+		if (existsSync(to)) {
+			try {
+				incumbentContent = await readFile(to, 'utf-8');
+			} catch {
+				incumbentContent = undefined;
+			}
+		}
+		evaluation = await evaluateSkillChange({
+			directory,
+			slug: cleanSlug,
+			candidateContent: flipped,
+			incumbentContent,
+			operation: options.operation ?? 'skill_apply',
+		});
+		if (!evaluation.passed) {
+			await appendRejectedSkillEdit(
+				{
+					directory,
+					slug: cleanSlug,
+					candidateContent: flipped,
+					incumbentContent,
+					operation: options.operation ?? 'skill_apply',
+				},
+				evaluation,
+			);
+			return {
+				activated: false,
+				from,
+				to,
+				reason: `validation_failed: ${evaluation.reason}`,
+				evaluation,
+			};
+		}
+	}
 	await atomicWrite(to, flipped);
 
 	// Phase G′: parse the draft frontmatter and stamp the source knowledge
@@ -721,6 +936,7 @@ export async function activateProposal(
 			to,
 			stamped: false,
 			reason: 'malformed_frontmatter: no source knowledge ids found',
+			evaluation,
 		};
 	}
 	try {
@@ -736,6 +952,7 @@ export async function activateProposal(
 			to,
 			stamped: true,
 			stampedIds: fm.sourceKnowledgeIds,
+			evaluation,
 		};
 	} catch (err) {
 		return {
@@ -744,6 +961,7 @@ export async function activateProposal(
 			to,
 			stamped: false,
 			reason: `stamp_failed: ${err instanceof Error ? err.message : String(err)}`,
+			evaluation,
 		};
 	}
 }
@@ -850,7 +1068,15 @@ export async function autoApplyProposals(
 			);
 			const verdict = response.trim().toUpperCase();
 			if (verdict === 'APPROVE') {
-				const activation = await activateProposal(directory, proposal.slug);
+				const activation = await activateProposal(
+					directory,
+					proposal.slug,
+					false,
+					{
+						evaluate: true,
+						operation: 'skill_auto_apply',
+					},
+				);
 				if (activation.activated) {
 					result.approved.push(proposal.slug);
 				} else {
@@ -991,12 +1217,14 @@ export async function retireSkill(
 export async function regenerateSkill(
 	directory: string,
 	slug: string,
+	options: { evaluate?: boolean } = {},
 ): Promise<{
 	regenerated: boolean;
 	path: string;
 	entryCount: number;
 	reason?: string;
 	retired?: boolean;
+	evaluation?: SkillEvaluationResult;
 }> {
 	const cleanSlug = sanitizeSlug(slug);
 	if (!isValidSlug(cleanSlug)) {
@@ -1194,6 +1422,35 @@ export async function regenerateSkill(
 				? origin
 				: 'generated',
 	});
+	let evaluation: SkillEvaluationResult | undefined;
+	if (options.evaluate) {
+		evaluation = await evaluateSkillChange({
+			directory,
+			slug: cleanSlug,
+			candidateContent: content,
+			incumbentContent: existingContent,
+			operation: 'skill_regenerate',
+		});
+		if (!evaluation.passed) {
+			await appendRejectedSkillEdit(
+				{
+					directory,
+					slug: cleanSlug,
+					candidateContent: content,
+					incumbentContent: existingContent,
+					operation: 'skill_regenerate',
+				},
+				evaluation,
+			);
+			return {
+				regenerated: false,
+				path: skillPath,
+				entryCount: matchedEntries.length,
+				reason: `validation_failed: ${evaluation.reason}`,
+				evaluation,
+			};
+		}
+	}
 	try {
 		await atomicWrite(skillPath, content);
 		// Re-stamp source entries
@@ -1226,6 +1483,7 @@ export async function regenerateSkill(
 		regenerated: true,
 		path: skillPath,
 		entryCount: matchedEntries.length,
+		evaluation,
 	};
 }
 
@@ -1237,6 +1495,7 @@ export const _internals = {
 	sanitizeSlug,
 	isValidSlug,
 	selectCandidateEntries,
+	isSkillMaturityEligible,
 	clusterEntries,
 	jaccardSimilarity,
 	renderSkillMarkdown,

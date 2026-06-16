@@ -230,14 +230,8 @@ export function createFullAutoDelegationHook(
 	toolAfter: (input: ToolAfterInput, output: ToolAfterOutput) => Promise<void>;
 } {
 	const { config, directory } = options;
-	const enabled = config.full_auto?.enabled === true;
-	if (!enabled) {
-		return {
-			toolBefore: async () => {},
-			toolAfter: async () => {},
-		};
-	}
-
+	// First-class toggle: always armed; both handlers below gate at runtime on
+	// the durable per-session run state (status !== 'running' → return).
 	return {
 		toolBefore: async (input, output) => {
 			const tool = (

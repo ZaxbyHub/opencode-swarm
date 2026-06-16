@@ -20,6 +20,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
 import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
@@ -27,6 +28,7 @@ import {
 } from '../hooks/knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
+	KnowledgeEntryBase,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
 import {
@@ -37,9 +39,12 @@ import { hasActiveFullAuto } from '../state.js';
 import {
 	type AutoApplyResult,
 	autoApplyProposals,
+	DEFAULT_SKILL_MIN_CONFIDENCE,
+	DEFAULT_SKILL_MIN_CONFIRMATIONS,
 	generateSkills,
 	listSkills,
 	parseDraftFrontmatter,
+	selectCandidateEntries,
 } from './skill-generator.js';
 import {
 	type QuotaWindow,
@@ -58,6 +63,8 @@ export interface SkillImproverConfigInput {
 	fallback_models: string[];
 	max_calls_per_day: number;
 	trigger: 'manual' | 'scheduled';
+	consolidation_interval_hours?: number;
+	consolidation_max_calls_per_run?: number;
 	targets: Array<'skills' | 'spec' | 'architect_prompt' | 'knowledge'>;
 	write_mode: 'proposal' | 'draft_skills';
 	require_user_approval: boolean;
@@ -84,6 +91,13 @@ export interface SkillImproveRequest {
 	 *  createSkillImproverLLMDelegate(directory, sessionId) which returns
 	 *  undefined unless swarmState.opencodeClient is wired. */
 	delegate?: SkillImproverLLMDelegate;
+	/** Dedicated quota for hardening quarantined knowledge entries. This is
+	 *  separate from the skill_improver proposal quota above. */
+	enrichmentQuota?: EnrichmentQuotaOptions;
+	/** Validate generated draft skills when write_mode is draft_skills. */
+	evaluateDrafts?: boolean;
+	/** Consolidation callers stage proposals only and must never auto-apply. */
+	allowAutoApply?: boolean;
 }
 
 export interface SkillImproveResult {
@@ -142,7 +156,7 @@ interface InventorySnapshot {
 		metadataReadable: number;
 	};
 	highConfidenceClusters: number;
-	matureCandidates: SwarmKnowledgeEntry[];
+	matureCandidates: KnowledgeEntryBase[];
 	staleActiveSkills: Array<{ slug: string; reasons: string[] }>;
 }
 
@@ -204,15 +218,10 @@ async function gatherInventory(directory: string): Promise<InventorySnapshot> {
 			});
 		}
 	}
-	const matureCandidates = swarm
-		.concat(hive as unknown as SwarmKnowledgeEntry[])
-		.filter(
-			(e) =>
-				e.status !== 'archived' &&
-				e.confidence >= 0.85 &&
-				!e.generated_skill_slug &&
-				(e.confirmed_by ?? []).length >= 2,
-		);
+	const matureCandidates = await selectCandidateEntries(directory, {
+		minConfidence: DEFAULT_SKILL_MIN_CONFIDENCE,
+		minConfirmations: DEFAULT_SKILL_MIN_CONFIRMATIONS,
+	});
 	return {
 		knowledge: { swarm: swarm.length, hive: hive.length, archived },
 		skills: {
@@ -553,8 +562,9 @@ export async function runSkillImprover(
 		const gen = await generateSkills({
 			directory: req.directory,
 			mode: 'draft',
-			minConfidence: 0.85,
-			minConfirmations: 2,
+			minConfidence: DEFAULT_SKILL_MIN_CONFIDENCE,
+			minConfirmations: DEFAULT_SKILL_MIN_CONFIRMATIONS,
+			evaluate: req.evaluateDrafts ?? false,
 		});
 		draftSkillsWritten = gen.written.map((w) => ({
 			slug: w.slug,
@@ -596,16 +606,17 @@ export async function runSkillImprover(
 	await atomicWrite(proposalFile, finalBody);
 
 	// Change 4 (Task 4.3): hardening pass over the unactionable queue. Each LLM
-	// attempt is individually quota-gated inside enrichLessonToV3 (shared
-	// skill-improver budget), and the batch limit bounds per-run cost. Skipped
-	// without a delegate — auto-retiring entries without an attempt would be
-	// wrong. Fail-open: a hardening failure never fails the improver run.
+	// attempt is individually quota-gated inside enrichLessonToV3 using the
+	// dedicated knowledge-enrichment budget, while this service's own proposal
+	// call remains governed by skill_improver.max_calls_per_day. Skipped without
+	// a delegate — auto-retiring entries without an attempt would be wrong.
+	// Fail-open: a hardening failure never fails the improver run.
 	let unactionableHardening: SkillImproveResult['unactionableHardening'];
 	if (delegate) {
 		unactionableHardening = await hardenUnactionableEntries({
 			directory: req.directory,
 			llmDelegate: delegate,
-			quota: { maxCalls: cfg.max_calls_per_day, window: cfg.quota_window },
+			quota: req.enrichmentQuota,
 		});
 	}
 
@@ -633,7 +644,12 @@ export async function runSkillImprover(
 	// it a request lacking a sessionId would auto-apply whenever any other session
 	// happened to be in full-auto (cross-session leak). Fail-open: never blocks.
 	let autoApply: AutoApplyResult | undefined;
-	if (delegate && req.sessionId && hasActiveFullAuto(req.sessionId)) {
+	if (
+		req.allowAutoApply !== false &&
+		delegate &&
+		req.sessionId &&
+		hasActiveFullAuto(req.sessionId)
+	) {
 		try {
 			autoApply = await autoApplyProposals(req.directory, delegate);
 		} catch {

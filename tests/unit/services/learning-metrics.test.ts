@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { clearKnowledgeRollupCache } from '../../../src/hooks/knowledge-events';
 import {
 	computeLearningMetrics,
 	formatLearningJSON,
@@ -45,7 +44,7 @@ function seedCounterBaseline(
 	mkdirSync(swarmDir, { recursive: true });
 	writeFileSync(
 		path.join(swarmDir, 'knowledge-counter-baseline.json'),
-		JSON.stringify({ schema_version: 1, entries }),
+		JSON.stringify(entries, null, 2),
 		'utf-8',
 	);
 }
@@ -695,7 +694,6 @@ describe('learning-metrics', () => {
 			);
 			seedKnowledgeEvents(tmp, events);
 			seedKnowledge(tmp, [entry]);
-			clearKnowledgeRollupCache();
 
 			const m = await computeLearningMetrics(tmp, { now: NOW });
 			const roi = m.entryROI.find((r) => r.entryId === 'e1');
@@ -731,7 +729,6 @@ describe('learning-metrics', () => {
 			);
 			seedKnowledgeEvents(tmp, events);
 			seedKnowledge(tmp, [entry]);
-			clearKnowledgeRollupCache();
 
 			const m = await computeLearningMetrics(tmp, { now: NOW });
 			const roi = m.entryROI.find((r) => r.entryId === 'e1');
@@ -765,7 +762,6 @@ describe('learning-metrics', () => {
 			);
 			seedKnowledgeEvents(tmp, events);
 			seedKnowledge(tmp, [entry]);
-			clearKnowledgeRollupCache();
 
 			const m = await computeLearningMetrics(tmp, { now: NOW });
 			// applicationRateByPriority totals must include baseline.

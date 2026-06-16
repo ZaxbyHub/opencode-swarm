@@ -2,18 +2,14 @@
 
 ## What changed
 
-- **`appendKnowledgeEvent` O(N) trim eliminated.** Per-append locked list traversal has been replaced with a lock-free atomic append and a lazy size-based locked trim, bounding append latency regardless of event log size.
+- **Counter baseline and rollup implementation aligned with origin/main.** The counter baseline/rollup implementation in `src/hooks/knowledge-events.ts` was aligned with origin/main after resolving merge conflicts.
 
-- **`effectiveRetrievalOutcomes` double-counting fixed.** Rollup is now authoritative for v2 counter entries; in-memory v2 counters are derived from the rollup rather than accumulated independently, eliminating double-counting when both the legacy application log and the event log contribute.
+- **`learning-metrics.ts` reads persisted counter baseline.** `readKnowledgeCounterRollups(directory)` is now used so that metrics include evicted-event counters preserved in the baseline, anchoring session-level retrieval outcomes to durable state.
 
-- **`rollupCache` is now directory-keyed with baseline stat in the cache key.** The cache is a bounded LRU map keyed by directory + baseline file mtime/ino, so stale cache entries from a replaced baseline file are automatically evicted.
+- **`searchKnowledge` forceReadHive fix preserved.** Manual recall with `forceReadHive: true` continues to correctly surface hive entries even when `config.hive_enabled` is false.
 
-- **Counter baseline file gains a schema-version envelope with one-step migration.** Unversioned baseline files are migrated to the versioned schema on first read; the envelope is validated on every load and rejected with a clear error if corrupted.
+- **Windows test isolation hardened.** `learning-loop-e2e.test.ts` preserves LOCALAPPDATA/XDG_DATA_HOME save/restore logic to prevent cross-test pollution on Windows.
 
-- **Proper-lockfile locking added to `appendAudit` FIFO trim.** The audit log trim in `knowledge-application.ts` now uses the lockfile protocol, preventing concurrent trim races that could corrupt the FIFO ordering.
+- **learning-metrics.test.ts updated to flat baseline format.** Unit tests for `learning-metrics.ts` were updated to match origin/main's flat baseline format.
 
-- **`learning-metrics.ts` now accounts for the counter baseline.** The metrics computation reads the persisted counter baseline so that session-level retrieval outcomes are anchored to durable state rather than in-memory accumulation.
-
-- **`knowledge-durability.test.ts` memoization verification hardened.** Tests now use the `_internals` seam to directly inspect memoized state, proving that rollup is actually cached and not recomputed on every call.
-
-- **`searchKnowledge` forceReadHive fix.** Manual recall with `forceReadHive: true` now correctly surfaces hive entries even when `config.hive_enabled` is false, matching the documented behavior.
+- **knowledge-durability.test.ts removed.** The test file was removed because it depended on PR-specific API names and behaviors that no longer match origin/main.

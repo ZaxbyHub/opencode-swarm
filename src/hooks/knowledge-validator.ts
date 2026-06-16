@@ -5,7 +5,12 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
-import { inferTags, readKnowledge } from './knowledge-store.js';
+import {
+	findNearDuplicate,
+	inferTags,
+	readKnowledge,
+	transactKnowledge,
+} from './knowledge-store.js';
 import type {
 	ActionableDirectiveFields,
 	DirectivePriority,
@@ -29,21 +34,29 @@ export interface ValidationResult {
 // Layer 2 — Content Safety Constants
 // ============================================================================
 
-export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+export const DANGEROUS_COMMAND_ERROR_PATTERNS: RegExp[] = [
 	/\brm\s+-rf\b/,
 	/\bsudo\s+rm\b/,
-	/\bformat\b/,
 	/\bmkfs\b/,
 	/\bdd\s+if=/,
 	/:\(\)\s*\{/,
 	/\bchmod\s+-R\s+777\b/i,
 	/\bdeltree\b/,
 	/\brmdir\s+\/s\b/,
+];
+
+export const DANGEROUS_COMMAND_WARNING_PATTERNS: RegExp[] = [
+	/\bformat\b/,
 	/\bkill\s+-9\b/,
 	/\bpkill\b/,
 	/\bkillall\b/,
 	/`[^`]*`/,
 	/\$\([^)]*\)/,
+];
+
+export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+	...DANGEROUS_COMMAND_ERROR_PATTERNS,
+	...DANGEROUS_COMMAND_WARNING_PATTERNS,
 ];
 
 export const SECURITY_DEGRADING_PATTERNS: RegExp[] = [
@@ -285,13 +298,24 @@ export function validateLesson(
 		.replace(/\s+/g, ' ')
 		.toLowerCase();
 
-	for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+	for (const pattern of DANGEROUS_COMMAND_ERROR_PATTERNS) {
 		if (pattern.test(normalizedCandidate)) {
 			return {
 				valid: false,
 				layer: 2,
 				reason: 'dangerous command pattern detected',
 				severity: 'error',
+			};
+		}
+	}
+
+	for (const pattern of DANGEROUS_COMMAND_WARNING_PATTERNS) {
+		if (pattern.test(normalizedCandidate)) {
+			return {
+				valid: true,
+				layer: 2,
+				reason: 'potentially dangerous command pattern queued for review',
+				severity: 'warning',
 			};
 		}
 	}
@@ -320,13 +344,13 @@ export function validateLesson(
 	}
 
 	// Layer 3 — Semantic Quality Checks
-	// Contradiction detection (error)
+	// Contradiction detection is heuristic; store with warning for review.
 	if (detectContradiction(candidate, existingLessons)) {
 		return {
-			valid: false,
+			valid: true,
 			layer: 3,
-			reason: 'lesson contradicts an existing lesson with shared tags',
-			severity: 'error',
+			reason: 'possible contradiction with an existing lesson with shared tags',
+			severity: 'warning',
 		};
 	}
 
@@ -604,12 +628,9 @@ export interface UnactionableRecord extends KnowledgeEntryBase {
  * queue (held out of the active store, pending hardening by the skill-improver).
  * FIFO-capped at 200. Best-effort: throws only on lock failure for tests.
  *
- * Flooding tradeoff (Phase 4 review): duplicate prose lessons are NOT deduped
- * at queue time, so a looping producer can fill the queue with duplicates and
- * FIFO-evict older legitimate records. Accepted because (a) the cap bounds the
- * damage at 200 records of plain text, (b) the hardening loop's promotion path
- * dedups at commit time against the active store, and (c) queue producers are
- * themselves quota- or phase-bounded. Revisit if telemetry shows real evictions.
+ * Duplicate or near-duplicate prose lessons are deduped under the same lock used
+ * for the append/trim transaction. This keeps hook-first/phase_complete replay
+ * from filling the bounded queue with equivalent quarantines.
  */
 export async function appendUnactionable(
 	directory: string,
@@ -619,30 +640,22 @@ export async function appendUnactionable(
 	const filePath = resolveUnactionablePath(directory);
 	const dirPath = path.dirname(filePath);
 	await mkdir(dirPath, { recursive: true });
-	let release: (() => Promise<void>) | null = null;
-	try {
-		release = await lockfile.lock(dirPath, {
-			retries: { retries: 50, minTimeout: 10, maxTimeout: 100 },
-			stale: 5000,
-		});
+	await transactKnowledge<UnactionableRecord>(filePath, (existing) => {
 		const record: UnactionableRecord = {
 			...entry,
 			status: 'quarantined_unactionable',
 			unactionable_reason: reason,
 			quarantined_at: new Date().toISOString(),
 		};
-		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
-		const existing = await readKnowledge<UnactionableRecord>(filePath);
-		if (existing.length > 200) {
-			const trimmed = existing.slice(-200);
-			await atomicWriteFile(
-				filePath,
-				`${trimmed.map((e) => JSON.stringify(e)).join('\n')}\n`,
-			);
+		const duplicate = findNearDuplicate(record.lesson, existing, 0.6);
+		if (duplicate?.unactionable_reason === reason) {
+			duplicate.quarantined_at = record.quarantined_at;
+			duplicate.updated_at = record.updated_at;
+			return existing;
 		}
-	} finally {
-		if (release) await release().catch(() => {});
-	}
+		const next = [...existing, record];
+		return next.length > 200 ? next.slice(-200) : next;
+	});
 }
 
 // ============================================================================

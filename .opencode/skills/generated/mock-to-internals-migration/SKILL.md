@@ -7,6 +7,16 @@ description: >
   files, converting test files, adding proper beforeEach/afterEach save/restore lifecycle, mockReset() cleanup,
   and temp directory cleanup. Prevents mock.module and vi.spyOn leaks across Bun's shared test-runner process.
 effort: medium
+generated_from_knowledge: []
+source_knowledge_ids: ['906f700a-d166-409c-aa64-717d5e56fd63']
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.8
+status: active
+version: 3
+skill_origin: generated
+provenance_note: >
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # mock.module / vi.spyOn → _internals DI Seam Migration Protocol
@@ -232,6 +242,7 @@ Not every `vi.spyOn` needs migration. Use this table to decide:
 | Using async `fs.rm` in `afterEach` without `await` | Temp directories not cleaned up; use `rmSync` |
 | Forgetting vi.mock() captures closures at hoist-time | Reassigning mockFn.mockImplementation(newFn) in test body does NOT update the hoisted closure — mock still calls original function. Symptom: toHaveBeenCalledTimes(N) fails unexpectedly. Fix: use _internals seam instead |
 | Converting `initGitRepo`-style helpers | These need the REAL subprocess; keep them as `require()` |
+| Mock returning `Buffer` for `stdout` when implementation calls `.trim()` | `Buffer.prototype.trim` does not exist; throws TypeError at runtime. Match mock return type to implementation usage. |
 
 ## When NOT to add a function to _internals
 
@@ -253,6 +264,7 @@ Only add a function to `_internals` when:
 - [ ] Test file has no `mock.module` calls
 - [ ] `beforeEach` saves original and assigns mock
 - [ ] `afterEach` restores original, calls `mockReset()`, cleans temp dir
+- [ ] Mock return type matches implementation usage (e.g., string stdout when `.trim()` is called)
 - [ ] All tests pass
 - [ ] ALL test files from Step 0b pass (not just the explicitly converted file)
 - [ ] `bun run build` passes

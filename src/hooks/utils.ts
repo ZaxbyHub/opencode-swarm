@@ -170,14 +170,29 @@ export async function readSwarmFileAsync(
 	directory: string,
 	filename: string,
 ): Promise<string | null> {
-	try {
-		const resolvedPath = _internals.validateSwarmPath(directory, filename);
-		const file = bunFile(resolvedPath);
-		const content = await file.text();
-		return content;
-	} catch {
-		return null;
+	// Retry loop to handle macOS/APFS rename-visibility race.
+	// After an atomic rename, the filesystem can take a few ms to update
+	// the directory entry. Immediately-following reads may see ENOENT.
+	// Retry up to 5 times with 10ms delay before giving up.
+	const maxAttempts = 5;
+	const retryDelayMs = 10;
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		try {
+			const resolvedPath = _internals.validateSwarmPath(directory, filename);
+			const file = bunFile(resolvedPath);
+			const content = await file.text();
+			return content;
+		} catch (err) {
+			// Only retry on ENOENT (file not found) — other errors should fail fast
+			const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
+			if (!isNotFound || attempt === maxAttempts - 1) {
+				return null;
+			}
+			// Wait before retrying
+			await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+		}
 	}
+	return null;
 }
 
 export function estimateTokens(text: string): number {

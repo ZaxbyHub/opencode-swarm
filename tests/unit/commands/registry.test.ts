@@ -237,6 +237,13 @@ describe('resolveCommand()', () => {
 			expect(result!.remainingArgs).toEqual(['2']);
 		});
 
+		test('resolves consolidate command with flags', () => {
+			const result = resolveCommand(['consolidate', '--respect-interval']);
+			expect(result).not.toBeNull();
+			expect(result!.key).toBe('consolidate');
+			expect(result!.remainingArgs).toEqual(['--respect-interval']);
+		});
+
 		test('resolves two-token compound "evidence summary"', () => {
 			const result = resolveCommand(['evidence', 'summary']);
 			expect(result).not.toBeNull();
@@ -292,10 +299,9 @@ describe('resolveCommand()', () => {
 				diagnoseResult!.entry.category,
 			);
 			// diagnosis is an alias of diagnose
-			expect(
-				(COMMAND_REGISTRY['diagnosis' as RegisteredCommand] as CommandEntry)
-					.aliasOf,
-			).toBe('diagnose');
+			expect((COMMAND_REGISTRY.diagnosis as CommandEntry).aliasOf).toBe(
+				'diagnose',
+			);
 		});
 	});
 
@@ -710,28 +716,28 @@ describe('COMMAND_REGISTRY alias entries — completeness', () => {
 		const infoEntry = COMMAND_REGISTRY[
 			'info' as RegisteredCommand
 		] as CommandEntry;
-		const statusEntry = COMMAND_REGISTRY['status'] as CommandEntry;
+		const statusEntry = COMMAND_REGISTRY.status as CommandEntry;
 		expect(infoEntry.category).toBe(statusEntry.category);
 
 		// list-agents → agents (core)
 		const listAgentsEntry = COMMAND_REGISTRY[
 			'list-agents' as RegisteredCommand
 		] as CommandEntry;
-		const agentsEntry = COMMAND_REGISTRY['agents'] as CommandEntry;
+		const agentsEntry = COMMAND_REGISTRY.agents as CommandEntry;
 		expect(listAgentsEntry.category).toBe(agentsEntry.category);
 
 		// health → diagnose (diagnostics)
 		const healthEntry = COMMAND_REGISTRY[
 			'health' as RegisteredCommand
 		] as CommandEntry;
-		const diagnoseEntry = COMMAND_REGISTRY['diagnose'] as CommandEntry;
+		const diagnoseEntry = COMMAND_REGISTRY.diagnose as CommandEntry;
 		expect(healthEntry.category).toBe(diagnoseEntry.category);
 
 		// check → preflight (diagnostics)
 		const checkEntry = COMMAND_REGISTRY[
 			'check' as RegisteredCommand
 		] as CommandEntry;
-		const preflightEntry = COMMAND_REGISTRY['preflight'] as CommandEntry;
+		const preflightEntry = COMMAND_REGISTRY.preflight as CommandEntry;
 		expect(checkEntry.category).toBe(preflightEntry.category);
 
 		// clear → reset-session (utility)

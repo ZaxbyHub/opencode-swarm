@@ -31,6 +31,7 @@ import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
 import { createDocsAgent } from './docs';
 import { createExplorerAgent } from './explorer';
+import { createResearcherAgent } from './researcher';
 import { createReviewerAgent } from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
@@ -484,6 +485,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 		sme.name = prefixName('sme');
 		agents.push(applyOverrides(sme, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 3b. Create Researcher agent — automated multi-source research specialist
+	if (!isAgentDisabled('researcher', swarmAgents, swarmPrefix)) {
+		const researcherPrompts = getPrompts('researcher');
+		const researcher = createResearcherAgent(
+			getModel('researcher'),
+			researcherPrompts.prompt,
+			researcherPrompts.appendPrompt,
+		);
+		researcher.name = prefixName('researcher');
+		agents.push(applyOverrides(researcher, swarmAgents, swarmPrefix, quiet));
 	}
 
 	// 4. Create pipeline agents
@@ -1236,6 +1249,7 @@ export { createCuratorAgent } from './curator-agent';
 export { createDesignerAgent } from './designer';
 export { createDocsAgent } from './docs';
 export { createExplorerAgent } from './explorer';
+export { createResearcherAgent } from './researcher';
 export {
 	createReviewerAgent,
 	SECURITY_CATEGORIES,

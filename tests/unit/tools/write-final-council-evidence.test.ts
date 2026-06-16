@@ -263,6 +263,46 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		expect(parsed.quorumRequired).toBe(5);
 	});
 
+	test('plan-missing early return returns success:false with reason: plan_not_found', async () => {
+		const emptyDir = await fs.promises.mkdtemp(
+			path.join(os.tmpdir(), 'final-council-evidence-empty-'),
+		);
+		await fs.promises.mkdir(path.join(emptyDir, '.swarm'), { recursive: true });
+
+		const result = await executeWriteFinalCouncilEvidence(
+			{
+				phase: 1,
+				projectSummary: 'Project summary',
+				verdicts: allApprovedVerdicts(),
+			},
+			emptyDir,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.reason).toBe('plan_not_found');
+
+		await fs.promises.rm(emptyDir, { recursive: true, force: true });
+	});
+
+	test('rejects phase > 1000 by zod schema', async () => {
+		const result = await executeWriteFinalCouncilEvidence(
+			{
+				phase: 1001,
+				projectSummary: 'Summary',
+				verdicts: allApprovedVerdicts(),
+			},
+			tempDir,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.reason).toBe('invalid arguments');
+		expect(
+			parsed.errors.map((error: { path: string }) => error.path),
+		).toContain('phase');
+	});
+
 	test('uses atomic temp+rename pattern', async () => {
 		const writeFileSpy = spyOn(fs.promises, 'writeFile');
 		const renameSpy = spyOn(fs.promises, 'rename');

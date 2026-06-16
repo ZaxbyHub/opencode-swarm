@@ -27,6 +27,7 @@ import {
 	expandTokens,
 	readSynonymMap,
 } from '../services/synonym-map.js';
+import { warn } from '../utils/logger.js';
 import {
 	effectiveRetrievalOutcomes,
 	newTraceId,
@@ -428,7 +429,7 @@ export async function searchKnowledge(
 			// chance to surface and prove (or disprove) themselves instead of being
 			// permanently out-ranked by entrenched lessons.
 			const coldStartBonus =
-				retrievalOutcomes.applied_count === 0 &&
+				(retrievalOutcomes.applied_explicit_count ?? 0) === 0 &&
 				entryAgePhases(entry) <
 					(config.retrieval?.cold_start_max_age_phases ??
 						DEFAULT_COLD_START_MAX_AGE_PHASES)
@@ -496,6 +497,7 @@ export async function searchKnowledge(
 				...entry,
 				retrieval_outcomes: retrievalOutcomes,
 				finalScore,
+				coldStartBoost: coldStartBonus,
 				__critical: isCritical,
 				__forceHive: isForceHive,
 			};
@@ -550,7 +552,12 @@ export async function searchKnowledge(
 		results = top.map(
 			({ __critical: _c, __forceHive: _f, ...rest }) => rest as RankedEntry,
 		);
-	} catch {
+	} catch (err) {
+		warn(
+			`[search-knowledge] retrieval failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
 		results = [];
 	}
 

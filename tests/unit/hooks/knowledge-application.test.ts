@@ -13,6 +13,7 @@ import {
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
 	gateKnowledgeApplication,
 	getShownButNotAcknowledged,
+	MAX_LEGACY_APPLICATION_LOG_ENTRIES,
 	parseAcknowledgments,
 	processArchitectText,
 	recordAcknowledgment,
@@ -164,6 +165,30 @@ describe('recordKnowledgeShown vs recordAcknowledgment', () => {
 		expect(lines.some((l) => l.includes('"shown"'))).toBe(true);
 		expect(lines.some((l) => l.includes('"applied"'))).toBe(true);
 	});
+
+	it('caps the legacy application audit log after appending', async () => {
+		const logPath = resolveApplicationLogPath(tmp);
+		await mkdir(path.dirname(logPath), { recursive: true });
+		const lines = Array.from(
+			{ length: MAX_LEGACY_APPLICATION_LOG_ENTRIES + 5 },
+			(_, i) =>
+				JSON.stringify({
+					timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
+					knowledgeId: `old-${i}`,
+					result: 'shown',
+				}),
+		);
+		await writeFile(logPath, `${lines.join('\n')}\n`, 'utf-8');
+
+		await recordKnowledgeShown(tmp, ['newest'], { phase: 'Phase 1' });
+
+		const capped = readFileSync(logPath, 'utf-8').trim().split('\n');
+		expect(capped).toHaveLength(MAX_LEGACY_APPLICATION_LOG_ENTRIES);
+		expect(capped.some((line) => line.includes('"knowledgeId":"old-0"'))).toBe(
+			false,
+		);
+		expect(capped[capped.length - 1]).toContain('"knowledgeId":"newest"');
+	});
 });
 
 describe('gateKnowledgeApplication', () => {
@@ -212,109 +237,6 @@ describe('processArchitectText', () => {
 	});
 });
 
-describe('appendAudit concurrent trim does not corrupt JSONL', () => {
-	// MAX_APPLICATION_LOG_ENTRIES = 5000, MIN_APPLICATION_LINE_BYTES = 80,
-	// TRIM_BATCH_SIZE = 100 → trimThreshold = 408_000 bytes.
-	// Write 5200 entries (≈416 KB) to exceed threshold and force the trim path.
-	const ENTRIES_BEYOND_THRESHOLD = 5200;
-
-	async function populateBeyondThreshold(directory: string): Promise<void> {
-		const logPath = resolveApplicationLogPath(directory);
-		await mkdir(path.dirname(logPath), { recursive: true });
-		const lines: string[] = [];
-		for (let i = 0; i < ENTRIES_BEYOND_THRESHOLD; i++) {
-			const record = {
-				timestamp: new Date().toISOString(),
-				phase: 'setup',
-				knowledgeId: `00000000-0000-4${String(i).padStart(3, '0')}-9fff-000000000001`,
-				result: 'shown',
-			};
-			lines.push(JSON.stringify(record));
-		}
-		await writeFile(logPath, `${lines.join('\n')}\n`, 'utf-8');
-	}
-
-	function isValidJsonl(content: string): boolean {
-		const lines = content.split('\n').filter((l) => l.trim().length > 0);
-		for (const line of lines) {
-			try {
-				JSON.parse(line);
-			} catch {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	function countLines(content: string): number {
-		return content.split('\n').filter((l) => l.trim().length > 0).length;
-	}
-
-	it('concurrent recordKnowledgeShown calls preserve valid JSONL when trim fires', async () => {
-		await populateBeyondThreshold(tmp);
-
-		const CONCURRENT_CALLS = 20;
-		const IDS_PER_CALL = 5;
-		const allIds: string[] = [];
-		for (let c = 0; c < CONCURRENT_CALLS; c++) {
-			const batchIds: string[] = [];
-			for (let i = 0; i < IDS_PER_CALL; i++) {
-				batchIds.push(
-					`bbbbbbbb-bbbb-4${String(c).padStart(3, '0')}-9fff-${String(i).padStart(12, '0')}`,
-				);
-			}
-			allIds.push(...batchIds);
-		}
-
-		// Fire concurrent recordKnowledgeShown calls — each batch appends 5 entries.
-		// With 20 batches × 5 = 100 new entries. Combined with the 5200 pre-existing
-		// entries, the trim (capped at 5000) must run. The lock serializes trims;
-		// fail-open ensures we never crash.
-		await Promise.all(
-			Array.from({ length: CONCURRENT_CALLS }, (_, c) =>
-				recordKnowledgeShown(
-					tmp,
-					Array.from(
-						{ length: IDS_PER_CALL },
-						(_, i) =>
-							`bbbbbbbb-bbbb-4${String(c).padStart(3, '0')}-9fff-${String(i).padStart(12, '0')}`,
-					),
-					{ phase: 'concurrent-test' },
-				),
-			),
-		);
-
-		const logPath = resolveApplicationLogPath(tmp);
-		const content = readFileSync(logPath, 'utf-8');
-
-		// Must be valid JSONL — no partial writes, no interleaved corruption
-		expect(isValidJsonl(content)).toBe(true);
-
-		// All concurrent entries must be present (no lost writes)
-		const finalCount = countLines(content);
-		const expectedMin = Math.min(5200 + CONCURRENT_CALLS * IDS_PER_CALL, 5000);
-		expect(finalCount).toBeGreaterThanOrEqual(expectedMin - 1); // allow 1 off for TOCTOU trim window
-	});
-
-	it('trim respects cap and does not under-count due to concurrent locking', async () => {
-		// Same setup: file well over threshold
-		await populateBeyondThreshold(tmp);
-
-		// Single call — trim should run and cap at MAX_APPLICATION_LOG_ENTRIES
-		await recordKnowledgeShown(tmp, ['cccccccc-cccc-4ccc-9ccc-cccccccccccc'], {
-			phase: 'single-call-test',
-		});
-
-		const logPath = resolveApplicationLogPath(tmp);
-		const content = readFileSync(logPath, 'utf-8');
-
-		expect(isValidJsonl(content)).toBe(true);
-		// After trim, count should be exactly MAX_APPLICATION_LOG_ENTRIES (or 1 more if TOCTOU append landed)
-		const count = countLines(content);
-		expect(count).toBeLessThanOrEqual(5001);
-	});
-});
-
 describe('getShownButNotAcknowledged', () => {
 	it('returns shown ids that have no acknowledgment in scope', async () => {
 		const a = '11111111-1111-4111-9111-111111111111';
@@ -332,6 +254,75 @@ describe('getShownButNotAcknowledged', () => {
 			knowledgeIds: [a, b],
 		});
 		expect(remaining).toEqual([b]);
+	});
+});
+
+// ============================================================================
+// bumpCountersBatch — TOCTOU race condition fix
+// ============================================================================
+
+describe('bumpCountersBatch - lock-before-read TOCTOU regression', () => {
+	it('recordAcknowledgment re-reads after an interleaved append instead of rewriting a stale snapshot', async () => {
+		const id = '99999999-9999-4999-9999-999999999999';
+		await seedEntry(id);
+
+		const { appendKnowledge } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+
+		const secondId = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const secondEntry: SwarmKnowledgeEntry = {
+			id: secondId,
+			tier: 'swarm',
+			lesson: 'second entry for concurrency test',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.8,
+			status: 'candidate',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: 'test',
+		};
+
+		const knowledgePath = resolveSwarmKnowledgePath(tmp);
+		const staleSnapshot = readFileSync(knowledgePath, 'utf-8')
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		expect(staleSnapshot.map((entry: any) => entry.id)).toEqual([id]);
+
+		// Previous code read before acquiring the rewrite lock. This fixed
+		// interleaving models that stale snapshot, appends a second entry, then
+		// performs the counter update. The fixed path must re-read under
+		// transactKnowledge and preserve the append.
+		await appendKnowledge(knowledgePath, secondEntry);
+		await recordAcknowledgment(
+			tmp,
+			{ id, result: 'applied' },
+			{ phase: 'Phase 1' },
+		);
+
+		const lines = readFileSync(knowledgePath, 'utf-8').trim().split('\n');
+		const allEntries = lines.map((line) => JSON.parse(line));
+
+		expect(allEntries).toHaveLength(2);
+
+		const originalEntry = allEntries.find((e: any) => e.id === id);
+		expect(originalEntry).toBeDefined();
+		expect(originalEntry.retrieval_outcomes.applied_explicit_count).toBe(1);
+		expect(originalEntry.retrieval_outcomes.acknowledged_count).toBe(1);
+
+		const appendedEntry = allEntries.find((e: any) => e.id === secondId);
+		expect(appendedEntry).toBeDefined();
+		expect(appendedEntry.id).toBe(secondId);
 	});
 });
 

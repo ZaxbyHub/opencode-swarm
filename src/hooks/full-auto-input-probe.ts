@@ -189,11 +189,9 @@ export function createFullAutoInputProbeHook(
 ): {
 	toolAfter: (input: ToolAfterInput, output: ToolAfterOutput) => Promise<void>;
 } {
-	const { config, directory } = options;
-	const enabled = config.full_auto?.enabled === true;
-	if (!enabled) {
-		return { toolAfter: async () => {} };
-	}
+	const { directory } = options;
+	// First-class toggle: always armed; the run-state check below
+	// (status !== 'running' → return) is the runtime gate.
 	return {
 		toolAfter: async (input, output) => {
 			const tool = (

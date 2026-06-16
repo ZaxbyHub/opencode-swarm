@@ -1,0 +1,1 @@
+Fixes PR-review lane dispatch so OpenCode uses a deterministic `dispatch_lanes` tool to fan out read-only explorer/reviewer lanes concurrently and join their results, instead of depending on local models to emit background Agent calls.

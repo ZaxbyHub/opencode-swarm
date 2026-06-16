@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
+const MAIN_BUNDLE_MAX_BYTES = 5.5 * 1024 * 1024;
 
 describe('packaging smoke tests', () => {
 	test('dist/index.js exists', () => {
@@ -37,10 +38,13 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 5MB)', () => {
+	test('dist/index.js file size is reasonable (< 5.5MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
-		// Main bundle should be under 5MB
-		expect(stats.size).toBeLessThan(5 * 1024 * 1024);
+		// Raised from 5MiB by #1302 Wave 2's eval-gated skill machinery and
+		// #1263 config-doctor validation expansion: 62+ switch cases, Levenshtein
+		// suggestion, atomic writes, symlink rejection; keep the cap narrow so
+		// future bundle growth remains visible in smoke CI.
+		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);
 	});
@@ -48,8 +52,8 @@ describe('packaging smoke tests', () => {
 	test('dist/cli/index.js file size is reasonable (< 2.4MB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/cli/index.js'));
 		// CLI bundle should be under 2.4MB (raised from 2.2MB due to #1234
-		// auto-triage commands + success-motif learning machinery; main was at
-		// ~2.30MB with little headroom before this feature landed)
+		// auto-triage commands + success-motif learning machinery plus
+		// first-class full-auto toggle — status subcommand, mode parsing)
 		expect(stats.size).toBeLessThan(2.4 * 1024 * 1024);
 		// But should be at least 1KB (non-empty)
 		expect(stats.size).toBeGreaterThan(1 * 1024);

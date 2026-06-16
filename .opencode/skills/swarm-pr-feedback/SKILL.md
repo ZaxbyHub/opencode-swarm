@@ -42,6 +42,14 @@ final state. Expect N rounds of review for N pushes, and budget for it.
    defense-in-depth rationale comment rather than continue to debate. One extra
    condition is cheap; per-round debate is expensive. Document the parent-vs-inner
    relationship inline so future readers see the rationale.
+   **When not to apply 3-strikes:** If the suggested fix would add incorrect,
+   misleading, or redundant code — e.g., an outer guard that already exists at an
+   inner scope and whose addition would imply the inner guard is absent, a type
+   narrowing that masks a real error class, or a check whose presence asserts a
+   false invariant — do not add the change. A wrong fix embedded in the code is
+   harder to remove than a repeated rebuttal in a comment thread. Apply item 6's
+   "surface to user" path instead, with the cumulative evidence that the fix
+   direction is incorrect.
 4. **Verify bot fix-direction suggestions against actual file structure.** Bots
    read files linearly and can miss parent-block guards. For any "add an X check"
    suggestion, read the surrounding function/block to confirm the check is genuinely
@@ -60,6 +68,25 @@ final state. Expect N rounds of review for N pushes, and budget for it.
 "start over, re-triage everything." With it, the rounds become incremental:
 each round's work is bounded by new findings + carried-forward items only.
 This matches how the bot actually behaves and avoids wasted cycles.
+
+### Bot Review Verification Traps
+
+When a bot or pasted review cites a code fact, verify the fact against the
+current branch before editing:
+
+- **Import/export claims:** Check the exact import path used by the changed file.
+  A symbol may be missing from an internal submodule but correctly exported by the
+  public barrel the tests or runtime actually import.
+- **Line numbers:** Treat bot line references as approximate after any follow-up
+  push or local edit. Re-locate the symbol or block with `rg` before patching.
+- **Ordering claims:** If the concern is about rule precedence, add or run a
+  direct precedence test that would fail under the wrong ordering; comments alone
+  are not enough.
+- **Disproved findings:** Do not change unrelated code to satisfy a false claim.
+  Keep the finding in the closure ledger with the source or test evidence that
+  disproves it.
+- **Cache/state claims:** Test both relevant state orders when the behavior
+  depends on cache priming, singleton state, or prior calls.
 
 ## Operating Stance
 

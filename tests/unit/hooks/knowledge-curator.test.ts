@@ -4,7 +4,10 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import type {
+	KnowledgeConfig,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types.js';
 
 // IMPORTANT: use local mock variables for all mock.module() delegates
 
@@ -163,8 +166,12 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 
 // Import the SUT and the transactKnowledge (the mock provided by the knowledge-store mock.module)
 // using dynamic import so that the mocks are active before the modules under test are loaded.
-const { createKnowledgeCuratorHook, curateAndStoreSwarm, runAutoPromotion } =
-	await import('../../../src/hooks/knowledge-curator.js');
+const {
+	createKnowledgeCuratorHook,
+	curateAndStoreSwarm,
+	runAutoPromotion,
+	_internals,
+} = await import('../../../src/hooks/knowledge-curator.js');
 
 const { transactKnowledge } = await import(
 	'../../../src/hooks/knowledge-store.js'
@@ -190,6 +197,10 @@ const defaultConfig: KnowledgeConfig = {
 	low_utility_threshold: 0.3,
 	min_retrievals_for_utility: 3,
 	schema_version: 1,
+	enrichment: {
+		max_calls_per_day: 30,
+		quota_window: 'utc',
+	},
 };
 
 function makePlanContent(lessons: string[]): string {
@@ -378,6 +389,52 @@ describe('knowledge-curator', () => {
 			// The function resolves successfully (even though it catches internally)
 			await expect(hook(input, {})).resolves.toBeUndefined();
 		});
+
+		test('hook passes session delegate and dedicated enrichment quota to curation', async () => {
+			const planContent = makePlanContent(['Always validate user input']);
+			mockReadSwarmFileAsync.mockResolvedValueOnce(planContent);
+			const delegate = mock(async () => '{}');
+			const factory = mock((sessionID: string) => {
+				expect(sessionID).toBe('sess-quota');
+				return delegate;
+			});
+			const quota = { maxCalls: 7, window: 'local' as const };
+			const realCurate = _internals.curateAndStoreSwarm;
+			const curateSpy = mock(async () => ({
+				stored: 0,
+				reinforced: 0,
+				skipped: 0,
+				rejected: 0,
+				quarantined: 0,
+			}));
+			_internals.curateAndStoreSwarm =
+				curateSpy as typeof _internals.curateAndStoreSwarm;
+
+			try {
+				const hook = createKnowledgeCuratorHook('/project', defaultConfig, {
+					llmDelegateFactory: factory,
+					enrichmentQuota: quota,
+				});
+				await hook(
+					{
+						toolName: 'write',
+						path: '/project/.swarm/plan.md',
+						sessionID: 'sess-quota',
+					},
+					{},
+				);
+
+				expect(factory).toHaveBeenCalledTimes(1);
+				expect(curateSpy).toHaveBeenCalledTimes(1);
+				const options = curateSpy.mock.calls[0][5];
+				expect(options).toEqual({
+					llmDelegate: delegate,
+					enrichmentQuota: quota,
+				});
+			} finally {
+				_internals.curateAndStoreSwarm = realCurate;
+			}
+		});
 	});
 
 	describe('extractLessonsFromRetro (via curateAndStoreSwarm)', () => {
@@ -470,7 +527,7 @@ Another line without a bullet
 			expect(transactKnowledge).not.toHaveBeenCalled();
 		});
 
-		test('near-duplicate lesson is silently skipped', async () => {
+		test('near-duplicate lesson reinforces the existing active entry', async () => {
 			// First, return a valid validation result
 			mockValidateLesson.mockReturnValue({
 				valid: true,
@@ -478,23 +535,123 @@ Another line without a bullet
 				reason: null,
 				severity: null,
 			});
-			// Return an existing entry as near-duplicate
-			mockFindNearDuplicate.mockReturnValueOnce({
+			const existingEntry: SwarmKnowledgeEntry = {
 				id: 'existing-id',
+				tier: 'swarm',
 				lesson: 'Similar lesson',
-			});
-			mockReadKnowledge.mockResolvedValueOnce([]);
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'candidate',
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00.000Z',
+						project_name: 'test-project',
+					},
+				],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00.000Z',
+				updated_at: '2026-01-01T00:00:00.000Z',
+				project_name: 'test-project',
+				auto_generated: true,
+				phases_alive: 2,
+			};
+			// Return an existing active entry as near-duplicate
+			mockFindNearDuplicate.mockReturnValueOnce(existingEntry);
+			mockReadKnowledge.mockResolvedValue([existingEntry]);
 
-			await curateAndStoreSwarm(
+			const result = await curateAndStoreSwarm(
 				['Always validate user input'],
 				'test-project',
-				{ phase_number: 1 },
+				{ phase_number: 2 },
 				'/project',
 				defaultConfig,
 			);
 
-			// Should skip the duplicate
-			expect(transactKnowledge).not.toHaveBeenCalled();
+			expect(transactKnowledge).toHaveBeenCalledTimes(1);
+			expect(result).toEqual(
+				expect.objectContaining({ stored: 0, reinforced: 1, skipped: 1 }),
+			);
+			expect(
+				existingEntry.confirmed_by.map((record) => record.phase_number),
+			).toEqual([1, 2]);
+			expect(existingEntry.phases_alive).toBe(0);
+			expect(existingEntry.updated_at).toEqual(expect.any(String));
+			expect(mockComputeConfidence).toHaveBeenCalledWith(2, true);
+		});
+
+		test('inactive near-duplicate lesson creates a fresh candidate without reviving the old entry', async () => {
+			mockValidateLesson.mockReturnValue({
+				valid: true,
+				layer: null,
+				reason: null,
+				severity: null,
+			});
+			const archivedEntry: SwarmKnowledgeEntry = {
+				id: 'archived-id',
+				tier: 'swarm',
+				lesson: 'Always validate user input',
+				category: 'process',
+				tags: [],
+				scope: 'global',
+				confidence: 0.6,
+				status: 'archived',
+				confirmed_by: [
+					{
+						phase_number: 1,
+						confirmed_at: '2026-01-01T00:00:00.000Z',
+						project_name: 'test-project',
+					},
+				],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 2,
+				created_at: '2026-01-01T00:00:00.000Z',
+				updated_at: '2026-01-01T00:00:00.000Z',
+				project_name: 'test-project',
+				auto_generated: true,
+				phases_alive: 7,
+			};
+			const store = [archivedEntry];
+			mockReadKnowledge.mockResolvedValue(store);
+
+			const result = await curateAndStoreSwarm(
+				['Always validate user input before processing'],
+				'test-project',
+				{ phase_number: 2 },
+				'/project',
+				defaultConfig,
+			);
+
+			expect(result).toEqual(
+				expect.objectContaining({ stored: 1, reinforced: 0, skipped: 0 }),
+			);
+			expect(store).toHaveLength(2);
+			expect(archivedEntry.status).toBe('archived');
+			expect(archivedEntry.confirmed_by).toHaveLength(1);
+			expect(archivedEntry.phases_alive).toBe(7);
+			expect(store[1]).toEqual(
+				expect.objectContaining({
+					lesson: 'Always validate user input before processing',
+					status: 'candidate',
+					confirmed_by: [
+						expect.objectContaining({
+							phase_number: 2,
+							project_name: 'test-project',
+						}),
+					],
+				}),
+			);
 		});
 
 		test('lesson with validation warning (vague) is still stored', async () => {

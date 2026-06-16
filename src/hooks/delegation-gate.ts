@@ -568,11 +568,54 @@ async function buildParallelExecutionGuidance(
 
 	const profile = plan.execution_profile;
 	const enabled = profile?.parallelization_enabled === true;
-	const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+	const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 	// Check for session-scoped concurrency override (Issue #761)
 	// Override only applies in standard mode — Lean Turbo short-circuits above.
-	const effectiveMaxConcurrent =
-		session?.maxConcurrencyOverride ?? maxConcurrent;
+	let effectiveMaxConcurrent = session?.maxConcurrencyOverride ?? maxConcurrent;
+
+	// Adaptive backoff on errors: detect failures and reduce concurrency.
+	// Only count tasks explicitly blocked by a failure, not normal dependency
+	// ordering. `blocked_reason` is set by the execution engine when a task
+	// fails; absent or non-failure reasons (e.g. "waiting on dependency")
+	// are NOT treated as backoff-worthy failures.
+	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
+	const blockedTasks = allTasks.filter((task) => {
+		if (task.status !== 'blocked') return false;
+		const reason = (task.blocked_reason ?? '').toLowerCase();
+		// Treat as a failure only when the reason explicitly indicates
+		// execution failure. Falls back to conservative "count nothing"
+		// when the reason is absent to avoid false-positive throttling.
+		return (
+			reason.includes('fail') ||
+			reason.includes('error') ||
+			reason.includes('exception')
+		);
+	});
+	const totalTasks = allTasks.length;
+	let backoffTriggered = false;
+
+	if (totalTasks > 0 && blockedTasks.length > 0) {
+		const failureRate = blockedTasks.length / totalTasks;
+		// If failure rate exceeds 20%, reduce concurrency by 50%
+		const FAILURE_RATE_THRESHOLD = 0.2;
+		const BACKOFF_MULTIPLIER = 0.5;
+
+		// Require at least 2 blocked tasks to avoid throttling on single-task
+		// flakiness in small plans (e.g. 1/4 = 25% should not auto-reduce).
+		if (failureRate > FAILURE_RATE_THRESHOLD && blockedTasks.length >= 2) {
+			const newConcurrency = Math.max(
+				1,
+				Math.floor(effectiveMaxConcurrent * BACKOFF_MULTIPLIER),
+			);
+			if (newConcurrency < effectiveMaxConcurrent) {
+				// Auto-reduce the effective concurrency due to high failure rate
+				effectiveMaxConcurrent = newConcurrency;
+				session.maxConcurrencyOverride = newConcurrency;
+				backoffTriggered = true;
+			}
+		}
+	}
+
 	if (!enabled || effectiveMaxConcurrent <= 1) return null;
 
 	if (hasActiveLeanTurbo(sessionID)) {
@@ -588,7 +631,6 @@ async function buildParallelExecutionGuidance(
 	const tasks = currentPhase.tasks;
 	if (tasks.length === 0) return null;
 
-	const allTasks = plan.phases.flatMap((phase) => phase.tasks);
 	const completed = new Set<string>();
 	for (const task of allTasks) {
 		const taskId = task.id;
@@ -626,7 +668,11 @@ async function buildParallelExecutionGuidance(
 		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; no dependency-ready pending tasks are available for a new coder slot. Continue the current task/gate.`;
 	}
 
-	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.`;
+	const failureWarning = backoffTriggered
+		? ` (${blockedTasks.length} blocked task(s) detected — concurrency auto-reduced due to failures)`
+		: '';
+
+	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.${failureWarning}`;
 }
 
 function isParallelGuidancePhaseComplete(phase: Phase): boolean {
@@ -1062,7 +1108,7 @@ export function createDelegationGateHook(
 		if (!plan) return;
 		const profile = plan.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
-		const maxConcurrent = profile?.max_concurrent_tasks ?? 1;
+		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =
 			session.maxConcurrencyOverride ?? maxConcurrent;
 		if (!parallelEnabled || effectiveMaxConcurrent <= 1) return;

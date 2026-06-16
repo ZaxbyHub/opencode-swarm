@@ -216,6 +216,78 @@ Runs a type-checking or linting command after the coder agent completes.
 }
 ```
 
+### full_auto
+
+Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through a `critic_oversight` review pass before they execute. As of the first-class toggle, runtime activation is decoupled from config enablement: a user activates Full-Auto per session via `/swarm full-auto on [mode]`, and `/swarm full-auto off` disarms (returns to normal interactive operation).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | **Deprecated as a gate.** Retained for backward compatibility with v1 configs. When `true`, fires the legacy init-time critic-model advisory; does NOT arm or disarm the v2 hooks. Use `locked` for a hard-off. |
+| `locked` | boolean | `false` | Administrative hard-off. When `true`, `/swarm full-auto on` is refused at runtime (with an explicit error). `off` and `status` still work. The lock ORs across config levels: a repo-controlled project config cannot override a user-level `locked: true`. |
+| `mode` | `assisted` \| `supervised` \| `strict` | `supervised` | Determines the classifier's escalation profile. `assisted` consults the critic only on deterministic policy escalations. `supervised` (default) routes risky/high-impact actions through the critic. `strict` routes ALL plan mutations through the critic. |
+| `critic_model` | string | _(unset)_ | Optional override for the critic's model. Defaults to `agents.critic.model`. When both this and `agents.architect.model` are explicitly set to the same string, an advisory warns that independent judgment is weakened. |
+| `max_interactions_per_phase` | number | `50` | Hard cap on architect interactions per phase. |
+| `deadlock_threshold` | number | `3` | Consecutive `escalate_critic` verdicts before the run is paused. |
+| `escalation_mode` | `pause` \| `terminate` | `pause` | What to do when denial or deadlock thresholds are hit. |
+| `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
+| `denials.max_total` | number | `20` | Pause after N total denials in the session. |
+| `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+
+**Fail-closed semantics:**
+- Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
+- A `paused` or `terminated` run state blocks every non-read-only tool for the session until `/swarm full-auto on` (resume) or `/swarm full-auto off` (disarm).
+- A corrupt `.swarm/full-auto-state.json` fail-closed-blocks non-read-only tools project-wide; `/swarm full-auto status` reports this as `UNREADABLE` with the restore instructions.
+
+**Example — refuse runtime activation entirely:**
+```json
+{
+  "full_auto": {
+    "locked": true
+  }
+}
+```
+
+**Example — change default mode to strict for all sessions:**
+```json
+{
+  "full_auto": {
+    "mode": "strict"
+  }
+}
+```
+
+### auto_review
+
+Opt-in automatic review of the execution diff by the reviewer agent — its own configured model (`agents.reviewer.model`), in a fresh ephemeral session, with write/edit/patch disabled. This is the "second model reviews the work in a clean context" pattern used by Claude Code's auto-review and Codex's review model.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable automatic execution-diff review |
+| `trigger` | `"task_completion" \| "phase_boundary" \| "both"` | `"phase_boundary"` | When to dispatch: after `update_task_status` → `completed`, at `phase_complete`, or both |
+| `timeout_ms` | number | `300000` | Reviewer dispatch timeout (10s–30min) |
+| `max_diff_kb` | number | `256` | Maximum diff size included in the review prompt (16–2048 KiB). Larger diffs are truncated to this size; if the raw diff exceeds twice this cap, collection aborts and the pass is skipped with an `error` event. |
+
+Behavior:
+
+- **Advisory and fire-and-forget** — the tool call that triggered the review is never delayed; dispatches are deduplicated per session with a 60-second cooldown (repeated `phase_complete` retries do not spam review sessions).
+- Verdicts are persisted as **durable review receipts** under `.swarm/review-receipts/` (scope-fingerprinted over the reviewed diff) and an `auto_review` event is appended to `.swarm/events.jsonl`.
+- A **REJECTED** verdict injects an `[AUTO-REVIEW]` advisory (top findings + required fixes) into the architect's next prompt; an unparseable response injects an UNVERIFIED advisory; APPROVED stays silent.
+- A clean working tree or missing git skips the pass with a `skipped` event.
+
+Independently of `auto_review`, every returning reviewer Task delegation now has its `VERDICT`/`RISK`/`ISSUES`/`FIXES` block parsed and persisted as a review receipt — a durable machine-readable record of prior judgments that future re-review and drift-verification consumers can build on (the parser is fail-safe: ambiguous or missing verdict lines persist nothing).
+
+```json
+{
+  "auto_review": {
+    "enabled": true,
+    "trigger": "both"
+  },
+  "agents": {
+    "reviewer": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": ["opencode/big-pickle"] }
+  }
+}
+```
+
 ### slop_detector
 
 Detects low-quality code patterns (AI slop) in generated output.
@@ -584,6 +656,23 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 > **appendPrompt note.** Council agents (`council_generalist`, `council_skeptic`, `council_domain_expert`) do **not** inherit `appendPrompt` from the underlying agent config entries (`agents.reviewer.appendPrompt`, etc.). Council prompts are fixed and self-contained — they define a specific council persona and must not be contaminated by workflow-role customizations. This omission is intentional. If you need consistent context across all agents including council roles, add it to the council prompts via a custom build rather than via `appendPrompt`.
 
 > **Reduced-council warning.** If `council.general.enabled` is `true` but you have disabled `reviewer`, `critic`, or `sme` in `agents`, the corresponding council role (`council_generalist`, `council_skeptic`, or `council_domain_expert` respectively) will not be registered and a deferred warning will be emitted. Re-enable the base agent or accept a reduced council. This warning is replayed when you run `/swarm diagnose`.
+
+## Skill Improver Consolidation
+
+`skill_improver` can run manually or at safe scheduled cadence points.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables the skill-improver service and consolidation command. |
+| `trigger` | `"manual" \| "scheduled"` | `"manual"` | `scheduled` allows opportunistic startup and phase-complete consolidation. |
+| `max_calls_per_day` | number | `10` | Hard daily quota for skill-improver proposal calls. |
+| `consolidation_interval_hours` | number | `24` | Minimum hours between scheduled consolidation runs. |
+| `consolidation_max_calls_per_run` | number | `1` | Per-run reservation for scheduled consolidation, capped by `max_calls_per_day`. |
+| `write_mode` | `"proposal" \| "draft_skills"` | `"proposal"` | Whether consolidation only writes improver proposals or also drafts generated skill proposals. |
+
+Scheduled consolidation is fire-and-forget, validates drafted skills against
+matching eval fixtures, and never auto-activates skills. Use `/swarm
+consolidate` for an explicit pass.
 
 ## External Skills Curation Pipeline
 

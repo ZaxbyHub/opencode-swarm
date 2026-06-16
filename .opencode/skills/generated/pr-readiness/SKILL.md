@@ -3,8 +3,19 @@ name: pr-readiness
 description: >
   Complete pre-merge checklist for opencode-swarm PRs. Covers lint, build,
   tests, security scans, CI verification, release fragments, invariant audit,
-PR body claim verification, placeholder cleanup, review state, and merge
-conflict detection.
+  PR body claim verification, placeholder cleanup, review state, and merge
+  conflict detection.
+effort: small
+generated_from_knowledge: []
+source_knowledge_ids: ['1bed6ebf-f834-4002-ae5c-18e4d7e22c1f']
+generated_at: 2026-06-14T16:50:00Z
+confidence: 0.8
+status: active
+version: 3
+skill_origin: generated
+provenance_note: >
+  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
+  Metadata and body preserved; version bumped to reflect provenance update.
 ---
 
 # PR Readiness Skill
@@ -269,7 +280,7 @@ entry.
 ### dist/ not rebuilt after source change
 
 Symptom: `dist-check` CI job fails with "source changed but dist/ not rebuilt".
-Fix: Run `bun run build` locally, commit the updated `dist/` directory, push.
+Fix: Run `bun run build` locally to verify the bundle, but do NOT commit `dist/` — it is generated and NOT committed. Push the source fix only.
 
 ### Version drift on stale branch
 

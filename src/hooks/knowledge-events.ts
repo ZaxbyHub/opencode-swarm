@@ -1,16 +1,16 @@
 /**
  * Event-sourced knowledge lifecycle for opencode-swarm.
  *
- * `.swarm/knowledge-events.jsonl` is an append-only, immutable log of every
- * meaningful knowledge interaction (retrieval, receipt, outcome, archival).
- * It is the authoritative history: per-entry counters
- * (`retrieval_outcomes.*`) become *derived rollups* recomputed deterministically
- * from this log via {@link recomputeCounters}.
+ * `.swarm/knowledge-events.jsonl` records meaningful knowledge interactions
+ * (retrieval, receipt, outcome, archival). Recent lines stay in the event log;
+ * old lines are folded into `.swarm/knowledge-counter-baseline.json` when the
+ * log exceeds the cap. The event log plus baseline are the authoritative
+ * history for derived per-entry counters (`retrieval_outcomes.*`).
  *
  * Design contracts:
- * - Append-only. We never rewrite or delete lines. OS-level atomic append is
- *   used (same pattern as `appendKnowledge` in knowledge-store.ts) — no lock is
- *   needed for append-only writes.
+ * - Append-first, bounded retention. New events use OS-level atomic append; trim
+ *   rewrites only after folding evicted counters into the baseline so aggregate
+ *   counters survive log rotation.
  * - Fail-open. Event recording is telemetry; it must never break tool or hook
  *   execution. Use {@link recordKnowledgeEvent} (swallows + warns) on hot paths;
  *   {@link appendKnowledgeEvent} throws and is intended for tests / callers that
@@ -22,9 +22,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import type {
 	KnowledgeApplicationRecord,
@@ -34,9 +35,6 @@ import type {
 /** Current event-log record schema version. Bump when the on-disk shape changes. */
 export const KNOWLEDGE_EVENT_SCHEMA_VERSION = 1;
 
-/** Counter baseline file schema version. Bump when the baseline envelope shape changes. */
-export const KNOWLEDGE_COUNTER_BASELINE_SCHEMA_VERSION = 1;
-
 /**
  * Soft cap on `.swarm/knowledge-events.jsonl` line count. Enforced FIFO after
  * each append: oldest lines are trimmed when total exceeds the cap. Sized for
@@ -44,25 +42,13 @@ export const KNOWLEDGE_COUNTER_BASELINE_SCHEMA_VERSION = 1;
  */
 export const MAX_EVENT_LOG_ENTRIES = 5000;
 
-/**
- * Batch size for async trim after appending. The trim is triggered when the
- * file size exceeds `(MAX_EVENT_LOG_ENTRIES + TRIM_BATCH_SIZE) * MIN_EVENT_LINE_BYTES`
- * to avoid acquiring the proper-lockfile lock on every append.
- */
-export const TRIM_BATCH_SIZE = 100;
+interface CounterRollupCacheEntry {
+	key: string;
+	rollups: Map<string, CounterRollup>;
+}
 
-/**
- * Conservative minimum bytes per JSONL event line. Used to estimate when the
- * file needs a read-modify-write trim without reading the full file first.
- *
- * The value is intentionally smaller than a typical average so the file cannot
- * grow far beyond `MAX_EVENT_LOG_ENTRIES` before the size-based trim check
- * fires. Lock-free appends are still serialized by the OS; there is a narrow
- * race window between the append and the locked trim where a concurrent append
- * can be overwritten — this is an intentional performance-vs-strict-serialization
- * trade-off for a best-effort event log.
- */
-export const MIN_EVENT_LINE_BYTES = 110;
+const counterRollupCache = new Map<string, CounterRollupCacheEntry>();
+const MAX_COUNTER_ROLLUP_CACHE_DIRS = 32;
 
 // ============================================================================
 // Event schema
@@ -167,6 +153,7 @@ export interface ArchivedEvent {
 	event_id: string;
 	timestamp: string;
 	entry_id: string;
+	tier?: 'swarm' | 'hive';
 	actor: string;
 	reason: string;
 	mode: 'archive' | 'quarantine' | 'purge';
@@ -231,14 +218,14 @@ export function resolveKnowledgeEventsPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-events.jsonl');
 }
 
+/** Returns `.swarm/knowledge-counter-baseline.json` for folded event counters. */
+export function resolveKnowledgeCounterBaselinePath(directory: string): string {
+	return path.join(directory, '.swarm', 'knowledge-counter-baseline.json');
+}
+
 /** Returns `.swarm/knowledge-application.jsonl` for legacy v2 audit records. */
 export function resolveLegacyApplicationLogPath(directory: string): string {
 	return path.join(directory, '.swarm', 'knowledge-application.jsonl');
-}
-
-/** Returns `.swarm/knowledge-counter-baseline.json` for preserved counters after trim. */
-export function resolveCounterBaselinePath(directory: string): string {
-	return path.join(directory, '.swarm', 'knowledge-counter-baseline.json');
 }
 
 // ============================================================================
@@ -266,142 +253,6 @@ function withDefaults(event: KnowledgeEventInput): KnowledgeEvent {
 }
 
 // ============================================================================
-// Counter baseline (preserved during trim)
-// ============================================================================
-
-/** Load the baseline counters for entries evicted during previous trims. */
-async function loadCounterBaseline(
-	directory: string,
-): Promise<Record<string, CounterRollup>> {
-	try {
-		const baselinePath = resolveCounterBaselinePath(directory);
-		if (!existsSync(baselinePath)) return {};
-		const content = await readFile(baselinePath, 'utf-8');
-		const parsed = JSON.parse(content);
-
-		// One-step migration: accept old unversioned baseline files that look
-		// like counter entries (i.e. keys other than the envelope fields).
-		if (
-			parsed &&
-			typeof parsed === 'object' &&
-			!Object.hasOwn(parsed, 'schema_version')
-		) {
-			const keys = Object.keys(parsed as Record<string, unknown>);
-			const looksLikeEntries = keys.some(
-				(key) => key !== 'schema_version' && key !== 'entries',
-			);
-			if (looksLikeEntries) {
-				warn(
-					'[knowledge-events] Migrating unversioned counter baseline to schema v1.',
-				);
-				return parsed as Record<string, CounterRollup>;
-			}
-		}
-
-		// Validate versioned envelope.
-		const envelope = parsed as CounterBaselineFile;
-		if (
-			!envelope ||
-			typeof envelope !== 'object' ||
-			typeof envelope.schema_version !== 'number' ||
-			envelope.schema_version !== KNOWLEDGE_COUNTER_BASELINE_SCHEMA_VERSION ||
-			typeof envelope.entries !== 'object' ||
-			envelope.entries === null
-		) {
-			warn(
-				`[knowledge-events] Counter baseline schema mismatch (expected schema_version=${KNOWLEDGE_COUNTER_BASELINE_SCHEMA_VERSION}); starting with empty baseline.`,
-			);
-			return {};
-		}
-
-		return envelope.entries;
-	} catch (err) {
-		warn(
-			`[knowledge-events] loadCounterBaseline failed (continuing with empty): ${
-				err instanceof Error ? err.message : String(err)
-			}`,
-		);
-		return {};
-	}
-}
-
-/** Save the baseline counters for entries being evicted during trim. */
-async function saveCounterBaseline(
-	directory: string,
-	evictedCounters: Record<string, CounterRollup>,
-): Promise<void> {
-	if (Object.keys(evictedCounters).length === 0) return;
-	try {
-		const baselinePath = resolveCounterBaselinePath(directory);
-		const baseDirPath = path.dirname(baselinePath);
-		await mkdir(baseDirPath, { recursive: true });
-		// Merge with existing baseline to avoid losing counters from previous trims.
-		const existing = await loadCounterBaseline(directory);
-		const merged: Record<string, CounterRollup> = { ...existing };
-		for (const [id, rollup] of Object.entries(evictedCounters)) {
-			if (merged[id]) {
-				// Merge: add all numeric counters, preserve timestamps.
-				const base = merged[id];
-				base.shown_count += rollup.shown_count;
-				base.acknowledged_count += rollup.acknowledged_count;
-				base.applied_explicit_count += rollup.applied_explicit_count;
-				base.ignored_count += rollup.ignored_count;
-				base.violated_count += rollup.violated_count;
-				base.contradicted_count += rollup.contradicted_count;
-				base.n_a_count += rollup.n_a_count;
-				base.succeeded_after_shown_count += rollup.succeeded_after_shown_count;
-				base.failed_after_shown_count += rollup.failed_after_shown_count;
-				base.partial_after_shown_count += rollup.partial_after_shown_count;
-				if (
-					rollup.last_applied_at &&
-					(!base.last_applied_at ||
-						rollup.last_applied_at > base.last_applied_at)
-				) {
-					base.last_applied_at = rollup.last_applied_at;
-				}
-				if (
-					rollup.last_acknowledged_at &&
-					(!base.last_acknowledged_at ||
-						rollup.last_acknowledged_at > base.last_acknowledged_at)
-				) {
-					base.last_acknowledged_at = rollup.last_acknowledged_at;
-				}
-				// Merge violation timestamps, keeping newest and respecting cap.
-				const allViolations = [
-					...(base.violation_timestamps ?? []),
-					...rollup.violation_timestamps,
-				];
-				allViolations.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-				base.violation_timestamps = allViolations.slice(
-					0,
-					MAX_VIOLATION_TIMESTAMPS,
-				);
-			} else {
-				merged[id] = rollup;
-			}
-		}
-		await writeFile(
-			baselinePath,
-			JSON.stringify(
-				{
-					schema_version: KNOWLEDGE_COUNTER_BASELINE_SCHEMA_VERSION,
-					entries: merged,
-				},
-				null,
-				2,
-			),
-			'utf-8',
-		);
-	} catch (err) {
-		warn(
-			`[knowledge-events] saveCounterBaseline failed (non-fatal): ${
-				err instanceof Error ? err.message : String(err)
-			}`,
-		);
-	}
-}
-
-// ============================================================================
 // Append (write)
 // ============================================================================
 
@@ -420,67 +271,25 @@ export async function appendKnowledgeEvent(
 	const filePath = resolveKnowledgeEventsPath(directory);
 	const dirPath = path.dirname(filePath);
 	await mkdir(dirPath, { recursive: true });
-
-	// Fast path: atomic append without locking. POSIX O_APPEND provides atomic
-	// positioning for small writes; Windows FILE_APPEND_DATA also serializes
-	// small appends in practice, but it is not a hard interleave guarantee.
-	// JSONL lines are small enough that concurrent writers are unlikely to tear
-	// a line in normal use.
-	await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
-
-	// Lazy trim: only acquire the expensive proper-lockfile lock when the file
-	// size suggests we are likely over the cap. This avoids ~8ms per-append
-	// lock overhead on the common path.
-	//
-	// TOCTOU trade-off: a concurrent append can land between this size check
-	// and the locked read-modify-write below. That append may be overwritten by
-	// the trim's writeFile. This is intentional — the event log is best-effort
-	// telemetry, and the tiny loss window is acceptable for the performance win
-	// of skipping the lock on every append.
-	const trimThreshold =
-		(MAX_EVENT_LOG_ENTRIES + TRIM_BATCH_SIZE) * MIN_EVENT_LINE_BYTES;
-	const fileStat = await getFileStat(filePath);
-	if (!fileStat || fileStat.size <= trimThreshold) {
-		return populated;
-	}
-
 	let release: (() => Promise<void>) | undefined;
 	try {
 		release = await lockfile.lock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 		});
+		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
 		// Best-effort FIFO trim once the log exceeds MAX_EVENT_LOG_ENTRIES.
-		// Done under the same lock as the read-modify-write so we avoid lock
-		// nesting and keep concurrent writers race-free.
+		// Done under the same lock as append so we avoid lock nesting and keep
+		// append+trim race-free for concurrent writers.
 		try {
 			const content = await readFile(filePath, 'utf-8');
 			const lines = content
 				.split('\n')
 				.filter((line) => line.trim().length > 0);
-			if (lines.length > MAX_EVENT_LOG_ENTRIES + TRIM_BATCH_SIZE) {
-				const trimmedCount = lines.length - MAX_EVENT_LOG_ENTRIES;
-				const evictedLines = lines.slice(0, trimmedCount);
-				const trimmed = lines.slice(trimmedCount);
-
-				// Parse and compute counters for evicted entries before discarding them.
-				const evictedCounters: Record<string, CounterRollup> = {};
-				for (const line of evictedLines) {
-					try {
-						const evt = JSON.parse(line) as KnowledgeEvent;
-						const rollup = recomputeCountersForEvent(evt, evictedCounters);
-						for (const [id, counts] of Object.entries(rollup)) {
-							evictedCounters[id] = counts;
-						}
-					} catch {
-						// Skip corrupted lines during baseline computation.
-					}
-				}
-
-				// Save evicted counters to baseline.
-				await saveCounterBaseline(directory, evictedCounters);
-
-				// Write trimmed log.
-				await writeFile(filePath, `${trimmed.join('\n')}\n`, 'utf-8');
+			if (lines.length > MAX_EVENT_LOG_ENTRIES) {
+				const evicted = lines.slice(0, lines.length - MAX_EVENT_LOG_ENTRIES);
+				const trimmed = lines.slice(lines.length - MAX_EVENT_LOG_ENTRIES);
+				await foldEvictedEventsIntoBaseline(directory, evicted, filePath);
+				await atomicWriteFile(filePath, `${trimmed.join('\n')}\n`);
 			}
 		} catch (err) {
 			warn(
@@ -530,22 +339,7 @@ export async function readKnowledgeEvents(
 	const filePath = resolveKnowledgeEventsPath(directory);
 	if (!existsSync(filePath)) return [];
 	const content = await readFile(filePath, 'utf-8');
-	const out: KnowledgeEvent[] = [];
-	for (const line of content.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			out.push(JSON.parse(trimmed) as KnowledgeEvent);
-		} catch {
-			warn(
-				`[knowledge-events] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
-					0,
-					80,
-				)}`,
-			);
-		}
-	}
-	return out;
+	return parseEventLines(content.split('\n'), filePath);
 }
 
 /**
@@ -613,12 +407,6 @@ export interface CounterRollup {
 	violation_timestamps: string[];
 }
 
-/** Envelope shape for the counter baseline file on disk. */
-export interface CounterBaselineFile {
-	schema_version: number;
-	entries: Record<string, CounterRollup>;
-}
-
 /** Cap on retained per-entry violation timestamps. */
 export const MAX_VIOLATION_TIMESTAMPS = 10;
 
@@ -638,6 +426,64 @@ function emptyRollup(): CounterRollup {
 	};
 }
 
+function cloneRollup(input: CounterRollup): CounterRollup {
+	return {
+		...emptyRollup(),
+		...input,
+		violation_timestamps: [...(input.violation_timestamps ?? [])],
+	};
+}
+
+function cloneRollupMap(
+	input: Map<string, CounterRollup>,
+): Map<string, CounterRollup> {
+	const out = new Map<string, CounterRollup>();
+	for (const [id, rollup] of input) {
+		out.set(id, cloneRollup(rollup));
+	}
+	return out;
+}
+
+function normalizeRollupTimestamps(rollup: CounterRollup): CounterRollup {
+	if (rollup.violation_timestamps.length > 1) {
+		rollup.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+	}
+	if (rollup.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
+		rollup.violation_timestamps = rollup.violation_timestamps.slice(
+			0,
+			MAX_VIOLATION_TIMESTAMPS,
+		);
+	}
+	return rollup;
+}
+
+function mergeRollupInto(target: CounterRollup, source: CounterRollup): void {
+	target.shown_count += source.shown_count ?? 0;
+	target.acknowledged_count += source.acknowledged_count ?? 0;
+	target.applied_explicit_count += source.applied_explicit_count ?? 0;
+	target.ignored_count += source.ignored_count ?? 0;
+	target.violated_count += source.violated_count ?? 0;
+	target.contradicted_count += source.contradicted_count ?? 0;
+	target.n_a_count += source.n_a_count ?? 0;
+	target.succeeded_after_shown_count += source.succeeded_after_shown_count ?? 0;
+	target.failed_after_shown_count += source.failed_after_shown_count ?? 0;
+	target.partial_after_shown_count += source.partial_after_shown_count ?? 0;
+	if (source.last_applied_at) {
+		target.last_applied_at = maxIso(
+			target.last_applied_at,
+			source.last_applied_at,
+		);
+	}
+	if (source.last_acknowledged_at) {
+		target.last_acknowledged_at = maxIso(
+			target.last_acknowledged_at,
+			source.last_acknowledged_at,
+		);
+	}
+	target.violation_timestamps.push(...(source.violation_timestamps ?? []));
+	normalizeRollupTimestamps(target);
+}
+
 function get(map: Map<string, CounterRollup>, id: string): CounterRollup {
 	let r = map.get(id);
 	if (!r) {
@@ -653,77 +499,105 @@ function maxIso(current: string | undefined, candidate: string): string {
 	return candidate > current ? candidate : current;
 }
 
-/**
- * Compute counters for a single event, updating the provided map.
- * Used during trim to compute baseline counters for evicted entries.
- */
-function recomputeCountersForEvent(
-	event: KnowledgeEvent,
-	map: Record<string, CounterRollup> = {},
-): Record<string, CounterRollup> {
-	const get = (id: string): CounterRollup => {
-		if (!map[id]) {
-			map[id] = emptyRollup();
-		}
-		return map[id];
-	};
+async function readCounterBaseline(
+	directory: string,
+): Promise<Map<string, CounterRollup>> {
+	const filePath = resolveKnowledgeCounterBaselinePath(directory);
+	if (!existsSync(filePath)) return new Map();
+	const raw = JSON.parse(await readFile(filePath, 'utf-8')) as Record<
+		string,
+		CounterRollup
+	>;
+	const map = new Map<string, CounterRollup>();
+	for (const [id, rollup] of Object.entries(raw)) {
+		map.set(id, normalizeRollupTimestamps(cloneRollup(rollup)));
+	}
+	return map;
+}
 
-	switch (event.type) {
-		case 'retrieved': {
-			for (const id of event.result_ids) {
-				get(id).shown_count += 1;
-			}
-			break;
-		}
-		case 'acknowledged': {
-			const r = get(event.knowledge_id);
-			r.acknowledged_count += 1;
-			r.last_acknowledged_at = maxIso(r.last_acknowledged_at, event.timestamp);
-			break;
-		}
-		case 'applied': {
-			const r = get(event.knowledge_id);
-			r.applied_explicit_count += 1;
-			r.last_applied_at = maxIso(r.last_applied_at, event.timestamp);
-			break;
-		}
-		case 'ignored':
-			get(event.knowledge_id).ignored_count += 1;
-			break;
-		case 'violated': {
-			const r = get(event.knowledge_id);
-			r.violated_count += 1;
-			r.violation_timestamps.push(event.timestamp);
-			// Normalize this entry's timestamps immediately (avoid O(N) loop
-			// over all entries on every event during trim).
-			if (r.violation_timestamps.length > 1) {
-				r.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-			}
-			if (r.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
-				r.violation_timestamps = r.violation_timestamps.slice(
+async function writeCounterBaseline(
+	directory: string,
+	baseline: Map<string, CounterRollup>,
+): Promise<void> {
+	const filePath = resolveKnowledgeCounterBaselinePath(directory);
+	const out: Record<string, CounterRollup> = {};
+	for (const [id, rollup] of [...baseline.entries()].sort(([a], [b]) =>
+		a.localeCompare(b),
+	)) {
+		out[id] = normalizeRollupTimestamps(cloneRollup(rollup));
+	}
+	await atomicWriteFile(filePath, `${JSON.stringify(out, null, 2)}\n`);
+}
+
+async function statCacheKey(filePath: string): Promise<string> {
+	try {
+		const fileStat = await stat(filePath);
+		return `${fileStat.mtimeMs}:${fileStat.ctimeMs}:${fileStat.size}`;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'missing';
+		throw err;
+	}
+}
+
+async function buildCounterRollupCacheKey(directory: string): Promise<string> {
+	const [eventsKey, legacyKey, baselineKey] = await Promise.all([
+		statCacheKey(resolveKnowledgeEventsPath(directory)),
+		statCacheKey(resolveLegacyApplicationLogPath(directory)),
+		statCacheKey(resolveKnowledgeCounterBaselinePath(directory)),
+	]);
+	return `${eventsKey}|${legacyKey}|${baselineKey}`;
+}
+
+function setCounterRollupCache(
+	directory: string,
+	key: string,
+	rollups: Map<string, CounterRollup>,
+): void {
+	if (counterRollupCache.has(directory)) {
+		counterRollupCache.delete(directory);
+	}
+	counterRollupCache.set(directory, {
+		key,
+		rollups: cloneRollupMap(rollups),
+	});
+	while (counterRollupCache.size > MAX_COUNTER_ROLLUP_CACHE_DIRS) {
+		const oldestKey = counterRollupCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		counterRollupCache.delete(oldestKey);
+	}
+}
+
+function parseEventLines(lines: string[], filePath: string): KnowledgeEvent[] {
+	const out: KnowledgeEvent[] = [];
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			out.push(JSON.parse(trimmed) as KnowledgeEvent);
+		} catch {
+			warn(
+				`[knowledge-events] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
 					0,
-					MAX_VIOLATION_TIMESTAMPS,
-				);
-			}
-			break;
-		}
-		case 'contradicted':
-			get(event.knowledge_id).contradicted_count += 1;
-			break;
-		case 'n_a':
-			get(event.knowledge_id).n_a_count += 1;
-			break;
-		case 'outcome': {
-			if (!event.knowledge_id) break;
-			const r = get(event.knowledge_id);
-			if (event.outcome === 'success') r.succeeded_after_shown_count += 1;
-			else if (event.outcome === 'failure') r.failed_after_shown_count += 1;
-			else if (event.outcome === 'partial') r.partial_after_shown_count += 1;
-			break;
+					80,
+				)}`,
+			);
 		}
 	}
+	return out;
+}
 
-	return map;
+async function foldEvictedEventsIntoBaseline(
+	directory: string,
+	evictedLines: string[],
+	filePath: string,
+): Promise<void> {
+	const evictedEvents = parseEventLines(evictedLines, filePath);
+	if (evictedEvents.length === 0) return;
+	const baseline = await readCounterBaseline(directory);
+	for (const [id, rollup] of recomputeCounters(evictedEvents)) {
+		mergeRollupInto(get(baseline, id), rollup);
+	}
+	await writeCounterBaseline(directory, baseline);
 }
 
 /**
@@ -752,28 +626,13 @@ function recomputeCountersForEvent(
 export function recomputeCounters(
 	events: KnowledgeEvent[],
 	legacyRecords: KnowledgeApplicationRecord[] = [],
-	baseline: Record<string, CounterRollup> = {},
+	baseline: Map<string, CounterRollup> = new Map(),
 ): Map<string, CounterRollup> {
 	const map = new Map<string, CounterRollup>();
 	const retrievedIds = new Set<string>();
-
-	// Start with baseline counters for entries that were evicted in previous trims.
-	for (const [id, baselineRollup] of Object.entries(baseline)) {
-		map.set(id, {
-			shown_count: baselineRollup.shown_count,
-			acknowledged_count: baselineRollup.acknowledged_count,
-			applied_explicit_count: baselineRollup.applied_explicit_count,
-			ignored_count: baselineRollup.ignored_count,
-			violated_count: baselineRollup.violated_count,
-			contradicted_count: baselineRollup.contradicted_count,
-			n_a_count: baselineRollup.n_a_count,
-			succeeded_after_shown_count: baselineRollup.succeeded_after_shown_count,
-			failed_after_shown_count: baselineRollup.failed_after_shown_count,
-			partial_after_shown_count: baselineRollup.partial_after_shown_count,
-			last_applied_at: baselineRollup.last_applied_at,
-			last_acknowledged_at: baselineRollup.last_acknowledged_at,
-			violation_timestamps: [...(baselineRollup.violation_timestamps ?? [])],
-		});
+	for (const [id, rollup] of baseline) {
+		map.set(id, cloneRollup(rollup));
+		if ((rollup.shown_count ?? 0) > 0) retrievedIds.add(id);
 	}
 
 	for (const e of events) {
@@ -854,15 +713,7 @@ export function recomputeCounters(
 
 	// Normalize violation timestamps: newest first, capped at the retention limit.
 	for (const r of map.values()) {
-		if (r.violation_timestamps.length > 1) {
-			r.violation_timestamps.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-		}
-		if (r.violation_timestamps.length > MAX_VIOLATION_TIMESTAMPS) {
-			r.violation_timestamps = r.violation_timestamps.slice(
-				0,
-				MAX_VIOLATION_TIMESTAMPS,
-			);
-		}
+		normalizeRollupTimestamps(r);
 	}
 
 	return map;
@@ -927,29 +778,6 @@ export async function countEntryViolationsInWindow(
 }
 
 /**
- * In-process memoization cache for readKnowledgeCounterRollups.
- * Keyed by eventsPath + eventsMtime + eventsSize + legacyPath + legacyMtime + legacySize + baselinePath + baselineMtime + baselineSize.
- * Invalidated when files are modified.
- *
- * Bounded directory-keyed LRU cache (AGENTS.md invariant 8): prevents
- * single-entry thrash when callers alternate between different project directories.
- */
-const MAX_ROLLUP_CACHE_ENTRIES = 16;
-const rollupCache = new Map<string, Map<string, CounterRollup>>();
-
-async function getFileStat(
-	filePath: string,
-): Promise<{ mtime: number; size: number } | null> {
-	try {
-		if (!existsSync(filePath)) return null;
-		const fileStat = await stat(filePath);
-		return { mtime: fileStat.mtimeMs, size: fileStat.size };
-	} catch {
-		return null;
-	}
-}
-
-/**
  * Fail-open rollup reader for hot paths. Search and promotion use this instead
  * of stale persisted counters so `knowledge_receipt` feedback affects ranking
  * and safety gates immediately.
@@ -958,45 +786,21 @@ export async function readKnowledgeCounterRollups(
 	directory: string,
 ): Promise<Map<string, CounterRollup>> {
 	try {
-		const eventPath = resolveKnowledgeEventsPath(directory);
-		const legacyPath = resolveLegacyApplicationLogPath(directory);
-		const baselinePath = resolveCounterBaselinePath(directory);
-		const [eventStat, legacyStat, baselineStat, baseline] = await Promise.all([
-			getFileStat(eventPath),
-			getFileStat(legacyPath),
-			getFileStat(baselinePath),
-			loadCounterBaseline(directory),
-		]);
-
-		// Build cache key from file metadata.
-		const cacheKey = `${eventPath}:${eventStat?.mtime ?? 0}:${eventStat?.size ?? 0}:${legacyPath}:${legacyStat?.mtime ?? 0}:${legacyStat?.size ?? 0}:${baselinePath}:${baselineStat?.mtime ?? 0}:${baselineStat?.size ?? 0}`;
-
-		// Check cache.
-		const cached = rollupCache.get(cacheKey);
-		if (cached) {
-			// Promote to most-recently-used for true LRU eviction.
-			rollupCache.delete(cacheKey);
-			rollupCache.set(cacheKey, cached);
-			return new Map(cached);
+		const cacheKey = await buildCounterRollupCacheKey(directory);
+		const cached = counterRollupCache.get(directory);
+		if (cached?.key === cacheKey) {
+			counterRollupCache.delete(directory);
+			counterRollupCache.set(directory, cached);
+			return cloneRollupMap(cached.rollups);
 		}
-
-		// Cache miss: read and compute.
-		const [events, legacyRecords] = await Promise.all([
-			_internals.readKnowledgeEvents(directory),
-			_internals.readLegacyApplicationRecords(directory),
+		const [events, legacyRecords, baseline] = await Promise.all([
+			readKnowledgeEvents(directory),
+			readLegacyApplicationRecords(directory),
+			readCounterBaseline(directory),
 		]);
 		const rollups = recomputeCounters(events, legacyRecords, baseline);
-
-		// LRU eviction: when at capacity, evict the oldest (least-recently-used)
-		// entry before inserting the new one. Insertions and cache-hit promotions
-		// both move the entry to the newest (rightmost) position.
-		if (rollupCache.size >= MAX_ROLLUP_CACHE_ENTRIES) {
-			const oldestKey = rollupCache.keys().next().value;
-			if (oldestKey) rollupCache.delete(oldestKey);
-		}
-		rollupCache.set(cacheKey, new Map(rollups));
-
-		return rollups;
+		setCounterRollupCache(directory, cacheKey, rollups);
+		return cloneRollupMap(rollups);
 	} catch (err) {
 		warn(
 			`[knowledge-events] readKnowledgeCounterRollups failed: ${
@@ -1007,22 +811,7 @@ export async function readKnowledgeCounterRollups(
 	}
 }
 
-/**
- * Clear the memoization cache for readKnowledgeCounterRollups.
- * Called internally after appending events or in tests.
- */
-export function clearKnowledgeRollupCache(): void {
-	rollupCache.clear();
-}
-
-/** Merge event-derived rollups over stored outcome counters for scoring only.
- *
- * Rollup is authoritative for v2 counter fields: when a rollup is provided, its
- * values replace (not add to) the corresponding stored v2 fields. The rollup
- * already includes baseline counters from evicted events plus remaining events,
- * so adding stored values on top would double-count. v1 fields
- * (`applied_count`, `succeeded_after_count`, `failed_after_count`) are always
- * preserved from stored. */
+/** Merge event-derived rollups over stored outcome counters for scoring only. */
 export function effectiveRetrievalOutcomes(
 	stored: RetrievalOutcome | undefined,
 	rollup: CounterRollup | undefined,
@@ -1033,33 +822,10 @@ export function effectiveRetrievalOutcomes(
 		failed_after_count: 0,
 	};
 	if (!rollup) return base;
-
-	// Rollup is authoritative for v2 counters: it already includes baseline
-	// (evicted) counters + remaining events, so we replace rather than add.
-	// v1 fields are always preserved from stored.
-	const result: RetrievalOutcome = {
+	return {
 		...base,
-		shown_count: rollup.shown_count,
-		acknowledged_count: rollup.acknowledged_count,
-		applied_explicit_count: rollup.applied_explicit_count,
-		ignored_count: rollup.ignored_count,
-		violated_count: rollup.violated_count,
-		contradicted_count: rollup.contradicted_count,
-		succeeded_after_shown_count: rollup.succeeded_after_shown_count,
-		failed_after_shown_count: rollup.failed_after_shown_count,
-		violation_timestamps: rollup.violation_timestamps,
-		// Use newer timestamp from rollup when available.
-		last_applied_at:
-			rollup.last_applied_at &&
-			(!base.last_applied_at || rollup.last_applied_at > base.last_applied_at)
-				? rollup.last_applied_at
-				: base.last_applied_at,
-		// v1 fields: keep stored values unchanged (frozen in v2).
-		applied_count: base.applied_count ?? 0,
-		succeeded_after_count: base.succeeded_after_count ?? 0,
-		failed_after_count: base.failed_after_count ?? 0,
+		...rollup,
 	};
-	return result;
 }
 
 // ============================================================================
@@ -1158,13 +924,13 @@ export async function applyKnowledgeVerdictFeedback(
 
 export const _internals: {
 	resolveKnowledgeEventsPath: typeof resolveKnowledgeEventsPath;
-	resolveCounterBaselinePath: typeof resolveCounterBaselinePath;
+	resolveKnowledgeCounterBaselinePath: typeof resolveKnowledgeCounterBaselinePath;
 	appendKnowledgeEvent: typeof appendKnowledgeEvent;
 	recordKnowledgeEvent: typeof recordKnowledgeEvent;
 	readKnowledgeEvents: typeof readKnowledgeEvents;
+	readCounterBaseline: typeof readCounterBaseline;
 	readLegacyApplicationRecords: typeof readLegacyApplicationRecords;
 	readKnowledgeCounterRollups: typeof readKnowledgeCounterRollups;
-	clearKnowledgeRollupCache: typeof clearKnowledgeRollupCache;
 	effectiveRetrievalOutcomes: typeof effectiveRetrievalOutcomes;
 	recomputeCounters: typeof recomputeCounters;
 	applyKnowledgeVerdictFeedback: typeof applyKnowledgeVerdictFeedback;
@@ -1172,13 +938,13 @@ export const _internals: {
 	newEventId: typeof newEventId;
 } = {
 	resolveKnowledgeEventsPath,
-	resolveCounterBaselinePath,
+	resolveKnowledgeCounterBaselinePath,
 	appendKnowledgeEvent,
 	recordKnowledgeEvent,
 	readKnowledgeEvents,
+	readCounterBaseline,
 	readLegacyApplicationRecords,
 	readKnowledgeCounterRollups,
-	clearKnowledgeRollupCache,
 	effectiveRetrievalOutcomes,
 	recomputeCounters,
 	applyKnowledgeVerdictFeedback,

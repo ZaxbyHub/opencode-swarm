@@ -295,6 +295,20 @@ async function main() {
 			].join(' '),
 		], { cwd: installDir });
 
+		runCommand(process.execPath, [
+			'--input-type=module',
+			'--eval',
+			[
+				"try {",
+				"  await import('opencode-swarm/cli');",
+				"  throw new Error('CLI subpath should not be exported');",
+				"} catch (error) {",
+				"  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;",
+				"}",
+				"console.log('installed package cli subpath not exported OK');",
+			].join(' '),
+		], { cwd: installDir });
+
 		runCommand('bun', [
 			path.join(
 				installDir,

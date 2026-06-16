@@ -77,6 +77,10 @@ export function createCuratorAgent(
 				edit: false,
 				patch: false,
 			},
+			// Classification tasks don't benefit from extended thinking; disabling
+			// avoids flooding OpenCode's session log with reasoning parts.
+			// Users may re-enable via agents.curator_<role>.thinking in their config.
+			thinking: { type: 'disabled' },
 		},
 	};
 }

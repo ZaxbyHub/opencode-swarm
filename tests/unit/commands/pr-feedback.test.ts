@@ -4,16 +4,18 @@ import { _internals } from '../../../src/commands/pr-ref';
 
 const DIR = '/tmp/pr-feedback-test';
 
-const realExecSync = _internals.execSync;
+const realSpawnSync = _internals.spawnSync;
 afterEach(() => {
-	_internals.execSync = realExecSync;
+	_internals.spawnSync = realSpawnSync;
 });
+
+const noGitRemoteSpawnSync: typeof _internals.spawnSync = () => {
+	throw new Error('fatal: No such remote');
+};
 
 /** Force `detectGitRemote` to report no reachable `origin` remote. */
 function withNoGitRemote(): void {
-	_internals.execSync = (() => {
-		throw new Error('fatal: No such remote');
-	}) as typeof _internals.execSync;
+	_internals.spawnSync = noGitRemoteSpawnSync;
 }
 
 describe('handlePrFeedbackCommand', () => {

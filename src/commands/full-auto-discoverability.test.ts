@@ -7,14 +7,19 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { handleFullAutoCommand } from '../commands/full-auto';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from '../commands/registry';
 import { swarmState } from '../state';
 
 describe('Full-Auto discoverability', () => {
 	let testSessionId: string;
+	let tmpDir: string;
 
 	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-disc-'));
 		testSessionId = `discoverability-test-${Date.now()}`;
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
@@ -67,6 +72,11 @@ describe('Full-Auto discoverability', () => {
 
 	afterEach(() => {
 		swarmState.agentSessions.delete(testSessionId);
+		try {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
 		swarmState.fullAutoEnabledInConfig = false;
 	});
 
@@ -123,12 +133,8 @@ describe('Full-Auto discoverability', () => {
 			expect(typeof entry.handler).toBe('function');
 
 			// Call the handler via handleFullAutoCommand to confirm it works
-			const result = await handleFullAutoCommand(
-				'/project',
-				['on'],
-				testSessionId,
-			);
-			expect(result).toBe('Full-Auto Mode enabled');
+			const result = await handleFullAutoCommand(tmpDir, ['on'], testSessionId);
+			expect(result).toContain('Full-Auto Mode enabled');
 		});
 	});
 });

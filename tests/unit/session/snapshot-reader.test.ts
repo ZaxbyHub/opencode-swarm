@@ -2,9 +2,11 @@
  * Verification tests for src/session/snapshot-reader.ts
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { startFullAutoRun } from '../../../src/full-auto/state';
 import {
 	deserializeAgentSession,
 	loadSnapshot,
@@ -932,11 +934,10 @@ describe('rehydrateState', () => {
 		expect(swarmState.agentSessions.size).toBe(0);
 	});
 
-	it('clears fullAutoMode on restored sessions when fullAutoEnabledInConfig is false', async () => {
-		// Simulate: config says full-auto is disabled, but snapshot has a
-		// session with fullAutoMode: true from a previous run where it was enabled.
-		swarmState.fullAutoEnabledInConfig = false;
-
+	it('clears fullAutoMode on restored sessions when no running durable Full-Auto run exists', async () => {
+		// First-class toggle: the durable per-session run state is the authority.
+		// A snapshot with fullAutoMode: true but no running durable run (here:
+		// no directory passed at all) must fail closed toward OFF.
 		const snapshot: SnapshotData = {
 			version: 1,
 			writtenAt: Date.now(),
@@ -976,54 +977,63 @@ describe('rehydrateState', () => {
 
 		const restored = swarmState.agentSessions.get('session-fa');
 		expect(restored).toBeDefined();
-		// fullAutoMode must be cleared because config says full-auto is disabled
+		// fullAutoMode must be cleared because no running durable run exists
 		expect(restored!.fullAutoMode).toBe(false);
 	});
 
-	it('preserves fullAutoMode on restored sessions when fullAutoEnabledInConfig is true', async () => {
-		swarmState.fullAutoEnabledInConfig = true;
+	it('preserves fullAutoMode on restored sessions when the durable run is still running', async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-fullauto-'));
+		try {
+			startFullAutoRun(tmpDir, 'session-fa', { enabled: true });
 
-		const snapshot: SnapshotData = {
-			version: 1,
-			writtenAt: Date.now(),
-			toolAggregates: {},
-			activeAgent: {},
-			delegationChains: {},
-			agentSessions: {
-				'session-fa': {
-					agentName: 'architect',
-					lastToolCallTime: Date.now(),
-					lastAgentEventTime: Date.now(),
-					delegationActive: false,
-					activeInvocationId: 1,
-					lastInvocationIdByAgent: {},
-					windows: {},
-					lastCompactionHint: 0,
-					architectWriteCount: 0,
-					lastCoderDelegationTaskId: null,
-					currentTaskId: null,
-					gateLog: {},
-					reviewerCallCount: {},
-					lastGateFailure: null,
-					partialGateWarningsIssuedForTask: [],
-					selfFixAttempted: false,
-					catastrophicPhaseWarnings: [],
-					lastPhaseCompleteTimestamp: 0,
-					lastPhaseCompletePhase: 0,
-					phaseAgentsDispatched: [],
-					qaSkipCount: 0,
-					qaSkipTaskIds: [],
-					fullAutoMode: true,
+			const snapshot: SnapshotData = {
+				version: 1,
+				writtenAt: Date.now(),
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {
+					'session-fa': {
+						agentName: 'architect',
+						lastToolCallTime: Date.now(),
+						lastAgentEventTime: Date.now(),
+						delegationActive: false,
+						activeInvocationId: 1,
+						lastInvocationIdByAgent: {},
+						windows: {},
+						lastCompactionHint: 0,
+						architectWriteCount: 0,
+						lastCoderDelegationTaskId: null,
+						currentTaskId: null,
+						gateLog: {},
+						reviewerCallCount: {},
+						lastGateFailure: null,
+						partialGateWarningsIssuedForTask: [],
+						selfFixAttempted: false,
+						catastrophicPhaseWarnings: [],
+						lastPhaseCompleteTimestamp: 0,
+						lastPhaseCompletePhase: 0,
+						phaseAgentsDispatched: [],
+						qaSkipCount: 0,
+						qaSkipTaskIds: [],
+						fullAutoMode: true,
+					},
 				},
-			},
-		};
+			};
 
-		await rehydrateState(snapshot);
+			await rehydrateState(snapshot, tmpDir);
 
-		const restored = swarmState.agentSessions.get('session-fa');
-		expect(restored).toBeDefined();
-		// fullAutoMode preserved because config allows it
-		expect(restored!.fullAutoMode).toBe(true);
+			const restored = swarmState.agentSessions.get('session-fa');
+			expect(restored).toBeDefined();
+			// fullAutoMode preserved because the durable run is still 'running'
+			expect(restored!.fullAutoMode).toBe(true);
+		} finally {
+			try {
+				fs.rmSync(tmpDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 });
 

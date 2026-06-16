@@ -282,6 +282,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 
 	// SME, Critic variants, Docs, Designer — reasoning/general tasks
 	sme: 'opencode/big-pickle',
+	researcher: 'opencode/big-pickle',
 	critic: 'opencode/big-pickle',
 	critic_sounding_board: 'opencode/gpt-5-nano',
 	critic_drift_verifier: 'opencode/gpt-5-nano',
@@ -336,6 +337,10 @@ export const DEFAULT_AGENT_CONFIGS: Record<
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},
 	sme: {
+		model: 'opencode/big-pickle',
+		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
+	},
+	researcher: {
 		model: 'opencode/big-pickle',
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},

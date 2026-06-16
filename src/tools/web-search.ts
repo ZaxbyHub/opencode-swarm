@@ -21,6 +21,7 @@ import {
 	WebSearchError,
 } from '../council/web-search-provider';
 import { writeEvidenceDocuments } from '../evidence/documents';
+import { scanExternalContent } from '../services/external-content-scanner';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -48,6 +49,7 @@ interface WebSearchOk {
 		url: string;
 		snippet: string;
 		evidenceRef?: string;
+		threatLevel?: 'error' | 'warning' | 'none';
 	}>;
 	evidence: {
 		stored: boolean;
@@ -169,6 +171,34 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 				policy.query,
 				results,
 			);
+
+			// Scan each result's title and snippet for threats
+			const scannedResults: WebSearchOk['results'] = results.map(
+				({ title, url, snippet }) => {
+					const titleScan = scanExternalContent(title, { trustLevel: 'low' });
+					const snippetScan = scanExternalContent(snippet, {
+						trustLevel: 'low',
+					});
+
+					const threatLevel: 'error' | 'warning' | 'none' =
+						titleScan.threatLevel === 'error' ||
+						snippetScan.threatLevel === 'error'
+							? 'error'
+							: titleScan.threatLevel === 'warning' ||
+									snippetScan.threatLevel === 'warning'
+								? 'warning'
+								: 'none';
+
+					return {
+						title: titleScan.clean ? title : titleScan.neutralized,
+						url,
+						snippet: snippetScan.clean ? snippet : snippetScan.neutralized,
+						evidenceRef: evidence.refByUrl.get(url),
+						threatLevel,
+					};
+				},
+			);
+
 			const ok: WebSearchOk = {
 				success: true,
 				query: policy.query,
@@ -177,12 +207,7 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 				freshness,
 				removedStaleYears: policy.removedStaleYears,
 				totalResults: results.length,
-				results: results.map(({ title, url, snippet }) => ({
-					title,
-					url,
-					snippet,
-					evidenceRef: evidence.refByUrl.get(url),
-				})),
+				results: scannedResults,
 				evidence: {
 					stored: evidence.stored,
 					path: evidence.path,

@@ -21,6 +21,19 @@ export async function runFinalCouncilGate(
 	try {
 		const preamble = await resolveGatePreamble(dir, sessionID);
 
+		if (!preamble.resolved || !preamble.plan) {
+			const warning =
+				'Final council gate: plan.json is missing. If final_council is required, the gate cannot be verified.';
+			gateWarnings.push(warning);
+			safeWarn(`[phase_complete] ${warning}`, undefined);
+			return {
+				blocked: false,
+				agentsDispatched,
+				agentsMissing: [],
+				warnings: [warning],
+			};
+		}
+
 		if (preamble.resolved && preamble.plan) {
 			const lastPhaseId =
 				preamble.plan.phases[preamble.plan.phases.length - 1]?.id;
@@ -47,6 +60,36 @@ export async function runFinalCouncilGate(
 							) {
 								fcVerdictFound = true;
 								_fcVerdict = entry.verdict;
+
+								// Timestamp freshness: block if timestamp is in the future, warn if older than 24h.
+								const now = new Date();
+								const fcTime = entry.timestamp
+									? new Date(entry.timestamp)
+									: null;
+								if (
+									fcTime &&
+									!Number.isNaN(fcTime.getTime()) &&
+									fcTime.getTime() > now.getTime()
+								) {
+									return {
+										blocked: true,
+										reason: 'FINAL_COUNCIL_FUTURE_TIMESTAMP',
+										message: `Phase ${phase} cannot be completed: final council evidence timestamp is in the future.`,
+										agentsDispatched,
+										agentsMissing: [],
+										warnings: [],
+									};
+								}
+								if (
+									fcTime &&
+									!Number.isNaN(fcTime.getTime()) &&
+									now.getTime() - fcTime.getTime() > 24 * 60 * 60 * 1000
+								) {
+									const warning =
+										'Final council evidence is older than 24 hours. Consider re-running the final council for fresh review.';
+									gateWarnings.push(warning);
+									safeWarn(`[phase_complete] ${warning}`, undefined);
+								}
 
 								// Plan ID binding: prevent stale evidence from prior project
 								if (preamble.plan) {

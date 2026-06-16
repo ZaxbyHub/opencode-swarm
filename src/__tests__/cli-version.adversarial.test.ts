@@ -42,7 +42,7 @@ describe('ADVERSARIAL: --version flag attack vectors', () => {
 	// 1. BOUNDARY: Very long argument strings (1000+ chars)
 	// =====================================================================
 	it('ADVERSARIAL: long argument string should not cause crash or hang', async () => {
-		const longArg = 'v' + 'a'.repeat(10000);
+		const longArg = `v${'a'.repeat(10000)}`;
 		const result = await runCli([`--${longArg}`]);
 		// Should NOT crash - should treat as unknown command
 		expect(result.exitCode).toBe(1);
@@ -50,7 +50,7 @@ describe('ADVERSARIAL: --version flag attack vectors', () => {
 	});
 
 	it('ADVERSARIAL: very long -v variant should be handled safely', async () => {
-		const longV = '-v' + 'v'.repeat(5000);
+		const longV = `-v${'v'.repeat(5000)}`;
 		const result = await runCli([longV]);
 		// Should be rejected, not matched as -v
 		expect(result.exitCode).toBe(1);

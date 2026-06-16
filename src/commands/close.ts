@@ -521,9 +521,6 @@ export async function handleCloseCommand(
 	try {
 		// Change 4 (Task 4.2): close-time lessons also pass the Layer-5
 		// actionability gate — enrich via the curator LLM when available.
-		const skillImproverCfg = SkillImproverConfigSchema.parse(
-			loadedConfig.skill_improver ?? {},
-		);
 		curationResult = await curateAndStoreSwarm(
 			allLessons,
 			projectName,
@@ -537,8 +534,8 @@ export async function handleCloseCommand(
 					options.sessionID,
 				),
 				enrichmentQuota: {
-					maxCalls: skillImproverCfg.max_calls_per_day,
-					window: skillImproverCfg.quota_window,
+					maxCalls: config.enrichment.max_calls_per_day,
+					window: config.enrichment.quota_window,
 				},
 			},
 		);
@@ -641,6 +638,10 @@ export async function handleCloseCommand(
 					targets: ['skills', 'knowledge'],
 					mode: 'proposal',
 					sessionId: options.sessionID,
+					enrichmentQuota: {
+						maxCalls: config.enrichment.max_calls_per_day,
+						window: config.enrichment.quota_window,
+					},
 				},
 				options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 			);

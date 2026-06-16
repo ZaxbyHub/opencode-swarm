@@ -25,6 +25,7 @@ import type { MessageWithParts } from './knowledge-types.js';
 import {
 	computeSkillRelevanceScore,
 	formatSkillIndexWithContext,
+	readSkillMetadata,
 } from './skill-scoring.js';
 import {
 	appendSkillUsageEntry,
@@ -277,6 +278,7 @@ export const _internals: {
 	extractTaskIdFromPrompt: typeof extractTaskIdFromPrompt;
 	extractSkillsFieldFromPrompt: typeof extractSkillsFieldFromPrompt;
 	computeSkillRelevanceScore: typeof computeSkillRelevanceScore;
+	readSkillMetadata: typeof readSkillMetadata;
 	formatSkillIndexWithContext: typeof formatSkillIndexWithContext;
 	loadRoutingSkills: typeof loadRoutingSkills;
 } = {
@@ -305,6 +307,7 @@ export const _internals: {
 	extractSkillsFieldFromPrompt:
 		null as unknown as typeof extractSkillsFieldFromPrompt,
 	computeSkillRelevanceScore,
+	readSkillMetadata,
 	formatSkillIndexWithContext,
 	loadRoutingSkills: null as unknown as typeof loadRoutingSkills,
 };
@@ -678,10 +681,12 @@ export async function skillPropagationGateBefore(
 						const skillEntries = sessionEntries.filter(
 							(e) => e.skillPath === skillPath,
 						);
+						const metadata = _internals.readSkillMetadata(skillPath, directory);
 						const score = _internals.computeSkillRelevanceScore(
 							skillPath,
 							prompt,
 							skillEntries,
+							metadata,
 						);
 						return { skillPath, score, usageCount: skillEntries.length };
 					})
@@ -889,6 +894,9 @@ const COMPLIANCE_PATTERN =
 /** Skill path pattern: SKILLS_USED_BY_CODER: <path> */
 const CODER_SKILLS_PATTERN = /SKILLS_USED_BY_CODER\s*:\s*(.+)/i;
 
+/** Explicit reviewer attribution pattern: TASK: <task-id> */
+const REVIEWER_TASK_PATTERN = /TASK\s*:\s*(\S+)/i;
+
 /**
  * Chat messages transform hook. Scans reviewer output for SKILL_COMPLIANCE
  * verdicts and records compliance outcomes to `.swarm/skill-usage.jsonl`.
@@ -963,8 +971,14 @@ export async function skillPropagationTransformScan(
 
 		// Extract SKILLS_USED_BY_CODER paths from the reviewer text
 		const skillPaths: string[] = [];
+		let explicitReviewerTaskID: string | undefined;
 		for (const line of text.split('\n')) {
-			const coderMatch = line.trim().match(CODER_SKILLS_PATTERN);
+			const trimmed = line.trim();
+			const taskMatch = trimmed.match(REVIEWER_TASK_PATTERN);
+			if (taskMatch) {
+				explicitReviewerTaskID = taskMatch[1];
+			}
+			const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
 			if (coderMatch) {
 				const parsed = _internals.parseSkillPaths(coderMatch[1]);
 				skillPaths.push(...parsed);
@@ -975,29 +989,31 @@ export async function skillPropagationTransformScan(
 		// compliance attribution. TaskID is always resolved when a delegation
 		// exists; skill paths are only populated as fallback when the reviewer
 		// didn't include SKILLS_USED_BY_CODER.
-		let resolvedTaskID = 'unknown';
+		let resolvedTaskID = explicitReviewerTaskID ?? 'unknown';
 		if (existingEntries.length > 0) {
-			const latestDelegation = [...existingEntries]
-				.reverse()
-				.find(
-					(e) => e.agentName !== 'reviewer' && e.skillPath !== '__overall__',
-				);
-			if (latestDelegation) {
-				resolvedTaskID = latestDelegation.taskID;
-				// Only populate skillPaths as fallback when reviewer didn't echo
-				// SKILLS_USED_BY_CODER
-				if (skillPaths.length === 0) {
-					const delegatedPaths = existingEntries
-						.filter(
-							(e) =>
-								e.agentName !== 'reviewer' &&
-								e.skillPath !== '__overall__' &&
-								e.taskID === resolvedTaskID,
-						)
-						.map((e) => e.skillPath);
-					if (delegatedPaths.length > 0) {
-						skillPaths.push(...new Set(delegatedPaths));
-					}
+			if (!explicitReviewerTaskID) {
+				const latestDelegation = [...existingEntries]
+					.reverse()
+					.find(
+						(e) => e.agentName !== 'reviewer' && e.skillPath !== '__overall__',
+					);
+				if (latestDelegation) {
+					resolvedTaskID = latestDelegation.taskID;
+				}
+			}
+			// Only populate skillPaths as fallback when reviewer didn't echo
+			// SKILLS_USED_BY_CODER. Prefer explicit TASK attribution when present.
+			if (skillPaths.length === 0 && resolvedTaskID !== 'unknown') {
+				const delegatedPaths = existingEntries
+					.filter(
+						(e) =>
+							e.agentName !== 'reviewer' &&
+							e.skillPath !== '__overall__' &&
+							e.taskID === resolvedTaskID,
+					)
+					.map((e) => e.skillPath);
+				if (delegatedPaths.length > 0) {
+					skillPaths.push(...new Set(delegatedPaths));
 				}
 			}
 		}

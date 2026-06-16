@@ -33,6 +33,13 @@ export const skill_generate: ReturnType<typeof createSwarmTool> =
 				),
 			mode: z.enum(['draft', 'active']).default('draft'),
 			force: z.boolean().optional().default(false),
+			evaluate: z
+				.boolean()
+				.optional()
+				.default(false)
+				.describe(
+					'Validate generated skill content against .swarm/skills/evals/<slug> before writing. Default false.',
+				),
 			min_confidence: z.number().min(0).max(1).optional(),
 			min_confirmations: z.number().int().min(1).max(50).optional(),
 		},
@@ -42,6 +49,7 @@ export const skill_generate: ReturnType<typeof createSwarmTool> =
 				slug?: string;
 				source_knowledge_ids?: string[];
 				force?: boolean;
+				evaluate?: boolean;
 				min_confidence?: number;
 				min_confirmations?: number;
 			};
@@ -51,6 +59,7 @@ export const skill_generate: ReturnType<typeof createSwarmTool> =
 				slug: a.slug,
 				sourceKnowledgeIds: a.source_knowledge_ids,
 				force: a.force ?? false,
+				evaluate: a.evaluate ?? false,
 				minConfidence: a.min_confidence,
 				minConfirmations: a.min_confirmations,
 			});

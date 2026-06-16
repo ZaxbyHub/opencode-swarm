@@ -65,6 +65,7 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
 	ensureAgentSession,
@@ -701,7 +702,7 @@ export async function executePhaseComplete(
 	// check, so it is enforced even under lean turbo.
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council, and final-council gates for phase ${phase}.`,
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
 		);
 	} else {
 		// Gate 1: Completion Verify
@@ -763,21 +764,20 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
-	if (!hasActiveTurboMode(sessionID)) {
-		const gateResult = await runFinalCouncilGate(gateCtx);
-		if (gateResult.blocked) {
-			return blockedResult(phase, gateResult);
-		}
-		warnings.push(...gateResult.warnings);
+	const gateResult = await runFinalCouncilGate(gateCtx);
+	if (gateResult.blocked) {
+		return blockedResult(phase, gateResult);
 	}
+	warnings.push(...gateResult.warnings);
 
 	// ── Post-gate logic ────────────────────────────────────────────────────────
 
 	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
 	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
 	// the autonomous-oversight approval — fail-closed by default. The gate is
-	// a no-op when full_auto.enabled is false or when no durable Full-Auto run
-	// is active for this session. Runs after Gate 6 (Final Council) so that
+	// a no-op when no durable Full-Auto run is active for this session
+	// (first-class toggle: config.full_auto.enabled no longer gates it).
+	// Runs after Gate 6 (Final Council) so that
 	// last-phase completions are gated by both council approval (when
 	// final_council is enabled) AND Full-Auto v2 approval (when active).
 	{
@@ -860,10 +860,7 @@ export async function executePhaseComplete(
 
 			// Change 4 (Task 4.2): provide the curator LLM delegate so plain-prose
 			// lessons are enriched with v3 actionability fields before the Layer-5
-			// gate; quota knobs come from the shared skill_improver budget.
-			const skillImproverCfg = SkillImproverConfigSchema.parse(
-				config.skill_improver ?? {},
-			);
+			// gate; quota knobs come from the dedicated knowledge.enrichment budget.
 			const curationResult = await curateAndStoreSwarm(
 				retroEntry.lessons_learned,
 				projectName,
@@ -873,8 +870,8 @@ export async function executePhaseComplete(
 				{
 					llmDelegate: createCuratorLLMDelegate(dir, 'phase', sessionID),
 					enrichmentQuota: {
-						maxCalls: skillImproverCfg.max_calls_per_day,
-						window: skillImproverCfg.quota_window,
+						maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+						window: knowledgeConfig.enrichment.quota_window,
 					},
 				},
 			);
@@ -883,7 +880,7 @@ export async function executePhaseComplete(
 				if (sessionState) {
 					sessionState.pendingAdvisoryMessages ??= [];
 					sessionState.pendingAdvisoryMessages.push(
-						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
+						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
 			}
@@ -1388,6 +1385,50 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
+		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
+		// It may call an LLM and write proposal files, so only launch it after the
+		// phase gates have accepted completion.
+		try {
+			const skillConfig = SkillImproverConfigSchema.parse(
+				config.skill_improver ?? {},
+			);
+			if (skillConfig.enabled && skillConfig.trigger === 'scheduled') {
+				runSkillConsolidationFireAndForget(
+					{
+						directory: dir,
+						config: skillConfig,
+						source: 'phase_complete',
+						sessionId: sessionID,
+						enrichmentQuota: {
+							maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
+							window: knowledgeConfig.enrichment.quota_window,
+						},
+						evaluateDrafts: true,
+					},
+					(consolidationResult) => {
+						if (!consolidationResult.started) return;
+						const sessionState = swarmState.agentSessions.get(sessionID);
+						if (!sessionState) return;
+						sessionState.pendingAdvisoryMessages ??= [];
+						sessionState.pendingAdvisoryMessages.push(
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						);
+					},
+					(err) => {
+						safeWarn(
+							'[phase_complete] Scheduled skill consolidation error (non-blocking):',
+							err,
+						);
+					},
+				);
+			}
+		} catch (skillConsolidationError) {
+			safeWarn(
+				'[phase_complete] Scheduled skill consolidation setup error (non-blocking):',
+				skillConsolidationError,
+			);
+		}
+
 		// Reset phase-tracking state for all contributor sessions
 		for (const contributorSessionId of crossSessionResult.contributorSessionIds) {
 			const contributorSession =

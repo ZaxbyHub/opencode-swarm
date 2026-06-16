@@ -12,8 +12,8 @@
  * retirement). Already-marked retire candidates are never re-processed.
  *
  * Quota: every LLM attempt goes through `enrichLessonToV3`, which reserves one
- * skill-improver quota slot per call — the loop can never exceed the shared
- * daily budget. A per-run batch cap bounds worst-case cost further.
+ * dedicated knowledge-enrichment quota slot per call. A per-run batch cap
+ * bounds worst-case cost further.
  */
 
 import { existsSync } from 'node:fs';

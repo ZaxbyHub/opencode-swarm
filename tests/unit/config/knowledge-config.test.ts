@@ -42,6 +42,10 @@ describe('KnowledgeConfigSchema', () => {
 				sweep_enabled: true,
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
+				enrichment: {
+					max_calls_per_day: 30,
+					quota_window: 'utc',
+				},
 			});
 		});
 
@@ -92,6 +96,10 @@ describe('KnowledgeConfigSchema', () => {
 				sweep_enabled: true,
 				// v7.10.0+ directive retrieval threshold
 				directive_min_confidence: 0.75,
+				enrichment: {
+					max_calls_per_day: 30,
+					quota_window: 'utc',
+				},
 			};
 
 			const result = KnowledgeConfigSchema.parse(fullConfig);
@@ -208,6 +216,10 @@ describe('KnowledgeConfigSchema', () => {
 					sweep_enabled: true,
 					// v7.10.0+ directive retrieval threshold
 					directive_min_confidence: 0.75,
+					enrichment: {
+						max_calls_per_day: 30,
+						quota_window: 'utc',
+					},
 				},
 			};
 

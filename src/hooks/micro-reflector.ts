@@ -13,7 +13,8 @@
  *
  * Budget: the prompt is capped well under ~2k input chars and the model is
  * asked for ≤512 output. Exactly one LLM call per qualifying return, gated by
- * the shared skill-improver quota. Fail-open: never throws, never blocks.
+ * the dedicated knowledge-enrichment quota. Fail-open: never throws, never
+ * blocks.
  */
 
 import { existsSync } from 'node:fs';
@@ -385,6 +386,7 @@ export async function runMicroReflection(params: {
 			nCalls: 1,
 			maxCalls: quota.maxCalls,
 			window: quota.window,
+			scope: 'knowledge-enrichment',
 		});
 		if (!reservation.allowed) return result;
 

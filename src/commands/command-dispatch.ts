@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import type { AgentDefinition } from '../agents/index.js';
 import { _internals, type CommandEntry, resolveCommand } from './registry.js';
 
@@ -65,37 +63,12 @@ export function formatCommandNotFound(tokens: string[]): string {
 	return [header, suggestions, footer].filter(Boolean).join('\n\n');
 }
 
-export function maybeMarkFirstRun(directory: string): boolean {
-	const sentinelPath = path.join(directory, '.swarm', '.first-run-complete');
-	try {
-		const swarmDir = path.join(directory, '.swarm');
-		fs.mkdirSync(swarmDir, { recursive: true });
-		fs.writeFileSync(
-			sentinelPath,
-			`first-run-complete: ${new Date().toISOString()}\n`,
-			{ flag: 'wx' },
-		);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-export function prependWelcome(text: string): string {
-	const welcomeMessage =
-		`Welcome to OpenCode Swarm!\n` +
-		`\n` +
-		`Run \`/swarm help\` to see all available commands, or \`/swarm config\` to review your configuration.\n`;
-	return welcomeMessage + text;
-}
-
 export async function executeSwarmCommand(args: {
 	directory: string;
 	agents: Record<string, AgentDefinition>;
 	sessionID: string;
 	tokens: string[];
 	packageRoot?: string;
-	includeWelcome?: boolean;
 	buildHelpText?: () => string;
 	policy?: SwarmCommandPolicy;
 }): Promise<SwarmCommandExecutionResult> {
@@ -105,7 +78,6 @@ export async function executeSwarmCommand(args: {
 		sessionID,
 		tokens,
 		packageRoot,
-		includeWelcome = false,
 		buildHelpText,
 		policy,
 	} = args;
@@ -142,10 +114,6 @@ export async function executeSwarmCommand(args: {
 				text = `${resolved.warning}\n\n${text}`;
 			}
 		}
-	}
-
-	if (includeWelcome && maybeMarkFirstRun(directory)) {
-		text = prependWelcome(text);
 	}
 
 	return {
