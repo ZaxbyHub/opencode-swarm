@@ -3,7 +3,8 @@
  *
  * Wraps shell commands with bwrap (Bubblewrap) to restrict process capabilities.
  * Uses --bind to mount scope paths read-write, --tmpfs for /tmp, and --ro-bind
- * for essential read-only system paths.
+ * for essential read-only system paths. Drops all capabilities via --cap-drop ALL
+ * for defense-in-depth within the user namespace.
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
@@ -186,6 +187,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'--unshare-ipc',
 			'--die-with-parent',
 			'--new-session',
+			'--cap-drop',
+			'ALL',
 			...bindArgs,
 			'--dev',
 			'/dev',

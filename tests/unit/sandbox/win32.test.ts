@@ -45,6 +45,12 @@ afterEach(() => {
 import * as edge from '../../../src/sandbox/win32/edge-cases';
 
 // ---------------------------------------------------------------------------
+// WindowsSandboxExecutor — restricted-environment-executor.ts
+// ---------------------------------------------------------------------------
+
+import { WindowsSandboxExecutor } from '../../../src/sandbox/win32/restricted-environment-executor';
+
+// ---------------------------------------------------------------------------
 // Test suite — NativeWindowsSandboxExecutor
 // ---------------------------------------------------------------------------
 
@@ -695,4 +701,67 @@ describe('detectTokenManipulation', () => {
 		);
 		expect(result).toBe(false);
 	});
+});
+
+// ---------------------------------------------------------------------------
+// WindowsSandboxExecutor — PATH resolution and PS-native command branching
+// ---------------------------------------------------------------------------
+
+describe('WindowsSandboxExecutor', () => {
+describe('getEnvOverrides() PATH resolution', () => {
+test('PATH includes System32 relative to SystemRoot env var', () => {
+// The executor should use process.env.SystemRoot, not a hardcoded C:\Windows.
+// We verify the pattern rather than the exact value since SystemRoot differs
+// on non-standard installations and is undefined on non-Windows CI.
+const executor = new WindowsSandboxExecutor([]);
+const env = executor.getEnvOverrides();
+const pathValue = env.PATH ?? '';
+
+// Path must contain System32 in some form
+expect(pathValue.toLowerCase()).toContain('system32');
+});
+
+test('PATH does not fall through to undefined', () => {
+const executor = new WindowsSandboxExecutor([]);
+const env = executor.getEnvOverrides();
+expect(typeof env.PATH).toBe('string');
+expect((env.PATH as string).length).toBeGreaterThan(0);
+});
+});
+
+describe('wrapCommand() PowerShell-native command handling', () => {
+test.skipIf(!isWin)(
+'PS-native command (Remove-Item) uses Invoke-Expression not cmd /c',
+() => {
+const executor = new WindowsSandboxExecutor([]);
+if (!executor.isAvailable()) return;
+const wrapped = executor.wrapCommand('Remove-Item foo.txt', []);
+expect(wrapped.toLowerCase()).toContain('invoke-expression');
+expect(wrapped).not.toContain('cmd /c');
+},
+);
+
+test.skipIf(!isWin)(
+'non-PS-native command (echo hello) uses cmd /c not Invoke-Expression',
+() => {
+const executor = new WindowsSandboxExecutor([]);
+if (!executor.isAvailable()) return;
+const wrapped = executor.wrapCommand('echo hello', []);
+expect(wrapped.toLowerCase()).toContain('cmd /c');
+},
+);
+
+test.skipIf(!isWin)(
+'Copy-Item is treated as PS-native and uses Invoke-Expression',
+() => {
+const executor = new WindowsSandboxExecutor([]);
+if (!executor.isAvailable()) return;
+const wrapped = executor.wrapCommand(
+'Copy-Item src.txt dest.txt',
+[],
+);
+expect(wrapped.toLowerCase()).toContain('invoke-expression');
+},
+);
+});
 });

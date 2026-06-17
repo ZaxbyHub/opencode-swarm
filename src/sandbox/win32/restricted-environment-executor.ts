@@ -97,6 +97,28 @@ function psStringEscape(s: string): string {
 }
 
 /**
+ * Resolve the safe Windows PATH using the actual SystemRoot environment variable,
+ * falling back to `C:\Windows` when SystemRoot is not set (non-standard installations).
+ */
+function getSafeWindowsPath(): string {
+	const sysRoot = process.env.SystemRoot ?? 'C:\\Windows';
+	return `${sysRoot}\\System32;${sysRoot}`;
+}
+
+/**
+ * Return true when the command begins with a PowerShell-native cmdlet or syntax
+ * that would fail when passed to `cmd /c`.
+ *
+ * Commands in this category must be invoked directly inside the PowerShell
+ * script rather than via `cmd /c`.
+ */
+function isPowerShellNativeCommand(command: string): boolean {
+	return /^(?:Remove-Item|Copy-Item|Move-Item|Rename-Item|New-Item|Get-Item|Get-ChildItem|Get-Content|Set-Content|Add-Content|Clear-Content|Test-Path|Resolve-Path|Split-Path|Join-Path|Out-File|Tee-Object|Select-Object|Where-Object|ForEach-Object|Sort-Object|Group-Object|Measure-Object|Compare-Object|Select-String|Write-Output|Write-Host|Write-Error|Write-Verbose|Write-Debug|Read-Host|New-Object|Set-Variable|Get-Variable|Remove-Variable|Export-Csv|Import-Csv|ConvertTo-Json|ConvertFrom-Json|ConvertTo-Xml|Start-Process|Stop-Process|Get-Process|Wait-Process|Invoke-WebRequest|Invoke-RestMethod|Start-Sleep|Get-Date|Format-Table|Format-List|Format-Wide)\b/i.test(
+		command.trimStart(),
+	);
+}
+
+/**
  * Check if all paths in a command are within the authorized scopes.
  *
  * @param command - The command string to analyze
@@ -250,12 +272,19 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 			);
 		}
 
-		// Safe PATH for Windows: only essential system directories
-		const safePath = 'C:\\Windows\\System32;C:\\Windows';
+		// Safe PATH for Windows: only essential system directories.
+		// Uses SystemRoot env var so non-standard installations (e.g., D:\Windows) work.
+		const safePath = getSafeWindowsPath();
 
 		// Escape values for PowerShell embedding
 		const escapedTemp = psStringEscape(temp);
 		const escapedCommand = psStringEscape(command);
+
+		// Choose execution strategy: PowerShell-native cmdlets must run directly inside
+		// the PS script; other commands are wrapped with cmd /c for standard shell behaviour.
+		const commandExec = isPowerShellNativeCommand(command)
+			? `Invoke-Expression "${escapedCommand}"`
+			: `cmd /c "${escapedCommand}"`;
 
 		// PowerShell script that sets up the restricted environment and runs the command
 		// Uses -NoProfile to skip loading PowerShell profile scripts for faster startup
@@ -286,8 +315,8 @@ try {
     }
   }
 
-  # Execute the command via cmd /c
-  cmd /c "${escapedCommand}";
+  # Execute the command (PS-native cmdlets run directly; others via cmd /c)
+  ${commandExec};
 } catch {
   Write-Error $_.Exception.Message;
   exit 1;
@@ -309,8 +338,9 @@ try {
 	 */
 	getEnvOverrides(): Record<string, string | null> {
 		return {
-			// Restrict PATH to essential system directories only
-			PATH: 'C:\\Windows\\System32;C:\\Windows',
+			// Restrict PATH to essential system directories only.
+			// Uses SystemRoot env var for non-standard Windows installations.
+			PATH: getSafeWindowsPath(),
 			// Scoped temp directory is set at runtime via wrapCommand
 			TEMP: null,
 			TMP: null,
