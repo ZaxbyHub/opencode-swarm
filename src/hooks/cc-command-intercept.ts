@@ -12,7 +12,7 @@
  */
 
 import {
-	CONFLICT_MAP,
+	CC_COMMAND_MAP,
 	type ConflictSeverity,
 } from '../commands/conflict-registry';
 import { CLAUDE_CODE_NATIVE_COMMANDS } from '../config/constants';
@@ -134,12 +134,12 @@ export function createCcCommandInterceptHook(
 
 				const bareCmd = bareCmdMatch[1].toLowerCase();
 
-				// Special case: /clear is a CC alias for /reset (in CC's alias chain)
-				// CONFLICT_MAP doesn't have 'clear' as a key since the conflict is on 'reset'
-				const effectiveCmd = bareCmd === 'clear' ? 'reset' : bareCmd;
-
-				// Check if it's a known CC command with a conflict
-				const conflict = CONFLICT_MAP.get(effectiveCmd);
+				// Check if it's a known CC command with a conflict.
+				// CC_COMMAND_MAP is populated by conflict-registry.ts with both direct commands
+				// (/plan → 'plan', /reset → 'reset', /checkpoint → 'checkpoint', ...) and
+				// documented aliases (/reset → 'clear' via the /reset entry's ccBehavior).
+				// If bareCmd is not in the map, it falls through to the native-command log.
+				const conflict = CC_COMMAND_MAP.get(bareCmd);
 				if (!conflict) {
 					// Check if it's in the native commands set (non-conflicting CC command)
 					if (CLAUDE_CODE_NATIVE_COMMANDS.has(bareCmd)) {

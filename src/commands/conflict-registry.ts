@@ -133,3 +133,27 @@ export const HIGH_CONFLICTS: Set<string> = new Set(
 export const CONFLICT_MAP = new Map<string, CommandConflict>(
 	CLAUDE_CODE_CONFLICTS.map((c) => [c.swarmCommand, c]),
 );
+
+/**
+ * CC_COMMAND_MAP — maps CC command names (without leading /) to their CommandConflict entry.
+ * Used by cc-command-intercept hook to look up conflicts by the bare CC command name.
+ * E.g., 'plan' → CommandConflict for /plan, 'reset' → CommandConflict for /reset, 'clear' → CommandConflict for /clear
+ *
+ * Known aliases are registered below: /clear is documented as an alias for /reset
+ * (see /reset entry's `ccBehavior` field), so it must be intercepted identically.
+ */
+export const CC_COMMAND_MAP = new Map<string, CommandConflict>();
+
+// Initialize CC_COMMAND_MAP: extract command name from ccCommand (e.g., '/plan' → 'plan').
+// Also register documented aliases (e.g., /clear is alias for /reset per /reset entry's ccBehavior).
+for (const conflict of CLAUDE_CODE_CONFLICTS) {
+	const ccCommandName = conflict.ccCommand.replace(/^\//, '').toLowerCase();
+	CC_COMMAND_MAP.set(ccCommandName, conflict);
+	// /clear is documented as an alias for /reset in the /reset entry's `ccBehavior`:
+	// "Alias for /clear — wipes the entire conversation context window".
+	// The alias key MUST point to the SAME conflict entry so the hard-block path
+	// in cc-command-intercept.ts (which checks `bareCmd === 'clear'`) is reachable.
+	if (ccCommandName === 'reset') {
+		CC_COMMAND_MAP.set('clear', conflict);
+	}
+}

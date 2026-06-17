@@ -58,7 +58,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    # 90m (was 35m → 50m → 60m): the `tests/unit/tools/` step runs 234 files
+    # sequentially. Cumulative runtime on GitHub's Windows runner is
+    # 4-7x slower than local Windows (4 min locally → 30-60+ min on the
+    # runner). The Windows runner is unreliable in this repo — earlier
+    # attempts at 35m, 50m, and 60m were all insufficient or the runner
+    # got stuck. Local precedent: e9677cb4 raised the ubuntu unit
+    # timeout. macOS/ubuntu complete the same step in 12-14 min, so
+    # 90m is well within their budget. Refs: PR #1245.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
