@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.79.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.79.0...v7.79.1) (2026-06-17)
+
+
+### Performance Improvements
+
+* **ci:** two-tier CI with automatic test sharding for faster PR feedback ([#1395](https://github.com/zaxbysauce/opencode-swarm/issues/1395)) ([5f4cd84](https://github.com/zaxbysauce/opencode-swarm/commit/5f4cd84690096b29b6bd10b3106e0be0b8033b3b))
+
 ## [7.79.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.8...v7.79.0) (2026-06-17)
 
 
