@@ -35,7 +35,6 @@ export { get_qa_gate_profile } from './get-qa-gate-profile';
 export { git_blame } from './git-blame';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
-export { knowledge_ack } from './knowledge-ack';
 export { knowledge_add } from './knowledge-add';
 export { knowledge_archive } from './knowledge-archive';
 export { knowledge_query } from './knowledge-query';

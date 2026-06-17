@@ -8,7 +8,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { AGENT_TOOL_MAP } from '../config/constants';
+import {
+	AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
+} from '../config/constants';
 import {
 	DOMAIN_EXPERT_COUNCIL_PROMPT,
 	GENERALIST_COUNCIL_PROMPT,
@@ -115,8 +118,9 @@ describe('AGENT_TOOL_MAP enforcement', () => {
 		expect(AGENT_TOOL_MAP.council_domain_expert).toEqual([]);
 	});
 
-	test('web_search is in architect (research phase ownership)', () => {
-		expect(AGENT_TOOL_MAP.architect).toContain('web_search');
+	test('web_search is in GENERAL_COUNCIL opt-in map (gated by council.general.enabled)', () => {
+		expect(GENERAL_COUNCIL_AGENT_TOOL_MAP.architect).toContain('web_search');
+		expect(AGENT_TOOL_MAP.architect).not.toContain('web_search');
 	});
 
 	test('web_search is NOT in any council agent', () => {
@@ -125,8 +129,11 @@ describe('AGENT_TOOL_MAP enforcement', () => {
 		expect(AGENT_TOOL_MAP.council_domain_expert).not.toContain('web_search');
 	});
 
-	test('convene_general_council is in architect', () => {
-		expect(AGENT_TOOL_MAP.architect).toContain('convene_general_council');
+	test('convene_general_council is in GENERAL_COUNCIL opt-in map (gated by council.general.enabled)', () => {
+		expect(GENERAL_COUNCIL_AGENT_TOOL_MAP.architect).toContain(
+			'convene_general_council',
+		);
+		expect(AGENT_TOOL_MAP.architect).not.toContain('convene_general_council');
 	});
 
 	test('convene_general_council is NOT in any other agent', () => {

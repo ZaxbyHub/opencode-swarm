@@ -25,6 +25,7 @@ import {
 } from '../../../src/hooks/knowledge-application-gate';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { swarmState } from '../../../src/state';
+import { knowledge_receipt } from '../../../src/tools/knowledge-receipt';
 
 let tmp: string;
 beforeEach(() => {
@@ -355,5 +356,33 @@ describe('knowledgeApplicationTransformScan', () => {
 		const out = { messages: [archMessage(`KNOWLEDGE_APPLIED: ${ID_A}`)] };
 		await knowledgeApplicationTransformScan(tmp, out, undefined);
 		expect(swarmState.knowledgeAckDedup.size).toBe(0);
+	});
+
+	describe('knowledge_receipt does NOT satisfy the enforcement gate', () => {
+		it('does not populate knowledgeAckDedup when recording a receipt', async () => {
+			const baselineSize = swarmState.knowledgeAckDedup.size;
+			await knowledge_receipt.execute(
+				{
+					trace_id: 'trace-receipt-gate-test',
+					applied: [
+						{
+							id: ID_A,
+							how: 'used in plan review',
+							evidence_files: ['src/agents/architect.ts'],
+							verified_by: 'reviewer',
+						},
+					],
+				} as never,
+				{ directory: tmp, sessionID: 's1', agent: 'architect' },
+			);
+			// knowledge_receipt writes audit events only; it must NOT touch the
+			// dedup set that the enforcement gate consults.
+			expect(swarmState.knowledgeAckDedup.size).toBe(baselineSize);
+			expect(
+				swarmState.knowledgeAckDedup.has(
+					buildAckDedupKey('s1', ID_A, 'applied'),
+				),
+			).toBe(false);
+		});
 	});
 });

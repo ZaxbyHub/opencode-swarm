@@ -415,7 +415,7 @@ export type PhaseCompleteConfig = z.infer<typeof PhaseCompleteConfigSchema>;
 // Summary configuration (reversible summaries for oversized tool outputs)
 export const SummaryConfigSchema = z.object({
 	enabled: z.boolean().default(true),
-	threshold_bytes: z.number().min(1024).max(1048576).default(102400),
+	threshold_bytes: z.number().min(1024).max(1048576).default(16384),
 	max_summary_chars: z.number().min(100).max(5000).default(1000),
 	max_stored_bytes: z.number().min(10240).max(104857600).default(10485760),
 	retention_days: z.number().min(1).max(365).default(7),

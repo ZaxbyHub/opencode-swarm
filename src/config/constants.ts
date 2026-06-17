@@ -244,6 +244,54 @@ export const EXTERNAL_SKILL_AGENT_TOOL_MAP: Partial<
 	architect: [...EXTERNAL_SKILL_TOOL_NAMES],
 };
 
+// ---------------------------------------------------------------------------
+// Council tools — opt-in, gated by council.enabled (QA council modes)
+// ---------------------------------------------------------------------------
+
+export const COUNCIL_TOOL_NAMES = [
+	'submit_council_verdicts',
+	'submit_phase_council_verdicts',
+	'declare_council_criteria',
+	'write_final_council_evidence',
+] as const satisfies readonly ToolName[];
+
+export const COUNCIL_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
+	architect: [...COUNCIL_TOOL_NAMES],
+};
+
+// ---------------------------------------------------------------------------
+// General council tools — opt-in, gated by council.general.enabled (research/synthesis)
+// ---------------------------------------------------------------------------
+
+export const GENERAL_COUNCIL_TOOL_NAMES = [
+	'convene_general_council',
+	'web_search',
+	'web_fetch',
+] as const satisfies readonly ToolName[];
+
+export const GENERAL_COUNCIL_AGENT_TOOL_MAP: Partial<
+	Record<AgentName, ToolName[]>
+> = {
+	architect: [...GENERAL_COUNCIL_TOOL_NAMES],
+};
+
+// ---------------------------------------------------------------------------
+// Lean Turbo tools — opt-in, gated by turbo config block presence
+// ---------------------------------------------------------------------------
+
+export const TURBO_TOOL_NAMES = [
+	'lean_turbo_plan_lanes',
+	'lean_turbo_acquire_locks',
+	'lean_turbo_runner_status',
+	'lean_turbo_review',
+	'lean_turbo_run_phase',
+	'lean_turbo_status',
+] as const satisfies readonly ToolName[];
+
+export const TURBO_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
+	architect: [...TURBO_TOOL_NAMES],
+};
+
 /**
  * Human-readable descriptions for tools shown in the architect Available Tools block.
  * Used to generate the Available Tools section of the architect prompt at construction time.

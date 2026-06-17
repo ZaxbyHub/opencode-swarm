@@ -56,7 +56,6 @@ import { get_qa_gate_profile } from './get-qa-gate-profile';
 import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
-import { knowledge_ack } from './knowledge-ack';
 import { knowledge_add } from './knowledge-add';
 import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
@@ -202,7 +201,6 @@ export const TOOL_MANIFEST = defineHandlers({
 	skill_retire: () => skill_retire,
 	skill_improve: () => skill_improve,
 	spec_write: () => spec_write,
-	knowledge_ack: () => knowledge_ack,
 	knowledge_receipt: () => knowledge_receipt,
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,

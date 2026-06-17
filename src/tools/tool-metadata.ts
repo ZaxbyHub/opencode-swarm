@@ -162,17 +162,17 @@ export const TOOL_METADATA = {
 	submit_council_verdicts: {
 		description:
 			'submit pre-collected council member verdicts for synthesis (architect MUST dispatch critic/reviewer/sme/test_engineer/explorer as Agent tasks first; this tool synthesizes only, it does not contact members)',
-		agents: ['architect'],
+		agents: [],
 	},
 	submit_phase_council_verdicts: {
 		description:
 			'submit pre-collected phase-level council member verdicts for holistic phase synthesis (architect MUST dispatch all 5 council members with phase-scoped context first; this tool synthesizes only, it does not contact members)',
-		agents: ['architect'],
+		agents: [],
 	},
 	declare_council_criteria: {
 		description:
 			'pre-declare acceptance criteria for a task before the coder starts work; criteria are read back during council evaluation',
-		agents: ['architect'],
+		agents: [],
 	},
 	sbom_generate: {
 		description: 'SBOM generation for dependency inventory',
@@ -453,22 +453,22 @@ export const TOOL_METADATA = {
 	web_search: {
 		description:
 			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, researcher auto-research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents, by SME for opt-in external skill/source evaluation, and by the researcher agent for multi-source auto-research.',
-		agents: ['architect', 'sme', 'researcher', 'skill_improver'],
+		agents: ['sme', 'researcher', 'skill_improver'],
 	},
 	web_fetch: {
 		description:
 			'Fetch the readable text of a single http(s) URL (architect-only). Returns decoded page text, document title, final URL after redirects, and an evidence reference. Reads primary sources that web_search only surfaces as snippets. Config-gated on council.general.enabled. Blocks private/loopback/link-local/metadata addresses (re-validated and re-pinned across redirects); enforces timeout and body size cap.',
-		agents: ['architect'],
+		agents: [],
 	},
 	convene_general_council: {
 		description:
 			'Synthesize responses from a multi-model General Council. Accepts parallel member responses (Round 1, optionally Round 2), detects disagreements, and returns consensus points, persisting disagreements, and a structured synthesis. Architect-only. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
-		agents: ['architect'],
+		agents: [],
 	},
 	write_final_council_evidence: {
 		description:
 			'Persist project-scoped final council evidence to .swarm/evidence/final-council.json. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks and collect their CouncilMemberVerdict JSON — this tool synthesizes only. Rejects on insufficient quorum or CONCERNS with unresolved requiredFixes; normalizes verdicts to approved/concerns/rejected. Architect-only.',
-		agents: ['architect'],
+		agents: [],
 	},
 	skill_generate: {
 		description: 'compile knowledge entries into a structured SKILL.md draft',
@@ -503,11 +503,6 @@ export const TOOL_METADATA = {
 	spec_write: {
 		description: 'author or update .swarm/spec.md for the current project',
 		agents: ['spec_writer'],
-	},
-	knowledge_ack: {
-		description:
-			'record an explicit KNOWLEDGE_APPLIED/IGNORED/VIOLATED acknowledgment',
-		agents: ['architect'],
 	},
 	knowledge_receipt: {
 		description:
@@ -574,31 +569,31 @@ export const TOOL_METADATA = {
 	lean_turbo_plan_lanes: {
 		description:
 			'partition phase tasks into parallel lanes based on file-scope conflicts for Lean Turbo execution',
-		agents: ['architect'],
+		agents: [],
 	},
 	lean_turbo_acquire_locks: {
 		description:
 			'acquire file locks for all files in a lane (all-or-nothing) before lane execution',
-		agents: ['architect'],
+		agents: [],
 	},
 	lean_turbo_runner_status: {
 		description: 'read Lean Turbo run state from .swarm/turbo-state.json',
-		agents: ['architect'],
+		agents: [],
 	},
 	lean_turbo_review: {
 		description:
 			'dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase',
-		agents: ['architect'],
+		agents: [],
 	},
 	lean_turbo_run_phase: {
 		description:
 			'Execute a phase using Lean Turbo parallel lane execution. Plans lanes, acquires file locks, and dispatches coder agents concurrently. Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.',
-		agents: ['architect'],
+		agents: [],
 	},
 	lean_turbo_status: {
 		description:
 			'returns Lean Turbo configuration and active status for the current session',
-		agents: ['architect'],
+		agents: [],
 	},
 	apply_patch: {
 		description:
