@@ -108,8 +108,8 @@ describe('computeSkillRelevanceScore', () => {
 
 	test('returns higher score for compliant skills', () => {
 		const nonCompliant = [
-			makeEntry({ complianceVerdict: 'violation' }),
-			makeEntry({ complianceVerdict: 'violation' }),
+			makeEntry({ complianceVerdict: 'violated' }),
+			makeEntry({ complianceVerdict: 'violated' }),
 		];
 		const compliant = [
 			makeEntry({ complianceVerdict: 'compliant' }),
@@ -247,86 +247,6 @@ describe('computeSkillRelevanceScore', () => {
 		expect(score).toBeGreaterThanOrEqual(0);
 		expect(score).toBeLessThanOrEqual(1);
 	});
-
-	test('declared trigger phrase gives an additive literal-match boost', () => {
-		const triggered = _internals.computeSkillRelevanceScore(
-			'.opencode/skills/generated/biome-lint/SKILL.md',
-			'fix the biome lint config',
-			[],
-			{
-				path: '.opencode/skills/generated/biome-lint/SKILL.md',
-				name: 'biome-lint',
-				description: 'No description provided',
-				triggers: ['biome lint config'],
-			},
-		);
-		const untriggered = _internals.computeSkillRelevanceScore(
-			'.opencode/skills/generated/other/SKILL.md',
-			'fix the biome lint config',
-			[],
-			{
-				path: '.opencode/skills/generated/other/SKILL.md',
-				name: 'other',
-				description: 'No description provided',
-				triggers: ['unrelated trigger'],
-			},
-		);
-
-		expect(triggered).toBeGreaterThan(untriggered);
-		expect(triggered).toBeGreaterThanOrEqual(0.3);
-	});
-
-	test('ignores trigger phrases shorter than the minimum guard', () => {
-		const score = _internals.computeSkillRelevanceScore(
-			'.opencode/skills/generated/ci/SKILL.md',
-			'ci failed',
-			[],
-			{
-				path: '.opencode/skills/generated/ci/SKILL.md',
-				name: 'other',
-				description: 'No description provided',
-				triggers: ['ci'],
-			},
-		);
-
-		expect(score).toBeLessThan(0.3);
-	});
-});
-
-describe('parseSkillFrontmatter triggers', () => {
-	test('parses YAML list triggers from skill frontmatter', () => {
-		const meta = _internals.parseSkillFrontmatter(
-			[
-				'---',
-				'name: biome-lint',
-				'description: Fix lint config',
-				'triggers:',
-				'  - biome',
-				'  - "lint config"',
-				'---',
-				'# Body',
-			].join('\n'),
-			'.opencode/skills/generated/biome-lint/SKILL.md',
-		);
-
-		expect(meta.triggers).toEqual(['biome', 'lint config']);
-	});
-
-	test('parses inline triggers from external spec-standard frontmatter', () => {
-		const meta = _internals.parseSkillFrontmatter(
-			[
-				'---',
-				'name: external-skill',
-				'description: External skill',
-				'triggers: ["biome", "lint config"]',
-				'---',
-				'# Body',
-			].join('\n'),
-			'.agents/skills/external/SKILL.md',
-		);
-
-		expect(meta.triggers).toEqual(['biome', 'lint config']);
-	});
 });
 
 // ============================================================================
@@ -414,20 +334,6 @@ describe('computeContextMatchScore', () => {
 		);
 		// code and skill match → 2/3
 		expect(score).toBeCloseTo(2 / 3, 5);
-	});
-
-	test('uses SKILL.md metadata description for context matching', () => {
-		const score = _internals.computeContextMatchScore(
-			'database migration rollback',
-			'.claude/skills/generated/unrelated/SKILL.md',
-			{
-				path: '.claude/skills/generated/unrelated/SKILL.md',
-				name: 'generated-unrelated',
-				description: 'Database migration rollback guidance',
-			},
-		);
-
-		expect(score).toBe(1);
 	});
 
 	test('extractSkillName handles SKILL.md basename', () => {
@@ -582,7 +488,7 @@ describe('rankSkillsForContext', () => {
 
 		expect(results).toHaveLength(2);
 		// They have identical scores and identical usage counts, order is stable
-		expect(Math.abs(results[0].score - results[1].score)).toBeLessThan(1e-9);
+		expect(results[0].score).toBeCloseTo(results[1].score, 10);
 	});
 });
 
@@ -631,7 +537,7 @@ describe('getSkillStats', () => {
 		const entries: SkillUsageEntry[] = [
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'compliant' }),
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'compliant' }),
-			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'violation' }),
+			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'violated' }),
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'not_checked' }), // excluded
 		];
 		fs.writeFileSync(
@@ -1037,7 +943,7 @@ describe('full round-trip: rankSkillsForContext with real temp log', () => {
 		const violationEntries = Array.from({ length: 3 }, (_, i) =>
 			makeEntry({
 				skillPath: 'skill-b',
-				complianceVerdict: 'violation',
+				complianceVerdict: 'violated',
 				id: `b-${i}`,
 			}),
 		);

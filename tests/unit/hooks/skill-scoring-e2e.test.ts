@@ -131,7 +131,7 @@ describe('readSkillUsageEntriesTail — integration with real scoring', () => {
 				sessionID,
 				taskID: 'task-b-1',
 				timestamp: hourAgo(720), // ~30 days ago
-				complianceVerdict: 'violation',
+				complianceVerdict: 'violated',
 			}),
 		];
 
@@ -560,7 +560,7 @@ describe('end-to-end ranking accuracy via tail-read + scoring', () => {
 				sessionID,
 				taskID: 'task-low-1',
 				timestamp: hourAgo(1),
-				complianceVerdict: 'violation',
+				complianceVerdict: 'violated',
 			}),
 		];
 
@@ -938,7 +938,7 @@ describe('scoring invariants — property tests', () => {
 
 		// Many entries
 		const manyEntries = Array.from({ length: 100 }, (_, i) =>
-			makeEntry({ complianceVerdict: i % 2 === 0 ? 'compliant' : 'violation' }),
+			makeEntry({ complianceVerdict: i % 2 === 0 ? 'compliant' : 'violated' }),
 		);
 		const score = computeSkillRelevanceScore(skillPath, taskDesc, manyEntries);
 		expect(score).toBeGreaterThanOrEqual(0);
@@ -948,7 +948,7 @@ describe('scoring invariants — property tests', () => {
 	test('idempotency: scoring same entries twice returns same score', () => {
 		const entries = [
 			makeEntry({ complianceVerdict: 'compliant' }),
-			makeEntry({ complianceVerdict: 'violation' }),
+			makeEntry({ complianceVerdict: 'violated' }),
 			makeEntry({ complianceVerdict: 'compliant' }),
 		];
 		const skillPath = '.claude/skills/test/SKILL.md';

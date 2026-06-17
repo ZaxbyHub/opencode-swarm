@@ -25,6 +25,10 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+	getSwarmArtifactCacheStats,
+	resetSwarmArtifactCache,
+} from '../../../src/utils/swarm-artifact-cache';
 
 describe('Hook Utilities', () => {
 	afterEach(() => {
@@ -261,10 +265,12 @@ describe('Hook Utilities', () => {
 		let tempDir: string;
 
 		beforeEach(async () => {
+			resetSwarmArtifactCache();
 			tempDir = await mkdtemp(join(tmpdir(), 'swarm-test-'));
 		});
 
 		afterEach(async () => {
+			resetSwarmArtifactCache();
 			try {
 				await rm(tempDir, { recursive: true, force: true });
 			} catch (error) {
@@ -338,6 +344,32 @@ describe('Hook Utilities', () => {
 		it('returns null when filename contains null bytes', async () => {
 			const result = await readSwarmFileAsync(tempDir, 'test\0file.txt');
 			expect(result).toBeNull();
+		});
+
+		it('reuses unchanged file content and invalidates after rewrite', async () => {
+			const swarmDir = join(tempDir, '.swarm');
+			await mkdir(swarmDir, { recursive: true });
+			const testFile = join(swarmDir, 'cached.txt');
+
+			await writeFile(testFile, 'cached-content');
+			expect(await readSwarmFileAsync(tempDir, 'cached.txt')).toBe(
+				'cached-content',
+			);
+			expect(await readSwarmFileAsync(tempDir, 'cached.txt')).toBe(
+				'cached-content',
+			);
+
+			let stats = getSwarmArtifactCacheStats();
+			expect(stats.textReadCount).toBe(1);
+			expect(stats.textCacheHitCount).toBe(1);
+
+			await writeFile(testFile, 'rewritten-content-is-longer');
+			expect(await readSwarmFileAsync(tempDir, 'cached.txt')).toBe(
+				'rewritten-content-is-longer',
+			);
+
+			stats = getSwarmArtifactCacheStats();
+			expect(stats.textReadCount).toBe(2);
 		});
 	});
 

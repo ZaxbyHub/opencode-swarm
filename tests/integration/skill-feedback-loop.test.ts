@@ -4,7 +4,7 @@
  * Verifies the complete learning cycle:
  *   1. Seed mature knowledge entries in .swarm/knowledge.jsonl
  *   2. Generate a skill from them via generateSkills() (active mode, explicit IDs)
- *   3. Record compliant and/or violation skill-usage entries
+ *   3. Record compliant and/or violated skill-usage entries
  *   4. Run applySkillUsageFeedback() to bridge usage → knowledge confidence
  *   5. Read knowledge back and verify confidence changed
  *   6. Regenerate skill and verify updated content
@@ -132,10 +132,10 @@ async function generateTestSkill(tmp: string): Promise<void> {
 /** Repo-relative path used in skill-usage entries. */
 const SKILL_PATH = `.opencode/skills/generated/${TEST_SLUG}/SKILL.md`;
 
-/** Append a single skill-usage entry (compliant or violation). */
+/** Append a single skill-usage entry (compliant or violated). */
 function recordUsage(
 	tmp: string,
-	verdict: 'compliant' | 'violation',
+	verdict: 'compliant' | 'violated',
 	taskID: string,
 	sessionID: string,
 ): void {
@@ -210,8 +210,8 @@ describe('skill-feedback learning loop', () => {
 
 		// 3. Record 1 compliant + 2 violations → violations win → decay
 		recordUsage(tmp, 'compliant', '1.1', 'session-violation-001');
-		recordUsage(tmp, 'violation', '1.2', 'session-violation-001');
-		recordUsage(tmp, 'violation', '1.3', 'session-violation-001');
+		recordUsage(tmp, 'violated', '1.2', 'session-violation-001');
+		recordUsage(tmp, 'violated', '1.3', 'session-violation-001');
 
 		// 4. Run feedback bridge
 		const feedback = await applySkillUsageFeedback(tmp);
@@ -274,7 +274,7 @@ describe('skill-feedback learning loop', () => {
 		// 3. Record multiple usages: 2 compliant, 1 violation
 		recordUsage(tmp, 'compliant', '2.1', 'session-dedup-001');
 		recordUsage(tmp, 'compliant', '2.2', 'session-dedup-001');
-		recordUsage(tmp, 'violation', '2.3', 'session-dedup-001');
+		recordUsage(tmp, 'violated', '2.3', 'session-dedup-001');
 
 		// 4. Run feedback bridge
 		const feedback = await applySkillUsageFeedback(tmp);
@@ -306,7 +306,7 @@ describe('skill-feedback learning loop', () => {
 		await generateTestSkill(tmp);
 
 		// 3. Record violation → decay
-		recordUsage(tmp, 'violation', '3.1', 'session-clamp-001');
+		recordUsage(tmp, 'violated', '3.1', 'session-clamp-001');
 		await applySkillUsageFeedback(tmp);
 
 		// Floor: 0.1 - 0.1 = 0.0 → clamped to 0.1
@@ -369,7 +369,7 @@ describe('skill-feedback learning loop', () => {
 		// Phase 4: Record mixed usage across two sessions
 		recordUsage(tmp, 'compliant', '4.1', 'session-e2e-001');
 		recordUsage(tmp, 'compliant', '4.2', 'session-e2e-001');
-		recordUsage(tmp, 'violation', '4.3', 'session-e2e-002');
+		recordUsage(tmp, 'violated', '4.3', 'session-e2e-002');
 
 		// Phase 5: Run feedback bridge
 		const feedback = await applySkillUsageFeedback(tmp);

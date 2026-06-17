@@ -6,21 +6,7 @@
  * This avoids Bun's known mock.module leak across test files.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
-
-// ---------------------------------------------------------------------------
-// Helper — plain function stub that records calls (avoids bun:test mock()
-// pollution across test files in the shared test-runner process).
-// ---------------------------------------------------------------------------
-function makeMockFn<T extends (...args: any[]) => any>(fn: T) {
-	const calls: Parameters<T>[] = [];
-	const mockFn = ((...args: Parameters<T>) => {
-		calls.push(args);
-		return fn(...args);
-	}) as T & { calls: Parameters<T>[] };
-	mockFn.calls = calls;
-	return mockFn;
-}
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 
 // ---------------------------------------------------------------------------
 // Import curator _internals — no module-level mocking required
@@ -66,8 +52,8 @@ describe('autoRetireSkills', () => {
 	test('TC1: skill exceeding violation threshold is retired with violation reason', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -79,21 +65,21 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath:
 					'file:/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
@@ -105,11 +91,9 @@ describe('autoRetireSkills', () => {
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
-		_internals.parseDraftFrontmatter = makeMockFn(() => ({
-			sourceKnowledgeIds: [],
-		}));
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.parseDraftFrontmatter = mock(() => ({ sourceKnowledgeIds: [] }));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		const observations = await _internals.autoRetireSkills(
 			directory,
@@ -119,12 +103,12 @@ describe('autoRetireSkills', () => {
 		expect(observations).toHaveLength(1);
 		expect(observations[0]).toContain('high-violation');
 		expect(observations[0]).toContain('violation rate');
-		expect(mockRetireSkill.calls).toHaveLength(1);
-		expect(mockRetireSkill.calls[0]).toEqual([
+		expect(mockRetireSkill).toHaveBeenCalledTimes(1);
+		expect(mockRetireSkill).toHaveBeenCalledWith(
 			directory,
 			'high-violation',
 			expect.stringContaining('violation rate'),
-		]);
+		);
 	});
 
 	// -----------------------------------------------------------------------
@@ -133,8 +117,8 @@ describe('autoRetireSkills', () => {
 	test('TC2: skill below violation threshold with no archived sources is NOT retired', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -146,7 +130,7 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/healthy-skill/SKILL.md',
@@ -162,11 +146,9 @@ describe('autoRetireSkills', () => {
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
-		_internals.parseDraftFrontmatter = makeMockFn(() => ({
-			sourceKnowledgeIds: [],
-		}));
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.parseDraftFrontmatter = mock(() => ({ sourceKnowledgeIds: [] }));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		const observations = await _internals.autoRetireSkills(
 			directory,
@@ -174,7 +156,7 @@ describe('autoRetireSkills', () => {
 		);
 
 		expect(observations).toHaveLength(0);
-		expect(mockRetireSkill.calls).toHaveLength(0);
+		expect(mockRetireSkill).not.toHaveBeenCalled();
 	});
 
 	// -----------------------------------------------------------------------
@@ -183,8 +165,8 @@ describe('autoRetireSkills', () => {
 	test('TC3: skill with no usage but all sources archived is retired with archived reason', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -196,8 +178,8 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => []);
-		const mockParseDraftFrontmatter = makeMockFn(() => ({
+		const mockReadSkillUsageEntries = mock(() => []);
+		const mockParseDraftFrontmatter = mock(() => ({
 			sourceKnowledgeIds: ['src1', 'src2'],
 		}));
 
@@ -208,7 +190,7 @@ describe('autoRetireSkills', () => {
 		// Use call-count-based mock: first call = swarm, subsequent = hive (empty).
 		// This avoids duplicate entries when both swarm and hive knowledge are read.
 		let readCallCount = 0;
-		_internals.readKnowledge = makeMockFn(() => {
+		_internals.readKnowledge = mock(() => {
 			readCallCount++;
 			if (readCallCount === 1) {
 				return Promise.resolve([
@@ -253,7 +235,7 @@ describe('autoRetireSkills', () => {
 			// Subsequent calls (hive) return empty
 			return Promise.resolve([]);
 		});
-		_internals.readFileAsync = makeMockFn(() =>
+		_internals.readFileAsync = mock(() =>
 			Promise.resolve('---\nsourceKnowledgeIds:\n  - src1\n  - src2\n---\n'),
 		);
 
@@ -265,12 +247,12 @@ describe('autoRetireSkills', () => {
 		expect(observations).toHaveLength(1);
 		expect(observations[0]).toContain('archived-skill');
 		expect(observations[0]).toContain('archived');
-		expect(mockRetireSkill.calls).toHaveLength(1);
-		expect(mockRetireSkill.calls[0]).toEqual([
+		expect(mockRetireSkill).toHaveBeenCalledTimes(1);
+		expect(mockRetireSkill).toHaveBeenCalledWith(
 			directory,
 			'archived-skill',
 			'auto-retire: all source knowledge entries archived',
-		]);
+		);
 	});
 
 	// -----------------------------------------------------------------------
@@ -279,8 +261,8 @@ describe('autoRetireSkills', () => {
 	test('TC4: skill with no usage and no archived sources is NOT retired', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -292,18 +274,16 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => []);
+		const mockReadSkillUsageEntries = mock(() => []);
 		// No sourceKnowledgeIds → no archived check
-		const mockParseDraftFrontmatter = makeMockFn(() => ({
-			sourceKnowledgeIds: [],
-		}));
+		const mockParseDraftFrontmatter = mock(() => ({ sourceKnowledgeIds: [] }));
 
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
 		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		const observations = await _internals.autoRetireSkills(
 			directory,
@@ -311,7 +291,7 @@ describe('autoRetireSkills', () => {
 		);
 
 		expect(observations).toHaveLength(0);
-		expect(mockRetireSkill.calls).toHaveLength(0);
+		expect(mockRetireSkill).not.toHaveBeenCalled();
 	});
 
 	// -----------------------------------------------------------------------
@@ -320,8 +300,8 @@ describe('autoRetireSkills', () => {
 	test('TC5: skill with no frontmatter skips archived check and only evaluates violation rate', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -334,14 +314,14 @@ describe('autoRetireSkills', () => {
 			}),
 		);
 		// 2 violations out of 3 = 66% > 30% → should retire
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
@@ -349,14 +329,14 @@ describe('autoRetireSkills', () => {
 			},
 		]);
 		// parseDraftFrontmatter returns null → skips archived check
-		const mockParseDraftFrontmatter = makeMockFn(() => null);
+		const mockParseDraftFrontmatter = mock(() => null);
 
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
 		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		const observations = await _internals.autoRetireSkills(
 			directory,
@@ -365,7 +345,7 @@ describe('autoRetireSkills', () => {
 
 		expect(observations).toHaveLength(1);
 		expect(observations[0]).toContain('no-fm-skill');
-		expect(mockRetireSkill.calls).toHaveLength(1);
+		expect(mockRetireSkill).toHaveBeenCalledTimes(1);
 	});
 
 	// -----------------------------------------------------------------------
@@ -374,10 +354,10 @@ describe('autoRetireSkills', () => {
 	test('TC6: retireSkill error is caught and does not propagate', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() =>
+		const mockRetireSkill = mock(() =>
 			Promise.reject(new Error('retireSkill failed')),
 		);
-		const mockListSkills = makeMockFn(() =>
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -389,10 +369,10 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
@@ -403,11 +383,9 @@ describe('autoRetireSkills', () => {
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
-		_internals.parseDraftFrontmatter = makeMockFn(() => ({
-			sourceKnowledgeIds: [],
-		}));
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.parseDraftFrontmatter = mock(() => ({ sourceKnowledgeIds: [] }));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		// Should NOT throw — fail-open
 		await expect(
@@ -419,7 +397,7 @@ describe('autoRetireSkills', () => {
 	// TC7: listSkills throws → caught, does not propagate (fail-open)
 	// -----------------------------------------------------------------------
 	test('TC7: listSkills error is caught and does not propagate', async () => {
-		const mockListSkills = makeMockFn(() =>
+		const mockListSkills = mock(() =>
 			Promise.reject(new Error('listSkills failed')),
 		);
 
@@ -437,8 +415,8 @@ describe('autoRetireSkills', () => {
 	test('TC8: multiple skills meeting different thresholds are both retired', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -455,11 +433,11 @@ describe('autoRetireSkills', () => {
 			}),
 		);
 		// violation-skill: 1/2 = 50% > 30%; archived-skill: no usage
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath:
 					'/fake/dir/.opencode/skills/generated/violation-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath:
@@ -470,7 +448,7 @@ describe('autoRetireSkills', () => {
 		// First skill (violation-skill): no source IDs
 		// Second skill (archived-skill): has source IDs pointing to archived entries
 		let parseCallCount = 0;
-		const mockParseDraftFrontmatter = makeMockFn(() => {
+		const mockParseDraftFrontmatter = mock(() => {
 			parseCallCount++;
 			if (parseCallCount === 1) return { sourceKnowledgeIds: [] };
 			return { sourceKnowledgeIds: ['src1'] };
@@ -483,7 +461,7 @@ describe('autoRetireSkills', () => {
 		// Use call-count-based mock: first call = swarm, subsequent = hive (empty).
 		// This avoids duplicate entries when both swarm and hive knowledge are read.
 		let readCallCount = 0;
-		_internals.readKnowledge = makeMockFn(() => {
+		_internals.readKnowledge = mock(() => {
 			readCallCount++;
 			if (readCallCount === 1) {
 				return Promise.resolve([
@@ -510,7 +488,7 @@ describe('autoRetireSkills', () => {
 			// Subsequent calls (hive) return empty
 			return Promise.resolve([]);
 		});
-		_internals.readFileAsync = makeMockFn(() =>
+		_internals.readFileAsync = mock(() =>
 			Promise.resolve('---\nsourceKnowledgeIds:\n  - src1\n---\n'),
 		);
 
@@ -522,7 +500,7 @@ describe('autoRetireSkills', () => {
 		expect(observations).toHaveLength(2);
 		expect(observations.some((o) => o.includes('violation-skill'))).toBe(true);
 		expect(observations.some((o) => o.includes('archived-skill'))).toBe(true);
-		expect(mockRetireSkill.calls).toHaveLength(2);
+		expect(mockRetireSkill).toHaveBeenCalledTimes(2);
 	});
 
 	// -----------------------------------------------------------------------
@@ -532,8 +510,8 @@ describe('autoRetireSkills', () => {
 	test('TC9: slug does not match as substring of another skill path', async () => {
 		const directory = '/fake/dir';
 
-		const mockRetireSkill = makeMockFn(() => Promise.resolve());
-		const mockListSkills = makeMockFn(() =>
+		const mockRetireSkill = mock(() => Promise.resolve());
+		const mockListSkills = mock(() =>
 			Promise.resolve({
 				active: [
 					makeSkill(
@@ -546,29 +524,27 @@ describe('autoRetireSkills', () => {
 			}),
 		);
 		// Usage entries for a DIFFERENT skill ("test-skill") — should NOT match slug "test"
-		const mockReadSkillUsageEntries = makeMockFn(() => [
+		const mockReadSkillUsageEntries = mock(() => [
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 			{
 				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violation' as const,
+				complianceVerdict: 'violated' as const,
 			},
 		]);
 
 		_internals.listSkills = mockListSkills;
 		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
 		_internals.retireSkill = mockRetireSkill;
-		_internals.parseDraftFrontmatter = makeMockFn(() => ({
-			sourceKnowledgeIds: [],
-		}));
-		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
-		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
+		_internals.parseDraftFrontmatter = mock(() => ({ sourceKnowledgeIds: [] }));
+		_internals.readKnowledge = mock(() => Promise.resolve([]));
+		_internals.readFileAsync = mock(() => Promise.resolve(''));
 
 		const observations = await _internals.autoRetireSkills(
 			directory,
@@ -577,6 +553,6 @@ describe('autoRetireSkills', () => {
 
 		// "test" skill should have zero usage entries (test-skill paths should NOT match)
 		expect(observations).toHaveLength(0);
-		expect(mockRetireSkill.calls).toHaveLength(0);
+		expect(mockRetireSkill).not.toHaveBeenCalled();
 	});
 });

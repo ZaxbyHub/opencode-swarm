@@ -9,6 +9,7 @@
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
 import { bunFile } from '../utils/bun-compat';
+import { readCachedTextFile } from '../utils/swarm-artifact-cache';
 
 /**
  * Test-only dependency-injection seam. Production code calls
@@ -179,9 +180,10 @@ export async function readSwarmFileAsync(
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
 		try {
 			const resolvedPath = _internals.validateSwarmPath(directory, filename);
-			const file = bunFile(resolvedPath);
-			const content = await file.text();
-			return content;
+			return await readCachedTextFile(resolvedPath, async () => {
+				const file = bunFile(resolvedPath);
+				return await file.text();
+			});
 		} catch (err) {
 			// Only retry on ENOENT (file not found) — other errors should fail fast
 			const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';

@@ -31,6 +31,12 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
+import {
+	readCachedParsedFileSync,
+	readCachedTextFileSync,
+} from '../utils/swarm-artifact-cache';
+
+const SPEC_STALENESS_CACHE_NAMESPACE = 'spec-staleness-json:v1';
 
 /**
  * Build the [spec-drift] advisory injected into the model's system prompt
@@ -74,19 +80,25 @@ function readSpecStalenessSnapshot(
 ): { specHash_plan: string; specHash_current: string | null } | null {
 	try {
 		const p = path.join(directory, '.swarm', 'spec-staleness.json');
-		if (!fs.existsSync(p)) return null;
-		const raw = fs.readFileSync(p, 'utf-8');
-		const parsed = JSON.parse(raw);
-		if (
-			typeof parsed?.specHash_plan === 'string' &&
-			(typeof parsed?.specHash_current === 'string' ||
-				parsed?.specHash_current === null)
-		) {
-			return {
-				specHash_plan: parsed.specHash_plan,
-				specHash_current: parsed.specHash_current,
-			};
-		}
+		return readCachedParsedFileSync(
+			p,
+			SPEC_STALENESS_CACHE_NAMESPACE,
+			() => (fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : null),
+			(raw) => {
+				const parsed = JSON.parse(raw);
+				if (
+					typeof parsed?.specHash_plan === 'string' &&
+					(typeof parsed?.specHash_current === 'string' ||
+						parsed?.specHash_current === null)
+				) {
+					return {
+						specHash_plan: parsed.specHash_plan,
+						specHash_current: parsed.specHash_current,
+					};
+				}
+				return null;
+			},
+		);
 	} catch {
 		/* malformed — fall through */
 	}
@@ -1048,11 +1060,14 @@ ${handoffContent}`;
 										'evidence',
 										`${taskId_ccp}.json`,
 									);
-									if (fs.existsSync(evidencePath)) {
-										const evidenceContent = fs.readFileSync(
-											evidencePath,
-											'utf-8',
-										);
+									const evidenceContent = readCachedTextFileSync(
+										evidencePath,
+										() =>
+											fs.existsSync(evidencePath)
+												? fs.readFileSync(evidencePath, 'utf-8')
+												: null,
+									);
+									if (evidenceContent !== null) {
 										const evidenceData = JSON.parse(evidenceContent) as {
 											bundle?: {
 												entries?: Array<{
