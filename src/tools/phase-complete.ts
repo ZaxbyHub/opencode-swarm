@@ -18,6 +18,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
 import {
@@ -1498,6 +1499,28 @@ export async function executePhaseComplete(
 		}
 
 		// Update plan.json phase status to complete via ledger-first savePlan
+		// Acquire lock on plan.json to prevent concurrent writes (F-03)
+		const planLockTaskId = `phase-complete-plan-${Date.now()}`;
+		const planFilePath = 'plan.json';
+		let planLockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
+		try {
+		planLockResult = await tryAcquireLock(
+		dir,
+		planFilePath,
+		agentName,
+		planLockTaskId,
+		);
+		} catch (error) {
+		warnings.push(
+		`Warning: failed to acquire lock for plan.json: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		}
+		if (!planLockResult?.acquired) {
+		warnings.push(
+		`Warning: could not acquire lock for plan.json write — proceeding without lock`,
+		);
+		}
+
 		try {
 			const plan = await loadPlan(dir);
 			if (plan === null) {
@@ -1545,7 +1568,7 @@ export async function executePhaseComplete(
 					);
 					if (phaseObj) {
 						phaseObj.status = 'complete';
-						fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8');
+						await atomicWriteFile(planPath, JSON.stringify(plan, null, 2));
 					}
 				} catch {
 					/* fallback failed */
@@ -1613,12 +1636,26 @@ export async function executePhaseComplete(
 				);
 				if (phaseObj) {
 					phaseObj.status = 'complete';
-					fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8');
+					await atomicWriteFile(planPath, JSON.stringify(plan, null, 2));
 				}
 			} catch {
 				/* fallback failed */
 			}
-		}
+} finally {
+if (planLockResult?.acquired && planLockResult.lock._release) {
+try {
+await planLockResult.lock._release();
+} catch (releaseError) {
+logger.warn(
+'[phase_complete] Plan lock release failed (non-blocking):',
+releaseError instanceof Error
+? releaseError.message
+: String(releaseError),
+);
+}
+}
+}
+
 	}
 
 	if (complianceWarnings.length > 0) {

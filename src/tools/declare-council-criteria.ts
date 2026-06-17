@@ -165,7 +165,7 @@ export const declare_council_criteria: ReturnType<typeof tool> =
 			const replaced = existing !== null;
 
 			// ── Persist ───────────────────────────────────────────────────────
-			writeCriteria(workingDir, input.taskId, input.criteria);
+			await writeCriteria(workingDir, input.taskId, input.criteria);
 
 			return JSON.stringify(
 				{

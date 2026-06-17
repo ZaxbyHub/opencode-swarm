@@ -64,6 +64,14 @@ export async function handleAcknowledgeSpecDriftCommand(
 	try {
 		const plan = await loadPlanJsonOnly(directory);
 		if (plan?.specHash) {
+			// F-07: Verify staleness file's specHash still matches current plan
+			// If spec changed again since staleness detection, reject acknowledgment
+			if (stalenessData.specHash_plan !== plan.specHash) {
+				return `Spec drift acknowledgment rejected: The spec has changed since the staleness was detected. 
+Current plan specHash: ${plan.specHash}
+Staleness file specHash: ${stalenessData.specHash_plan}
+Please re-run the relevant phase to detect current drift status.`;
+			}
 			currentHash = await computeSpecHash(directory);
 			// Convert null to undefined since plan.specHash is string | undefined
 			plan.specHash = currentHash ?? undefined;

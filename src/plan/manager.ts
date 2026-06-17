@@ -275,6 +275,12 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
  * Used to detect drift between plan.json and plan.md.
  * Uses natural numeric sorting for task IDs (1.2 < 1.10).
  * Returns a short hash string for compact storage in plan.md.
+ *
+ * F-06: Hash function difference from ledger.ts:
+ * - This function uses Bun.hash (compact) vs SHA-256 (ledger.ts::computePlanHash)
+ * - This function excludes execution_profile vs included in ledger hash
+ * - Purpose: plan.md drift detection (short, readable) vs plan state integrity (cryptographic)
+ * Both are intentional design choices for their respective use cases.
  */
 function computePlanContentHash(plan: Plan): string {
 	// Create deterministic representation (no timestamps, sorted IDs)
@@ -353,7 +359,10 @@ async function isPlanMdInSync(directory: string, plan: Plan): Promise<boolean> {
 		return true;
 	}
 
-	// Check if actual contains the derived content (handles added comments/metadata)
+	// F-11: Fuzzy substring matching fallback — permissive for backward compatibility
+	// Once PLAN_HASH headers are universally present (no old plan.md files), this check
+	// should be removed or replaced with an exact-match-only check to reduce false positives.
+	// For now, keep it to support plan.md files generated before hashing was added.
 	return (
 		normalizedActual.includes(normalizedExpected) ||
 		normalizedExpected.includes(normalizedActual.replace(/^#.*$/gm, '').trim())
