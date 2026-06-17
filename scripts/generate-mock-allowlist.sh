@@ -4,6 +4,7 @@
 # and outputs a sorted unique set to scripts/mock-allowlist.txt.
 #
 # Usage: scripts/generate-mock-allowlist.sh [--check]
+# NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
 
 set -euo pipefail
 

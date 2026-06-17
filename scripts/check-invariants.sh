@@ -2,6 +2,7 @@
 # Engineering invariant checks for opencode-swarm.
 # Runs three grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7.
 # Compatible with GitHub Actions (ubuntu-latest, bash).
+# NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
 set -euo pipefail
 
 violations=0
