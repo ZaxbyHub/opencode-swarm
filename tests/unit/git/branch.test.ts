@@ -75,6 +75,40 @@ describe('Git Branch Module', () => {
 
 			expect(result).toBe(false);
 		});
+
+		test('returns false when spawnSync result.error is ENOENT (git not found)', () => {
+			// When git binary cannot be found, spawnSync sets result.error with code ENOENT
+			const enoentError = Object.assign(new Error('spawnSync git ENOENT'), {
+				code: 'ENOENT',
+			});
+			mockSpawnSync.mockImplementationOnce(() => ({
+				error: enoentError,
+				status: null,
+				stdout: '',
+				stderr: '',
+			}));
+
+			const result = branch.isGitRepo(testCwd);
+
+			expect(result).toBe(false);
+		});
+
+		test('returns false when spawnSync result.error is ETIMEDOUT (connection timeout)', () => {
+			// When git times out (e.g., network-related git operations), spawnSync sets result.error
+			const timeoutError = Object.assign(new Error('spawnSync git ETIMEDOUT'), {
+				code: 'ETIMEDOUT',
+			});
+			mockSpawnSync.mockImplementationOnce(() => ({
+				error: timeoutError,
+				status: null,
+				stdout: '',
+				stderr: '',
+			}));
+
+			const result = branch.isGitRepo(testCwd);
+
+			expect(result).toBe(false);
+		});
 	});
 
 	describe('getCurrentBranch()', () => {

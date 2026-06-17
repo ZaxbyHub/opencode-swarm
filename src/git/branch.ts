@@ -11,8 +11,14 @@ function gitExec(args: string[], cwd: string): string {
 		cwd,
 		encoding: 'utf-8',
 		timeout: GIT_TIMEOUT_MS,
-		stdio: ['pipe', 'pipe', 'pipe'],
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
 	});
+	if (result.error) {
+		throw new Error(
+			`git failed to start: ${(result.error as NodeJS.ErrnoException).code ?? 'unknown'} — ${result.error.message}`,
+		);
+	}
 	if (result.status !== 0) {
 		throw new Error(result.stderr || `git exited with ${result.status}`);
 	}

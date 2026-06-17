@@ -603,7 +603,7 @@ Idempotent 4-stage project finalization:
 1. **Finalize** — write retrospectives for in-progress phases.
 2. **Archive** — timestamped bundle of swarm artifacts and evidence.
 3. **Clean** — remove active-state files (see below).
-4. **Align** — safe git `ff-only` to `main`.
+4. **Align** — aggressive alignment to the default remote branch via `git reset --hard` plus `git clean -fd`, discarding uncommitted changes and untracked files; falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed.
 
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
