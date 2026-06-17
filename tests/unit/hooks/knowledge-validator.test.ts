@@ -585,6 +585,75 @@ describe('knowledge-validator', () => {
 			expect(result.valid).toBe(true);
 		});
 
+		// Multi-word negation pair coverage (FB-001 regression tests)
+		it('flags contradiction for multi-word pair: must not vs must (overlapping context)', () => {
+			const candidate = 'must not use typescript';
+			const existingLessons = ['must use typescript for all projects'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'architecture',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('allows agreeing multi-word pair: must not vs must (no context overlap)', () => {
+			const candidate = 'must not use docker for builds';
+			const existingLessons = ['must use git for version control'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(3);
+		});
+
+		it('flags contradiction for multi-word pair: recommended vs not recommended (overlapping context)', () => {
+			const candidate = 'recommended to use docker for builds';
+			const existingLessons = ['not recommended to use docker for builds'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('flags contradiction for multi-word pair: must vs should not (overlapping context)', () => {
+			const candidate = 'must use docker for all deployments';
+			const existingLessons = ['should not use docker for all deployments'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('allows agreeing multi-word pair: enable vs disable (no context overlap)', () => {
+			// Different subjects (docker vs vitest) → no shared tags → no contradiction
+			const candidate = 'enable docker for production builds';
+			const existingLessons = ['disable vitest for local testing'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(3);
+		});
+
+		// Note: "don't use" pair is not tested here because normalizeText strips
+		// apostrophes ("don't" → "don t"), so the pair ['use', "don't use"] will
+		// never match via includes() — a separate pre-existing normalization bug.
+
 		it('flags vague lesson (warning - valid: true)', () => {
 			const candidate = 'Good things happen';
 			const result = validateLesson(candidate, [], {

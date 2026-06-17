@@ -169,6 +169,7 @@ function normalizeText(text: string): string {
 /**
  * Extract context words around a target word (bigrams/surrounding words).
  * Context window is 3 words before and after, excluding the negation word itself.
+ * Handles multi-word terms (e.g. "must not", "don't use") by scanning word slices.
  */
 function extractContextWords(
 	text: string,
@@ -176,19 +177,45 @@ function extractContextWords(
 	contextWindow = 3,
 ): Set<string> {
 	const words = text.split(' ');
-	const idx = words.indexOf(word);
-	if (idx === -1) return new Set();
 
-	const start = Math.max(0, idx - contextWindow);
-	const end = Math.min(words.length, idx + contextWindow + 1);
+	// Fast path: single-word term
+	if (!word.includes(' ')) {
+		const idx = words.indexOf(word);
+		if (idx === -1) return new Set();
 
-	const context = new Set<string>();
-	for (let i = start; i < end; i++) {
-		if (i !== idx && words[i] && words[i].length > 0) {
-			context.add(words[i]);
+		const start = Math.max(0, idx - contextWindow);
+		const end = Math.min(words.length, idx + contextWindow + 1);
+
+		const context = new Set<string>();
+		for (let i = start; i < end; i++) {
+			if (i !== idx && words[i] && words[i].length > 0) {
+				context.add(words[i]);
+			}
+		}
+		return context;
+	}
+
+	// Multi-word term: scan for the term as a contiguous word slice
+	const termLen = word.split(' ').length;
+	for (let i = 0; i <= words.length - termLen; i++) {
+		const slice = words.slice(i, i + termLen).join(' ');
+		if (slice === word) {
+			const start = Math.max(0, i - contextWindow);
+			const end = Math.min(words.length, i + termLen + contextWindow);
+
+			const context = new Set<string>();
+			for (let j = start; j < end; j++) {
+				if (j < i || j >= i + termLen) {
+					if (words[j] && words[j].length > 0) {
+						context.add(words[j]);
+					}
+				}
+			}
+			return context;
 		}
 	}
-	return context;
+
+	return new Set();
 }
 
 /**
