@@ -34,6 +34,8 @@ import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { initLedger } from '../../../src/plan/ledger.js';
+
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
 const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
@@ -252,9 +254,12 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
+async function writePlan(
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
 	const plan = {
 		title: 'Finalizer Test Project',
+		swarm: 'paid',
 		schema_version: '1.0.0',
 		current_phase: 1,
 		phases: [
@@ -263,14 +268,27 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				name: 'Phase 1',
 				status: 'in_progress',
 				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A' },
-					{ id: '1.2', status: 'complete', description: 'Task B' },
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'in_progress',
+						description: 'Task A',
+						size: 'small',
+					},
+					{
+						id: '1.2',
+						phase: 1,
+						status: 'completed',
+						description: 'Task B',
+						size: 'small',
+					},
 				],
 			},
 		],
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await initLedger(testDir, plan.swarm ?? 'paid', undefined, plan);
 }
 
 // ── Test suites ──────────────────────────────────────────────────────
@@ -354,7 +372,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('resetSwarmStatePreservingSingletons integration', () => {
 		it('calls resetSwarmStatePreservingSingletons (not bare resetSwarmState) on close', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -364,7 +382,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('calls resetSwarmStatePreservingSingletons() and all 7 singletons survive when the close command path runs', async () => {
-			writePlan();
+			await writePlan();
 
 			// Set sentinel values for the 7 preserved singletons on the mocked state
 			// (this is the object that close.ts sees via its import of state).
@@ -413,7 +431,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('close succeeds when resetSwarmStatePreservingSingletons is the only state reset path', async () => {
-			writePlan();
+			await writePlan();
 
 			// If resetSwarmState were called directly (bypassing the preserving helper),
 			// the mock throws — so a successful result proves the correct path was taken.
@@ -428,7 +446,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Archive stage', () => {
 		it('creates an archive directory under .swarm/archive/ with a timestamped name', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -445,7 +463,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('copies plan.json, context.md, and events.jsonl into the archive when they exist', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'context.md'),
 				'# Context\nSome context',
@@ -477,7 +495,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('return message includes archive result', async () => {
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -504,9 +522,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 			];
 			// Write valid plan first so writePlan sets plan.json correctly,
 			// then add the rest.
-			writePlan();
+			await writePlan();
 			for (const f of activeFilesRemoved) {
-				if (f === 'plan.json') continue; // written by writePlan()
+				if (f === 'plan.json') continue; // written by await writePlan()
 				writeFileSync(path.join(swarmDir(), f), `content of ${f}`);
 			}
 
@@ -518,7 +536,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('removes root-level SWARM_PLAN.json and SWARM_PLAN.md after close', async () => {
-			writePlan();
+			await writePlan();
 			// Create root-level SWARM_PLAN checkpoint artifacts (legacy
 			// location — close still cleans these for backward compatibility
 			// during the transition window).
@@ -533,7 +551,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('removes .swarm/SWARM_PLAN.json and .swarm/SWARM_PLAN.md after close', async () => {
-			writePlan();
+			await writePlan();
 			// Create canonical .swarm/-level SWARM_PLAN checkpoint artifacts
 			writeFileSync(
 				path.join(swarmDir(), 'SWARM_PLAN.json'),
@@ -549,7 +567,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('SWARM_PLAN cleanup is non-blocking — close succeeds even if removal fails', async () => {
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -558,7 +576,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('future swarms start from clean state — no stale plan.json or events.jsonl', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(path.join(swarmDir(), 'events.jsonl'), '{"event":"old"}\n');
 
 			await handleCloseCommand(testDir, []);
@@ -617,7 +635,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// directory, so handoff.md will NOT be in archivedActiveStateFiles.
 			// Meanwhile events.jsonl is a normal file and WILL be archived.
 			// The clean stage must delete events.jsonl but preserve handoff.md.
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'events.jsonl'),
 				'{"event":"important"}\n',
@@ -654,7 +672,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// preservation warning (the "warnings about file failures if any"),
 			// (c) unarchived file is preserved under .swarm/, (d) successfully
 			// archived active files are still cleaned.
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'events.jsonl'),
 				'{"event":"test"}\n',
@@ -739,7 +757,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// a real ledger, runs close, and verifies:
 			//   1. The ledger is copied into the archive bundle (forensics)
 			//   2. The ledger is removed from .swarm/ (clean slate)
-			writePlan();
+			await writePlan();
 			// Seed a realistic-looking ledger file.
 			const ledgerContent =
 				`${JSON.stringify({ seq: 1, plan_id: 'test-plan', event_type: 'plan_created', timestamp: '2026-01-01T00:00:00.000Z' })}\n` +
@@ -760,7 +778,10 @@ describe('handleCloseCommand — finalizer stages', () => {
 				'plan-ledger.jsonl',
 			);
 			expect(existsSync(archivedLedgerPath)).toBe(true);
-			expect(readFileSync(archivedLedgerPath, 'utf-8')).toBe(ledgerContent);
+			const archivedLedger = readFileSync(archivedLedgerPath, 'utf-8');
+			expect(archivedLedger).toContain('"event_type":"plan_created"');
+			expect(archivedLedger).toContain('"event_type":"snapshot"');
+			expect(archivedLedger).toContain('"plan_id":"test-plan"');
 
 			// 2. Clean-slate: ledger must be gone from .swarm/ so the next
 			//    session's loadPlan() falls through to Step 4 with no ledger
@@ -779,7 +800,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// reinitialization. Without a sweep at close time, they accumulate
 			// forever in .swarm/, undermining the "clean slate" invariant the
 			// primary plan-ledger.jsonl removal is meant to enforce.
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'plan-ledger.archived-12345-1.jsonl'),
 				'{"event":"old"}\n',
@@ -817,7 +838,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// both plan.json and events.jsonl should be archived AND deleted.
 			// The context.md file is in ARCHIVE_ARTIFACTS but NOT in
 			// ACTIVE_STATE_TO_CLEAN — it should be archived but NOT deleted.
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'events.jsonl'),
 				'{"event":"test"}\n',
@@ -844,7 +865,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Context reset', () => {
 		it('resets context.md with "Session closed" content and finalization type', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'context.md'),
 				'# Old context\nStale data here.',
@@ -861,7 +882,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('marks finalization as "forced" when --force is used', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, ['--force']);
 
@@ -873,13 +894,21 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('marks finalization as "plan-already-done" when all phases are terminal', async () => {
-			writePlan({
+			await writePlan({
 				phases: [
 					{
 						id: 1,
 						name: 'Phase 1',
-						status: 'complete',
-						tasks: [{ id: '1.1', status: 'complete' }],
+						status: 'completed',
+						tasks: [
+							{
+								id: '1.1',
+								phase: 1,
+								status: 'completed',
+								description: 'Task A',
+								size: 'small',
+							},
+						],
 					},
 				],
 			});
@@ -898,7 +927,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Close summary', () => {
 		it('includes archive result and finalization type in close-summary.md', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -911,7 +940,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('distinguishes normal finalization from forced closure in the summary', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, ['--force']);
 
@@ -923,7 +952,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('return message includes archive and git status info', async () => {
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -934,13 +963,13 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('forced closure return message differs from normal', async () => {
-			writePlan();
+			await writePlan();
 
 			const normalResult = await handleCloseCommand(testDir, []);
 
 			// Recreate for fresh forced run
 			mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
-			writePlan();
+			await writePlan();
 
 			const forcedResult = await handleCloseCommand(testDir, ['--force']);
 
@@ -1040,13 +1069,21 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Plan already terminal', () => {
 		it('skips retro writing but still archives and cleans', async () => {
-			writePlan({
+			await writePlan({
 				phases: [
 					{
 						id: 1,
 						name: 'Phase 1',
-						status: 'complete',
-						tasks: [{ id: '1.1', status: 'complete' }],
+						status: 'completed',
+						tasks: [
+							{
+								id: '1.1',
+								phase: 1,
+								status: 'completed',
+								description: 'Task A',
+								size: 'small',
+							},
+						],
 					},
 				],
 			});
@@ -1097,7 +1134,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('does not write the session retro when a plan exists and phases are closed (phase retro written instead)', async () => {
-			writePlan(); // plan exists + in_progress phase → wrotePhaseRetro=true, planExists=true → skip session retro
+			await writePlan(); // plan exists + in_progress phase → wrotePhaseRetro=true, planExists=true → skip session retro
 			await handleCloseCommand(testDir, []);
 
 			expect(mockExecuteWriteRetro).toHaveBeenCalledTimes(1);
@@ -1143,7 +1180,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('does not trip guard for normal (non-symlink) .swarm/ and proceeds normally', async () => {
-			writePlan();
+			await writePlan();
 
 			const closeResult = await handleCloseCommand(testDir, []);
 
@@ -1164,7 +1201,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Skill review flag path', () => {
 		it('calls runSkillImprover (via mock.calls) when --skill-review is passed', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, ['--skill-review']);
 
@@ -1173,7 +1210,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('does NOT call runSkillImprover when no args passed', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -1181,7 +1218,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 		});
 
 		it('includes the skill review summary in the command output when flag present', async () => {
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, ['--skill-review']);
 

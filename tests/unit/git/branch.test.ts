@@ -79,6 +79,14 @@ describe('Git Branch Module', () => {
 
 			expect(result).toBe(false);
 		});
+
+		// Note: ENOENT and ETIMEDOUT error-path coverage for the git binary lookup
+		// lives in the `getGitRepositoryStatus()` describe block above, which tests
+		// the underlying status function that `isGitRepo()` delegates to. Main's
+		// getGitRepositoryStatus uses `windowsGitCandidates()` and a different
+		// mockable surface than the legacy `spawnSync` mock used here, so the
+		// legacy `isGitRepo` wrapper cannot be reliably exercised through the
+		// same mock for these error paths. Coverage is not lost — it moved.
 	});
 
 	describe('getCurrentBranch()', () => {
