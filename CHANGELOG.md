@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.79.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.8...v7.79.0) (2026-06-17)
+
+
+### Features
+
+* **tools:** reduce architect tool surface and lower summarizer threshold ([#1393](https://github.com/zaxbysauce/opencode-swarm/issues/1393)) ([d098499](https://github.com/zaxbysauce/opencode-swarm/commit/d098499a80537b8f921679aa06ea864061c07583))
+
 ## [7.78.8](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.7...v7.78.8) (2026-06-17)
 
 
