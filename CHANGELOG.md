@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.78.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.5...v7.78.6) (2026-06-17)
+
+
+### Bug Fixes
+
+* **close:** distinguish git lookup failures ([#1254](https://github.com/zaxbysauce/opencode-swarm/issues/1254)) ([37eb88f](https://github.com/zaxbysauce/opencode-swarm/commit/37eb88fa3ab433154f964ae1c51873e05dad87da))
+
 ## [7.78.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.4...v7.78.5) (2026-06-16)
 
 
