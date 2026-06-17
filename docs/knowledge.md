@@ -351,10 +351,11 @@ For each applicable directive, the Architect emits:
 - `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
 - `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
 
-You can also call the `knowledge_receipt` tool for the same effect from structured
-tool args. `knowledge_receipt` is the batched successor to the former `knowledge_ack`
-tool (retired in #1323) and supports applied/ignored/contradicted outcomes plus
-new-lesson persistence in a single call.
+Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that
+satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
+(which replaced the former `knowledge_ack`) records knowledge-usage receipts for
+audit — including applied/ignored/contradicted outcomes and new-lesson persistence
+— but does NOT satisfy the enforcement gate.
 
 ### Audit log
 

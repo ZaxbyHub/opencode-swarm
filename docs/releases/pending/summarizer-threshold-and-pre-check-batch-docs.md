@@ -53,3 +53,7 @@ No configuration changes required. Existing configs continue to work unchanged.
 ## Breaking changes
 
 None.
+
+## Behavioral change
+
+The `tool_filter.overrides.architect` conflict guard that previously threw an error when council tools were omitted from a user override (with `council.enabled=true`) has been replaced with auto-merge. Council tools are now always available when `council.enabled=true`, regardless of override contents. Users who relied on the throw behavior to exclude council tools should set `council.enabled=false` instead.

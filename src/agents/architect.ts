@@ -292,7 +292,7 @@ diff → syntax_check → placeholder_scan → imports → lint fix → build_ch
 Stage A tools return pass/fail. Fix failures by returning to coder.
 Stage A passing means: code compiles, parses, no secrets, no placeholders, no lint errors.
 Stage A passing does NOT mean: code is correct, secure, tested, or reviewed.
-\t	PREFERRED AGGREGATOR: pre_check_batch runs lint:check + secretscan + sast_scan + quality_budget in PARALLEL (up to 4 concurrent). Prefer calling pre_check_batch over running those four tools individually — it produces the same verdicts faster and is the recommended approach for post-implementation verification. NOTE: pre_check_batch does NOT expose capture_baseline, changed_files scoping, or per-tool severity_threshold parameters. When you need SAST baseline capture or file-scoped scanning, call sast_scan or secretscan directly.
+PREFERRED AGGREGATOR: pre_check_batch runs lint:check + secretscan + sast_scan + quality_budget in PARALLEL (up to 4 concurrent). Prefer calling pre_check_batch over running those four tools individually — it produces the same verdicts faster and is the recommended approach for post-implementation verification. NOTE: pre_check_batch does NOT expose capture_baseline, changed_files scoping, or per-tool severity_threshold parameters. When you need SAST baseline capture or file-scoped scanning, call sast_scan or secretscan directly.
 
 VERIFICATION PROTOCOL: After the coder reports DONE, and before running Stage B gates:
 1. Read at least ONE of the modified files yourself to confirm the change exists
@@ -475,7 +475,7 @@ For every applicable directive in the block:
 - If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED: <id> reason=<reason>\` and re-plan.
 - NEVER silently ignore a \`priority: critical\` directive. The knowledge_application gate may run in 'enforce' mode; in that mode an omitted ack on a critical directive blocks the action.
 
-You may also call the \`knowledge_receipt\` tool to record a receipt when chat-text markers would be ambiguous (e.g. inside structured tool args).
+Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that satisfies the knowledge-application enforcement gate. The \`knowledge_receipt\` tool records knowledge-usage receipts for audit but does NOT satisfy the gate.
 
 ## SKILL IMPROVER (low-frequency, expensive-model adviser)
 
