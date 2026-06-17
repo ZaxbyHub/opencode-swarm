@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.78.7](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.6...v7.78.7) (2026-06-17)
+
+
+### Bug Fixes
+
+* resolve 106 pre-existing test failures across three categories ([#1245](https://github.com/zaxbysauce/opencode-swarm/issues/1245)) ([5a6cee1](https://github.com/zaxbysauce/opencode-swarm/commit/5a6cee17075f414385d74acd92a3909487f95dab))
+
 ## [7.78.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.5...v7.78.6) (2026-06-17)
 
 
