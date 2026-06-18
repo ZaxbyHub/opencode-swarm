@@ -694,4 +694,37 @@ describe('swarm CLI bypass guard (issue #890)', () => {
 			}
 		});
 	});
+
+	// Regression: dash-alias forms of human-only commands must be blocked too.
+	// TUI shortcuts (e.g. swarm-memory-import) normalize to a single dash token
+	// (`memory-import`), which now resolves to the canonical human-only handler
+	// via a registry alias. The Bash guardrail set must therefore also contain
+	// the dash form, or an agent could bypass the human-only gate by running
+	// `bunx opencode-swarm run memory-import` instead of `... run memory import`.
+	describe('dash-alias forms of human-only commands are blocked', () => {
+		test('memory-import (dash) is blocked like memory import (space)', async () => {
+			await expectBlocked('bunx opencode-swarm run memory import');
+			await expectBlocked('bunx opencode-swarm run memory-import');
+		});
+		test('memory-migrate (dash) is blocked', async () => {
+			await expectBlocked('bunx opencode-swarm run memory-migrate');
+		});
+		test('sdd-project (dash) is blocked', async () => {
+			await expectBlocked('bunx opencode-swarm run sdd-project');
+		});
+		test('pr-subscribe (dash) is blocked', async () => {
+			await expectBlocked('bunx opencode-swarm run pr-subscribe 123');
+		});
+		test('pr-unsubscribe (dash) is blocked', async () => {
+			await expectBlocked('bunx opencode-swarm run pr-unsubscribe 123');
+		});
+		test('clear (alias of restricted reset-session) is blocked', async () => {
+			await expectBlocked('bunx opencode-swarm run clear');
+		});
+		test('agent-policy dash aliases stay allowed (pr-status, memory-status, sdd-status)', async () => {
+			await expectAllowed('bunx opencode-swarm run pr-status');
+			await expectAllowed('bunx opencode-swarm run memory-status');
+			await expectAllowed('bunx opencode-swarm run sdd-status');
+		});
+	});
 });

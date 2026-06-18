@@ -582,7 +582,22 @@ describe('Command registration parity', () => {
 		// After the fix, only these 5 additions are permitted to differ:
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set(['pr status', 'learning', 'post-mortem']),
-			humanOnly: new Set(['pr subscribe', 'pr unsubscribe']),
+			// Space-form human-only commands plus every alias that inherits a
+			// human-only/restricted canonical target (so the Bash CLI guardrail
+			// blocks the alias/dash form too — see HUMAN_ONLY_SWARM_COMMANDS).
+			// `clear` (→ reset-session, restricted) is a pre-existing alias that
+			// the canonical-aware derivation now also covers, closing a latent
+			// bypass.
+			humanOnly: new Set([
+				'pr subscribe',
+				'pr unsubscribe',
+				'pr-subscribe',
+				'pr-unsubscribe',
+				'sdd-project',
+				'memory-import',
+				'memory-migrate',
+				'clear',
+			]),
 			toolCommands: new Set([
 				'pr subscribe',
 				'pr unsubscribe',
@@ -625,7 +640,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 2 additions', () => {
+		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 8 additions (2 space + 6 canonical-inheriting aliases)', () => {
 			const actual = HUMAN_ONLY_SWARM_COMMANDS;
 			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
 			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));

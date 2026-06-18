@@ -60,6 +60,7 @@
 		".opencode/skills/critic-gate",
 		".opencode/skills/execute",
 		".opencode/skills/phase-wrap",
+		".opencode/skills/loop",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"

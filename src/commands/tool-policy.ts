@@ -82,8 +82,26 @@ export const SWARM_COMMAND_TOOL_ALLOWLIST = lazySet(() =>
  */
 export const HUMAN_ONLY_SWARM_COMMANDS = lazySet(() =>
 	VALID_COMMANDS.filter((cmd) => {
-		const policy = (COMMAND_REGISTRY[cmd] as CommandEntry)?.toolPolicy;
-		return policy === 'human-only' || policy === 'restricted';
+		const entry = COMMAND_REGISTRY[cmd] as CommandEntry;
+		const policy = entry?.toolPolicy;
+		if (policy === 'human-only' || policy === 'restricted') return true;
+		// A dash alias (e.g. 'memory-import' → 'memory import') carries no
+		// toolPolicy of its own, but the TUI-shortcut and CLI `run` paths both
+		// resolve it to the canonical handler. The Bash CLI guardrail
+		// (src/hooks/guardrails/tool-before.ts) matches the raw captured token
+		// against THIS set, so an alias pointing to a human-only / restricted
+		// command MUST be included here too — otherwise an agent could bypass
+		// the human-only gate by invoking the dash form
+		// (`bunx opencode-swarm run memory-import`). The chat / swarm_command
+		// path is already safe because it checks the canonical key.
+		if (entry?.aliasOf) {
+			const target = COMMAND_REGISTRY[
+				entry.aliasOf as keyof typeof COMMAND_REGISTRY
+			] as CommandEntry | undefined;
+			const targetPolicy = target?.toolPolicy;
+			return targetPolicy === 'human-only' || targetPolicy === 'restricted';
+		}
+		return false;
 	}),
 );
 

@@ -1324,6 +1324,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					description:
 						'Use /swarm brainstorm to enter the architect MODE: BRAINSTORM planning workflow',
 				},
+				'swarm-loop': {
+					template: '/swarm loop $ARGUMENTS',
+					description:
+						'Use /swarm loop <objective> to run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
+				},
 				'swarm-council': {
 					template: '/swarm council $ARGUMENTS',
 					description:

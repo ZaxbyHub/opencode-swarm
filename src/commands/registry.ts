@@ -40,6 +40,7 @@ import {
 	handleKnowledgeUnactionableCommand,
 } from './knowledge.js';
 import { handleLearningCommand } from './learning.js';
+import { handleLoopCommand } from './loop.js';
 import {
 	handleMemoryCommand,
 	handleMemoryCompactCommand,
@@ -695,6 +696,31 @@ export const COMMAND_REGISTRY = {
 		category: 'utility',
 		toolPolicy: 'human-only',
 	},
+	// Aliases for the TUI shortcuts 'swarm-sdd-status' / 'swarm-sdd-validate' /
+	// 'swarm-sdd-project', which normalize to single dash tokens. See the
+	// 'pr-subscribe' alias note above. Each inherits its canonical tool policy
+	// (sdd project is human-only) via canonicalCommandKey (aliasOf).
+	'sdd-status': {
+		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
+		description:
+			'Show OpenSpec-compatible SDD status and effective spec source',
+		aliasOf: 'sdd status',
+		deprecated: true,
+	},
+	'sdd-validate': {
+		handler: (ctx) => handleSddValidateCommand(ctx.directory, ctx.args),
+		description:
+			'Validate OpenSpec-compatible artifacts and effective spec projection',
+		aliasOf: 'sdd validate',
+		deprecated: true,
+	},
+	'sdd-project': {
+		handler: (ctx) => handleSddProjectCommand(ctx.directory, ctx.args),
+		description:
+			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
+		aliasOf: 'sdd project',
+		deprecated: true,
+	},
 	analyze: {
 		handler: (ctx) => handleAnalyzeCommand(ctx.directory, ctx.args),
 		description: 'Analyze spec.md vs plan.md for requirement coverage gaps',
@@ -726,6 +752,17 @@ export const COMMAND_REGISTRY = {
 		args: '[topic-text]',
 		details:
 			'Triggers the architect to run the brainstorm workflow: CONTEXT SCAN, single-question DIALOGUE, APPROACHES, DESIGN SECTIONS, SPEC WRITE + SELF-REVIEW, QA GATE SELECTION, TRANSITION. Use for new plans where requirements need to be drawn out before writing spec.md / plan.md.',
+		category: 'agent',
+		toolPolicy: 'none',
+	},
+	loop: {
+		handler: (ctx) =>
+			handleModeCommandWithBundledSkills(ctx, handleLoopCommand),
+		description:
+			'Enter architect MODE: LOOP — compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [objective]',
+		args: '<objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
+		details:
+			'Triggers the architect to run the compound-engineering loop defined in .opencode/skills/loop/SKILL.md: BRAINSTORM (requirements) → PLAN (+ critic gate) → BUILD (execute) → REVIEW (independent reviewer + critic on the diff, report-only) → IMPROVE (phase-wrap retrospective + compounding learning capture), then evaluate stop conditions and loop for another improvement cycle if the objective is unmet and budget remains. Generator and reviewer/critic run in separate contexts; failing assertions must be fixed at the root cause, never weakened, mocked, or skipped. Defense-in-depth stop conditions: objective met, --max-cycles budget (default 3), no-progress/plateau, oscillation, unrecoverable error, or explicit user stop. --autonomy checkpoint (default) pauses at phase gates for user approval; --autonomy auto runs unattended with hard stops still enforced. --depth exhaustive widens exploration. --resume continues an existing loop run from durable .swarm/loop/ state. Distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): loop is a user-initiated, gated, compounding workflow.',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -782,6 +819,20 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 		toolPolicy: 'human-only',
 	},
+	// Alias for the TUI shortcut 'swarm-pr-subscribe', which normalizes to the
+	// single dash token 'pr-subscribe'. Without this alias
+	// resolveCommand(['pr-subscribe']) returns null and the TUI reports
+	// "command not found" instead of running the command. Mirrors the
+	// 'config-doctor'/'doctor-tools' alias pattern. The alias inherits the
+	// canonical human-only tool policy via canonicalCommandKey (aliasOf).
+	'pr-subscribe': {
+		handler: (ctx) =>
+			handlePrSubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Subscribe the current session to PR state-change notifications',
+		aliasOf: 'pr subscribe',
+		deprecated: true,
+	},
 	'pr unsubscribe': {
 		handler: (ctx) =>
 			handlePrUnsubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
@@ -793,6 +844,16 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 		toolPolicy: 'human-only',
 	},
+	// Alias for the TUI shortcut 'swarm-pr-unsubscribe' (normalizes to
+	// 'pr-unsubscribe'). See the 'pr-subscribe' alias note above.
+	'pr-unsubscribe': {
+		handler: (ctx) =>
+			handlePrUnsubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Unsubscribe the current session from PR state-change notifications',
+		aliasOf: 'pr unsubscribe',
+		deprecated: true,
+	},
 	'pr status': {
 		handler: (ctx) =>
 			handlePrMonitorStatusCommand(ctx.directory, ctx.args, ctx.sessionID),
@@ -803,6 +864,15 @@ export const COMMAND_REGISTRY = {
 		category: 'agent',
 		toolPolicy: 'agent',
 		toolNoArgs: true,
+	},
+	// Alias for the TUI shortcut 'swarm-pr-status' (normalizes to 'pr-status').
+	// See the 'pr-subscribe' alias note above.
+	'pr-status': {
+		handler: (ctx) =>
+			handlePrMonitorStatusCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description: 'Show PR monitor subscription status for the current session',
+		aliasOf: 'pr status',
+		deprecated: true,
 	},
 	'deep-dive': {
 		handler: (ctx) =>
@@ -1152,6 +1222,35 @@ export const COMMAND_REGISTRY = {
 		args: '',
 		category: 'utility',
 		toolPolicy: 'human-only',
+	},
+	// Aliases for the TUI shortcuts 'swarm-memory-status' / 'swarm-memory-export'
+	// / 'swarm-memory-import' / 'swarm-memory-migrate', which normalize to single
+	// dash tokens. See the 'pr-subscribe' alias note above. Each inherits its
+	// canonical tool policy (import/migrate are human-only) via
+	// canonicalCommandKey (aliasOf).
+	'memory-status': {
+		handler: (ctx) => handleMemoryStatusCommand(ctx.directory, ctx.args),
+		description: 'Show Swarm memory provider, JSONL, and migration status',
+		aliasOf: 'memory status',
+		deprecated: true,
+	},
+	'memory-export': {
+		handler: (ctx) => handleMemoryExportCommand(ctx.directory, ctx.args),
+		description: 'Export current Swarm memory to JSONL files',
+		aliasOf: 'memory export',
+		deprecated: true,
+	},
+	'memory-import': {
+		handler: (ctx) => handleMemoryImportCommand(ctx.directory, ctx.args),
+		description: 'Import legacy JSONL memory into SQLite',
+		aliasOf: 'memory import',
+		deprecated: true,
+	},
+	'memory-migrate': {
+		handler: (ctx) => handleMemoryMigrateCommand(ctx.directory, ctx.args),
+		description: 'Run the one-time legacy JSONL to SQLite migration',
+		aliasOf: 'memory migrate',
+		deprecated: true,
 	},
 	checkpoint: {
 		handler: (ctx) => handleCheckpointCommand(ctx.directory, ctx.args),

@@ -66,6 +66,11 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 		'.claude/skills/deep-dive/SKILL.md',
 	],
 	[
+		'deep-research',
+		'.opencode/skills/deep-research/SKILL.md',
+		'.claude/skills/deep-research/SKILL.md',
+	],
+	[
 		'issue-ingest',
 		'.opencode/skills/issue-ingest/SKILL.md',
 		'.claude/skills/issue-ingest/SKILL.md',
@@ -125,6 +130,24 @@ const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
 	},
 ];
 
+// Skills whose architect mode stub loads a .opencode protocol that is
+// intentionally NOT mirrored to .claude. Used when a .claude mirror would
+// collide with a Claude Code built-in skill of the same name, or when the mode
+// is only reachable through the OpenCode plugin runtime (not a Claude Code
+// command). Both facts are asserted below so the intent is durable.
+const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	opencodePath: string;
+	reason: string;
+}> = [
+	{
+		slug: 'loop',
+		opencodePath: '.opencode/skills/loop/SKILL.md',
+		reason:
+			"MODE: LOOP is reachable only through the OpenCode /swarm loop command; a .claude/skills/loop mirror would shadow Claude Code's built-in /loop (recurring-interval) skill, so it is intentionally not mirrored.",
+	},
+];
+
 describe('architect mode skill mirrors - regression: prevent mirror drift (F-001)', () => {
 	for (const [
 		skillName,
@@ -159,6 +182,21 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		});
 	}
 
+	for (const {
+		slug,
+		opencodePath,
+		reason,
+	} of OPENCODE_ONLY_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} skill: .opencode exists and is intentionally NOT mirrored to .claude (${reason})`, () => {
+			expect(existsSync(join(process.cwd(), opencodePath))).toBe(true);
+			const claudePath = opencodePath.replace(
+				'.opencode/skills/',
+				'.claude/skills/',
+			);
+			expect(existsSync(join(process.cwd(), claudePath))).toBe(false);
+		});
+	}
+
 	it('keeps mirrored skill list in sync with architect mode stubs', () => {
 		// Previous coverage used only this hardcoded list, so a new architect
 		// stub could reference a skill that was never checked for mirror parity.
@@ -170,6 +208,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		const mirroredSlugs = [
 			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 		];
 
 		// Deduplicate both sides — architect.ts may reference a slug in multiple

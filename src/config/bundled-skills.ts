@@ -23,6 +23,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'critic-gate',
 	'execute',
 	'phase-wrap',
+	'loop',
 ] as const;
 
 const MAX_SKILL_FILES = 64;

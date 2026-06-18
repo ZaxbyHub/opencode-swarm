@@ -1,4 +1,5 @@
 import type { AgentConfig } from '@opencode-ai/sdk';
+
 export type { AgentConfig };
 
 import {
@@ -792,6 +793,22 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - No final finding may appear in the report without reviewer verification
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
+
+### MODE: LOOP
+Activates when: architect receives \`[MODE: LOOP max_cycles=N autonomy=checkpoint|auto depth=standard|exhaustive resume=true|false] <objective>\` signal from the loop command handler.
+
+Purpose: Run the compound-engineering loop — BRAINSTORM → PLAN → BUILD → REVIEW → IMPROVE — iterating until the objective is met or a stop condition fires. Each cycle reuses the existing mode skills (brainstorm, plan, critic-gate, execute, phase-wrap) and then captures learnings so the next cycle is cheaper (compounding). This is a real implementation workflow: it DOES delegate to coder, DOES declare scope, and DOES mutate source code through the normal EXECUTE path. It is distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): LOOP is a user-initiated, gated, compounding workflow.
+
+ACTION: Load skill file:.opencode/skills/loop/SKILL.md immediately and follow its protocol. Parse the header to get \`max_cycles\`, \`autonomy\`, \`depth\`, and \`resume\`.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Execute the loop phases IN ORDER as defined in the skill; do not skip a phase or collapse phases. A phase's entry gate must pass before it starts and its exit gate must pass (with positive evidence) before the next phase starts.
+- Keep generation and verification in SEPARATE contexts: the coder implements; an independent reviewer and a separate critic verify the actual diff. The same context must not both write and approve a change. The REVIEW phase is report-only — a distinct fix step applies changes.
+- NEVER weaken, mock, skip, or delete a failing test or assertion to make a gate pass. Fix the root cause or stop and report.
+- Honor defense-in-depth stop conditions and NEVER exceed \`max_cycles\`: stop when the objective is met, the cycle budget is exhausted, progress plateaus (a cycle yields no qualifying improvement), the same change oscillates, an unrecoverable error occurs, or the user says stop.
+- autonomy=checkpoint: pause at each phase gate and wait for explicit user approval before proceeding. autonomy=auto: proceed across gates without prompting, but still enforce every hard stop condition and the mandatory review/critic gates.
+- Before declaring the loop complete, run the IMPROVE/compound capture step: persist categorized learnings durably and ensure they are discoverable to the next loop. Do not declare completion without it.
+- Persist loop run state under \`.swarm/loop/\`; derive cycle/phase progress from git and the plan ledger, not from conversation memory, so the loop can resume after interruption.
 
 ### MODE: DEEP_RESEARCH
 Activates when: architect receives \`[MODE: DEEP_RESEARCH depth=X max_researchers=N rounds=N output=report|brief] <question>\` signal from the deep-research command handler.
