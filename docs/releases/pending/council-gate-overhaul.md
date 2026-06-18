@@ -7,7 +7,7 @@
 ## New Features
 - `phase_council` QA gate: full 5-member council reviews all work in a phase holistically at phase_complete time.
 - General Council advisory input offered as Phase 1b in MODE: BRAINSTORM and before `save_plan` in MODE: PLAN when council.general.enabled is true.
-- QA gate selection section unified: gates, parallel coders, and commit frequency presented together.
+- QA gate selection section unified: gates, parallel coders, commit frequency, and auto_proceed presented together.
 
 ## Clarifications
 - `final_council` explicitly documented as using the full 5-member council, not the General Council.

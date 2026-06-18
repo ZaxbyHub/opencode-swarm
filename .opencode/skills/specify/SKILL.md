@@ -30,10 +30,10 @@ Activates when: user asks to "specify", "define requirements", "write a spec", o
    - Edge cases and known failure modes
     - `[NEEDS CLARIFICATION]` markers for items where uncertainty could change scope, security, or core behavior, BUT ONLY after running the clarification funnel: (1) inventory all material uncertainties without numeric cap, (2) classify each as self_resolved/critic_resolved/research_needed/user_decision/deferred_nonblocking — **overconfidence guard:** if the default is not directly supported by user request, spec, or recorded context, classify as `user_decision` rather than `self_resolved`, (3) consult critic_sounding_board with candidate items — critic responds per SoundingBoardVerdict: UNNECESSARY→DROP, RESOLVE→RESOLVE, REPHRASE→REPHRASE, APPROVED→ASK_USER — **always-surface protection:** always-surface categories must not receive UNNECESSARY/DROP; override to APPROVED/ASK_USER, (4) record all resolved items as explicit assumptions in the spec, (5) use markers only for items that survive the funnel (ASK_USER or unresolved after critic consultation). Decision packet format: grouped by category, recommended defaults, blocking vs optional markers, impact of accepting default. Prefer informed defaults over asking
 5. Write the spec to `.swarm/spec.md`.
-5b. **QA GATE SELECTION, PARALLEL CODERS, AND COMMIT FREQUENCY (dialogue only).**
-Ask the user which QA gates to enable for this plan, how many parallel coders to use, and the commit frequency -- do not select on their behalf. Present all three items together as one unified exchange.
+5b. **QA GATE SELECTION, PARALLEL CODERS, COMMIT FREQUENCY, AND AUTO_PROCEED (dialogue only).**
+Ask the user which QA gates to enable for this plan, how many parallel coders to use, the commit frequency, and auto_proceed -- do not select on their behalf. Present all four items together as one unified exchange.
 
-Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder count, and commit frequency as a single user-facing section. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
+Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder count, commit frequency, and auto_proceed as a single user-facing section. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
 - reviewer (default: ON) -- code review of coder output
 - test_engineer (default: ON) -- test verification of coder output
 - sme_enabled (default: ON) -- SME consultation during planning/clarification
@@ -88,9 +88,9 @@ GATE SELECTION IS MANDATORY — these thoughts are WRONG and must be ignored:
 
 MANDATORY PAUSE: Do NOT write the spec summary (step 7). Do NOT suggest next steps.
 You are BLOCKED until ALL THREE of these conditions are met:
-  (1) The unified gate/coders/commit selection section has been presented to the user in a single message
-  (2) The user has responded (accept defaults OR customized list for all three items)
-  (3) The elected gates, parallel coder config, and commit policy have been written to .swarm/context.md under "## Pending QA Gate Selection" (and related sections as applicable)
+  (1) The unified gate/coders/commit/auto_proceed selection section has been presented to the user in a single message
+  (2) The user has responded (accept defaults OR customized list for all four items)
+  (3) The elected gates, parallel coder config, commit policy, and auto_proceed selection have been written to .swarm/context.md under "## Pending QA Gate Selection" (and related sections as applicable)
 <!-- BEHAVIORAL_GUIDANCE_END -->
 
 Do NOT call `set_qa_gates` yet — `plan.json` does not exist at this point. Once the user answers, write the elected gates to `.swarm/context.md` under a new section:
