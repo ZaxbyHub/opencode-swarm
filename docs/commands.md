@@ -385,6 +385,32 @@ Note: `/swarm turbo lean [on|off]` explicitly controls Lean Turbo regardless of 
 
 See [Modes Guide](modes.md) for tradeoffs.
 
+### `/swarm loop <objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]`
+
+Run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until the objective is met or a budget stop condition fires. Each cycle captures learnings so the next is cheaper.
+
+```text
+/swarm loop "add rate limiting to the public API"
+/swarm loop "harden auth session handling" --depth exhaustive --max-cycles 2
+/swarm loop "migrate config loader" --autonomy auto
+/swarm loop --resume
+```
+
+**Flags:**
+
+| Flag | Values | Default | Effect |
+|------|--------|---------|--------|
+| `--max-cycles` | `1`–`5` | `3` | Outer improvement cycles before budget stop |
+| `--autonomy` | `checkpoint`, `auto` | `checkpoint` | `checkpoint` pauses at phase gates; `auto` runs unattended (hard stop conditions still apply) |
+| `--depth` | `standard`, `exhaustive` | `standard` | `exhaustive` widens exploration in brainstorm/review phases |
+| `--resume` | _(boolean)_ | `false` | Resume the most recent unfinished loop run from `.swarm/loop/<run-id>/state.json` |
+
+**Phases per cycle:** BRAINSTORM (cycle 1) or refinement (cycle 2+) → PLAN (with critic gate) → BUILD (execute) → REVIEW (independent reviewer + separate critic, report-only) → IMPROVE (phase-wrap + learning-capture).
+
+**Stop conditions (defense-in-depth):** objective met, `--max-cycles` budget exhausted, plateau (no meaningful diff), oscillation (reverting prior changes), unrecoverable error, explicit user stop.
+
+**State directory:** `.swarm/loop/<run-id>/` — contains `state.json` (loop control: cycle counter, phase, gate outcomes, learnings) and `learnings/` (captured per-cycle knowledge). Implementation progress is derived from git and the plan ledger, not conversation memory.
+
 ### `/swarm full-auto [on|off]`
 
 Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
@@ -674,10 +700,20 @@ Acknowledge that the spec has drifted from the plan and suppress further warning
 
 When you type a two-word command like `/swarm config doctor`, Swarm tries the compound key first, then falls back to the single-token key. Aliases with hyphens exist for TUI shortcuts (which split on hyphens):
 
-| Command | Alias |
-|---------|-------|
-| `/swarm config doctor` | `/swarm config-doctor` |
-| `/swarm evidence summary` | `/swarm evidence-summary` |
+| Command | Alias | Notes |
+|---------|-------|-------|
+| `/swarm config doctor` | `/swarm config-doctor` | |
+| `/swarm evidence summary` | `/swarm evidence-summary` | |
+| `/swarm pr subscribe` | `/swarm pr-subscribe` | TUI shim (deprecated) |
+| `/swarm pr unsubscribe` | `/swarm pr-unsubscribe` | TUI shim (deprecated) |
+| `/swarm pr status` | `/swarm pr-status` | TUI shim (deprecated) |
+| `/swarm sdd status` | `/swarm sdd-status` | TUI shim (deprecated) |
+| `/swarm sdd validate` | `/swarm sdd-validate` | TUI shim (deprecated) |
+| `/swarm sdd project` | `/swarm sdd-project` | TUI shim (deprecated) |
+| `/swarm memory status` | `/swarm memory-status` | TUI shim (deprecated) |
+| `/swarm memory export` | `/swarm memory-export` | TUI shim (deprecated) |
+| `/swarm memory import` | `/swarm memory-import` | TUI shim (deprecated) |
+| `/swarm memory migrate` | `/swarm memory-migrate` | TUI shim (deprecated) |
 
 ---
 

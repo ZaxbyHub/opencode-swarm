@@ -71,9 +71,17 @@ stop.
      objective, parsed parameters, start HEAD commit, `cycle: 0`,
      `phase: brainstorm`, empty `improvements` and `learnings` lists.
    - Resume (`resume=true`): locate the most recent `.swarm/loop/<run-id>/`
-     with an unfinished state, read it, print a short progress summary (cycle
-     N of max_cycles, current phase, last gate result), and continue from the
-     recorded phase. If no resumable run exists, say so and stop.
+     with an unfinished state, read it, **validate required fields** (`run_id`,
+     `cycle`, `phase`, `done` must all be present and have the correct types;
+     if any are missing or malformed, report the corruption clearly and stop
+     rather than continuing with undefined values), print a short progress
+     summary (cycle N of max_cycles, current phase, last gate result), and
+     continue from the recorded phase. If no resumable run exists, say so and
+     stop.
+   - **Retention:** On both new-run and resume entry, prune completed runs
+     (`.done === true`) that exceed 10 in count — keep the 10 most recent by
+     timestamp, remove the rest. This prevents unbounded state accumulation
+     under `.swarm/loop/`.
 3. **State is derived, not authoritative for code.** The durable state file
    tracks *loop control* (cycle counter, phase, gate outcomes, captured
    learnings, stop reason). Actual implementation progress is derived from git

@@ -1491,7 +1491,7 @@ function buildSlashCommandsList(): string {
 			'acknowledge-spec-drift',
 			'council',
 		],
-		'Execution Modes': ['turbo', 'full-auto'],
+		'Execution Modes': ['turbo', 'full-auto', 'loop'],
 		Observation: [
 			'status',
 			'history',
