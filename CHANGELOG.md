@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.79.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.1...v7.79.2) (2026-06-18)
+
+
+### Bug Fixes
+
+* **ci:** add preload-based keepalive to wrapper for universal Bun [#32056](https://github.com/ZaxbyHub/opencode-swarm/issues/32056) fix ([e832e9a](https://github.com/ZaxbyHub/opencode-swarm/commit/e832e9ad6946093a638cf1019db2f51b59d2e8fd))
+* **ci:** per-file wall-clock timeout wrapper for Windows merge-queue shard hangs ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([a7bc92d](https://github.com/ZaxbyHub/opencode-swarm/commit/a7bc92d1be8a35c2f69e40029f0a921f2afd649b))
+* **ci:** per-file wall-clock timeout wrapper for Windows merge-queue shard hangs ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([9f11a90](https://github.com/ZaxbyHub/opencode-swarm/commit/9f11a9027a941974c8e1af897dd6d907f0c475c8))
+* **ci:** rename test fixtures to avoid CI auto-discovery ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([f2ace34](https://github.com/ZaxbyHub/opencode-swarm/commit/f2ace3432fe0324ac6a3cbb8f7bf08b13ed65380))
+* **tests:** add Bun [#32056](https://github.com/ZaxbyHub/opencode-swarm/issues/32056) keepalive workaround to Windows-hanging test files ([0e05d34](https://github.com/ZaxbyHub/opencode-swarm/commit/0e05d34f08a1e8e00b3baffe14f5fedadfd1fc50))
+
 ## [7.79.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.79.0...v7.79.1) (2026-06-17)
 
 
