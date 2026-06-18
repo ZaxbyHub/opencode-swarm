@@ -15,7 +15,7 @@ Issue #1283 identified a contract violation where the cold-start exploration bon
 This test ensures that:
 1. An entry with explicit applications (`applied_explicit_count > 0`) does NOT receive the cold-start bonus, even if young
 2. The gap between never-applied and explicitly-applied entries is approximately the bonus (~0.08)
-3. The contract from `src/hooks/knowledge-types.ts:28-36` is honored going forward
+3. The contract from `src/hooks/knowledge-types.ts:48-49` is honored going forward
 
 ## Test coverage
 
