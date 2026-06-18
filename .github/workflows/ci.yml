@@ -111,13 +111,15 @@ jobs:
             [ -f "$f" ] || continue
             tmp="$tmpdir/bun-out-$$-${f##*/}"
             exit_code=0
-            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
             if [ $exit_code -ne 0 ]; then
-              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp"; then
+              if grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp"; then
                 echo "::error file=$f::FAILED: $f"
                 failed=1
               fi
             fi
+            # Surface timing and timeout info to CI output (not just temp file)
+            grep -E "^\[TIMING\]|^\[TIMEOUT\]" "$tmp" || true
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
           exit $failed
