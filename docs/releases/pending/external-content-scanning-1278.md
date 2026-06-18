@@ -2,7 +2,7 @@
 
 ## Summary
 
-Fixed [#1278](https://github.com/zaxbysauce/opencode-swarm/issues/1278): inconsistent prompt-injection treatment across external content sources.
+Fixed [#1278](https://github.com/ZaxbyHub/opencode-swarm/issues/1278): inconsistent prompt-injection treatment across external content sources.
 
 Previously, `gitingest` and `web_search` returned external content directly to the LLM without scanning, while the external-skill curation pipeline applied comprehensive threat detection. This asymmetry created a security gap where attacker-controlled repository content or malicious web snippets could inject prompts directly into model context.
 
