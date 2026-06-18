@@ -30,7 +30,7 @@ const QUICK_PASS_FIXTURE = join(
 	'scripts',
 	'ci',
 	'fixtures',
-	'quick-pass.test.ts',
+	'quick-pass-fixture.ts',
 );
 const HANGING_FIXTURE = join(
 	REPO_ROOT,
@@ -39,7 +39,7 @@ const HANGING_FIXTURE = join(
 	'scripts',
 	'ci',
 	'fixtures',
-	'hanging.test.ts',
+	'hanging-fixture.ts',
 );
 
 // ---------------------------------------------------------------------------
