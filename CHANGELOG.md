@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.79.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.2...v7.79.3) (2026-06-18)
+
+
+### Bug Fixes
+
+* **planning:** offer general council before plan writing ([c27cb76](https://github.com/ZaxbyHub/opencode-swarm/commit/c27cb763ffc0e3f4ae8453f90b3520ade86802bd))
+
 ## [7.79.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.1...v7.79.2) (2026-06-18)
 
 
