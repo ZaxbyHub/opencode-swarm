@@ -903,6 +903,14 @@ export async function activateProposal(
 		/^status:\s*draft\s*$/m,
 		'status: active',
 	);
+	if (await isRejectedSkillContent(directory, cleanSlug, flipped)) {
+		return {
+			activated: false,
+			from,
+			to,
+			reason: 'previously rejected equivalent content',
+		};
+	}
 	let evaluation: SkillEvaluationResult | undefined;
 	if (options.evaluate) {
 		let incumbentContent: string | undefined;
