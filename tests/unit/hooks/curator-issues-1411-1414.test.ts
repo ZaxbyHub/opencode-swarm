@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
 	parseKnowledgeRecommendationsWithDiagnostics,
 	runCuratorPhase,
@@ -12,6 +13,10 @@ let tempDir: string;
 
 const knownId = '00000000-0000-4000-8000-000000000001';
 const unknownId = '00000000-0000-4000-8000-000000000099';
+const repoRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'../../..',
+);
 
 function swarmPath(...parts: string[]): string {
 	return path.join(tempDir, '.swarm', ...parts);
@@ -26,6 +31,25 @@ function readSummary(): CuratorSummary {
 	return JSON.parse(
 		fs.readFileSync(swarmPath('curator-summary.json'), 'utf-8'),
 	) as CuratorSummary;
+}
+
+function readRepoFile(...parts: string[]): string {
+	return fs.readFileSync(path.join(repoRoot, ...parts), 'utf-8');
+}
+
+function markdownTableCell(
+	markdown: string,
+	field: string,
+	cellIndex: number,
+): string | undefined {
+	for (const line of markdown.split(/\r?\n/)) {
+		const cells = line
+			.split('|')
+			.slice(1, -1)
+			.map((cell) => cell.trim().replaceAll('`', ''));
+		if (cells[0] === field) return cells[cellIndex];
+	}
+	return undefined;
 }
 
 function writeKnowledge(): void {
@@ -196,24 +220,84 @@ describe('curator issue regressions', () => {
 		expect(summary.digest).toContain('### Phase 51');
 	});
 
-	test('documents enabled defaults and malformed structured-output diagnostics', () => {
-		const planning = fs.readFileSync(
-			path.join(process.cwd(), 'docs', 'planning.md'),
-			'utf-8',
-		);
-		const configuration = fs.readFileSync(
-			path.join(process.cwd(), 'docs', 'configuration.md'),
-			'utf-8',
-		);
-		const knowledge = fs.readFileSync(
-			path.join(process.cwd(), 'docs', 'knowledge.md'),
-			'utf-8',
+	test('caps accumulated compliance observations and knowledge recommendations', async () => {
+		writeJson(swarmPath('curator-summary.json'), {
+			schema_version: 1,
+			session_id: 'prior',
+			last_updated: '2026-06-01T00:00:00.000Z',
+			last_phase_covered: 1,
+			digest: '### Phase 1\nprior',
+			phase_digests: [
+				{
+					phase: 1,
+					timestamp: '2026-06-01T00:00:00.000Z',
+					summary: 'prior',
+					agents_used: [],
+					tasks_completed: 0,
+					tasks_total: 0,
+					key_decisions: [],
+					blockers_resolved: [],
+				},
+			],
+			compliance_observations: Array.from({ length: 201 }, (_, i) => ({
+				phase: i,
+				timestamp: '2026-06-01T00:00:00.000Z',
+				type: 'workflow_deviation',
+				description: `observation-${i}`,
+				severity: 'info',
+			})),
+			knowledge_recommendations: Array.from({ length: 201 }, (_, i) => ({
+				action: 'rewrite',
+				lesson: `recommendation-${i}`,
+				reason: `recommendation-${i}`,
+			})),
+		});
+
+		await runCuratorPhase(
+			tempDir,
+			2,
+			['reviewer', 'test_engineer'],
+			{
+				enabled: true,
+				init_enabled: true,
+				phase_enabled: true,
+				max_summary_tokens: 2000,
+				min_knowledge_confidence: 0.5,
+				compliance_report: true,
+				suppress_warnings: false,
+				drift_inject_max_chars: 1000,
+			},
+			{},
 		);
 
-		expect(planning).toContain('| `enabled` | `true` |');
-		expect(configuration).toContain(
-			'| `enabled` | boolean | `true` | Master switch for Curator |',
+		const summary = readSummary();
+		expect(summary.compliance_observations).toHaveLength(200);
+		expect(summary.compliance_observations[0].description).toBe(
+			'observation-1',
 		);
+		expect(summary.knowledge_recommendations).toHaveLength(200);
+		expect(summary.knowledge_recommendations[0].lesson).toBe(
+			'recommendation-1',
+		);
+	});
+
+	test('documents enabled defaults and malformed structured-output diagnostics', () => {
+		const planning = readRepoFile('docs', 'planning.md');
+		const configuration = readRepoFile('docs', 'configuration.md');
+		const knowledge = readRepoFile('docs', 'knowledge.md');
+
+		expect(markdownTableCell(planning, 'enabled', 1)).toBe('true');
+		expect(markdownTableCell(planning, 'postmortem_enabled', 1)).toBe('true');
+		expect(markdownTableCell(planning, 'llm_timeout_ms', 1)).toBe('300000');
+		expect(markdownTableCell(planning, 'skill_generation_enabled', 1)).toBe(
+			'true',
+		);
+		expect(markdownTableCell(planning, 'skill_generation_mode', 1)).toBe(
+			'draft',
+		);
+		expect(markdownTableCell(planning, 'min_skill_confidence', 1)).toBe('0.7');
+		expect(markdownTableCell(planning, 'min_skill_confirmations', 1)).toBe('2');
+		expect(markdownTableCell(configuration, 'enabled', 2)).toBe('true');
 		expect(knowledge).toContain(
 			'reported through debug-gated curator diagnostics',
 		);

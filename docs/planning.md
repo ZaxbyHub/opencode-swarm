@@ -370,8 +370,14 @@ interface DriftReport {
 | `enabled` | `true` | Master switch; set to `false` to disable Curator activity |
 | `init_enabled` | `true` | Run curator init on first phase |
 | `phase_enabled` | `true` | Run phase analysis + drift check after each phase |
+| `postmortem_enabled` | `true` | Run curator postmortem analysis during closeout |
 | `max_summary_tokens` | `2000` | Cap on curator summary size |
 | `min_knowledge_confidence` | `0.7` | Minimum confidence for knowledge entry inclusion |
 | `drift_inject_max_chars` | `500` | Max chars of drift text injected into architect context |
+| `llm_timeout_ms` | `300000` | Timeout for curator init and phase LLM calls |
+| `skill_generation_enabled` | `true` | Enable curator-generated skill candidate output |
+| `skill_generation_mode` | `draft` | Write generated skill candidates as drafts by default |
+| `min_skill_confidence` | `0.7` | Minimum confidence for generated skill candidates |
+| `min_skill_confirmations` | `2` | Minimum confirmations before skill promotion |
 
 See the [Curator section in README.md](../README.md#curator) for full configuration details.

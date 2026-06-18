@@ -264,6 +264,8 @@ describe('EscalationTracker', () => {
 			expect(state1).not.toBe(state2);
 			expect(state1.patternCounts.get('repetition_loop')).toBe(1);
 			state1.patternCounts.set('repetition_loop', 99);
+			state1.lastPatternDetected?.affectedAgents.push('mutated-agent');
+			state1.lastPatternDetected?.affectedTargets.push('mutated-target');
 			state1.correctionsPending.push({
 				alert: 'mutated',
 				category: 'reasoning_error',
@@ -276,6 +278,12 @@ describe('EscalationTracker', () => {
 
 			const freshState = tracker.getState();
 			expect(freshState.patternCounts.get('repetition_loop')).toBe(1);
+			expect(freshState.lastPatternDetected?.affectedAgents).toEqual([
+				'agent-a',
+			]);
+			expect(freshState.lastPatternDetected?.affectedTargets).toEqual([
+				'src/foo.ts',
+			]);
 			expect(freshState.correctionsPending).toHaveLength(1);
 		});
 	});

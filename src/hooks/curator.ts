@@ -98,6 +98,8 @@ export type CuratorLLMDelegate = (
  * Used as fallback when config.llm_timeout_ms is not set. */
 const DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300_000;
 const MAX_CURATOR_PHASE_DIGESTS = 50;
+const MAX_CURATOR_COMPLIANCE_OBSERVATIONS = 200;
+const MAX_CURATOR_RECOMMENDATIONS = 200;
 
 // ============================================================================
 // DI Seam — _internals (declared before functions that use it to avoid TDZ)
@@ -133,6 +135,18 @@ export interface RecommendationParseDiagnostic {
 
 function capPhaseDigests(digests: PhaseDigestEntry[]): PhaseDigestEntry[] {
 	return digests.slice(-MAX_CURATOR_PHASE_DIGESTS);
+}
+
+function capComplianceObservations(
+	observations: ComplianceObservation[],
+): ComplianceObservation[] {
+	return observations.slice(-MAX_CURATOR_COMPLIANCE_OBSERVATIONS);
+}
+
+function capKnowledgeRecommendations(
+	recommendations: KnowledgeRecommendation[],
+): KnowledgeRecommendation[] {
+	return recommendations.slice(-MAX_CURATOR_RECOMMENDATIONS);
 }
 
 function buildDigestFromPhaseDigests(digests: PhaseDigestEntry[]): string {
@@ -1297,14 +1311,14 @@ export async function runCuratorPhase(
 				last_phase_covered: Math.max(priorSummary.last_phase_covered, phase),
 				digest: buildDigestFromPhaseDigests(phaseDigests),
 				phase_digests: phaseDigests,
-				compliance_observations: [
+				compliance_observations: capComplianceObservations([
 					...priorSummary.compliance_observations,
 					...complianceObservations,
-				],
-				knowledge_recommendations: [
+				]),
+				knowledge_recommendations: capKnowledgeRecommendations([
 					...priorSummary.knowledge_recommendations,
 					...knowledgeRecommendations,
-				],
+				]),
 			};
 		} else {
 			const phaseDigests = capPhaseDigests([phaseDigest]);
@@ -1315,8 +1329,12 @@ export async function runCuratorPhase(
 				last_phase_covered: phase,
 				digest: buildDigestFromPhaseDigests(phaseDigests),
 				phase_digests: phaseDigests,
-				compliance_observations: complianceObservations,
-				knowledge_recommendations: knowledgeRecommendations,
+				compliance_observations: capComplianceObservations(
+					complianceObservations,
+				),
+				knowledge_recommendations: capKnowledgeRecommendations(
+					knowledgeRecommendations,
+				),
 			};
 		}
 
