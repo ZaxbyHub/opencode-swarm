@@ -344,15 +344,17 @@ export function validateLesson(
 	}
 
 	// Layer 3 — Semantic Quality Checks
-	// Contradiction detection is heuristic; store with warning for review.
-	if (detectContradiction(candidate, existingLessons)) {
-		return {
-			valid: true,
-			layer: 3,
-			reason: 'possible contradiction with an existing lesson with shared tags',
-			severity: 'warning',
-		};
-	}
+	// NOTE: Contradiction detection disabled per #1295 — word-presence heuristic produces
+	// false positives for semantically equivalent lessons (e.g., "Always X" vs "Never Y without X").
+	// Re-enable with a smarter algorithm that understands semantic context.
+	// if (detectContradiction(candidate, existingLessons)) {
+	// 	return {
+	// 		valid: true,
+	// 		layer: 3,
+	// 		reason: 'possible contradiction with an existing lesson with shared tags',
+	// 		severity: 'warning',
+	// 	};
+	// }
 
 	// Vagueness check (warning — does not block)
 	if (isVagueLesson(candidate)) {

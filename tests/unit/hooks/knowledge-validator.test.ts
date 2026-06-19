@@ -525,7 +525,7 @@ describe('knowledge-validator', () => {
 	// =========================================================================
 
 	describe('Layer 3 - Semantic Quality', () => {
-		it('flags contradiction with shared tags as a warning', () => {
+		it('allows lessons with negation word pairs that share tags (detector disabled per #1295)', () => {
 			const candidate = 'always use typescript';
 			const existingLessons = ['never use typescript'];
 			const result = validateLesson(candidate, existingLessons, {
@@ -533,16 +533,13 @@ describe('knowledge-validator', () => {
 				scope: 'global',
 				confidence: 0.9,
 			});
-			expect(result).toEqual({
-				valid: true,
-				layer: 3,
-				reason:
-					'possible contradiction with an existing lesson with shared tags',
-				severity: 'warning',
-			});
+			// Contradiction detector is disabled; these pass through
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBeNull();
+			expect(result.severity).toBeNull();
 		});
 
-		it('keeps agreeing negation pairs storable with warning at most', () => {
+		it('stores agreeing negation pairs without false-positive contradictions (issue #1295)', () => {
 			const candidate = 'Always run tests before commit';
 			const existingLessons = ['Never commit without running tests'];
 			const result = validateLesson(candidate, existingLessons, {
@@ -550,8 +547,10 @@ describe('knowledge-validator', () => {
 				scope: 'global',
 				confidence: 0.9,
 			});
+			// These are semantically equivalent — should pass with no warnings
 			expect(result.valid).toBe(true);
-			expect(result.severity).not.toBe('error');
+			expect(result.layer).toBeNull();
+			expect(result.severity).toBeNull();
 		});
 
 		it('passes contradiction without shared tags', () => {
@@ -562,7 +561,10 @@ describe('knowledge-validator', () => {
 				scope: 'global',
 				confidence: 0.9,
 			});
-			// Should pass because no tech tags (no shared tags)
+			// NOTE: This test passed before and after the PR. The detector only compared
+			// entries that share inferred tags. "wake up early" has no tech tags (not a
+			// technical lesson), so no contradiction was ever detected — the gate at
+			// line 187 (shared tags check) filtered this case before the detector ran.
 			expect(result.valid).toBe(true);
 		});
 
