@@ -1,9 +1,8 @@
 /**
- * Issue #1151 PR 2 (Stage A) — completion observer tests.
+ * Background completion observer tests.
  *
- * Stage A is observe-only: the observer NEVER mutates the durable store or advances gates.
- * These tests assert no-throw, disabled-no-op, the synthetic trust gate, and that a
- * correlated completion does NOT change the pending record's status (Stage B will).
+ * Advisory completion ingestion mutates only the durable background ledger. It never
+ * advances workflow gates.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
@@ -45,7 +44,7 @@ function syntheticPartEvent(opts: {
 const completedEnvelope = (id: string) =>
 	`<task id="${id}" state="completed">\n<task_result>done</task_result>\n</task>`;
 
-describe('background completion observer (Stage A)', () => {
+describe('background completion observer', () => {
 	let dir: string;
 	beforeEach(() => {
 		dir = makeTempProject();
@@ -69,7 +68,7 @@ describe('background completion observer (Stage A)', () => {
 		).resolves.toBeUndefined();
 	});
 
-	it('does not mutate the durable record on a correlated completion (observe-only)', async () => {
+	it('records a trusted correlated completion in the durable ledger', async () => {
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_obs',
 			jobId: 'job_obs',
@@ -93,8 +92,39 @@ describe('background completion observer (Stage A)', () => {
 			}),
 		);
 
-		// Stage A: status is unchanged (still pending) — no gate/store mutation.
-		expect(findByCorrelationId(dir, 'ses_obs')?.status).toBe('pending');
+		const record = findByCorrelationId(dir, 'ses_obs');
+		expect(record?.status).toBe('completed');
+		expect(record?.result?.text).toBe('done');
+	});
+
+	it('ignores a correlated completion with the wrong parent session', async () => {
+		await recordPendingDelegation(dir, {
+			correlationId: 'ses_parent_mismatch',
+			jobId: 'job_obs',
+			subagentSessionId: 'ses_parent_mismatch',
+			parentSessionId: 'parent_session',
+			callID: 'c1',
+			normalizedAgent: 'reviewer',
+			swarmPrefixedAgent: 'reviewer',
+			planTaskId: '1.1',
+			evidenceTaskId: '1.1',
+		});
+
+		const obs = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory: dir,
+		});
+		await obs.event(
+			syntheticPartEvent({
+				text: completedEnvelope('ses_parent_mismatch'),
+				synthetic: true,
+				sessionID: 'other_parent',
+			}),
+		);
+
+		expect(findByCorrelationId(dir, 'ses_parent_mismatch')?.status).toBe(
+			'pending',
+		);
 	});
 
 	it('ignores non-synthetic envelope-shaped text (trust gate)', async () => {

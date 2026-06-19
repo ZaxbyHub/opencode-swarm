@@ -3,17 +3,17 @@
  *
  * Append-only JSONL event log under project-root `.swarm/background-delegations.jsonl`.
  * Each line is a full record snapshot; readers fold to the latest snapshot per
- * `correlationId`. This tracks background swarm `Task` dispatches so a later (Stage B)
- * trusted completion can be correlated to a real dispatch. The stale sweep bounds the
- * number of permanently-running (unresolved) entries by transitioning them to `stale`, so
- * the folded in-memory view stays bounded by distinct correlationIds. Note: the on-disk
- * log itself is append-only and is NOT compacted in Stage A — each dispatch leaves a small,
- * fixed number of lines; on-disk compaction of dropped/stale records is a future stage.
+ * `correlationId`. This tracks native background `Task` dispatches and deterministic
+ * async advisory lanes so trusted completions can be correlated to a real dispatch.
+ * The stale sweep bounds the number of permanently-running entries by transitioning
+ * them to `stale`, so the folded in-memory view stays bounded by distinct correlationIds.
+ * The on-disk log itself is append-only and is NOT compacted; each dispatch leaves a
+ * small, fixed number of lines.
  *
- * Stage A scope: dispatch records a `pending` snapshot and the stale sweep records
- * `stale` snapshots. There is NO gate advancement and NO completion mutation here — the
- * completion observer (Stage A) is read-only. Gate-affecting completion ingestion is
- * Stage B, gated on runtime confirmation of the upstream completion signal.
+ * Scope: dispatch records `pending`/`running` snapshots, collection or trusted synthetic
+ * completions record terminal snapshots, and the stale sweep records `stale` snapshots.
+ * This store still has NO gate advancement and NO gate evidence side effect; it is an
+ * advisory result ledger only.
  *
  * Concurrency: all writes (append, sweep) run under a single project-scoped lock via
  * `withEvidenceLock`, so concurrent dispatches/sweeps cannot interleave appends. Reads are
@@ -38,12 +38,15 @@ const STORE_LOCK_TASK = 'background-delegations';
 
 export type BackgroundDelegationStatus =
 	| 'pending'
+	| 'running'
 	| 'completed'
 	| 'error'
-	| 'stale';
+	| 'cancelled'
+	| 'stale'
+	| 'consumed';
 
 export interface BackgroundDelegationRecord {
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
 	/** Subagent session id from the dispatch envelope — the correlation key. */
 	correlationId: string;
 	/** Structured jobId from dispatch metadata when available, else null. */
@@ -64,11 +67,60 @@ export interface BackgroundDelegationRecord {
 	status: BackgroundDelegationStatus;
 	createdAt: number;
 	updatedAt: number;
+	/** Async advisory lane batch id. Present for dispatch_lanes_async records. */
+	batchId?: string;
+	/** Stable lane id within batchId. */
+	laneId?: string;
+	/** Advisory workflow/mode that launched the lane. */
+	mode?: string;
+	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
+	promptHash?: string;
+	/** Project/root provenance captured at dispatch time. */
+	workspace?: BackgroundWorkspaceSnapshot;
+	generation?: number;
+	result?: BackgroundDelegationResult;
+	completedAt?: number;
 }
+
+export interface BackgroundWorkspaceSnapshot {
+	directory: string;
+	gitHead: string | null;
+	dirtyHash: string | null;
+	prHeadSha: string | null;
+	scope: string | null;
+}
+
+export interface BackgroundDelegationResult {
+	text?: string;
+	error?: string;
+	chars: number;
+	truncated: boolean;
+	digest: string;
+}
+
+const ResultSchema = z
+	.object({
+		text: z.string().optional(),
+		error: z.string().optional(),
+		chars: z.number(),
+		truncated: z.boolean(),
+		digest: z.string(),
+	})
+	.strict();
+
+const WorkspaceSchema = z
+	.object({
+		directory: z.string(),
+		gitHead: z.string().nullable(),
+		dirtyHash: z.string().nullable(),
+		prHeadSha: z.string().nullable(),
+		scope: z.string().nullable(),
+	})
+	.strict();
 
 const RecordSchema = z
 	.object({
-		schemaVersion: z.literal(1),
+		schemaVersion: z.union([z.literal(1), z.literal(2)]),
 		correlationId: z.string().min(1),
 		jobId: z.string().nullable(),
 		subagentSessionId: z.string().min(1),
@@ -78,9 +130,25 @@ const RecordSchema = z
 		swarmPrefixedAgent: z.string(),
 		planTaskId: z.string().nullable(),
 		evidenceTaskId: z.string().nullable(),
-		status: z.enum(['pending', 'completed', 'error', 'stale']),
+		status: z.enum([
+			'pending',
+			'running',
+			'completed',
+			'error',
+			'cancelled',
+			'stale',
+			'consumed',
+		]),
 		createdAt: z.number(),
 		updatedAt: z.number(),
+		batchId: z.string().optional(),
+		laneId: z.string().optional(),
+		mode: z.string().optional(),
+		promptHash: z.string().optional(),
+		workspace: WorkspaceSchema.optional(),
+		generation: z.number().optional(),
+		result: ResultSchema.optional(),
+		completedAt: z.number().optional(),
 	})
 	.strict();
 
@@ -98,10 +166,8 @@ function ensureSwarmDir(directory: string): void {
  * (never throws). Records are returned in first-seen correlationId order.
  *
  * Cost: O(lines on disk) per call — a full read + parse + fold with no in-memory cache.
- * This is intentionally simple and acceptable at Stage A volumes (a swarm has few concurrent
- * background delegations, and the on-disk log is small). If sustained high-throughput
- * background load ever makes this hot, a future stage should add a stat-invalidated in-memory
- * cache and/or JSONL compaction (the same future-compaction work noted in the module header).
+ * This is intentionally simple and acceptable at advisory-lane volumes (a swarm has few
+ * concurrent background delegations, and the on-disk log is small).
  */
 export function readDelegations(
 	directory: string,
@@ -169,13 +235,20 @@ export interface RecordPendingInput {
 	swarmPrefixedAgent: string;
 	planTaskId: string | null;
 	evidenceTaskId: string | null;
+	batchId?: string;
+	laneId?: string;
+	mode?: string;
+	promptHash?: string;
+	workspace?: BackgroundWorkspaceSnapshot;
+	generation?: number;
 }
 
 /**
  * Record a `pending` background delegation. Runs the stale sweep first (lazy maintenance,
  * no plugin-init cost), then appends the pending snapshot — all under one lock acquisition
  * so concurrent dispatches cannot interleave. Best-effort: returns null on lock timeout or
- * write failure (Stage A has no gate effects, so a missed record is non-fatal).
+ * write failure. Async advisory launchers must treat null as a launch failure so they do
+ * not create untracked background work.
  */
 export async function recordPendingDelegation(
 	directory: string,
@@ -184,7 +257,7 @@ export async function recordPendingDelegation(
 ): Promise<BackgroundDelegationRecord | null> {
 	const now = Date.now();
 	const record: BackgroundDelegationRecord = {
-		schemaVersion: 1,
+		schemaVersion: input.batchId ? 2 : 1,
 		correlationId: input.correlationId,
 		jobId: input.jobId,
 		subagentSessionId: input.subagentSessionId,
@@ -197,6 +270,12 @@ export async function recordPendingDelegation(
 		status: 'pending',
 		createdAt: now,
 		updatedAt: now,
+		...(input.batchId ? { batchId: input.batchId } : {}),
+		...(input.laneId ? { laneId: input.laneId } : {}),
+		...(input.mode ? { mode: input.mode } : {}),
+		...(input.promptHash ? { promptHash: input.promptHash } : {}),
+		...(input.workspace ? { workspace: input.workspace } : {}),
+		...(input.generation !== undefined ? { generation: input.generation } : {}),
 	};
 
 	try {
@@ -221,6 +300,85 @@ export async function recordPendingDelegation(
 	}
 }
 
+export async function appendDelegationTransition(
+	directory: string,
+	correlationId: string,
+	transition: {
+		status: BackgroundDelegationStatus;
+		result?: BackgroundDelegationResult;
+		completedAt?: number;
+	},
+): Promise<BackgroundDelegationRecord | null> {
+	const now = Date.now();
+	try {
+		let next: BackgroundDelegationRecord | null = null;
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const current = findByCorrelationId(directory, correlationId);
+				if (!current) return;
+				if (isTerminal(current.status) && transition.status !== 'consumed') {
+					next = current;
+					return;
+				}
+				next = {
+					...current,
+					schemaVersion:
+						current.schemaVersion === 1 ? 2 : current.schemaVersion,
+					status: transition.status,
+					updatedAt: now,
+					...(transition.completedAt !== undefined
+						? { completedAt: transition.completedAt }
+						: transition.status === 'completed' || transition.status === 'error'
+							? { completedAt: now }
+							: {}),
+					...(transition.result ? { result: transition.result } : {}),
+				};
+				appendRecord(directory, next);
+			},
+		);
+		return next;
+	} catch (err) {
+		logger.warn(
+			`[background] appendDelegationTransition failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
+}
+
+export function findByBatchId(
+	directory: string,
+	batchId: string,
+): BackgroundDelegationRecord[] {
+	if (!batchId) return [];
+	return readDelegations(directory).filter(
+		(record) => record.batchId === batchId,
+	);
+}
+
+export function findOpenAsyncLaneBatches(
+	directory: string,
+): BackgroundDelegationRecord[] {
+	return readDelegations(directory).filter(
+		(record) =>
+			record.batchId !== undefined &&
+			(record.status === 'pending' || record.status === 'running'),
+	);
+}
+
+function isTerminal(status: BackgroundDelegationStatus): boolean {
+	return (
+		status === 'completed' ||
+		status === 'error' ||
+		status === 'cancelled' ||
+		status === 'stale' ||
+		status === 'consumed'
+	);
+}
+
 /**
  * Mark all `pending` records older than `timeoutMs` as `stale` (status-only; no gate
  * effect). Called within an already-held store lock.
@@ -232,7 +390,7 @@ function sweepStaleLocked(
 ): number {
 	let swept = 0;
 	for (const record of readDelegations(directory)) {
-		if (record.status !== 'pending') continue;
+		if (record.status !== 'pending' && record.status !== 'running') continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
 		appendRecord(directory, {
 			...record,

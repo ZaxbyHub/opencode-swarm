@@ -6,7 +6,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	appendDelegationTransition,
 	BACKGROUND_DELEGATIONS_FILE,
+	findByBatchId,
 	findByCorrelationId,
 	type RecordPendingInput,
 	readDelegations,
@@ -158,5 +160,58 @@ describe('pending-delegations store', () => {
 		expect(all).toHaveLength(8);
 		const ids = new Set(all.map((r) => r.correlationId));
 		expect(ids.size).toBe(8);
+	});
+
+	it('records async lane metadata and finds records by batch id', async () => {
+		await recordPendingDelegation(
+			dir,
+			input({
+				correlationId: 'ses_async',
+				batchId: 'batch-1',
+				laneId: 'security',
+				mode: 'deep-dive',
+				promptHash: 'hash-1',
+				workspace: {
+					directory: dir,
+					gitHead: null,
+					dirtyHash: null,
+					prHeadSha: 'abc123',
+					scope: 'src/security.ts',
+				},
+				generation: 1,
+			}),
+		);
+
+		const records = findByBatchId(dir, 'batch-1');
+		expect(records).toHaveLength(1);
+		expect(records[0].schemaVersion).toBe(2);
+		expect(records[0].laneId).toBe('security');
+		expect(records[0].workspace?.prHeadSha).toBe('abc123');
+	});
+
+	it('appends terminal completion exactly once', async () => {
+		await recordPendingDelegation(dir, input({ correlationId: 'ses_done' }));
+		const first = await appendDelegationTransition(dir, 'ses_done', {
+			status: 'completed',
+			result: {
+				text: 'done',
+				chars: 4,
+				truncated: false,
+				digest: 'digest-1',
+			},
+		});
+		const second = await appendDelegationTransition(dir, 'ses_done', {
+			status: 'error',
+			result: {
+				error: 'late',
+				chars: 4,
+				truncated: false,
+				digest: 'digest-2',
+			},
+		});
+
+		expect(first?.status).toBe('completed');
+		expect(second?.status).toBe('completed');
+		expect(findByCorrelationId(dir, 'ses_done')?.result?.text).toBe('done');
 	});
 });

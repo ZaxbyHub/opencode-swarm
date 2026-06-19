@@ -142,6 +142,24 @@ Build a complete feedback ledger before editing. Include every available source:
 If a source is unavailable, record that limitation. Do not treat missing access as
 evidence that no feedback exists.
 
+### Async advisory verification lanes
+
+After the complete feedback ledger exists and before editing, use
+`dispatch_lanes_async` when available for independent read-only verification lanes:
+comment classification, CI/log root-cause inspection, test impact mapping,
+release/docs claim checks, and stale-branch/conflict analysis. Record each
+returned `batch_id`, then continue only ledger-safe architect work: normalize
+feedback IDs, gather deterministic PR metadata, prepare reproduction commands,
+and plan likely fix groups. Do not edit, close items, or mark feedback resolved
+from running lanes.
+
+Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
+`PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, call
+`collect_lane_results` with `wait: true` for every open verification batch.
+Missing, stale, cancelled, or failed lanes remain explicit ledger limitations.
+If `dispatch_lanes_async` is unavailable, use blocking verification and record
+that async advisory lanes were unavailable.
+
 ### CI matrix cascade check (do this before fixing)
 
 When the PR's `unit` job is a matrix across multiple OSes and downstream jobs

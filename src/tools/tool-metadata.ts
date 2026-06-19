@@ -546,6 +546,16 @@ export const TOOL_METADATA = {
 			'dispatch multiple read-only exploration/review lanes concurrently and return a structured join result',
 		agents: ['architect'],
 	},
+	dispatch_lanes_async: {
+		description:
+			'launch multiple read-only advisory lanes asynchronously and return a batch id for later collection',
+		agents: ['architect'],
+	},
+	collect_lane_results: {
+		description:
+			'collect or poll results for a dispatch_lanes_async advisory batch without advancing workflow gates',
+		agents: ['architect'],
+	},
 	summarize_work: {
 		description:
 			'emit a short structured summary of completed work (key decisions, assumptions, risks, constraints) at task completion; rolls up per phase for architecture-supervisor review. Advisory, never blocks.',

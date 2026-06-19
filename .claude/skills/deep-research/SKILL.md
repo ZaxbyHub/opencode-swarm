@@ -97,8 +97,12 @@ RESEARCH CONTEXT — <subtopic>
 
 ## Step 4 — Parallel Synthesis Workers
 
-Dispatch up to `max_researchers` `the active swarm's sme agent` calls IN PARALLEL
-— one per subtopic — then STOP and wait for all responses. Each sme dispatch must
+Dispatch up to `max_researchers` `the active swarm's sme agent` calls with
+`dispatch_lanes_async` when available — one per subtopic. Record the returned
+`batch_id`, then continue architect-owned retrieval quality work that does not
+depend on worker output: tighten the evidence ledger, check source authority,
+prepare reviewer shard structure, and identify unresolved gaps. Do not write final
+claims from running lanes. Each sme dispatch must
 include:
 - `DOMAIN`: the subtopic
 - `TASK`: "Synthesize an evidence-grounded answer for this subtopic. Cite each
@@ -109,9 +113,13 @@ include:
 - `OUTPUT`: claims with evidence refs, contradictions noted, confidence (0–1)
 - `SKILLS: none`
 
-The sme synthesizes only from the provided evidence — it does not fetch. Collect
-all worker responses into a candidate findings set, each finding tagged with its
-subtopic, evidence refs, and the worker's confidence.
+The sme synthesizes only from the provided evidence — it does not fetch. Before
+Step 5, call `collect_lane_results` with `wait: true` for every open synthesis
+batch. Collect all completed worker responses into a candidate findings set, each
+finding tagged with its subtopic, evidence refs, and the worker's confidence.
+Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps. If
+`dispatch_lanes_async` is unavailable, use blocking parallel dispatch and record
+that async advisory lanes were unavailable.
 
 ## Step 5 — Dual-Reviewer Claim Verification
 

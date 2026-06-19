@@ -102,19 +102,17 @@ in `tool.execute.before`, so OpenCode rejects the call before the background tas
 a belt-and-suspenders check in `tool.execute.after` ensures a running placeholder never
 advances workflow state even if it slips through.
 
-### Opt-in tracking (PR 2 Stage A)
+### Opt-in tracking and advisory ingestion
 
 Setting `hooks.background_subagents: true` lifts the block: background swarm dispatches are
 **allowed and tracked** as durable pending records in `.swarm/background-delegations.jsonl`,
-and a read-only observer logs the upstream completion signal (the trusted `synthetic` task
-envelope) when `OPENCODE_SWARM_DEBUG=1`. Unresolved pendings are transitioned to `stale`
-after `hooks.background_pending_timeout_minutes` (default 30); the on-disk log is append-only
-and not compacted in Stage A.
+and the observer ingests trusted `synthetic` task envelopes into that advisory ledger when
+they correlate to a real dispatch. Unresolved pendings are transitioned to `stale` after
+`hooks.background_pending_timeout_minutes` (default 30); the on-disk log is append-only.
 
-> **Stage A is observe-only:** a background completion does **not** advance workflow gates or
-> record gate evidence yet. This stage exists to confirm the runtime completion signal before
-> gate-affecting ingestion (Stage B) is enabled. Until then, background swarm delegations are
-> tracked but do not satisfy reviewer/test_engineer gates — use foreground delegations when you
+> **Advisory only:** a background completion does **not** advance workflow gates or
+> record gate evidence yet. Background swarm delegations are tracked and collectable, but they
+> do not satisfy reviewer/test_engineer gates — use foreground delegations when you
 > need a gate to advance. Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`.
 
 ---

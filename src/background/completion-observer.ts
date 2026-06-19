@@ -1,5 +1,5 @@
 /**
- * Background subagent completion OBSERVER (issue #1151, PR 2 Stage A).
+ * Background subagent completion observer/ingester.
  *
  * Registers as a swarm `event` hook to watch for the upstream background-completion signal:
  * a message part with `synthetic === true` whose text is a task envelope with
@@ -7,17 +7,21 @@
  * background-delegation record, it is logged (debug-gated) as the empirical confirmation
  * instrument operators use to verify the runtime signal in a real environment.
  *
- * Stage A is strictly READ-ONLY: this observer NEVER advances workflow gates, records gate
- * evidence, or mutates the durable store. Gate-affecting completion ingestion is Stage B,
- * gated on runtime confirmation produced by exactly this observer.
+ * PR1 async advisory lanes ingest trusted terminal completions into the durable
+ * background-delegation ledger only. This still NEVER advances workflow gates or records
+ * gate evidence; gate-bearing execution is intentionally outside this advisory path.
  *
  * The `synthetic` flag is the trust gate (set by OpenCode, not the model/user). Non-synthetic
  * text that merely looks like an envelope is ignored. The observer is fail-open: any error is
  * swallowed so it can never block event delivery or plugin load (Invariant 1/10).
  */
 
+import { createHash } from 'node:crypto';
 import * as logger from '../utils/logger.js';
-import { findByCorrelationId } from './pending-delegations.js';
+import {
+	appendDelegationTransition,
+	findByCorrelationId,
+} from './pending-delegations.js';
 import { parseTaskEnvelope } from './task-envelope.js';
 
 interface ObserverConfig {
@@ -37,7 +41,7 @@ interface MaybeEvent {
 }
 
 /**
- * Build the Stage A completion observer. Returns an `event` handler suitable for the
+ * Build the background completion observer. Returns an `event` handler suitable for the
  * OpenCode plugin `event` hook. No-op (cheap early return) when the feature is disabled.
  */
 export function createBackgroundCompletionObserver(opts: {
@@ -73,16 +77,42 @@ export function createBackgroundCompletionObserver(opts: {
 				// Synthetic completion with no matching durable record — log for visibility
 				// but take no action (could be a non-swarm background task or a spoof).
 				logger.log(
-					`[background] observed synthetic completion (state=${envelope.state}) for subagent ${envelope.sessionId} in parent ${parentSessionId} with NO matching pending record — ignored (Stage A observe-only)`,
+					`[background] observed synthetic completion (state=${envelope.state}) for subagent ${envelope.sessionId} in parent ${parentSessionId} with NO matching pending record — ignored`,
 				);
 				return;
 			}
+			if (pending.parentSessionId !== parentSessionId) {
+				logger.warn(
+					`[background] observed synthetic completion for ${envelope.sessionId} with parent mismatch: expected=${pending.parentSessionId} observed=${parentSessionId}; ignored`,
+				);
+				return;
+			}
+			if (pending.status !== 'pending' && pending.status !== 'running') {
+				logger.log(
+					`[background] observed duplicate/late completion for ${envelope.sessionId}; current status=${pending.status}; ignored`,
+				);
+				return;
+			}
+
+			const text =
+				envelope.state === 'error'
+					? (envelope.errorText ?? '')
+					: (envelope.resultText ?? '');
+			await appendDelegationTransition(directory, envelope.sessionId, {
+				status: envelope.state === 'error' ? 'error' : 'completed',
+				result: {
+					...(envelope.state === 'error' ? { error: text } : { text }),
+					chars: envelope.resultChars ?? text.length,
+					truncated: envelope.resultTruncated ?? false,
+					digest: digest(text),
+				},
+			});
 
 			logger.log(
 				`[background] observed trusted completion (state=${envelope.state}) correlated to pending delegation: ` +
 					`agent=${pending.normalizedAgent} task=${pending.evidenceTaskId ?? pending.planTaskId ?? 'unknown'} ` +
 					`parent=${pending.parentSessionId} observedParent=${parentSessionId} pendingStatus=${pending.status} ` +
-					'(Stage A observe-only — no gate effect; Stage B will ingest completion)',
+					'(advisory ledger update only — no gate effect)',
 			);
 		} catch (err) {
 			// Fail-open: never block event delivery.
@@ -93,4 +123,8 @@ export function createBackgroundCompletionObserver(opts: {
 	};
 
 	return { event };
+}
+
+function digest(text: string): string {
+	return createHash('sha256').update(text).digest('hex');
 }

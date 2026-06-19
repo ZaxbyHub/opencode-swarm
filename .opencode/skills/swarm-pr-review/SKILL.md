@@ -468,11 +468,11 @@ Tool candidate rules:
 
 ## Phase 3: Parallel Base Explorer Lanes
 
-Launch all base lanes with the `dispatch_lanes` tool in one call. Pass the six lane specs together, set `max_concurrent` to `6`, and treat the returned `lane_results` as the join barrier before synthesis. Use read-only explorer/reviewer-style agents; do not rely on model-emitted background Agent calls or native background flags for base-lane parallelism.
+Launch all base lanes with `dispatch_lanes_async` when available. Pass the six lane specs together, set `max_concurrent` to `6`, record the returned `batch_id`, and continue only non-dependent architect work: refine the obligation ledger, inspect PR metadata, prepare micro-lane trigger checks, and run deterministic read-only local tools. Do not synthesize findings from running lanes.
 
-If `dispatch_lanes` is unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record that deterministic dispatch was unavailable in the validation gate.
+Before Phase 4 or synthesis, call `collect_lane_results` with `wait: true` for the base-lane batch and treat the collected `lane_results` as the join barrier. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
 
-**lane id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, every `dispatch_lanes` lane `id` MUST be unique within that dispatch batch and should include lane and attempt suffixes (e.g. `pr_review_explore_lane1_attempt2`). Never reuse an id in the same batch unless intentionally replacing that exact lane before dispatch.
+**lane id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, every `dispatch_lanes_async` or `dispatch_lanes` lane `id` MUST be unique within that dispatch batch and should include lane and attempt suffixes (e.g. `pr_review_explore_lane1_attempt2`). Never reuse an id in the same batch unless intentionally replacing that exact lane before dispatch.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
@@ -510,7 +510,7 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After `dispatch_lanes` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes` again when more than one read-only micro-lane is needed. Do not launch irrelevant micro-lanes.
+After `collect_lane_results` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Collect every micro-lane batch with `wait: true` before reviewer classification. Do not launch irrelevant micro-lanes.
 
 Each micro-lane receives:
 
@@ -793,7 +793,7 @@ Council mode is opt-in only and adversarial.
 When triggered:
 
 1. Build the same context pack as default mode.
-2. Launch all council agents with one `dispatch_lanes` call when available; use the returned `lane_results` as the join barrier before reviewer classification.
+2. Launch all council agents with one `dispatch_lanes_async` call when available; continue only non-dependent context preparation while they run, then use `collect_lane_results` with `wait: true` as the join barrier before reviewer classification. Fall back to blocking `dispatch_lanes` when async launch is unavailable.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
 5. Agents return evidence states only: `EVIDENCE_FOUND`, `SUSPICIOUS`, or `CLEAN`.

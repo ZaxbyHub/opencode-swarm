@@ -209,12 +209,12 @@ export const HooksConfigSchema = z.object({
 	delegation_gate: z.boolean().default(true),
 	delegation_max_chars: z.number().min(500).max(20000).default(4000),
 	/**
-	 * Issue #1151 PR 2 (Stage A): opt-in support for OpenCode background subagents.
+	 * Opt-in support for OpenCode background subagents.
 	 * When false (default) swarm fail-closed-blocks background swarm `Task` dispatches
 	 * (PR 1 behavior). When true, background swarm dispatches are allowed and tracked as
-	 * durable pending records under `.swarm/background-delegations.jsonl`, and a read-only
-	 * completion observer logs the upstream completion signal — but NO workflow gate is
-	 * advanced from a background completion in Stage A (gate-affecting ingestion is Stage B).
+	 * durable records under `.swarm/background-delegations.jsonl`, and the completion
+	 * observer ingests trusted upstream completion signals into that advisory ledger. NO
+	 * workflow gate is advanced and NO gate evidence is recorded from a background completion.
 	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` to have any effect.
 	 */
 	background_subagents: z.boolean().default(false),

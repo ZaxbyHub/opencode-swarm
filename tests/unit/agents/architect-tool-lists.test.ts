@@ -146,7 +146,13 @@ describe('Available Tools generation from AGENT_TOOL_MAP', () => {
 	});
 
 	it('has descriptions for tools that have TOOL_DESCRIPTIONS entries', () => {
-		for (const tool of ['build_check', 'checkpoint', 'dispatch_lanes']) {
+		for (const tool of [
+			'build_check',
+			'checkpoint',
+			'collect_lane_results',
+			'dispatch_lanes',
+			'dispatch_lanes_async',
+		]) {
 			const description =
 				TOOL_DESCRIPTIONS[tool as keyof typeof TOOL_DESCRIPTIONS];
 			expect(description).toBeTruthy();

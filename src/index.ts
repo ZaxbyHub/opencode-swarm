@@ -526,8 +526,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 	);
 	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
-	// Issue #1151 PR 2 (Stage A): read-only observer for the background-subagent
-	// completion signal. No-op unless hooks.background_subagents is opted in.
+	// Advisory ingester for trusted background-subagent completion signals.
+	// No-op unless hooks.background_subagents is opted in; never advances gates.
 	const backgroundCompletionObserver = createBackgroundCompletionObserver({
 		config: {
 			enabled:

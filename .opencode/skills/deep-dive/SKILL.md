@@ -45,7 +45,7 @@ Produce a SCOPE MAP: list of files, modules, and interfaces within the audit bou
 
 ## Step 3 — Explorer Missions (Parallel Waves)
 
-Dispatch explorer waves using parallel Task calls. Each wave contains up to `max_explorers` missions.
+Dispatch explorer waves with `dispatch_lanes_async` when available. Each wave contains up to `max_explorers` missions.
 
 **File caps per mission:**
 - 8 files maximum per mission
@@ -71,7 +71,9 @@ Each explorer mission receives:
 - The scope map context from Step 2
 - Instruction: "You are performing a [LANE] audit. Report findings as candidate observations with severity (INFO/LOW/MEDIUM/HIGH/CRITICAL), location, and evidence."
 
-Explorer missions are dispatched in parallel waves. Wait for ALL missions in a wave to complete before dispatching the next wave.
+Explorer missions are dispatched in parallel waves. Launch the wave, record the returned `batch_id`, then continue deterministic architect work that does not depend on lane output: refine the scope map, build the candidate ledger shell, inspect local evidence with read-only tools, and prepare reviewer shard structure. Do not synthesize findings from running lanes.
+
+At the Step 4 boundary, call `collect_lane_results` with `wait: true` for every open wave batch. Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps; do not silently proceed past a required lane. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes` or parallel Task calls and record that async advisory lanes were unavailable.
 
 Explorers generate CANDIDATE FINDINGS only — they do NOT make verdicts. All findings are unverified until Step 5.
 
