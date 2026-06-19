@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.79.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.5...v7.79.6) (2026-06-19)
+
+
+### Bug Fixes
+
+* **ci:** apply biome auto-fixes for quality job ([f7870bb](https://github.com/ZaxbyHub/opencode-swarm/commit/f7870bb9585794f94adc3102c467193e9c596f10))
+* **knowledge-validator:** iterate all occurrences, add release fragment and direct tests ([5ca19a6](https://github.com/ZaxbyHub/opencode-swarm/commit/5ca19a63d974986a2a7e7fbfe3f4454551755cb2))
+* **knowledge-validator:** require context overlap to detect lesson contradictions ([9b4cd86](https://github.com/ZaxbyHub/opencode-swarm/commit/9b4cd865ff06c75ec80d881dd8929d517f15766a))
+* **skill-usage:** Eliminate marker-loss reprocessing; enforce explicit task attribution ([d8a2a41](https://github.com/ZaxbyHub/opencode-swarm/commit/d8a2a41d914b9e3d4a56bf5df6a6de4445be28e0))
+* **skill-usage:** preserve malformed log lines in prune and strengthen tests ([113dca5](https://github.com/ZaxbyHub/opencode-swarm/commit/113dca5e8057e2bd58c520de3e0d58ade90b1d4e))
+
 ## [7.79.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.4...v7.79.5) (2026-06-18)
 
 
