@@ -330,7 +330,301 @@ describe('listSkills + inspectSkill + activateProposal', () => {
 // jaccardSimilarity tests
 // ============================================================================
 
-const { jaccardSimilarity } = _internals;
+const { jaccardSimilarity, isSkillMaturityEligible } = _internals;
+
+// Helper to create a minimal entry for isSkillMaturityEligible testing
+function makeEligibilityEntry(
+	overrides: Partial<{
+		confidence: number;
+		confirmed_by: Array<{ phase_number?: number }>;
+		retrieval_outcomes: {
+			applied_count?: number;
+			succeeded_after_count?: number;
+			failed_after_count?: number;
+			applied_explicit_count?: number;
+			succeeded_after_shown_count?: number;
+		};
+	}> = {},
+) {
+	return {
+		id: 'test-eligibility',
+		tier: 'swarm' as const,
+		lesson: 'test lesson',
+		category: 'process' as const,
+		tags: ['test'],
+		scope: 'global' as const,
+		confidence: 0.9,
+		status: 'established' as const,
+		confirmed_by: [
+			{
+				phase_number: 1,
+				confirmed_at: '2025-01-01T00:00:00.000Z',
+				project_name: 'test',
+			},
+			{
+				phase_number: 2,
+				confirmed_at: '2025-01-01T00:00:00.000Z',
+				project_name: 'test',
+			},
+		],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 2 as const,
+		created_at: '2025-01-01T00:00:00.000Z',
+		updated_at: '2025-01-01T00:00:00.000Z',
+		project_name: 'test',
+		triggers: [],
+		required_actions: [],
+		forbidden_actions: [],
+		applies_to_agents: [],
+		directive_priority: 'medium' as const,
+		...overrides,
+	};
+}
+
+describe('isSkillMaturityEligible — phase number filtering', () => {
+	it('eligible when confirmed_by has sufficient distinct numeric phase numbers', () => {
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+				{
+					phase_number: 2,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+		});
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(true);
+	});
+
+	it('filters undefined phase_number values before counting distinct phases', () => {
+		// confirmed_by includes records where phase_number is undefined (e.g. ProjectConfirmationRecord)
+		// The filter should count only numeric phase numbers, so {1, undefined} → {1} → size 1
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+				{
+					phase_number: undefined,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			] as Array<{ phase_number?: number }>,
+		});
+		// minConfirmations: 2 but only 1 distinct numeric phase → should be ineligible
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+
+	it('treats all-undefined phase_number as 0 distinct phases', () => {
+		// All phase_numbers are undefined → distinct set is empty → size 0
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: undefined,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+				{
+					phase_number: undefined,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			] as Array<{ phase_number?: number }>,
+		});
+		// minConfirmations: 2 but 0 distinct phases → ineligible
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+
+	it('treats empty confirmed_by as 0 distinct phases', () => {
+		const entry = makeEligibilityEntry({ confirmed_by: [] });
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+
+	it('does NOT count same-phase repeated confirmations as multiple distinct phases', () => {
+		// Two confirmations but both on phase 1 → distinct set size is 1, not 2
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-02T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+		});
+		// minConfirmations: 2 but only 1 distinct phase → ineligible
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+
+	it('outcomeSignal === 0 (neutral) with strongOutcomes=true passes via the legacy fallback', () => {
+		// Neutral signal: positives == negatives → signal = 0
+		// applied_explicit_count=3 gives strongOutcomes=true, ignored_count=3 gives neutral signal
+		const entry = makeEligibilityEntry({
+			confidence: 0.6,
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+				applied_explicit_count: 3, // strong outcomes
+				ignored_count: 3, // neutralizes the signal to 0
+			},
+		});
+		// Low confidence (< 0.7) and only 1 distinct phase, but strongOutcomes=true
+		// → legacy fallback path should pass via strongOutcomes
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(true);
+	});
+
+	it('outcomeSignal > 0 with strongOutcomes=true passes via positive gate', () => {
+		// Positive signal: positives > negatives
+		// applied_explicit_count=4 gives strongOutcomes=true, no negatives
+		const entry = makeEligibilityEntry({
+			confidence: 0.5,
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+				applied_explicit_count: 4, // strong outcomes + positive signal
+			},
+		});
+		// Low confidence and only 1 phase, but positive signal + strong outcomes
+		// → positive gate should return true immediately
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(true);
+	});
+
+	it('outcomeSignal < 0 is always rejected', () => {
+		// Negative signal: negatives > positives (even with adequate distinct phases)
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+				{
+					phase_number: 2,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 5, // negative signal
+				violated_count: 2,
+			},
+		});
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+
+	it('eligible via strong outcomes even with insufficient distinct phases', () => {
+		// Has only 1 distinct phase but strong positive outcomes → should be eligible
+		const entry = makeEligibilityEntry({
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+				applied_explicit_count: 3, // STRONG_SKILL_OUTCOME_COUNT = 3
+			},
+		});
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(true);
+	});
+
+	it('high confidence alone is NOT enough without adequate distinct phases or strong outcomes', () => {
+		// High confidence (0.9) but only 1 distinct phase and no strong outcomes
+		// → should be rejected: confidence alone does not bypass distinct-phase count
+		const entry = makeEligibilityEntry({
+			confidence: 0.95,
+			confirmed_by: [
+				{
+					phase_number: 1,
+					confirmed_at: '2025-01-01T00:00:00.000Z',
+					project_name: 'test',
+				},
+			],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+		});
+		const result = isSkillMaturityEligible(entry, {
+			minConfidence: 0.7,
+			minConfirmations: 2,
+		});
+		expect(result).toBe(false);
+	});
+});
 
 describe('jaccardSimilarity', () => {
 	it('identical sets return 1.0', () => {

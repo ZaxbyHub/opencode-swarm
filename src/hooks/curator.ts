@@ -40,6 +40,7 @@ import {
 	formatLearningSummary,
 } from '../services/learning-metrics.js';
 import {
+	DEFAULT_SKILL_MIN_CONFIDENCE,
 	listSkills,
 	parseDraftFrontmatter,
 	retireSkill,
@@ -1390,7 +1391,7 @@ export async function runCuratorPhase(
 					if (
 						cand.confidence <
 						((config as { min_skill_confidence?: number })
-							.min_skill_confidence ?? 0.85)
+							.min_skill_confidence ?? DEFAULT_SKILL_MIN_CONFIDENCE)
 					) {
 						continue;
 					}
