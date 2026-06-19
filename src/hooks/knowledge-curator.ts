@@ -561,6 +561,9 @@ function parseV3BatchEnrichmentResponse(
 	if (parsed.length < expectedLength) {
 		missing.push(`expected ${expectedLength} items but got ${parsed.length}`);
 	} else if (parsed.length > expectedLength) {
+		warn(
+			`[knowledge-curator] parseV3BatchEnrichmentResponse received ${parsed.length} items but expected ${expectedLength}; extras will be discarded`,
+		);
 		missing.push(
 			`got ${parsed.length} items but only first ${expectedLength} will be used; extras discarded`,
 		);

@@ -1079,6 +1079,7 @@ export const KnowledgeConfigSchema = z.object({
 		.object({
 			max_calls_per_day: z.number().int().min(0).max(1000).default(30),
 			quota_window: z.enum(['utc', 'local']).default('utc'),
+			batch_size: z.number().int().min(1).max(100).optional(),
 		})
 		.default({ max_calls_per_day: 30, quota_window: 'utc' }),
 });

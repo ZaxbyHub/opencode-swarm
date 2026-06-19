@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { KnowledgeConfigSchema } from '../../src/config/schema.js';
 import { curateAndStoreSwarm } from '../../src/hooks/knowledge-curator.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
 import { resolveUnactionablePath } from '../../src/hooks/knowledge-validator.js';
@@ -246,7 +247,7 @@ describe('curator v3 enrichment + retry (Task 4.2)', () => {
 		expect(readQuotaState(dir, 'skill-improver-quota.json')).toBeNull();
 	});
 
-	it('stores without any LLM call when the lesson-entry is already actionable via future structured inputs', async () => {
+	it('enriches a plain-prose lesson through the batch path even when no v3 fields are pre-populated', async () => {
 		// Sanity guard for Phase 5: a delegate that would fail loudly proves the
 		// gate short-circuits when actionability is already satisfied. Today the
 		// prose path never pre-populates fields, so this asserts the enrichment is
@@ -497,6 +498,82 @@ describe('curator v3 enrichment + retry (Task 4.2)', () => {
 			},
 		);
 
+		// 10 lessons / batch size 3 => 4 calls (3+3+3+1)
+		expect(calls).toBe(4);
+		expect(result.stored).toBe(10);
+	});
+
+	it('parses enrichment batch_size through KnowledgeConfigSchema and honors it in curateAndStoreSwarm', async () => {
+		const lessons = Array.from(
+			{ length: 10 },
+			(_, i) => `Lesson ${i + 1}: always use immutable data structures`,
+		);
+		let calls = 0;
+		const mockDelegate = async (
+			_system: string,
+			userInput: string,
+		): Promise<string> => {
+			calls++;
+			const expectedLenMatch = /The array length MUST be exactly (\d+)\./.exec(
+				userInput,
+			);
+			const expectedLen = expectedLenMatch
+				? Number.parseInt(expectedLenMatch[1], 10)
+				: 0;
+			return JSON.stringify(
+				Array.from({ length: expectedLen }, () => ({
+					applies_to_agents: ['coder'],
+					required_actions: ['use immutable data'],
+					directive_priority: 'medium',
+				})),
+			);
+		};
+
+		const parsed = KnowledgeConfigSchema.parse({
+			enabled: true,
+			swarm_max_entries: 100,
+			hive_max_entries: 200,
+			auto_promote_days: 90,
+			max_inject_count: 5,
+			dedup_threshold: 0.6,
+			scope_filter: ['global'],
+			hive_enabled: false,
+			rejected_max_entries: 20,
+			validation_enabled: true,
+			evergreen_confidence: 0.9,
+			evergreen_utility: 0.8,
+			low_utility_threshold: 0.3,
+			min_retrievals_for_utility: 3,
+			schema_version: 2,
+			same_project_weight: 1,
+			cross_project_weight: 0.5,
+			min_encounter_score: 0.1,
+			initial_encounter_score: 1,
+			encounter_increment: 0.1,
+			max_encounter_score: 10,
+			default_max_phases: 10,
+			todo_max_phases: 3,
+			sweep_enabled: true,
+			enrichment: {
+				max_calls_per_day: 30,
+				quota_window: 'utc',
+				batch_size: 3,
+			},
+		});
+
+		const result = await curateAndStoreSwarm(
+			lessons,
+			'proj',
+			{ phase_number: 1 },
+			dir,
+			parsed,
+			{
+				llmDelegate: mockDelegate,
+				enrichmentQuota: { maxCalls: 30, window: 'utc' },
+			},
+		);
+
+		expect(parsed.enrichment?.batch_size).toBe(3);
 		// 10 lessons / batch size 3 => 4 calls (3+3+3+1)
 		expect(calls).toBe(4);
 		expect(result.stored).toBe(10);

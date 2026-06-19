@@ -12,6 +12,7 @@
   - quota exhaustion uses `knowledge-enrichment-quota.json`
   - enrichment batching stores 12 lessons in 2 enrichment calls
   - skill improver quota state is untouched by curator enrichment.
+  - retry is batch-level: the whole batch is retried, not individual items.
 
 ## Why
 
@@ -24,6 +25,7 @@ scope behavior.
 
 - Large retrospective batches now consume substantially fewer enrichment calls.
 - Curator enrichment remains isolated from skill improver quota state.
+- Each enrichment attempt — including retries — counts against the knowledge-enrichment quota.
 - Queue behavior and actionability quarantine semantics remain unchanged.
 
 ## Migration
