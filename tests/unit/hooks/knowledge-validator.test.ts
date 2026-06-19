@@ -6,12 +6,12 @@
 import { describe, expect, it } from 'bun:test';
 import type { KnowledgeCategory } from '../../../src/hooks/knowledge-types.js';
 import {
+	_internals,
 	DANGEROUS_COMMAND_PATTERNS,
 	INJECTION_PATTERNS,
 	INVISIBLE_FORMAT_CHARS,
 	SECURITY_DEGRADING_PATTERNS,
 	validateLesson,
-	_internals,
 } from '../../../src/hooks/knowledge-validator.js';
 
 describe('knowledge-validator', () => {
@@ -992,15 +992,15 @@ describe('extractContextWords / hasSignificantOverlap (direct)', () => {
 	});
 
 	it('hasSignificantOverlap returns true when sets share at least one element', () => {
-		expect(hasSignificantOverlap(new Set(['a', 'b']), new Set(['b', 'c']))).toBe(
-			true,
-		);
+		expect(
+			hasSignificantOverlap(new Set(['a', 'b']), new Set(['b', 'c'])),
+		).toBe(true);
 	});
 
 	it('hasSignificantOverlap returns false when sets have no shared elements', () => {
-		expect(hasSignificantOverlap(new Set(['a', 'b']), new Set(['c', 'd']))).toBe(
-			false,
-		);
+		expect(
+			hasSignificantOverlap(new Set(['a', 'b']), new Set(['c', 'd'])),
+		).toBe(false);
 	});
 
 	it('hasSignificantOverlap returns true with single shared element', () => {

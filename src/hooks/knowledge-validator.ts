@@ -216,7 +216,7 @@ function extractContextWords(
 					}
 				}
 			}
-			i += termLen;  // skip past this match
+			i += termLen; // skip past this match
 		} else {
 			i += 1;
 		}
