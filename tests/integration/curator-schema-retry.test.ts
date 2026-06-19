@@ -166,7 +166,7 @@ describe('curator v3 enrichment + retry (Task 4.2)', () => {
 		let callCount = 0;
 		const mockDelegate = async (): Promise<string> => {
 			callCount++;
-			return MISSING_PREDICATE; // never produces a predicate
+			return MISSING_PREDICATE_BATCH; // never produces a predicate
 		};
 
 		const result = await curateAndStoreSwarm(
@@ -316,5 +316,189 @@ describe('curator v3 enrichment + retry (Task 4.2)', () => {
 		);
 		expect(enrichmentQuota?.calls_used).toBe(2);
 		expect(readQuotaState(dir, 'skill-improver-quota.json')).toBeNull();
+	});
+
+	it('quarantines only the unresolved items in a partially-successful batch', async () => {
+		const lessons = [
+			'Lesson 1: always validate input before processing',
+			'Lesson 2: avoid global mutable state in module scope',
+			'Lesson 3: prefer composition over inheritance',
+		];
+		const mockDelegate = async (
+			_system: string,
+			_userInput: string,
+		): Promise<string> => {
+			// First call: items 0 valid, 1+2 null (failure)
+			return JSON.stringify([
+				{
+					applies_to_agents: ['coder'],
+					required_actions: ['validate input first'],
+					directive_priority: 'medium',
+				},
+				null,
+				null,
+			]);
+		};
+
+		const result = await curateAndStoreSwarm(
+			lessons,
+			'proj',
+			{ phase_number: 1 },
+			dir,
+			CONFIG,
+			{
+				llmDelegate: mockDelegate,
+				enrichmentQuota: { maxCalls: 30, window: 'utc' },
+			},
+		);
+
+		// Only item 0 stored; items 1, 2 quarantined
+		expect(result.stored).toBe(1);
+		expect(result.quarantined).toBe(2);
+
+		const active = readActiveEntries(dir);
+		expect(active).toHaveLength(1);
+		expect(active[0].required_actions).toEqual(['validate input first']);
+
+		const unactionable = readUnactionable(dir);
+		expect(unactionable).toHaveLength(2);
+	});
+
+	it('quarantines remaining batches when quota is exhausted mid-batch', async () => {
+		// 12 lessons, but only 1 quota call allowed — the second batch is blocked
+		const lessons = Array.from(
+			{ length: 12 },
+			(_, i) => `Lesson ${i + 1}: always do the right thing`,
+		);
+		let calls = 0;
+		const mockDelegate = async (
+			_system: string,
+			userInput: string,
+		): Promise<string> => {
+			calls++;
+			const expectedLenMatch = /The array length MUST be exactly (\d+)\./.exec(
+				userInput,
+			);
+			const expectedLen = expectedLenMatch
+				? Number.parseInt(expectedLenMatch[1], 10)
+				: 0;
+			return JSON.stringify(
+				Array.from({ length: expectedLen }, () => ({
+					applies_to_agents: ['coder'],
+					required_actions: ['do the right thing'],
+					directive_priority: 'medium',
+				})),
+			);
+		};
+
+		const result = await curateAndStoreSwarm(
+			lessons,
+			'proj',
+			{ phase_number: 1 },
+			dir,
+			CONFIG,
+			{
+				llmDelegate: mockDelegate,
+				enrichmentQuota: { maxCalls: 1, window: 'utc' },
+			},
+		);
+
+		// First batch (6 lessons) succeeds; second batch (6 lessons) blocked by quota
+		expect(calls).toBe(1);
+		expect(result.stored).toBe(6);
+		expect(result.quarantined).toBe(6);
+	});
+
+	it('emits unactionable queue entry and curator_skipped event for failed batch items', async () => {
+		const lessons = [
+			'Lesson 1: always use feature flags for risky changes',
+			'Lesson 2: never skip code review',
+		];
+		const mockDelegate = async (
+			_system: string,
+			_userInput: string,
+		): Promise<string> => {
+			// Both items null on first call; second call also null
+			return JSON.stringify([null, null]);
+		};
+
+		const result = await curateAndStoreSwarm(
+			lessons,
+			'proj',
+			{ phase_number: 1 },
+			dir,
+			CONFIG,
+			{
+				llmDelegate: mockDelegate,
+				enrichmentQuota: { maxCalls: 30, window: 'utc' },
+			},
+		);
+
+		expect(result.stored).toBe(0);
+		expect(result.quarantined).toBe(2);
+
+		// Verify the unactionable queue has both entries
+		const unactionable = readUnactionable(dir);
+		expect(unactionable).toHaveLength(2);
+
+		// Verify the events.jsonl has curator_skipped events
+		const events = readEventsJsonl(dir).filter(
+			(e) => e.event === 'curator_skipped',
+		);
+		expect(events).toHaveLength(2);
+		expect(events[0].entry_id).toBeDefined();
+		expect(events[0].lesson).toBeDefined();
+	});
+
+	it('respects configured batch_size from KnowledgeConfig.enrichment', async () => {
+		const lessons = Array.from(
+			{ length: 10 },
+			(_, i) => `Lesson ${i + 1}: always use immutable data structures`,
+		);
+		let calls = 0;
+		const mockDelegate = async (
+			_system: string,
+			userInput: string,
+		): Promise<string> => {
+			calls++;
+			const expectedLenMatch = /The array length MUST be exactly (\d+)\./.exec(
+				userInput,
+			);
+			const expectedLen = expectedLenMatch
+				? Number.parseInt(expectedLenMatch[1], 10)
+				: 0;
+			return JSON.stringify(
+				Array.from({ length: expectedLen }, () => ({
+					applies_to_agents: ['coder'],
+					required_actions: ['use immutable data'],
+					directive_priority: 'medium',
+				})),
+			);
+		};
+
+		const configWithBatchSize: KnowledgeConfig = {
+			...CONFIG,
+			enrichment: {
+				max_calls_per_day: 30,
+				quota_window: 'utc',
+				batch_size: 3,
+			},
+		};
+
+		const result = await curateAndStoreSwarm(
+			lessons,
+			'proj',
+			{ phase_number: 1 },
+			dir,
+			configWithBatchSize,
+			{
+				llmDelegate: mockDelegate,
+				enrichmentQuota: { maxCalls: 30, window: 'utc' },
+			},
+		);
+
+		// 10 lessons / batch size 3 => 4 calls (3+3+3+1)
+		expect(calls).toBe(4);
+		expect(result.stored).toBe(10);
 	});
 });

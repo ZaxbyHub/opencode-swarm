@@ -560,27 +560,43 @@ function parseV3BatchEnrichmentResponse(
 	}
 	if (parsed.length < expectedLength) {
 		missing.push(`expected ${expectedLength} items but got ${parsed.length}`);
+	} else if (parsed.length > expectedLength) {
+		missing.push(`got ${parsed.length} items but only first ${expectedLength} will be used; extras discarded`);
 	}
 	return { fields, missing };
 }
 
+/**
+ * Batch-enrich plain-prose lessons via the curator LLM with bounded retry.
+ *
+ * Behavior notes:
+ * - Each batch attempt reserves 1 quota slot via `reserveQuota(scope: 'knowledge-enrichment')`.
+ *   If the reservation is denied (quota exhausted), the inner attempt loop breaks and
+ *   remaining batches also produce all-null results; the caller quarantines those lessons.
+ * - Retry preserves already-resolved items: `best[i]` is only updated if it was null.
+ *   This prevents a worse-quality retry from overwriting a good first-attempt result.
+ * - Retry prompts explicitly instruct the LLM to preserve resolved items.
+ * - The batch loop is sequential (no parallel batches) to keep quota accounting deterministic.
+ */
 async function enrichLessonsToV3Batched(params: {
 	directory: string;
 	llmDelegate: CuratorLLMDelegate;
 	lessons: EnrichmentLessonInput[];
 	quota?: EnrichmentQuotaOptions;
+	batchSize?: number;
 }): Promise<Array<ActionableDirectiveFields | null>> {
 	const quota = params.quota ?? { maxCalls: 10, window: 'utc' as const };
 	const out = Array.from(
 		{ length: params.lessons.length },
 		() => null as ActionableDirectiveFields | null,
 	);
+	const batchSize = params.batchSize ?? ENRICHMENT_BATCH_SIZE;
 	for (
 		let start = 0;
 		start < params.lessons.length;
-		start += ENRICHMENT_BATCH_SIZE
+		start += batchSize
 	) {
-		const batch = params.lessons.slice(start, start + ENRICHMENT_BATCH_SIZE);
+		const batch = params.lessons.slice(start, start + batchSize);
 		const prompt = buildV3BatchEnrichmentPrompt(batch);
 		let userInput = prompt;
 		let best = Array.from(
@@ -603,16 +619,23 @@ async function enrichLessonsToV3Batched(params: {
 					AbortSignal.timeout(ENRICHMENT_LLM_TIMEOUT_MS),
 				);
 				const parsed = parseV3BatchEnrichmentResponse(response, batch.length);
-				best = best.map((current, idx) => parsed.fields[idx] ?? current);
+				best = best.map((current, idx) => current ?? parsed.fields[idx]);
 				const unresolved = best
 					.map((fields, idx) => ({ fields, idx }))
 					.filter((item) => item.fields === null)
 					.map((item) => item.idx + 1);
 				if (unresolved.length === 0) break;
 				retryHint = parsed.missing.join('; ');
+				const resolvedList = best
+					.map((fields, idx) => ({ fields, idx }))
+					.filter((item) => item.fields !== null)
+					.map((item) => item.idx + 1);
+				const preserveClause = resolvedList.length > 0
+					? `Preserve the already-valid entries for items ${resolvedList.join(', ')} exactly as you returned them previously. `
+					: '';
 				userInput = `${prompt}\n\nRETRY: your last output still missed valid directives for items ${unresolved.join(
 					', ',
-				)}. ${retryHint} Return a full JSON array with valid entries for every item.`;
+				)}. ${retryHint} ${preserveClause}Return a full JSON array with valid entries for every item.`;
 			} catch (err) {
 				warn(
 					`[knowledge-curator] v3 batch enrichment attempt ${attempt + 1} failed: ${
@@ -1042,6 +1065,7 @@ export async function curateAndStoreSwarm(
 				tags: item.tags,
 			})),
 			quota: options.enrichmentQuota,
+			batchSize: config.enrichment?.batch_size,
 		});
 		for (let i = 0; i < pendingBatchEnrichment.length; i++) {
 			const pending = pendingBatchEnrichment[i];
