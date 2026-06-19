@@ -123,6 +123,19 @@ describe('buildQaGateSelectionDialogue text', () => {
 		expect(text).toContain('## Task Completion Commit Policy');
 		expect(text).toContain('commit_after_each_completed_task: true');
 	});
+
+	test('dialogue presents parallel coders proactively with worktree concept', () => {
+		for (const mode of ['SPECIFY', 'BRAINSTORM', 'PLAN'] as const) {
+			const text = buildQaGateSelectionDialogue(mode);
+			// Preserve the question phrase asserted by the plan skill protocol test.
+			expect(text.toLowerCase()).toContain(
+				'how many coders should run in parallel',
+			);
+			// Teach the isolation mechanism and make the recommendation proactive.
+			expect(text).toContain('isolated git worktree');
+			expect(text).toMatch(/recommend/i);
+		}
+	});
 });
 
 describe('Architect prompt behavioral guidance markers', () => {

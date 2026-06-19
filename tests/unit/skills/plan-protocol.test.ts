@@ -5,9 +5,12 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildQaGateSelectionDialogue } from '../../../src/agents/architect';
 
 const SKILL_PATH = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
 const skillContent = readFileSync(SKILL_PATH, 'utf-8');
+const CLAUDE_SKILL_PATH = join(process.cwd(), '.claude/skills/plan/SKILL.md');
+const claudeSkillContent = readFileSync(CLAUDE_SKILL_PATH, 'utf-8');
 
 describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 	describe('frontmatter', () => {
@@ -60,6 +63,30 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('TEST TASK DEDUPLICATION');
 			expect(skillContent).toContain('PHASE COUNT GUIDANCE');
 			expect(skillContent).toContain('TRACEABILITY CHECK');
+		});
+
+		it('teaches worktree isolation in the parallel-coders sub-item', () => {
+			expect(skillContent).toContain('isolated git worktree');
+			expect(skillContent).toMatch(/file[- ]disjoint|do NOT overlap/i);
+		});
+	});
+
+	// Lockstep guard: the parallel-coders/worktree guidance is duplicated across the
+	// two skill copies and the architect dialogue. They must not silently drift.
+	describe('worktree/parallelization lockstep', () => {
+		it('.claude and .opencode plan skill copies stay byte-identical', () => {
+			expect(claudeSkillContent).toBe(skillContent);
+		});
+
+		it('architect dialogue and plan skill share the parallel + worktree concepts', () => {
+			const dialogue = buildQaGateSelectionDialogue('PLAN');
+			for (const needle of [
+				'how many coders should run in parallel',
+				'isolated git worktree',
+			]) {
+				expect(dialogue.toLowerCase()).toContain(needle.toLowerCase());
+				expect(skillContent.toLowerCase()).toContain(needle.toLowerCase());
+			}
 		});
 	});
 });

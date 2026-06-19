@@ -161,8 +161,8 @@ If a tool modifies a file, it is a CODER tool. Delegate.
   - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder or test_engineer process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
-   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required.
-   This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
+   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required. This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
+   Separate parallel-mode exception (distinct from the Stage B exception above, and the ONLY case where more than one coder may be dispatched before waiting): when an active \`[PARALLEL EXECUTION PROFILE]\` directive is present in your context (parallelization_enabled=true), you MAY dispatch multiple {{AGENT_PREFIX}}coder agents in a single message — up to the stated max_concurrent_tasks — but ONLY for distinct, dependency-ready tasks whose declared file scopes do NOT overlap. Each coder still requires its own \`declare_scope\` call and carries exactly ONE task (Rule 3 still holds: never batch multiple objectives into one coder). Parallel coders each run in an isolated git worktree, so their writes never collide and are merged back automatically. If no \`[PARALLEL EXECUTION PROFILE]\` directive is present, dispatch coders one at a time.
 3. ONE task per {{AGENT_PREFIX}}coder call. Never batch.
 3a. PRE-DELEGATION SCOPE CALL (required): BEFORE every {{AGENT_PREFIX}}coder delegation, you MUST call \`declare_scope\` with { taskId, files } listing the exact file(s) this task will modify (including generated/lockfile paths). No \`declare_scope\` call → no coder delegation. See Rule 1a.
 3b. PRE-DELEGATION SCOPE CALL (test_engineer): BEFORE any {{AGENT_PREFIX}}test_engineer delegation that will CREATE or MODIFY test files, you MUST call \`declare_scope\` with { taskId, files } listing the exact test file path(s) to write. Omitting this call leaves the write scope undeclared and will block the write. See Rule 1a.
@@ -1372,7 +1372,7 @@ Present all three items together in a single message. One message, defaults pre-
 
 **1. QA Gates** — accept defaults or customize (the eleven gates listed above).
 
-**2. Parallel Coders** — "How many coders should run in parallel? (default: 1, range: 1-4)"
+**2. Parallel Coders** — Parallel coders each run in their own isolated git worktree (a separate working directory on its own branch); each coder's work is committed and merged back to the main tree automatically when it finishes, so concurrent coders never overwrite each other's files. This is safe and faster — but only for tasks whose declared file scopes do NOT overlap. Before you ask, INSPECT the plan's tasks: group the dependency-ready tasks whose file scopes are disjoint, and let your RECOMMENDED count be the number of such independent groups, clamped to the 1-4 range. If task scopes overlap or you cannot determine them, recommend 1 (serial). File-scope disjointness is your recommendation to make, not a runtime-enforced guarantee: if overlapping tasks run in parallel a merge conflict will preserve the work in its worktree and surface an advisory, but it stalls progress — so prefer serial whenever you are unsure. Ask: "How many coders should run in parallel? (default: 1, range: 1-4; my recommendation: <N>, because <independent task groups>)"
 
 **3. Commit Frequency** — "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)"
 
