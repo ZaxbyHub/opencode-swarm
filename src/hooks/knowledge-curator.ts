@@ -400,6 +400,40 @@ export function buildV3EnrichmentPrompt(
 	].join('\n');
 }
 
+/** Build the v3-schema enrichment prompt for a batch of prose lessons. */
+function buildV3BatchEnrichmentPrompt(
+	lessons: EnrichmentLessonInput[],
+): string {
+	const lessonLines = lessons
+		.map(
+			(item, idx) =>
+				`${idx + 1}. LESSON: ${item.lesson}\n   CATEGORY: ${item.category}\n   TAGS: ${item.tags.join(', ')}`,
+		)
+		.join('\n');
+	return [
+		'Convert each prose lesson below into an actionable knowledge directive.',
+		'Output ONLY a JSON array (no code fences, no commentary).',
+		`The array length MUST be exactly ${lessons.length}.`,
+		'Each array element at position i maps to lesson i (1-indexed above).',
+		'',
+		'For EACH element, mandatory requirements:',
+		'- At least ONE scope field non-empty:',
+		'  "applies_to_agents": string[] — roles from: architect, coder, reviewer, test_engineer, sme, docs, designer, critic, curator',
+		'  "applies_to_tools": string[] — tool names from: edit, write, patch, bash, read, grep, glob',
+		'- At least ONE predicate field non-empty:',
+		'  "forbidden_actions": string[] | "required_actions": string[] | "verification_checks": string[]',
+		'',
+		'Optional per element:',
+		'"triggers": string[], "directive_priority": "low" | "medium" | "high" | "critical"',
+		'',
+		'Example array:',
+		'[{"applies_to_agents":["coder"],"required_actions":["run focused tests before commit"],"directive_priority":"high"}]',
+		'',
+		'LESSONS:',
+		lessonLines,
+	].join('\n');
+}
+
 /**
  * Parse + validate an enrichment response. Returns the sanitized fields when
  * the output is shape-valid AND actionable, otherwise the list of missing
@@ -459,12 +493,184 @@ export function parseV3EnrichmentResponse(
 	return { fields };
 }
 
+function parseV3BatchEnrichmentResponse(
+	text: string,
+	expectedLength: number,
+): { fields: Array<ActionableDirectiveFields | null>; missing: string[] } {
+	const empty = Array.from({ length: expectedLength }, () => null);
+	if (!text || typeof text !== 'string') {
+		return { fields: empty, missing: ['valid JSON array'] };
+	}
+	const start = text.indexOf('[');
+	const end = text.lastIndexOf(']');
+	if (start < 0 || end <= start) {
+		return { fields: empty, missing: ['valid JSON array'] };
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text.slice(start, end + 1));
+	} catch {
+		return { fields: empty, missing: ['valid JSON array'] };
+	}
+	if (!Array.isArray(parsed)) {
+		return { fields: empty, missing: ['valid JSON array'] };
+	}
+	const fields = Array.from(
+		{ length: expectedLength },
+		() => null as ActionableDirectiveFields | null,
+	);
+	const missing: string[] = [];
+	for (let i = 0; i < expectedLength; i++) {
+		const item = parsed[i];
+		if (!item || typeof item !== 'object' || Array.isArray(item)) {
+			missing.push(`item ${i + 1}: valid JSON object`);
+			continue;
+		}
+		const raw = item as Record<string, unknown>;
+		const candidate: ActionableDirectiveFields = {};
+		for (const key of ENRICHMENT_ALLOWED_FIELDS) {
+			if (raw[key] !== undefined) {
+				(candidate as Record<string, unknown>)[key] = raw[key];
+			}
+		}
+		const shape = validateActionableFields(candidate);
+		if (!shape.valid) {
+			missing.push(`item ${i + 1}: ${shape.errors.join('; ')}`);
+			continue;
+		}
+		const actionability = validateActionability(candidate);
+		if (!actionability.actionable) {
+			const expected: string[] = [];
+			if (
+				actionability.reason === 'missing_predicate' ||
+				actionability.reason === 'missing_predicate_and_scope'
+			) {
+				expected.push(
+					'a non-empty predicate field (forbidden_actions, required_actions, or verification_checks)',
+				);
+			}
+			if (
+				actionability.reason === 'missing_scope' ||
+				actionability.reason === 'missing_predicate_and_scope'
+			) {
+				expected.push(
+					'a non-empty scope field (applies_to_agents or applies_to_tools)',
+				);
+			}
+			missing.push(`item ${i + 1}: ${expected.join('; ')}`);
+			continue;
+		}
+		fields[i] = candidate;
+	}
+	if (parsed.length < expectedLength) {
+		missing.push(`expected ${expectedLength} items but got ${parsed.length}`);
+	} else if (parsed.length > expectedLength) {
+		warn(
+			`[knowledge-curator] parseV3BatchEnrichmentResponse received ${parsed.length} items but expected ${expectedLength}; extras will be discarded`,
+		);
+		missing.push(
+			`got ${parsed.length} items but only first ${expectedLength} will be used; extras discarded`,
+		);
+	}
+	return { fields, missing };
+}
+
+/**
+ * Batch-enrich plain-prose lessons via the curator LLM with bounded retry.
+ *
+ * Behavior notes:
+ * - Each batch attempt reserves 1 quota slot via `reserveQuota(scope: 'knowledge-enrichment')`.
+ *   If the reservation is denied (quota exhausted), the inner attempt loop breaks and
+ *   remaining batches also produce all-null results; the caller quarantines those lessons.
+ * - Retry preserves already-resolved items: `best[i]` is only updated if it was null.
+ *   This prevents a worse-quality retry from overwriting a good first-attempt result.
+ * - Retry prompts explicitly instruct the LLM to preserve resolved items.
+ * - The batch loop is sequential (no parallel batches) to keep quota accounting deterministic.
+ */
+async function enrichLessonsToV3Batched(params: {
+	directory: string;
+	llmDelegate: CuratorLLMDelegate;
+	lessons: EnrichmentLessonInput[];
+	quota?: EnrichmentQuotaOptions;
+	batchSize?: number;
+}): Promise<Array<ActionableDirectiveFields | null>> {
+	const quota = params.quota ?? { maxCalls: 10, window: 'utc' as const };
+	const out = Array.from(
+		{ length: params.lessons.length },
+		() => null as ActionableDirectiveFields | null,
+	);
+	const batchSize = params.batchSize ?? ENRICHMENT_BATCH_SIZE;
+	for (let start = 0; start < params.lessons.length; start += batchSize) {
+		const batch = params.lessons.slice(start, start + batchSize);
+		const prompt = buildV3BatchEnrichmentPrompt(batch);
+		let userInput = prompt;
+		let best = Array.from(
+			{ length: batch.length },
+			() => null as ActionableDirectiveFields | null,
+		);
+		let retryHint = '';
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				const reservation = await reserveQuota(params.directory, {
+					nCalls: 1,
+					maxCalls: quota.maxCalls,
+					window: quota.window,
+					scope: 'knowledge-enrichment',
+				});
+				if (!reservation.allowed) break;
+				const response = await params.llmDelegate(
+					'',
+					userInput,
+					AbortSignal.timeout(ENRICHMENT_LLM_TIMEOUT_MS),
+				);
+				const parsed = parseV3BatchEnrichmentResponse(response, batch.length);
+				best = best.map((current, idx) => current ?? parsed.fields[idx]);
+				const unresolved = best
+					.map((fields, idx) => ({ fields, idx }))
+					.filter((item) => item.fields === null)
+					.map((item) => item.idx + 1);
+				if (unresolved.length === 0) break;
+				retryHint = parsed.missing.join('; ');
+				const resolvedList = best
+					.map((fields, idx) => ({ fields, idx }))
+					.filter((item) => item.fields !== null)
+					.map((item) => item.idx + 1);
+				const preserveClause =
+					resolvedList.length > 0
+						? `Preserve the already-valid entries for items ${resolvedList.join(', ')} exactly as you returned them previously. `
+						: '';
+				userInput = `${prompt}\n\nRETRY: your last output still missed valid directives for items ${unresolved.join(
+					', ',
+				)}. ${retryHint} ${preserveClause}Return a full JSON array with valid entries for every item.`;
+			} catch (err) {
+				warn(
+					`[knowledge-curator] v3 batch enrichment attempt ${attempt + 1} failed: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+			}
+		}
+		for (let i = 0; i < best.length; i++) {
+			out[start + i] = best[i];
+		}
+	}
+	return out;
+}
+
 /** Per-call timeout for enrichment LLM calls (small, targeted prompts). */
 const ENRICHMENT_LLM_TIMEOUT_MS = 60_000;
+/** Max lessons enriched per LLM call (batch mode). */
+export const ENRICHMENT_BATCH_SIZE = 6;
 
 export interface EnrichmentQuotaOptions {
 	maxCalls: number;
 	window: 'utc' | 'local';
+}
+
+interface EnrichmentLessonInput {
+	lesson: string;
+	category: string;
+	tags: string[];
 }
 
 /**
@@ -728,6 +934,12 @@ export async function curateAndStoreSwarm(
 	const snapshotPlusNew: SwarmKnowledgeEntry[] = [...snapshot];
 	const toAdd: SwarmKnowledgeEntry[] = [];
 	const pendingReinforcementIds = new Set<string>();
+	const pendingBatchEnrichment: Array<{
+		entry: SwarmKnowledgeEntry;
+		lesson: string;
+		category: string;
+		tags: string[];
+	}> = [];
 
 	for (const lesson of lessons) {
 		// Determine category from tags
@@ -820,20 +1032,10 @@ export async function curateAndStoreSwarm(
 		// Plain-prose lessons are enriched via the curator LLM (one retry); entries
 		// that still fail are quarantined to the unactionable queue (recoverable by
 		// the skill-improver hardening loop), never activated.
-		let actionability = validateActionability(entry);
+		const actionability = validateActionability(entry);
 		if (!actionability.actionable && options?.llmDelegate) {
-			const enriched = await enrichLessonToV3({
-				directory,
-				llmDelegate: options.llmDelegate,
-				lesson,
-				category,
-				tags,
-				quota: options.enrichmentQuota,
-			});
-			if (enriched) {
-				Object.assign(entry, enriched);
-				actionability = validateActionability(entry);
-			}
+			pendingBatchEnrichment.push({ entry, lesson, category, tags });
+			continue;
 		}
 		if (!actionability.actionable) {
 			quarantined++;
@@ -857,6 +1059,48 @@ export async function curateAndStoreSwarm(
 		toAdd.push(entry);
 		// Track in accumulator so subsequent lessons in this batch see it for dedup.
 		snapshotPlusNew.push(entry);
+	}
+
+	if (pendingBatchEnrichment.length > 0 && options?.llmDelegate) {
+		const enrichedBatch = await enrichLessonsToV3Batched({
+			directory,
+			llmDelegate: options.llmDelegate,
+			lessons: pendingBatchEnrichment.map((item) => ({
+				lesson: item.lesson,
+				category: item.category,
+				tags: item.tags,
+			})),
+			quota: options.enrichmentQuota,
+			batchSize: config.enrichment?.batch_size,
+		});
+		for (let i = 0; i < pendingBatchEnrichment.length; i++) {
+			const pending = pendingBatchEnrichment[i];
+			const enriched = enrichedBatch[i];
+			if (enriched) {
+				Object.assign(pending.entry, enriched);
+			}
+			const actionability = validateActionability(pending.entry);
+			if (!actionability.actionable) {
+				quarantined++;
+				try {
+					await appendUnactionable(
+						directory,
+						pending.entry,
+						actionability.reason ?? 'unactionable',
+					);
+				} catch {
+					// queue write is best-effort; the entry is still withheld from active
+				}
+				await appendCuratorSkippedEvent(directory, {
+					entry_id: pending.entry.id,
+					lesson: pending.lesson,
+					reason: actionability.reason ?? 'unactionable',
+				});
+				continue;
+			}
+			toAdd.push(pending.entry);
+			snapshotPlusNew.push(pending.entry);
+		}
 	}
 
 	// Meso reflector (Change 6, Task 5.2): fold in micro-reflection insight

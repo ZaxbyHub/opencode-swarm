@@ -244,6 +244,7 @@ export interface KnowledgeConfig {
 	enrichment: {
 		max_calls_per_day: number;
 		quota_window: 'utc' | 'local';
+		batch_size?: number;
 	};
 }
 
