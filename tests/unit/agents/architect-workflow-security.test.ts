@@ -370,6 +370,19 @@ describe('ARCHITECT WORKFLOW: Delegation Safety', () => {
 		expect(prompt).toContain('Never batch');
 	});
 
+	test('SECURITY: parallel-mode coder exception is gated on the runtime directive and stays scope-disjoint', () => {
+		// The only path that permits >1 coder before waiting must be tied to an
+		// active [PARALLEL EXECUTION PROFILE] directive, remain limited to distinct
+		// file-disjoint tasks, and still require one declare_scope per coder. A
+		// regression that drops any of these would silently widen coder fan-out.
+		expect(prompt).toContain('[PARALLEL EXECUTION PROFILE]');
+		expect(prompt).toContain('whose declared file scopes do NOT overlap');
+		expect(prompt).toContain('its own `declare_scope` call');
+		expect(prompt).toContain(
+			'If no `[PARALLEL EXECUTION PROFILE]` directive is present, dispatch coders one at a time',
+		);
+	});
+
 	test('SECURITY: CONSTRAINT field enforces restrictions in delegation', () => {
 		// CONSTRAINT appears in actual delegation examples, not as a format template
 		// (format template was refactored to [agent-specific fields required by INPUT FORMAT])

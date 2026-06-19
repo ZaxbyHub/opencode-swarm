@@ -76,7 +76,7 @@ Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder 
 - final_council (default: OFF) -- when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) -- NOT the General Council -- at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
 
 Additionally, present these two sub-items as part of the same exchange:
-- Parallel coders (default: 1, range: 1-4) -- how many coders should run in parallel.
+- Parallel coders (default: 1, range: 1-4) -- how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files -- safe and faster, but only for tasks whose file scopes do NOT overlap. The per-task file scopes that determine a safe parallel count are not known until the plan is finalized, so default to 1 (serial) here; the precise recommendation is made at plan time once the tasks and their scopes exist.
 - Commit frequency (default: phase-level only) -- optional per-task checkpoint commit after each task completion.
 
 The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
