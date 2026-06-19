@@ -5,7 +5,7 @@
 Added a `prepare` lifecycle script (`"prepare": "bun run build"`) to `package.json`
 so that `dist/` is built automatically whenever the package is installed **from
 source** — a local checkout (`bun install` / `npm install`) or a git/GitHub
-reference (`npm i github:zaxbysauce/opencode-swarm`). The now-redundant
+reference (`npm i github:ZaxbyHub/opencode-swarm`). The now-redundant
 `prepublishOnly` build hook was removed (`prepare` already builds before
 `pack`/`publish`). `scripts/package-smoke.mjs` was hardened to tolerate the build
 output that `npm pack` now prints ahead of its `--json` payload. Documented in
