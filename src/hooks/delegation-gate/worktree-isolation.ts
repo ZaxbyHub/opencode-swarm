@@ -21,6 +21,13 @@ import {
 	removeWorktree,
 } from '../../worktree';
 
+// INVARIANT: this cap MUST stay strictly above the `max_concurrent_tasks`
+// schema ceiling (currently clamped to <= 64 in execution-profile-schema). The
+// tracking-cap branch in precreateStandardWorktreeSession degrades gracefully
+// (un-isolated) instead of blocking, which is only safe because in-flight coders
+// can never approach this cap. If the concurrency ceiling is ever raised to or
+// above this value, that branch would reopen the F-008 un-isolated-collision
+// window and must switch to handleStandardWorktreeFailure like the other paths.
 export const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
 
 export interface StandardWorktreeDispatch {
