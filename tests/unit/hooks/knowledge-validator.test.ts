@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { KnowledgeCategory } from '../../../src/hooks/knowledge-types.js';
 import {
+	_internals,
 	DANGEROUS_COMMAND_PATTERNS,
 	INJECTION_PATTERNS,
 	INVISIBLE_FORMAT_CHARS,
@@ -542,7 +543,7 @@ describe('knowledge-validator', () => {
 			});
 		});
 
-		it('keeps agreeing negation pairs storable with warning at most', () => {
+		it('keeps agreeing negation pairs storable (no contradiction warning)', () => {
 			const candidate = 'Always run tests before commit';
 			const existingLessons = ['Never commit without running tests'];
 			const result = validateLesson(candidate, existingLessons, {
@@ -551,7 +552,26 @@ describe('knowledge-validator', () => {
 				confidence: 0.9,
 			});
 			expect(result.valid).toBe(true);
-			expect(result.severity).not.toBe('error');
+			// Should NOT be flagged as contradiction since contexts don't overlap
+			if (result.reason) {
+				expect(result.reason).not.toContain('contradiction');
+			}
+			// Should not have layer 3 (contradiction layer)
+			expect(result.layer).not.toBe(3);
+		});
+
+		it('still flags true contradictions with overlapping context', () => {
+			const candidate = 'Always use typescript for safety';
+			const existingLessons = ['Never use typescript for safety'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'architecture',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+			expect(result.reason).toContain('shared tags');
 		});
 
 		it('passes contradiction without shared tags', () => {
@@ -565,6 +585,101 @@ describe('knowledge-validator', () => {
 			// Should pass because no tech tags (no shared tags)
 			expect(result.valid).toBe(true);
 		});
+
+		// Multi-word negation pair coverage (FB-001 regression tests)
+		it('flags contradiction for multi-word pair: must not vs must (overlapping context)', () => {
+			const candidate = 'must not use typescript';
+			const existingLessons = ['must use typescript for all projects'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'architecture',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('allows agreeing multi-word pair: must not vs must (no context overlap)', () => {
+			const candidate = 'must not use docker for builds';
+			const existingLessons = ['must use git for version control'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(3);
+		});
+
+		it('flags contradiction for multi-word pair: recommended vs not recommended (overlapping context)', () => {
+			const candidate = 'recommended to use docker for builds';
+			const existingLessons = ['not recommended to use docker for builds'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('flags contradiction for multi-word pair: must vs should not (overlapping context)', () => {
+			const candidate = 'must use docker for all deployments';
+			const existingLessons = ['should not use docker for all deployments'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('allows agreeing multi-word pair: enable vs disable (no context overlap)', () => {
+			// Different subjects (docker vs vitest) → no shared tags → no contradiction
+			const candidate = 'enable docker for production builds';
+			const existingLessons = ['disable vitest for local testing'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(3);
+		});
+
+		it('flags contradiction for "use" vs "avoid" pair (overlapping context)', () => {
+			const candidate = 'use typescript for safety';
+			const existingLessons = ['avoid typescript for safety'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'architecture',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).toBe(3);
+			expect(result.reason).toContain('contradiction');
+		});
+
+		it('allows agreeing "use" vs "avoid" pair (no shared tags)', () => {
+			// typescript and python produce distinct tags, so no shared tag → no contradiction
+			const candidate = 'use typescript for safety';
+			const existingLessons = ['avoid python for scripting'];
+			const result = validateLesson(candidate, existingLessons, {
+				category: 'tooling',
+				scope: 'global',
+				confidence: 0.9,
+			});
+			expect(result.valid).toBe(true);
+			expect(result.layer).not.toBe(3);
+		});
+
+		// Note: "don't use" pair is not tested here because normalizeText strips
+		// apostrophes ("don't" → "don t"), so the pair ['use', "don't use"] will
+		// never match via includes() — a separate pre-existing normalization bug.
 
 		it('flags vague lesson (warning - valid: true)', () => {
 			const candidate = 'Good things happen';
@@ -727,5 +842,168 @@ describe('knowledge-validator', () => {
 			expect(matches).not.toBeNull();
 			expect(matches!.length).toBe(4);
 		});
+	});
+});
+
+// =========================================================================
+// _internals.extractContextWords and hasSignificantOverlap direct tests
+// =========================================================================
+
+describe('extractContextWords / hasSignificantOverlap (direct)', () => {
+	const { extractContextWords, hasSignificantOverlap } = _internals;
+
+	it('returns empty Set when target word is not present', () => {
+		const result = extractContextWords('hello world', 'always');
+		expect(result).toBeInstanceOf(Set);
+		expect(result.size).toBe(0);
+	});
+
+	it('returns empty Set when input is empty string', () => {
+		const result = extractContextWords('', 'always');
+		expect(result).toBeInstanceOf(Set);
+		expect(result.size).toBe(0);
+	});
+
+	it('extracts 3 words before and after for a single-word target in the middle', () => {
+		// 10-word sentence with "always" at index 4 (0-based)
+		const sentence =
+			'one two three four always use typescript for all projects';
+		const result = extractContextWords(sentence, 'always');
+		expect(result).toBeInstanceOf(Set);
+		// Window=3, idx=4: before=[1,2,3], after=[5,6,7]
+		expect(result.size).toBe(6);
+		expect(result.has('two')).toBe(true);
+		expect(result.has('three')).toBe(true);
+		expect(result.has('four')).toBe(true);
+		expect(result.has('use')).toBe(true);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('for')).toBe(true);
+		expect(result.has('one')).toBe(false); // idx 0 is outside window
+		expect(result.has('all')).toBe(false); // idx 8 is outside window
+		expect(result.has('projects')).toBe(false); // idx 9 is outside window
+		expect(result.has('always')).toBe(false);
+	});
+
+	it('handles single-word target at position 0 (no words before)', () => {
+		const sentence = 'always use typescript for safety';
+		const result = extractContextWords(sentence, 'always');
+		expect(result).toBeInstanceOf(Set);
+		// idx=0, window=3: start=0, end=4 → indices 1,2,3
+		expect(result.size).toBe(3);
+		expect(result.has('use')).toBe(true);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('for')).toBe(true);
+		expect(result.has('safety')).toBe(false); // idx 4 is outside window
+		expect(result.has('always')).toBe(false);
+	});
+
+	it('handles single-word target at last position (no words after)', () => {
+		const sentence = 'use typescript for safety always';
+		const result = extractContextWords(sentence, 'always');
+		expect(result).toBeInstanceOf(Set);
+		// idx=4, window=3: start=max(0,1)=1, end=5 → indices 1,2,3
+		expect(result.size).toBe(3);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('for')).toBe(true);
+		expect(result.has('safety')).toBe(true);
+		expect(result.has('use')).toBe(false); // idx 0 is outside window
+		expect(result.has('always')).toBe(false);
+	});
+
+	it('handles single-word target at end of a short 2-word string', () => {
+		const sentence = 'hello always';
+		const result = extractContextWords(sentence, 'always');
+		expect(result).toBeInstanceOf(Set);
+		expect(result.size).toBe(1);
+		expect(result.has('hello')).toBe(true);
+		expect(result.has('always')).toBe(false);
+	});
+
+	it('returns union of contexts for multiple occurrences of the same word', () => {
+		const sentence = 'always use typescript always use docker';
+		const result = extractContextWords(sentence, 'always');
+		expect(result).toBeInstanceOf(Set);
+		// The target word may appear in context around a later occurrence,
+		// so the union includes the target itself as well as surrounding words.
+		expect(result.has('use')).toBe(true);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('docker')).toBe(true);
+		expect(result.has('always')).toBe(true);
+	});
+
+	it('extracts context for a multi-word term in the middle', () => {
+		const sentence =
+			'one two must not use typescript for all projects extra words';
+		const result = extractContextWords(sentence, 'must not');
+		expect(result).toBeInstanceOf(Set);
+		expect(result.size).toBe(5);
+		expect(result.has('one')).toBe(true);
+		expect(result.has('two')).toBe(true);
+		expect(result.has('use')).toBe(true);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('for')).toBe(true);
+		expect(result.has('all')).toBe(false); // idx 7 outside window
+		expect(result.has('must')).toBe(false);
+		expect(result.has('not')).toBe(false);
+	});
+
+	it('returns union of contexts when a multi-word term appears twice', () => {
+		const sentence = 'must not use typescript and must not use docker too';
+		const result = extractContextWords(sentence, 'must not');
+		expect(result).toBeInstanceOf(Set);
+		// first occurrence at i=0: before=none, after={use, typescript, and}
+		// second occurrence at i=5: before={typescript, and, use}, after={docker, too}
+		expect(result.has('use')).toBe(true);
+		expect(result.has('typescript')).toBe(true);
+		expect(result.has('and')).toBe(true);
+		expect(result.has('docker')).toBe(true);
+		expect(result.has('too')).toBe(true);
+		expect(result.has('must')).toBe(false);
+		expect(result.has('not')).toBe(false);
+	});
+
+	it('returns empty Set when multi-word term is not present', () => {
+		const sentence = 'always use typescript for safety';
+		const result = extractContextWords(sentence, 'must not');
+		expect(result).toBeInstanceOf(Set);
+		expect(result.size).toBe(0);
+	});
+
+	it('respects custom contextWindow parameter', () => {
+		// Simple 11-word sentence with target at index 4
+		const sentence = 'a b c d always e f g h i';
+		const result = extractContextWords(sentence, 'always', 1);
+		expect(result).toBeInstanceOf(Set);
+		// window=1 around idx=4: before=[d], after=[e]
+		expect(result.size).toBe(2);
+		expect(result.has('d')).toBe(true);
+		expect(result.has('e')).toBe(true);
+		expect(result.has('c')).toBe(false);
+		expect(result.has('f')).toBe(false);
+		expect(result.has('always')).toBe(false);
+	});
+
+	it('hasSignificantOverlap returns false when set1 is empty', () => {
+		expect(hasSignificantOverlap(new Set(), new Set(['a', 'b']))).toBe(false);
+	});
+
+	it('hasSignificantOverlap returns false when set2 is empty', () => {
+		expect(hasSignificantOverlap(new Set(['a', 'b']), new Set())).toBe(false);
+	});
+
+	it('hasSignificantOverlap returns true when sets share at least one element', () => {
+		expect(
+			hasSignificantOverlap(new Set(['a', 'b']), new Set(['b', 'c'])),
+		).toBe(true);
+	});
+
+	it('hasSignificantOverlap returns false when sets have no shared elements', () => {
+		expect(
+			hasSignificantOverlap(new Set(['a', 'b']), new Set(['c', 'd'])),
+		).toBe(false);
+	});
+
+	it('hasSignificantOverlap returns true with single shared element', () => {
+		expect(hasSignificantOverlap(new Set(['x']), new Set(['x']))).toBe(true);
 	});
 });
