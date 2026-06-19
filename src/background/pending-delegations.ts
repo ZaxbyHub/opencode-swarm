@@ -352,10 +352,14 @@ export async function appendDelegationTransition(
 export function findByBatchId(
 	directory: string,
 	batchId: string,
+	opts?: { parentSessionId?: string },
 ): BackgroundDelegationRecord[] {
 	if (!batchId) return [];
 	return readDelegations(directory).filter(
-		(record) => record.batchId === batchId,
+		(record) =>
+			record.batchId === batchId &&
+			(opts?.parentSessionId === undefined ||
+				record.parentSessionId === opts.parentSessionId),
 	);
 }
 

@@ -30,6 +30,7 @@ const DEFAULT_ASYNC_STALE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
+const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
@@ -283,6 +284,7 @@ export const _internals: {
 	getGeneratedAgentNames: () => readonly string[];
 	createParallelDispatcher: typeof createParallelDispatcher;
 	now: () => number;
+	sleep: (ms: number) => Promise<void>;
 } = {
 	getSessionOps: () =>
 		(swarmState.opencodeClient?.session as unknown as SessionOps | undefined) ??
@@ -290,9 +292,15 @@ export const _internals: {
 	getGeneratedAgentNames: () => swarmState.generatedAgentNames,
 	createParallelDispatcher,
 	now: () => Date.now(),
+	sleep,
 };
 
-export const _test_exports = { formatError };
+export const _test_exports = {
+	extractLastAssistantText,
+	formatError,
+	nextCollectPollInterval,
+	promptHash,
+};
 
 type ReadOnlyToolPermissions = Record<string, false> & {
 	write: false;
@@ -462,6 +470,7 @@ export async function executeDispatchLanesAsync(
 export async function executeCollectLaneResults(
 	args: unknown,
 	directory: string,
+	context: Pick<DispatchLanesExecutionContext, 'sessionID'> = {},
 ): Promise<CollectLaneResultsResult> {
 	const parsed = CollectLaneResultsArgsSchema.safeParse(args);
 	if (!parsed.success) {
@@ -484,8 +493,12 @@ export async function executeCollectLaneResults(
 	}
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
+	const batchFilter =
+		context.sessionID !== undefined
+			? { parentSessionId: context.sessionID }
+			: undefined;
 	await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
-	let records = findByBatchId(directory, parsed.data.batch_id);
+	let records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 	if (records.length === 0) {
 		return collectFailureResult({
 			failure_class: 'not_found',
@@ -495,6 +508,7 @@ export async function executeCollectLaneResults(
 	}
 
 	let keepPolling = true;
+	let pollIntervalMs = COLLECT_POLL_INTERVAL_MS;
 	while (keepPolling) {
 		await collectOnce(
 			session,
@@ -503,7 +517,7 @@ export async function executeCollectLaneResults(
 			parsed.data.cancel_pending === true,
 		);
 		await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
-		records = findByBatchId(directory, parsed.data.batch_id);
+		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 		if (allSettled(records) || parsed.data.wait !== true) {
 			keepPolling = false;
 			continue;
@@ -512,12 +526,10 @@ export async function executeCollectLaneResults(
 			keepPolling = false;
 			continue;
 		}
-		await sleep(
-			Math.min(
-				COLLECT_POLL_INTERVAL_MS,
-				Math.max(0, deadline - _internals.now()),
-			),
+		await _internals.sleep(
+			Math.min(pollIntervalMs, Math.max(0, deadline - _internals.now())),
 		);
+		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
 	}
 
 	return buildCollectResult(
@@ -786,6 +798,11 @@ function extractLastAssistantText(
 		if (text.trim().length > 0) return text;
 	}
 	return '';
+}
+
+function nextCollectPollInterval(currentMs: number): number {
+	if (currentMs <= 0) return COLLECT_POLL_INTERVAL_MS;
+	return Math.min(currentMs * 2, MAX_COLLECT_POLL_INTERVAL_MS);
 }
 
 async function runLane(
@@ -1334,7 +1351,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async advisory batch without advancing workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch; this is the required join barrier for advisory lane workflows and does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,
@@ -1342,8 +1359,10 @@ export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 			include_pending: CollectLaneResultsArgsSchema.shape.include_pending,
 			cancel_pending: CollectLaneResultsArgsSchema.shape.cancel_pending,
 		},
-		execute: async (args: unknown, directory: string): Promise<string> => {
-			const result = await executeCollectLaneResults(args, directory);
+		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
+			const result = await executeCollectLaneResults(args, directory, {
+				sessionID: getContextSessionID(ctx),
+			});
 			return JSON.stringify(result, null, 2);
 		},
 	});

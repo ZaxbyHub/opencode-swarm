@@ -117,4 +117,40 @@ they correlate to a real dispatch. Unresolved pendings are transitioned to `stal
 
 ---
 
+## 8. Recovering from Async Advisory Lane Batches
+
+Async advisory lanes launched with `dispatch_lanes_async` are tracked in
+`.swarm/background-delegations.jsonl` and joined with `collect_lane_results`.
+They are advisory only: their results can inform the architect, but they never
+advance reviewer, test, council, or phase-completion gates.
+
+**Lost `batch_id`:** inspect the architect transcript for the
+`dispatch_lanes_async` result and reuse its `batch_id`. If the transcript is not
+available, inspect `.swarm/background-delegations.jsonl` for recent records with
+a matching `mode`, `laneId`, or `parentSessionId`, then run
+`collect_lane_results` for the recovered batch. If the batch cannot be
+identified, relaunch the advisory lanes with a new explicit `batch_id`.
+
+**Stale batch:** `collect_lane_results` reports stale counts when lanes exceed
+the async pending timeout. Treat stale lanes as missing advisory evidence, then
+rerun only the affected read-only lanes under a new batch. Do not treat stale
+advisory lanes as completed gate evidence.
+
+**Cancelled batch:** if `cancel_pending: true` was used, the cancelled rows are
+terminal. Relaunch a new batch if the advisory evidence is still needed. A
+cancelled advisory batch is not a failure of any workflow gate.
+
+**Orphaned pending delegation:** if a parent session was closed or the child
+session disappeared, run `collect_lane_results` with `wait: false` to collect any
+finished lanes, then run it again with `cancel_pending: true` to mark the
+remaining orphaned rows as cancelled. Relaunch any required advisory lanes with a
+fresh `batch_id`.
+
+**Cross-session mismatch:** `collect_lane_results` filters by the current parent
+session when the tool context supplies one. If a batch was launched in a
+different session, collect it from that parent session, or relaunch the advisory
+lanes in the current session.
+
+---
+
 For architecture details, see `docs/plan-durability.md`.

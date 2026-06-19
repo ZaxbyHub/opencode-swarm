@@ -69,6 +69,17 @@ describe('parseTaskEnvelope', () => {
 	it('rejects empty id', () => {
 		expect(parseTaskEnvelope('<task id="" state="completed">')).toBeNull();
 	});
+
+	it('documents embedded envelope parsing as trust-gated by the observer', () => {
+		const parsed = parseTaskEnvelope(
+			`untrusted prefix ${completedEnvelope} untrusted suffix`,
+		);
+		expect(parsed).toMatchObject({
+			sessionId: 'ses_abc123',
+			state: 'completed',
+			resultText: 'looks good',
+		});
+	});
 });
 
 describe('extractDispatchIds', () => {
