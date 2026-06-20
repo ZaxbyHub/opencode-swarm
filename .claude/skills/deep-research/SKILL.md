@@ -102,7 +102,12 @@ Dispatch up to `max_researchers` `the active swarm's sme agent` calls with
 `batch_id`, then continue architect-owned retrieval quality work that does not
 depend on worker output: tighten the evidence ledger, check source authority,
 prepare reviewer shard structure, and identify unresolved gaps. Do not write final
-claims from running lanes. Each sme dispatch must
+claims from running lanes. Dispatch promptly — do not accumulate extensive planning
+prose before the call, or output truncation may swallow the tool call itself. Keep each
+lane `prompt` compact: send shared context ONCE via the `common_prompt` field, or have
+lanes read it from a file by absolute path, instead of inlining the same large blob into
+every lane prompt — oversized inline prompts produce malformed or truncated tool-call
+JSON. Each sme dispatch must
 include:
 - `DOMAIN`: the subtopic
 - `TASK`: "Synthesize an evidence-grounded answer for this subtopic. Cite each

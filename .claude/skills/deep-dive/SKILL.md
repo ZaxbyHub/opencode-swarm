@@ -71,7 +71,7 @@ Each explorer mission receives:
 - The scope map context from Step 2
 - Instruction: "You are performing a [LANE] audit. Report findings as candidate observations with severity (INFO/LOW/MEDIUM/HIGH/CRITICAL), location, and evidence."
 
-Explorer missions are dispatched in parallel waves. Launch the wave, record the returned `batch_id`, then continue deterministic architect work that does not depend on lane output: refine the scope map, build the candidate ledger shell, inspect local evidence with read-only tools, and prepare reviewer shard structure. Do not synthesize findings from running lanes.
+Explorer missions are dispatched in parallel waves. Launch the wave promptly — do not accumulate extensive planning prose before the call, or output truncation may swallow the tool call itself. Launch the wave, record the returned `batch_id`, then continue deterministic architect work that does not depend on lane output: refine the scope map, build the candidate ledger shell, inspect local evidence with read-only tools, and prepare reviewer shard structure. Do not synthesize findings from running lanes. Keep each lane `prompt` compact: send shared context ONCE via the `common_prompt` field, or have lanes read it from a file by absolute path, instead of inlining the same large blob into every lane prompt — oversized inline prompts produce malformed or truncated tool-call JSON.
 
 At the Step 4 boundary, call `collect_lane_results` with `wait: true` for every open wave batch. Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps; do not silently proceed past a required lane. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes` or parallel Task calls and record that async advisory lanes were unavailable.
 

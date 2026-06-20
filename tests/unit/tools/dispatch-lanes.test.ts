@@ -1526,3 +1526,141 @@ describe('formatError — regression: PR #1358 review (R1.3)', () => {
 		expect(result.length).toBe(203);
 	});
 });
+
+describe('common_prompt (shared lane context)', () => {
+	// Mirrors MAX_PROMPT_CHARS in src/tools/dispatch-lanes.ts (per-lane prompt limit).
+	const MAX_PROMPT_CHARS = 80_000;
+
+	test('applyCommonPrompt prepends shared context to every lane prompt', () => {
+		const result = _test_exports.applyCommonPrompt(
+			[
+				{ id: 'a', agent: 'explorer', prompt: 'focus A' },
+				{ id: 'b', agent: 'reviewer', prompt: 'focus B' },
+			],
+			'SHARED CONTEXT',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.lanes[0].prompt).toBe('SHARED CONTEXT\n\nfocus A');
+		expect(result.lanes[1].prompt).toBe('SHARED CONTEXT\n\nfocus B');
+	});
+
+	test('applyCommonPrompt returns lanes unchanged when common_prompt is omitted', () => {
+		const lanes = [{ id: 'a', agent: 'explorer', prompt: 'focus A' }];
+		const result = _test_exports.applyCommonPrompt(lanes, undefined);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		// passthrough: same reference, no allocation
+		expect(result.lanes).toBe(lanes);
+	});
+
+	test('applyCommonPrompt rejects when combined length exceeds the per-lane limit', () => {
+		const common = 'a'.repeat(MAX_PROMPT_CHARS - 1);
+		const result = _test_exports.applyCommonPrompt(
+			[{ id: 'big', agent: 'explorer', prompt: 'bb' }],
+			common,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.errors).toHaveLength(1);
+		expect(result.errors[0]).toContain('big');
+		expect(result.errors[0]).toContain(`max ${MAX_PROMPT_CHARS}`);
+	});
+
+	test('executeDispatchLanes sends common_prompt + per-lane prompt to each lane', async () => {
+		const directory = makeTempDir();
+		let nextSession = 0;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: `session-${++nextSession}` },
+				error: undefined,
+			})),
+			prompt: mock(async (input) => ({
+				data: {
+					parts: [{ type: 'text' as const, text: `done ${input.body.agent}` }],
+				},
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'PR DIFF + LEDGER',
+				lanes: [
+					{ id: 'corr', agent: 'explorer', prompt: 'correctness focus' },
+					{ id: 'sec', agent: 'reviewer', prompt: 'security focus' },
+				],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		const texts = (ops.prompt as ReturnType<typeof mock>).mock.calls.map(
+			(call) => call[0].body.parts[0].text,
+		);
+		expect(texts).toContain('PR DIFF + LEDGER\n\ncorrectness focus');
+		expect(texts).toContain('PR DIFF + LEDGER\n\nsecurity focus');
+	});
+
+	test('executeDispatchLanes rejects oversized common_prompt + prompt without dispatching', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'a'.repeat(MAX_PROMPT_CHARS - 1),
+				lanes: [{ id: 'big', agent: 'explorer', prompt: 'bbbb' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.prompt).toHaveBeenCalledTimes(0);
+	});
+
+	test('executeDispatchLanesAsync sends common_prompt + lane prompt to promptAsync', async () => {
+		const directory = makeTempDir();
+		let nextSession = 0;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: `session-${++nextSession}` },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-common-1',
+				common_prompt: 'SHARED ASYNC CONTEXT',
+				lanes: [
+					{ id: 'runtime', agent: 'explorer', prompt: 'inspect runtime' },
+				],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.promptAsync).toHaveBeenCalledTimes(1);
+		const sentText = (ops.promptAsync as ReturnType<typeof mock>).mock
+			.calls[0][0].body.parts[0].text;
+		expect(sentText).toBe('SHARED ASYNC CONTEXT\n\ninspect runtime');
+	});
+});

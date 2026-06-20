@@ -543,12 +543,12 @@ export const TOOL_METADATA = {
 	},
 	dispatch_lanes: {
 		description:
-			'dispatch multiple read-only exploration/review lanes concurrently and return a structured join result',
+			'dispatch read-only exploration/review lanes concurrently and BLOCK until all finish; prefer dispatch_lanes_async for non-blocking dispatch, use this only when promptAsync is unavailable',
 		agents: ['architect'],
 	},
 	dispatch_lanes_async: {
 		description:
-			'launch multiple read-only advisory lanes asynchronously and return a batch id for later collection',
+			'launch read-only advisory lanes non-blockingly and return a batch id immediately so you can keep working; join later with collect_lane_results',
 		agents: ['architect'],
 	},
 	collect_lane_results: {

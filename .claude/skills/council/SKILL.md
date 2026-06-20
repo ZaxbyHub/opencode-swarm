@@ -92,7 +92,11 @@ RESEARCH CONTEXT
    continue only non-dependent architect work: prepare the synthesis outline,
    normalize the RESEARCH CONTEXT citations, and draft disagreement categories.
    Do not call `convene_general_council` or present conclusions from running
-   lanes. Each dispatch message must
+   lanes. Dispatch promptly — do not accumulate extensive planning prose before the
+   call, or output truncation may swallow the tool call itself. Keep each lane `prompt`
+   compact: send shared context ONCE via the `common_prompt` field, or have lanes read
+   it from a file by absolute path, instead of inlining the same large blob into every
+   lane prompt. Each dispatch message must
    include:
    - The question
    - Round number: 1
