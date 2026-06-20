@@ -310,6 +310,8 @@ export const _test_exports = {
 	formatError,
 	nextCollectPollInterval,
 	promptHash,
+	DispatchLanesArgsSchema,
+	DispatchLanesAsyncArgsSchema,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {

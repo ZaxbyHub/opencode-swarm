@@ -1592,6 +1592,24 @@ describe('common_prompt (shared lane context)', () => {
 		expect(ops.create).toHaveBeenCalledTimes(0);
 	});
 
+	test('DispatchLanesAsyncArgsSchema inherits common_prompt from the base schema — regression: false-positive "missing from async schema" review claim', () => {
+		// A PR review claimed common_prompt was absent from the async schema, so
+		// dispatch_lanes_async would silently drop it. That is false: the async
+		// schema is `DispatchLanesArgsSchema.extend({...})`, and Zod's .extend
+		// preserves every base field. This locks the parity down permanently.
+		const { DispatchLanesArgsSchema, DispatchLanesAsyncArgsSchema } =
+			_test_exports;
+		expect(DispatchLanesArgsSchema.shape.common_prompt).toBeDefined();
+		expect(DispatchLanesAsyncArgsSchema.shape.common_prompt).toBeDefined();
+
+		const parsed = DispatchLanesAsyncArgsSchema.parse({
+			batch_id: 'batch-schema-1',
+			common_prompt: 'shared async context',
+			lanes: [{ id: 'x', agent: 'explorer', prompt: 'focus' }],
+		});
+		expect(parsed.common_prompt).toBe('shared async context');
+	});
+
 	test('applyCommonPrompt rejects when combined length exceeds the per-lane limit', () => {
 		const common = 'a'.repeat(MAX_PROMPT_CHARS - 1);
 		const result = _test_exports.applyCommonPrompt(
