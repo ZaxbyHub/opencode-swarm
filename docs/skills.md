@@ -31,7 +31,8 @@ During phase execution, knowledge is **retrieved and injected** into the archite
 1. **Search & Rank**
    - Unified `searchKnowledge()` queries both swarm and hive
    - Near-duplicate removal via Jaccard bigram similarity (threshold 0.6)
-   - Action-aware ranking: triggers, `applies_to_agents/tools`, priority level, trigger phrase boost
+    - Action-aware ranking: triggers, `applies_to_agents/tools`, priority level, trigger phrase boost
+    - For ranking algorithm details, see [Knowledge System](knowledge.md#query-ranking).
 
 2. **Injection Budget** (context-adaptive)
    - \>60% headroom: full budget (up to 5 entries, 2000 chars)
@@ -63,7 +64,8 @@ During phase execution, knowledge is **retrieved and injected** into the archite
 4. **Outcomes Recorded**
    - Chat-visible `KNOWLEDGE_*` markers are the enforcement gate
    - `knowledge_receipt` tool records outcomes to `.swarm/knowledge-application.jsonl`
-   - Counters: `shown_count`, `acknowledged_count`, `applied_explicit_count`, `ignored_count`, `violated_count`, `succeeded_after_shown_count`, `failed_after_shown_count`
+    - Counters: `shown_count`, `acknowledged_count`, `applied_explicit_count`, `ignored_count`, `violated_count`, `succeeded_after_shown_count`, `failed_after_shown_count`
+    - See [Evidence and Telemetry](evidence-and-telemetry.md) for the outcome persistence schema.
 
 ### Phase 3: Feedback & Learning
 
@@ -77,7 +79,8 @@ After phase completion, feedback is collected:
 
 2. **Knowledge Durability**
    - **TTL decay**: Active entries age every successful phase (increments `phases_alive`)
-   - Archived when `phases_alive > max_phases` (default 10 phases for general, 3 for `todo`)
+    - Archived when `phases_alive > max_phases` (default 10 phases for general, 3 for `todo`)
+    - Archived entries are excluded from query results but preserved on disk (not deleted). They can be restored via the quarantine/workflow tools if needed.
    - **Promoted entries are TTL-exempt** — live until explicitly quarantined
    - Quarantine workflow: `/swarm knowledge quarantine <id> [reason]` hides but preserves
 
@@ -109,13 +112,15 @@ Mature, high-confidence knowledge can be compiled into reusable **SKILL.md** fil
 An entry passes the maturity gate if:
 
 1. **Not negatively evidenced** — `computeOutcomeSignal >= 0` (no strong negative outcome)
-2. **Strong outcome bypass** — `applied_explicit_count >= 3` OR `succeeded_after_shown_count >= 3` AND `computeOutcomeSignal > 0`
+ 2. **Strong outcome bypass** — (`applied_explicit_count >= 3` OR `succeeded_after_shown_count >= 3`) AND `computeOutcomeSignal > 0`
    - Bypasses confidence floor and confirmation count
    - Allows well-evidenced singletons to become skills early
 3. **Legacy AND gates** — for other entries:
    - Confidence >= `min_skill_confidence` (default 0.70)
    - Either `confirmed_by` count >= `min_skill_confirmations` (default 2 distinct phases) OR strong outcome record
-   - Both conditions must independently hold (neither alone is sufficient)
+    - Both conditions must independently hold (neither alone is sufficient)
+
+> **Note:** `confirmed_by` tracks distinct phase numbers where the entry was actually applied (recorded via `KNOWLEDGE_APPLIED` markers). Only phases with evidence of use count toward the threshold.
 
 #### Generation Workflow
 
@@ -157,7 +162,8 @@ Agent task / curator review
 4. **Activation** — `skill_apply <slug>` promotes draft to `.opencode/skills/generated/<slug>/SKILL.md`
    - Becomes available to all agents via `SKILLS:` delegation field
    - Locked against overwrite (requires `force=true` if generator marker removed)
-   - Rejected candidates recorded to `.swarm/skills/rejected-edits.jsonl`
+    - Rejected candidates recorded to `.swarm/skills/rejected-edits.jsonl`
+    - Entries are added to this file when `isRejectedSkillContent` detects a hash match with previously rejected content, or when skill evaluation fails required-phrases or forbidden-phrases checks.
 
 5. **Ongoing Refinement** — `skill_regenerate <slug>` rebuilds active skill from updated source knowledge
 
@@ -235,7 +241,7 @@ When invoked, emits proposal with sections: Inventory snapshot, Repeated ignored
 When `curator.skill_generation_enabled: true` (default), the curator can emit `skill_candidates` JSON blocks:
 
 - High-confidence candidates (>= `curator.min_skill_confidence`, default 0.70) trigger `skill_generate` in **draft** mode
-- Activation always requires human review via `skill_apply`
+- When `skill_generation_mode: "draft"` (default), activation always requires human review via `skill_apply`. When `"active"`, generated skills are placed directly into `.opencode/skills/generated/` without a draft step.
 - Curator diagnostics (debug-gated) report malformed JSON without writes
 
 ---
@@ -290,6 +296,7 @@ Key settings (full reference: `src/config/schema.ts`):
     "high_risk_tools": ["save_plan", "update_task_status", "phase_complete"]
   },
   "curator": {
+    "skill_generation_mode": "draft",        // 'draft' (default) | 'active': 'active' bypasses draft review
     "skill_generation_enabled": true,
     "min_skill_confidence": 0.70,
     "min_skill_confirmations": 2
@@ -332,7 +339,7 @@ When reviewing a draft skill before applying:
 | **Generated skill** | Compilable SKILL.md derived from mature knowledge (review checklist, triggers, directives) |
 | **Maturity gate** | Decision logic determining if an entry can become a skill (outcome signal, confidence, confirmations) |
 | **Outcome signal** | Rollup of `applied_explicit_count`, `succeeded_after_shown_count`, `violated_count`, etc. |
-| **Knowledge injection** | Retrieval of relevant entries and inclusion in architect's prompt at phase start |
+| **Knowledge injection** | Retrieval of relevant entries and inclusion in architect's prompt at phase start — see [knowledge.md#injection](knowledge.md#injection) |
 | **Promotion** | Swarm → Hive transition after threshold (3 phases confirmed, fast-track, or 90-day age) |
 | **v2 directives** | Optional fields on knowledge entries (`triggers`, `required_actions`, `applies_to_agents/tools`, priority) |
 | **Knowledge application contract** | Architect MUST emit `KNOWLEDGE_APPLIED/IGNORED/VIOLATED` for applicable directives |
