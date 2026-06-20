@@ -1092,4 +1092,103 @@ describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => 
 			}
 		});
 	});
+
+	/**
+	 * Attack Vector 11: retrieve_lane_output exemption ratchet
+	 * Verify retrieve_lane_output is treated like retrieve_summary — exempt by default,
+	 * not bypassable via suffix/prefix/case variations.
+	 */
+	describe('retrieve_lane_output exemption ratchet', () => {
+		it('should exempt retrieve_lane_output when in exempt list', async () => {
+			const config: SummaryConfig = {
+				enabled: true,
+				threshold_bytes: 1024,
+				max_summary_chars: 500,
+				max_stored_bytes: 1024 * 1024,
+				retention_days: 7,
+				exempt_tools: [
+					'retrieve_summary',
+					'retrieve_lane_output',
+					'task',
+					'read',
+				],
+			};
+
+			const hook = createToolSummarizerHook(config, tempDir);
+
+			const output = {
+				title: 'Test Tool',
+				output: largeOutput,
+				metadata: {},
+			};
+
+			await hook(
+				{ tool: 'retrieve_lane_output', sessionID: 'test', callID: 'test' },
+				output,
+			);
+
+			expect(output.output).toBe(largeOutput);
+		});
+
+		it('should NOT exempt retrieve_lane_output with suffix', async () => {
+			const config: SummaryConfig = {
+				enabled: true,
+				threshold_bytes: 1024,
+				max_summary_chars: 500,
+				max_stored_bytes: 1024 * 1024,
+				retention_days: 7,
+				exempt_tools: [
+					'retrieve_summary',
+					'retrieve_lane_output',
+					'task',
+					'read',
+				],
+			};
+
+			const hook = createToolSummarizerHook(config, tempDir);
+
+			const output = {
+				title: 'Test Tool',
+				output: largeOutput,
+				metadata: {},
+			};
+
+			await hook(
+				{
+					tool: 'retrieve_lane_output_extra',
+					sessionID: 'test',
+					callID: 'test',
+				},
+				output,
+			);
+
+			expect(output.output).not.toBe(largeOutput);
+		});
+
+		it('should NOT exempt retrieve_lane_output when missing from exempt list', async () => {
+			const config: SummaryConfig = {
+				enabled: true,
+				threshold_bytes: 1024,
+				max_summary_chars: 500,
+				max_stored_bytes: 1024 * 1024,
+				retention_days: 7,
+				exempt_tools: ['retrieve_summary', 'task', 'read'],
+			};
+
+			const hook = createToolSummarizerHook(config, tempDir);
+
+			const output = {
+				title: 'Test Tool',
+				output: largeOutput,
+				metadata: {},
+			};
+
+			await hook(
+				{ tool: 'retrieve_lane_output', sessionID: 'test', callID: 'test' },
+				output,
+			);
+
+			expect(output.output).not.toBe(largeOutput);
+		});
+	});
 });

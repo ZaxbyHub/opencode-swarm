@@ -269,12 +269,27 @@ function laneOutputRelativePath(ref: string): string {
 	);
 }
 
+// Windows can briefly hold a file handle after close; retry on transient errors.
+const WINDOWS_RENAME_MAX_RETRIES = 3;
+
 function writeAtomicJson(absPath: string, value: unknown): void {
 	mkdirSync(path.dirname(absPath), { recursive: true });
 	const tempFile = `${absPath}.tmp-${Date.now()}-${process.pid}`;
 	try {
 		writeFileSync(tempFile, JSON.stringify(value, null, 2), 'utf-8');
-		renameSync(tempFile, absPath);
+		let lastRenameError: unknown;
+		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
+			try {
+				renameSync(tempFile, absPath);
+				lastRenameError = undefined;
+				break;
+			} catch (err) {
+				lastRenameError = err;
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') break;
+			}
+		}
+		if (lastRenameError) throw lastRenameError;
 	} finally {
 		if (existsSync(tempFile)) {
 			try {

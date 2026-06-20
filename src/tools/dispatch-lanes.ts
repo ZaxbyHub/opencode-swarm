@@ -877,6 +877,9 @@ function extractAssistantTranscript(
 	return {
 		text: assistantTexts.join('\n\n'),
 		messageCount: assistantTexts.length,
+		// Total message count (not just assistant) is the correct signal: the API
+		// limit is applied to all message types, so hitting it means there may be
+		// earlier messages of any role — including assistant — that were not fetched.
 		transcriptIncomplete: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
 	};
 }
