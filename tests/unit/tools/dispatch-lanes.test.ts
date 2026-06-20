@@ -1596,6 +1596,34 @@ describe('common_prompt (shared lane context)', () => {
 		expect(ops.create).toHaveBeenCalledTimes(0);
 	});
 
+	test('whitespace-only common_prompt is rejected by schema (regex \\S guard)', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		// A whitespace-only common_prompt passes .min(1) but carries no context;
+		// the \S regex guard rejects it before any session is created so lanes
+		// never receive a blank prefix + separator.
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: '   \n\t  ',
+				lanes: [{ id: 'x', agent: 'explorer', prompt: 'focus' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.create).toHaveBeenCalledTimes(0);
+	});
+
 	test('DispatchLanesAsyncArgsSchema inherits common_prompt from the base schema — regression: false-positive "missing from async schema" review claim', () => {
 		// A PR review claimed common_prompt was absent from the async schema, so
 		// dispatch_lanes_async would silently drop it. That is false: the async

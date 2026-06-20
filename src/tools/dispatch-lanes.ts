@@ -107,6 +107,9 @@ const DispatchLanesArgsSchema = z.object({
 	common_prompt: z
 		.string()
 		.min(1)
+		// Must carry real content: a whitespace-only value would prepend a blank
+		// prefix + separator to every lane prompt without adding any context.
+		.regex(/\S/, 'common_prompt must contain non-whitespace content')
 		// Reserve room for the separator + at least 1 char of lane prompt so any
 		// schema-valid common_prompt can coexist with the shortest valid lane
 		// prompt without the combined length exceeding MAX_PROMPT_CHARS.
