@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -14,17 +14,17 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		claudeContent = readFileSync(SKILL_CLAUDE, 'utf-8');
 	});
 
-	test('files exist and are non-empty', () => {
+	it('files exist and are non-empty', () => {
 		expect(opencodeContent.length).toBeGreaterThan(0);
 		expect(claudeContent.length).toBeGreaterThan(0);
 	});
 
-	test('1 — contains "CLARIFICATION FUNNEL (pre-save_plan)" heading', () => {
+	it('1 — contains "CLARIFICATION FUNNEL (pre-save_plan)" heading', () => {
 		expect(opencodeContent).toContain('CLARIFICATION FUNNEL (pre-save_plan)');
 		expect(claudeContent).toContain('CLARIFICATION FUNNEL (pre-save_plan)');
 	});
 
-	test('2 — all four stages present', () => {
+	it('2 — all four stages present', () => {
 		expect(opencodeContent).toContain(
 			'#### Stage 1: Inventory All Material Uncertainties',
 		);
@@ -39,7 +39,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		);
 	});
 
-	test('3 — all five classification categories present', () => {
+	it('3 — all five classification categories present', () => {
 		expect(opencodeContent).toContain('self_resolved');
 		expect(opencodeContent).toContain('critic_resolved');
 		expect(opencodeContent).toContain('research_needed');
@@ -47,8 +47,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(opencodeContent).toContain('deferred_nonblocking');
 	});
 
-	test('4 — all four critic outcomes present with SoundingBoardVerdict mapping', () => {
-		// Anchor to the Stage 3 section to verify structured mapping exists
+	it('4 — all four critic outcomes present with SoundingBoardVerdict mapping', () => {
 		const stage3Start = opencodeContent.indexOf(
 			'#### Stage 3: Consult Critic Sounding Board',
 		);
@@ -68,7 +67,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(stage3Section).toContain('ASK_USER');
 	});
 
-	test('4b — overconfidence guard present in Stage 3', () => {
+	it('4b — overconfidence guard present in Stage 3', () => {
 		const stage3Start = opencodeContent.indexOf(
 			'#### Stage 3: Consult Critic Sounding Board',
 		);
@@ -79,10 +78,9 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(stage3Section).toContain('Overconfidence guard');
 	});
 
-	test('5 — "Always-Surface Categories" section present with all 13 categories', () => {
+	it('5 — "Always-Surface Categories" section present with all 13 categories', () => {
 		expect(opencodeContent).toContain('#### Always-Surface Categories');
 		
-		// All 13 always-surface categories that MUST be enumerated
 		const expectedCategories = [
 			'Scope boundaries',
 			'Data loss or destructive behavior',
@@ -106,11 +104,11 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		}
 	});
 
-	test('6 — "Assumptions Recording" section present', () => {
+	it('6 — "Assumptions Recording" section present', () => {
 		expect(opencodeContent).toContain('#### Assumptions Recording');
 	});
 
-	test('7 — funnel section appears BEFORE save_plan tool section', () => {
+	it('7 — funnel section appears BEFORE save_plan tool section', () => {
 		const funnelIdx = opencodeContent.indexOf(
 			'### CLARIFICATION FUNNEL (pre-save_plan)',
 		);
@@ -120,7 +118,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(funnelIdx).toBeLessThan(saveIdx);
 	});
 
-	test('7b — General Council option appears before funnel and save_plan in both mirrors', () => {
+	it('7b — General Council option appears before funnel and save_plan in both mirrors', () => {
 		const section = '### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)';
 		const opencodeCouncilIdx = opencodeContent.indexOf(section);
 		const claudeCouncilIdx = claudeContent.indexOf(section);
@@ -137,7 +135,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(claudeContent).toContain('before any critic pre-plan review');
 	});
 
-	test('8 — mirror parity: .claude version is byte-identical to .opencode version', () => {
+	it('8 — mirror parity: .claude version is byte-identical to .opencode version', () => {
 		expect(claudeContent).toBe(opencodeContent);
 	});
 });

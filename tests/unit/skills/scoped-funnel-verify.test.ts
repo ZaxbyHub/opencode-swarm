@@ -1,22 +1,33 @@
 /**
- * Verification tests for scoped-funnel protocol in specify, brainstorm, and issue-ingest skills.
+ * Verification tests for abbreviated and scoped-funnel protocols.
  *
- * Validates that all abbreviated funnel summaries in these skills contain:
+ * Abbreviated funnel skills (specify, brainstorm, issue-ingest): these embed
+ * a shortened funnel summary (all categories, protections, and outcomes but
+ * without the full 4-stage protocol prose found in clarify/plan skills).
+ *
+ * Scoped-funnel skill (clarify-spec): has a unique scoped protocol tailored
+ * to spec editing, with its own stage structure and outcome mappings.
+ *
+ * Validates that all abbreviated funnel summaries contain:
  * 1. All five classification categories
  * 2. Overconfidence guard
  * 3. Always-surface protection with UNNECESSARY/DROP override
  * 4. SoundingBoardVerdict mapping reference
  * 5. Assumptions recording requirement
+ *
+ * And that the scoped-funnel skill (clarify-spec) validates its own protocol.
  */
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const SKILLS_TO_TEST = ['specify', 'brainstorm', 'issue-ingest'];
+const ABBREVIATED_FUNNEL_SKILLS = ['specify', 'brainstorm', 'issue-ingest'];
+const SCOPED_FUNNEL_SKILLS = ['clarify-spec'];
+const SKILLS_TO_TEST = [...ABBREVIATED_FUNNEL_SKILLS, ...SCOPED_FUNNEL_SKILLS];
 
-describe('Scoped Funnel Protocol Verification (specify, brainstorm, issue-ingest)', () => {
-	for (const skillSlug of SKILLS_TO_TEST) {
+describe('Scoped and Abbreviated Funnel Protocol Verification', () => {
+	for (const skillSlug of ABBREVIATED_FUNNEL_SKILLS) {
 		describe(`${skillSlug} skill`, () => {
 			const skillPath = join(
 				process.cwd(),
@@ -114,4 +125,44 @@ describe('Scoped Funnel Protocol Verification (specify, brainstorm, issue-ingest
 			});
 		});
 	}
+
+	// ===== Dedicated scoped-funnel tests for clarify-spec =====
+	describe('clarify-spec scoped protocol', () => {
+		const specPath = join(
+			process.cwd(),
+			'.opencode/skills/clarify-spec/SKILL.md',
+		);
+		const content = readFileSync(specPath, 'utf-8');
+
+		it('has "Scoped Funnel Protocol (CLARIFY-SPEC only)" heading', () => {
+			expect(content).toContain('Scoped Funnel Protocol (CLARIFY-SPEC only)');
+		});
+
+		it('contains overconfidence guard reference', () => {
+			expect(content).toContain('Overconfidence guard');
+		});
+
+		it('contains always-surface protection with DROP override', () => {
+			expect(content).toContain('always-surface');
+			expect(content).toContain('UNNECESSARY');
+			expect(content).toContain('DROP');
+		});
+
+		it('documents override direction: UNNECESSARY/DROP → APPROVED/ASK_USER', () => {
+			expect(content).toMatch(/UNNECESSARY.*DROP.*APPROVED|APPROVED.*ASK_USER/);
+		});
+
+		it('describes scope as lighter than the full funnel', () => {
+			expect(content).toMatch(/lighter|scoped|subset|not.*full/i);
+		});
+
+		it('mirror parity: .claude version is byte-identical', () => {
+			const claudePath = join(
+				process.cwd(),
+				'.claude/skills/clarify-spec/SKILL.md',
+			);
+			const claudeContent = readFileSync(claudePath, 'utf-8');
+			expect(claudeContent).toBe(content);
+		});
+	});
 });
