@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.83.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.2...v7.83.0) (2026-06-20)
+
+
+### Features
+
+* **repo-graph:** configurable directory excludes and crash-resilient builds ([4d49446](https://github.com/ZaxbyHub/opencode-swarm/commit/4d49446e7fef98ea64775495b59150ba79edc7f8))
+
 ## [7.82.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.1...v7.82.2) (2026-06-20)
 
 
