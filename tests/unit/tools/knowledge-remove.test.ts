@@ -773,8 +773,8 @@ describe('knowledge_remove tool verification tests', () => {
 			await appendKnowledge(knowledgePath, {
 				...baseEntry,
 				id: activeId,
-				lesson: 'active entry',
-				status: 'active',
+				lesson: 'established entry',
+				status: 'established',
 			});
 			await appendKnowledge(knowledgePath, {
 				...baseEntry,
