@@ -166,9 +166,14 @@ export function readLaneOutput(
 	if (!REF_RE.test(ref)) return null;
 	const absPath = validateSwarmPath(directory, laneOutputRelativePath(ref));
 	if (!existsSync(absPath)) return null;
-	const parsed = LaneOutputArtifactSchema.safeParse(
-		JSON.parse(readFileSync(absPath, 'utf-8')),
-	);
+	let parsed: ReturnType<typeof LaneOutputArtifactSchema.safeParse>;
+	try {
+		parsed = LaneOutputArtifactSchema.safeParse(
+			JSON.parse(readFileSync(absPath, 'utf-8')),
+		);
+	} catch {
+		return null;
+	}
 	if (!parsed.success || parsed.data.ref !== ref) return null;
 	return { artifact: parsed.data };
 }
