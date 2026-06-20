@@ -436,6 +436,8 @@ function shouldMaskToolOutput(
 	}
 
 	// Exempt retrieval tools and small read/task outputs.
+	// - retrieve_lane_output / retrieve_summary: paged artifacts must stay visible so the
+	//   architect can page through them; masking defeats the delivery mechanism.
 	// - task: results are already summarized by the agent that created the task call
 	// Check structured tool name first (reliable); fall back to text heuristic for
 	// legacy tool result formats that may not carry toolName in msg.info.
