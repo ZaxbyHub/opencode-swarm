@@ -48,7 +48,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('1. Fallback chain: symbolic-ref fails, git config returns "develop"', () => {
-		test('targetBranch should be origin/develop when config returns develop', () => {
+		test('targetBranch should be origin/develop when config returns develop', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> FAILS (fallback)
 			// 3. config init.defaultBranch -> develop (succeeds)
@@ -72,7 +72,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 10. reset --hard
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(result.targetBranch).toBe('origin/develop');
@@ -83,7 +83,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('2. Busy-wait retry: 4 retry attempts before giving up', () => {
-		test('gives up after 4 failed reset attempts', () => {
+		test('gives up after 4 failed reset attempts', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -111,7 +111,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 1, stdout: '', stderr: 'unable to lock ref' }, // 12. reset fail 4 (final)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Reset failed');
@@ -119,7 +119,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 			expect(mockSpawnSync).toHaveBeenCalledTimes(12);
 		});
 
-		test('succeeds on 4th retry after 3 failures', () => {
+		test('succeeds on 4th retry after 3 failures', async () => {
 			// Same as above but 4th attempt succeeds
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
@@ -136,7 +136,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 12. reset success 4
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(mockSpawnSync).toHaveBeenCalledTimes(12);
@@ -144,7 +144,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('3. Prune gone branches: gone detected, non-gone skipped', () => {
-		test('prunes gone branches but skips branches with active upstream', () => {
+		test('prunes gone branches but skips branches with active upstream', async () => {
 			// Sequence:
 			// 1-9: Normal reset sequence
 			// 10: branch --merged -> only active-branch (not merged, should be skipped)
@@ -178,7 +178,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 13. branch -d gone-branch
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -193,7 +193,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('4. Prune merged: current branch (*) excluded from pruning', () => {
-		test('does not attempt to delete current branch marked with asterisk', () => {
+		test('does not attempt to delete current branch marked with asterisk', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -211,7 +211,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				}, // 10. branch --merged - main has asterisk
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -225,7 +225,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('5. Already-aligned with pruning enabled', () => {
-		test('returns alreadyAligned: true but does NOT prune branches', () => {
+		test('returns alreadyAligned: true but does NOT prune branches', async () => {
 			// When already aligned, function returns early BEFORE any pruning logic
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
@@ -237,7 +237,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (SAME!)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -250,7 +250,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('6. Fetch failure', () => {
-		test('returns success: false with specific fetch error message', () => {
+		test('returns success: false with specific fetch error message', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -259,7 +259,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 128, stdout: '', stderr: 'fatal: unable to access remote' }, // 5. fetch FAILS
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toBe(
@@ -271,7 +271,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('7. Mixed prune results: some succeed, some fail', () => {
-		test('populates both prunedBranches and warnings', () => {
+		test('populates both prunedBranches and warnings', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -305,7 +305,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				}, // 15. branch -d gone-fail (fails)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -321,7 +321,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('8. Result structure: all fields present and types correct', () => {
-		test('success case has correct field types', () => {
+		test('success case has correct field types', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -332,7 +332,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (aligned)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			// Verify all fields exist with correct types
 			expect(typeof result.success).toBe('boolean');
@@ -350,7 +350,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 			expect(result.alreadyAligned).toBe(true);
 		});
 
-		test('failure case has correct field types', () => {
+		test('failure case has correct field types', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 128, stdout: '', stderr: 'not a symbolic ref' }, // 2. symbolic-ref FAILS
@@ -359,7 +359,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 128, stdout: '', stderr: "fatal: couldn't find remote ref" }, // 5. origin/master FAILS
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(typeof result.success).toBe('boolean');
 			expect(typeof result.targetBranch).toBe('string');
@@ -375,7 +375,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('9. Empty options object: same as no options (no pruning)', () => {
-		test('empty options object {} produces same result as undefined', () => {
+		test('empty options object {} produces same result as undefined', async () => {
 			// Test with empty options object
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
@@ -387,7 +387,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (aligned)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {});
+			const result = await branch.resetToRemoteBranch(testCwd, {});
 
 			expect(result.success).toBe(true);
 			// With empty options, no pruning should occur
@@ -395,7 +395,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 			expect(mockSpawnSync).toHaveBeenCalledTimes(7);
 		});
 
-		test('explicit pruneBranches: false does not prune', () => {
+		test('explicit pruneBranches: false does not prune', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -406,7 +406,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (aligned)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: false,
 			});
 
@@ -415,7 +415,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 			expect(mockSpawnSync).toHaveBeenCalledTimes(7);
 		});
 
-		test('explicit pruneBranches: true does prune', () => {
+		test('explicit pruneBranches: true does prune', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -426,7 +426,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (aligned)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -439,7 +439,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 	});
 
 	describe('Additional edge cases', () => {
-		test('branch -vv output with complex formatting is parsed correctly', () => {
+		test('branch -vv output with complex formatting is parsed correctly', async () => {
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -462,7 +462,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 14. branch -d feature-c
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -473,7 +473,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 			// feature-b has [origin/feature-b] without : gone, so should not be pruned
 		});
 
-		test('checkout failure returns appropriate error message', () => {
+		test('checkout failure returns appropriate error message', async () => {
 			setupMock(
 				{ status: 0, stdout: 'feature', stderr: '' }, // 1. getCurrentBranch
 				{ status: 0, stdout: 'refs/remotes/origin/main', stderr: '' }, // 2. symbolic-ref
@@ -489,13 +489,13 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				}, // 8. checkout FAILS
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Checkout failed');
 		});
 
-		test('unpushed commits check handles git log failure gracefully', () => {
+		test('unpushed commits check handles git log failure gracefully', async () => {
 			// When git log fails (branch might not exist upstream), it continues
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
@@ -509,7 +509,7 @@ describe('resetToRemoteBranch - Additional Verification Tests', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			// Should continue despite log failure and succeed
 			expect(result.success).toBe(true);

@@ -538,7 +538,7 @@ describe('Git Branch Module', () => {
 		// 8. gitExec(['checkout', currentBranch])
 		// 9. gitExec(['reset', '--hard', defaultRemoteBranch])
 
-		test('Happy path: symbolic-ref succeeds, clean worktree -> alignment succeeds', () => {
+		test('Happy path: symbolic-ref succeeds, clean worktree -> alignment succeeds', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -560,7 +560,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(result.alreadyAligned).toBe(false);
@@ -570,7 +570,7 @@ describe('Git Branch Module', () => {
 			expect(mockSpawnSync.mock.calls[8][1]).toContain('origin/main');
 		});
 
-		test('Already aligned: HEAD SHA matches remote -> returns alreadyAligned: true', () => {
+		test('Already aligned: HEAD SHA matches remote -> returns alreadyAligned: true', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -588,14 +588,14 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (SAME!)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(result.alreadyAligned).toBe(true);
 			expect(result.message).toBe('Already aligned with remote');
 		});
 
-		test('Uncommitted changes detected -> returns success: false', () => {
+		test('Uncommitted changes detected -> returns success: false', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> DIRTY!
@@ -605,7 +605,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: ' M modified.ts\n', stderr: '' }, // 3. hasUncommittedChanges (DIRTY)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toBe(
@@ -613,7 +613,7 @@ describe('Git Branch Module', () => {
 			);
 		});
 
-		test('Unpushed commits detected -> returns success: false', () => {
+		test('Unpushed commits detected -> returns success: false', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -625,7 +625,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: 'abc123 feat: some commit\n', stderr: '' }, // 4. log (has unpushed)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toBe('Cannot reset: unpushed commits');
@@ -633,17 +633,17 @@ describe('Git Branch Module', () => {
 			expect(mockSpawnSync.mock.calls[3][1][1]).toContain('origin/main');
 		});
 
-		test('Detached HEAD -> returns success: false', () => {
+		test('Detached HEAD -> returns success: false', async () => {
 			// 1. getCurrentBranch -> HEAD (detached!)
 			setupMock({ status: 0, stdout: 'HEAD', stderr: '' }); // 1. getCurrentBranch (detached)
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toBe('Cannot reset: detached HEAD state');
 		});
 
-		test('symbolic-ref fails -> fallback to git config init.defaultBranch succeeds', () => {
+		test('symbolic-ref fails -> fallback to git config init.defaultBranch succeeds', async () => {
 			// 1. getCurrentBranch -> develop
 			// 2. symbolic-ref -> FAILS
 			// 3. config init.defaultBranch -> develop
@@ -667,14 +667,14 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 10. reset --hard develop
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(result.localBranch).toBe('develop');
 			expect(result.targetBranch).toBe('origin/develop');
 		});
 
-		test('All detection methods fail -> returns success: false', () => {
+		test('All detection methods fail -> returns success: false', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> FAILS
 			// 3. config init.defaultBranch -> FAILS
@@ -688,13 +688,13 @@ describe('Git Branch Module', () => {
 				{ status: 128, stdout: '', stderr: "fatal: couldn't find remote ref" }, // 5. origin/master (FAILS)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toBe('Could not detect default remote branch');
 		});
 
-		test('Prune branches enabled -> prunes merged branches and gone upstream', () => {
+		test('Prune branches enabled -> prunes merged branches and gone upstream', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -734,7 +734,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 14. branch -d gone-branch
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd, {
+			const result = await branch.resetToRemoteBranch(testCwd, {
 				pruneBranches: true,
 			});
 
@@ -742,7 +742,7 @@ describe('Git Branch Module', () => {
 			expect(result.prunedBranches.length).toBeGreaterThan(0);
 		});
 
-		test('Prune branches disabled (default) -> no pruning occurs', () => {
+		test('Prune branches disabled (default) -> no pruning occurs', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -765,7 +765,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd); // pruneBranches defaults to undefined
+			const result = await branch.resetToRemoteBranch(testCwd); // pruneBranches defaults to undefined
 
 			expect(result.success).toBe(true);
 			// No branch --merged or branch -vv calls should be made
@@ -773,7 +773,7 @@ describe('Git Branch Module', () => {
 			expect(mockSpawnSync).toHaveBeenCalledTimes(9);
 		});
 
-		test('Windows retry: reset fails twice then succeeds on third try', () => {
+		test('Windows retry: reset fails twice then succeeds on third try', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -799,13 +799,13 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 11. reset --hard success 3
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(mockSpawnSync).toHaveBeenCalledTimes(11);
 		});
 
-		test('Fetch failure -> returns success: false with fetch error', () => {
+		test('Fetch failure -> returns success: false with fetch error', async () => {
 			// 1. getCurrentBranch -> main
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -819,13 +819,13 @@ describe('Git Branch Module', () => {
 				{ status: 128, stdout: '', stderr: 'fatal: unable to access' }, // 5. fetch --prune fails
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Fetch failed');
 		});
 
-		test('Feature branch scenario: user on feature branch, switches to default and resets', () => {
+		test('Feature branch scenario: user on feature branch, switches to default and resets', async () => {
 			// 1. getCurrentBranch -> feature-branch
 			// 2. symbolic-ref -> refs/remotes/origin/main
 			// 3. hasUncommittedChanges -> clean
@@ -847,25 +847,25 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: '', stderr: '' }, // 9. reset --hard main
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(true);
 			expect(result.localBranch).toBe('feature-branch');
 			expect(result.targetBranch).toBe('origin/main');
 		});
 
-		test('Handles unexpected error gracefully', () => {
+		test('Handles unexpected error gracefully', async () => {
 			mockSpawnSync.mockImplementation(() => {
 				throw new Error('unexpected error');
 			});
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Unexpected error');
 		});
 
-		test('Returns correct result structure on success', () => {
+		test('Returns correct result structure on success', async () => {
 			// Already aligned case - no reset needed
 			setupMock(
 				{ status: 0, stdout: 'main', stderr: '' }, // 1. getCurrentBranch
@@ -877,7 +877,7 @@ describe('Git Branch Module', () => {
 				{ status: 0, stdout: 'abc123', stderr: '' }, // 7. rev-parse origin/main (same = aligned)
 			);
 
-			const result = branch.resetToRemoteBranch(testCwd);
+			const result = await branch.resetToRemoteBranch(testCwd);
 
 			expect(result).toHaveProperty('success');
 			expect(result).toHaveProperty('targetBranch');

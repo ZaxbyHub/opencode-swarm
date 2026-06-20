@@ -133,6 +133,51 @@ describe('knowledge-store', () => {
 
 			await fs.promises.unlink(tempPath);
 		});
+
+		it(
+			'readKnowledge with maxEntries does NOT poison the cache for uncapped callers ' +
+				'(regression: capped read must not corrupt subsequent uncapped read)',
+			async () => {
+				const tempPath = path.join(
+					os.tmpdir(),
+					`test-cache-poison-${Date.now()}.jsonl`,
+				);
+				try {
+					// Write 20 entries — more than the cap of 5
+					const entries = Array.from({ length: 20 }, (_, i) =>
+						JSON.stringify({ id: i + 1, text: `entry-${i + 1}` }),
+					);
+					await fs.promises.writeFile(
+						tempPath,
+						entries.join('\n') + '\n',
+						'utf-8',
+					);
+
+					// Step 1: capped read (maxEntries=5) — bypasses cache by design
+					const capped = await readKnowledge<{ id: number; text: string }>(
+						tempPath,
+						5,
+					);
+					expect(capped).toHaveLength(5);
+					expect(capped[0].id).toBe(1);
+					expect(capped[4].id).toBe(5);
+
+					// Step 2: uncapped read — must return ALL 20 entries, not the 5
+					// from the cached capped result. This is the regression test for
+					// the cache-poisoning bug where a capped read would cache its
+					// capped result under (path, namespace), causing later uncapped
+					// reads to get the wrong (capped) result.
+					const uncapped = await readKnowledge<{ id: number; text: string }>(
+						tempPath,
+					);
+					expect(uncapped).toHaveLength(20);
+					expect(uncapped[0].id).toBe(1);
+					expect(uncapped[19].id).toBe(20);
+				} finally {
+					await fs.promises.unlink(tempPath);
+				}
+			},
+		);
 	});
 
 	describe('appendKnowledge', () => {

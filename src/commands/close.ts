@@ -4,7 +4,9 @@ import path from 'node:path';
 import { loadPluginConfigWithMeta } from '../config';
 import type { Plan } from '../config/plan-schema';
 import {
+	type KnowledgeConfig,
 	KnowledgeConfigSchema,
+	type PluginConfig,
 	SkillImproverConfigSchema,
 } from '../config/schema';
 import { archiveEvidence } from '../evidence/manager';
@@ -14,7 +16,8 @@ import {
 	resetToRemoteBranch,
 } from '../git/branch';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
-import { isHiveEligible, promoteToHive } from '../hooks/hive-promoter';
+import { runCuratorPostMortem } from '../hooks/curator-postmortem';
+import { checkHivePromotions } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import {
 	readKnowledge,
@@ -22,6 +25,7 @@ import {
 } from '../hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
+import { tryAcquireLock } from '../parallel/file-locks.js';
 import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
@@ -29,6 +33,7 @@ import {
 	type SkillImproveRequest,
 	type SkillImproveResult,
 } from '../services/skill-improver';
+import { readEarliestSessionStart } from '../session/session-start-store.js';
 import { resetSwarmStatePreservingSingletons, swarmState } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
 
@@ -64,6 +69,53 @@ interface CloseKnowledgeEntry {
 	created_at?: string;
 }
 
+export interface ArchiveStageContext {
+	directory: string;
+	swarmDir: string;
+	config: PluginConfig;
+	warnings: string[];
+}
+
+export interface CloseStageContext {
+	directory: string;
+	swarmDir: string;
+	planData: PlanData;
+	planExists: boolean;
+	planAlreadyDone: boolean;
+	config: KnowledgeConfig;
+	projectName: string;
+	warnings: string[];
+	closedPhases: number[];
+	closedTasks: string[];
+	sessionStart: string | undefined;
+	isForced: boolean;
+	runSkillReview: boolean;
+	options: CloseCommandOptions;
+	phases: PlanPhase[];
+	inProgressPhases: PlanPhase[];
+	curationSucceeded: boolean;
+	curationResult: CurationCounts | undefined;
+	allLessons: string[];
+	explicitLessons: string[];
+	retroLessons: string[];
+	knowledgeSkillHint: string;
+	skillReviewSummary: string;
+	postMortemSummary: string;
+	hivePromoted: number;
+	sessionKnowledgeCreated: number;
+	fallbackKnowledgeCreated: number;
+	originalStatuses: Map<string, string>;
+	guaranteeResult: { closedPhaseIds: number[]; closedTaskIds: string[] };
+	archiveResult: string;
+	archivedFileCount: number;
+	archivedActiveStateFiles: Set<string>;
+	archivedActiveStateDirs: Set<string>;
+	timestamp: string;
+	archiveDir: string;
+	archiveSuffix: string;
+	args: string[];
+}
+
 const CLOSE_SKILL_REVIEW_TIMEOUT_MS = 120_000;
 
 async function runAbortableSkillReview(
@@ -88,6 +140,10 @@ async function runAbortableSkillReview(
 	} finally {
 		if (timeout) clearTimeout(timeout);
 	}
+}
+
+function normalizeLessonText(text: string): string {
+	return (text ?? '').trim().toLowerCase();
 }
 
 function countSessionKnowledgeEntries(
@@ -225,7 +281,6 @@ const ACTIVE_STATE_DIRS_TO_CLEAN = [
 	'evidence',
 	'session',
 	'scopes',
-	'locks',
 	'spec-archive',
 ];
 
@@ -265,6 +320,779 @@ function guaranteeAllPlansComplete(planData: PlanData): {
 	}
 
 	return { closedPhaseIds, closedTaskIds };
+}
+
+export interface GitAlignResult {
+	gitAlignResult: string;
+	prunedBranches: string[];
+}
+
+export interface CleanStageResult {
+	cleanedFiles: string[];
+	configBackupsRemoved: number;
+	swarmPlanFilesRemoved: number;
+	tmpFilesRemoved: number;
+}
+
+/**
+ * STAGE 1: FINALIZE
+ *
+ * Writes retrospectives for in-progress phases (or a session-level retro for
+ * plan-free closes), curates lessons, promotes to hive, runs skill review,
+ * persists terminal plan state, and runs post-mortem. All state mutations are
+ * written back to ctx so the caller can build the close summary.
+ */
+export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
+	// ─── PER-PHASE RETROSPECTIVE WRITES ───────────────────────────────
+	if (!ctx.planAlreadyDone) {
+		for (const phase of ctx.inProgressPhases) {
+			ctx.closedPhases.push(phase.id);
+
+			let retroResult: string | undefined;
+			try {
+				retroResult = await executeWriteRetro(
+					{
+						phase: phase.id,
+						summary: ctx.isForced
+							? `Phase force-closed via /swarm close --force`
+							: `Phase closed via /swarm close`,
+						task_count: Math.max(1, (phase.tasks ?? []).length),
+						task_complexity: 'simple',
+						total_tool_calls: 0,
+						coder_revisions: 0,
+						reviewer_rejections: 0,
+						test_failures: 0,
+						security_findings: 0,
+						integration_issues: 0,
+					},
+					ctx.directory,
+				);
+			} catch (retroError) {
+				ctx.warnings.push(
+					`Retrospective write threw for phase ${phase.id}: ${retroError instanceof Error ? retroError.message : String(retroError)}`,
+				);
+			}
+
+			if (retroResult !== undefined) {
+				try {
+					const parsed = JSON.parse(retroResult);
+					if (parsed.success !== true) {
+						ctx.warnings.push(
+							`Retrospective write failed for phase ${phase.id}`,
+						);
+					}
+				} catch {
+					// Non-JSON response is not an error
+				}
+			}
+
+			for (const task of phase.tasks ?? []) {
+				if (task.status !== 'completed' && task.status !== 'complete') {
+					ctx.closedTasks.push(task.id);
+				}
+			}
+		}
+	}
+
+	// Derive session start time for session-scoping.
+	// This prevents taxonomy noise from residual evidence bundles of prior sessions (#444 item 9).
+	// Use the earliest lastAgentEventTime from in-memory swarmState — this is reliable because
+	// it reflects the current process's session lifecycle and is not affected by .swarm/ directory
+	// persistence across /swarm close cycles (the directory is preserved, only files are removed).
+	{
+		let earliest = Infinity;
+		for (const [, session] of swarmState.agentSessions) {
+			if (
+				session.lastAgentEventTime > 0 &&
+				session.lastAgentEventTime < earliest
+			) {
+				earliest = session.lastAgentEventTime;
+			}
+		}
+		if (earliest < Infinity) {
+			ctx.sessionStart = new Date(earliest).toISOString();
+		}
+	}
+
+	// Cross-process fallback: if ctx.sessionStart is still undefined (no in-memory sessions
+	// because /swarm close is running in a different process from the session), read the
+	// persisted session-start file.
+	if (!ctx.sessionStart) {
+		ctx.sessionStart = readEarliestSessionStart(ctx.directory) ?? undefined;
+	}
+
+	// Session-level retrospective for plan-free closes. The user's original ask
+	// included "run retrospective" — the per-phase loop above skips this case
+	// because there are no phases. We write a dedicated retro-session bundle so
+	// the archive + knowledge curator still have something to work with.
+	const wrotePhaseRetro = ctx.closedPhases.length > 0;
+	if (!wrotePhaseRetro && !ctx.planExists) {
+		try {
+			const sessionRetroResult = await executeWriteRetro(
+				{
+					phase: 1,
+					task_id: 'retro-session',
+					summary: ctx.isForced
+						? 'Plan-free session force-closed via /swarm close --force'
+						: 'Plan-free session closed via /swarm close',
+					task_count: 1,
+					task_complexity: 'simple',
+					total_tool_calls: 0,
+					coder_revisions: 0,
+					reviewer_rejections: 0,
+					test_failures: 0,
+					security_findings: 0,
+					integration_issues: 0,
+					metadata: {
+						session_scope: 'plan_free',
+						...(ctx.sessionStart ? { session_start: ctx.sessionStart } : {}),
+					},
+				},
+				ctx.directory,
+			);
+			try {
+				const parsed = JSON.parse(sessionRetroResult);
+				if (parsed.success !== true) {
+					ctx.warnings.push(
+						`Session retrospective write failed: ${parsed.message ?? 'unknown'}`,
+					);
+				}
+			} catch {
+				// Non-JSON response is not an error
+			}
+		} catch (retroError) {
+			ctx.warnings.push(
+				`Session retrospective write threw: ${retroError instanceof Error ? retroError.message : String(retroError)}`,
+			);
+		}
+	}
+
+	// Read explicit lessons from .swarm/close-lessons.md if present
+	const lessonsFilePath = path.join(ctx.swarmDir, 'close-lessons.md');
+	try {
+		const lessonsText = await fs.readFile(lessonsFilePath, 'utf-8');
+		ctx.explicitLessons = lessonsText
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0 && !line.startsWith('#'));
+	} catch {
+		// File absent or unreadable — use empty array
+	}
+
+	// Read lessons from retro evidence bundles
+	try {
+		const evidenceDir = path.join(ctx.swarmDir, 'evidence');
+		const evidenceEntries = await fs.readdir(evidenceDir);
+		const retroDirs = evidenceEntries
+			.filter((e) => e.startsWith('retro-'))
+			.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+		for (const retroDir of retroDirs) {
+			const evidencePath = path.join(evidenceDir, retroDir, 'evidence.json');
+			try {
+				const content = await fs.readFile(evidencePath, 'utf-8');
+				const parsed = JSON.parse(content);
+				// Evidence format: { entries: [{ lessons_learned: string[] }] }
+				// or flat: { lessons_learned: string[] }
+				const entries = parsed.entries ?? [parsed];
+				for (const entry of entries) {
+					if (Array.isArray(entry.lessons_learned)) {
+						for (const lesson of entry.lessons_learned) {
+							if (typeof lesson === 'string' && lesson.trim().length > 0) {
+								ctx.retroLessons.push(lesson.trim());
+							}
+						}
+					}
+				}
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+	} catch {
+		// evidence dir may not exist — non-blocking
+	}
+
+	// FR-015: exclude retro lessons already committed in the knowledge store
+	let dedupedRetroLessons = ctx.retroLessons;
+	try {
+		const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
+			resolveSwarmKnowledgePath(ctx.directory),
+		);
+		const existingLessonTexts = new Set(
+			existingEntries
+				.map((e) => normalizeLessonText(e.lesson))
+				.filter((t) => t.length > 0),
+		);
+		if (existingLessonTexts.size > 0) {
+			dedupedRetroLessons = ctx.retroLessons.filter(
+				(l) => !existingLessonTexts.has(normalizeLessonText(l)),
+			);
+		}
+	} catch {
+		dedupedRetroLessons = ctx.retroLessons; // fail-open
+	}
+
+	ctx.allLessons = [
+		...new Set([...ctx.explicitLessons, ...dedupedRetroLessons]),
+	];
+
+	ctx.curationSucceeded = false;
+	try {
+		// Change 4 (Task 4.2): close-time lessons also pass the Layer-5
+		// actionability gate — enrich via the curator LLM when available.
+		ctx.curationResult = await _internals.curateAndStoreSwarm(
+			ctx.allLessons,
+			ctx.projectName,
+			{ phase_number: 0 },
+			ctx.directory,
+			ctx.config,
+			{
+				llmDelegate: _internals.createCuratorLLMDelegate(
+					ctx.directory,
+					'phase',
+					ctx.options.sessionID,
+				),
+				enrichmentQuota: {
+					maxCalls: ctx.config.enrichment.max_calls_per_day,
+					window: ctx.config.enrichment.quota_window,
+				},
+			},
+		);
+		ctx.curationSucceeded = true;
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		ctx.warnings.push(`Lessons curation failed: ${msg}`);
+		console.warn('[close-command] curateAndStoreSwarm error:', error);
+	}
+
+	if (ctx.curationSucceeded && ctx.allLessons.length > 0) {
+		await fs.unlink(lessonsFilePath).catch(() => {});
+	}
+
+	// ─── HIVE PROMOTION ──────────────────────────────────────────────
+	// Promote swarm lessons to cross-project hive knowledge.
+	// Non-blocking: failures are logged as warnings, close still succeeds.
+	if (ctx.curationSucceeded) {
+		if (ctx.config.hive_enabled === false) {
+			// Hive disabled by configuration — skip promotion entirely
+		} else {
+			try {
+				const entries = await readKnowledge<SwarmKnowledgeEntry>(
+					resolveSwarmKnowledgePath(ctx.directory),
+				);
+				const result = await _internals.checkHivePromotions(
+					entries,
+					ctx.config,
+				);
+				ctx.hivePromoted = result.new_promotions;
+			} catch (hiveErr) {
+				const msg =
+					hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
+				ctx.warnings.push(`Hive promotion failed: ${msg}`);
+			}
+		}
+	}
+
+	ctx.fallbackKnowledgeCreated = ctx.curationResult?.stored ?? 0;
+	ctx.sessionKnowledgeCreated = ctx.fallbackKnowledgeCreated;
+	try {
+		const knowledgePath = resolveSwarmKnowledgePath(ctx.directory);
+		const entries = await readKnowledge<CloseKnowledgeEntry>(knowledgePath);
+		ctx.sessionKnowledgeCreated = countSessionKnowledgeEntries(
+			entries,
+			ctx.sessionStart,
+			ctx.fallbackKnowledgeCreated,
+		);
+	} catch (knowledgeErr) {
+		const msg =
+			knowledgeErr instanceof Error
+				? knowledgeErr.message
+				: String(knowledgeErr);
+		ctx.warnings.push(`Knowledge session count failed: ${msg}`);
+	}
+
+	ctx.knowledgeSkillHint =
+		ctx.sessionKnowledgeCreated > 0
+			? `${ctx.sessionKnowledgeCreated} knowledge entries created this session. Consider running skill_improve or skill_generate to compile mature entries into skills.`
+			: '';
+
+	if (ctx.runSkillReview) {
+		try {
+			const { config: loadedConfig } = _internals.loadPluginConfigWithMeta(
+				ctx.directory,
+			);
+			const skillImproverConfig = SkillImproverConfigSchema.parse(
+				loadedConfig.skill_improver ?? {},
+			);
+			const skillReviewResult = await runAbortableSkillReview(
+				{
+					directory: ctx.directory,
+					config: skillImproverConfig,
+					targets: ['skills', 'knowledge'],
+					mode: 'proposal',
+					sessionId: ctx.options.sessionID,
+					enrichmentQuota: {
+						maxCalls: ctx.config.enrichment.max_calls_per_day,
+						window: ctx.config.enrichment.quota_window,
+					},
+				},
+				ctx.options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
+			);
+			if (skillReviewResult.ran) {
+				const proposal = skillReviewResult.proposalPath
+					? ` Proposal: ${skillReviewResult.proposalPath}.`
+					: '';
+				const source = skillReviewResult.source
+					? ` Source: ${skillReviewResult.source}.`
+					: '';
+				ctx.skillReviewSummary = `Skill review proposal generated.${proposal}${source}`;
+			} else {
+				const reason = skillReviewResult.reason ?? 'unknown reason';
+				ctx.skillReviewSummary = `Skill review skipped: ${reason}`;
+				ctx.warnings.push(ctx.skillReviewSummary);
+			}
+		} catch (skillReviewErr) {
+			const msg =
+				skillReviewErr instanceof Error
+					? skillReviewErr.message
+					: String(skillReviewErr);
+			ctx.skillReviewSummary = `Skill review failed: ${msg}`;
+			ctx.warnings.push(ctx.skillReviewSummary);
+		}
+	}
+
+	// ─── ALL-PLANS-COMPLETE GUARANTEE ────────────────────────────────
+	if (ctx.planExists) {
+		// Capture original task statuses before guaranteeAllPlansComplete mutates them
+		ctx.originalStatuses = new Map<string, string>();
+		for (const phase of ctx.planData.phases ?? []) {
+			for (const task of phase.tasks ?? []) {
+				ctx.originalStatuses.set(task.id, task.status);
+			}
+		}
+
+		// FR-014 snapshot: capture pre-mutation state for SC-013 rollback
+		const planDataSnapshot = structuredClone(ctx.planData);
+		const closedPhasesLenBefore = ctx.closedPhases.length;
+		const closedTasksLenBefore = ctx.closedTasks.length;
+
+		ctx.guaranteeResult = guaranteeAllPlansComplete(ctx.planData);
+		// Only track newly closed phases/tasks by identity
+		for (const phaseId of ctx.guaranteeResult.closedPhaseIds) {
+			if (!ctx.closedPhases.includes(phaseId)) {
+				ctx.closedPhases.push(phaseId);
+			}
+		}
+		for (const taskId of ctx.guaranteeResult.closedTaskIds) {
+			if (!ctx.closedTasks.includes(taskId)) {
+				ctx.closedTasks.push(taskId);
+			}
+		}
+
+		// Persist the terminal plan state
+		if (
+			!ctx.planAlreadyDone ||
+			ctx.guaranteeResult.closedPhaseIds.length > 0 ||
+			ctx.guaranteeResult.closedTaskIds.length > 0
+		) {
+			try {
+				await _internals.closePlanTerminalState(
+					ctx.directory,
+					ctx.planData as Plan,
+					{
+						closedPhaseIds: ctx.guaranteeResult.closedPhaseIds,
+						closedTaskIds: ctx.guaranteeResult.closedTaskIds,
+						originalStatuses: ctx.originalStatuses,
+					},
+				);
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : String(error);
+				ctx.warnings.push(`Failed to persist terminal plan state: ${msg}`);
+				console.warn(
+					'[close-command] Failed to write terminal plan state:',
+					error,
+				);
+				// SC-013 rollback: restore in-memory state to match on-disk when
+				// terminal write fails so the summary does not falsely claim
+				// phases/tasks were closed
+				ctx.planData = planDataSnapshot;
+				ctx.closedPhases.length = closedPhasesLenBefore;
+				ctx.closedTasks.length = closedTasksLenBefore;
+			}
+		}
+	}
+
+	// ─── POST-MORTEM (WP7, #1234) ──────────────────────────────────
+	// Run the post-mortem agent as part of finalize. Idempotent: if
+	// phase_complete already produced a report, this is a no-op.
+	try {
+		const { CuratorConfigSchema: CCS } = await import('../config/schema.js');
+		const { config: pmLoadedConfig } = _internals.loadPluginConfigWithMeta(
+			ctx.directory,
+		);
+		const curatorCfg = CCS.parse(pmLoadedConfig.curator ?? {});
+		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
+			const pmResult = await _internals.runCuratorPostMortem(ctx.directory, {
+				llmDelegate: _internals.createCuratorLLMDelegate(
+					ctx.directory,
+					'postmortem',
+					ctx.options.sessionID,
+				),
+			});
+			if (pmResult.success && pmResult.summary) {
+				ctx.postMortemSummary = pmResult.summary;
+			}
+			for (const w of pmResult.warnings) {
+				ctx.warnings.push(`[POST-MORTEM] ${w}`);
+			}
+		}
+	} catch (err) {
+		// fail-open: post-mortem never blocks finalize — but surface the error for diagnostics
+		const msg = err instanceof Error ? err.message : String(err);
+		ctx.warnings.push(`Post-mortem failed: ${msg}`);
+	}
+}
+
+/**
+ * STAGE 2: ARCHIVE
+ *
+ * Creates a timestamped archive bundle under .swarm/archive/, copies flat-file
+ * artifacts and active-state directories, then runs the evidence retention
+ * policy. All state mutations (archive path, counts, success sets) are written
+ * back to ctx so the caller can build the close summary.
+ */
+export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
+	ctx.timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+	ctx.archiveSuffix = Math.random().toString(36).slice(2, 8);
+	ctx.archiveDir = path.join(
+		ctx.swarmDir,
+		'archive',
+		`swarm-${ctx.timestamp}-${ctx.archiveSuffix}`,
+	);
+
+	try {
+		await fs.mkdir(ctx.archiveDir, { recursive: true });
+
+		// Copy swarm artifacts to archive
+		for (const artifact of ARCHIVE_ARTIFACTS) {
+			const srcPath = path.join(ctx.swarmDir, artifact);
+			const destPath = path.join(ctx.archiveDir, artifact);
+			try {
+				await fs.copyFile(srcPath, destPath);
+				ctx.archivedFileCount++;
+				if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
+					ctx.archivedActiveStateFiles.add(artifact);
+				}
+			} catch {
+				// File may not exist — skip silently
+			}
+		}
+
+		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
+		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+			const srcDir = path.join(ctx.swarmDir, dirName);
+			const destDir = path.join(ctx.archiveDir, dirName);
+			try {
+				const copied = await copyDirRecursive(srcDir, destDir);
+				ctx.archivedFileCount += copied;
+				ctx.archivedActiveStateDirs.add(dirName);
+			} catch {
+				// Directory may not exist — skip silently
+			}
+		}
+
+		ctx.archiveResult = `Archived ${ctx.archivedFileCount} artifact(s) to .swarm/archive/swarm-${ctx.timestamp}-${ctx.archiveSuffix}/`;
+	} catch (archiveError) {
+		ctx.warnings.push(
+			`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`,
+		);
+		ctx.archiveResult = 'Archive creation failed (see warnings)';
+	}
+
+	// Archive evidence bundles (retention policy)
+	// FR-016: read retention from config.evidence when available.
+	await runArchiveEvidenceRetention({
+		directory: ctx.directory,
+		swarmDir: ctx.swarmDir,
+		config: ctx.config as unknown as PluginConfig,
+		warnings: ctx.warnings,
+	});
+}
+
+/**
+ * Runs the evidence-retention sub-logic of STAGE 2 (ARCHIVE).
+ * Reads max_age_days / max_bundles from config.evidence (FR-016) and
+ * calls archiveEvidence. Fail-open: pushes a warning on error but never throws.
+ */
+export async function runArchiveEvidenceRetention(
+	ctx: ArchiveStageContext,
+): Promise<void> {
+	let maxAgeDays = 30;
+	let maxBundles = 10;
+	try {
+		const { config: evidenceLoadedConfig } =
+			_internals.loadPluginConfigWithMeta(ctx.directory);
+		const evidenceCfg = (evidenceLoadedConfig.evidence ?? {}) as Record<
+			string,
+			unknown
+		>;
+		if (typeof evidenceCfg.max_age_days === 'number') {
+			maxAgeDays = evidenceCfg.max_age_days;
+		}
+		if (typeof evidenceCfg.max_bundles === 'number') {
+			maxBundles = evidenceCfg.max_bundles;
+		}
+	} catch {
+		// Fallback to defaults on config read failure
+	}
+
+	try {
+		await _internals.archiveEvidence(ctx.directory, maxAgeDays, maxBundles);
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		ctx.warnings.push(`Evidence retention archive failed: ${msg}`);
+		console.warn('[close-command] archiveEvidence error:', error);
+	}
+}
+
+/**
+ * STAGE 3: CLEAN
+ *
+ * Removes active-state files and directories that were successfully archived
+ * (archive-first guard), plus stale config-backup/ledger-sibling/SWARM_PLAN/.tmp
+ * artifacts. Resets context.md for the next session. All state mutations are
+ * written back to ctx so the caller can build the close summary.
+ */
+export async function runCleanStage(
+	ctx: CloseStageContext,
+): Promise<CleanStageResult> {
+	let configBackupsRemoved = 0;
+	const cleanedFiles: string[] = [];
+
+	// Only delete active-state files that were successfully copied to the archive.
+	// This prevents data loss when a partial archive succeeds for some files but
+	// fails for others — only the backed-up files are safe to remove.
+	if (ctx.archivedActiveStateFiles.size > 0) {
+		for (const artifact of ACTIVE_STATE_TO_CLEAN) {
+			if (!ctx.archivedActiveStateFiles.has(artifact)) {
+				// This file was NOT successfully archived — do not delete it
+				ctx.warnings.push(
+					`Preserved ${artifact} because it was not successfully archived.`,
+				);
+				continue;
+			}
+			const filePath = path.join(ctx.swarmDir, artifact);
+			try {
+				await fs.unlink(filePath);
+				cleanedFiles.push(artifact);
+			} catch {
+				// File may not exist
+			}
+		}
+	} else {
+		ctx.warnings.push(
+			'Skipped active-state cleanup because no active-state files were archived. Files preserved to prevent data loss.',
+		);
+	}
+
+	// Delete directories that were successfully archived
+	// Uses archive-first-guard: only delete directories we confirmed are in the archive
+	for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
+		if (!ctx.archivedActiveStateDirs.has(dirName)) {
+			// Directory was NOT archived — do not delete
+			continue;
+		}
+		const dirPath = path.join(ctx.swarmDir, dirName);
+		try {
+			await fs.rm(dirPath, { recursive: true, force: true });
+			cleanedFiles.push(`${dirName}/`);
+		} catch {
+			// Per-directory failure is non-blocking
+		}
+	}
+
+	// Remove stale config-backup-*.json files AND ledger sibling files
+	// (plan-ledger.archived-*.jsonl and plan-ledger.backup-*.jsonl) that
+	// savePlan creates during identity-mismatch reinitialization. Without
+	// this sweep, those siblings accumulate forever in .swarm/, undermining
+	// the same "clean slate for next session" invariant that motivates the
+	// plan-ledger.jsonl removal in ACTIVE_STATE_TO_CLEAN above. The primary
+	// plan-ledger.jsonl is already archived into the bundle by stage 2, so
+	// these stale siblings are pure noise and safe to delete here.
+	try {
+		const swarmFiles = await fs.readdir(ctx.swarmDir);
+		const configBackups = swarmFiles.filter(
+			(f) => f.startsWith('config-backup-') && f.endsWith('.json'),
+		);
+		for (const backup of configBackups) {
+			try {
+				await fs.unlink(path.join(ctx.swarmDir, backup));
+				configBackupsRemoved++;
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+		const ledgerSiblings = swarmFiles.filter(
+			(f) =>
+				(f.startsWith('plan-ledger.archived-') ||
+					f.startsWith('plan-ledger.backup-')) &&
+				f.endsWith('.jsonl'),
+		);
+		for (const sibling of ledgerSiblings) {
+			try {
+				await fs.unlink(path.join(ctx.swarmDir, sibling));
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+	} catch {
+		// readdir failure is non-blocking
+	}
+
+	// Remove SWARM_PLAN checkpoint artifacts written by writeCheckpoint().
+	// Cleans both the canonical .swarm/ location and any legacy root-level
+	// artifacts from pre-7.0 sessions. These are redundant copies of
+	// plan.json/plan.md (already archived) and should not be left behind.
+	let swarmPlanFilesRemoved = 0;
+	const candidates = [
+		path.join(ctx.directory, '.swarm', 'SWARM_PLAN.json'),
+		path.join(ctx.directory, '.swarm', 'SWARM_PLAN.md'),
+		path.join(ctx.directory, 'SWARM_PLAN.json'),
+		path.join(ctx.directory, 'SWARM_PLAN.md'),
+	];
+	for (const candidate of candidates) {
+		try {
+			await fs.unlink(candidate);
+			swarmPlanFilesRemoved++;
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+				ctx.warnings.push(
+					`Failed to remove ${candidate}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+	}
+
+	// Remove stale .tmp.* files that were left behind by interrupted handoff
+	// writes or other transient operations. These are safe to delete because
+	// they are recreated on next session init and must be removed to avoid
+	// stale-state pollution in the archive bundle.
+	let tmpFilesRemoved = 0;
+	try {
+		const swarmFiles = await fs.readdir(ctx.swarmDir);
+		const tmpFiles = swarmFiles.filter((f) => f.startsWith('.tmp.'));
+		for (const tmp of tmpFiles) {
+			try {
+				await fs.unlink(path.join(ctx.swarmDir, tmp));
+				tmpFilesRemoved++;
+			} catch {
+				// Per-file failure is non-blocking
+			}
+		}
+	} catch {
+		// readdir failure is non-blocking
+	}
+	if (tmpFilesRemoved > 0) {
+		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
+	}
+
+	// #519 (v6.71.1): clear persisted declare_scope files so the next session
+	// starts without inherited scope. Scope files are ephemeral state; they are
+	// not archived because they contain no forensic signal not already captured
+	// by plan.json:files_touched.
+	clearAllScopes(ctx.directory);
+
+	// Reset context.md so new sessions start fresh
+	const contextPath = path.join(ctx.swarmDir, 'context.md');
+	const contextContent = [
+		'# Context',
+		'',
+		'## Status',
+		`Session closed after: ${ctx.projectName}`,
+		`Closed: ${new Date().toISOString()}`,
+		`Finalization: ${ctx.isForced ? 'forced' : ctx.planAlreadyDone ? 'plan-already-done' : 'normal'}`,
+		'No active plan. Next session starts fresh.',
+		'',
+	].join('\n');
+	try {
+		await fs.writeFile(contextPath, contextContent, 'utf-8');
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		ctx.warnings.push(`Failed to reset context.md: ${msg}`);
+		console.warn('[close-command] Failed to write context.md:', error);
+	}
+
+	return {
+		cleanedFiles,
+		configBackupsRemoved,
+		swarmPlanFilesRemoved,
+		tmpFilesRemoved,
+	};
+}
+
+/**
+ * STAGE 4: ALIGN
+ *
+ * Performs safe git alignment to main (resetToMainAfterMerge / resetToRemoteBranch
+ * via _internals), handling post-merge scenarios and non-git directories.
+ * Returns { gitAlignResult, prunedBranches } so the orchestrator can build
+ * the close summary. All warnings are pushed into ctx.warnings.
+ */
+export async function runAlignStage(
+	ctx: CloseStageContext,
+): Promise<GitAlignResult> {
+	const pruneBranches = ctx.args.includes('--prune-branches');
+	let gitAlignResult = '';
+	const prunedBranches: string[] = [];
+
+	const gitStatus = _internals.getGitRepositoryStatus(ctx.directory);
+	if (gitStatus.isRepo) {
+		// Try aggressive reset first (handles post-merge scenario with uncommitted changes)
+		const aggressiveResult = await _internals.resetToMainAfterMerge(
+			ctx.directory,
+			{
+				pruneBranches,
+			},
+		);
+		if (aggressiveResult.success) {
+			gitAlignResult = aggressiveResult.message;
+			for (const w of aggressiveResult.warnings) {
+				ctx.warnings.push(w);
+			}
+			if (aggressiveResult.changesDiscarded) {
+				ctx.warnings.push(
+					'Uncommitted changes were discarded during git alignment',
+				);
+			}
+		} else {
+			// Fallback to cautious reset (preserves uncommitted changes)
+			const alignResult = await _internals.resetToRemoteBranch(ctx.directory, {
+				pruneBranches,
+			});
+			gitAlignResult = alignResult.message;
+			prunedBranches.push(...alignResult.prunedBranches);
+
+			if (!alignResult.success) {
+				ctx.warnings.push(`Git alignment: ${alignResult.message}`);
+			}
+			if (alignResult.alreadyAligned) {
+				gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
+			}
+			for (const w of alignResult.warnings) {
+				ctx.warnings.push(w);
+			}
+		}
+	} else if (gitStatus.reason === 'git_unavailable') {
+		gitAlignResult = `Git executable unavailable — skipped git alignment: ${gitStatus.message}`;
+		ctx.warnings.push(gitAlignResult);
+	} else if (gitStatus.reason === 'git_error') {
+		gitAlignResult = `Git repository check failed — skipped git alignment: ${gitStatus.message}`;
+		ctx.warnings.push(gitAlignResult);
+	} else {
+		// gitStatus.reason === 'not_git_repo'
+		gitAlignResult = 'Not a git repository — skipped git alignment';
+	}
+
+	return { gitAlignResult, prunedBranches };
 }
 
 /**
@@ -324,6 +1152,15 @@ export async function handleCloseCommand(
 		// .swarm/ exists but plan.json is absent — valid plan-free session, continue with cleanup
 	}
 
+	// FR-012: acquire finalize lock before any destructive work
+	let finalizeLock: { acquired: boolean; release?: () => Promise<void> } = {
+		acquired: false,
+	};
+	finalizeLock = await _internals.acquireFinalizeLock(directory);
+	if (!finalizeLock.acquired) {
+		return `❌ Another /swarm finalize is already running for this project. If you are certain no other run is active, wait for the lock to expire or remove the stale lock and retry.`;
+	}
+
 	const phases = planData.phases ?? [];
 	const inProgressPhases = phases.filter((p) => p.status === 'in_progress');
 	const isForced = args.includes('--force');
@@ -343,817 +1180,233 @@ export async function handleCloseCommand(
 			);
 	}
 
-	const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
-	const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
-	const projectName = planData.title ?? 'Unknown Project';
-	const closedPhases: number[] = [];
-	const closedTasks: string[] = [];
-	const warnings: string[] = [];
-	let hivePromoted = 0;
-	let hiveSkipped = 0;
-
-	// ─── STAGE 1: FINALIZE ───────────────────────────────────────────
-	if (!planAlreadyDone) {
-		for (const phase of inProgressPhases) {
-			closedPhases.push(phase.id);
-
-			let retroResult: string | undefined;
-			try {
-				retroResult = await executeWriteRetro(
-					{
-						phase: phase.id,
-						summary: isForced
-							? `Phase force-closed via /swarm close --force`
-							: `Phase closed via /swarm close`,
-						task_count: Math.max(1, (phase.tasks ?? []).length),
-						task_complexity: 'simple',
-						total_tool_calls: 0,
-						coder_revisions: 0,
-						reviewer_rejections: 0,
-						test_failures: 0,
-						security_findings: 0,
-						integration_issues: 0,
-					},
-					directory,
-				);
-			} catch (retroError) {
-				warnings.push(
-					`Retrospective write threw for phase ${phase.id}: ${retroError instanceof Error ? retroError.message : String(retroError)}`,
-				);
-			}
-
-			if (retroResult !== undefined) {
-				try {
-					const parsed = JSON.parse(retroResult);
-					if (parsed.success !== true) {
-						warnings.push(`Retrospective write failed for phase ${phase.id}`);
-					}
-				} catch {
-					// Non-JSON response is not an error
-				}
-			}
-
-			for (const task of phase.tasks ?? []) {
-				if (task.status !== 'completed' && task.status !== 'complete') {
-					closedTasks.push(task.id);
-				}
-			}
-		}
-	}
-
-	// Derive session start time for session-scoping.
-	// This prevents taxonomy noise from residual evidence bundles of prior sessions (#444 item 9).
-	// Use the earliest lastAgentEventTime from in-memory swarmState — this is reliable because
-	// it reflects the current process's session lifecycle and is not affected by .swarm/ directory
-	// persistence across /swarm close cycles (the directory is preserved, only files are removed).
-	let sessionStart: string | undefined;
-	{
-		let earliest = Infinity;
-		for (const [, session] of swarmState.agentSessions) {
-			if (
-				session.lastAgentEventTime > 0 &&
-				session.lastAgentEventTime < earliest
-			) {
-				earliest = session.lastAgentEventTime;
-			}
-		}
-		if (earliest < Infinity) {
-			sessionStart = new Date(earliest).toISOString();
-		}
-	}
-
-	// Session-level retrospective for plan-free closes. The user's original ask
-	// included "run retrospective" — the per-phase loop above skips this case
-	// because there are no phases. We write a dedicated retro-session bundle so
-	// the archive + knowledge curator still have something to work with.
-	const wrotePhaseRetro = closedPhases.length > 0;
-	if (!wrotePhaseRetro && !planExists) {
-		try {
-			const sessionRetroResult = await executeWriteRetro(
-				{
-					phase: 1,
-					task_id: 'retro-session',
-					summary: isForced
-						? 'Plan-free session force-closed via /swarm close --force'
-						: 'Plan-free session closed via /swarm close',
-					task_count: 1,
-					task_complexity: 'simple',
-					total_tool_calls: 0,
-					coder_revisions: 0,
-					reviewer_rejections: 0,
-					test_failures: 0,
-					security_findings: 0,
-					integration_issues: 0,
-					metadata: {
-						session_scope: 'plan_free',
-						...(sessionStart ? { session_start: sessionStart } : {}),
-					},
-				},
-				directory,
-			);
-			try {
-				const parsed = JSON.parse(sessionRetroResult);
-				if (parsed.success !== true) {
-					warnings.push(
-						`Session retrospective write failed: ${parsed.message ?? 'unknown'}`,
-					);
-				}
-			} catch {
-				// Non-JSON response is not an error
-			}
-		} catch (retroError) {
-			warnings.push(
-				`Session retrospective write threw: ${retroError instanceof Error ? retroError.message : String(retroError)}`,
-			);
-		}
-	}
-
-	// Read explicit lessons from .swarm/close-lessons.md if present
-	const lessonsFilePath = path.join(swarmDir, 'close-lessons.md');
-	let explicitLessons: string[] = [];
 	try {
-		const lessonsText = await fs.readFile(lessonsFilePath, 'utf-8');
-		explicitLessons = lessonsText
-			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => line.length > 0 && !line.startsWith('#'));
-	} catch {
-		// File absent or unreadable — use empty array
-	}
+		const { config: loadedConfig } =
+			_internals.loadPluginConfigWithMeta(directory);
+		const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
 
-	// Read lessons from retro evidence bundles
-	const retroLessons: string[] = [];
-	try {
-		const evidenceDir = path.join(swarmDir, 'evidence');
-		const evidenceEntries = await fs.readdir(evidenceDir);
-		const retroDirs = evidenceEntries
-			.filter((e) => e.startsWith('retro-'))
-			.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-		for (const retroDir of retroDirs) {
-			const evidencePath = path.join(evidenceDir, retroDir, 'evidence.json');
-			try {
-				const content = await fs.readFile(evidencePath, 'utf-8');
-				const parsed = JSON.parse(content);
-				// Evidence format: { entries: [{ lessons_learned: string[] }] }
-				// or flat: { lessons_learned: string[] }
-				const entries = parsed.entries ?? [parsed];
-				for (const entry of entries) {
-					if (Array.isArray(entry.lessons_learned)) {
-						for (const lesson of entry.lessons_learned) {
-							if (typeof lesson === 'string' && lesson.trim().length > 0) {
-								retroLessons.push(lesson.trim());
-							}
-						}
-					}
-				}
-			} catch {
-				// Per-file failure is non-blocking
-			}
-		}
-	} catch {
-		// evidence dir may not exist — non-blocking
-	}
-
-	const allLessons = [...new Set([...explicitLessons, ...retroLessons])];
-
-	let curationSucceeded = false;
-	let curationResult: CurationCounts | undefined;
-	try {
-		// Change 4 (Task 4.2): close-time lessons also pass the Layer-5
-		// actionability gate — enrich via the curator LLM when available.
-		curationResult = await curateAndStoreSwarm(
-			allLessons,
-			projectName,
-			{ phase_number: 0 },
+		const ctx: CloseStageContext = {
 			directory,
+			swarmDir,
+			planData,
+			planExists,
+			planAlreadyDone,
 			config,
-			{
-				llmDelegate: createCuratorLLMDelegate(
-					directory,
-					'phase',
-					options.sessionID,
-				),
-				enrichmentQuota: {
-					maxCalls: config.enrichment.max_calls_per_day,
-					window: config.enrichment.quota_window,
-				},
-			},
+			projectName: planData.title ?? 'Unknown Project',
+			warnings: [],
+			closedPhases: [],
+			closedTasks: [],
+			sessionStart: undefined,
+			isForced,
+			runSkillReview,
+			options,
+			phases,
+			inProgressPhases,
+			curationSucceeded: false,
+			curationResult: undefined,
+			allLessons: [],
+			explicitLessons: [],
+			retroLessons: [],
+			knowledgeSkillHint: '',
+			skillReviewSummary: '',
+			postMortemSummary: '',
+			hivePromoted: 0,
+			sessionKnowledgeCreated: 0,
+			fallbackKnowledgeCreated: 0,
+			originalStatuses: new Map(),
+			guaranteeResult: { closedPhaseIds: [], closedTaskIds: [] },
+			archiveResult: '',
+			archivedFileCount: 0,
+			archivedActiveStateFiles: new Set(),
+			archivedActiveStateDirs: new Set(),
+			timestamp: '',
+			archiveDir: '',
+			archiveSuffix: '',
+			args,
+		};
+
+		await runFinalizeStage(ctx);
+		await runArchiveStage(ctx);
+		const cleanResult = await runCleanStage(ctx);
+		const { gitAlignResult, prunedBranches } = await runAlignStage(ctx);
+
+		// ─── WRITE CLOSE SUMMARY ─────────────────────────────────────────
+		const closeSummaryPath = validateSwarmPath(
+			ctx.directory,
+			'close-summary.md',
 		);
-		curationSucceeded = true;
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`Lessons curation failed: ${msg}`);
-		console.warn('[close-command] curateAndStoreSwarm error:', error);
-	}
 
-	if (curationSucceeded && allLessons.length > 0) {
-		await fs.unlink(lessonsFilePath).catch(() => {});
-	}
+		const finalizationType = ctx.isForced
+			? 'Forced closure'
+			: ctx.planAlreadyDone
+				? 'Plan already terminal — cleanup only'
+				: 'Normal finalization';
 
-	// ─── HIVE PROMOTION ──────────────────────────────────────────────
-	// Promote swarm lessons to cross-project hive knowledge.
-	// Non-blocking: failures are logged as warnings, close still succeeds.
-	if (curationSucceeded) {
-		if (config.hive_enabled === false) {
-			// Hive disabled by configuration — skip promotion entirely
-		} else {
-			try {
-				const knowledgePath = resolveSwarmKnowledgePath(directory);
-				const entries = await readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
-				const autoPromoteDays = config.auto_promote_days;
-				if (entries.length > 0) {
-					for (const entry of entries) {
-						// ─── Eligibility gate (shared with checkHivePromotions) ──
-						if (!isHiveEligible(entry, autoPromoteDays)) {
-							hiveSkipped++;
-							continue;
-						}
+		const summaryContent = [
+			'# Swarm Close Summary',
+			'',
+			`**Project:** ${ctx.projectName}`,
+			`**Closed:** ${new Date().toISOString()}`,
+			`**Finalization:** ${finalizationType}`,
+			'',
+			'## Retrospective',
+			!ctx.planExists
+				? '_No plan — ad-hoc session_'
+				: ctx.closedPhases.length > 0
+					? ctx.closedPhases.map((id) => `- Phase ${id} closed`).join('\n')
+					: '_No phases closed this run_',
+			...(ctx.closedTasks.length > 0
+				? [
+						'',
+						`**Tasks marked closed:** ${ctx.closedTasks.length}`,
+						...ctx.closedTasks.map((id) => `- ${id}`),
+					]
+				: []),
+			'',
+			'## Lessons Committed',
+			ctx.allLessons.length > 0 ? `| # | Lesson |` : '_No lessons committed_',
+			...(ctx.allLessons.length > 0
+				? [
+						'| --- | --- |',
+						...ctx.allLessons.map((l, i) => `| ${i + 1} | ${l} |`),
+					]
+				: []),
+			...(ctx.knowledgeSkillHint ? ['', ctx.knowledgeSkillHint] : []),
+			...(ctx.runSkillReview
+				? [
+						'',
+						'## Skill Review',
+						ctx.skillReviewSummary || 'Skill review completed without details.',
+					]
+				: []),
+			'',
+			'## Local Repo State',
+			...(gitAlignResult
+				? [`- **Git:** ${gitAlignResult}`]
+				: ['- Git alignment skipped']),
+			...(prunedBranches.length > 0
+				? [`- **Pruned branches:** ${prunedBranches.join(', ')}`]
+				: []),
+			`- **Archive:** ${ctx.archiveResult}`,
+			...(cleanResult.cleanedFiles.length > 0
+				? [`- **Cleaned:** ${cleanResult.cleanedFiles.length} file(s)`]
+				: []),
+			'',
+			'## Context',
+			'- Reset context.md for next session',
+			'- Cleared agent sessions and delegation chains',
+			...(cleanResult.configBackupsRemoved > 0
+				? [
+						`- Removed ${cleanResult.configBackupsRemoved} stale config backup file(s)`,
+					]
+				: []),
+			...(cleanResult.swarmPlanFilesRemoved > 0
+				? [
+						`- Removed ${cleanResult.swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s)`,
+					]
+				: []),
+			...(ctx.planExists && !ctx.planAlreadyDone
+				? ['- Set non-completed phases/tasks to closed status']
+				: []),
+			...(ctx.curationSucceeded && ctx.allLessons.length > 0
+				? [`- Committed ${ctx.allLessons.length} lesson(s) to knowledge store`]
+				: []),
+			...(ctx.hivePromoted > 0
+				? [`- Promoted ${ctx.hivePromoted} lesson(s) to hive knowledge`]
+				: []),
+			'',
+			...(ctx.warnings.length > 0
+				? ['## Warnings', ...ctx.warnings.map((w) => `- ${w}`), '']
+				: []),
+		].join('\n');
 
-						try {
-							const result = await promoteToHive(
-								directory,
-								entry.lesson,
-								entry.category,
-							);
-							// Only count actual promotions, not near-duplicate no-ops
-							if (!result.includes('already exists')) {
-								hivePromoted++;
-							}
-						} catch (promotionErr) {
-							const msg =
-								promotionErr instanceof Error
-									? promotionErr.message
-									: String(promotionErr);
-							warnings.push(`Hive promotion skipped for lesson: ${msg}`);
-						}
-					}
-					if (hiveSkipped > 0) {
-						warnings.push(
-							`${hiveSkipped} swarm knowledge entr${hiveSkipped === 1 ? 'y' : 'ies'} not eligible for hive promotion`,
-						);
-					}
-				}
-			} catch (hiveErr) {
-				const msg =
-					hiveErr instanceof Error ? hiveErr.message : String(hiveErr);
-				warnings.push(`Hive promotion failed: ${msg}`);
-			}
+		try {
+			await fs.writeFile(closeSummaryPath, summaryContent, 'utf-8');
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
+			console.warn('[close-command] Failed to write close-summary.md:', error);
 		}
-	}
 
-	const fallbackKnowledgeCreated = curationResult?.stored ?? 0;
-	let sessionKnowledgeCreated = fallbackKnowledgeCreated;
-	try {
-		const knowledgePath = resolveSwarmKnowledgePath(directory);
-		const entries = await readKnowledge<CloseKnowledgeEntry>(knowledgePath);
-		sessionKnowledgeCreated = countSessionKnowledgeEntries(
-			entries,
-			sessionStart,
-			fallbackKnowledgeCreated,
+		// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
+		// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in
+		// .swarm/archive/) and should not be written to the .swarm/ directory during close.
+		// Stage 3 cleanup removes any pre-existing SWARM_PLAN artifacts from prior sessions.
+
+		// Preserve plugin-init singletons through state reset
+		_internals.resetSwarmStatePreservingSingletons();
+
+		// Separate retro-specific warnings for prominent display
+		const retroWarnings = ctx.warnings.filter(
+			(w) =>
+				w.includes('Retrospective write') ||
+				w.includes('retrospective write') ||
+				w.includes('Session retrospective'),
 		);
-	} catch (knowledgeErr) {
-		const msg =
-			knowledgeErr instanceof Error
-				? knowledgeErr.message
-				: String(knowledgeErr);
-		warnings.push(`Knowledge session count failed: ${msg}`);
-	}
+		const otherWarnings = ctx.warnings.filter(
+			(w) =>
+				!w.includes('Retrospective write') &&
+				!w.includes('retrospective write') &&
+				!w.includes('Session retrospective'),
+		);
+		let warningMsg = '';
+		if (retroWarnings.length > 0) {
+			warningMsg += `\n\n**⚠ Retrospective evidence incomplete:**\n${retroWarnings.map((w) => `- ${w}`).join('\n')}`;
+		}
+		if (otherWarnings.length > 0) {
+			warningMsg += `\n\n**Warnings:**\n${otherWarnings.map((w) => `- ${w}`).join('\n')}`;
+		}
 
-	const knowledgeSkillHint =
-		sessionKnowledgeCreated > 0
-			? `${sessionKnowledgeCreated} knowledge entries created this session. Consider running skill_improve or skill_generate to compile mature entries into skills.`
+		const lessonSummary =
+			ctx.curationSucceeded && ctx.allLessons.length > 0
+				? `\n\n**Lessons Committed:** ${ctx.allLessons.length} lesson(s) committed to knowledge store`
+				: '';
+		const knowledgeHintSummary = ctx.knowledgeSkillHint
+			? `\n\n**Knowledge Review:** ${ctx.knowledgeSkillHint}`
+			: '';
+		const skillReviewOutput = ctx.skillReviewSummary
+			? `\n\n**Skill Review:** ${ctx.skillReviewSummary}`
+			: '';
+		const postMortemOutput = ctx.postMortemSummary
+			? `\n\n**Post-Mortem:** ${ctx.postMortemSummary}`
 			: '';
 
-	let skillReviewSummary = '';
-	if (runSkillReview) {
-		try {
-			const { config: loadedConfig } = loadPluginConfigWithMeta(directory);
-			const skillImproverConfig = SkillImproverConfigSchema.parse(
-				loadedConfig.skill_improver ?? {},
-			);
-			const skillReviewResult = await runAbortableSkillReview(
-				{
-					directory,
-					config: skillImproverConfig,
-					targets: ['skills', 'knowledge'],
-					mode: 'proposal',
-					sessionId: options.sessionID,
-					enrichmentQuota: {
-						maxCalls: config.enrichment.max_calls_per_day,
-						window: config.enrichment.quota_window,
-					},
-				},
-				options.skillReviewTimeoutMs ?? CLOSE_SKILL_REVIEW_TIMEOUT_MS,
-			);
-			if (skillReviewResult.ran) {
-				const proposal = skillReviewResult.proposalPath
-					? ` Proposal: ${skillReviewResult.proposalPath}.`
-					: '';
-				const source = skillReviewResult.source
-					? ` Source: ${skillReviewResult.source}.`
-					: '';
-				skillReviewSummary = `Skill review proposal generated.${proposal}${source}`;
-			} else {
-				const reason = skillReviewResult.reason ?? 'unknown reason';
-				skillReviewSummary = `Skill review skipped: ${reason}`;
-				warnings.push(skillReviewSummary);
-			}
-		} catch (skillReviewErr) {
-			const msg =
-				skillReviewErr instanceof Error
-					? skillReviewErr.message
-					: String(skillReviewErr);
-			skillReviewSummary = `Skill review failed: ${msg}`;
-			warnings.push(skillReviewSummary);
+		if (ctx.planAlreadyDone) {
+			return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
 		}
-	}
-
-	// ─── ALL-PLANS-COMPLETE GUARANTEE ────────────────────────────────
-	if (planExists) {
-		// Capture original task statuses before guaranteeAllPlansComplete mutates them
-		const originalStatuses = new Map<string, string>();
-		for (const phase of planData.phases ?? []) {
-			for (const task of phase.tasks ?? []) {
-				originalStatuses.set(task.id, task.status);
-			}
-		}
-
-		const guaranteeResult = guaranteeAllPlansComplete(planData);
-		// Only track newly closed phases/tasks by identity
-		for (const phaseId of guaranteeResult.closedPhaseIds) {
-			if (!closedPhases.includes(phaseId)) {
-				closedPhases.push(phaseId);
-			}
-		}
-		for (const taskId of guaranteeResult.closedTaskIds) {
-			if (!closedTasks.includes(taskId)) {
-				closedTasks.push(taskId);
-			}
-		}
-
-		// Persist the terminal plan state
-		if (
-			!planAlreadyDone ||
-			guaranteeResult.closedPhaseIds.length > 0 ||
-			guaranteeResult.closedTaskIds.length > 0
-		) {
+		return `✅ Swarm finalized. ${ctx.closedPhases.length} phase(s) closed, ${ctx.closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
+	} finally {
+		if (finalizeLock.release) {
 			try {
-				await closePlanTerminalState(directory, planData as Plan, {
-					closedPhaseIds: guaranteeResult.closedPhaseIds,
-					closedTaskIds: guaranteeResult.closedTaskIds,
-					originalStatuses,
-				});
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				warnings.push(`Failed to persist terminal plan state: ${msg}`);
-				console.warn(
-					'[close-command] Failed to write terminal plan state:',
-					error,
-				);
+				await finalizeLock.release();
+			} catch {
+				// non-fatal — lock release failure should not mask the operation result
 			}
 		}
 	}
+}
 
-	// ─── POST-MORTEM (WP7, #1234) ──────────────────────────────────
-	// Run the post-mortem agent as part of finalize. Idempotent: if
-	// phase_complete already produced a report, this is a no-op.
-	let postMortemSummary = '';
-	try {
-		const { CuratorConfigSchema: CCS } = await import('../config/schema.js');
-		const { config: pmLoadedConfig } = loadPluginConfigWithMeta(directory);
-		const curatorCfg = CCS.parse(pmLoadedConfig.curator ?? {});
-		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
-			const { runCuratorPostMortem } = await import(
-				'../hooks/curator-postmortem.js'
-			);
-			const pmResult = await runCuratorPostMortem(directory, {
-				llmDelegate: createCuratorLLMDelegate(
-					directory,
-					'postmortem',
-					options.sessionID,
-				),
-			});
-			if (pmResult.success && pmResult.summary) {
-				postMortemSummary = pmResult.summary;
-			}
-			for (const w of pmResult.warnings) {
-				warnings.push(`[POST-MORTEM] ${w}`);
-			}
-		}
-	} catch {
-		// fail-open: post-mortem never blocks finalize
-	}
-
-	// ─── STAGE 2: ARCHIVE ────────────────────────────────────────────
-	const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-	const suffix = Math.random().toString(36).slice(2, 8);
-	const archiveDir = path.join(
-		swarmDir,
-		'archive',
-		`swarm-${timestamp}-${suffix}`,
+/**
+ * Acquire the finalize lock for the close command (FR-012).
+ * Wraps tryAcquireLock with a directory-only API.
+ */
+async function acquireFinalizeLock(
+	directory: string,
+): Promise<{ acquired: boolean; release?: () => Promise<void> }> {
+	const result = await tryAcquireLock(
+		directory,
+		'finalize.lock',
+		'close-command',
+		'finalize',
 	);
-	let archiveResult = '';
-	let archivedFileCount = 0;
-	/** Track which active-state files were successfully backed up to the archive.
-	 *  Only these files are safe to delete in the clean stage. */
-	const archivedActiveStateFiles = new Set<string>();
-	/** Track which active-state directories were successfully backed up to the archive.
-	 *  Only these directories are safe to delete in the clean stage. */
-	const archivedActiveStateDirs = new Set<string>();
-
-	try {
-		await fs.mkdir(archiveDir, { recursive: true });
-
-		// Copy swarm artifacts to archive
-		for (const artifact of ARCHIVE_ARTIFACTS) {
-			const srcPath = path.join(swarmDir, artifact);
-			const destPath = path.join(archiveDir, artifact);
-			try {
-				await fs.copyFile(srcPath, destPath);
-				archivedFileCount++;
-				if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
-					archivedActiveStateFiles.add(artifact);
-				}
-			} catch {
-				// File may not exist — skip silently
-			}
-		}
-
-		// Archive directories (evidence/, session/, scopes/, locks/, spec-archive/)
-		for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
-			const srcDir = path.join(swarmDir, dirName);
-			const destDir = path.join(archiveDir, dirName);
-			try {
-				const copied = await copyDirRecursive(srcDir, destDir);
-				archivedFileCount += copied;
-				archivedActiveStateDirs.add(dirName);
-			} catch {
-				// Directory may not exist — skip silently
-			}
-		}
-
-		archiveResult = `Archived ${archivedFileCount} artifact(s) to .swarm/archive/swarm-${timestamp}-${suffix}/`;
-	} catch (archiveError) {
-		warnings.push(
-			`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`,
-		);
-		archiveResult = 'Archive creation failed (see warnings)';
+	if (result.acquired) {
+		return { acquired: true, release: result.lock._release };
 	}
-
-	// Archive evidence bundles (retention policy)
-	try {
-		await archiveEvidence(directory, 30, 10);
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`Evidence retention archive failed: ${msg}`);
-		console.warn('[close-command] archiveEvidence error:', error);
-	}
-
-	// ─── STAGE 3: CLEAN ──────────────────────────────────────────────
-	let configBackupsRemoved = 0;
-	const cleanedFiles: string[] = [];
-
-	// Only delete active-state files that were successfully copied to the archive.
-	// This prevents data loss when a partial archive succeeds for some files but
-	// fails for others — only the backed-up files are safe to remove.
-	if (archivedActiveStateFiles.size > 0) {
-		for (const artifact of ACTIVE_STATE_TO_CLEAN) {
-			if (!archivedActiveStateFiles.has(artifact)) {
-				// This file was NOT successfully archived — do not delete it
-				warnings.push(
-					`Preserved ${artifact} because it was not successfully archived.`,
-				);
-				continue;
-			}
-			const filePath = path.join(swarmDir, artifact);
-			try {
-				await fs.unlink(filePath);
-				cleanedFiles.push(artifact);
-			} catch {
-				// File may not exist
-			}
-		}
-	} else {
-		warnings.push(
-			'Skipped active-state cleanup because no active-state files were archived. Files preserved to prevent data loss.',
-		);
-	}
-
-	// Delete directories that were successfully archived
-	// Uses archive-first-guard: only delete directories we confirmed are in the archive
-	for (const dirName of ACTIVE_STATE_DIRS_TO_CLEAN) {
-		if (!archivedActiveStateDirs.has(dirName)) {
-			// Directory was NOT archived — do not delete
-			continue;
-		}
-		const dirPath = path.join(swarmDir, dirName);
-		try {
-			await fs.rm(dirPath, { recursive: true, force: true });
-			cleanedFiles.push(`${dirName}/`);
-		} catch {
-			// Per-directory failure is non-blocking
-		}
-	}
-
-	// Remove stale config-backup-*.json files AND ledger sibling files
-	// (plan-ledger.archived-*.jsonl and plan-ledger.backup-*.jsonl) that
-	// savePlan creates during identity-mismatch reinitialization. Without
-	// this sweep, those siblings accumulate forever in .swarm/, undermining
-	// the same "clean slate for next session" invariant that motivates the
-	// plan-ledger.jsonl removal in ACTIVE_STATE_TO_CLEAN above. The primary
-	// plan-ledger.jsonl is already archived into the bundle by stage 2, so
-	// these stale siblings are pure noise and safe to delete here.
-	try {
-		const swarmFiles = await fs.readdir(swarmDir);
-		const configBackups = swarmFiles.filter(
-			(f) => f.startsWith('config-backup-') && f.endsWith('.json'),
-		);
-		for (const backup of configBackups) {
-			try {
-				await fs.unlink(path.join(swarmDir, backup));
-				configBackupsRemoved++;
-			} catch {
-				// Per-file failure is non-blocking
-			}
-		}
-		const ledgerSiblings = swarmFiles.filter(
-			(f) =>
-				(f.startsWith('plan-ledger.archived-') ||
-					f.startsWith('plan-ledger.backup-')) &&
-				f.endsWith('.jsonl'),
-		);
-		for (const sibling of ledgerSiblings) {
-			try {
-				await fs.unlink(path.join(swarmDir, sibling));
-			} catch {
-				// Per-file failure is non-blocking
-			}
-		}
-	} catch {
-		// readdir failure is non-blocking
-	}
-
-	// Remove SWARM_PLAN checkpoint artifacts written by writeCheckpoint().
-	// Cleans both the canonical .swarm/ location and any legacy root-level
-	// artifacts from pre-7.0 sessions. These are redundant copies of
-	// plan.json/plan.md (already archived) and should not be left behind.
-	let swarmPlanFilesRemoved = 0;
-	const candidates = [
-		path.join(directory, '.swarm', 'SWARM_PLAN.json'),
-		path.join(directory, '.swarm', 'SWARM_PLAN.md'),
-		path.join(directory, 'SWARM_PLAN.json'),
-		path.join(directory, 'SWARM_PLAN.md'),
-	];
-	for (const candidate of candidates) {
-		try {
-			await fs.unlink(candidate);
-			swarmPlanFilesRemoved++;
-		} catch (err: unknown) {
-			if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-				warnings.push(
-					`Failed to remove ${candidate}: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-		}
-	}
-
-	// Remove stale .tmp.* files that were left behind by interrupted handoff
-	// writes or other transient operations. These are safe to delete because
-	// they are recreated on next session init and must be removed to avoid
-	// stale-state pollution in the archive bundle.
-	let tmpFilesRemoved = 0;
-	try {
-		const swarmFiles = await fs.readdir(swarmDir);
-		const tmpFiles = swarmFiles.filter((f) => f.startsWith('.tmp.'));
-		for (const tmp of tmpFiles) {
-			try {
-				await fs.unlink(path.join(swarmDir, tmp));
-				tmpFilesRemoved++;
-			} catch {
-				// Per-file failure is non-blocking
-			}
-		}
-	} catch {
-		// readdir failure is non-blocking
-	}
-	if (tmpFilesRemoved > 0) {
-		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
-	}
-
-	// #519 (v6.71.1): clear persisted declare_scope files so the next session
-	// starts without inherited scope. Scope files are ephemeral state; they are
-	// not archived because they contain no forensic signal not already captured
-	// by plan.json:files_touched.
-	clearAllScopes(directory);
-
-	// Reset context.md so new sessions start fresh
-	const contextPath = path.join(swarmDir, 'context.md');
-	const contextContent = [
-		'# Context',
-		'',
-		'## Status',
-		`Session closed after: ${projectName}`,
-		`Closed: ${new Date().toISOString()}`,
-		`Finalization: ${isForced ? 'forced' : planAlreadyDone ? 'plan-already-done' : 'normal'}`,
-		'No active plan. Next session starts fresh.',
-		'',
-	].join('\n');
-	try {
-		await fs.writeFile(contextPath, contextContent, 'utf-8');
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`Failed to reset context.md: ${msg}`);
-		console.warn('[close-command] Failed to write context.md:', error);
-	}
-
-	// ─── STAGE 4: ALIGN ──────────────────────────────────────────────
-	const pruneBranches = args.includes('--prune-branches');
-	let gitAlignResult = '';
-	const prunedBranches: string[] = [];
-
-	const gitStatus = _internals.getGitRepositoryStatus(directory);
-	if (gitStatus.isRepo) {
-		// Try aggressive reset first (handles post-merge scenario with uncommitted changes)
-		const aggressiveResult = _internals.resetToMainAfterMerge(directory, {
-			pruneBranches,
-		});
-		if (aggressiveResult.success) {
-			gitAlignResult = aggressiveResult.message;
-			for (const w of aggressiveResult.warnings) {
-				warnings.push(w);
-			}
-			if (aggressiveResult.changesDiscarded) {
-				warnings.push(
-					'Uncommitted changes were discarded during git alignment',
-				);
-			}
-		} else {
-			// Fallback to cautious reset (preserves uncommitted changes)
-			const alignResult = _internals.resetToRemoteBranch(directory, {
-				pruneBranches,
-			});
-			gitAlignResult = alignResult.message;
-			prunedBranches.push(...alignResult.prunedBranches);
-
-			if (!alignResult.success) {
-				warnings.push(`Git alignment: ${alignResult.message}`);
-			}
-			if (alignResult.alreadyAligned) {
-				gitAlignResult = `Already aligned with ${alignResult.targetBranch}`;
-			}
-			for (const w of alignResult.warnings) {
-				warnings.push(w);
-			}
-		}
-	} else if (gitStatus.reason === 'git_unavailable') {
-		gitAlignResult = `Git executable unavailable — skipped git alignment: ${gitStatus.message}`;
-		warnings.push(gitAlignResult);
-	} else if (gitStatus.reason === 'git_error') {
-		gitAlignResult = `Git repository check failed — skipped git alignment: ${gitStatus.message}`;
-		warnings.push(gitAlignResult);
-	} else {
-		// gitStatus.reason === 'not_git_repo'
-		gitAlignResult = 'Not a git repository — skipped git alignment';
-	}
-
-	// ─── WRITE CLOSE SUMMARY ─────────────────────────────────────────
-	const closeSummaryPath = validateSwarmPath(directory, 'close-summary.md');
-
-	const finalizationType = isForced
-		? 'Forced closure'
-		: planAlreadyDone
-			? 'Plan already terminal — cleanup only'
-			: 'Normal finalization';
-
-	const summaryContent = [
-		'# Swarm Close Summary',
-		'',
-		`**Project:** ${projectName}`,
-		`**Closed:** ${new Date().toISOString()}`,
-		`**Finalization:** ${finalizationType}`,
-		'',
-		'## Retrospective',
-		!planExists
-			? '_No plan — ad-hoc session_'
-			: closedPhases.length > 0
-				? closedPhases.map((id) => `- Phase ${id} closed`).join('\n')
-				: '_No phases closed this run_',
-		...(closedTasks.length > 0
-			? [
-					'',
-					`**Tasks marked closed:** ${closedTasks.length}`,
-					...closedTasks.map((id) => `- ${id}`),
-				]
-			: []),
-		'',
-		'## Lessons Committed',
-		allLessons.length > 0 ? `| # | Lesson |` : '_No lessons committed_',
-		...(allLessons.length > 0
-			? ['| --- | --- |', ...allLessons.map((l, i) => `| ${i + 1} | ${l} |`)]
-			: []),
-		...(knowledgeSkillHint ? ['', knowledgeSkillHint] : []),
-		...(runSkillReview
-			? [
-					'',
-					'## Skill Review',
-					skillReviewSummary || 'Skill review completed without details.',
-				]
-			: []),
-		'',
-		'## Local Repo State',
-		...(gitAlignResult
-			? [`- **Git:** ${gitAlignResult}`]
-			: ['- Git alignment skipped']),
-		...(prunedBranches.length > 0
-			? [`- **Pruned branches:** ${prunedBranches.join(', ')}`]
-			: []),
-		`- **Archive:** ${archiveResult}`,
-		...(cleanedFiles.length > 0
-			? [`- **Cleaned:** ${cleanedFiles.length} file(s)`]
-			: []),
-		'',
-		'## Context',
-		'- Reset context.md for next session',
-		'- Cleared agent sessions and delegation chains',
-		...(configBackupsRemoved > 0
-			? [`- Removed ${configBackupsRemoved} stale config backup file(s)`]
-			: []),
-		...(swarmPlanFilesRemoved > 0
-			? [`- Removed ${swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s)`]
-			: []),
-		...(planExists && !planAlreadyDone
-			? ['- Set non-completed phases/tasks to closed status']
-			: []),
-		...(curationSucceeded && allLessons.length > 0
-			? [`- Committed ${allLessons.length} lesson(s) to knowledge store`]
-			: []),
-		...(hivePromoted > 0
-			? [`- Promoted ${hivePromoted} lesson(s) to hive knowledge`]
-			: []),
-		'',
-		...(warnings.length > 0
-			? ['## Warnings', ...warnings.map((w) => `- ${w}`), '']
-			: []),
-	].join('\n');
-
-	try {
-		await fs.writeFile(closeSummaryPath, summaryContent, 'utf-8');
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		warnings.push(`Failed to write close-summary.md: ${msg}`);
-		console.warn('[close-command] Failed to write close-summary.md:', error);
-	}
-
-	// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
-	// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in
-	// .swarm/archive/) and should not be written to the .swarm/ directory during close.
-	// Stage 3 cleanup removes any pre-existing SWARM_PLAN artifacts from prior sessions.
-
-	// Preserve plugin-init singletons through state reset
-	resetSwarmStatePreservingSingletons();
-
-	// Separate retro-specific warnings for prominent display
-	const retroWarnings = warnings.filter(
-		(w) =>
-			w.includes('Retrospective write') ||
-			w.includes('retrospective write') ||
-			w.includes('Session retrospective'),
-	);
-	const otherWarnings = warnings.filter(
-		(w) =>
-			!w.includes('Retrospective write') &&
-			!w.includes('retrospective write') &&
-			!w.includes('Session retrospective'),
-	);
-	let warningMsg = '';
-	if (retroWarnings.length > 0) {
-		warningMsg += `\n\n**⚠ Retrospective evidence incomplete:**\n${retroWarnings.map((w) => `- ${w}`).join('\n')}`;
-	}
-	if (otherWarnings.length > 0) {
-		warningMsg += `\n\n**Warnings:**\n${otherWarnings.map((w) => `- ${w}`).join('\n')}`;
-	}
-
-	const lessonSummary =
-		curationSucceeded && allLessons.length > 0
-			? `\n\n**Lessons Committed:** ${allLessons.length} lesson(s) committed to knowledge store`
-			: '';
-	const knowledgeHintSummary = knowledgeSkillHint
-		? `\n\n**Knowledge Review:** ${knowledgeSkillHint}`
-		: '';
-	const skillReviewOutput = skillReviewSummary
-		? `\n\n**Skill Review:** ${skillReviewSummary}`
-		: '';
-	const postMortemOutput = postMortemSummary
-		? `\n\n**Post-Mortem:** ${postMortemSummary}`
-		: '';
-
-	if (planAlreadyDone) {
-		return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
-	}
-	return `✅ Swarm finalized. ${closedPhases.length} phase(s) closed, ${closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${warningMsg}`;
+	return { acquired: false };
 }
 
 export const _internals = {
+	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 	guaranteeAllPlansComplete,
@@ -1161,4 +1414,18 @@ export const _internals = {
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 	copyDirRecursive,
+	loadPluginConfigWithMeta,
+	curateAndStoreSwarm,
+	checkHivePromotions,
+	runCuratorPostMortem,
+	createCuratorLLMDelegate,
+	resetSwarmStatePreservingSingletons,
+	runFinalizeStage,
+	acquireFinalizeLock,
+	runArchiveStage,
+	runArchiveEvidenceRetention,
+	runCleanStage,
+	runAlignStage,
+	archiveEvidence,
+	closePlanTerminalState,
 };

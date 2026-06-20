@@ -59,14 +59,14 @@ Full field definitions live in `src/config/evidence-schema.ts`.
 
 Config keys (`src/config/schema.ts:179`):
 
-| Key | Default | Range | Purpose |
-|-----|:---:|:---:|---------|
-| `enabled` | `true` | — | Master switch |
-| `max_age_days` | `90` | 1–365 | Age threshold for archiving |
-| `max_bundles` | `1000` | 10–10000 | Count cap |
-| `auto_archive` | `false` | — | Future gate (config-only) |
+| Key | Archive default | Finalize default | Range | Purpose |
+|-----|:---:|:---:|:---:|---------|
+| `enabled` | `true` | `true` | — | Master switch |
+| `max_age_days` | `90` | **30** | 1–365 | Age threshold for archiving |
+| `max_bundles` | `1000` | **10** | 10–10000 | Count cap |
+| `auto_archive` | `false` | `false` | — | Future gate (config-only) |
 
-`/swarm archive` applies two-tier retention: age first, then count. Oldest bundles go first when the count cap is hit. Use `--dry-run` to preview.
+`/swarm archive` applies two-tier retention: age first, then count. `/swarm finalize` applies tighter retention (30 days / 10 bundles) to keep only recent evidence. Configure via `evidence.max_age_days` and `evidence.max_bundles` in your project config. Use `--dry-run` to preview.
 
 ---
 

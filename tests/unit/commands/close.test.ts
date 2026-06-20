@@ -100,9 +100,12 @@ const mockArchiveEvidence = mock(async () => {});
 
 const mockFlushPendingSnapshot = mock(async () => {});
 
-const mockPromoteToHive = mock(
-	async (_dir: string, _lesson: string, _category: string) => {},
-);
+const mockCheckHivePromotions = mock(async () => ({
+	new_promotions: 0,
+	encounters_incremented: 0,
+	advancements: 0,
+	total_hive_entries: 0,
+}));
 
 let forceSkillReviewConfigError = false;
 let configLoadCallCount = 0;
@@ -155,7 +158,7 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 
 mock.module('../../../src/hooks/hive-promoter.js', () => ({
 	isHiveEligible: () => false,
-	promoteToHive: mockPromoteToHive,
+	checkHivePromotions: mockCheckHivePromotions,
 }));
 
 mock.module('../../../src/evidence/manager.js', () => ({
@@ -287,7 +290,7 @@ describe('handleCloseCommand', () => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
-		mockPromoteToHive.mockClear();
+		mockCheckHivePromotions.mockClear();
 		mockLoadPluginConfigWithMeta.mockClear();
 		mockRunSkillImprover.mockClear();
 		forceSkillReviewTimeout = false;

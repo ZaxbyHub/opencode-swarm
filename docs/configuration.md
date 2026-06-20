@@ -578,6 +578,30 @@ Controls phase completion gating and validation.
 }
 ```
 
+## Evidence Retention Configuration
+
+Controls evidence bundle archival for `/swarm finalize` and `/swarm archive`. The two commands use different defaults: finalize uses tighter retention (30 days / 10 bundles) to keep only recent evidence; archive targets long-term retention (90 days / 1000 bundles) for periodic cleanup.
+
+| Field | Type | Default (finalize) | Default (archive) | Range | Description |
+|-------|------|:---:|:---:|:---:|---|
+| `enabled` | boolean | `true` | `true` | — | Master switch |
+| `max_age_days` | number | **30** | 90 | 1–365 | Age threshold for archiving |
+| `max_bundles` | number | **10** | 1000 | 10–10000 | Count cap |
+| `auto_archive` | boolean | `false` | `false` | — | Future gate (config-only) |
+
+> **Note:** `/swarm finalize` applies tighter retention (30 days / 10 bundles) by default to keep only recent evidence for the current project. `/swarm archive` targets long-term retention (90 days / 1000 bundles). Both are configurable via `evidence.max_age_days` and `evidence.max_bundles` in your project config.
+
+**Example** — Tighten finalize retention:
+
+```json
+{
+  "evidence": {
+    "max_age_days": 14,
+    "max_bundles": 5
+  }
+}
+```
+
 ## Council
 
 Opt-in verification gate that runs five specialized reviewers in parallel before a task advances to `completed`.

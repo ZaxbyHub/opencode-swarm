@@ -298,10 +298,10 @@ function detectDefaultRemoteBranch(cwd: string): string | null {
  * @param options - Options including pruneBranches flag
  * @returns Result object with success status and details
  */
-export function resetToRemoteBranch(
+export async function resetToRemoteBranch(
 	cwd: string,
 	options?: { pruneBranches?: boolean },
-): ResetToRemoteBranchResult {
+): Promise<ResetToRemoteBranchResult> {
 	const warnings: string[] = [];
 	const prunedBranches: string[] = [];
 
@@ -423,13 +423,9 @@ export function resetToRemoteBranch(
 		let lastError: unknown;
 		for (let retry = 0; retry < 4; retry++) {
 			if (retry > 0 && process.platform === 'win32') {
-				// Synchronous delay for Windows — git file-locking race on Windows
-				// requires a brief pause between retries. On Linux/macOS the retry
-				// is immediate since the file-locking issue is Windows-specific.
-				const endTime = Date.now() + 500;
-				while (Date.now() < endTime) {
-					// busy wait
-				}
+				// Async wait for Windows file-locking (FR-018) — yields the event loop
+				// instead of a synchronous spin loop that blocks it.
+				await new Promise((resolve) => setTimeout(resolve, 500));
 			}
 			try {
 				gitExec(['reset', '--hard', targetBranch], cwd);
@@ -542,10 +538,10 @@ export interface ResetToMainAfterMergeResult {
  * Steps: detect default branch → safety check → fetch → checkout → discard changes → reset → delete branch.
  * Safety guard: refuses if current branch has commits not on any remote tracking branch.
  */
-export function resetToMainAfterMerge(
+export async function resetToMainAfterMerge(
 	cwd: string,
 	options?: { pruneBranches?: boolean },
-): ResetToMainAfterMergeResult {
+): Promise<ResetToMainAfterMergeResult> {
 	const warnings: string[] = [];
 
 	try {
@@ -707,10 +703,9 @@ export function resetToMainAfterMerge(
 			let discardSucceeded = false;
 			for (let retry = 0; retry < 4; retry++) {
 				if (retry > 0 && process.platform === 'win32') {
-					const endTime = Date.now() + 500;
-					while (Date.now() < endTime) {
-						// busy wait for Windows file-locking
-					}
+					// Async wait for Windows file-locking (FR-018) — yields the event loop
+					// instead of a synchronous spin loop that blocks it.
+					await new Promise((resolve) => setTimeout(resolve, 500));
 				}
 				try {
 					_internals.gitExec(['checkout', '--', '.'], cwd);
@@ -728,10 +723,10 @@ export function resetToMainAfterMerge(
 			changesDiscarded = discardSucceeded;
 		}
 
-		// Step 7b: Remove untracked files/directories
+		// Step 7b: Remove only gitignored files/directories (build artifacts); user-created untracked files are preserved (FR-013).
 		// git checkout -- . only resets tracked files; git clean removes untracked.
 		try {
-			_internals.gitExec(['clean', '-fd'], cwd);
+			_internals.gitExec(['clean', '-fdX'], cwd);
 		} catch {
 			warnings.push('Could not clean untracked files');
 		}

@@ -419,14 +419,35 @@ export async function recordHiveKnowledgeEvent(
  * Read all events from the log. Skips corrupted JSONL lines (logging a warning
  * for each) and returns an empty array when the file does not exist — mirrors
  * `readKnowledge` in knowledge-store.ts.
+ *
+ * Optional maxEvents cap: when provided as a positive finite number, stops
+ * after that many events are parsed, preventing unbounded memory growth.
  */
 export async function readKnowledgeEvents(
 	directory: string,
+	maxEvents?: number,
 ): Promise<KnowledgeEvent[]> {
 	const filePath = resolveKnowledgeEventsPath(directory);
 	if (!existsSync(filePath)) return [];
 	const content = await readFile(filePath, 'utf-8');
-	return parseEventLines(content.split('\n'), filePath);
+	const out: KnowledgeEvent[] = [];
+	const max = maxEvents !== undefined && maxEvents > 0 ? maxEvents : Infinity;
+	for (const line of content.split('\n')) {
+		if (out.length >= max) break;
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			out.push(JSON.parse(trimmed) as KnowledgeEvent);
+		} catch {
+			warn(
+				`[knowledge-events] Skipping corrupted JSONL line in ${filePath}: ${trimmed.slice(
+					0,
+					80,
+				)}`,
+			);
+		}
+	}
+	return out;
 }
 
 /**
