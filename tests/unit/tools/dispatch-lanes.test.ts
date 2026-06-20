@@ -21,6 +21,7 @@ import {
 	executeCollectLaneResults,
 	executeDispatchLanes,
 	executeDispatchLanesAsync,
+	MAX_PROMPT_CHARS,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes';
 
@@ -1524,5 +1525,297 @@ describe('formatError — regression: PR #1358 review (R1.3)', () => {
 		const result = formatError(longText);
 		expect(result).toBe(`${longText.slice(0, 200)}...`);
 		expect(result.length).toBe(203);
+	});
+});
+
+describe('common_prompt (shared lane context)', () => {
+	test('applyCommonPrompt prepends shared context to every lane prompt', () => {
+		const result = _test_exports.applyCommonPrompt(
+			[
+				{ id: 'a', agent: 'explorer', prompt: 'focus A' },
+				{ id: 'b', agent: 'reviewer', prompt: 'focus B' },
+			],
+			'SHARED CONTEXT',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.lanes[0].prompt).toBe('SHARED CONTEXT\n\nfocus A');
+		expect(result.lanes[1].prompt).toBe('SHARED CONTEXT\n\nfocus B');
+	});
+
+	test('applyCommonPrompt returns a fresh, equal array when common_prompt is omitted', () => {
+		const lanes = [{ id: 'a', agent: 'explorer', prompt: 'focus A' }];
+		const result = _test_exports.applyCommonPrompt(lanes, undefined);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		// Contract: the caller always owns the returned array (a fresh copy), so
+		// mutating it can never affect the originals. Same contents, new reference.
+		expect(result.lanes).toEqual(lanes);
+		expect(result.lanes).not.toBe(lanes);
+		result.lanes.push({ id: 'z', agent: 'explorer', prompt: 'injected' });
+		expect(lanes).toHaveLength(1);
+	});
+
+	test('applyCommonPrompt handles multi-line common_prompt and special characters correctly', () => {
+		// The separator is '\n\n', so a multi-line common_prompt produces a blank line
+		// between it and the lane prompt — standard Markdown paragraph separation.
+		const common = 'Line 1\nLine 2\n\nParagraph 2 — emoji: 🔍 unicode: café';
+		const result = _test_exports.applyCommonPrompt(
+			[{ id: 'x', agent: 'explorer', prompt: 'focus area' }],
+			common,
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.lanes[0].prompt).toBe(
+			'Line 1\nLine 2\n\nParagraph 2 — emoji: 🔍 unicode: café\n\nfocus area',
+		);
+	});
+
+	test('empty string common_prompt is rejected by schema (min(1))', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: '' as string, // type cast to bypass TS — testing runtime schema guard
+				lanes: [{ id: 'x', agent: 'explorer', prompt: 'focus' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.create).toHaveBeenCalledTimes(0);
+	});
+
+	test('whitespace-only common_prompt is rejected by schema (regex \\S guard)', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		// A whitespace-only common_prompt passes .min(1) but carries no context;
+		// the \S regex guard rejects it before any session is created so lanes
+		// never receive a blank prefix + separator.
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: '   \n\t  ',
+				lanes: [{ id: 'x', agent: 'explorer', prompt: 'focus' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.create).toHaveBeenCalledTimes(0);
+	});
+
+	test('DispatchLanesAsyncArgsSchema inherits common_prompt from the base schema — regression: false-positive "missing from async schema" review claim', () => {
+		// A PR review claimed common_prompt was absent from the async schema, so
+		// dispatch_lanes_async would silently drop it. That is false: the async
+		// schema is `DispatchLanesArgsSchema.extend({...})`, and Zod's .extend
+		// preserves every base field. This locks the parity down permanently.
+		const { DispatchLanesArgsSchema, DispatchLanesAsyncArgsSchema } =
+			_test_exports;
+		expect(DispatchLanesArgsSchema.shape.common_prompt).toBeDefined();
+		expect(DispatchLanesAsyncArgsSchema.shape.common_prompt).toBeDefined();
+
+		const parsed = DispatchLanesAsyncArgsSchema.parse({
+			batch_id: 'batch-schema-1',
+			common_prompt: 'shared async context',
+			lanes: [{ id: 'x', agent: 'explorer', prompt: 'focus' }],
+		});
+		expect(parsed.common_prompt).toBe('shared async context');
+	});
+
+	test('applyCommonPrompt rejects when combined length exceeds the per-lane limit', () => {
+		const common = 'a'.repeat(MAX_PROMPT_CHARS - 1);
+		const result = _test_exports.applyCommonPrompt(
+			[{ id: 'big', agent: 'explorer', prompt: 'bb' }],
+			common,
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.errors).toHaveLength(1);
+		expect(result.errors[0]).toContain('big');
+		expect(result.errors[0]).toContain(`max ${MAX_PROMPT_CHARS}`);
+	});
+
+	test('applyCommonPrompt passes when combined length equals the per-lane limit exactly', () => {
+		// common_prompt schema max = MAX_PROMPT_CHARS - separator(2) - 1 = 79997
+		// combined = 79997 + 2 + 1 = 80000 = MAX_PROMPT_CHARS, NOT > MAX_PROMPT_CHARS → passes
+		const common = 'a'.repeat(MAX_PROMPT_CHARS - 3); // 79997 chars
+		const result = _test_exports.applyCommonPrompt(
+			[{ id: 'x', agent: 'explorer', prompt: 'y' }],
+			common,
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.lanes[0].prompt.length).toBe(MAX_PROMPT_CHARS); // exactly at limit
+	});
+
+	test('common_prompt schema rejects values exceeding the tightened max (79997)', async () => {
+		// 79998-char common_prompt is schema-invalid (max is MAX_PROMPT_CHARS - sep - 1 = 79997)
+		// so the executor must fail with invalid_args before any session is created
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'a'.repeat(MAX_PROMPT_CHARS - 2), // 79998 chars — exceeds schema max of 79997
+				lanes: [{ id: 'x', agent: 'explorer', prompt: 'y' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.create).toHaveBeenCalledTimes(0);
+	});
+
+	test('executeDispatchLanes sends common_prompt + per-lane prompt to each lane', async () => {
+		const directory = makeTempDir();
+		let nextSession = 0;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: `session-${++nextSession}` },
+				error: undefined,
+			})),
+			prompt: mock(async (input) => ({
+				data: {
+					parts: [{ type: 'text' as const, text: `done ${input.body.agent}` }],
+				},
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'PR DIFF + LEDGER',
+				lanes: [
+					{ id: 'corr', agent: 'explorer', prompt: 'correctness focus' },
+					{ id: 'sec', agent: 'reviewer', prompt: 'security focus' },
+				],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		const texts = (ops.prompt as ReturnType<typeof mock>).mock.calls.map(
+			(call) => call[0].body.parts[0].text,
+		);
+		expect(texts).toContain('PR DIFF + LEDGER\n\ncorrectness focus');
+		expect(texts).toContain('PR DIFF + LEDGER\n\nsecurity focus');
+	});
+
+	test('executeDispatchLanes rejects oversized common_prompt + prompt without dispatching', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'done' }] },
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'a'.repeat(MAX_PROMPT_CHARS - 1),
+				lanes: [{ id: 'big', agent: 'explorer', prompt: 'bbbb' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.prompt).toHaveBeenCalledTimes(0);
+	});
+
+	test('executeDispatchLanesAsync sends common_prompt + lane prompt to promptAsync', async () => {
+		const directory = makeTempDir();
+		let nextSession = 0;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: `session-${++nextSession}` },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-common-1',
+				common_prompt: 'SHARED ASYNC CONTEXT',
+				lanes: [
+					{ id: 'runtime', agent: 'explorer', prompt: 'inspect runtime' },
+				],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		expect(ops.promptAsync).toHaveBeenCalledTimes(1);
+		const sentText = (ops.promptAsync as ReturnType<typeof mock>).mock
+			.calls[0][0].body.parts[0].text;
+		expect(sentText).toBe('SHARED ASYNC CONTEXT\n\ninspect runtime');
+	});
+
+	test('executeDispatchLanesAsync rejects oversized common_prompt + prompt without dispatching', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'session' }, error: undefined })),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-oversized-1',
+				common_prompt: 'a'.repeat(MAX_PROMPT_CHARS - 1),
+				lanes: [{ id: 'big', agent: 'explorer', prompt: 'bbbb' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(ops.promptAsync).toHaveBeenCalledTimes(0);
 	});
 });

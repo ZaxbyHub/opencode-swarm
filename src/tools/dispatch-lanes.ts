@@ -19,7 +19,8 @@ import { swarmState } from '../state.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_LANES = 8;
-const MAX_PROMPT_CHARS = 80_000;
+export const MAX_PROMPT_CHARS = 80_000;
+const COMMON_PROMPT_SEPARATOR = '\n\n';
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const MAX_LANE_OUTPUT_CHARS = 20_000;
@@ -103,6 +104,20 @@ const DispatchLanesArgsSchema = z.object({
 		.min(1)
 		.max(MAX_LANES)
 		.describe('Read-only lane specs to dispatch concurrently'),
+	common_prompt: z
+		.string()
+		.min(1)
+		// Must carry real content: a whitespace-only value would prepend a blank
+		// prefix + separator to every lane prompt without adding any context.
+		.regex(/\S/, 'common_prompt must contain non-whitespace content')
+		// Reserve room for the separator + at least 1 char of lane prompt so any
+		// schema-valid common_prompt can coexist with the shortest valid lane
+		// prompt without the combined length exceeding MAX_PROMPT_CHARS.
+		.max(MAX_PROMPT_CHARS - COMMON_PROMPT_SEPARATOR.length - 1)
+		.optional()
+		.describe(
+			'Optional shared context prepended to every lane prompt. Send large shared context (PR diff, obligation ledger, scope) ONCE here instead of inlining the same blob into each lane prompt; this keeps the tool-call payload small and avoids malformed/truncated tool-call JSON. Combined common_prompt + per-lane prompt must not exceed the per-lane character limit.',
+		),
 	max_concurrent: z
 		.number()
 		.int()
@@ -296,10 +311,13 @@ export const _internals: {
 };
 
 export const _test_exports = {
+	applyCommonPrompt,
 	extractLastAssistantText,
 	formatError,
 	nextCollectPollInterval,
 	promptHash,
+	DispatchLanesArgsSchema,
+	DispatchLanesAsyncArgsSchema,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
@@ -346,7 +364,18 @@ export async function executeDispatchLanes(
 		});
 	}
 
-	const lanes = parsed.data.lanes;
+	const common = applyCommonPrompt(
+		parsed.data.lanes,
+		parsed.data.common_prompt,
+	);
+	if (!common.ok) {
+		return failureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid dispatch_lanes arguments',
+			errors: common.errors,
+		});
+	}
+	const lanes = common.lanes;
 	const maxConcurrent = Math.min(
 		parsed.data.max_concurrent ?? lanes.length,
 		lanes.length,
@@ -407,7 +436,18 @@ export async function executeDispatchLanesAsync(
 		});
 	}
 
-	const lanes = parsed.data.lanes;
+	const common = applyCommonPrompt(
+		parsed.data.lanes,
+		parsed.data.common_prompt,
+	);
+	if (!common.ok) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid dispatch_lanes_async arguments',
+			errors: common.errors,
+		});
+	}
+	const lanes = common.lanes;
 	const batchId = parsed.data.batch_id ?? makeBatchId();
 	if (findByBatchId(directory, batchId).length > 0) {
 		return asyncFailureResult({
@@ -1207,6 +1247,41 @@ function collectFailureResult(args: {
 	};
 }
 
+type ApplyCommonPromptResult =
+	| { ok: true; lanes: DispatchLaneSpec[] }
+	| { ok: false; errors: string[] };
+
+/**
+ * Prepend an optional shared `common_prompt` to every lane prompt so callers can
+ * send large shared context once instead of inlining it into each lane (which
+ * bloats the tool-call payload and triggers truncated/malformed tool-call JSON).
+ * Returns an error when any assembled prompt exceeds the per-lane character limit.
+ *
+ * Always returns a fresh array the caller owns: a shallow copy of the originals
+ * when no `commonPrompt` is provided, or shallow-copied lanes with rewritten
+ * prompts when it is. Callers may treat the returned array as their own.
+ */
+function applyCommonPrompt(
+	lanes: DispatchLaneSpec[],
+	commonPrompt: string | undefined,
+): ApplyCommonPromptResult {
+	if (!commonPrompt) return { ok: true, lanes: [...lanes] };
+	const errors: string[] = [];
+	const merged = lanes.map((lane) => {
+		const prompt = `${commonPrompt}${COMMON_PROMPT_SEPARATOR}${lane.prompt}`;
+		if (prompt.length > MAX_PROMPT_CHARS) {
+			errors.push(
+				`Lane "${lane.id}" combined common_prompt + prompt is ${prompt.length} chars ` +
+					`(common_prompt ${commonPrompt.length} + separator ${COMMON_PROMPT_SEPARATOR.length} + ` +
+					`lane prompt ${lane.prompt.length}; max ${MAX_PROMPT_CHARS})`,
+			);
+		}
+		return { ...lane, prompt };
+	});
+	if (errors.length > 0) return { ok: false, errors };
+	return { ok: true, lanes: merged };
+}
+
 function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 	const seen = new Set<string>();
 	const duplicates = new Set<string>();
@@ -1312,9 +1387,10 @@ function sleep(ms: number): Promise<void> {
 export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Dispatch multiple read-only exploration/review lanes concurrently through OpenCode sessions and return a structured join result.',
+			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt.',
 		args: {
 			lanes: DispatchLanesArgsSchema.shape.lanes,
+			common_prompt: DispatchLanesArgsSchema.shape.common_prompt,
 			max_concurrent: DispatchLanesArgsSchema.shape.max_concurrent,
 			timeout_ms: DispatchLanesArgsSchema.shape.timeout_ms,
 		},
@@ -1329,9 +1405,10 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return immediately with a batch id for collect_lane_results.',
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id (non-blocking). After launching, keep working on non-dependent tasks while the lanes run, then call collect_lane_results to join. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
 		args: {
 			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
+			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
 			max_concurrent: DispatchLanesAsyncArgsSchema.shape.max_concurrent,
 			timeout_ms: DispatchLanesAsyncArgsSchema.shape.timeout_ms,
 			batch_id: DispatchLanesAsyncArgsSchema.shape.batch_id,
