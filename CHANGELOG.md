@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.82.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.4...v7.82.0) (2026-06-20)
+
+
+### Features
+
+* **background:** wire async stage b gates ([abe3726](https://github.com/ZaxbyHub/opencode-swarm/commit/abe372664492765b9cd25c651e8565003f22ebc2))
+
 ## [7.81.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.3...v7.81.4) (2026-06-20)
 
 
