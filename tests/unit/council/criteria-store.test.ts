@@ -24,12 +24,12 @@ afterEach(() => {
 });
 
 describe('criteria-store round-trip', () => {
-	test('write then read returns identical criteria', () => {
+	test('write then read returns identical criteria', async () => {
 		const criteria = [
 			{ id: 'C1', description: 'All tests pass', mandatory: true },
 			{ id: 'C2', description: 'No placeholder bodies', mandatory: true },
 		];
-		writeCriteria(tempDir, '1.1', criteria);
+		await writeCriteria(tempDir, '1.1', criteria);
 		const result = readCriteria(tempDir, '1.1');
 		expect(result).not.toBeNull();
 		expect(result?.criteria).toEqual(criteria);
@@ -40,8 +40,8 @@ describe('criteria-store round-trip', () => {
 		expect(readCriteria(tempDir, 'nonexistent')).toBeNull();
 	});
 
-	test('taskId with dots is safely encoded and round-trips', () => {
-		writeCriteria(tempDir, '1.1', [
+	test('taskId with dots is safely encoded and round-trips', async () => {
+		await writeCriteria(tempDir, '1.1', [
 			{ id: 'C1', description: 'x', mandatory: true },
 		]);
 		const result = readCriteria(tempDir, '1.1');
@@ -68,10 +68,10 @@ describe('criteria-store round-trip', () => {
 		expect(readCriteria(tempDir, 'bad.schema')).toBeNull();
 	});
 
-	test('path traversal characters in taskId are sanitized', () => {
+	test('path traversal characters in taskId are sanitized', async () => {
 		// Ensure malicious taskId cannot escape the .swarm/council directory.
 		const traversalId = '../../../etc/passwd';
-		writeCriteria(tempDir, traversalId, [
+		await writeCriteria(tempDir, traversalId, [
 			{ id: 'C1', description: 'x', mandatory: true },
 		]);
 		// Must be readable with the same sanitized id

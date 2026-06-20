@@ -1,46 +1,19 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-import { createPrmHook } from '../index';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { _internals, createPrmHook } from '../index';
+import { clearTrajectoryCache } from '../trajectory-store';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
 
-// Mock telemetry first
-vi.mock('../../telemetry', () => ({
-	telemetry: {
-		prmPatternDetected: vi.fn(),
-		prmCourseCorrectionInjected: vi.fn(),
-		prmEscalationTriggered: vi.fn(),
-		prmHardStop: vi.fn(),
-	},
-}));
-
-// Mock state module
-vi.mock('../../state', () => ({
-	getAgentSession: vi.fn(),
-}));
-
-// Mock trajectory-store
-vi.mock('../trajectory-store', () => ({
-	readTrajectory: vi.fn(),
-}));
-
-// Mock pattern-detector
-vi.mock('../pattern-detector', () => ({
-	detectPatterns: vi.fn(),
-}));
-
-// Mock course-correction
-vi.mock('../course-correction', () => ({
-	generateCourseCorrection: vi.fn(),
-	formatCourseCorrectionForInjection: vi.fn(),
-}));
-
-import { getAgentSession } from '../../state';
-import { telemetry } from '../../telemetry';
-import {
-	formatCourseCorrectionForInjection,
-	generateCourseCorrection,
-} from '../course-correction';
-import { detectPatterns } from '../pattern-detector';
-import { readTrajectory } from '../trajectory-store';
+const originalGetAgentSession = _internals.getAgentSession;
+const originalReadTrajectory = _internals.readTrajectory;
+const originalGetInMemoryTrajectory = _internals.getInMemoryTrajectory;
+const originalDetectPatterns = _internals.detectPatterns;
+const originalGenerateCourseCorrection = _internals.generateCourseCorrection;
+const originalFormatCourseCorrectionForInjection =
+	_internals.formatCourseCorrectionForInjection;
+const originalCleanupOldTrajectoryFiles = _internals.cleanupOldTrajectoryFiles;
+const originalRecordReplayEntry = _internals.recordReplayEntry;
+const originalStartReplayRecording = _internals.startReplayRecording;
+const originalTelemetry = _internals.telemetry;
 
 function createMockConfig(overrides: Partial<PrmConfig> = {}): PrmConfig {
 	return {
@@ -134,14 +107,13 @@ function createMockSession(sessionId: string, delegationActive = true) {
 		coderRevisions: 0,
 		revisionLimitHit: false,
 		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [],
+		pendingAdvisoryMessages: [] as string[],
 		sessionRehydratedAt: 0,
 		lastPhaseCompleteTimestamp: 0,
 		lastPhaseCompletePhase: 0,
 		phaseAgentsDispatched: new Set(),
 		lastCompletedPhaseAgentsDispatched: new Set(),
-		// PRM fields
-		prmPatternCounts: new Map(),
+		prmPatternCounts: new Map<string, number>(),
 		prmEscalationLevel: 0,
 		prmLastPatternDetected: null as PatternMatch | null,
 		prmTrajectoryStep: 0,
@@ -151,71 +123,20 @@ function createMockSession(sessionId: string, delegationActive = true) {
 }
 
 function setupMocks(
-	_sessionId: string,
+	sessionId: string,
 	trajectory: TrajectoryEntry[],
 	matches: PatternMatch[],
 ) {
-	(getAgentSession as ReturnType<typeof vi.fn>).mockReturnValue({
-		agentName: 'test-agent',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
-		delegationActive: true,
-		activeInvocationId: 1,
-		lastInvocationIdByAgent: {},
-		windows: {},
-		lastCompactionHint: 0,
-		architectWriteCount: 0,
-		lastCoderDelegationTaskId: null,
-		currentTaskId: '1.1',
-		gateLog: new Map(),
-		reviewerCallCount: new Map(),
-		lastGateFailure: null,
-		partialGateWarningsIssuedForTask: new Set(),
-		selfFixAttempted: false,
-		selfCodingWarnedAtCount: 0,
-		catastrophicPhaseWarnings: new Set(),
-		qaSkipCount: 0,
-		qaSkipTaskIds: [],
-		taskWorkflowStates: new Map(),
-		stageBCompletion: new Map(),
-		taskCouncilApproved: new Map(),
-		lastGateOutcome: null,
-		declaredCoderScope: null,
-		lastScopeViolation: null,
-		scopeViolationDetected: false,
-		modifiedFilesThisCoderTask: [],
-		turboMode: false,
-		qaGateSessionOverrides: {},
-		fullAutoMode: false,
-		fullAutoInteractionCount: 0,
-		fullAutoDeadlockCount: 0,
-		fullAutoLastQuestionHash: null,
-		model_fallback_index: 0,
-		modelFallbackExhausted: false,
-		coderRevisions: 0,
-		revisionLimitHit: false,
-		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [],
-		sessionRehydratedAt: 0,
-		lastPhaseCompleteTimestamp: 0,
-		lastPhaseCompletePhase: 0,
-		phaseAgentsDispatched: new Set(),
-		lastCompletedPhaseAgentsDispatched: new Set(),
-		prmPatternCounts: new Map(),
-		prmEscalationLevel: 0,
-		prmLastPatternDetected: null as PatternMatch | null,
-		prmTrajectoryStep: 0,
-		prmHardStopPending: false,
-		prmEscalationTracker: undefined,
-	});
-
-	(readTrajectory as ReturnType<typeof vi.fn>).mockResolvedValue(trajectory);
-	(detectPatterns as ReturnType<typeof vi.fn>).mockReturnValue({
+	const session = createMockSession(sessionId);
+	_internals.getAgentSession = () => session;
+	_internals.readTrajectory = async () => trajectory;
+	_internals.getInMemoryTrajectory = () => [];
+	_internals.detectPatterns = () => ({
 		matches,
 		detectionTimeMs: 5,
 		patternsChecked: 5,
 	});
-	(generateCourseCorrection as ReturnType<typeof vi.fn>).mockReturnValue({
+	_internals.generateCourseCorrection = () => ({
 		alert: 'TRAJECTORY ALERT: repetition_loop detected',
 		category: 'coordination_error',
 		guidance: 'Stop the repetitive loop',
@@ -223,9 +144,18 @@ function setupMocks(
 		pattern: 'repetition_loop',
 		stepRange: [1, 3],
 	});
-	(
-		formatCourseCorrectionForInjection as ReturnType<typeof vi.fn>
-	).mockReturnValue('FORMATTED CORRECTION');
+	_internals.formatCourseCorrectionForInjection = () => 'FORMATTED CORRECTION';
+	_internals.cleanupOldTrajectoryFiles = async () => {};
+	_internals.recordReplayEntry = async () => {};
+	_internals.startReplayRecording = async () => null;
+	_internals.telemetry = {
+		...originalTelemetry,
+		prmPatternDetected: mock(() => {}),
+		prmCourseCorrectionInjected: mock(() => {}),
+		prmEscalationTriggered: mock(() => {}),
+		prmHardStop: mock(() => {}),
+	};
+	return session;
 }
 
 describe('Escalation Correction Queue Drain', () => {
@@ -233,11 +163,22 @@ describe('Escalation Correction Queue Drain', () => {
 	const directory = '/test/project';
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		clearTrajectoryCache();
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		_internals.getAgentSession = originalGetAgentSession;
+		_internals.readTrajectory = originalReadTrajectory;
+		_internals.getInMemoryTrajectory = originalGetInMemoryTrajectory;
+		_internals.detectPatterns = originalDetectPatterns;
+		_internals.generateCourseCorrection = originalGenerateCourseCorrection;
+		_internals.formatCourseCorrectionForInjection =
+			originalFormatCourseCorrectionForInjection;
+		_internals.cleanupOldTrajectoryFiles = originalCleanupOldTrajectoryFiles;
+		_internals.recordReplayEntry = originalRecordReplayEntry;
+		_internals.startReplayRecording = originalStartReplayRecording;
+		_internals.telemetry = originalTelemetry;
+		clearTrajectoryCache();
 	});
 
 	describe('Task 3.6: clearPendingCorrections after injection', () => {
@@ -245,21 +186,16 @@ describe('Escalation Correction Queue Drain', () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
-			setupMocks(sessionId, trajectory, [match]);
+			const session = setupMocks(sessionId, trajectory, [match]);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			// Get session and escalation tracker
-			const session = getAgentSession(sessionId);
-			expect(session).not.toBeNull();
-			expect(session?.prmEscalationTracker).not.toBeUndefined();
+			expect(session.prmEscalationTracker).not.toBeUndefined();
 
-			// After toolAfter completes, the pending corrections queue should be empty
-			// because clearPendingCorrections() is called after pushing to pendingAdvisoryMessages
 			const pendingCorrections =
-				session!.prmEscalationTracker!.getPendingCorrections();
+				session.prmEscalationTracker!.getPendingCorrections();
 			expect(pendingCorrections).toEqual([]);
 		});
 
@@ -268,118 +204,68 @@ describe('Escalation Correction Queue Drain', () => {
 			const trajectory = createMockTrajectory();
 			const match1 = createMockPatternMatch('repetition_loop');
 			const match2 = createMockPatternMatch('ping_pong');
-			setupMocks(sessionId, trajectory, [match1, match2]);
+			const session = setupMocks(sessionId, trajectory, [match1, match2]);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			// Get session and escalation tracker
-			const session = getAgentSession(sessionId);
-			expect(session).not.toBeNull();
-
-			// After processing multiple matches, the pending corrections queue should be empty
-			// Each correction is pushed to pendingAdvisoryMessages then queue is cleared
 			const pendingCorrections =
-				session!.prmEscalationTracker!.getPendingCorrections();
+				session.prmEscalationTracker!.getPendingCorrections();
 			expect(pendingCorrections).toEqual([]);
 
-			// But pendingAdvisoryMessages should have all the injected corrections
-			expect(session!.pendingAdvisoryMessages).toHaveLength(2);
-			expect(session!.pendingAdvisoryMessages).toContain(
-				'FORMATTED CORRECTION',
-			);
-			expect(session!.pendingAdvisoryMessages).toContain(
-				'FORMATTED CORRECTION',
-			);
+			expect(session.pendingAdvisoryMessages).toHaveLength(2);
+			expect(session.pendingAdvisoryMessages).toContain('FORMATTED CORRECTION');
 		});
 
 		test('pending corrections queue does not accumulate across multiple toolAfter calls', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
-			setupMocks(sessionId, trajectory, [match]);
+			const session = setupMocks(sessionId, trajectory, [match]);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
-			// First toolAfter call
 			await toolAfter({ sessionID: sessionId });
+			expect(session.prmEscalationTracker!.getPendingCorrections()).toEqual([]);
 
-			const session = getAgentSession(sessionId);
-			expect(session).not.toBeNull();
-
-			// Queue should be empty after first call
-			expect(session!.prmEscalationTracker!.getPendingCorrections()).toEqual(
-				[],
-			);
-
-			// Second toolAfter call
 			await toolAfter({ sessionID: sessionId });
+			expect(session.prmEscalationTracker!.getPendingCorrections()).toEqual([]);
 
-			// Queue should still be empty after second call
-			expect(session!.prmEscalationTracker!.getPendingCorrections()).toEqual(
-				[],
-			);
-
-			// Third toolAfter call
 			await toolAfter({ sessionID: sessionId });
+			expect(session.prmEscalationTracker!.getPendingCorrections()).toEqual([]);
 
-			// Queue should still be empty after third call
-			expect(session!.prmEscalationTracker!.getPendingCorrections()).toEqual(
-				[],
-			);
-
-			// Verify the session state is correctly maintained
-			// Pattern count should be 3 (3 detections)
-			expect(session!.prmPatternCounts.get('repetition_loop')).toBe(3);
-			// Escalation level should be 3 (hard stop)
-			expect(session!.prmEscalationLevel).toBe(3);
-			expect(session!.prmHardStopPending).toBe(true);
-
-			// But pendingAdvisoryMessages should NOT accumulate - should only have 3 entries total
-			expect(session!.pendingAdvisoryMessages).toHaveLength(3);
+			expect(session.prmPatternCounts.get('repetition_loop')).toBe(3);
+			expect(session.prmEscalationLevel).toBe(3);
+			expect(session.prmHardStopPending).toBe(true);
+			expect(session.pendingAdvisoryMessages).toHaveLength(3);
 		});
 
 		test('correction is injected to pendingAdvisoryMessages before queue is cleared', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const match = createMockPatternMatch('repetition_loop');
-			setupMocks(sessionId, trajectory, [match]);
+			const session = setupMocks(sessionId, trajectory, [match]);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			const session = getAgentSession(sessionId);
-			expect(session).not.toBeNull();
-
-			// The correction was injected to pendingAdvisoryMessages
-			expect(session!.pendingAdvisoryMessages).toContain(
-				'FORMATTED CORRECTION',
-			);
-
-			// And the escalation tracker's queue was cleared
-			expect(session!.prmEscalationTracker!.getPendingCorrections()).toEqual(
-				[],
-			);
+			expect(session.pendingAdvisoryMessages).toContain('FORMATTED CORRECTION');
+			expect(session.prmEscalationTracker!.getPendingCorrections()).toEqual([]);
 		});
 
 		test('session without pattern matches has empty pending corrections', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
-			setupMocks(sessionId, trajectory, []);
+			const session = setupMocks(sessionId, trajectory, []);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
 
-			const session = getAgentSession(sessionId);
-			expect(session).not.toBeNull();
-
-			// No pattern matches, so no corrections were added
-			// Tracker might not even be created for empty matches
-			if (session!.prmEscalationTracker) {
-				expect(session!.prmEscalationTracker!.getPendingCorrections()).toEqual(
+			if (session.prmEscalationTracker) {
+				expect(session.prmEscalationTracker.getPendingCorrections()).toEqual(
 					[],
 				);
 			}

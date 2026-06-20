@@ -86,17 +86,23 @@ describe('executeWithTimeout subprocess hardening', () => {
 	});
 
 	it('bounds runaway stdout accumulation (DD-C004)', async () => {
-		// Emit far more than the cap; accumulated stdout must stay bounded.
+		// Emit far more than the cap with multibyte characters (UTF-8 emoji, 4 bytes each);
+		// accumulated stdout must stay bounded in bytes.
 		const script = writeScript(
 			'flood.js',
-			'process.stdout.write("x".repeat(500_000)); process.exit(0);',
+			'process.stdout.write("😀".repeat(500_000)); process.exit(0);',
 		);
 		const result = await _internals.executeWithTimeout(
 			process.execPath,
 			[script],
 			{ timeoutMs: 10_000, maxOutputBytes: 1024 },
 		);
-		expect(result.stdout.length).toBeLessThanOrEqual(1024);
+		// Byte count assertion: stdout must not exceed byte cap
+		const stdoutBytes = Buffer.byteLength(result.stdout ?? '', 'utf8');
+		expect(stdoutBytes).toBeLessThanOrEqual(1024);
+		// Note: emoji "😀" is 4 bytes in UTF-8 but 2 UTF-16 code units in JavaScript
+		// So max 256 emojis fit in 1024 bytes = 512 JavaScript string length
+		expect(result.stdout.length).toBeLessThanOrEqual(512);
 		// Truncation must be signaled so runSemgrep does not fail open.
 		expect(result.truncated).toBe(true);
 	});
@@ -115,23 +121,63 @@ describe('executeWithTimeout subprocess hardening', () => {
 	});
 
 	it('bounds runaway stderr accumulation (F-001 parity with stdout)', async () => {
-		// Emit far more than the cap to stderr; accumulated stderr must stay bounded.
+		// Emit far more than the cap with multibyte characters (UTF-8 emoji, 4 bytes each);
+		// accumulated stderr must stay bounded in bytes (F-001).
 		const script = writeScript(
 			'flood-stderr.js',
-			'process.stderr.write("e".repeat(500_000)); process.exit(0);',
+			'process.stderr.write("😀".repeat(500_000)); process.exit(0);',
 		);
 		const result = await _internals.executeWithTimeout(
 			process.execPath,
 			[script],
 			{ timeoutMs: 10_000, maxOutputBytes: 1024 },
 		);
-		// stderr must not exceed the cap
-		expect(result.stderr.length).toBeLessThanOrEqual(1024);
+		// Byte count assertion: stderr must not exceed byte cap
+		const stderrBytes = Buffer.byteLength(result.stderr ?? '', 'utf8');
+		expect(stderrBytes).toBeLessThanOrEqual(1024);
+		// Note: emoji "😀" is 4 bytes in UTF-8 but 2 UTF-16 code units in JavaScript
+		// So max 256 emojis fit in 1024 bytes = 512 JavaScript string length
+		expect(result.stderr.length).toBeLessThanOrEqual(512);
 		// Truncation flag must be raised (same as stdout path)
 		expect(result.truncated).toBe(true);
 	});
 
+	it('kills child process when stdout overflows (overflow-kill)', async () => {
+		// Skip on Windows: this test relies on SIGTERM/SIGKILL escalation semantics
+		// which differ on Windows.
+		if (process.platform === 'win32') {
+			return;
+		}
+		// Child that writes to stdout faster than settle() can stop it.
+		// The overflow handler must call settle() and kill the child, not wait for close.
+		const script = writeScript(
+			'runaway-stdout.js',
+			[
+				// Ignore SIGTERM to force SIGKILL escalation
+				'process.on("SIGTERM", () => { /* ignore */ });',
+				// Write continuously until killed
+				'setInterval(() => process.stdout.write("😀".repeat(100)), 5);',
+			].join('\n'),
+		);
+		const result = await _internals.executeWithTimeout(
+			process.execPath,
+			[script],
+			{ timeoutMs: 30_000, maxOutputBytes: 1024 }, // Long timeout but low byte cap
+		);
+		// Must detect truncation
+		expect(result.truncated).toBe(true);
+		// Byte count must be bounded
+		const stdoutBytes = Buffer.byteLength(result.stdout ?? '', 'utf8');
+		expect(stdoutBytes).toBeLessThanOrEqual(1024);
+		// Child must have been killed (exit code or signal)
+		expect(result.exitCode).not.toBe(0);
+	});
+
 	it('terminates the child via SIGKILL after SIGTERM grace period (KILL_GRACE_MS escalation)', async () => {
+		// Skip this test on Windows since SIGTERM/SIGKILL handling differs
+		if (process.platform === 'win32') {
+			return;
+		}
 		// Script ignores SIGTERM and writes endlessly to stdout so that:
 		// 1. The timeout triggers and SIGTERM is sent.
 		// 2. The child ignores SIGTERM and stays alive.
@@ -142,6 +188,9 @@ describe('executeWithTimeout subprocess hardening', () => {
 		// we get the timeout exit code and the promise resolves at all, which
 		// means the SIGKILL escalation path must have fired for the process to
 		// actually die on platforms where SIGTERM can be ignored).
+		// Note: Promise resolution timing depends on child process termination,
+		// which may vary across platforms; the key invariant is that settle()
+		// is called exactly once and the child is killed (SIGKILL ensures this).
 		const script = writeScript(
 			'ignore-sigterm.js',
 			[

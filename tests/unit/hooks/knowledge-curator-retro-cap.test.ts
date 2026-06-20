@@ -12,6 +12,7 @@ import { _internals } from '../../../src/hooks/knowledge-curator.js';
 const {
 	seenRetroSections,
 	recordSeenRetroSection,
+	hashContent,
 	MAX_TRACKED_RETRO_SECTIONS,
 } = _internals;
 
@@ -56,5 +57,15 @@ describe('seenRetroSections size cap (Invariant 8)', () => {
 		recordSeenRetroSection('session-B', 'hash-B', Date.now());
 		expect(seenRetroSections.get('session-A')?.value).toBe('hash-A');
 		expect(seenRetroSections.get('session-B')?.value).toBe('hash-B');
+	});
+
+	it('hashes full retrospective content, not only length and prefix', () => {
+		const prefix = 'x'.repeat(100);
+		const first = `${prefix}${'a'.repeat(20)}`;
+		const second = `${prefix}${'b'.repeat(20)}`;
+
+		expect(first.length).toBe(second.length);
+		expect(first.slice(0, 100)).toBe(second.slice(0, 100));
+		expect(hashContent(first)).not.toBe(hashContent(second));
 	});
 });

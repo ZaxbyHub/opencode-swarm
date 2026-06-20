@@ -458,9 +458,13 @@ export async function readMergedKnowledge(
 			keywordsScore = 0.5; // Neutral if no tags
 		}
 
-		// Tier boost: hive entries get a constant boost of 0.05 (HIVE_TIER_BOOST)
-		// when they have a source_project; this replaces the earlier configurable
-		// same_project_weight / cross_project_weight approach
+		// Tier boost: hive entries get a small constant boost (HIVE_TIER_BOOST).
+		// The configurable same_project_weight / cross_project_weight values from
+		// the knowledge config schema are no longer applied here — they were
+		// removed from ranking by PR #1207 in favor of a single fixed constant.
+		// The same config weights are still used in src/hooks/hive-promoter.ts
+		// for encounter-score increments during promotion evaluation, so they
+		// are not dead code globally — only their ranking-side usage is gone.
 		let tierBoost = 0;
 		let isSameProject = false;
 		if (entry.tier === 'hive' && 'source_project' in entry) {

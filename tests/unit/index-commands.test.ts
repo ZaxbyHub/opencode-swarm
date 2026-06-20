@@ -39,7 +39,7 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries.
-		expect(commandKeys.length).toBe(65);
+		expect(commandKeys.length).toBe(66);
 
 		// Verify catch-all exists
 		expect(commands.swarm).toBeDefined();
@@ -111,6 +111,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-sdd-validate',
 			'swarm-sdd-project',
 			'swarm-brainstorm',
+			'swarm-loop',
 			'swarm-council',
 			'swarm-pr-review',
 			'swarm-pr-feedback',

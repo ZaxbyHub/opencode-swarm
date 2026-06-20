@@ -219,7 +219,7 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 **Starting from scratch:**
 1. `/swarm specify <feature description>` → architect generates spec.md
 2. If spec has `[NEEDS CLARIFICATION]` markers → `/swarm clarify` to resolve them
-3. Tell the architect to start planning → PLAN mode reads spec.md and cross-references FR-### automatically
+3. Tell the architect to start planning → PLAN mode reads spec.md, optionally offers General Council advisory input when `council.general.enabled` is configured, and cross-references FR-### automatically
 4. Optionally `/swarm analyze` after planning to verify coverage
 
 **Importing an existing plan:**
@@ -230,6 +230,9 @@ Keep current requirements in `openspec/specs/**/spec.md` and pending deltas in `
 
 **Without a spec:**
 Planning works fine without a spec. When you enter PLAN mode without a spec.md, the architect offers to create one first or skip straight to planning. If you skip, planning behavior is identical to prior versions — no behavioral change.
+
+**Using General Council before planning:**
+When `council.general.enabled` is true and a Tavily or Brave search API key is configured, MODE: PLAN asks whether to use the three-agent General Council before `save_plan`. If accepted, the architect gathers current external context, records the council consensus/disagreements in `.swarm/context.md`, and uses that input before writing the plan and before critic pre-plan review.
 
 ### Spec Format
 
@@ -290,7 +293,7 @@ The coder and reviewer agents automatically receive language-specific constraint
 
 ## Curator Integration
 
-The Curator is an optional background analysis system that provides phase-level intelligence across the project lifecycle. It is **disabled by default** — set `curator.enabled = true` in `.opencode/opencode-swarm.json` to activate it.
+The Curator is a background analysis system that provides phase-level intelligence across the project lifecycle. It is **enabled by default**; set `curator.enabled = false` in `.opencode/opencode-swarm.json` to disable it.
 
 ### How the Curator Hooks into Execution
 
@@ -367,11 +370,17 @@ interface DriftReport {
 
 | Field | Default | Effect |
 |-------|---------|--------|
-| `enabled` | `false` | Master switch — must be `true` for any Curator activity |
+| `enabled` | `true` | Master switch; set to `false` to disable Curator activity |
 | `init_enabled` | `true` | Run curator init on first phase |
 | `phase_enabled` | `true` | Run phase analysis + drift check after each phase |
+| `postmortem_enabled` | `true` | Run curator postmortem analysis during closeout |
 | `max_summary_tokens` | `2000` | Cap on curator summary size |
 | `min_knowledge_confidence` | `0.7` | Minimum confidence for knowledge entry inclusion |
 | `drift_inject_max_chars` | `500` | Max chars of drift text injected into architect context |
+| `llm_timeout_ms` | `300000` | Timeout for curator init and phase LLM calls |
+| `skill_generation_enabled` | `true` | Enable curator-generated skill candidate output |
+| `skill_generation_mode` | `draft` | Write generated skill candidates as drafts by default |
+| `min_skill_confidence` | `0.7` | Minimum confidence for generated skill candidates |
+| `min_skill_confirmations` | `2` | Minimum confirmations before skill promotion |
 
 See the [Curator section in README.md](../README.md#curator) for full configuration details.

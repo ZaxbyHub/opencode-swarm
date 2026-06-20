@@ -257,6 +257,12 @@ export interface BuildWorkspaceGraphOptions {
 	maxFiles?: number;
 	walkBudgetMs?: number;
 	followSymlinks?: boolean;
+	/**
+	 * Extra directory basenames to skip during the workspace walk, merged with
+	 * the built-in `SKIP_DIRECTORIES` defaults (issue #1448). Matched by basename
+	 * at any depth, not as glob/path patterns.
+	 */
+	excludeDirs?: readonly string[];
 }
 
 // ============ Utilities ============

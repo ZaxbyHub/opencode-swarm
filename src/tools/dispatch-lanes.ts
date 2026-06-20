@@ -1,5 +1,13 @@
+import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import {
+	appendDelegationTransition,
+	type BackgroundDelegationRecord,
+	findByBatchId,
+	recordPendingDelegation,
+	sweepStaleDelegations,
+} from '../background/pending-delegations.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
 	isKnownCanonicalRole,
@@ -11,12 +19,19 @@ import { swarmState } from '../state.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_LANES = 8;
-const MAX_PROMPT_CHARS = 80_000;
+export const MAX_PROMPT_CHARS = 80_000;
+const COMMON_PROMPT_SEPARATOR = '\n\n';
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const MAX_LANE_OUTPUT_CHARS = 20_000;
 const MAX_ERROR_CHARS = 200;
 const ERROR_TRUNCATION_SUFFIX = '...';
+const MAX_BATCH_ID_CHARS = 120;
+const DEFAULT_ASYNC_STALE_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
+const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
+const COLLECT_POLL_INTERVAL_MS = 500;
+const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
@@ -89,6 +104,20 @@ const DispatchLanesArgsSchema = z.object({
 		.min(1)
 		.max(MAX_LANES)
 		.describe('Read-only lane specs to dispatch concurrently'),
+	common_prompt: z
+		.string()
+		.min(1)
+		// Must carry real content: a whitespace-only value would prepend a blank
+		// prefix + separator to every lane prompt without adding any context.
+		.regex(/\S/, 'common_prompt must contain non-whitespace content')
+		// Reserve room for the separator + at least 1 char of lane prompt so any
+		// schema-valid common_prompt can coexist with the shortest valid lane
+		// prompt without the combined length exceeding MAX_PROMPT_CHARS.
+		.max(MAX_PROMPT_CHARS - COMMON_PROMPT_SEPARATOR.length - 1)
+		.optional()
+		.describe(
+			'Optional shared context prepended to every lane prompt. Send large shared context (PR diff, obligation ledger, scope) ONCE here instead of inlining the same blob into each lane prompt; this keeps the tool-call payload small and avoids malformed/truncated tool-call JSON. Combined common_prompt + per-lane prompt must not exceed the per-lane character limit.',
+		),
 	max_concurrent: z
 		.number()
 		.int()
@@ -105,10 +134,63 @@ const DispatchLanesArgsSchema = z.object({
 		.describe('Per-lane session create/prompt timeout in milliseconds'),
 });
 
+const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
+	batch_id: z
+		.string()
+		.min(1)
+		.max(MAX_BATCH_ID_CHARS)
+		.regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/)
+		.optional()
+		.describe(
+			'Stable async batch id for later collection; generated when omitted',
+		),
+	mode: z
+		.string()
+		.min(1)
+		.max(80)
+		.optional()
+		.describe('Advisory workflow mode, such as deep-dive or swarm-pr-review'),
+	pr_head_sha: z.string().min(1).max(80).optional(),
+	scope: z.string().min(1).max(500).optional(),
+});
+
+const CollectLaneResultsArgsSchema = z.object({
+	batch_id: z.string().min(1).max(MAX_BATCH_ID_CHARS),
+	wait: z
+		.boolean()
+		.optional()
+		.describe('Poll until all lanes settle or timeout'),
+	timeout_ms: z
+		.number()
+		.int()
+		.min(0)
+		.max(MAX_COLLECT_TIMEOUT_MS)
+		.optional()
+		.describe('Total wait budget when wait=true'),
+	include_pending: z.boolean().optional(),
+	cancel_pending: z
+		.boolean()
+		.optional()
+		.describe('Abort and mark pending/running lanes cancelled'),
+});
+
 export type DispatchLaneSpec = z.infer<typeof LaneSchema>;
 export type DispatchLanesArgs = z.infer<typeof DispatchLanesArgsSchema>;
+export type DispatchLanesAsyncArgs = z.infer<
+	typeof DispatchLanesAsyncArgsSchema
+>;
+export type CollectLaneResultsArgs = z.infer<
+	typeof CollectLaneResultsArgsSchema
+>;
 
-export type DispatchLaneStatus = 'completed' | 'failed' | 'rejected';
+export type DispatchLaneStatus =
+	| 'pending'
+	| 'completed'
+	| 'failed'
+	| 'rejected'
+	| 'cancelled'
+	| 'stale'
+	| 'consumed';
 
 export interface DispatchLaneResult {
 	id: string;
@@ -140,6 +222,38 @@ export interface DispatchLanesResult {
 	errors?: string[];
 }
 
+export interface DispatchLanesAsyncResult {
+	success: boolean;
+	failure_class?: 'invalid_args' | 'no_client';
+	message?: string;
+	batch_id: string | null;
+	dispatched: number;
+	pending: number;
+	failed: number;
+	rejected: number;
+	max_concurrent: number;
+	timeout_ms: number;
+	lane_results: DispatchLaneResult[];
+	errors?: string[];
+}
+
+export interface CollectLaneResultsResult {
+	success: boolean;
+	failure_class?: 'invalid_args' | 'not_found' | 'no_client';
+	message?: string;
+	batch_id: string;
+	total: number;
+	completed: number;
+	failed: number;
+	cancelled: number;
+	stale: number;
+	pending: number;
+	consumed: number;
+	all_settled: boolean;
+	lane_results: DispatchLaneResult[];
+	errors?: string[];
+}
+
 export interface SessionOps {
 	create(args: {
 		query: { directory: string };
@@ -156,6 +270,27 @@ export interface SessionOps {
 		data?: { parts?: Array<{ type: string; text?: string }> } | null;
 		error?: unknown;
 	}>;
+	promptAsync?: (args: {
+		path: { id: string };
+		query?: { directory?: string };
+		body: {
+			agent: string;
+			tools: ReadOnlyToolPermissions;
+			parts: Array<{ type: 'text'; text: string }>;
+		};
+		signal?: AbortSignal;
+	}) => Promise<{ data?: unknown; error?: unknown }>;
+	messages?: (args: {
+		path: { id: string };
+		query?: { directory?: string; limit?: number };
+	}) => Promise<{
+		data?: Array<{
+			info?: { role?: string };
+			parts?: Array<{ type: string; text?: string }>;
+		}> | null;
+		error?: unknown;
+	}>;
+	abort?: (args: { path: { id: string } }) => Promise<unknown>;
 	delete(args: { path: { id: string } }): Promise<unknown>;
 }
 
@@ -164,6 +299,7 @@ export const _internals: {
 	getGeneratedAgentNames: () => readonly string[];
 	createParallelDispatcher: typeof createParallelDispatcher;
 	now: () => number;
+	sleep: (ms: number) => Promise<void>;
 } = {
 	getSessionOps: () =>
 		(swarmState.opencodeClient?.session as unknown as SessionOps | undefined) ??
@@ -171,9 +307,18 @@ export const _internals: {
 	getGeneratedAgentNames: () => swarmState.generatedAgentNames,
 	createParallelDispatcher,
 	now: () => Date.now(),
+	sleep,
 };
 
-export const _test_exports = { formatError };
+export const _test_exports = {
+	applyCommonPrompt,
+	extractLastAssistantText,
+	formatError,
+	nextCollectPollInterval,
+	promptHash,
+	DispatchLanesArgsSchema,
+	DispatchLanesAsyncArgsSchema,
+};
 
 type ReadOnlyToolPermissions = Record<string, false> & {
 	write: false;
@@ -183,6 +328,7 @@ type ReadOnlyToolPermissions = Record<string, false> & {
 
 interface DispatchLanesExecutionContext {
 	callerAgent?: string;
+	sessionID?: string;
 }
 
 export async function executeDispatchLanes(
@@ -218,7 +364,18 @@ export async function executeDispatchLanes(
 		});
 	}
 
-	const lanes = parsed.data.lanes;
+	const common = applyCommonPrompt(
+		parsed.data.lanes,
+		parsed.data.common_prompt,
+	);
+	if (!common.ok) {
+		return failureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid dispatch_lanes arguments',
+			errors: common.errors,
+		});
+	}
+	const lanes = common.lanes;
 	const maxConcurrent = Math.min(
 		parsed.data.max_concurrent ?? lanes.length,
 		lanes.length,
@@ -244,6 +401,448 @@ export async function executeDispatchLanes(
 	} finally {
 		dispatcher.shutdown();
 	}
+}
+
+export async function executeDispatchLanesAsync(
+	args: unknown,
+	directory: string,
+	context: DispatchLanesExecutionContext = {},
+): Promise<DispatchLanesAsyncResult> {
+	const parsed = DispatchLanesAsyncArgsSchema.safeParse(args);
+	if (!parsed.success) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid dispatch_lanes_async arguments',
+			errors: parsed.error.issues.map(
+				(issue) => `${issue.path.join('.')}: ${issue.message}`,
+			),
+		});
+	}
+
+	const duplicateLaneIds = findDuplicateLaneIds(parsed.data.lanes);
+	if (duplicateLaneIds.length > 0) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: 'Lane IDs must be unique within one dispatch_lanes_async batch',
+			errors: duplicateLaneIds.map((id) => `Duplicate lane id: ${id}`),
+		});
+	}
+
+	const session = _internals.getSessionOps();
+	if (!session || typeof session.promptAsync !== 'function') {
+		return asyncFailureResult({
+			failure_class: 'no_client',
+			message: 'OpenCode session promptAsync client is not available',
+		});
+	}
+
+	const common = applyCommonPrompt(
+		parsed.data.lanes,
+		parsed.data.common_prompt,
+	);
+	if (!common.ok) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: 'Invalid dispatch_lanes_async arguments',
+			errors: common.errors,
+		});
+	}
+	const lanes = common.lanes;
+	const batchId = parsed.data.batch_id ?? makeBatchId();
+	if (findByBatchId(directory, batchId).length > 0) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: `Async lane batch already exists: ${batchId}`,
+			errors: [`batch_id must be unique: ${batchId}`],
+		});
+	}
+	const maxConcurrent = Math.min(
+		parsed.data.max_concurrent ?? lanes.length,
+		lanes.length,
+		MAX_LANES,
+	);
+	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+	const dispatcher = _internals.createParallelDispatcher({
+		enabled: true,
+		maxConcurrentTasks: maxConcurrent,
+		evidenceLockTimeoutMs: 0,
+	});
+	const limit = pLimit(maxConcurrent);
+
+	try {
+		const laneResults = await Promise.all(
+			lanes.map((lane) =>
+				limit(() =>
+					launchAsyncLane({
+						session,
+						dispatcher,
+						lane,
+						directory,
+						timeoutMs,
+						context,
+						batchId,
+						mode: parsed.data.mode,
+						prHeadSha: parsed.data.pr_head_sha,
+						scope: parsed.data.scope,
+					}),
+				),
+			),
+		);
+		const failed = laneResults.filter((lane) => lane.status === 'failed');
+		const rejected = laneResults.filter((lane) => lane.status === 'rejected');
+		const pending = laneResults.filter((lane) => lane.status === 'pending');
+		return {
+			success: failed.length === 0 && rejected.length === 0,
+			batch_id: batchId,
+			dispatched: laneResults.length,
+			pending: pending.length,
+			failed: failed.length,
+			rejected: rejected.length,
+			max_concurrent: maxConcurrent,
+			timeout_ms: timeoutMs,
+			lane_results: laneResults,
+		};
+	} finally {
+		dispatcher.shutdown();
+	}
+}
+
+export async function executeCollectLaneResults(
+	args: unknown,
+	directory: string,
+	context: Pick<DispatchLanesExecutionContext, 'sessionID'> = {},
+): Promise<CollectLaneResultsResult> {
+	const parsed = CollectLaneResultsArgsSchema.safeParse(args);
+	if (!parsed.success) {
+		return collectFailureResult({
+			failure_class: 'invalid_args',
+			batch_id: '',
+			message: 'Invalid collect_lane_results arguments',
+			errors: parsed.error.issues.map(
+				(issue) => `${issue.path.join('.')}: ${issue.message}`,
+			),
+		});
+	}
+	const session = _internals.getSessionOps();
+	if (!session || typeof session.messages !== 'function') {
+		return collectFailureResult({
+			failure_class: 'no_client',
+			batch_id: parsed.data.batch_id,
+			message: 'OpenCode session messages client is not available',
+		});
+	}
+	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
+	const deadline = _internals.now() + timeoutMs;
+	const batchFilter =
+		context.sessionID !== undefined
+			? { parentSessionId: context.sessionID }
+			: undefined;
+	await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
+	let records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+	if (records.length === 0) {
+		return collectFailureResult({
+			failure_class: 'not_found',
+			batch_id: parsed.data.batch_id,
+			message: `No async lane batch found for ${parsed.data.batch_id}`,
+		});
+	}
+
+	let keepPolling = true;
+	let pollIntervalMs = COLLECT_POLL_INTERVAL_MS;
+	while (keepPolling) {
+		await collectOnce(
+			session,
+			directory,
+			records,
+			parsed.data.cancel_pending === true,
+		);
+		await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
+		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+		if (allSettled(records) || parsed.data.wait !== true) {
+			keepPolling = false;
+			continue;
+		}
+		if (_internals.now() >= deadline) {
+			keepPolling = false;
+			continue;
+		}
+		await _internals.sleep(
+			Math.min(pollIntervalMs, Math.max(0, deadline - _internals.now())),
+		);
+		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
+	}
+
+	return buildCollectResult(
+		parsed.data.batch_id,
+		records,
+		parsed.data.include_pending === true,
+	);
+}
+
+async function launchAsyncLane(args: {
+	session: SessionOps;
+	dispatcher: ParallelDispatcher;
+	lane: DispatchLaneSpec;
+	directory: string;
+	timeoutMs: number;
+	context: DispatchLanesExecutionContext;
+	batchId: string;
+	mode?: string;
+	prHeadSha?: string;
+	scope?: string;
+}): Promise<DispatchLaneResult> {
+	const validation = validateLaneAgent(args.lane.agent, args.context);
+	const role = validation.role;
+	const startedAt = isoNow();
+	if (!validation.ok) {
+		return {
+			id: args.lane.id,
+			agent: args.lane.agent,
+			role,
+			status: 'rejected',
+			started_at: startedAt,
+			completed_at: isoNow(),
+			error: validation.error,
+		};
+	}
+	const decision = args.dispatcher.dispatch(args.lane.id);
+	if (decision.action !== 'dispatch') {
+		return {
+			id: args.lane.id,
+			agent: args.lane.agent,
+			role,
+			status: 'failed',
+			started_at: startedAt,
+			completed_at: isoNow(),
+			error: `dispatcher ${decision.action}: ${decision.reason}`,
+		};
+	}
+	try {
+		const createTimeoutMessage = `Lane "${args.lane.id}" session.create timed out after ${args.timeoutMs}ms`;
+		const createPromise = args.session.create({
+			query: { directory: args.directory },
+		});
+		let createTimedOut = false;
+		createPromise
+			.then((createResult) => {
+				if (createTimedOut && createResult.data?.id) {
+					scheduleSessionCleanup(args.session, createResult.data.id);
+				}
+			})
+			.catch(() => undefined);
+		const createResult = await withTimeout(
+			createPromise,
+			args.timeoutMs,
+			createTimeoutMessage,
+		).catch((error) => {
+			if (formatError(error) === createTimeoutMessage) {
+				createTimedOut = true;
+			}
+			throw error;
+		});
+		const sessionId = createResult.data?.id;
+		if (!sessionId) {
+			return failedLane(
+				args.lane,
+				role,
+				startedAt,
+				`session.create failed: ${formatError(createResult.error)}`,
+				decision.slot.slotId,
+				decision.slot.runId,
+			);
+		}
+
+		const pendingRecord = await recordPendingDelegation(
+			args.directory,
+			{
+				correlationId: sessionId,
+				jobId: null,
+				subagentSessionId: sessionId,
+				parentSessionId:
+					args.context.sessionID ?? `dispatch_lanes_async:${args.batchId}`,
+				callID: args.batchId,
+				normalizedAgent: role,
+				swarmPrefixedAgent: args.lane.agent,
+				planTaskId: null,
+				evidenceTaskId: null,
+				batchId: args.batchId,
+				laneId: args.lane.id,
+				mode: args.mode ?? 'advisory',
+				promptHash: promptHash(args.lane, args.directory, args.batchId),
+				workspace: {
+					directory: args.directory,
+					gitHead: null,
+					dirtyHash: null,
+					prHeadSha: args.prHeadSha ?? null,
+					scope: args.scope ?? null,
+				},
+				generation: 1,
+			},
+			{ staleTimeoutMs: DEFAULT_ASYNC_STALE_TIMEOUT_MS },
+		);
+		if (!pendingRecord) {
+			cleanupAsyncLaunchSession(args.session, sessionId);
+			return failedLane(
+				args.lane,
+				role,
+				startedAt,
+				'Failed to record async lane in background delegation ledger',
+				decision.slot.slotId,
+				decision.slot.runId,
+			);
+		}
+
+		const promptController = new AbortController();
+		let promptResult: { data?: unknown; error?: unknown };
+		try {
+			promptResult = await withTimeout(
+				args.session.promptAsync!({
+					path: { id: sessionId },
+					query: { directory: args.directory },
+					body: {
+						agent: args.lane.agent,
+						tools: buildReadOnlyTools(),
+						parts: [{ type: 'text', text: args.lane.prompt }],
+					},
+					signal: promptController.signal,
+				}),
+				args.timeoutMs,
+				`Lane "${args.lane.id}" session.promptAsync timed out after ${args.timeoutMs}ms`,
+				promptController,
+			);
+		} catch (error) {
+			const message = formatError(error);
+			await appendDelegationTransition(args.directory, sessionId, {
+				status: 'error',
+				result: {
+					error: message,
+					chars: message.length,
+					truncated: false,
+					digest: digestText(message),
+				},
+			});
+			cleanupAsyncLaunchSession(args.session, sessionId);
+			return failedLane(
+				args.lane,
+				role,
+				startedAt,
+				message,
+				decision.slot.slotId,
+				decision.slot.runId,
+			);
+		}
+		if (promptResult.error) {
+			const error = `session.promptAsync failed: ${formatError(promptResult.error)}`;
+			await appendDelegationTransition(args.directory, sessionId, {
+				status: 'error',
+				result: {
+					error,
+					chars: error.length,
+					truncated: false,
+					digest: digestText(error),
+				},
+			});
+			cleanupAsyncLaunchSession(args.session, sessionId);
+			return failedLane(
+				args.lane,
+				role,
+				startedAt,
+				error,
+				decision.slot.slotId,
+				decision.slot.runId,
+			);
+		}
+		await appendDelegationTransition(args.directory, sessionId, {
+			status: 'running',
+		});
+
+		return {
+			id: args.lane.id,
+			agent: args.lane.agent,
+			role,
+			status: 'pending',
+			session_id: sessionId,
+			slot_id: decision.slot.slotId,
+			run_id: decision.slot.runId,
+			started_at: startedAt,
+			completed_at: isoNow(),
+		};
+	} catch (error) {
+		return failedLane(
+			args.lane,
+			role,
+			startedAt,
+			formatError(error),
+			decision.slot.slotId,
+			decision.slot.runId,
+		);
+	} finally {
+		args.dispatcher.releaseSlot(decision.slot.slotId);
+	}
+}
+
+async function collectOnce(
+	session: SessionOps,
+	directory: string,
+	records: BackgroundDelegationRecord[],
+	cancelPending: boolean,
+): Promise<void> {
+	for (const record of records) {
+		if (record.status !== 'pending' && record.status !== 'running') continue;
+		if (cancelPending) {
+			if (typeof session.abort === 'function') {
+				await session
+					.abort({ path: { id: record.subagentSessionId } })
+					.catch(() => undefined);
+			}
+			await appendDelegationTransition(directory, record.correlationId, {
+				status: 'cancelled',
+			});
+			continue;
+		}
+		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
+		try {
+			messages = await session.messages!({
+				path: { id: record.subagentSessionId },
+				query: { directory, limit: 50 },
+			});
+		} catch {
+			continue;
+		}
+		if (!messages.data) continue;
+		const text = extractLastAssistantText(messages.data);
+		if (!text) continue;
+		const bounded = boundLaneOutput(text);
+		await appendDelegationTransition(directory, record.correlationId, {
+			status: 'completed',
+			result: {
+				text: bounded.output,
+				chars: bounded.output_chars,
+				truncated: bounded.output_truncated,
+				digest: digestText(text),
+			},
+		});
+	}
+}
+
+function extractLastAssistantText(
+	messages: Array<{
+		info?: { role?: string };
+		parts?: Array<{ type: string; text?: string }>;
+	}>,
+): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.info?.role !== 'assistant') continue;
+		const text = extractText(message.parts);
+		if (text.trim().length > 0) return text;
+	}
+	return '';
+}
+
+function nextCollectPollInterval(currentMs: number): number {
+	if (currentMs <= 0) return COLLECT_POLL_INTERVAL_MS;
+	return Math.min(currentMs * 2, MAX_COLLECT_POLL_INTERVAL_MS);
 }
 
 async function runLane(
@@ -395,6 +994,88 @@ function buildResult(
 	};
 }
 
+function buildCollectResult(
+	batchId: string,
+	records: BackgroundDelegationRecord[],
+	includePending: boolean,
+): CollectLaneResultsResult {
+	const laneResults = records
+		.filter(
+			(record) =>
+				includePending ||
+				(record.status !== 'pending' && record.status !== 'running'),
+		)
+		.map(recordToLaneResult);
+	const completed = records.filter((record) => record.status === 'completed');
+	const failed = records.filter(
+		(record) =>
+			record.status === 'error' || record.status === 'ingestion_error',
+	);
+	const cancelled = records.filter((record) => record.status === 'cancelled');
+	const stale = records.filter((record) => record.status === 'stale');
+	const pending = records.filter(
+		(record) => record.status === 'pending' || record.status === 'running',
+	);
+	const consumed = records.filter((record) => record.status === 'consumed');
+	return {
+		success:
+			pending.length === 0 &&
+			failed.length === 0 &&
+			cancelled.length === 0 &&
+			stale.length === 0,
+		batch_id: batchId,
+		total: records.length,
+		completed: completed.length,
+		failed: failed.length,
+		cancelled: cancelled.length,
+		stale: stale.length,
+		pending: pending.length,
+		consumed: consumed.length,
+		all_settled: pending.length === 0,
+		lane_results: laneResults,
+	};
+}
+
+function recordToLaneResult(
+	record: BackgroundDelegationRecord,
+): DispatchLaneResult {
+	const status =
+		record.status === 'error'
+			? 'failed'
+			: record.status === 'ingestion_error'
+				? 'failed'
+				: record.status === 'running'
+					? 'pending'
+					: record.status;
+	return {
+		id: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		status,
+		session_id: record.subagentSessionId,
+		started_at: new Date(record.createdAt).toISOString(),
+		completed_at: new Date(
+			record.completedAt ?? record.updatedAt,
+		).toISOString(),
+		...(record.result?.text !== undefined
+			? {
+					output: record.result.text,
+					output_chars: record.result.chars,
+					output_truncated: record.result.truncated,
+				}
+			: {}),
+		...(record.result?.error !== undefined
+			? { error: record.result.error }
+			: {}),
+	};
+}
+
+function allSettled(records: BackgroundDelegationRecord[]): boolean {
+	return records.every(
+		(record) => record.status !== 'pending' && record.status !== 'running',
+	);
+}
+
 function failedLane(
 	lane: DispatchLaneSpec,
 	role: string,
@@ -526,6 +1207,86 @@ function failureResult(args: {
 	};
 }
 
+function asyncFailureResult(args: {
+	failure_class: 'invalid_args' | 'no_client';
+	message: string;
+	errors?: string[];
+}): DispatchLanesAsyncResult {
+	return {
+		success: false,
+		failure_class: args.failure_class,
+		message: args.message,
+		batch_id: null,
+		dispatched: 0,
+		pending: 0,
+		failed: 0,
+		rejected: 0,
+		max_concurrent: 0,
+		timeout_ms: 0,
+		lane_results: [],
+		errors: args.errors,
+	};
+}
+
+function collectFailureResult(args: {
+	failure_class: 'invalid_args' | 'not_found' | 'no_client';
+	batch_id: string;
+	message: string;
+	errors?: string[];
+}): CollectLaneResultsResult {
+	return {
+		success: false,
+		failure_class: args.failure_class,
+		message: args.message,
+		batch_id: args.batch_id,
+		total: 0,
+		completed: 0,
+		failed: 0,
+		cancelled: 0,
+		stale: 0,
+		pending: 0,
+		consumed: 0,
+		all_settled: false,
+		lane_results: [],
+		errors: args.errors,
+	};
+}
+
+type ApplyCommonPromptResult =
+	| { ok: true; lanes: DispatchLaneSpec[] }
+	| { ok: false; errors: string[] };
+
+/**
+ * Prepend an optional shared `common_prompt` to every lane prompt so callers can
+ * send large shared context once instead of inlining it into each lane (which
+ * bloats the tool-call payload and triggers truncated/malformed tool-call JSON).
+ * Returns an error when any assembled prompt exceeds the per-lane character limit.
+ *
+ * Always returns a fresh array the caller owns: a shallow copy of the originals
+ * when no `commonPrompt` is provided, or shallow-copied lanes with rewritten
+ * prompts when it is. Callers may treat the returned array as their own.
+ */
+function applyCommonPrompt(
+	lanes: DispatchLaneSpec[],
+	commonPrompt: string | undefined,
+): ApplyCommonPromptResult {
+	if (!commonPrompt) return { ok: true, lanes: [...lanes] };
+	const errors: string[] = [];
+	const merged = lanes.map((lane) => {
+		const prompt = `${commonPrompt}${COMMON_PROMPT_SEPARATOR}${lane.prompt}`;
+		if (prompt.length > MAX_PROMPT_CHARS) {
+			errors.push(
+				`Lane "${lane.id}" combined common_prompt + prompt is ${prompt.length} chars ` +
+					`(common_prompt ${commonPrompt.length} + separator ${COMMON_PROMPT_SEPARATOR.length} + ` +
+					`lane prompt ${lane.prompt.length}; max ${MAX_PROMPT_CHARS})`,
+			);
+		}
+		return { ...lane, prompt };
+	});
+	if (errors.length > 0) return { ok: false, errors };
+	return { ok: true, lanes: merged };
+}
+
 function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 	const seen = new Set<string>();
 	const duplicates = new Set<string>();
@@ -538,6 +1299,16 @@ function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 
 function scheduleSessionCleanup(session: SessionOps, sessionId: string): void {
 	void session.delete({ path: { id: sessionId } }).catch(() => undefined);
+}
+
+function cleanupAsyncLaunchSession(
+	session: SessionOps,
+	sessionId: string,
+): void {
+	if (typeof session.abort === 'function') {
+		void session.abort({ path: { id: sessionId } }).catch(() => undefined);
+	}
+	scheduleSessionCleanup(session, sessionId);
 }
 
 async function withTimeout<T>(
@@ -555,9 +1326,6 @@ async function withTimeout<T>(
 					controller?.abort();
 					reject(new Error(message));
 				}, timeoutMs);
-				if (typeof (timeout as { unref?: () => void }).unref === 'function') {
-					(timeout as { unref: () => void }).unref();
-				}
 			}),
 		]);
 	} finally {
@@ -590,12 +1358,44 @@ function isoNow(): string {
 	return new Date(_internals.now()).toISOString();
 }
 
+function makeBatchId(): string {
+	return `lanes-${_internals.now().toString(36)}`;
+}
+
+function promptHash(
+	lane: DispatchLaneSpec,
+	directory: string,
+	batchId: string,
+): string {
+	return digestText(
+		JSON.stringify({
+			batchId,
+			laneId: lane.id,
+			agent: lane.agent,
+			directory,
+			prompt: lane.prompt.replace(/\r\n/g, '\n'),
+		}),
+	);
+}
+
+function digestText(text: string): string {
+	return createHash('sha256').update(text).digest('hex');
+}
+
+function sleep(ms: number): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
+
 export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Dispatch multiple read-only exploration/review lanes concurrently through OpenCode sessions and return a structured join result.',
+			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt.',
 		args: {
 			lanes: DispatchLanesArgsSchema.shape.lanes,
+			common_prompt: DispatchLanesArgsSchema.shape.common_prompt,
 			max_concurrent: DispatchLanesArgsSchema.shape.max_concurrent,
 			timeout_ms: DispatchLanesArgsSchema.shape.timeout_ms,
 		},
@@ -607,8 +1407,56 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 		},
 	});
 
+export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
+	createSwarmTool({
+		description:
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id (non-blocking). After launching, keep working on non-dependent tasks while the lanes run, then call collect_lane_results to join. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
+		args: {
+			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
+			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
+			max_concurrent: DispatchLanesAsyncArgsSchema.shape.max_concurrent,
+			timeout_ms: DispatchLanesAsyncArgsSchema.shape.timeout_ms,
+			batch_id: DispatchLanesAsyncArgsSchema.shape.batch_id,
+			mode: DispatchLanesAsyncArgsSchema.shape.mode,
+			pr_head_sha: DispatchLanesAsyncArgsSchema.shape.pr_head_sha,
+			scope: DispatchLanesAsyncArgsSchema.shape.scope,
+		},
+		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
+			const result = await executeDispatchLanesAsync(args, directory, {
+				callerAgent: getContextAgent(ctx),
+				sessionID: getContextSessionID(ctx),
+			});
+			return JSON.stringify(result, null, 2);
+		},
+	});
+
+export const collect_lane_results: ReturnType<typeof createSwarmTool> =
+	createSwarmTool({
+		description:
+			'Collect or poll results for a dispatch_lanes_async batch; this is the required join barrier for advisory lane workflows and does not advance workflow gates.',
+		args: {
+			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
+			wait: CollectLaneResultsArgsSchema.shape.wait,
+			timeout_ms: CollectLaneResultsArgsSchema.shape.timeout_ms,
+			include_pending: CollectLaneResultsArgsSchema.shape.include_pending,
+			cancel_pending: CollectLaneResultsArgsSchema.shape.cancel_pending,
+		},
+		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
+			const result = await executeCollectLaneResults(args, directory, {
+				sessionID: getContextSessionID(ctx),
+			});
+			return JSON.stringify(result, null, 2);
+		},
+	});
+
 function getContextAgent(ctx: unknown): string | undefined {
 	if (!ctx || typeof ctx !== 'object') return undefined;
 	const value = (ctx as Record<string, unknown>).agent;
+	return typeof value === 'string' ? value : undefined;
+}
+
+function getContextSessionID(ctx: unknown): string | undefined {
+	if (!ctx || typeof ctx !== 'object') return undefined;
+	const value = (ctx as Record<string, unknown>).sessionID;
 	return typeof value === 'string' ? value : undefined;
 }

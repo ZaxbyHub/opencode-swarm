@@ -125,4 +125,14 @@ describe('PHP backend selectFramework — edge-case layouts (F-002c)', () => {
 		expect(sel).not.toBeNull();
 		expect(sel?.name).toBe('laravel');
 	});
+
+	test('case-sensitivity: ARTISAN (uppercase) should NOT count as artisan signal', async () => {
+		// Only the lowercase "artisan" filename is the artisan signal.
+		// ARTISAN (uppercase) or Artisan (mixed case) must NOT count.
+		fs.writeFileSync(path.join(tmpDir, 'ARTISAN'), '#!/usr/bin/env php');
+		// With only 1 signal (uppercase ARTISAN, not lowercase artisan) → below threshold.
+		const backend = buildPhpBackend();
+		const sel = await backend.selectFramework?.(tmpDir);
+		expect(sel ?? null).toBeNull();
+	});
 });

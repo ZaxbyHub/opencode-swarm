@@ -281,23 +281,45 @@ describe('phase_complete adversarial locking + path tests', () => {
 	// CONCURRENT LOCK CONTENTION
 	// =======================================================================
 	describe('Real lock contention', () => {
-		test('second caller gets acquired=false and proceeds without blocking', async () => {
+		test('second caller gets acquired=false and returns failure (plan.json contention)', async () => {
 			// First call acquires lock
 			const release1 = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock
-				.mockResolvedValueOnce({
-					acquired: true,
-					lock: {
-						filePath: 'events.jsonl',
-						agent: 'phase-complete',
-						taskId: 'phase-complete-first',
-						timestamp: new Date().toISOString(),
-						expiresAt: Date.now() + 300000,
-						_release: release1,
-					},
-				})
-				// Second concurrent call fails to acquire
-				.mockResolvedValueOnce({ acquired: false });
+			const release2 = vi.fn().mockResolvedValue(undefined);
+			const planLockCalls: string[] = [];
+			mockTryAcquireLock.mockImplementation(
+				(_dir: string, filePath: string) => {
+					if (filePath === 'events.jsonl') {
+						return {
+							acquired: true,
+							lock: {
+								filePath: 'events.jsonl',
+								agent: 'phase-complete',
+								taskId: 'phase-complete-events',
+								timestamp: new Date().toISOString(),
+								expiresAt: Date.now() + 300000,
+								_release: release2,
+							},
+						};
+					}
+					// plan.json: first caller gets lock, second gets contention
+					if (planLockCalls.length === 0) {
+						planLockCalls.push('first');
+						return {
+							acquired: true,
+							lock: {
+								filePath: 'plan.json',
+								agent: 'phase-complete',
+								taskId: 'phase-complete-plan-first',
+								timestamp: new Date().toISOString(),
+								expiresAt: Date.now() + 300000,
+								_release: release1,
+							},
+						};
+					}
+					// Second plan.json caller: contention
+					return { acquired: false };
+				},
+			);
 
 			// Fire two calls nearly simultaneously
 			const [r1, r2] = await Promise.all([
@@ -308,16 +330,22 @@ describe('phase_complete adversarial locking + path tests', () => {
 			const p1 = JSON.parse(r1);
 			const p2 = JSON.parse(r2);
 
-			// Both should succeed (write is unconditional)
-			expect(p1.success).toBe(true);
-			expect(p2.success).toBe(true);
+			// One call should succeed, the other should fail (order non-deterministic)
+			const successes = [p1, p2].filter((p) => p.success);
+			const failures = [p1, p2].filter((p) => !p.success);
+			expect(successes.length).toBe(1);
+			expect(failures.length).toBe(1);
 
-			// Second call should have a warning about lock
-			expect(
-				p2.warnings.some((w: string) => w.includes('could not acquire lock')),
-			).toBe(true);
+			const failed = failures[0];
+			expect(failed.status).toBe('incomplete');
+			expect(failed.message).toContain(
+				'Plan write blocked: plan.json is locked',
+			);
+			expect(failed.errors.length).toBeGreaterThan(0);
+			expect(failed.errors[0]).toContain('Concurrent plan write detected');
+			expect(failed.recovery_guidance).toBeDefined();
 
-			// Both events should be written (unconditional write)
+			// Both events should be written (events.jsonl write is soft-fail, happens before plan.json lock)
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
 			const lines = content.split('\n').filter(Boolean);
 			const phaseEvents = lines
@@ -326,7 +354,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 			expect(phaseEvents.length).toBe(2);
 		});
 
-		test('lock throw does not crash executePhaseComplete — event still written', async () => {
+		test('lock throw causes phase_complete to return failure', async () => {
 			// Simulate filesystem error on lock acquisition
 			mockTryAcquireLock.mockRejectedValue(new Error('Cannot create lock dir'));
 
@@ -336,15 +364,15 @@ describe('phase_complete adversarial locking + path tests', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Must not throw — errors are caught and turned into warnings
-			expect(parsed.success).toBe(true);
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('failed to acquire lock'),
-				),
-			).toBe(true);
+			// Must return failure with clear error, not throw
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('incomplete');
+			expect(parsed.message).toContain('Failed to acquire lock for plan.json');
+			expect(parsed.errors.length).toBeGreaterThan(0);
+			expect(parsed.errors[0]).toContain('Cannot create lock dir');
+			expect(parsed.recovery_guidance).toBeDefined();
 
-			// Event must still be written (write is unconditional)
+			// Event must still be written (events.jsonl write is soft-fail, happens before plan.json lock)
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
 			expect(() => JSON.parse(content)).not.toThrow();
 			const event = JSON.parse(content);
@@ -360,17 +388,36 @@ describe('phase_complete adversarial locking + path tests', () => {
 		test('write to a directory (not a file) adds warning but returns success', async () => {
 			// Lock succeeds but events.jsonl is a directory → write throws
 			const release = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: release,
+			const planRelease = vi.fn().mockResolvedValue(undefined);
+			mockTryAcquireLock.mockImplementation(
+				(_dir: string, filePath: string) => {
+					if (filePath === 'events.jsonl') {
+						return {
+							acquired: true,
+							lock: {
+								filePath: 'events.jsonl',
+								agent: 'phase-complete',
+								taskId: 'phase-complete-test',
+								timestamp: new Date().toISOString(),
+								expiresAt: Date.now() + 300000,
+								_release: release,
+							},
+						};
+					}
+					// plan.json also acquired
+					return {
+						acquired: true,
+						lock: {
+							filePath: 'plan.json',
+							agent: 'phase-complete',
+							taskId: 'phase-complete-plan-test',
+							timestamp: new Date().toISOString(),
+							expiresAt: Date.now() + 300000,
+							_release: planRelease,
+						},
+					};
 				},
-			});
+			);
 
 			// Replace file with directory
 			fs.rmSync(eventsPath);
@@ -752,19 +799,38 @@ describe('phase_complete adversarial locking + path tests', () => {
 	// LOCK RELEASE IS CALLED IN FINALLY — even if write throws
 	// =======================================================================
 	describe('Lock release in finally block (non-throwing guarantee)', () => {
-		test('when appendFileSync throws, _release() is still called', async () => {
-			const release = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: release,
+		test('when appendFileSync throws, _release() is still called for all acquired locks', async () => {
+			const eventsRelease = vi.fn().mockResolvedValue(undefined);
+			const planRelease = vi.fn().mockResolvedValue(undefined);
+			mockTryAcquireLock.mockImplementation(
+				(_dir: string, filePath: string) => {
+					if (filePath === 'events.jsonl') {
+						return {
+							acquired: true,
+							lock: {
+								filePath: 'events.jsonl',
+								agent: 'phase-complete',
+								taskId: 'phase-complete-test',
+								timestamp: new Date().toISOString(),
+								expiresAt: Date.now() + 300000,
+								_release: eventsRelease,
+							},
+						};
+					}
+					// plan.json also acquired
+					return {
+						acquired: true,
+						lock: {
+							filePath: 'plan.json',
+							agent: 'phase-complete',
+							taskId: 'phase-complete-plan-test',
+							timestamp: new Date().toISOString(),
+							expiresAt: Date.now() + 300000,
+							_release: planRelease,
+						},
+					};
 				},
-			});
+			);
 
 			// Replace events.jsonl with a directory to cause write failure
 			fs.rmSync(eventsPath);
@@ -778,8 +844,9 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 			// Must not throw
 			expect(parsed.success).toBe(true);
-			// _release MUST be called even though write threw
-			expect(release).toHaveBeenCalledTimes(1);
+			// Both acquired locks must be released even though write threw
+			expect(eventsRelease).toHaveBeenCalledTimes(1);
+			expect(planRelease).toHaveBeenCalledTimes(1);
 		});
 
 		test('when _release() itself throws, the error is caught and logged, not thrown', async () => {

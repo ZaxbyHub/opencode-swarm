@@ -1,7 +1,7 @@
 /**
  * Tests for the curator's strict-JSON parser:
  *  - parses well-formed knowledge_application_findings + skill_candidates
- *  - silently drops malformed JSON without mutating anything
+ *  - reports malformed JSON without mutating anything
  *  - rejects entries with bad verdict / missing required fields
  */
 
@@ -46,14 +46,21 @@ describe('parseStructuredCuratorBlocks', () => {
 		expect(out.findings[0].verdict).toBe('violated');
 		expect(out.candidates.length).toBe(1);
 		expect(out.candidates[0].slug).toBe('coder-scope-discipline');
+		expect(out.diagnostics).toEqual([]);
 	});
 
-	it('silently drops malformed JSON', () => {
+	it('reports malformed JSON without producing writes', () => {
 		const out = parseStructuredCuratorBlocks(
 			'```json knowledge_application_findings\n{ not json\n```',
 		);
 		expect(out.findings).toEqual([]);
 		expect(out.candidates).toEqual([]);
+		expect(out.diagnostics).toMatchObject([
+			{
+				block: 'knowledge_application_findings',
+				reason: 'malformed_json',
+			},
+		]);
 	});
 
 	it('rejects findings with invalid verdict', () => {
@@ -65,6 +72,13 @@ describe('parseStructuredCuratorBlocks', () => {
 			].join('\n'),
 		);
 		expect(out.findings).toEqual([]);
+		expect(out.diagnostics).toMatchObject([
+			{
+				block: 'knowledge_application_findings',
+				reason: 'invalid_finding',
+				index: 0,
+			},
+		]);
 	});
 
 	it('rejects skill candidates without source_knowledge_ids', () => {
@@ -76,5 +90,12 @@ describe('parseStructuredCuratorBlocks', () => {
 			].join('\n'),
 		);
 		expect(out.candidates).toEqual([]);
+		expect(out.diagnostics).toMatchObject([
+			{
+				block: 'skill_candidates',
+				reason: 'invalid_skill_candidate',
+				index: 0,
+			},
+		]);
 	});
 });

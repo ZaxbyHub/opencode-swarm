@@ -448,6 +448,73 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 		});
 	});
 
+	describe('F-07: Plan-version scoping for spec drift acknowledgment', () => {
+		test('should reject acknowledgment if spec has changed since staleness detection', async () => {
+			const specStalenessPath = await getSwarmPath('spec-staleness.json');
+			const planPath = getSwarmPathSync('plan.json');
+			const specMdPath = getSwarmPathSync('spec.md');
+
+			// Create plan with a different specHash than what staleness file has
+			const plan = {
+				schema_version: '1.0.0',
+				title: 'Test Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: '1.1',
+								phase: 1,
+								status: 'in_progress',
+								size: 'small',
+								description: 'Test task',
+								depends: [],
+							},
+						],
+					},
+				],
+				migration_status: 'native',
+				specHash: 'currentHash999', // Different from staleness file's specHash_plan
+			};
+			writeFileSync(planPath, JSON.stringify(plan, null, 2));
+
+			// Create spec.md
+			writeFileSync(specMdPath, '# Spec\nUpdated content.');
+
+			// Create spec-staleness.json with different specHash_plan
+			await writeFile(
+				specStalenessPath,
+				JSON.stringify({
+					planTitle: 'Test Plan',
+					phase: 1,
+					specHash_plan: 'oldhash123', // Doesn't match plan.specHash
+					specHash_current: 'newhash456',
+					reason: 'spec.md has been modified',
+					timestamp: new Date().toISOString(),
+				}),
+			);
+
+			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
+
+			// Should reject and mention the mismatch
+			expect(result).toContain('Spec drift acknowledgment rejected');
+			expect(result).toContain('spec has changed');
+
+			// spec-staleness.json should NOT be deleted (since we rejected the ack)
+			expect(existsSync(specStalenessPath)).toBe(true);
+
+			// F-006: content must be preserved unchanged on rejection
+			const stalenessContent = readFileSync(specStalenessPath, 'utf-8');
+			const stalenessData = JSON.parse(stalenessContent);
+			expect(stalenessData.specHash_plan).toBe('oldhash123');
+			expect(stalenessData.reason).toBe('spec.md has been modified');
+		});
+	});
+
 	describe('Event file handling edge cases', () => {
 		test('should handle missing events.jsonl (create new one)', async () => {
 			const specStalenessPath = await getSwarmPath('spec-staleness.json');

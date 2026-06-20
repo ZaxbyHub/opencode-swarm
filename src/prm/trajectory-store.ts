@@ -13,6 +13,8 @@ import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import type { TrajectoryEntry } from './types';
 
+const MAX_TRACKED_TRAJECTORY_SESSIONS = 500;
+
 /**
  * Builds the validated absolute path to a session's trajectory file.
  */
@@ -25,6 +27,27 @@ function getTrajectoryPath(sessionId: string, directory: string): string {
 // Populated on write by appendTrajectoryEntry, used by pattern detection.
 // Eliminates full disk reads on every toolAfter call.
 const _inMemoryTrajectoryCache = new Map<string, TrajectoryEntry[]>();
+
+function setTrajectoryCache(
+	sessionId: string,
+	entries: TrajectoryEntry[],
+	maxLines: number = 1000,
+): void {
+	const boundedEntries =
+		entries.length > maxLines
+			? entries.slice(-Math.max(1, Math.floor(maxLines / 2)))
+			: [...entries];
+
+	if (!_inMemoryTrajectoryCache.has(sessionId)) {
+		while (_inMemoryTrajectoryCache.size >= MAX_TRACKED_TRAJECTORY_SESSIONS) {
+			const oldestSessionId = _inMemoryTrajectoryCache.keys().next().value;
+			if (oldestSessionId === undefined) break;
+			_inMemoryTrajectoryCache.delete(oldestSessionId);
+		}
+	}
+
+	_inMemoryTrajectoryCache.set(sessionId, boundedEntries);
+}
 
 /**
  * Returns cached trajectory entries for a session (empty array if not cached).
@@ -60,23 +83,15 @@ export async function appendTrajectoryEntry(
 	maxLines: number = 1000,
 ): Promise<void> {
 	try {
-		// 1. Update in-memory cache (always)
-		const cached = _inMemoryTrajectoryCache.get(sessionId) ?? [];
-		cached.push(entry);
-
-		// Keep in-memory cache bounded
-		if (cached.length > maxLines) {
-			const keepCount = Math.max(1, Math.floor(maxLines / 2));
-			_inMemoryTrajectoryCache.set(sessionId, cached.slice(-keepCount));
-		} else {
-			_inMemoryTrajectoryCache.set(sessionId, cached);
-		}
-
-		// 2. Append to disk (best-effort, no truncation read)
+		// Append to disk before updating cache so failed writes cannot create
+		// memory-only trajectory state that PRM later treats as durable.
 		const trajectoryPath = getTrajectoryPath(sessionId, directory);
 		await fs.mkdir(path.dirname(trajectoryPath), { recursive: true });
 		const line = `${JSON.stringify(entry)}\n`;
 		await fs.appendFile(trajectoryPath, line, 'utf-8');
+
+		const cached = _inMemoryTrajectoryCache.get(sessionId) ?? [];
+		setTrajectoryCache(sessionId, [...cached, entry], maxLines);
 	} catch (err) {
 		// Non-blocking: swallow errors to prevent PRM from breaking main flow
 		console.warn(
@@ -110,6 +125,7 @@ export async function readTrajectory(
 				// Skip malformed JSON lines
 			}
 		}
+		setTrajectoryCache(sessionId, entries);
 		return entries;
 	} catch (err) {
 		// File doesn't exist or read error - return empty array
@@ -120,6 +136,10 @@ export async function readTrajectory(
 		return [];
 	}
 }
+
+export const _test_exports = {
+	MAX_TRACKED_TRAJECTORY_SESSIONS,
+} as const;
 
 /**
  * Alias for readTrajectory - retrieves trajectory entries for a session.

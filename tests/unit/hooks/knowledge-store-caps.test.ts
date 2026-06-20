@@ -358,172 +358,223 @@ describe('enforceKnowledgeCap — TOCTOU race fix', () => {
 });
 
 // =============================================================================
-// appendKnowledgeWithCapEnforcement Tests
+// appendKnowledgeWithCapEnforcement — direct unit tests (issue #1219 F-002)
 //
-// Verifies that appendKnowledgeWithCapEnforcement appends an entry and enforces
-// the cap in a single call, returning a boolean success indicator. True atomicity
-// (resistance to concurrent failure mid-operation) is exercised by the TOCTOU
-// race fix tests above, not here.
+// These tests directly cover the function exported from src/hooks/knowledge-store.ts
+// (added by PR #1207). Previously the function was only exercised indirectly through
+// knowledge_add integration tests. We verify the three guarantees the issue calls out:
+//   1. Appending within the cap limit succeeds.
+//   2. When maxEntries is exceeded, the newest entries are retained (FIFO drop).
+//   3. The operation is atomic (append + cap enforcement happen in one transaction
+//      under a directory lock — concurrent appends do not silently get dropped).
 // =============================================================================
 
-describe('appendKnowledgeWithCapEnforcement', () => {
-	it('appends entry when under the cap limit', async () => {
-		// Start with 5 entries
-		await writeEntries(5);
-
-		// Append one more entry with cap of 10 — should succeed
-		const newEntry: TestEntry = { id: 100, lesson: 'new-entry' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
+describe('appendKnowledgeWithCapEnforcement (issue #1219 F-002)', () => {
+	it('appends a single entry to an empty file and returns true', async () => {
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
 			testFile,
-			newEntry,
+			{ id: 0, lesson: 'first-entry' },
 			10,
 		);
-
-		expect(result).toBe(true);
-
-		// Verify entry was appended
-		const entries = await readKnowledge<TestEntry>(testFile);
-		expect(entries).toHaveLength(6);
-		expect(entries[5].id).toBe(100);
-		expect(entries[5].lesson).toBe('new-entry');
-	});
-
-	it('appends at exactly the cap limit', async () => {
-		// Start with 10 entries
-		await writeEntries(10);
-
-		// Append one more with cap of 10 — should trigger cap enforcement
-		const newEntry: TestEntry = { id: 100, lesson: 'entry-at-cap' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
-			testFile,
-			newEntry,
-			10,
-		);
-
-		expect(result).toBe(true);
-
-		// After append + cap enforcement, should have exactly 10 entries
-		// The newest entry (id: 100) should be present
-		const entries = await readKnowledge<TestEntry>(testFile);
-		expect(entries).toHaveLength(10);
-		// Newest entry should be present
-		const ids = entries.map((e) => e.id);
-		expect(ids).toContain(100);
-		// Oldest entry (id: 0) should be dropped
-		expect(ids).not.toContain(0);
-	});
-
-	it('when cap is exceeded, newest entries are retained (FIFO: oldest dropped)', async () => {
-		// Start with 15 entries
-		await writeEntries(15);
-
-		// Append one more with cap of 10
-		const newEntry: TestEntry = { id: 100, lesson: 'final-entry' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
-			testFile,
-			newEntry,
-			10,
-		);
-
-		expect(result).toBe(true);
-
-		// After append + cap, should have 10 entries
-		// Oldest entries should be dropped, newest retained
-		const entries = await readKnowledge<TestEntry>(testFile);
-		expect(entries).toHaveLength(10);
-
-		// Newest entry (id: 100) should be present
-		const ids = entries.map((e) => e.id);
-		expect(ids).toContain(100);
-		// Entries 0-5 should be dropped (oldest)
-		for (const id of [0, 1, 2, 3, 4, 5]) {
-			expect(ids).not.toContain(id);
-		}
-		// Entries 6-14 should be retained
-		for (const id of [6, 7, 8, 9, 10, 11, 12, 13, 14]) {
-			expect(ids).toContain(id);
-		}
-	});
-
-	it('appends entry and enforces cap in a single call when result is true', async () => {
-		// Start with 8 entries
-		await writeEntries(8);
-
-		// Append an entry that will trigger cap enforcement with cap of 10
-		const newEntry: TestEntry = { id: 200, lesson: 'atomic-entry' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
-			testFile,
-			newEntry,
-			10,
-		);
-
-		expect(result).toBe(true);
-
-		// Verify the file is in a consistent state
-		// If the operation was atomic, the new entry should be present
-		// and the file should have exactly 9 entries (8 original + 1 new, all under cap)
-		const entries = await readKnowledge<TestEntry>(testFile);
-		expect(entries).toHaveLength(9);
-
-		// The new entry should be at the end
-		expect(entries[entries.length - 1].id).toBe(200);
-
-		// File should be valid JSONL (all entries parseable)
-		// This is implicitly checked by readKnowledge not throwing
-	});
-
-	it('handles file with no entries', async () => {
-		// File doesn't exist yet, start fresh
-		const newEntry: TestEntry = { id: 50, lesson: 'first-entry' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
-			testFile,
-			newEntry,
-			10,
-		);
-
-		expect(result).toBe(true);
+		expect(appended).toBe(true);
 
 		const entries = await readKnowledge<TestEntry>(testFile);
 		expect(entries).toHaveLength(1);
-		expect(entries[0].id).toBe(50);
+		expect(entries[0].id).toBe(0);
+		expect(entries[0].lesson).toBe('first-entry');
 	});
 
-	it('appends and trims correctly when exceeding cap by a large margin', async () => {
-		// Start with 50 entries
-		await writeEntries(50);
+	it('appends within the cap without dropping existing entries', async () => {
+		// Pre-populate 5 entries (cap is 10 — well under the limit).
+		await writeEntries(5);
 
-		// Append one more with a cap of 10
-		const newEntry: TestEntry = { id: 500, lesson: 'trimmed-entry' };
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
+		// Append a 6th entry — cap not reached.
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
 			testFile,
-			newEntry,
+			{ id: 5, lesson: 'lesson-5' },
 			10,
 		);
+		expect(appended).toBe(true);
 
-		expect(result).toBe(true);
+		const entries = await readKnowledge<TestEntry>(testFile);
+		expect(entries).toHaveLength(6);
+		expect(entries.map((e) => e.id)).toEqual([0, 1, 2, 3, 4, 5]);
+	});
 
-		// Should have exactly 10 entries (newest 10)
+	it('appends when entry count equals cap exactly — no trim needed', async () => {
+		// Pre-populate to exactly the cap (10).
+		await writeEntries(10);
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 10, lesson: 'lesson-10' },
+			10,
+		);
+		expect(appended).toBe(true);
+
+		// 11 entries > cap of 10, so the oldest entry must be dropped.
+		const entries = await readKnowledge<TestEntry>(testFile);
+		expect(entries).toHaveLength(10);
+		expect(entries[0].id).toBe(1); // id=0 dropped (oldest)
+		expect(entries[9].id).toBe(10); // newest entry survives
+	});
+
+	it('drops the oldest entries (FIFO) when exceeding cap — newest retained', async () => {
+		// Pre-populate 12 entries, cap is 10 → appending a 13th must keep newest 10.
+		await writeEntries(12);
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 12, lesson: 'newest-entry' },
+			10,
+		);
+		expect(appended).toBe(true);
+
 		const entries = await readKnowledge<TestEntry>(testFile);
 		expect(entries).toHaveLength(10);
 
-		// Newest entry should be present
 		const ids = entries.map((e) => e.id);
-		expect(ids).toContain(500);
-
-		// Check that the newest 10 entries (ids 41-50, plus 500) are present
-		// Old entries 0-40 should be dropped
-		for (const id of [0, 1, 2, 3, 4, 5]) {
-			expect(ids).not.toContain(id);
-		}
+		// Newest 10 must survive: ids 3-12 (oldest 3 dropped: 0, 1, 2)
+		expect(ids).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		expect(entries[entries.length - 1].lesson).toBe('newest-entry');
 	});
 
-	it('returns true on successful append and cap enforcement', async () => {
-		// Add entry to empty file with cap of 5
-		const result = await appendKnowledgeWithCapEnforcement<TestEntry>(
+	it('handles large over-limit: 200 entries + append with cap 100 → 100 newest kept', async () => {
+		await writeEntries(200);
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
 			testFile,
-			{ id: 1, lesson: 'test' },
-			5,
+			{ id: 200, lesson: 'appended-after-200' },
+			100,
 		);
-		expect(result).toBe(true);
+		expect(appended).toBe(true);
+
+		const entries = await readKnowledge<TestEntry>(testFile);
+		expect(entries).toHaveLength(100);
+		expect(entries[0].id).toBe(101); // oldest 101 dropped
+		expect(entries[99].id).toBe(200); // appended entry survives
+	});
+
+	it('cap of 1: appending evicts every prior entry', async () => {
+		await writeEntries(5);
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 5, lesson: 'only-survivor' },
+			1,
+		);
+		expect(appended).toBe(true);
+
+		const entries = await readKnowledge<TestEntry>(testFile);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].id).toBe(5);
+		expect(entries[0].lesson).toBe('only-survivor');
+	});
+
+	it('non-existent file: appends as the first entry', async () => {
+		const newFile = path.join(tmpDir, 'fresh.jsonl');
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
+			newFile,
+			{ id: 0, lesson: 'first-ever' },
+			10,
+		);
+		expect(appended).toBe(true);
+
+		const entries = await readKnowledge<TestEntry>(newFile);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].id).toBe(0);
+	});
+
+	it('atomicity: concurrent appendKnowledgeWithCapEnforcement calls do not lose entries', async () => {
+		// Pre-populate 5 entries (under cap of 10).
+		await writeEntries(5);
+
+		// Race 5 concurrent appends that will overflow the cap.
+		// At most 10 entries can survive (5 original + 5 appended).
+		const appends = Array.from({ length: 5 }, (_, i) =>
+			appendKnowledgeWithCapEnforcement<TestEntry>(
+				testFile,
+				{ id: 100 + i, lesson: `concurrent-${i}` },
+				10,
+			),
+		);
+
+		const results = await Promise.all(appends);
+		// Every call must have reported the append+enforce cycle ran.
+		for (const r of results) expect(r).toBe(true);
+
+		const entries = await readKnowledge<TestEntry>(testFile);
+		// Cap is 10; with lock-before-read the final state must be exactly 10.
+		expect(entries).toHaveLength(10);
+
+		const ids = entries.map((e) => e.id);
+		// All 5 concurrent appends (ids 100-104) must survive — none silently dropped
+		// by a TOCTOU window between concurrent cap-enforcement rewrites.
+		for (let i = 0; i < 5; i++) {
+			expect(ids).toContain(100 + i);
+		}
+		// The 5 original entries (ids 0-4) are evicted since cap is 10
+		// and 5+5=10 exactly fills it.
+	});
+
+	it('atomicity: concurrent appendKnowledgeWithCapEnforcement + standalone enforceKnowledgeCap do not lose entries', async () => {
+		// Pre-populate 8 entries (under cap of 10).
+		await writeEntries(8);
+
+		// Race: two appends AND a standalone cap-enforcement call.
+		const appendA = appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 100, lesson: 'concurrent-A' },
+			10,
+		);
+		const cap = enforceKnowledgeCap<TestEntry>(testFile, 10);
+		const appendB = appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 101, lesson: 'concurrent-B' },
+			10,
+		);
+
+		await Promise.all([appendA, cap, appendB]);
+
+		const entries = await readKnowledge<TestEntry>(testFile);
+		// Cap is 10; lock-before-read must serialize all three callers so neither
+		// concurrent append is silently dropped by the cap-enforcement rewrite.
+		expect(entries).toHaveLength(10);
+		const ids = entries.map((e) => e.id);
+		expect(ids).toContain(100);
+		expect(ids).toContain(101);
+	});
+
+	it('atomicity: append + cap rewrite happens in one transaction (no intermediate state)', async () => {
+		// This test verifies the "atomic" guarantee by asserting on observable
+		// persisted state after the call: append must not be visible without
+		// the trim having happened, and trim must not drop the just-appended
+		// entry. Both halves of the operation must complete together (PR #1207
+		// explicit goal: prevent the race "entry is appended but cap enforcement
+		// fails").
+		await writeEntries(12);
+
+		const appended = await appendKnowledgeWithCapEnforcement<TestEntry>(
+			testFile,
+			{ id: 12, lesson: 'newest' },
+			10,
+		);
+		expect(appended).toBe(true);
+
+		// Final persisted state must reflect both the append AND the trim:
+		// exactly 10 entries, newest entry present, oldest entries dropped.
+		// If the operation were split into two non-atomic writes (append, then
+		// enforceKnowledgeCap), a crash between them would leave either:
+		//   - 13 entries (append visible, trim never ran) — cap exceeded
+		//   - 11 or 9 entries (append lost, trim ran on different snapshot)
+		const entries = await readKnowledge<TestEntry>(testFile);
+		expect(entries).toHaveLength(10);
+		expect(entries[entries.length - 1].id).toBe(12);
+		expect(entries.map((e) => e.id)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+		// The appended entry MUST be the final entry in the file (it was the
+		// newest, so cap-enforcement's FIFO drop must preserve it).
+		expect(entries[entries.length - 1].lesson).toBe('newest');
 	});
 });

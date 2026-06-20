@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import {
 	addEdge,
 	buildWorkspaceGraph,
+	buildWorkspaceGraphAsync,
 	clearCache,
 	createEmptyGraph,
 	type GraphEdge,
@@ -1614,5 +1615,125 @@ describe('loadOrCreateGraph with safeRealpathSync returning null', () => {
 		await expect(loadOrCreateGraph(workspaceName)).rejects.toThrow(
 			'realpath security check failed',
 		);
+	});
+});
+
+describe('buildWorkspaceGraph — issue #1448: resilience + directory excludes', () => {
+	let tmp: string;
+
+	beforeEach(() => {
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-1448-'));
+	});
+	afterEach(() => {
+		try {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		} catch {
+			// ignore cleanup errors
+		}
+	});
+
+	// A minified line: a tab control character inside a template literal, plus a
+	// `token` identifier so it is captured as ontology `security.evidence` — the
+	// exact shape that previously aborted the whole build (validation.ts rejects
+	// control characters in ontology strings).
+	const MINIFIED_WITH_CONTROL_CHAR =
+		'const token="x";const h=[`\t`,`/`,`?`];export const g=255;';
+
+	const nodeKeys = (graph: RepoGraph): string[] => Object.keys(graph.nodes);
+	const hasFile = (graph: RepoGraph, suffix: string): boolean =>
+		nodeKeys(graph).some((k) => k.replace(/\\/g, '/').endsWith(suffix));
+	const hasSegment = (graph: RepoGraph, segment: string): boolean =>
+		nodeKeys(graph).some((k) => k.replace(/\\/g, '/').includes(segment));
+
+	test('sync build does not abort on a file with control chars in ontology evidence; bad file is skipped, clean node survives', () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(tmp, 'src/index.ts'), 'export const a = 1;\n');
+		// Intentionally skipped (not a bug): a node whose ontology evidence carries
+		// a control character is dropped rather than throwing and aborting the build.
+		fs.writeFileSync(
+			path.join(tmp, 'src/generated.min.js'),
+			MINIFIED_WITH_CONTROL_CHAR,
+		);
+
+		let graph: RepoGraph | undefined;
+		expect(() => {
+			graph = buildWorkspaceGraph(tmp);
+		}).not.toThrow();
+		if (!graph) throw new Error('graph not built');
+		expect(hasFile(graph, 'src/index.ts')).toBe(true);
+		expect(hasFile(graph, 'src/generated.min.js')).toBe(false);
+		// Only the clean file is counted. nodeCount is the public, behaviorally
+		// meaningful counterpart to the internal filesScanned stat (which is
+		// log-only and never exposed on metadata): a skipped node must not
+		// inflate the count in either build path.
+		expect(graph.metadata.nodeCount).toBe(1);
+	});
+
+	test('async build (the startup-hook path) does not abort on the same file', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(tmp, 'src/index.ts'), 'export const a = 1;\n');
+		fs.writeFileSync(
+			path.join(tmp, 'src/generated.min.js'),
+			MINIFIED_WITH_CONTROL_CHAR,
+		);
+
+		let graph: RepoGraph | undefined;
+		await expect(
+			(async () => {
+				graph = await buildWorkspaceGraphAsync(tmp);
+			})(),
+		).resolves.toBeUndefined();
+		if (!graph) throw new Error('graph not built');
+		expect(hasFile(graph, 'src/index.ts')).toBe(true);
+		expect(hasFile(graph, 'src/generated.min.js')).toBe(false);
+		// Same accuracy guarantee for the async path: the skipped node must not
+		// inflate nodeCount. (Asserts the async counting is correct without the
+		// erroneous filesScanned-- the bot review suggested, which would have
+		// corrupted the log-only stat downward.)
+		expect(graph.metadata.nodeCount).toBe(1);
+	});
+
+	test('.svelte-kit build output is excluded by default (sync and async)', async () => {
+		const chunkDir = path.join(
+			tmp,
+			'.svelte-kit/output/client/_app/immutable/chunks',
+		);
+		fs.mkdirSync(chunkDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(chunkDir, 'B7VY7OzO.js'),
+			MINIFIED_WITH_CONTROL_CHAR,
+		);
+		fs.writeFileSync(path.join(tmp, 'index.ts'), 'export const a = 1;\n');
+
+		const syncGraph = buildWorkspaceGraph(tmp);
+		expect(hasSegment(syncGraph, '/.svelte-kit/')).toBe(false);
+		expect(hasFile(syncGraph, '/index.ts')).toBe(true);
+
+		const asyncGraph = await buildWorkspaceGraphAsync(tmp);
+		expect(hasSegment(asyncGraph, '/.svelte-kit/')).toBe(false);
+		expect(hasFile(asyncGraph, '/index.ts')).toBe(true);
+	});
+
+	test('user-configured excludeDirs are skipped (sync and async)', async () => {
+		fs.mkdirSync(path.join(tmp, 'generated'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'generated/thing.ts'),
+			'export const gen = 1;\n',
+		);
+		fs.writeFileSync(path.join(tmp, 'index.ts'), 'export const a = 1;\n');
+
+		const syncGraph = buildWorkspaceGraph(tmp, { excludeDirs: ['generated'] });
+		expect(hasSegment(syncGraph, '/generated/')).toBe(false);
+		expect(hasFile(syncGraph, '/index.ts')).toBe(true);
+
+		const asyncGraph = await buildWorkspaceGraphAsync(tmp, {
+			excludeDirs: ['generated'],
+		});
+		expect(hasSegment(asyncGraph, '/generated/')).toBe(false);
+		expect(hasFile(asyncGraph, '/index.ts')).toBe(true);
+
+		// Without the exclude, the directory IS indexed (proves the option is wired).
+		const included = buildWorkspaceGraph(tmp);
+		expect(hasFile(included, 'generated/thing.ts')).toBe(true);
 	});
 });

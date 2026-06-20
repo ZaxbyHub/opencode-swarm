@@ -158,13 +158,20 @@ export async function tryAcquireLock(
 
 	let release: (() => Promise<void>) | undefined;
 	try {
+		// F-09: Add automatic retries with exponential backoff
+		// Transient lock contention no longer requires manual LLM retry
 		release = await lockfile.lock(lockPath, {
 			stale: LOCK_TIMEOUT_MS,
-			retries: { retries: 0 },
+			retries: {
+				retries: 5,
+				minTimeout: 10,
+				maxTimeout: 500,
+				factor: 2,
+			},
 			realpath: false,
 		});
 	} catch (err: unknown) {
-		// ELOCKED means another process holds the lock
+		// ELOCKED means another process holds the lock (after retries exhausted)
 		const code = (err as NodeJS.ErrnoException).code;
 		if (code === 'ELOCKED' || code === 'EEXIST') {
 			return { acquired: false };

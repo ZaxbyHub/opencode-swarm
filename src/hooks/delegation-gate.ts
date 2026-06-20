@@ -1051,7 +1051,31 @@ export function createDelegationGateHook(
 		const session = ensureAgentSession(input.sessionID);
 		if (!session || !session.taskWorkflowStates) return;
 
-		// Check if ANY task is in coder_delegated state (coder ran, no reviewer yet)
+		// Load the plan once up front. Both the reviewer-gate parallel exemption
+		// below and the standard worktree precreate path need execution_profile;
+		// loading here avoids a second read.
+		const plan = await _internals.loadPlanJsonOnly(directory);
+		const profile = plan?.execution_profile;
+		const parallelEnabled = profile?.parallelization_enabled === true;
+		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
+		const effectiveMaxConcurrent =
+			session.maxConcurrencyOverride ?? maxConcurrent;
+		// Parallel mode is active only when the plan enables it, allows >1 concurrent
+		// task, and Lean Turbo is not driving its own lane execution.
+		const parallelModeActive =
+			parallelEnabled &&
+			effectiveMaxConcurrent > 1 &&
+			!hasActiveLeanTurbo(input.sessionID);
+		const planTaskIds = plan
+			? new Set(plan.phases.flatMap((phase) => phase.tasks.map((t) => t.id)))
+			: new Set<string>();
+		const incomingCoderTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+
+		// Reviewer gate: block coder re-delegation when a prior coder task awaits
+		// review. In parallel mode (parallelization_enabled), dispatching a coder
+		// for a DIFFERENT dependency-ready task is legitimate, so a coder_delegated
+		// task only blocks a coder for the SAME task (a true re-delegation that would
+		// skip review). The slot cap below bounds total in-flight unreviewed coders.
 		for (const [taskId, state] of session.taskWorkflowStates) {
 			if (state !== 'coder_delegated') continue;
 
@@ -1091,11 +1115,40 @@ export function createDelegationGateHook(
 				if (!isTier3) continue; // Allow bypass for non-Tier-3 in turbo
 			}
 
+			// Parallel-mode exemption: a coder for a DIFFERENT task does not block.
+			// Re-delegating the SAME unreviewed task still falls through and throws.
+			if (
+				parallelModeActive &&
+				incomingCoderTaskId &&
+				taskId !== incomingCoderTaskId
+			) {
+				continue;
+			}
+
 			throw new Error(
 				`REVIEWER_GATE_VIOLATION: Cannot re-delegate to coder without reviewer delegation. ` +
 					`Task ${taskId} state: coder_delegated. Delegate to reviewer first. ` +
 					`If this is stale state from a prior session, run /swarm reset-session to clear workflow state.`,
 			);
+		}
+
+		// Parallel slot cap: bound the number of concurrently-unreviewed coders to
+		// max_concurrent_tasks so the architect cannot outrun the review gates. The
+		// cap applies whenever parallel mode is active, independent of whether the
+		// incoming coder's task id is parseable — an unresolvable task id must not be
+		// a way to slip past the cap and oversubscribe in-flight coders (F-001).
+		if (parallelModeActive) {
+			let coderDelegatedCount = 0;
+			for (const s of session.taskWorkflowStates.values()) {
+				if (s === 'coder_delegated') coderDelegatedCount++;
+			}
+			if (coderDelegatedCount >= effectiveMaxConcurrent) {
+				throw new Error(
+					`PARALLEL_SLOTS_EXHAUSTED: ${coderDelegatedCount} coder task(s) are awaiting review ` +
+						`(max_concurrent_tasks=${effectiveMaxConcurrent}). Dispatch reviewer/test_engineer for an ` +
+						`in-flight coder task before starting another coder.`,
+				);
+			}
 		}
 
 		if (standardWorktreeSerializationSessions.has(input.sessionID)) {
@@ -1104,20 +1157,10 @@ export function createDelegationGateHook(
 			);
 		}
 
-		const plan = await _internals.loadPlanJsonOnly(directory);
 		if (!plan) return;
-		const profile = plan.execution_profile;
-		const parallelEnabled = profile?.parallelization_enabled === true;
-		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
-		const effectiveMaxConcurrent =
-			session.maxConcurrencyOverride ?? maxConcurrent;
-		if (!parallelEnabled || effectiveMaxConcurrent <= 1) return;
-		if (hasActiveLeanTurbo(input.sessionID)) return;
+		if (!parallelModeActive) return;
 
-		const planTaskIds = new Set(
-			plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
-		);
-		const resolvedTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
+		const resolvedTaskId = incomingCoderTaskId;
 		await precreateStandardWorktreeSession({
 			config,
 			directory,
@@ -1317,8 +1360,10 @@ export function createDelegationGateHook(
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { recordPendingDelegation } = await import(
-							'../background/pending-delegations.js'
+						const { buildPromptSnapshot, recordPendingDelegation } =
+							await import('../background/pending-delegations.js');
+						const { captureWorkspaceSnapshot } = await import(
+							'../background/workspace-snapshot.js'
 						);
 						const { subagentSessionId, jobId } = extractDispatchIds(_output);
 						if (subagentSessionId) {
@@ -1328,6 +1373,15 @@ export function createDelegationGateHook(
 								session,
 								directory,
 							);
+							const scope =
+								session.declaredCoderScope &&
+								session.declaredCoderScope.length > 0
+									? session.declaredCoderScope.join(',')
+									: evidenceTaskId;
+							const prHeadShaRaw =
+								mergedArgs.prHeadSha ?? mergedArgs.pr_head_sha;
+							const prHeadSha =
+								typeof prHeadShaRaw === 'string' ? prHeadShaRaw : null;
 							await recordPendingDelegation(
 								directory,
 								{
@@ -1340,6 +1394,18 @@ export function createDelegationGateHook(
 									swarmPrefixedAgent: subagentType,
 									planTaskId: evidenceTaskId,
 									evidenceTaskId,
+									workspace: captureWorkspaceSnapshot(directory, {
+										prHeadSha,
+										scope,
+									}),
+									prompt:
+										typeof mergedArgs.prompt === 'string'
+											? buildPromptSnapshot(
+													mergedArgs.prompt,
+													delegationMaxChars,
+												)
+											: undefined,
+									generation: 1,
 								},
 								{ staleTimeoutMs: backgroundPendingTimeoutMs },
 							);

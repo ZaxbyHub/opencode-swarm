@@ -11,7 +11,7 @@ enabling continuous agent performance improvement through a closed feedback syst
 ### Feedback Loop
 - New `applySkillUsageFeedback` hook closes the skill→knowledge→skill loop
 - Phase-complete feedback writes usage signals to knowledge confidence
-- Idempotent processing via `.swarm/skill-usage-last-processed.json` marker
+- Idempotent processing via `feedback_applied` markers recorded within `.swarm/skill-usage.jsonl` (no external sidecar)
 - Fail-open: feedback errors never block phase completion
 
 ### Curator Hardening
@@ -48,7 +48,7 @@ enabling continuous agent performance improvement through a closed feedback syst
 | A-004 | No path resolution safety | `resolveSwarmKnowledgePath` |
 | A-005 | No feedback loop | `applySkillUsageFeedback` in skill-usage-log.ts |
 | A-006 | Phase-complete doesn't close loop | Feedback bridge in phase-complete.ts |
-| A-007 | No idempotent processing | `.swarm/skill-usage-last-processed.json` marker |
+| A-007 | No idempotent processing | `feedback_applied` markers in `.swarm/skill-usage.jsonl`, preserved across `pruneSkillUsageLog` cycles |
 | A-008 | Feedback errors could block | Fail-open try/catch around feedback |
 | A-009 | No auto-retire for stale skills | `autoRetireSkills` in curator.ts |
 | A-010 | No spec-based drift detection | `extractRequirementIds` + curator-drift.ts |

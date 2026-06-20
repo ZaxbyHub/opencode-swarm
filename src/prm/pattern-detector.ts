@@ -53,6 +53,9 @@ export function sanitizeString(input: string): string {
 	// Remove backticks to prevent template literal injection
 	result = result.replace(/`/g, '');
 
+	// Remove HTML/script-style tags from prompt-bound diagnostic text
+	result = result.replace(/<[^>]*>/g, '');
+
 	// Remove prompt injection patterns
 	for (const pattern of INJECTION_PATTERNS) {
 		result = result.replace(pattern, '[REDACTED]');

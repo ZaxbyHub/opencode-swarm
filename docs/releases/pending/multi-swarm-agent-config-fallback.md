@@ -42,4 +42,4 @@ This pre-existing architectural gap was exposed by PR #1216 (fix: respect top-le
 
 The root cause: module-level `_swarmAgents` variable was designed for single-slot use and never updated when multi-swarm support was added in earlier versions.
 
-Related issue #1225: https://github.com/zaxbysauce/opencode-swarm/issues/1225
+Related issue #1225: https://github.com/ZaxbyHub/opencode-swarm/issues/1225

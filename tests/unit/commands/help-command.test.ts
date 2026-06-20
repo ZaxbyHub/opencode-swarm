@@ -280,6 +280,15 @@ describe('buildDetailedHelp() — via handleHelpCommand for single-token command
 		expect(result).toContain('**Args:**');
 		expect(result).toContain('<pr-url|owner/repo#N|N>');
 	});
+
+	test('shows detailed help for pr-feedback optional PR ref and pasted-feedback mode', async () => {
+		const ctx: CommandContext = { ...baseCtx, args: ['pr-feedback'] };
+		const result = await handleHelpCommand(ctx);
+		expect(result).toContain('## /swarm pr-feedback');
+		expect(result).toContain('**Args:**');
+		expect(result).toContain('[url|owner/repo#N|N] [instructions...]');
+		expect(result).toContain('The PR reference is optional');
+	});
 });
 
 describe('handleHelpCommand — integration with createSwarmCommandHandler patterns', () => {

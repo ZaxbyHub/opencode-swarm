@@ -253,7 +253,7 @@ describe('EscalationTracker', () => {
 	});
 
 	describe('getState', () => {
-		test('returns reference to internal state (not a copy)', () => {
+		test('returns a defensive copy of internal state', () => {
 			const tracker = new EscalationTracker('session-1');
 			const match = createMockPatternMatch('repetition_loop');
 			tracker.recordDetection(match);
@@ -261,8 +261,30 @@ describe('EscalationTracker', () => {
 			const state1 = tracker.getState();
 			const state2 = tracker.getState();
 
-			expect(state1).toBe(state2); // Same reference
+			expect(state1).not.toBe(state2);
 			expect(state1.patternCounts.get('repetition_loop')).toBe(1);
+			state1.patternCounts.set('repetition_loop', 99);
+			state1.lastPatternDetected?.affectedAgents.push('mutated-agent');
+			state1.lastPatternDetected?.affectedTargets.push('mutated-target');
+			state1.correctionsPending.push({
+				alert: 'mutated',
+				category: 'reasoning_error',
+				pattern: 'repetition_loop',
+				guidance: 'mutated',
+				action: 'mutated',
+				stepRange: [1, 1],
+				timestamp: new Date().toISOString(),
+			});
+
+			const freshState = tracker.getState();
+			expect(freshState.patternCounts.get('repetition_loop')).toBe(1);
+			expect(freshState.lastPatternDetected?.affectedAgents).toEqual([
+				'agent-a',
+			]);
+			expect(freshState.lastPatternDetected?.affectedTargets).toEqual([
+				'src/foo.ts',
+			]);
+			expect(freshState.correctionsPending).toHaveLength(1);
 		});
 	});
 
@@ -339,16 +361,19 @@ describe('EscalationTracker', () => {
 			expect(tracker.getPendingCorrections()).toEqual([]);
 		});
 
-		test('returns reference to internal corrections array', () => {
+		test('returns defensive copies of internal corrections array', () => {
 			const tracker = new EscalationTracker('session-1');
 			const match = createMockPatternMatch('repetition_loop');
 			tracker.recordDetection(match);
 
 			const corrections = tracker.getPendingCorrections();
 			expect(corrections.length).toBe(1);
-			// Returns reference - mutations affect internal state
 			corrections.push({} as CourseCorrection);
-			expect(tracker.getPendingCorrections().length).toBe(2);
+			corrections[0].stepRange[0] = 99;
+
+			const freshCorrections = tracker.getPendingCorrections();
+			expect(freshCorrections.length).toBe(1);
+			expect(freshCorrections[0].stepRange[0]).not.toBe(99);
 		});
 	});
 

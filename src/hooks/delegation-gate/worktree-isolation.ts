@@ -21,6 +21,13 @@ import {
 	removeWorktree,
 } from '../../worktree';
 
+// INVARIANT: this cap MUST stay strictly above the `max_concurrent_tasks`
+// schema ceiling (currently clamped to <= 64 in execution-profile-schema). The
+// tracking-cap branch in precreateStandardWorktreeSession degrades gracefully
+// (un-isolated) instead of blocking, which is only safe because in-flight coders
+// can never approach this cap. If the concurrency ceiling is ever raised to or
+// above this value, that branch would reopen the F-008 un-isolated-collision
+// window and must switch to handleStandardWorktreeFailure like the other paths.
 export const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
 
 export interface StandardWorktreeDispatch {
@@ -47,6 +54,48 @@ function rememberStandardWorktreeDispatch(
 
 function hasStandardWorktreeDispatchCapacity(): boolean {
 	return standardWorktreeByCallID.size < MAX_TRACKED_STANDARD_WORKTREE_CALLS;
+}
+
+/**
+ * True when at least one standard worktree dispatch for this parent session is
+ * still tracked (provisioned but not yet merged back). Used to decide whether a
+ * NON-required isolation failure can safely degrade to an un-isolated coder.
+ */
+function hasInFlightStandardWorktreeDispatch(parentSessionID: string): boolean {
+	for (const dispatch of standardWorktreeByCallID.values()) {
+		if (dispatch.parentSessionID === parentSessionID) return true;
+	}
+	return false;
+}
+
+/**
+ * Handle a standard worktree isolation failure under the resolved policy.
+ *
+ * - `required`: always throw — isolation is mandatory.
+ * - otherwise (auto/best-effort): degrading the triggering coder to run
+ *   un-isolated in the main working tree is only safe when NO sibling coder is
+ *   currently isolated in a worktree for this session. If a sibling IS in-flight,
+ *   running this coder un-isolated risks a merge-back collision when the sibling
+ *   finishes, so block this dispatch and force the architect to wait (F-008).
+ *   With no in-flight sibling the un-isolated coder runs alone, which is the
+ *   intended graceful degradation to serial execution.
+ */
+function handleStandardWorktreeFailure(
+	parentSessionID: string,
+	policy: WorktreeIsolationConfig['policy'],
+	message: string,
+): void {
+	if (policy === 'required') throw new Error(message);
+	if (hasInFlightStandardWorktreeDispatch(parentSessionID)) {
+		throw new Error(
+			`STANDARD_WORKTREE_ISOLATION_UNSAFE: ${message} ` +
+				`Sibling coder task(s) are isolated in worktrees for this session, so ` +
+				`dispatching this coder un-isolated in the main tree would risk a ` +
+				`merge-back collision. Wait for in-flight coder task(s) to be reviewed ` +
+				`and merged, then retry.`,
+		);
+	}
+	serializeStandardWorktreeDispatches(parentSessionID, message);
 }
 
 function serializeStandardWorktreeDispatches(
@@ -121,6 +170,9 @@ export async function precreateStandardWorktreeSession(args: {
 		const message =
 			'STANDARD_WORKTREE_TRACKING_CAP_EXCEEDED: too many standard worktree coder dispatches are already awaiting merge-back.';
 		if (worktreeConfig.policy === 'required') throw new Error(message);
+		// The tracking cap is a memory bound, not an isolation failure, and the
+		// parallel slot cap (max_concurrent_tasks) keeps in-flight coders far below
+		// it in practice. Degrade gracefully here rather than blocking.
 		serializeStandardWorktreeDispatches(args.parentSessionID, message);
 		return;
 	}
@@ -129,8 +181,11 @@ export async function precreateStandardWorktreeSession(args: {
 	if (!client) {
 		const message =
 			'STANDARD_WORKTREE_ISOLATION_UNAVAILABLE: OpenCode SDK client is unavailable; standard parallel coder work cannot be isolated.';
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, message);
+		handleStandardWorktreeFailure(
+			args.parentSessionID,
+			worktreeConfig.policy,
+			message,
+		);
 		return;
 	}
 
@@ -145,9 +200,12 @@ export async function precreateStandardWorktreeSession(args: {
 		},
 	);
 	if ('error' in provisionResult) {
-		const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}`;
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, `${message}.`);
+		const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}.`;
+		handleStandardWorktreeFailure(
+			args.parentSessionID,
+			worktreeConfig.policy,
+			message,
+		);
 		return;
 	}
 
@@ -167,9 +225,12 @@ export async function precreateStandardWorktreeSession(args: {
 			typeof createError === 'string'
 				? createError
 				: JSON.stringify(createError ?? 'missing session id');
-		const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}`;
-		if (worktreeConfig.policy === 'required') throw new Error(message);
-		serializeStandardWorktreeDispatches(args.parentSessionID, `${message}.`);
+		const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}.`;
+		handleStandardWorktreeFailure(
+			args.parentSessionID,
+			worktreeConfig.policy,
+			message,
+		);
 		return;
 	}
 

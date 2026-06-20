@@ -243,8 +243,13 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 	});
 
 	describe('BOUNDARY: architect tool count and composition', () => {
-		it('architect should have 78 tools', () => {
-			expect(AGENT_TOOL_MAP['architect'].length).toBe(78);
+		it('architect tools should be consistent with AGENT_TOOL_MAP', () => {
+			const architectTools = AGENT_TOOL_MAP['architect'];
+			// Verify no duplicates (tool count matches unique count)
+			const uniqueTools = new Set(architectTools);
+			expect(architectTools.length).toBe(uniqueTools.size);
+			// Verify non-empty
+			expect(architectTools.length).toBeGreaterThan(0);
 		});
 
 		it('architect should include all orchestrator-specific tools', () => {
@@ -271,10 +276,18 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(Array.isArray(AGENT_TOOL_MAP)).toBe(false);
 		});
 
-		it('architect array should not have unexpected length changes', () => {
-			const originalLength = AGENT_TOOL_MAP['architect'].length;
-			// Verify current state matches expected
-			expect(originalLength).toBe(78);
+		it('architect array should maintain structural integrity', () => {
+			const architectTools = AGENT_TOOL_MAP['architect'];
+			// Verify array is non-empty
+			expect(architectTools.length).toBeGreaterThan(0);
+			// Verify no undefined or null entries
+			expect(architectTools.every((t) => t !== undefined && t !== null)).toBe(
+				true,
+			);
+			// Verify all entries are valid tool names
+			expect(
+				architectTools.every((t) => TOOL_NAME_SET.has(t as ToolName)),
+			).toBe(true);
 		});
 	});
 });

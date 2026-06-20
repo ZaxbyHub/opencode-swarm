@@ -515,14 +515,66 @@ export function pruneSkillUsageLog(
 		return { pruned: 0, remaining: 0 };
 	}
 
-	const allEntries = readSkillUsageEntries(directory);
-	if (allEntries.length === 0) {
+	// Read raw lines so we can preserve feedback_applied markers through the prune.
+	const raw = _internals.readFileSync(resolved, 'utf-8');
+	const lines = raw.split('\n');
+
+	// Partition lines into parsed entries and preserved marker raw lines.
+	const entries: SkillUsageEntry[] = [];
+	const preservedMarkers: string[] = [];
+
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed);
+			// Check for feedback_applied marker before entry parser (which returns null for them)
+			const marker = parseFeedbackMarker(parsed);
+			if (marker) {
+				preservedMarkers.push(trimmed);
+				continue;
+			}
+			const entry = parseSkillUsageEntry(parsed);
+			if (entry) {
+				entries.push(entry);
+			}
+		} catch {
+			// skip malformed line — preserved by leaving the file untouched below
+		}
+	}
+
+	if (entries.length === 0) {
+		// Nothing to prune — write back preserved markers (if any) to refresh the file,
+		// then return. Malformed lines are left untouched so we do not accidentally
+		// destroy data that a future parser revision might be able to recover.
+		if (preservedMarkers.length > 0) {
+			const dir = path.dirname(resolved);
+			const tmpPath = path.join(dir, `skill-usage-${Date.now()}.tmp`);
+			const content = preservedMarkers
+				.join('\n')
+				.concat(preservedMarkers.length > 0 ? '\n' : '');
+			try {
+				_internals.writeFileSync(tmpPath, content, 'utf-8');
+				_internals.renameSync(tmpPath, resolved);
+			} catch (writeErr) {
+				const msg =
+					writeErr instanceof Error ? writeErr.message : String(writeErr);
+				try {
+					if (_internals.existsSync(tmpPath)) {
+						_internals.writeFileSync(tmpPath, '', 'utf-8');
+					}
+				} catch {
+					// ignore cleanup failure
+				}
+				return { pruned: 0, remaining: 0, error: msg };
+			}
+		}
 		return { pruned: 0, remaining: 0 };
 	}
 
 	// Group by skillPath
 	const groups = new Map<string, SkillUsageEntry[]>();
-	for (const entry of allEntries) {
+	for (const entry of entries) {
 		const list = groups.get(entry.skillPath);
 		if (list) list.push(entry);
 		else groups.set(entry.skillPath, [entry]);
@@ -531,31 +583,30 @@ export function pruneSkillUsageLog(
 	let pruned = 0;
 	const surviving: SkillUsageEntry[] = [];
 
-	groups.forEach((entries) => {
-		if (entries.length <= maxEntriesPerSkill) {
-			surviving.push(...entries);
+	groups.forEach((skillEntries) => {
+		if (skillEntries.length <= maxEntriesPerSkill) {
+			surviving.push(...skillEntries);
 			return;
 		}
 		// Sort newest-first by timestamp (ISO 8601 is lexicographically sortable)
-		entries.sort((a, b) =>
+		skillEntries.sort((a, b) =>
 			b.timestamp > a.timestamp ? 1 : b.timestamp < a.timestamp ? -1 : 0,
 		);
-		const kept = entries.slice(0, maxEntriesPerSkill);
-		pruned += entries.length - kept.length;
+		const kept = skillEntries.slice(0, maxEntriesPerSkill);
+		pruned += skillEntries.length - kept.length;
 		surviving.push(...kept);
 	});
 
 	if (pruned === 0) {
-		return { pruned: 0, remaining: allEntries.length };
+		return { pruned: 0, remaining: entries.length };
 	}
 
-	// Write atomically: temp file in same directory, then rename
+	// Write surviving entries plus all preserved marker lines.
 	const dir = path.dirname(resolved);
 	const tmpPath = path.join(dir, `skill-usage-${Date.now()}.tmp`);
-	const content = surviving
-		.map((e) => JSON.stringify(e))
-		.join('\n')
-		.concat('\n');
+	const entryLines = surviving.map((e) => JSON.stringify(e));
+	const allLines = [...entryLines, ...preservedMarkers];
+	const content = allLines.join('\n').concat('\n');
 
 	try {
 		_internals.writeFileSync(tmpPath, content, 'utf-8');
@@ -570,7 +621,7 @@ export function pruneSkillUsageLog(
 		} catch {
 			// ignore cleanup failure
 		}
-		return { pruned: 0, remaining: allEntries.length, error: msg };
+		return { pruned: 0, remaining: entries.length, error: msg };
 	}
 
 	return { pruned, remaining: surviving.length };

@@ -92,6 +92,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'full-auto',
 		'handoff',
 		'issue',
+		'loop',
 		'pr-feedback',
 		'pr-review',
 		'promote',
@@ -150,14 +151,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'none' bucket contains exactly the expected 24 standalone non-tool commands", () => {
+	test("'none' bucket contains exactly the expected 25 standalone non-tool commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'none') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(24);
+		expect(actual.size).toBe(25);
 		for (const name of EXPECTED_NONE) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -247,6 +248,22 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 			const e = entry as CommandEntry;
 			if (e.toolPolicy === 'human-only' || e.toolPolicy === 'restricted') {
 				derived.add(name);
+				continue;
+			}
+			// Dash aliases carry no toolPolicy of their own but resolve to a
+			// canonical handler. HUMAN_ONLY_SWARM_COMMANDS includes any alias whose
+			// aliasOf target is human-only/restricted so the Bash CLI guardrail
+			// blocks the dash form too (e.g. `memory-import` → `memory import`).
+			if (e.aliasOf) {
+				const target = COMMAND_REGISTRY[
+					e.aliasOf as keyof typeof COMMAND_REGISTRY
+				] as CommandEntry | undefined;
+				if (
+					target?.toolPolicy === 'human-only' ||
+					target?.toolPolicy === 'restricted'
+				) {
+					derived.add(name);
+				}
 			}
 		}
 		// pr subscribe, pr unsubscribe are the 2 new gap human-only commands

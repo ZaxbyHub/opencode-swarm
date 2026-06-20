@@ -1,34 +1,118 @@
 import * as child_process from 'node:child_process';
+import path from 'node:path';
+import {
+	GitBinaryMissingError,
+	isGitBinaryMissing,
+} from '../utils/git-binary-missing-error.js';
 import { warn } from '../utils/logger.js';
 
 const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
+
+export type GitRepositoryStatus =
+	| { isRepo: true }
+	| {
+			isRepo: false;
+			reason: 'not_git_repo' | 'git_unavailable' | 'git_error';
+			message: string;
+	  };
+
+function unique(values: string[]): string[] {
+	return [...new Set(values.filter(Boolean))];
+}
+
+function windowsGitCandidates(): string[] {
+	if (process.platform !== 'win32') return ['git'];
+
+	const roots = unique([
+		process.env.ProgramFiles ?? '',
+		process.env['ProgramFiles(x86)'] ?? '',
+		process.env.LOCALAPPDATA
+			? path.join(process.env.LOCALAPPDATA, 'Programs')
+			: '',
+	]);
+	const installed = roots.flatMap((root) => [
+		path.join(root, 'Git', 'cmd', 'git.exe'),
+		path.join(root, 'Git', 'bin', 'git.exe'),
+	]);
+	return unique(['git', ...installed]);
+}
+
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function isNotGitRepositoryMessage(message: string): boolean {
+	const lower = message.toLowerCase();
+	return (
+		lower.includes('not a git repository') || lower.includes('not a git repo')
+	);
+}
 
 /**
  * Execute git command safely
  */
 function gitExec(args: string[], cwd: string): string {
-	const result = child_process.spawnSync('git', args, {
-		cwd,
-		encoding: 'utf-8',
-		timeout: GIT_TIMEOUT_MS,
-		stdio: ['pipe', 'pipe', 'pipe'],
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || `git exited with ${result.status}`);
+	let missingGitError: unknown;
+
+	for (const command of windowsGitCandidates()) {
+		const result = child_process.spawnSync(command, args, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: GIT_MAX_BUFFER_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+		if (result.error) {
+			if (isGitBinaryMissing(result.error)) {
+				missingGitError ??= result.error;
+				continue;
+			}
+			throw new Error(errorMessage(result.error));
+		}
+		if (result.status !== 0) {
+			throw new Error(
+				result.stderr || result.stdout || `git exited with ${result.status}`,
+			);
+		}
+		return result.stdout;
 	}
-	return result.stdout;
+
+	throw new GitBinaryMissingError(
+		process.platform === 'win32'
+			? 'git executable is not available on PATH or common Windows install locations'
+			: 'git executable is not available on PATH',
+		{ cause: missingGitError },
+	);
+}
+
+export function getGitRepositoryStatus(cwd: string): GitRepositoryStatus {
+	try {
+		gitExec(['rev-parse', '--git-dir'], cwd);
+		return { isRepo: true };
+	} catch (err) {
+		if (err instanceof GitBinaryMissingError) {
+			return {
+				isRepo: false,
+				reason: 'git_unavailable',
+				message: err.message,
+			};
+		}
+		const message = errorMessage(err);
+		return {
+			isRepo: false,
+			reason: isNotGitRepositoryMessage(message) ? 'not_git_repo' : 'git_error',
+			message,
+		};
+	}
 }
 
 /**
  * Check if we're in a git repository
  */
 export function isGitRepo(cwd: string): boolean {
-	try {
-		gitExec(['rev-parse', '--git-dir'], cwd);
-		return true;
-	} catch {
-		return false;
-	}
+	return getGitRepositoryStatus(cwd).isRepo;
 }
 
 /**
@@ -214,10 +298,10 @@ function detectDefaultRemoteBranch(cwd: string): string | null {
  * @param options - Options including pruneBranches flag
  * @returns Result object with success status and details
  */
-export function resetToRemoteBranch(
+export async function resetToRemoteBranch(
 	cwd: string,
 	options?: { pruneBranches?: boolean },
-): ResetToRemoteBranchResult {
+): Promise<ResetToRemoteBranchResult> {
 	const warnings: string[] = [];
 	const prunedBranches: string[] = [];
 
@@ -339,13 +423,9 @@ export function resetToRemoteBranch(
 		let lastError: unknown;
 		for (let retry = 0; retry < 4; retry++) {
 			if (retry > 0 && process.platform === 'win32') {
-				// Synchronous delay for Windows — git file-locking race on Windows
-				// requires a brief pause between retries. On Linux/macOS the retry
-				// is immediate since the file-locking issue is Windows-specific.
-				const endTime = Date.now() + 500;
-				while (Date.now() < endTime) {
-					// busy wait
-				}
+				// Async wait for Windows file-locking (FR-018) — yields the event loop
+				// instead of a synchronous spin loop that blocks it.
+				await new Promise((resolve) => setTimeout(resolve, 500));
 			}
 			try {
 				gitExec(['reset', '--hard', targetBranch], cwd);
@@ -458,10 +538,10 @@ export interface ResetToMainAfterMergeResult {
  * Steps: detect default branch → safety check → fetch → checkout → discard changes → reset → delete branch.
  * Safety guard: refuses if current branch has commits not on any remote tracking branch.
  */
-export function resetToMainAfterMerge(
+export async function resetToMainAfterMerge(
 	cwd: string,
 	options?: { pruneBranches?: boolean },
-): ResetToMainAfterMergeResult {
+): Promise<ResetToMainAfterMergeResult> {
 	const warnings: string[] = [];
 
 	try {
@@ -623,10 +703,9 @@ export function resetToMainAfterMerge(
 			let discardSucceeded = false;
 			for (let retry = 0; retry < 4; retry++) {
 				if (retry > 0 && process.platform === 'win32') {
-					const endTime = Date.now() + 500;
-					while (Date.now() < endTime) {
-						// busy wait for Windows file-locking
-					}
+					// Async wait for Windows file-locking (FR-018) — yields the event loop
+					// instead of a synchronous spin loop that blocks it.
+					await new Promise((resolve) => setTimeout(resolve, 500));
 				}
 				try {
 					_internals.gitExec(['checkout', '--', '.'], cwd);
@@ -644,10 +723,10 @@ export function resetToMainAfterMerge(
 			changesDiscarded = discardSucceeded;
 		}
 
-		// Step 7b: Remove untracked files/directories
+		// Step 7b: Remove only gitignored files/directories (build artifacts); user-created untracked files are preserved (FR-013).
 		// git checkout -- . only resets tracked files; git clean removes untracked.
 		try {
-			_internals.gitExec(['clean', '-fd'], cwd);
+			_internals.gitExec(['clean', '-fdX'], cwd);
 		} catch {
 			warnings.push('Could not clean untracked files');
 		}
@@ -744,12 +823,14 @@ export const _internals: {
 	gitExec: typeof gitExec;
 	detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
 	getDefaultBaseBranch: typeof getDefaultBaseBranch;
+	getGitRepositoryStatus: typeof getGitRepositoryStatus;
 	resetToRemoteBranch: typeof resetToRemoteBranch;
 	resetToMainAfterMerge: typeof resetToMainAfterMerge;
 } = {
 	gitExec,
 	detectDefaultRemoteBranch,
 	getDefaultBaseBranch,
+	getGitRepositoryStatus,
 	resetToRemoteBranch,
 	resetToMainAfterMerge,
 } as const;

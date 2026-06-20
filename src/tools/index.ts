@@ -18,7 +18,11 @@ export { declare_council_criteria } from './declare-council-criteria';
 export { declare_scope } from './declare-scope';
 export { type DiffErrorResult, type DiffResult, diff } from './diff';
 export { diff_summary } from './diff-summary';
-export { dispatch_lanes } from './dispatch-lanes';
+export {
+	collect_lane_results,
+	dispatch_lanes,
+	dispatch_lanes_async,
+} from './dispatch-lanes';
 export { doc_extract, doc_scan } from './doc-scan';
 export { detect_domains } from './domain-detector';
 export { evidence_check } from './evidence-check';
@@ -35,7 +39,6 @@ export { get_qa_gate_profile } from './get-qa-gate-profile';
 export { git_blame } from './git-blame';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
-export { knowledge_ack } from './knowledge-ack';
 export { knowledge_add } from './knowledge-add';
 export { knowledge_archive } from './knowledge-archive';
 export { knowledge_query } from './knowledge-query';

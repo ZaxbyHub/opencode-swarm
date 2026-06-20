@@ -351,8 +351,11 @@ For each applicable directive, the Architect emits:
 - `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
 - `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
 
-You can also call the `knowledge_ack` tool for the same effect from structured
-tool args.
+Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that
+satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
+(which replaced the former `knowledge_ack`) records knowledge-usage receipts for
+audit — including applied/ignored/contradicted outcomes and new-lesson persistence
+— but does NOT satisfy the enforcement gate.
 
 ### Audit log
 
@@ -446,23 +449,25 @@ skill revision writes anything. Rejected candidates are recorded in the bounded
 
 When `curator.skill_generation_enabled` is true (default), the curator's
 phase analysis can emit `skill_candidates` and `knowledge_application_findings`
-JSON blocks that are parsed strictly. Malformed JSON is silently dropped.
+JSON blocks that are parsed strictly. Malformed JSON is skipped without writes
+and reported through debug-gated curator diagnostics.
 High-confidence candidates (>= `curator.min_skill_confidence`) trigger
 `skill_generate` in **draft** mode; activation always requires a human or
 architect to call `skill_apply`.
 
 ### Maturity gate
 
-The compiler no longer requires only repeated high-confidence confirmations.
-Selection uses the effective event-sourced outcome rollup:
+An entry passes the maturity gate according to the following decision logic:
 
-- Repeated confirmations still qualify candidates.
-- Strong positive outcomes (`applied_explicit`, `succeeded_after_shown`, or
-  repeated acknowledgments) can qualify a well-evidenced singleton even when
-  confirmation count is low.
-- Negative outcome signal blocks compilation even when confidence is high.
-- The default confidence floor is `0.70`; high/critical priority and strong
-  outcome records can draft a singleton proposal, but activation remains manual.
+1. **Negative outcome signal** — Entries with `computeOutcomeSignal < 0` are rejected regardless of confirmations or confidence.
+2. **Strong outcome bypass** — entries with a strong outcome record (`applied_explicit_count >= 3` or `succeeded_after_shown_count >= 3`) and a strictly positive outcome signal (`computeOutcomeSignal > 0`) bypass all remaining gates and are accepted regardless of confidence or confirmation count. Negative signals are still rejected by step 1 regardless of outcome record strength.
+3. **Legacy AND gates** — for entries that reach this step, confidence must be >= `min_skill_confidence` (unless a strong outcome record is present, which bypasses the confidence floor), and either distinct phases >= `min_skill_confirmations` or a strong outcome record is present. When no strong outcome record is present, both conditions must hold independently; neither alone is sufficient.
+
+**Configuration keys** (under `curator` config):
+- `min_skill_confidence`: Confidence floor for candidates (default `0.70`). Configurable via config schema.
+- `min_skill_confirmations`: Minimum distinct phases required for non-strong entries (default `2`). Configurable via config schema.
+
+**Singleton promotion** — After the maturity gate above, 1-entry clusters are evaluated for promotion by `isSkillSingletonEligible` during clustering. A singleton passes this post-maturity check if it is a high/critical priority directive **or** has a strong outcome record (`applied/succeeded >= 3`). This allows well-evidenced singletons to become skills even when they haven't accumulated multiple confirmations yet.
 
 See [Generated Skills](skills.md) for the generated-skill lifecycle and file
 layout.

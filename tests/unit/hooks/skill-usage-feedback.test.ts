@@ -23,6 +23,7 @@ import {
 	applySkillUsageFeedback,
 	computeComplianceByVersion,
 	normalizeComplianceVerdict,
+	pruneSkillUsageLog,
 	readSkillUsageEntries,
 	resolveSourceKnowledgeIds,
 	type SkillUsageEntry,
@@ -894,6 +895,184 @@ Content
 		const knowledge = readSwarmKnowledge(tempDir);
 		expect(knowledge).toHaveLength(1);
 		expect(knowledge[0]!.confidence).toBeCloseTo(0.55);
+	});
+	test('prune preserves feedback_applied markers so reprocessing is idempotent across prune cycles', async () => {
+		writeSwarmKnowledge(tempDir, [
+			{
+				id: 'prune-feedback-uuid',
+				lesson: 'prune marker survival test entry',
+				confidence: 0.5,
+			},
+		]);
+		writeSkillFile(tempDir, '.claude/skills/prune-feedback-skill/SKILL.md', [
+			'prune-feedback-uuid',
+		]);
+
+		// Write non-actionable entries first (older timestamps)
+		for (let i = 0; i < 5; i++) {
+			appendSkillUsageEntry(tempDir, {
+				skillPath: '.claude/skills/prune-feedback-skill/SKILL.md',
+				agentName: 'test-agent',
+				taskID: `task-old-${i}`,
+				timestamp: `2026-01-01T00:0${i.toString()}:00.000Z`,
+				complianceVerdict: 'not_checked',
+				sessionID: 'session-abc',
+			});
+		}
+
+		// Write the actionable compliant entry LAST (newest timestamp — survives pruning)
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/prune-feedback-skill/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-actionable',
+			timestamp: '2026-01-02T00:00:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+
+		// First feedback pass — writes a feedback_applied marker covering task-actionable
+		const first = await applySkillUsageFeedback(tempDir);
+		expect(first).toEqual({ processed: 1, bumps: 1 });
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+
+		// Prune with maxEntriesPerSkill=3: keeps the 3 newest entries (the compliant
+		// actionable entry + 2 of the not_checked entries). The marker must survive.
+		const pruneResult = pruneSkillUsageLog(tempDir, 3);
+		expect(pruneResult.pruned).toBeGreaterThan(0);
+
+		// Verify feedback_applied markers still exist in the raw log after prune
+		const rawLog = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'skill-usage.jsonl'),
+			'utf-8',
+		);
+		const markerLines = rawLog
+			.split('\n')
+			.filter((l) => l.trim().includes('"type":"feedback_applied"'));
+		expect(markerLines.length).toBeGreaterThan(0);
+
+		// Second feedback pass — the actionable entry is still in the log (newest),
+		// but the preserved marker covers its ID, so no reprocessing occurs.
+		const second = await applySkillUsageFeedback(tempDir);
+		expect(second).toEqual({ processed: 0, bumps: 0 });
+
+		// Knowledge confidence must not be bumped again
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+	});
+
+	test('markers survive multiple prune cycles and remain idempotent', async () => {
+		writeSwarmKnowledge(tempDir, [
+			{
+				id: 'multi-cycle-uuid',
+				lesson: 'multi-cycle prune idempotency test entry',
+				confidence: 0.5,
+			},
+		]);
+		writeSkillFile(tempDir, '.claude/skills/multi-cycle-skill/SKILL.md', [
+			'multi-cycle-uuid',
+		]);
+
+		// Seed one actionable entry and several older non-actionable entries so
+		// pruning actually removes lines on each cycle.
+		for (let i = 0; i < 5; i++) {
+			appendSkillUsageEntry(tempDir, {
+				skillPath: '.claude/skills/multi-cycle-skill/SKILL.md',
+				agentName: 'test-agent',
+				taskID: `task-old-${i}`,
+				timestamp: `2026-01-01T00:0${i.toString()}:00.000Z`,
+				complianceVerdict: 'not_checked',
+				sessionID: 'session-abc',
+			});
+		}
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/multi-cycle-skill/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-actionable',
+			timestamp: '2026-01-02T00:00:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+
+		const first = await applySkillUsageFeedback(tempDir);
+		expect(first).toEqual({ processed: 1, bumps: 1 });
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+
+		// First prune + feedback cycle.
+		expect(pruneSkillUsageLog(tempDir, 3).pruned).toBeGreaterThan(0);
+		expect(await applySkillUsageFeedback(tempDir)).toEqual({
+			processed: 0,
+			bumps: 0,
+		});
+
+		// Second prune + feedback cycle — markers must still survive.
+		expect(pruneSkillUsageLog(tempDir, 2).pruned).toBeGreaterThan(0);
+		expect(await applySkillUsageFeedback(tempDir)).toEqual({
+			processed: 0,
+			bumps: 0,
+		});
+
+		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+	});
+
+	test('incremental processing only applies feedback for new entries', async () => {
+		writeSwarmKnowledge(tempDir, [
+			{ id: 'incr-a-uuid', lesson: 'incremental skill A', confidence: 0.5 },
+			{ id: 'incr-b-uuid', lesson: 'incremental skill B', confidence: 0.5 },
+		]);
+		writeSkillFile(tempDir, '.claude/skills/incr-skill-a/SKILL.md', [
+			'incr-a-uuid',
+		]);
+		writeSkillFile(tempDir, '.claude/skills/incr-skill-b/SKILL.md', [
+			'incr-b-uuid',
+		]);
+
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/incr-skill-a/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-a-1',
+			timestamp: '2026-01-01T00:00:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/incr-skill-b/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-b-1',
+			timestamp: '2026-01-01T00:01:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+
+		const first = await applySkillUsageFeedback(tempDir);
+		expect(first).toEqual({ processed: 2, bumps: 2 });
+
+		const afterFirst = readSwarmKnowledge(tempDir);
+		expect(
+			afterFirst.find((e) => e.id === 'incr-a-uuid')!.confidence,
+		).toBeCloseTo(0.55);
+		expect(
+			afterFirst.find((e) => e.id === 'incr-b-uuid')!.confidence,
+		).toBeCloseTo(0.55);
+
+		// Add one more entry for skill A only.
+		appendSkillUsageEntry(tempDir, {
+			skillPath: '.claude/skills/incr-skill-a/SKILL.md',
+			agentName: 'test-agent',
+			taskID: 'task-a-2',
+			timestamp: '2026-01-01T00:02:00.000Z',
+			complianceVerdict: 'compliant',
+			sessionID: 'session-abc',
+		});
+
+		const second = await applySkillUsageFeedback(tempDir);
+		expect(second).toEqual({ processed: 1, bumps: 1 });
+
+		const afterSecond = readSwarmKnowledge(tempDir);
+		expect(
+			afterSecond.find((e) => e.id === 'incr-a-uuid')!.confidence,
+		).toBeCloseTo(0.6);
+		expect(
+			afterSecond.find((e) => e.id === 'incr-b-uuid')!.confidence,
+		).toBeCloseTo(0.55);
 	});
 });
 

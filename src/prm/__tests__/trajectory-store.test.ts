@@ -11,9 +11,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+	_test_exports,
 	appendTrajectoryEntry,
+	cleanupOldTrajectoryFiles,
 	clearTrajectoryCache,
 	getCurrentStep,
+	getInMemoryTrajectory,
 	getTrajectoryForSession,
 	readTrajectory,
 	truncateTrajectoryIfNeeded,
@@ -145,6 +148,26 @@ describe('trajectory-store', () => {
 				appendTrajectoryEntry(sessionId, createEntry(1), ''),
 			).resolves.toBeUndefined();
 		});
+
+		test('does not update cache when disk append fails', async () => {
+			const sessionId = 'test-session-cache-fail';
+
+			await appendTrajectoryEntry(sessionId, createEntry(1), '/invalid\0path');
+
+			expect(getInMemoryTrajectory(sessionId)).toEqual([]);
+		});
+
+		test('bounds tracked cached sessions with FIFO eviction', async () => {
+			const maxSessions = _test_exports.MAX_TRACKED_TRAJECTORY_SESSIONS;
+
+			for (let i = 0; i <= maxSessions; i++) {
+				await appendTrajectoryEntry(`session-${i}`, createEntry(1), tempDir);
+			}
+
+			expect(getInMemoryTrajectory('session-0')).toEqual([]);
+			expect(getInMemoryTrajectory('session-1')).toHaveLength(1);
+			expect(getInMemoryTrajectory(`session-${maxSessions}`)).toHaveLength(1);
+		});
 	});
 
 	// =========================================================================
@@ -237,6 +260,27 @@ describe('trajectory-store', () => {
 
 			const entries = await readTrajectory(sessionId, tempDir);
 			expect(entries).toEqual([]);
+		});
+
+		test('populates cache from disk on cold read', async () => {
+			const sessionId = 'test-session-cold-read';
+			await appendTrajectoryEntry(sessionId, createEntry(1), tempDir);
+			clearTrajectoryCache(sessionId);
+
+			const entries = await readTrajectory(sessionId, tempDir);
+
+			expect(entries).toHaveLength(1);
+			expect(getInMemoryTrajectory(sessionId)).toHaveLength(1);
+		});
+
+		test('getInMemoryTrajectory returns a defensive array copy', async () => {
+			const sessionId = 'test-session-cache-copy';
+			await appendTrajectoryEntry(sessionId, createEntry(1), tempDir);
+
+			const cached = getInMemoryTrajectory(sessionId);
+			cached.push(createEntry(2));
+
+			expect(getInMemoryTrajectory(sessionId)).toHaveLength(1);
 		});
 	});
 
@@ -446,6 +490,40 @@ describe('trajectory-store', () => {
 			await expect(readTrajectory('../traversal', tempDir)).resolves.toEqual(
 				[],
 			);
+		});
+	});
+
+	describe('cleanupOldTrajectoryFiles', () => {
+		test('removes old trajectory and replay files and keeps fresh files', async () => {
+			const trajectoriesDir = path.join(tempDir, '.swarm', 'trajectories');
+			const replaysDir = path.join(tempDir, '.swarm', 'replays');
+			fs.mkdirSync(trajectoriesDir, { recursive: true });
+			fs.mkdirSync(replaysDir, { recursive: true });
+			const oldTrajectory = path.join(trajectoriesDir, 'old.jsonl');
+			const freshTrajectory = path.join(trajectoriesDir, 'fresh.jsonl');
+			const oldReplay = path.join(replaysDir, 'old.jsonl');
+			const freshReplay = path.join(replaysDir, 'fresh.jsonl');
+			for (const file of [
+				oldTrajectory,
+				freshTrajectory,
+				oldReplay,
+				freshReplay,
+			]) {
+				fs.writeFileSync(file, '{}\n');
+			}
+			const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+			const fresh = new Date();
+			fs.utimesSync(oldTrajectory, old, old);
+			fs.utimesSync(oldReplay, old, old);
+			fs.utimesSync(freshTrajectory, fresh, fresh);
+			fs.utimesSync(freshReplay, fresh, fresh);
+
+			await cleanupOldTrajectoryFiles(tempDir, 7);
+
+			expect(fs.existsSync(oldTrajectory)).toBe(false);
+			expect(fs.existsSync(oldReplay)).toBe(false);
+			expect(fs.existsSync(freshTrajectory)).toBe(true);
+			expect(fs.existsSync(freshReplay)).toBe(true);
 		});
 	});
 

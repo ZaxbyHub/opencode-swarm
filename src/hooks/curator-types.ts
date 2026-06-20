@@ -11,13 +11,13 @@ export interface CuratorSummary {
 	session_id: string;
 	last_updated: string; // ISO 8601
 	last_phase_covered: number;
-	/** Running digest — extended each phase, never regenerated */
+	/** Running digest rebuilt from the capped phase_digests projection */
 	digest: string;
-	/** Phase-level digests for lookup */
+	/** Phase-level digests for lookup, capped to the most recent phases */
 	phase_digests: PhaseDigestEntry[];
 	/** Accumulated compliance observations */
 	compliance_observations: ComplianceObservation[];
-	/** Knowledge update recommendations from the last curator run */
+	/** Accumulated knowledge update recommendations from curator runs */
 	knowledge_recommendations: KnowledgeRecommendation[];
 }
 
@@ -113,12 +113,17 @@ export interface CuratorConfig {
 	enabled: boolean;
 	init_enabled: boolean;
 	phase_enabled: boolean;
+	postmortem_enabled?: boolean;
 	max_summary_tokens: number;
 	min_knowledge_confidence: number;
 	compliance_report: boolean;
 	suppress_warnings: boolean;
 	drift_inject_max_chars: number;
 	llm_timeout_ms?: number;
+	skill_generation_enabled?: boolean;
+	skill_generation_mode?: 'draft' | 'active';
+	min_skill_confidence?: number;
+	min_skill_confirmations?: number;
 }
 
 export interface CuratorInitResult {

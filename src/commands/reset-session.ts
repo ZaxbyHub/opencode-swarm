@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
+import { resetPrmSessionState } from '../prm';
 import { swarmState } from '../state';
 
 /**
@@ -52,6 +54,10 @@ export async function handleResetSessionCommand(
 
 	// Clear in-memory agent sessions
 	const sessionCount = swarmState.agentSessions.size;
+	for (const [sessionId, session] of swarmState.agentSessions) {
+		resetPrmSessionState(session, sessionId);
+		clearTrajectoryStep(sessionId);
+	}
 	swarmState.agentSessions.clear();
 	results.push(`✅ Cleared ${sessionCount} in-memory agent session(s)`);
 

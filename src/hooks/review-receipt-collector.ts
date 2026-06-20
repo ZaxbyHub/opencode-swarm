@@ -180,8 +180,73 @@ export interface ReviewerReceiptOutput {
 	output?: unknown;
 }
 
+export interface ReviewerReceiptTranscriptInput {
+	targetAgent?: string;
+	prompt: string;
+	transcript: string;
+	sessionID?: string;
+	sessionId?: string;
+}
+
 function isTaskTool(tool: unknown): boolean {
 	return tool === 'Task' || tool === 'task';
+}
+
+export async function collectReviewerReceiptFromTranscript(
+	directory: string,
+	input: ReviewerReceiptTranscriptInput,
+): Promise<string | null> {
+	try {
+		if (
+			input.targetAgent &&
+			stripKnownSwarmPrefix(input.targetAgent).toLowerCase() !== 'reviewer'
+		) {
+			return null;
+		}
+		if (!input.prompt || !input.transcript) return null;
+
+		const parsed = parseReviewerOutput(input.transcript);
+		if (!parsed) return null;
+
+		const receipt =
+			parsed.verdict === 'approved'
+				? buildApprovedReceipt({
+						agent: 'reviewer',
+						sessionId: input.sessionID ?? input.sessionId,
+						scopeContent: input.prompt,
+						scopeDescription: 'reviewer-task-prompt',
+						checkedAspects: ['code-review'],
+						validatedClaims: [
+							`VERDICT: APPROVED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,
+						],
+						caveats: parsed.issues.map((i) => i.text),
+					})
+				: buildRejectedReceipt({
+						agent: 'reviewer',
+						sessionId: input.sessionID ?? input.sessionId,
+						scopeContent: input.prompt,
+						scopeDescription: 'reviewer-task-prompt',
+						blockingFindings: parsed.issues.map(
+							(i): BlockingFinding => ({
+								location: i.location ?? 'unknown',
+								summary: i.text,
+								severity: i.severity,
+							}),
+						),
+						evidenceReferences: parsed.issues
+							.map((i) => i.location)
+							.filter((loc): loc is string => Boolean(loc)),
+						passConditions: parsed.fixes,
+						summary: `Reviewer REJECTED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,
+					});
+
+		return await persistReviewReceipt(directory, receipt);
+	} catch (err) {
+		logger.warn(
+			`[review-receipt-collector] failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
 }
 
 /**
@@ -214,47 +279,15 @@ export async function collectReviewerReceiptAfter(
 				? argsRecord.prompt
 				: '';
 		const transcript = typeof output.output === 'string' ? output.output : '';
-		if (!prompt || !transcript) return null;
-
-		const parsed = parseReviewerOutput(transcript);
-		if (!parsed) return null;
-
-		const sessionId =
+		const sessionID =
 			typeof input.sessionID === 'string' ? input.sessionID : undefined;
 
-		const receipt =
-			parsed.verdict === 'approved'
-				? buildApprovedReceipt({
-						agent: 'reviewer',
-						sessionId,
-						scopeContent: prompt,
-						scopeDescription: 'reviewer-task-prompt',
-						checkedAspects: ['code-review'],
-						validatedClaims: [
-							`VERDICT: APPROVED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,
-						],
-						caveats: parsed.issues.map((i) => i.text),
-					})
-				: buildRejectedReceipt({
-						agent: 'reviewer',
-						sessionId,
-						scopeContent: prompt,
-						scopeDescription: 'reviewer-task-prompt',
-						blockingFindings: parsed.issues.map(
-							(i): BlockingFinding => ({
-								location: i.location ?? 'unknown',
-								summary: i.text,
-								severity: i.severity,
-							}),
-						),
-						evidenceReferences: parsed.issues
-							.map((i) => i.location)
-							.filter((loc): loc is string => Boolean(loc)),
-						passConditions: parsed.fixes,
-						summary: `Reviewer REJECTED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,
-					});
-
-		return await persistReviewReceipt(directory, receipt);
+		return await collectReviewerReceiptFromTranscript(directory, {
+			targetAgent: parsedArgs.targetAgent,
+			prompt,
+			transcript,
+			sessionID,
+		});
 	} catch (err) {
 		logger.warn(
 			`[review-receipt-collector] failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -27,6 +27,33 @@ export function createDefaultEscalationState(): EscalationState {
 	};
 }
 
+function cloneCourseCorrection(correction: CourseCorrection): CourseCorrection {
+	return {
+		...correction,
+		stepRange: [...correction.stepRange] as [number, number],
+	};
+}
+
+function cloneEscalationState(state: EscalationState): EscalationState {
+	return {
+		patternCounts: new Map(state.patternCounts),
+		escalationLevel: state.escalationLevel,
+		lastPatternDetected: state.lastPatternDetected
+			? {
+					...state.lastPatternDetected,
+					stepRange: [...state.lastPatternDetected.stepRange] as [
+						number,
+						number,
+					],
+					affectedAgents: [...state.lastPatternDetected.affectedAgents],
+					affectedTargets: [...state.lastPatternDetected.affectedTargets],
+				}
+			: null,
+		hardStopPending: state.hardStopPending,
+		correctionsPending: state.correctionsPending.map(cloneCourseCorrection),
+	};
+}
+
 /**
  * Generates a CourseCorrection from a PatternMatch.
  * Uses simple templates based on pattern type and escalation level.
@@ -182,12 +209,12 @@ export class EscalationTracker {
 	}
 
 	/**
-	 * Returns the current escalation state.
+	 * Returns a defensive copy of the current escalation state.
 	 *
-	 * @returns The current EscalationState (reference, not a copy)
+	 * @returns The current EscalationState copy
 	 */
 	getState(): EscalationState {
-		return this._state;
+		return cloneEscalationState(this._state);
 	}
 
 	/**
@@ -199,12 +226,12 @@ export class EscalationTracker {
 	}
 
 	/**
-	 * Returns all pending course corrections.
+	 * Returns defensive copies of all pending course corrections.
 	 *
 	 * @returns Array of pending CourseCorrection objects
 	 */
 	getPendingCorrections(): CourseCorrection[] {
-		return this._state.correctionsPending;
+		return this._state.correctionsPending.map(cloneCourseCorrection);
 	}
 
 	/**

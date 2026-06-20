@@ -155,17 +155,23 @@ function writeCheckpointLog(log: CheckpointLog, directory: string): void {
 /**
  * Execute git command safely using spawnSync with argument array (no shell interpolation)
  */
-function gitExec(args: string[]): string {
+function gitExec(args: string[], cwd: string): string {
 	const result = child_process.spawnSync('git', args, {
+		cwd,
 		encoding: 'utf-8',
 		timeout: GIT_TIMEOUT_MS,
-		stdio: ['pipe', 'pipe', 'pipe'],
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
 	});
+	if (result.error) {
+		throw new Error(
+			`git failed to start: ${(result.error as NodeJS.ErrnoException).code ?? 'unknown'} — ${result.error.message}`,
+		);
+	}
 	if (result.status !== 0) {
-		const err = new Error(
+		throw new Error(
 			result.stderr?.trim() || `git exited with code ${result.status}`,
 		);
-		throw err;
 	}
 	return result.stdout;
 }
@@ -183,17 +189,17 @@ function appendRetentionEvent(directory: string, event: RetentionEvent): void {
 /**
  * Get current git SHA
  */
-function getCurrentSha(): string {
-	const output = gitExec(['rev-parse', 'HEAD']);
+function getCurrentSha(directory: string): string {
+	const output = gitExec(['rev-parse', 'HEAD'], directory);
 	return output.trim();
 }
 
 /**
  * Check if we're in a git repository
  */
-function isGitRepo(): boolean {
+function isGitRepo(directory: string): boolean {
 	try {
-		gitExec(['rev-parse', '--git-dir']);
+		gitExec(['rev-parse', '--git-dir'], directory);
 		return true;
 	} catch {
 		return false;
@@ -239,12 +245,12 @@ function handleSave(label: string, directory: string): string {
 		// Stage all changes, excluding .swarm/ to avoid committing checkpoint metadata
 		// into project history. On timeout or permission error this throws, which
 		// propagates to the outer catch — safer than committing a partially-staged tree.
-		gitExec(['add', '--all', '--', ':!.swarm/']);
+		gitExec(['add', '--all', '--', ':!.swarm/'], directory);
 
 		// Check whether anything was staged (exit 0 = nothing staged, non-zero = changes)
 		const hasStagedChanges = (() => {
 			try {
-				gitExec(['diff', '--cached', '--quiet']);
+				gitExec(['diff', '--cached', '--quiet'], directory);
 				return false;
 			} catch {
 				return true;
@@ -252,18 +258,21 @@ function handleSave(label: string, directory: string): string {
 		})();
 
 		if (hasStagedChanges) {
-			gitExec(['commit', '-m', `checkpoint: ${label}`]);
+			gitExec(['commit', '-m', `checkpoint: ${label}`], directory);
 		} else if (allowEmptyCommits) {
 			// Explicit opt-in: preserve legacy behaviour of creating a commit even
 			// when the working tree is clean.
-			gitExec(['commit', '--allow-empty', '-m', `checkpoint: ${label}`]);
+			gitExec(
+				['commit', '--allow-empty', '-m', `checkpoint: ${label}`],
+				directory,
+			);
 		}
 		// Otherwise: nothing to commit — checkpoint records current HEAD SHA without
 		// creating a new git commit. Two consecutive clean-tree saves will share the
 		// same SHA in the log; both restore correctly to the same HEAD position.
 
 		// Get SHA (equals _sha when no commit was made)
-		const newSha = getCurrentSha();
+		const newSha = getCurrentSha(directory);
 
 		// Append to log
 		log.checkpoints.push({
@@ -339,9 +348,9 @@ export function saveCheckpointRecord(
 			return { success: false, error: `duplicate label: "${label}"` };
 		}
 		let sha = '';
-		if (isGitRepo()) {
+		if (isGitRepo(directory)) {
 			try {
-				sha = getCurrentSha();
+				sha = getCurrentSha(directory);
 			} catch {
 				sha = '';
 			}
@@ -383,7 +392,7 @@ function handleRestore(label: string, directory: string): string {
 		}
 
 		// Soft reset to the checkpoint SHA (preserves working tree)
-		gitExec(['reset', '--soft', checkpoint.sha]);
+		gitExec(['reset', '--soft', checkpoint.sha], directory);
 
 		return JSON.stringify(
 			{
@@ -508,7 +517,7 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 	},
 	execute: async (args, directory) => {
 		// Validate we're in a git repository
-		if (!isGitRepo()) {
+		if (!isGitRepo(directory)) {
 			return JSON.stringify(
 				{
 					action: 'unknown',

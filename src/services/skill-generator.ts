@@ -159,11 +159,29 @@ export function isSkillMaturityEligible(
 		| undefined = entry.retrieval_outcomes,
 ): boolean {
 	const outcomeSignal = computeOutcomeSignal(outcomes);
+
+	// Negative track record always blocks
 	if (outcomeSignal < 0) return false;
+
 	const strongOutcomes = hasStrongSkillOutcomeRecord(outcomes);
+
+	// POSITIVE GATE: Strong positive outcome track record overrides other criteria
+	// (allows low-confidence or few-confirmation entries if they have strong outcomes)
+	if (outcomeSignal > 0 && strongOutcomes) return true;
+
+	// LEGACY GATES (for entries without strong positive outcomes):
+	// Entries must have adequate confidence; strong outcomes alone don't bypass confidence
 	if (entry.confidence < opts.minConfidence && !strongOutcomes) return false;
-	const confirmations = (entry.confirmed_by ?? []).length;
-	return confirmations >= opts.minConfirmations || strongOutcomes;
+
+	// Count distinct phase numbers (not total confirmations)
+	const distinctPhases = new Set(
+		(entry.confirmed_by ?? [])
+			.map((c) => c.phase_number)
+			.filter((p): p is number => typeof p === 'number'),
+	).size;
+
+	// Must have sufficient confirmations (counting distinct phases) OR strong outcomes
+	return distinctPhases >= opts.minConfirmations || strongOutcomes;
 }
 
 // ============================================================================
@@ -880,6 +898,16 @@ export async function activateProposal(
 			reason: `proposal not found or already activated: ${readErr instanceof Error ? readErr.message : String(readErr)}`,
 		};
 	}
+	// Check rejection ledger BEFORE the status flip: generateSkills stores
+	// draft-content hashes, so the lookup must use the same form.
+	if (await isRejectedSkillContent(directory, cleanSlug, proposalContent)) {
+		return {
+			activated: false,
+			from,
+			to,
+			reason: 'previously rejected equivalent content',
+		};
+	}
 	// Re-stamp status: active in frontmatter (proposals carry status: draft).
 	const flipped = proposalContent.replace(
 		/^status:\s*draft\s*$/m,
@@ -907,7 +935,7 @@ export async function activateProposal(
 				{
 					directory,
 					slug: cleanSlug,
-					candidateContent: flipped,
+					candidateContent: proposalContent,
 					incumbentContent,
 					operation: options.operation ?? 'skill_apply',
 				},

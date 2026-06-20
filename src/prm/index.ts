@@ -8,9 +8,9 @@
  * - Escalation tracking via escalation
  *
  * This module provides the createPrmHook factory that returns the toolAfter
- * handler used by the swarm hook system. PRM replaces loop-detector.ts for
- * repetition_loop detection, but loop-detector.ts is kept as a fast circuit
- * breaker for backward compatibility.
+ * handler used by the swarm hook system. PRM complements loop-detector.ts:
+ * loop-detector.ts remains the fast circuit breaker in guardrails/tool-before,
+ * while PRM provides deeper multi-pattern detection and escalation.
  */
 
 // Course correction
@@ -53,6 +53,7 @@ import { detectPatterns } from './pattern-detector';
 import { recordReplayEntry, startReplayRecording } from './replay';
 import {
 	cleanupOldTrajectoryFiles,
+	clearTrajectoryCache,
 	getInMemoryTrajectory,
 	readTrajectory,
 } from './trajectory-store';
@@ -74,6 +75,7 @@ export const _internals: {
 	generateCourseCorrection: typeof generateCourseCorrection;
 	formatCourseCorrectionForInjection: typeof formatCourseCorrectionForInjection;
 	cleanupOldTrajectoryFiles: typeof cleanupOldTrajectoryFiles;
+	clearTrajectoryCache: typeof clearTrajectoryCache;
 	recordReplayEntry: typeof recordReplayEntry;
 	startReplayRecording: typeof startReplayRecording;
 	telemetry: typeof telemetry;
@@ -85,6 +87,7 @@ export const _internals: {
 	generateCourseCorrection,
 	formatCourseCorrectionForInjection,
 	cleanupOldTrajectoryFiles,
+	clearTrajectoryCache,
 	recordReplayEntry,
 	startReplayRecording,
 	telemetry,
@@ -117,6 +120,35 @@ interface SessionPrmState {
 	prmInitialized?: boolean;
 	/** Replay artifact path for this session */
 	replayArtifactPath?: string | null;
+}
+
+interface ResettablePrmSessionState {
+	prmEscalationTracker?: EscalationTracker;
+	prmInitialized?: boolean;
+	prmPatternCounts?: Map<string, number>;
+	prmEscalationLevel?: number;
+	prmLastPatternDetected?: unknown;
+	prmHardStopPending?: boolean;
+	prmTrajectoryStep?: number;
+	replayArtifactPath?: string | null;
+}
+
+export function resetPrmSessionState(
+	session: ResettablePrmSessionState,
+	sessionId?: string,
+): void {
+	session.prmEscalationTracker = undefined;
+	session.prmInitialized = false;
+	session.prmPatternCounts = new Map();
+	session.prmEscalationLevel = 0;
+	session.prmLastPatternDetected = null;
+	session.prmHardStopPending = false;
+	session.prmTrajectoryStep = 0;
+	session.replayArtifactPath = null;
+
+	if (sessionId) {
+		_internals.clearTrajectoryCache(sessionId);
+	}
 }
 
 /**
@@ -248,9 +280,6 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 					hardStopPending = escalationResult.hardStop;
 				}
 
-				// Clear the corrections queue after injection to prevent unbounded growth
-				escalationTracker.clearPendingCorrections();
-
 				// Update session PRM state fields
 				session.prmPatternCounts.set(
 					match.pattern,
@@ -309,6 +338,10 @@ export function createPrmHook(config: PrmConfig, directory: string): PrmHook {
 					});
 				}
 			}
+
+			// Clear the corrections queue after all matches are injected so a batch
+			// cannot discard later matches before session state has observed them.
+			escalationTracker.clearPendingCorrections();
 
 			// Record escalation level change for replay (non-blocking, serialized)
 			if (

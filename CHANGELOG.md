@@ -1,5 +1,176 @@
 # Changelog
 
+## [7.83.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.2...v7.83.0) (2026-06-20)
+
+
+### Features
+
+* **repo-graph:** configurable directory excludes and crash-resilient builds ([4d49446](https://github.com/ZaxbyHub/opencode-swarm/commit/4d49446e7fef98ea64775495b59150ba79edc7f8))
+
+## [7.82.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.1...v7.82.2) (2026-06-20)
+
+
+### Bug Fixes
+
+* **knowledge:** close PR [#1207](https://github.com/ZaxbyHub/opencode-swarm/issues/1207) review gaps (issue [#1219](https://github.com/ZaxbyHub/opencode-swarm/issues/1219) F-002/F-003/F-004) ([9c03e7d](https://github.com/ZaxbyHub/opencode-swarm/commit/9c03e7dee9146690671479a4b63b8c847ff1db1e))
+* **pr-1450:** add release fragment and fix invalid test status ([badbdd6](https://github.com/ZaxbyHub/opencode-swarm/commit/badbdd6bad808ac1b0377fd07654fde0de3e995c))
+
+## [7.82.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.0...v7.82.1) (2026-06-20)
+
+
+### Bug Fixes
+
+* add Buffer.byteLength nullish guards + clarify doc gap mapping ([2c1a6af](https://github.com/ZaxbyHub/opencode-swarm/commit/2c1a6af73bf4cd4dd6cd7d7765fbd297cb6a965d))
+
+## [7.82.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.4...v7.82.0) (2026-06-20)
+
+
+### Features
+
+* **background:** wire async stage b gates ([abe3726](https://github.com/ZaxbyHub/opencode-swarm/commit/abe372664492765b9cd25c651e8565003f22ebc2))
+
+## [7.81.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.3...v7.81.4) (2026-06-20)
+
+
+### Bug Fixes
+
+* **prm,skills,learning:** resolve 5 defects from issue [#1417](https://github.com/ZaxbyHub/opencode-swarm/issues/1417) ([431f072](https://github.com/ZaxbyHub/opencode-swarm/commit/431f072e28467030b0b7e5a62bc67c5b612c2c27))
+
+## [7.81.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.2...v7.81.3) (2026-06-20)
+
+
+### Bug Fixes
+
+* **sandbox:** address five advisory hardening findings ([7347fa3](https://github.com/ZaxbyHub/opencode-swarm/commit/7347fa3d30cec1ac1b248b6e795bae3f5b821571))
+
+## [7.81.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.1...v7.81.2) (2026-06-20)
+
+
+### Bug Fixes
+
+* canonicalize mock.target normalization, add allowlist O(1) lookup, extend tests ([7563de2](https://github.com/ZaxbyHub/opencode-swarm/commit/7563de222cb8bf500d623787ac743b6eced31a9b))
+
+## [7.81.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.0...v7.81.1) (2026-06-20)
+
+
+### Bug Fixes
+
+* **planning-system:** resolve audit findings F-03 through F-12 ([2adc105](https://github.com/ZaxbyHub/opencode-swarm/commit/2adc105dafa84541aaeccc43cd0b2282a190180b))
+
+## [7.81.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.80.0...v7.81.0) (2026-06-20)
+
+
+### Features
+
+* **skills:** unify pr review and feedback flow ([e8f42f5](https://github.com/ZaxbyHub/opencode-swarm/commit/e8f42f5375f4cbe3b9370c5b11bb52e53e1f6c82))
+* **skills:** unify pr review and feedback flow ([51d8205](https://github.com/ZaxbyHub/opencode-swarm/commit/51d8205510b8fb916c6fe81538ec803c4f2ff4d4))
+
+
+### Performance Improvements
+
+* **ci:** skip CI for release-please PRs in both PR and merge-queue tiers ([4adb6f1](https://github.com/ZaxbyHub/opencode-swarm/commit/4adb6f13c27d670b7bcd92023fa820e0ee7a377a))
+
+## [7.80.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.7...v7.80.0) (2026-06-19)
+
+
+### Features
+
+* **async:** add advisory lane dispatch ([bb668ee](https://github.com/ZaxbyHub/opencode-swarm/commit/bb668eeb13d7978e1f55bf15fa0aad4295cdcde7))
+* **parallel:** make parallel coders + worktree isolation first-class ([cf76234](https://github.com/ZaxbyHub/opencode-swarm/commit/cf76234757b9cf8f7237e9243ad2bdf06f6cd81f))
+
+
+### Bug Fixes
+
+* **knowledge:** batch curator enrichment and isolate enrichment quota usage ([d4d7498](https://github.com/ZaxbyHub/opencode-swarm/commit/d4d7498343c6975727db5d5db91e09c1815ba75d))
+* **knowledge:** wire enrichment batch_size through Zod schema and address review findings ([66b7f59](https://github.com/ZaxbyHub/opencode-swarm/commit/66b7f5902fa43cfe60f6b4f9308bb7692daa8d0e))
+
+## [7.79.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.6...v7.79.7) (2026-06-19)
+
+
+### Bug Fixes
+
+* **skill-generation:** filter undefined phase numbers and add maturity gate tests ([2d5354d](https://github.com/ZaxbyHub/opencode-swarm/commit/2d5354d79248a60f621be1209435b49f6a64fcf5))
+* **skill-generation:** implement outcome-based maturity gates for knowledge-to-skill compilation ([5afc75a](https://github.com/ZaxbyHub/opencode-swarm/commit/5afc75a9090bbf4085163ccefd5f2e41249f8441))
+
+## [7.79.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.5...v7.79.6) (2026-06-19)
+
+
+### Bug Fixes
+
+* **ci:** apply biome auto-fixes for quality job ([f7870bb](https://github.com/ZaxbyHub/opencode-swarm/commit/f7870bb9585794f94adc3102c467193e9c596f10))
+* **knowledge-validator:** iterate all occurrences, add release fragment and direct tests ([5ca19a6](https://github.com/ZaxbyHub/opencode-swarm/commit/5ca19a63d974986a2a7e7fbfe3f4454551755cb2))
+* **knowledge-validator:** require context overlap to detect lesson contradictions ([9b4cd86](https://github.com/ZaxbyHub/opencode-swarm/commit/9b4cd865ff06c75ec80d881dd8929d517f15766a))
+* **skill-usage:** Eliminate marker-loss reprocessing; enforce explicit task attribution ([d8a2a41](https://github.com/ZaxbyHub/opencode-swarm/commit/d8a2a41d914b9e3d4a56bf5df6a6de4445be28e0))
+* **skill-usage:** preserve malformed log lines in prune and strengthen tests ([113dca5](https://github.com/ZaxbyHub/opencode-swarm/commit/113dca5e8057e2bd58c520de3e0d58ade90b1d4e))
+
+## [7.79.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.4...v7.79.5) (2026-06-18)
+
+
+### Bug Fixes
+
+* **prm:** harden trajectory, curator, and learning flows ([8446abc](https://github.com/ZaxbyHub/opencode-swarm/commit/8446abc0e21eee9047c0ddffae795ad958ef5663))
+
+## [7.79.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.3...v7.79.4) (2026-06-18)
+
+
+### Bug Fixes
+
+* **npm:** update repository URL for provenance verification after repo move ([9a289de](https://github.com/ZaxbyHub/opencode-swarm/commit/9a289de1b512a29dc6bb0cffeb6afb1b8700001c))
+* **npm:** update repository URL for provenance verification after repo move ([e22794e](https://github.com/ZaxbyHub/opencode-swarm/commit/e22794eaf5f3b1b72f8b58839666f80174cbb6ff))
+
+## [7.79.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.2...v7.79.3) (2026-06-18)
+
+
+### Bug Fixes
+
+* **planning:** offer general council before plan writing ([c27cb76](https://github.com/ZaxbyHub/opencode-swarm/commit/c27cb763ffc0e3f4ae8453f90b3520ade86802bd))
+
+## [7.79.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.79.1...v7.79.2) (2026-06-18)
+
+
+### Bug Fixes
+
+* **ci:** add preload-based keepalive to wrapper for universal Bun [#32056](https://github.com/ZaxbyHub/opencode-swarm/issues/32056) fix ([e832e9a](https://github.com/ZaxbyHub/opencode-swarm/commit/e832e9ad6946093a638cf1019db2f51b59d2e8fd))
+* **ci:** per-file wall-clock timeout wrapper for Windows merge-queue shard hangs ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([a7bc92d](https://github.com/ZaxbyHub/opencode-swarm/commit/a7bc92d1be8a35c2f69e40029f0a921f2afd649b))
+* **ci:** per-file wall-clock timeout wrapper for Windows merge-queue shard hangs ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([9f11a90](https://github.com/ZaxbyHub/opencode-swarm/commit/9f11a9027a941974c8e1af897dd6d907f0c475c8))
+* **ci:** rename test fixtures to avoid CI auto-discovery ([#1403](https://github.com/ZaxbyHub/opencode-swarm/issues/1403)) ([f2ace34](https://github.com/ZaxbyHub/opencode-swarm/commit/f2ace3432fe0324ac6a3cbb8f7bf08b13ed65380))
+* **tests:** add Bun [#32056](https://github.com/ZaxbyHub/opencode-swarm/issues/32056) keepalive workaround to Windows-hanging test files ([0e05d34](https://github.com/ZaxbyHub/opencode-swarm/commit/0e05d34f08a1e8e00b3baffe14f5fedadfd1fc50))
+
+## [7.79.1](https://github.com/zaxbysauce/opencode-swarm/compare/v7.79.0...v7.79.1) (2026-06-17)
+
+
+### Performance Improvements
+
+* **ci:** two-tier CI with automatic test sharding for faster PR feedback ([#1395](https://github.com/zaxbysauce/opencode-swarm/issues/1395)) ([5f4cd84](https://github.com/zaxbysauce/opencode-swarm/commit/5f4cd84690096b29b6bd10b3106e0be0b8033b3b))
+
+## [7.79.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.8...v7.79.0) (2026-06-17)
+
+
+### Features
+
+* **tools:** reduce architect tool surface and lower summarizer threshold ([#1393](https://github.com/zaxbysauce/opencode-swarm/issues/1393)) ([d098499](https://github.com/zaxbysauce/opencode-swarm/commit/d098499a80537b8f921679aa06ea864061c07583))
+
+## [7.78.8](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.7...v7.78.8) (2026-06-17)
+
+
+### Bug Fixes
+
+* **git:** correct finalize git detection and subprocess safety ([#1396](https://github.com/zaxbysauce/opencode-swarm/issues/1396)) ([b3fb3ce](https://github.com/zaxbysauce/opencode-swarm/commit/b3fb3ce6c3e697a40cd630065f63a14b8bb2d56f))
+
+## [7.78.7](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.6...v7.78.7) (2026-06-17)
+
+
+### Bug Fixes
+
+* resolve 106 pre-existing test failures across three categories ([#1245](https://github.com/zaxbysauce/opencode-swarm/issues/1245)) ([5a6cee1](https://github.com/zaxbysauce/opencode-swarm/commit/5a6cee17075f414385d74acd92a3909487f95dab))
+
+## [7.78.6](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.5...v7.78.6) (2026-06-17)
+
+
+### Bug Fixes
+
+* **close:** distinguish git lookup failures ([#1254](https://github.com/zaxbysauce/opencode-swarm/issues/1254)) ([37eb88f](https://github.com/zaxbysauce/opencode-swarm/commit/37eb88fa3ab433154f964ae1c51873e05dad87da))
+
 ## [7.78.5](https://github.com/zaxbysauce/opencode-swarm/compare/v7.78.4...v7.78.5) (2026-06-16)
 
 

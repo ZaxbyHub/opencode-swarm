@@ -97,6 +97,23 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		expect(funnelIdx).toBeLessThan(saveIdx);
 	});
 
+	test('7b — General Council option appears before funnel and save_plan in both mirrors', () => {
+		const section = '### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)';
+		const opencodeCouncilIdx = opencodeContent.indexOf(section);
+		const claudeCouncilIdx = claudeContent.indexOf(section);
+		const opencodeFunnelIdx = opencodeContent.indexOf(
+			'### CLARIFICATION FUNNEL (pre-save_plan)',
+		);
+		const opencodeSaveIdx = opencodeContent.indexOf('Use the `save_plan` tool');
+
+		expect(opencodeCouncilIdx).toBeGreaterThan(0);
+		expect(claudeCouncilIdx).toBeGreaterThan(0);
+		expect(opencodeCouncilIdx).toBeLessThan(opencodeFunnelIdx);
+		expect(opencodeCouncilIdx).toBeLessThan(opencodeSaveIdx);
+		expect(opencodeContent).toContain('before any critic pre-plan review');
+		expect(claudeContent).toContain('before any critic pre-plan review');
+	});
+
 	test('8 — mirror parity: .claude version is byte-identical to .opencode version', () => {
 		expect(claudeContent).toBe(opencodeContent);
 	});

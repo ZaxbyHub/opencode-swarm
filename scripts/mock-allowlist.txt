@@ -2,14 +2,14 @@
 # One normalized target per line. Blank lines and # comments are ignored.
 # EXACT match only — each target must be listed individually.
 #
-# Normalization: strip leading ../ sequences -> replace with src/
+# Normalization: strip leading ../ and ./ sequences -> replace with src/
 #                strip trailing .js
 # Example: '../../../src/plan/manager.js' -> 'src/plan/manager'
 #
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
 #
-# Last updated: 2026-05-25
+# Last updated: 2026-06-17
 
 # --- Node builtins ---
 node:child_process
@@ -17,85 +17,59 @@ node:fs
 node:fs/promises
 node:path
 
-# --- src/agents ---
+# --- src ---
 src/agents/critic
-
-# --- src/background ---
 src/background/event-bus
 src/background/manager
-
-# --- src/build ---
 src/build/discovery
-
-# --- src/config ---
 src/config
 src/config/index
 src/config/index.ts
 src/config/schema
 src/config/schema.ts
-
-# --- src/db ---
 src/db/qa-gate-profile
-
-# --- src/evidence ---
 src/evidence/manager
 src/evidence/task-file
-
-# --- src/git ---
 src/git/branch
-
-# --- src/hooks ---
 src/hooks/curator
 src/hooks/curator-drift
 src/hooks/design-doc-drift
 src/hooks/extractors
 src/hooks/hive-promoter
+src/hooks/knowledge-application
 src/hooks/knowledge-curator
 src/hooks/knowledge-migrator
-src/hooks/knowledge-application
 src/hooks/knowledge-reader
 src/hooks/knowledge-store
 src/hooks/knowledge-validator
+src/hooks/review-receipt
 src/hooks/search-knowledge
 src/hooks/skill-usage-log
 src/hooks/utils
-
-# --- src/lang ---
 src/lang/detector
 src/lang/registry
-
-# --- src/mutation ---
+src/ledger
+src/mutation/engine
 src/mutation/equivalence
-
-# --- src/parallel ---
+src/mutation/gate
 src/parallel/file-locks
-
-# --- src/plan ---
 src/plan/checkpoint
 src/plan/ledger
 src/plan/manager
-
-# --- src/sast ---
+src/proper-lockfile
+src/sandbox/linux/bubblewrap-executor
 src/sast/rules/index
 src/sast/semgrep
-
-# --- src/services ---
 src/services/evidence-summary-service
 src/services/handoff-service
+src/services/preflight-service
 src/services/run-memory
 src/services/skill-generator
 src/services/skill-improver
-
-# --- src/session ---
 src/session/snapshot-writer
-
-# --- src/state ---
 src/state
-
-# --- src/telemetry ---
 src/telemetry
-
-# --- src/tools ---
+src/test-impact/analyzer
 src/tools/co-change-analyzer
 src/tools/knowledge-recall
 src/tools/lint
@@ -104,16 +78,9 @@ src/tools/sast-baseline
 src/tools/sast-scan
 src/tools/secretscan
 src/tools/write-retro
-
-# --- src/sandbox ---
-src/sandbox/linux/bubblewrap-executor
-
-# --- src/utils ---
+src/utils
 src/utils/bun-compat
 src/utils/logger
 src/utils/path-security
 src/utils/spec-hash
-src/utils
 
-# --- Third-party packages (legacy mock.module in knowledge-reader test) ---
-src/proper-lockfile

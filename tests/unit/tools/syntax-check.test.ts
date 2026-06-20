@@ -31,6 +31,7 @@ describe('syntax_check tool', () => {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
 		vi.clearAllMocks();
+		vi.restoreAllMocks();
 	});
 
 	// ============ Valid File Parsing ============
@@ -347,6 +348,8 @@ describe('syntax_check tool', () => {
 			expect(result).toBeDefined();
 			// verdict must be a valid value (no uncaught exception from traversal)
 			expect(['pass', 'fail', 'skipped']).toContain(result?.verdict);
+			// Ensure summary is a string and present in the result
+			expect(typeof result?.summary).toBe('string');
 		});
 	});
 });

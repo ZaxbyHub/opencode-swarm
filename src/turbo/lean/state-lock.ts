@@ -106,7 +106,7 @@ export async function withTurboStateLock<T>(
 			);
 		}
 
-		if (result && result.acquired) {
+		if (result?.acquired) {
 			const lock = result.lock;
 			try {
 				return await fn();

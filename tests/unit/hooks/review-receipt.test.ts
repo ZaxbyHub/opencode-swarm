@@ -321,7 +321,7 @@ describe('persistReviewReceipt', () => {
 		const receiptPath = await persistReviewReceipt(tmpDir, receipt);
 
 		expect(fs.existsSync(receiptPath)).toBe(true);
-		expect(receiptPath).toContain('.swarm/review-receipts');
+		expect(receiptPath).toContain(path.join('.swarm', 'review-receipts'));
 	});
 
 	it('receipt file is valid JSON matching the receipt', async () => {
@@ -784,14 +784,16 @@ describe('buildReceiptContextForDrift', () => {
 describe('resolveReceiptsDir', () => {
 	it('returns .swarm/review-receipts under the given directory', () => {
 		const dir = resolveReceiptsDir('/projects/myapp');
-		expect(dir).toBe('/projects/myapp/.swarm/review-receipts');
+		expect(dir).toBe(path.join('/projects/myapp', '.swarm', 'review-receipts'));
 	});
 });
 
 describe('resolveReceiptIndexPath', () => {
 	it('returns .swarm/review-receipts/index.json under the given directory', () => {
 		const p = resolveReceiptIndexPath('/projects/myapp');
-		expect(p).toBe('/projects/myapp/.swarm/review-receipts/index.json');
+		expect(p).toBe(
+			path.join('/projects/myapp', '.swarm', 'review-receipts', 'index.json'),
+		);
 	});
 });
 

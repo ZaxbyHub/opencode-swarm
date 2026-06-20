@@ -10,7 +10,9 @@ const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-const REQUIRED_PROJECT_SKILL_SLUGS = [
+// Must stay in sync with BUNDLED_PROJECT_SKILLS in src/config/bundled-skills.ts.
+// A drift test in tests/unit/scripts/package-smoke.test.ts asserts the two match.
+export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'brainstorm',
 	'specify',
 	'clarify-spec',
@@ -31,6 +33,7 @@ const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'critic-gate',
 	'execute',
 	'phase-wrap',
+	'loop',
 ];
 
 const REQUIRED_PACKAGE_FILES = [

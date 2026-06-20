@@ -322,7 +322,9 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 	// Ensure .swarm/ exists before repo graph init tries to save the first graph.
 	initTelemetry(ctx.directory);
 
-	const repoGraphHook = createRepoGraphBuilderHook(ctx.directory);
+	const repoGraphHook = createRepoGraphBuilderHook(ctx.directory, undefined, {
+		excludeDirs: config.repo_graph?.exclude_dirs,
+	});
 	queueMicrotask(() => {
 		const watchdog = setTimeout(() => {
 			log(
@@ -526,8 +528,8 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 		ctx.directory,
 	);
 	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
-	// Issue #1151 PR 2 (Stage A): read-only observer for the background-subagent
-	// completion signal. No-op unless hooks.background_subagents is opted in.
+	// Advisory ingester for trusted background-subagent completion signals.
+	// No-op unless hooks.background_subagents is opted in; never advances gates.
 	const backgroundCompletionObserver = createBackgroundCompletionObserver({
 		config: {
 			enabled:
@@ -1323,6 +1325,11 @@ async function initializeOpenCodeSwarm(ctx: Parameters<Plugin>[0]) {
 					template: '/swarm brainstorm $ARGUMENTS',
 					description:
 						'Use /swarm brainstorm to enter the architect MODE: BRAINSTORM planning workflow',
+				},
+				'swarm-loop': {
+					template: '/swarm loop $ARGUMENTS',
+					description:
+						'Use /swarm loop <objective> to run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
 				},
 				'swarm-council': {
 					template: '/swarm council $ARGUMENTS',

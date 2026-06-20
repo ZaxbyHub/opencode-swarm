@@ -106,12 +106,54 @@ export function resolveHiveEventsPath(): string {
 // Read Functions
 // ============================================================================
 
+// Parse JSONL knowledge content, stopping after `max` valid entries. Skips
+// unparseable lines (with a warning). Used by both the cached (uncapped) and
+// bypass (capped) read paths.
+function parseKnowledgeContent<T>(content: string, max: number): T[] {
+	const results: T[] = [];
+	for (const line of content.split('\n')) {
+		if (Number.isFinite(max) && results.length >= max) break;
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			results.push(normalizeEntry(JSON.parse(trimmed) as T));
+		} catch {
+			console.warn(
+				`[knowledge-store] Skipping corrupted JSONL line: ${trimmed.slice(
+					0,
+					80,
+				)}`,
+			);
+		}
+	}
+	return results;
+}
+
 // Read JSONL file. Skip lines that fail JSON.parse (log a warning for each skipped line).
 // Returns empty array if file does not exist.
 // v2: each parsed entry is passed through normalizeEntry() so v1 entries get
 // optional v2 fields filled in WITHOUT mutating on-disk JSONL.
-export async function readKnowledge<T>(filePath: string): Promise<T[]> {
+//
+// Optional maxEntries cap: when provided as a positive finite number, parsing stops
+// after that many valid entries are collected, preventing unbounded memory growth
+// when reading large files. Capped reads BYPASS the cache to prevent a capped read
+// from poisoning the cache for uncapped callers (cache key does not include maxEntries).
+export async function readKnowledge<T>(
+	filePath: string,
+	maxEntries?: number,
+): Promise<T[]> {
 	const resolvedPath = path.resolve(filePath);
+	const cap =
+		maxEntries !== undefined && maxEntries > 0 ? maxEntries : undefined;
+
+	// Capped reads BYPASS the cache: the cache key does not include maxEntries,
+	// so a capped read must not poison the cache for uncapped callers.
+	if (cap !== undefined) {
+		if (!existsSync(resolvedPath)) return [];
+		const content = await readFile(resolvedPath, 'utf-8');
+		return parseKnowledgeContent<T>(content, cap);
+	}
+
 	const entries = await readCachedParsedFile<T[]>(
 		resolvedPath,
 		KNOWLEDGE_JSONL_CACHE_NAMESPACE,
@@ -119,25 +161,7 @@ export async function readKnowledge<T>(filePath: string): Promise<T[]> {
 			if (!existsSync(resolvedPath)) return null;
 			return await readFile(resolvedPath, 'utf-8');
 		},
-		(content) => {
-			const results: T[] = [];
-			for (const line of content.split('\n')) {
-				const trimmed = line.trim();
-				if (!trimmed) continue;
-				try {
-					const raw = JSON.parse(trimmed) as T;
-					results.push(normalizeEntry(raw));
-				} catch {
-					console.warn(
-						`[knowledge-store] Skipping corrupted JSONL line in ${resolvedPath}: ${trimmed.slice(
-							0,
-							80,
-						)}`,
-					);
-				}
-			}
-			return results;
-		},
+		(content) => parseKnowledgeContent<T>(content, Infinity),
 	);
 	return entries ?? [];
 }
@@ -869,6 +893,7 @@ export const _internals: {
 	resolveHiveRejectedPath: typeof resolveHiveRejectedPath;
 	resolveHiveEventsPath: typeof resolveHiveEventsPath;
 	readKnowledge: typeof readKnowledge;
+	parseKnowledgeContent: typeof parseKnowledgeContent;
 	readRejectedLessons: typeof readRejectedLessons;
 	appendKnowledge: typeof appendKnowledge;
 	rewriteKnowledge: typeof rewriteKnowledge;
@@ -894,6 +919,7 @@ export const _internals: {
 	resolveHiveRejectedPath,
 	resolveHiveEventsPath,
 	readKnowledge,
+	parseKnowledgeContent,
 	readRejectedLessons,
 	appendKnowledge,
 	rewriteKnowledge,

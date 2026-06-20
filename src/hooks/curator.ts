@@ -40,6 +40,7 @@ import {
 	formatLearningSummary,
 } from '../services/learning-metrics.js';
 import {
+	DEFAULT_SKILL_MIN_CONFIDENCE,
 	listSkills,
 	parseDraftFrontmatter,
 	retireSkill,
@@ -97,6 +98,9 @@ export type CuratorLLMDelegate = (
 /** Default timeout for curator LLM delegation calls (ms).
  * Used as fallback when config.llm_timeout_ms is not set. */
 const DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300_000;
+const MAX_CURATOR_PHASE_DIGESTS = 50;
+const MAX_CURATOR_COMPLIANCE_OBSERVATIONS = 200;
+const MAX_CURATOR_RECOMMENDATIONS = 200;
 
 // ============================================================================
 // DI Seam — _internals (declared before functions that use it to avoid TDZ)
@@ -104,6 +108,7 @@ const DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300_000;
 
 export const _internals = {
 	parseKnowledgeRecommendations,
+	parseKnowledgeRecommendationsWithDiagnostics,
 	readCuratorSummary,
 	writeCuratorSummary,
 	filterPhaseEvents,
@@ -122,6 +127,34 @@ export const _internals = {
 	reviseSkill,
 	getSkillVersion,
 };
+
+export interface RecommendationParseDiagnostic {
+	section: 'OBSERVATIONS' | 'KNOWLEDGE_UPDATES';
+	line: string;
+	reason: string;
+}
+
+function capPhaseDigests(digests: PhaseDigestEntry[]): PhaseDigestEntry[] {
+	return digests.slice(-MAX_CURATOR_PHASE_DIGESTS);
+}
+
+function capComplianceObservations(
+	observations: ComplianceObservation[],
+): ComplianceObservation[] {
+	return observations.slice(-MAX_CURATOR_COMPLIANCE_OBSERVATIONS);
+}
+
+function capKnowledgeRecommendations(
+	recommendations: KnowledgeRecommendation[],
+): KnowledgeRecommendation[] {
+	return recommendations.slice(-MAX_CURATOR_RECOMMENDATIONS);
+}
+
+function buildDigestFromPhaseDigests(digests: PhaseDigestEntry[]): string {
+	return digests
+		.map((digest) => `### Phase ${digest.phase}\n${digest.summary}`)
+		.join('\n\n');
+}
 
 /**
  * Auto-retire generated skills whose violation rate exceeds 30% or
@@ -221,7 +254,18 @@ async function autoRetireSkills(
 export function parseKnowledgeRecommendations(
 	llmOutput: string,
 ): KnowledgeRecommendation[] {
+	return parseKnowledgeRecommendationsWithDiagnostics(llmOutput)
+		.recommendations;
+}
+
+export function parseKnowledgeRecommendationsWithDiagnostics(
+	llmOutput: string,
+): {
+	recommendations: KnowledgeRecommendation[];
+	diagnostics: RecommendationParseDiagnostic[];
+} {
 	const recommendations: KnowledgeRecommendation[] = [];
+	const diagnostics: RecommendationParseDiagnostic[] = [];
 	const UUID_V4 =
 		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -237,7 +281,14 @@ export function parseKnowledgeRecommendations(
 
 			// Match "- entry <uuid> (observable): text" or "- entry <uuid> (observable, directive hint): text"
 			const match = trimmed.match(/^-\s+entry\s+(\S+)\s+\(([^)]+)\):\s+(.+)$/i);
-			if (!match) continue;
+			if (!match) {
+				diagnostics.push({
+					section: 'OBSERVATIONS',
+					line: trimmed,
+					reason: 'expected "- entry <uuid|new> (<observable>): <text>"',
+				});
+				continue;
+			}
 
 			const uuid = match[1];
 			const parenthetical = match[2];
@@ -299,10 +350,24 @@ export function parseKnowledgeRecommendations(
 
 			// Match "- <action> <id>: <text>"
 			const match = trimmed.match(/^-\s+(\S+)\s+(\S+):\s+(.+)$/);
-			if (!match) continue;
+			if (!match) {
+				diagnostics.push({
+					section: 'KNOWLEDGE_UPDATES',
+					line: trimmed,
+					reason: 'expected "- <action> <id>: <text>"',
+				});
+				continue;
+			}
 
 			const action = match[1].toLowerCase();
-			if (!validActions.has(action)) continue;
+			if (!validActions.has(action)) {
+				diagnostics.push({
+					section: 'KNOWLEDGE_UPDATES',
+					line: trimmed,
+					reason: `unknown action "${action}"`,
+				});
+				continue;
+			}
 
 			const id = match[2];
 			const text = match[3].trim();
@@ -317,7 +382,7 @@ export function parseKnowledgeRecommendations(
 		}
 	}
 
-	return recommendations;
+	return { recommendations, diagnostics };
 }
 
 /**
@@ -333,30 +398,56 @@ export function parseKnowledgeRecommendations(
  * [{ "slug": "...", "title": "...", ... }]
  * ```
  *
- * Malformed JSON or unexpected types are silently dropped: no knowledge or
- * skill writes happen when curator output is malformed.
+ * Malformed JSON or unexpected types are skipped with diagnostics: no knowledge
+ * or skill writes happen when curator output is malformed.
  */
+export interface StructuredCuratorDiagnostic {
+	block: 'knowledge_application_findings' | 'skill_candidates';
+	reason:
+		| 'malformed_json'
+		| 'expected_array'
+		| 'invalid_finding'
+		| 'invalid_skill_candidate';
+	index?: number;
+	detail?: string;
+}
+
 export function parseStructuredCuratorBlocks(llmOutput: string): {
 	findings: import('./curator-types.js').KnowledgeApplicationFinding[];
 	candidates: import('./curator-types.js').SkillCandidate[];
+	diagnostics: StructuredCuratorDiagnostic[];
 } {
 	const out: {
 		findings: import('./curator-types.js').KnowledgeApplicationFinding[];
 		candidates: import('./curator-types.js').SkillCandidate[];
-	} = { findings: [], candidates: [] };
+		diagnostics: StructuredCuratorDiagnostic[];
+	} = { findings: [], candidates: [], diagnostics: [] };
 	if (!llmOutput || typeof llmOutput !== 'string') return out;
 
 	const fences =
 		/```(?:json|jsonc)?\s+(knowledge_application_findings|skill_candidates)\s*\n([\s\S]*?)\n```/g;
 	for (const m of llmOutput.matchAll(fences)) {
-		const kind = m[1];
+		const kind = m[1] as StructuredCuratorDiagnostic['block'];
 		const body = m[2];
 		try {
 			const parsed = JSON.parse(body);
-			if (!Array.isArray(parsed)) continue;
+			if (!Array.isArray(parsed)) {
+				out.diagnostics.push({
+					block: kind,
+					reason: 'expected_array',
+				});
+				continue;
+			}
 			if (kind === 'knowledge_application_findings') {
-				for (const item of parsed) {
-					if (!item || typeof item !== 'object') continue;
+				for (const [index, item] of parsed.entries()) {
+					if (!item || typeof item !== 'object') {
+						out.diagnostics.push({
+							block: kind,
+							reason: 'invalid_finding',
+							index,
+						});
+						continue;
+					}
 					const knowledge_id = (item as { knowledge_id?: unknown })
 						.knowledge_id;
 					const verdict = (item as { verdict?: unknown }).verdict;
@@ -367,6 +458,11 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 							verdict,
 						)
 					) {
+						out.diagnostics.push({
+							block: kind,
+							reason: 'invalid_finding',
+							index,
+						});
 						continue;
 					}
 					const expected = String(
@@ -397,11 +493,25 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 					});
 				}
 			} else if (kind === 'skill_candidates') {
-				for (const item of parsed) {
-					if (!item || typeof item !== 'object') continue;
+				for (const [index, item] of parsed.entries()) {
+					if (!item || typeof item !== 'object') {
+						out.diagnostics.push({
+							block: kind,
+							reason: 'invalid_skill_candidate',
+							index,
+						});
+						continue;
+					}
 					const slug = (item as { slug?: unknown }).slug;
 					const title = (item as { title?: unknown }).title;
-					if (typeof slug !== 'string' || typeof title !== 'string') continue;
+					if (typeof slug !== 'string' || typeof title !== 'string') {
+						out.diagnostics.push({
+							block: kind,
+							reason: 'invalid_skill_candidate',
+							index,
+						});
+						continue;
+					}
 					const ids = Array.isArray(
 						(item as { source_knowledge_ids?: unknown }).source_knowledge_ids,
 					)
@@ -413,7 +523,14 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 								) as string[]
 							).slice(0, 50)
 						: [];
-					if (ids.length === 0) continue;
+					if (ids.length === 0) {
+						out.diagnostics.push({
+							block: kind,
+							reason: 'invalid_skill_candidate',
+							index,
+						});
+						continue;
+					}
 					out.candidates.push({
 						slug: String(slug).slice(0, 64),
 						title: String(title).slice(0, 200),
@@ -443,8 +560,12 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 					});
 				}
 			}
-		} catch {
-			// malformed JSON — silently skip; never mutate knowledge from bad output.
+		} catch (err) {
+			out.diagnostics.push({
+				block: kind,
+				reason: 'malformed_json',
+				detail: err instanceof Error ? err.message.slice(0, 200) : String(err),
+			});
 		}
 	}
 	return out;
@@ -954,7 +1075,7 @@ export async function runCuratorPhase(
 	phase: number,
 	agentsDispatched: string[],
 	config: CuratorConfig,
-	_knowledgeConfig: { directory?: string },
+	knowledgeConfig: { directory?: string },
 	llmDelegate?: CuratorLLMDelegate,
 ): Promise<CuratorPhaseResult> {
 	try {
@@ -1048,9 +1169,11 @@ export async function runCuratorPhase(
 		// 6. LLM delegation: delegate to explorer agent in CURATOR_PHASE mode
 		// for knowledge recommendations and enhanced phase analysis
 		// Read current knowledge entries for curator review (capped to avoid context bloat)
-		const curatorKnowledgePath = resolveSwarmKnowledgePath(directory);
+		const knowledgeDirectory = knowledgeConfig.directory ?? directory;
+		const curatorKnowledgePath = resolveSwarmKnowledgePath(knowledgeDirectory);
 		const allKnowledgeEntries =
 			await readKnowledge<SwarmKnowledgeEntry>(curatorKnowledgePath);
+		const knownKnowledgeIds = new Set(allKnowledgeEntries.map((e) => e.id));
 		const knowledgeForCurator = [...allKnowledgeEntries]
 			.sort(
 				(a, b) =>
@@ -1113,9 +1236,43 @@ export async function runCuratorPhase(
 				}
 
 				if (llmOutput?.trim()) {
-					knowledgeRecommendations =
-						_internals.parseKnowledgeRecommendations(llmOutput);
+					const parsed =
+						_internals.parseKnowledgeRecommendationsWithDiagnostics(llmOutput);
+					for (const diagnostic of parsed.diagnostics) {
+						logger.warn('[curator] skipped malformed recommendation line', {
+							phase,
+							...diagnostic,
+						});
+					}
+					knowledgeRecommendations = parsed.recommendations.filter(
+						(recommendation) => {
+							if (
+								!recommendation.entry_id ||
+								knownKnowledgeIds.has(recommendation.entry_id)
+							) {
+								return true;
+							}
+							logger.warn(
+								'[curator] skipped recommendation for unknown knowledge entry',
+								{
+									phase,
+									entry_id: recommendation.entry_id,
+									action: recommendation.action,
+								},
+							);
+							return false;
+						},
+					);
 					const structured = parseStructuredCuratorBlocks(llmOutput);
+					for (const diagnostic of structured.diagnostics) {
+						logger.warn('[curator] skipped malformed structured block', {
+							phase,
+							block: diagnostic.block,
+							reason: diagnostic.reason,
+							index: diagnostic.index,
+							detail: diagnostic.detail,
+						});
+					}
 					knowledgeApplicationFindings = structured.findings;
 					skillCandidates = structured.candidates;
 				}
@@ -1144,31 +1301,41 @@ export async function runCuratorPhase(
 
 		let updatedSummary: CuratorSummary;
 		if (priorSummary) {
+			const phaseDigests = capPhaseDigests([
+				...priorSummary.phase_digests,
+				phaseDigest,
+			]);
 			// Extend existing summary
 			updatedSummary = {
 				...priorSummary,
 				last_updated: now,
 				last_phase_covered: Math.max(priorSummary.last_phase_covered, phase),
-				digest:
-					priorSummary.digest +
-					`\n\n### Phase ${phase}\n${phaseDigest.summary}`,
-				phase_digests: [...priorSummary.phase_digests, phaseDigest],
-				compliance_observations: [
+				digest: buildDigestFromPhaseDigests(phaseDigests),
+				phase_digests: phaseDigests,
+				compliance_observations: capComplianceObservations([
 					...priorSummary.compliance_observations,
 					...complianceObservations,
-				],
-				knowledge_recommendations: knowledgeRecommendations,
+				]),
+				knowledge_recommendations: capKnowledgeRecommendations([
+					...priorSummary.knowledge_recommendations,
+					...knowledgeRecommendations,
+				]),
 			};
 		} else {
+			const phaseDigests = capPhaseDigests([phaseDigest]);
 			updatedSummary = {
 				schema_version: 1,
 				session_id: sessionId,
 				last_updated: now,
 				last_phase_covered: phase,
-				digest: `### Phase ${phase}\n${phaseDigest.summary}`,
-				phase_digests: [phaseDigest],
-				compliance_observations: complianceObservations,
-				knowledge_recommendations: knowledgeRecommendations,
+				digest: buildDigestFromPhaseDigests(phaseDigests),
+				phase_digests: phaseDigests,
+				compliance_observations: capComplianceObservations(
+					complianceObservations,
+				),
+				knowledge_recommendations: capKnowledgeRecommendations(
+					knowledgeRecommendations,
+				),
 			};
 		}
 
@@ -1224,7 +1391,7 @@ export async function runCuratorPhase(
 					if (
 						cand.confidence <
 						((config as { min_skill_confidence?: number })
-							.min_skill_confidence ?? 0.85)
+							.min_skill_confidence ?? DEFAULT_SKILL_MIN_CONFIDENCE)
 					) {
 						continue;
 					}

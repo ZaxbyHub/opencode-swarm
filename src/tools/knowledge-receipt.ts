@@ -1,5 +1,5 @@
 /**
- * knowledge_receipt — the strong successor to knowledge_ack.
+ * knowledge_receipt — the knowledge acknowledgment tool (replaces the former knowledge_ack).
  *
  * An agent files a single receipt summarizing how it considered the knowledge
  * surfaced by a retrieval (referenced by `trace_id`): which entries were

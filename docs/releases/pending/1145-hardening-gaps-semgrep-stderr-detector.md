@@ -2,7 +2,7 @@
 
 ## What changed
 
-Six low-severity hardening gaps identified in the PR #1142 review are addressed:
+Five low-severity hardening gaps identified in the PR #1142 review are addressed. All 17 follow-up items from the PR #1194 review are also covered:
 
 - **F-001 / F-003 — `src/sast/semgrep.ts`:** The stderr truncation handler now calls
   `child.kill('SIGTERM')` immediately upon cap breach (matching the existing stdout
@@ -24,14 +24,16 @@ Six low-severity hardening gaps identified in the PR #1142 review are addressed:
 
 ## New tests
 
-- `tests/unit/sast/semgrep.test.ts`: two new cases — stderr cap parity (F-001) and
-  SIGKILL escalation after SIGTERM grace period.
+- `tests/unit/sast/semgrep.test.ts`: three new cases — stderr cap parity (F-001), overflow-kill
+  immediate child termination, and SIGKILL escalation after SIGTERM grace period.
 - `tests/unit/tools/syntax-check.test.ts`: deep-nesting traversal test with 10,000
-  levels of JSON nesting (DD-C018 explicit stack path).
-- `tests/unit/lang/php-backend.test.ts`: five edge-case Laravel detection scenarios
-  (capitalized Artisan, single signal, malformed composer.json, empty dir, two-signal
-  without config/app.php).
-- `tests/unit/lang/detector.test.ts`: three adversarial cases (malformed package.json,
+  levels of array nesting (DD-C018 — verifies explicit stack-based JSON traversal
+  avoids recursive call-stack overflow on pathological input).
+- `tests/unit/lang/php-backend.test.ts`: six edge-case Laravel detection scenarios
+  (capitalized Artisan, uppercase ARTISAN case-sensitivity, single signal, malformed composer.json,
+  empty dir, two-signal without config/app.php).
+- `tests/unit/lang/detector.test.ts`: seven adversarial edge-cases (unreadable path, non-existent
+  directory, unknown extensions, glob-pattern file detection, malformed package.json,
   directory named `*.csproj`, circular symlink).
 
 ## Migration

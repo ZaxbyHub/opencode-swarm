@@ -4,6 +4,15 @@ import {
 	runCuratorPostMortem,
 } from '../hooks/curator-postmortem.js';
 
+// ── DI Seam ──────────────────────────────────────────────────────────
+
+export const _internals = {
+	createCuratorLLMDelegate,
+	runCuratorPostMortem,
+};
+
+// ── Command handler ───────────────────────────────────────────────────
+
 export async function handlePostMortemCommand(
 	directory: string,
 	args: string[],
@@ -18,7 +27,7 @@ export async function handlePostMortemCommand(
 
 		if (options?.sessionID) {
 			try {
-				pmOptions.llmDelegate = createCuratorLLMDelegate(
+				pmOptions.llmDelegate = _internals.createCuratorLLMDelegate(
 					directory,
 					'postmortem',
 					options.sessionID,
@@ -28,7 +37,7 @@ export async function handlePostMortemCommand(
 			}
 		}
 
-		const result = await runCuratorPostMortem(directory, pmOptions);
+		const result = await _internals.runCuratorPostMortem(directory, pmOptions);
 
 		const lines: string[] = [];
 

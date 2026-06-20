@@ -305,16 +305,22 @@ Optional knowledge-base curator that validates agent output against project know
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Master switch for Curator |
+| `enabled` | boolean | `true` | Master switch for Curator |
 | `init_enabled` | boolean | `true` | Run Curator at session start |
 | `phase_enabled` | boolean | `true` | Run Curator at phase boundaries |
+| `postmortem_enabled` | boolean | `true` | Run postmortem curator analysis during closeout |
 | `max_summary_tokens` | number | `2000` | Max tokens for Curator summary output |
 | `min_knowledge_confidence` | number | `0.7` | Minimum confidence threshold for knowledge entries |
 | `compliance_report` | boolean | `true` | Include compliance report in phase digest |
 | `suppress_warnings` | boolean | `true` | Suppress TUI warnings; emit events only |
 | `drift_inject_max_chars` | number | `500` | Max chars for drift report summary injected into architect context |
+| `llm_timeout_ms` | number | `300000` | Timeout for Curator init and phase LLM calls |
+| `skill_generation_enabled` | boolean | `true` | Enable curator-generated skill candidate output |
+| `skill_generation_mode` | `draft` \| `active` | `draft` | Controls whether skill candidates are drafted or promoted as active skills |
+| `min_skill_confidence` | number | `0.7` | Minimum confidence for generated skill candidates |
+| `min_skill_confirmations` | number | `2` | Minimum confirmations before skill promotion |
 
-Curator is optional and disabled by default. When enabled, it writes `.swarm/curator-summary.json` and `.swarm/drift-report-phase-N.json` to track knowledge alignment and drift detection.
+Curator is enabled by default. Set `curator.enabled = false` to disable it. When enabled, it writes `.swarm/curator-summary.json` and `.swarm/drift-report-phase-N.json` to track knowledge alignment and drift detection. Curator uses directory-level knowledge locking for cross-file updates; this favors simple atomic consistency over per-file parallelism.
 
 ### Architectural supervision
 
@@ -572,6 +578,63 @@ Controls phase completion gating and validation.
 }
 ```
 
+## Repo Graph Configuration (`repo_graph`)
+
+Controls the repository dependency graph that the plugin builds on session start.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
+
+The graph scanner already skips common generated directories by default:
+`node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `.next`, `.nuxt`,
+`.cache`, `vendor`, `.svn`, `.hg`, and `.svelte-kit`. Use `exclude_dirs` to add
+your own (for example a custom generated-code or fixtures directory).
+
+Matching is by directory **basename at any depth** — the same mechanism the
+built-in defaults use — so `".svelte-kit"` skips every `.svelte-kit` directory
+in the workspace. Entries are directory names, **not** glob or path patterns.
+The exclude also applies to write-triggered incremental updates, so files under
+an excluded directory are never (re-)added to the graph.
+
+**Example** — exclude a generated-code directory and a docs build dir:
+
+```json
+{
+  "repo_graph": {
+    "exclude_dirs": ["generated", "site"]
+  }
+}
+```
+
+> Note: even without configuring `exclude_dirs`, a single unparseable or
+> minified file can no longer abort the whole graph build — such files are
+> skipped individually (issue #1448).
+
+## Evidence Retention Configuration
+
+Controls evidence bundle archival for `/swarm finalize` and `/swarm archive`. The two commands use different defaults: finalize uses tighter retention (30 days / 10 bundles) to keep only recent evidence; archive targets long-term retention (90 days / 1000 bundles) for periodic cleanup.
+
+| Field | Type | Default (finalize) | Default (archive) | Range | Description |
+|-------|------|:---:|:---:|:---:|---|
+| `enabled` | boolean | `true` | `true` | — | Master switch |
+| `max_age_days` | number | **30** | 90 | 1–365 | Age threshold for archiving |
+| `max_bundles` | number | **10** | 1000 | 10–10000 | Count cap |
+| `auto_archive` | boolean | `false` | `false` | — | Future gate (config-only) |
+
+> **Note:** `/swarm finalize` applies tighter retention (30 days / 10 bundles) by default to keep only recent evidence for the current project. `/swarm archive` targets long-term retention (90 days / 1000 bundles). Both are configurable via `evidence.max_age_days` and `evidence.max_bundles` in your project config.
+
+**Example** — Tighten finalize retention:
+
+```json
+{
+  "evidence": {
+    "max_age_days": 14,
+    "max_bundles": 5
+  }
+}
+```
+
 ## Council
 
 Opt-in verification gate that runs five specialized reviewers in parallel before a task advances to `completed`.
@@ -610,7 +673,7 @@ Distinct from the Work Complete Council above. Where the Work Complete Council i
 
 The three council agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — for General Council dispatch, the architect runs `web_search` 1–3 times before dispatch and passes the results in. Separately, SME agents may call `web_search` directly for external skill/source research when `council.general.enabled=true` and a Tavily or Brave API key is configured.
 
-Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or offered as an early workflow option in MODE: BRAINSTORM (Phase 1b) when enabled.
+Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or offered as an early workflow option in MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before `save_plan` when enabled.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

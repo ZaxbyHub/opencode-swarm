@@ -63,3 +63,9 @@ Use these baselines unless repository policy explicitly requires stricter or old
 6. Run inline critic for CRITICAL/HIGH defects, enhancement critic for all kept enhancements, and final whole-report critic.
 7. Write `review-report.md` only after coverage closure and final critic PASS.
 8. Final response reports only the run path, selected tracks, counts summary, highest-risk items, coverage limitations, and confirmation that no source files were modified.
+
+## Async advisory lanes
+
+When selected-track inventory or candidate generation decomposes into independent read-only units, launch those units with `dispatch_lanes_async` when available. Record each returned `batch_id`, then continue architect-owned deterministic work that does not depend on lane output: update the coverage ledger shell, run safe local tools, prepare validation shards, and document unresolved coverage units. Do not mark coverage `REVIEWED`, promote candidates to findings, or write the final report from running lanes.
+
+At every coverage, validation, and synthesis boundary, call `collect_lane_results` with `wait: true` for all open batches. Missing, stale, cancelled, or failed lanes are explicit coverage gaps and must become `BLOCKED` or `SKIPPED_WITH_REASON`; they cannot be silently ignored. If `dispatch_lanes_async` is unavailable, use the existing blocking dispatch pattern and record that async advisory lanes were unavailable.

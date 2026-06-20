@@ -167,8 +167,76 @@ function normalizeText(text: string): string {
 }
 
 /**
+ * Extract context words around each occurrence of a target word (single tokens within a window).
+ * Context window is 3 words before and after, excluding the target word itself.
+ * Handles multi-word terms (e.g. "must not", "don't use") by scanning word slices.
+ *
+ * Note: this is an exact-word-match heuristic. Synonyms (e.g. "use" / "utilize")
+ * will not match across lessons. The 3-token window is bounded; more distant
+ * negation attachments will not be detected as contradictions.
+ */
+function extractContextWords(
+	text: string,
+	word: string,
+	contextWindow = 3,
+): Set<string> {
+	const words = text.split(' ');
+	const context = new Set<string>();
+
+	// Single-word term: iterate every occurrence
+	if (!word.includes(' ')) {
+		let from = 0;
+		let idx = words.indexOf(word, from);
+		while (idx !== -1) {
+			const start = Math.max(0, idx - contextWindow);
+			const end = Math.min(words.length, idx + contextWindow + 1);
+			for (let i = start; i < end; i++) {
+				if (i !== idx && words[i] && words[i].length > 0) {
+					context.add(words[i]);
+				}
+			}
+			from = idx + 1;
+			idx = words.indexOf(word, from);
+		}
+		return context;
+	}
+
+	// Multi-word term: scan contiguous word slices, accumulate across all matches
+	const termLen = word.split(' ').length;
+	let i = 0;
+	while (i <= words.length - termLen) {
+		const slice = words.slice(i, i + termLen).join(' ');
+		if (slice === word) {
+			const start = Math.max(0, i - contextWindow);
+			const end = Math.min(words.length, i + termLen + contextWindow);
+			for (let j = start; j < end; j++) {
+				if (j < i || j >= i + termLen) {
+					if (words[j] && words[j].length > 0) {
+						context.add(words[j]);
+					}
+				}
+			}
+			i += termLen; // skip past this match
+		} else {
+			i += 1;
+		}
+	}
+
+	return context;
+}
+
+/**
+ * Check if two sets of words have significant overlap (at least one word in common).
+ */
+function hasSignificantOverlap(set1: Set<string>, set2: Set<string>): boolean {
+	if (set1.size === 0 || set2.size === 0) return false;
+	return [...set1].some((word) => set2.has(word));
+}
+
+/**
  * Detect contradiction between candidate and existing lessons.
  * Only compares pairs that share at least 1 tag in common.
+ * Requires negation words to attach to overlapping content to flag as contradiction.
  * Returns true if a contradiction is found.
  */
 function detectContradiction(
@@ -191,11 +259,23 @@ function detectContradiction(
 
 		// Check for negation pairs
 		for (const [wordA, wordB] of NEGATION_PAIRS) {
-			const hasA =
-				candidateNorm.includes(wordA) && existingNorm.includes(wordB);
-			const hasB =
-				candidateNorm.includes(wordB) && existingNorm.includes(wordA);
-			if (hasA || hasB) return true;
+			// Case 1: candidate has wordA, existing has wordB
+			if (candidateNorm.includes(wordA) && existingNorm.includes(wordB)) {
+				const contextA = extractContextWords(candidateNorm, wordA);
+				const contextB = extractContextWords(existingNorm, wordB);
+				if (hasSignificantOverlap(contextA, contextB)) {
+					return true;
+				}
+			}
+
+			// Case 2: candidate has wordB, existing has wordA
+			if (candidateNorm.includes(wordB) && existingNorm.includes(wordA)) {
+				const contextB = extractContextWords(candidateNorm, wordB);
+				const contextA = extractContextWords(existingNorm, wordA);
+				if (hasSignificantOverlap(contextA, contextB)) {
+					return true;
+				}
+			}
 		}
 	}
 
@@ -963,9 +1043,13 @@ export const _internals: {
 	auditEntryHealth: typeof auditEntryHealth;
 	quarantineEntry: typeof quarantineEntry;
 	restoreEntry: typeof restoreEntry;
+	extractContextWords: typeof extractContextWords;
+	hasSignificantOverlap: typeof hasSignificantOverlap;
 } = {
 	validateLesson,
 	auditEntryHealth,
 	quarantineEntry,
 	restoreEntry,
+	extractContextWords,
+	hasSignificantOverlap,
 };

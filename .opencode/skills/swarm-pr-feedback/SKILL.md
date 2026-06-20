@@ -16,6 +16,13 @@ Use this skill to close known PR feedback. This is not a fresh broad PR review.
 feedback surfaces, verifies each claim, clusters related problems, fixes confirmed
 issues, validates the branch, and reports closure status for every item.
 
+When the work starts from a prior `swarm-pr-review` run, ingest the review's
+handoff artifact (for example
+`.swarm/pr-review/<run_id>/feedback-handoff.md` or `.json`) before triage.
+Carry forward the original review finding IDs, classifications, reviewer/critic
+provenance, and any operational blockers instead of renumbering them as new
+discoveries.
+
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
 The repository's bot reviewer (`hermes-pr-review` / Qwen3.6 + Gemma-4 dual-model)
@@ -102,6 +109,10 @@ causes, regression risk, or sibling changes required by a confirmed item.
 GitHub review-thread resolution is user-controlled. Do not resolve or mark review
 threads resolved unless the user explicitly instructs you to do so.
 
+Do not act on review-discovered findings from a prior `swarm-pr-review` run
+unless the user has explicitly approved the transition into `swarm-pr-feedback`.
+The handoff artifact is triage input, not standing authorization to change code.
+
 ## Pre-flight: Check Out the PR Branch Locally
 
 Before verifying any claim or making any fix, ensure the PR branch is the working
@@ -130,6 +141,7 @@ tree:
 
 Build a complete feedback ledger before editing. Include every available source:
 
+- validated findings and operational blockers handed off from `swarm-pr-review`,
 - pasted user or reviewer feedback,
 - GitHub review threads, inline review comments, and review summaries,
 - PR issue comments and requested-changes reviews,
@@ -142,6 +154,60 @@ Build a complete feedback ledger before editing. Include every available source:
 If a source is unavailable, record that limitation. Do not treat missing access as
 evidence that no feedback exists.
 
+### Async advisory verification lanes
+
+After the complete feedback ledger exists and before editing, use
+`dispatch_lanes_async` when available for independent read-only verification lanes:
+comment classification, CI/log root-cause inspection, test impact mapping,
+release/docs claim checks, and stale-branch/conflict analysis. Record each
+returned `batch_id`, then continue only ledger-safe architect work: normalize
+feedback IDs, gather deterministic PR metadata, prepare reproduction commands,
+and plan likely fix groups. Do not edit, close items, or mark feedback resolved
+from running lanes.
+
+Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
+`PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, call
+`collect_lane_results` with `wait: true` for every open verification batch.
+Missing, stale, cancelled, or failed lanes remain explicit ledger limitations.
+If `dispatch_lanes_async` is unavailable, use blocking verification and record
+that async advisory lanes were unavailable.
+
+### CI matrix cascade check (do this before fixing)
+
+When the PR's `unit` job is a matrix across multiple OSes and downstream jobs
+(`integration`, `smoke`) have `needs: unit`, an OS leg failure blocks the
+entire pipeline. Before triaging, check:
+
+1. Are `integration` or `smoke` jobs in `skipped` or `cancelled` state rather
+   than `failed`? That signals a unit matrix cascade — the unit job failed
+   on one OS leg, blocking the downstream jobs from running on the current
+   HEAD.
+2. If a unit OS leg is the blocker, classify the failure:
+   - **Code issue** — the test itself fails. Reproduce locally; if the
+     test passes locally, the runner is the problem.
+   - **Runner performance** — the test step exceeds the configured timeout.
+     Run all files in the step locally with per-file timing; if cumulative
+     local runtime is <10 min and the runner can't complete in 60+ min, the
+     issue is runner performance. Bump the CI timeout as a stopgap and file
+     a follow-up issue for parallelization. Do not loop bumping the timeout
+     past 90 min without filing the follow-up.
+3. Surface cascade failures to the user explicitly. The downstream jobs'
+   results don't exist; the code's coverage of the current HEAD cannot be
+   confirmed by CI alone.
+
+### PR body claim verification
+
+PR body text like "PHASE 2 council APPROVED (5/5, round 2)" or "Final council
+APPROVED" must be backed by an evidence file in `.swarm/evidence/`
+(typically `phase-council.json` or `final-council.json`). Bot-generated PR
+bodies commonly auto-fill these claims without real review. Before accepting
+such a claim as part of triage:
+
+1. Check whether the corresponding evidence file exists with `verdict:APPROVED`.
+2. If the claim is unsupported, mark the closure ledger item as
+   `NEEDS_MORE_EVIDENCE` rather than `CONFIRMED`. Do not silently drop the
+   claim — it indicates the PR body was generated without a real review.
+
 ## Feedback Ledger
 
 Normalize each item before triage:
@@ -152,6 +218,11 @@ FB-001 | source | author/tool | status: UNTRIAGED | location | claim | raw link/
 
 Rules:
 
+- Preserve prior `F-###`, `CI-###`, `CONFLICT-###`, `STALE-###`, and similar
+  IDs from a review handoff when they already exist. Only mint fresh `FB-###`
+  IDs for new feedback discovered after the handoff.
+- Preserve reviewer/critic provenance from the handoff artifact so the closure
+  ledger can show which items were review-validated before fix work began.
 - Preserve exact reviewer wording or log summary when practical.
 - Split compound comments into separate ledger items only when they require
   different evidence or fixes.
@@ -163,6 +234,59 @@ Rules:
   `CONFLICT-001` for merge/base drift and `CI-001` for check failures, so PR
   bodies can show exactly how operational blockers were closed.
 
+### Mandatory: integrate all PR comments with feedback or findings before validation
+
+**Before the Verification step begins, every PR comment that contains feedback
+or findings MUST be integrated into the total feedback ledger as a
+`FB-###` item.** This is a hard requirement, not a best-effort step.
+
+What counts as "feedback or findings":
+- A reviewer request for a code change ("please rename this", "add a test for
+  X", "this should call `_internals.foo`")
+- A reviewer claim about correctness, security, or style ("this is
+  incorrect", "X will leak")
+- A bot reviewer's findings table entries
+- A CI failure with a specific file:line root cause
+- A reviewer question that implies a code change is needed ("why is this
+  static?")
+- PR review summaries or aggregate comments
+
+What does NOT count (and is therefore not required to be a ledger item):
+- Pure acknowledgements ("LGTM", "looks good")
+- PR-level metadata changes (title, label, milestone)
+- Force-push acknowledgements
+
+Rules:
+- **No finding may be addressed outside the ledger.** If you fix something a
+  reviewer mentioned, the corresponding `FB-###` item MUST be in the ledger
+  before the fix. If you skip the fix, the `FB-###` item MUST be in the
+  ledger with a `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or
+  `NEEDS_USER_DECISION` status before validation can begin.
+- **Status semantics for unaddressed items:**
+  - `CONFIRMED` and `PARTIAL` items must be addressed (fixed or
+    disproved) before validation can begin. A `CONFIRMED` item that is
+    left unaddressed is a regression against the review.
+  - `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, and
+    `NEEDS_USER_DECISION` items may remain open at validation time, but
+    each must be explicitly justified in the closure ledger.
+- **The closure ledger at the end of the run must account for every `FB-###`
+  item** with a final status (fixed / disproved / pre-existing / needs user
+  decision / needs more evidence).
+- **Comments from the latest bot round take precedence over earlier rounds**
+  for the same finding; the earlier-round `FB-###` item is updated with the
+  new evidence rather than a new item being created.
+- **Multi-round pattern continues to apply** (see "Multi-Round Bot Reviews"
+  section). A new bot round adds new `FB-###` items for findings that
+  weren't in the prior round; the prior round's items are carried forward
+  and updated with the new evidence.
+
+Rationale: silently addressing a review comment without a corresponding
+ledger item means the closure summary at the end of the run cannot
+demonstrate that every review comment was considered. The closure summary
+is the only artifact the user/maintainer reads to confirm the PR is ready
+to merge. Missing items in the ledger = missing items in the closure = a
+PR that ships with unreviewed feedback.
+
 ## Verification
 
 Classify every ledger item before fixing:
@@ -173,6 +297,7 @@ Classify every ledger item before fixing:
 | `PARTIAL` | The comment points at a real concern, but the framing, severity, or requested fix is incomplete. |
 | `DISPROVED` | Source, tests, or execution context prove the claim is false, unreachable, or already mitigated. |
 | `PRE_EXISTING` | The issue exists on the base branch and is not materially worsened by the PR. |
+| `NEEDS_MORE_EVIDENCE` | The claim (e.g., "council APPROVED") is unsupported by stored evidence (e.g., a missing or failed `.swarm/evidence/` artifact); more information is required before triage. |
 | `NEEDS_USER_DECISION` | The item requires a product, UX, compatibility, or scope choice that cannot be inferred. |
 
 Verification checklist:
@@ -183,6 +308,26 @@ Verification checklist:
 - Determine whether the issue is PR-introduced, pre-existing, or unresolved.
 - Check related tests and whether a failing/proposed test would prove the item.
 - Check whether multiple feedback items share one root cause.
+
+### DI seam migration validation
+
+When a test file mutates a DI seam object (e.g., `_internals.foo = mock`),
+verify that the production source reads from the seam at call time. A common
+anti-pattern: the test mutates the seam object, but the production code
+imports the named function (`import { foo } from './module'`) which is bound
+at module load. The seam mutation has no effect on the named reference,
+so the test fails even though the seam object's `foo === mock`.
+
+Verification: open the source file and grep for call sites. If you see
+`import { foo } from '...'` followed by `foo(...)` in the production code,
+and the test does `_internals.foo = mock`, the test will fail. The fix is
+to change the production code to call `_internals.foo(...)` (or equivalent
+active-seam pattern) so the seam mutation is read at call time.
+
+If only a few call sites exist, fix them in the source. If many call sites
+exist, consider whether the migration should use `mock.module()` instead,
+which replaces the entire module object (including the named export
+reference).
 
 ## Fix Planning
 
@@ -251,6 +396,7 @@ FB-001 | fixed | commit/test evidence
 FB-002 | disproved | code evidence
 FB-003 | pre-existing | base-branch evidence
 FB-004 | needs user decision | decision required
+FB-005 | needs more evidence | .swarm/evidence/phase-council.json missing
 CONFLICT-001 | fixed | remote mergeability is MERGEABLE/CLEAN
 CI-001 | fixed | current-head check/run evidence
 ```

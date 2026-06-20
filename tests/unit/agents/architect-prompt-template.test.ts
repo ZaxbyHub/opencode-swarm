@@ -170,7 +170,7 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 	it('27. MODE:PLAN section includes fallback delegation pattern', () => {
 		expect(prompt).toContain('If `save_plan` is unavailable');
 		expect(planSkill).toContain(
-			'delegate plan writing to {{AGENT_PREFIX}}coder',
+			"delegate plan writing to the active swarm's coder agent",
 		);
 	});
 

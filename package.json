@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.78.5",
+	"version": "7.83.0",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -21,7 +21,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/zaxbysauce/opencode-swarm.git"
+		"url": "https://github.com/ZaxbyHub/opencode-swarm.git"
 	},
 	"publishConfig": {
 		"access": "public",
@@ -60,6 +60,7 @@
 		".opencode/skills/critic-gate",
 		".opencode/skills/execute",
 		".opencode/skills/phase-wrap",
+		".opencode/skills/loop",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"

@@ -27,7 +27,8 @@ This mode is ADVISORY. It does not block any other workflow and does not modify
 code, plans, or specs. The output is for the user (general mode) or for the spec
 being drafted (spec_review mode is available via `/swarm council --spec-review`
 for manual spec review). General Council advisory input is offered as an early
-workflow option in MODE: BRAINSTORM (Phase 1b).
+workflow option in MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before
+`save_plan`.
 
 #### Pre-flight (always run first)
 
@@ -86,8 +87,16 @@ RESEARCH CONTEXT
 
 3. Dispatch `the active swarm's council_generalist agent`,
    `the active swarm's council_skeptic agent`, and
-   `the active swarm's council_domain_expert agent` in PARALLEL -- one message
-   per agent, then STOP and wait for all responses. Each dispatch message must
+   `the active swarm's council_domain_expert agent` with `dispatch_lanes_async`
+   when available -- one lane per agent. Record the returned `batch_id`, then
+   continue only non-dependent architect work: prepare the synthesis outline,
+   normalize the RESEARCH CONTEXT citations, and draft disagreement categories.
+   Do not call `convene_general_council` or present conclusions from running
+   lanes. Dispatch promptly — do not accumulate extensive planning prose before the
+   call, or output truncation may swallow the tool call itself. Keep each lane `prompt`
+   compact: send shared context ONCE via the `common_prompt` field, or have lanes read
+   it from a file by absolute path, instead of inlining the same large blob into every
+   lane prompt. Each dispatch message must
    include:
    - The question
    - Round number: 1
@@ -98,7 +107,10 @@ RESEARCH CONTEXT
 
 Do NOT share other agents' responses at this stage.
 
-4. Collect all three JSON responses. The `round1Responses` array will contain
+4. Call `collect_lane_results` with `wait: true` for the Round 1 batch and collect
+   all three JSON responses. If `dispatch_lanes_async` is unavailable, use
+   blocking parallel dispatch and record that async advisory lanes were
+   unavailable. The `round1Responses` array will contain
    entries with `memberId` of `council_generalist`, `council_skeptic`, and
    `council_domain_expert` and `role` of `generalist`, `skeptic`, and
    `domain_expert` respectively. These come from the agents' JSON output; no

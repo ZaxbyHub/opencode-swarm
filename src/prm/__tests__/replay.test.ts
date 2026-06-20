@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { ReplayEntry } from '../replay';
-import { recordReplayEntry, startReplayRecording } from '../replay';
+import {
+	_test_exports,
+	recordReplayEntry,
+	startReplayRecording,
+} from '../replay';
 
 describe('startReplayRecording', () => {
-	const directory = '/test/project';
+	let directory: string;
 
 	beforeEach(async () => {
+		directory = await fs.mkdtemp(path.join(os.tmpdir(), 'prm-replay-'));
 		// Clean up any test directories
 		const replayDir = path.join(directory, '.swarm', 'replays');
 		try {
@@ -18,13 +24,7 @@ describe('startReplayRecording', () => {
 	});
 
 	afterEach(async () => {
-		// Clean up test directories
-		const replayDir = path.join(directory, '.swarm', 'replays');
-		try {
-			await fs.rm(replayDir, { recursive: true, force: true });
-		} catch {
-			// ignore
-		}
+		await fs.rm(directory, { recursive: true, force: true });
 	});
 
 	test('creates replay directory if it does not exist', async () => {
@@ -79,10 +79,11 @@ describe('startReplayRecording', () => {
 });
 
 describe('recordReplayEntry', () => {
-	const directory = '/test/project';
+	let directory: string;
 	let artifactPath: string;
 
 	beforeEach(async () => {
+		directory = await fs.mkdtemp(path.join(os.tmpdir(), 'prm-replay-'));
 		// Create a test directory and get artifact path
 		const replayDir = path.join(directory, '.swarm', 'replays');
 		try {
@@ -95,13 +96,7 @@ describe('recordReplayEntry', () => {
 	});
 
 	afterEach(async () => {
-		// Clean up test directories
-		const replayDir = path.join(directory, '.swarm', 'replays');
-		try {
-			await fs.rm(replayDir, { recursive: true, force: true });
-		} catch {
-			// ignore
-		}
+		await fs.rm(directory, { recursive: true, force: true });
 	});
 
 	test('appends entry to replay artifact file', async () => {
@@ -173,10 +168,24 @@ describe('recordReplayEntry', () => {
 });
 
 describe('sanitizeFilename', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await fs.mkdtemp(path.join(os.tmpdir(), 'prm-replay-'));
+	});
+
+	afterEach(async () => {
+		await fs.rm(directory, { recursive: true, force: true });
+	});
+
+	test('directly sanitizes unsafe filename characters', () => {
+		expect(_test_exports.sanitizeFilename('../a b:c')).toBe('___a_b_c');
+	});
+
 	test('allows alphanumeric, underscore, and hyphen', async () => {
 		const artifactPath = await startReplayRecording(
 			'test_session-123',
-			'/test',
+			directory,
 		);
 		expect(artifactPath).not.toBeNull();
 		expect(artifactPath).toContain('test_session-123');
@@ -185,7 +194,7 @@ describe('sanitizeFilename', () => {
 	test('replaces special characters with underscore', async () => {
 		const artifactPath = await startReplayRecording(
 			'test@session#123',
-			'/test',
+			directory,
 		);
 		expect(artifactPath).not.toBeNull();
 		expect(artifactPath).toContain('test_session_123');
@@ -194,16 +203,41 @@ describe('sanitizeFilename', () => {
 	test('replaces spaces with underscore', async () => {
 		const artifactPath = await startReplayRecording(
 			'test session 123',
-			'/test',
+			directory,
 		);
 		expect(artifactPath).not.toBeNull();
 		expect(artifactPath).toContain('test_session_123');
 	});
 
 	test('handles unicode characters', async () => {
-		const artifactPath = await startReplayRecording('sessão-teste', '/test');
+		const artifactPath = await startReplayRecording('sessão-teste', directory);
 		expect(artifactPath).not.toBeNull();
 		// 'ã' is outside a-zA-Z0-9_- so it becomes underscore, but '-' is preserved
 		expect(artifactPath).toContain('sess_o-teste');
+	});
+});
+
+describe('replay path guards', () => {
+	test('isPathSafe rejects traversal outside the base directory', () => {
+		const base = path.join('/workspace', '.swarm', 'replays');
+		expect(_test_exports.isPathSafe(path.join(base, 'ok.jsonl'), base)).toBe(
+			true,
+		);
+		expect(
+			_test_exports.isPathSafe(path.join(base, '..', 'x.jsonl'), base),
+		).toBe(false);
+	});
+
+	test('isWithinReplaysDir requires a .swarm/replays path segment', () => {
+		expect(
+			_test_exports.isWithinReplaysDir(
+				path.join('/workspace', '.swarm', 'replays', 'a.jsonl'),
+			),
+		).toBe(true);
+		expect(
+			_test_exports.isWithinReplaysDir(
+				path.join('/workspace', '.swarm', 'not-replays', 'a.jsonl'),
+			),
+		).toBe(false);
 	});
 });

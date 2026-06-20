@@ -58,11 +58,22 @@ export interface NeverAppliedEntry {
 	phasesAlive: number;
 }
 
+export interface LearningMetricsOptions {
+	now?: Date;
+	currentPhase?: number;
+	signal?: AbortSignal;
+}
+
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_PHASES_ALIVE_THRESHOLD = 3;
 const MAX_LESSON_DISPLAY_CHARS = 60;
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	throw new Error('Learning metrics computation aborted');
+}
 
 function safeDivide(numerator: number, denominator: number): number {
 	return denominator === 0 ? 0 : numerator / denominator;
@@ -136,8 +147,9 @@ function classifyROI(rollup: CounterRollup): EntryROI['roi'] {
 
 export async function computeLearningMetrics(
 	directory: string,
-	options?: { now?: Date; currentPhase?: number },
+	options?: LearningMetricsOptions,
 ): Promise<LearningMetrics> {
+	throwIfAborted(options?.signal);
 	const now = options?.now ?? new Date();
 	const nowMs = now.getTime();
 	const phasesThreshold =
@@ -148,6 +160,7 @@ export async function computeLearningMetrics(
 		readKnowledge<SwarmKnowledgeEntry>(resolveSwarmKnowledgePath(directory)),
 		readKnowledgeCounterRollups(directory),
 	]);
+	throwIfAborted(options?.signal);
 
 	if (events.length === 0 && entries.length === 0) {
 		return emptyMetrics();
@@ -155,11 +168,13 @@ export async function computeLearningMetrics(
 
 	const entryMap = new Map<string, SwarmKnowledgeEntry>();
 	for (const entry of entries) {
+		throwIfAborted(options?.signal);
 		entryMap.set(entry.id, entry);
 	}
 
 	const sessionIds = new Set<string>();
 	for (const e of events) {
+		throwIfAborted(options?.signal);
 		if ('session_id' in e && typeof e.session_id === 'string') {
 			sessionIds.add(e.session_id);
 		}
@@ -169,6 +184,7 @@ export async function computeLearningMetrics(
 	// Violation trends
 	const violationTrends: ViolationTrend[] = [];
 	for (const [entryId, rollup] of rollups) {
+		throwIfAborted(options?.signal);
 		if (rollup.violated_count === 0) continue;
 		const entry = entryMap.get(entryId);
 		const lesson = entry?.lesson ?? entryId;
@@ -197,6 +213,7 @@ export async function computeLearningMetrics(
 	let totalViolations30d = 0;
 	let totalReceipts30d = 0;
 	for (const e of events) {
+		throwIfAborted(options?.signal);
 		if (!isReceiptType(e)) continue;
 		const t = Date.parse(e.timestamp);
 		if (Number.isNaN(t)) continue;
@@ -217,6 +234,7 @@ export async function computeLearningMetrics(
 	// Application rate by priority
 	const priorityGroups = new Map<string, { applied: number; total: number }>();
 	for (const entry of entries) {
+		throwIfAborted(options?.signal);
 		const priority = entry.directive_priority ?? 'medium';
 		const rollup = rollups.get(entry.id);
 		if (!rollup) continue;
@@ -265,6 +283,7 @@ export async function computeLearningMetrics(
 
 	// Escalation frequency
 	const recentEscalations30d = await readRecentEscalations(directory, 30, now);
+	throwIfAborted(options?.signal);
 	const last7dCutoff = nowMs - SEVEN_DAYS_MS;
 	const last7d = recentEscalations30d.filter((esc) => {
 		const t = Date.parse(esc.at);
@@ -272,6 +291,7 @@ export async function computeLearningMetrics(
 	}).length;
 	let totalEscalations = 0;
 	for (const e of events) {
+		throwIfAborted(options?.signal);
 		if (e.type === 'escalation') totalEscalations++;
 	}
 	const escalationFrequency = {
@@ -283,6 +303,7 @@ export async function computeLearningMetrics(
 	// Unacknowledged critical
 	let unacknowledgedCriticalCount = 0;
 	for (const entry of entries) {
+		throwIfAborted(options?.signal);
 		if (entry.directive_priority !== 'critical') continue;
 		const rollup = rollups.get(entry.id);
 		if (!rollup) continue;
@@ -298,6 +319,7 @@ export async function computeLearningMetrics(
 	// Entry ROI
 	const entryROI: EntryROI[] = [];
 	for (const entry of entries) {
+		throwIfAborted(options?.signal);
 		const rollup = rollups.get(entry.id);
 		if (!rollup) {
 			entryROI.push({
@@ -325,6 +347,7 @@ export async function computeLearningMetrics(
 	// Never applied
 	const neverApplied: NeverAppliedEntry[] = [];
 	for (const entry of entries) {
+		throwIfAborted(options?.signal);
 		const rollup = rollups.get(entry.id);
 		const applied = rollup?.applied_explicit_count ?? 0;
 		const phasesAlive = entry.phases_alive ?? 0;

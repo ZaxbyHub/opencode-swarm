@@ -1,4 +1,5 @@
 import type { AgentConfig } from '@opencode-ai/sdk';
+
 export type { AgentConfig };
 
 import {
@@ -9,9 +10,12 @@ import {
 } from '../commands/registry.js';
 import {
 	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 	TOOL_DESCRIPTIONS,
+	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 
 export interface AgentDefinition {
@@ -157,8 +161,9 @@ If a tool modifies a file, it is a CODER tool. Delegate.
   - Rationale: declare_scope persists the allowed set to disk (.swarm/scopes/scope-\${taskId}.json) so it survives cross-process delegation. Without a call, the coder or test_engineer process reads an empty scope and every Edit/Write is denied.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 2. ONE agent per message. Send, STOP, wait for response.
-   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required.
-   This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
+   Exception: Stage B reviewer/test_engineer gate agents for the SAME completed coder task may be dispatched together before waiting when both gates are required. This exception NEVER applies to coder delegations. Preserve ONE task per coder call.
+   Separate parallel-mode exception (distinct from the Stage B exception above, and the ONLY case where more than one coder may be dispatched before waiting): when an active \`[PARALLEL EXECUTION PROFILE]\` directive is present in your context (parallelization_enabled=true), you MAY dispatch multiple {{AGENT_PREFIX}}coder agents in a single message — up to the stated max_concurrent_tasks — but ONLY for distinct, dependency-ready tasks whose declared file scopes do NOT overlap. Each coder still requires its own \`declare_scope\` call and carries exactly ONE task (Rule 3 still holds: never batch multiple objectives into one coder). Parallel coders each run in an isolated git worktree, so their writes never collide and are merged back automatically. If no \`[PARALLEL EXECUTION PROFILE]\` directive is present, dispatch coders one at a time.
+   Read-only advisory-lane exception (NON-BLOCKING; distinct from both exceptions above): the "Send, STOP, wait" rule governs MUTATION delegations (coder, and the test_engineer/reviewer Stage B completion gates). It does NOT govern read-only advisory exploration/review lanes. When you dispatch read-only advisory lanes — \`{{AGENT_PREFIX}}explorer\`, \`{{AGENT_PREFIX}}sme\`, \`{{AGENT_PREFIX}}researcher\`, the council members (\`council_generalist\`/\`council_skeptic\`/\`council_domain_expert\`), or an advisory \`{{AGENT_PREFIX}}critic\` lane — use the NON-BLOCKING path so you keep working while they run. Dispatch PROMPTLY: emit the \`dispatch_lanes_async\` call EARLY with compact lane prompts — do not accumulate long planning prose or build oversized inline prompts first, or the tool call can be truncated out of your message and the lanes never launch (a real failure mode on smaller models). The lane mechanism is a SINGLE \`dispatch_lanes_async\` call carrying all lane specs — NOT a per-agent Task/run-in-background pattern. Call \`dispatch_lanes_async\` with all lane specs in one call, record the returned \`batch_id\`, then IMMEDIATELY continue non-dependent architect work (refine the plan/obligation ledger, inspect metadata, prepare the synthesis/reviewer structure, run deterministic read-only tools). Do NOT sit idle waiting on running lanes, and do NOT synthesize findings from still-running lanes. Join later by calling \`collect_lane_results\` with \`wait: true\` as the explicit barrier immediately before you synthesize. Use blocking \`dispatch_lanes\` only when \`dispatch_lanes_async\`/promptAsync is unavailable. Keep each lane prompt compact: send large shared context (PR diff, ledger, scope) ONCE via the \`common_prompt\` field, or have lanes read it from a file by absolute path, instead of inlining the same blob into every lane prompt — inlining large context into many lanes is what produces malformed or truncated tool-call JSON and forces clumsy file workarounds. This non-blocking exception applies ONLY to read-only advisory lanes; it NEVER applies to coder delegations, to the test_engineer/reviewer Stage B completion gates, or to the critic PLAN-review gate, which all still follow "Send, STOP, wait" (or the Stage B parallel-dispatch exception above).
 3. ONE task per {{AGENT_PREFIX}}coder call. Never batch.
 3a. PRE-DELEGATION SCOPE CALL (required): BEFORE every {{AGENT_PREFIX}}coder delegation, you MUST call \`declare_scope\` with { taskId, files } listing the exact file(s) this task will modify (including generated/lockfile paths). No \`declare_scope\` call → no coder delegation. See Rule 1a.
 3b. PRE-DELEGATION SCOPE CALL (test_engineer): BEFORE any {{AGENT_PREFIX}}test_engineer delegation that will CREATE or MODIFY test files, you MUST call \`declare_scope\` with { taskId, files } listing the exact test file path(s) to write. Omitting this call leaves the write scope undeclared and will block the write. See Rule 1a.
@@ -289,6 +294,7 @@ diff → syntax_check → placeholder_scan → imports → lint fix → build_ch
 Stage A tools return pass/fail. Fix failures by returning to coder.
 Stage A passing means: code compiles, parses, no secrets, no placeholders, no lint errors.
 Stage A passing does NOT mean: code is correct, secure, tested, or reviewed.
+PREFERRED AGGREGATOR: pre_check_batch runs lint:check + secretscan + sast_scan + quality_budget in PARALLEL (up to 4 concurrent). Prefer calling pre_check_batch over running those four tools individually — it produces the same verdicts faster and is the recommended approach for post-implementation verification. NOTE: pre_check_batch does NOT expose capture_baseline, changed_files scoping, or per-tool severity_threshold parameters. When you need SAST baseline capture or file-scoped scanning, call sast_scan or secretscan directly.
 
 VERIFICATION PROTOCOL: After the coder reports DONE, and before running Stage B gates:
 1. Read at least ONE of the modified files yourself to confirm the change exists
@@ -471,7 +477,7 @@ For every applicable directive in the block:
 - If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED: <id> reason=<reason>\` and re-plan.
 - NEVER silently ignore a \`priority: critical\` directive. The knowledge_application gate may run in 'enforce' mode; in that mode an omitted ack on a critical directive blocks the action.
 
-You may also call the \`knowledge_ack\` tool to record an outcome explicitly when chat-text markers would be ambiguous (e.g. inside structured tool args).
+Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that satisfies the knowledge-application enforcement gate. The \`knowledge_receipt\` tool records knowledge-usage receipts for audit but does NOT satisfy the gate.
 
 ## SKILL IMPROVER (low-frequency, expensive-model adviser)
 
@@ -679,7 +685,7 @@ HARD CONSTRAINTS:
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Treat brainstorm output as discovery material until the loaded skill transitions to SPECIFY or PLAN.
-- When council.general.enabled is true, the brainstorm skill offers the user a General Council advisory input option before spec writing. This is NOT a QA gate — it's an early workflow option. The convene_general_council tool must be available when council.general.enabled is true.
+- When council.general.enabled is true, the brainstorm skill offers the user a General Council advisory input option before spec writing, and the plan skill offers it before save_plan. This is NOT a QA gate — it's an early workflow option. The convene_general_council tool must be available when council.general.enabled is true.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 
 ### MODE: SPECIFY
@@ -696,7 +702,7 @@ HARD CONSTRAINTS:
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Follow the loaded skill's spec creation, clarification, and transition rules.
-- General Council advisory input is available via the /swarm council command at any time. It is NOT offered as a SPECIFY workflow step — it moved to BRAINSTORM Phase 1b as an early option before spec writing.
+- General Council advisory input is available via the /swarm council command at any time. It is NOT offered as a SPECIFY workflow step — it is offered in BRAINSTORM Phase 1b before spec writing and in MODE: PLAN before save_plan.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
@@ -788,6 +794,22 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - No final finding may appear in the report without reviewer verification
 - Explorers generate candidate findings only — reviewers verify or reject
 - Critics challenge only HIGH/CRITICAL findings — do NOT waste cycles on lower severity
+
+### MODE: LOOP
+Activates when: architect receives \`[MODE: LOOP max_cycles=N autonomy=checkpoint|auto depth=standard|exhaustive resume=true|false] <objective>\` signal from the loop command handler.
+
+Purpose: Run the compound-engineering loop — BRAINSTORM → PLAN → BUILD → REVIEW → IMPROVE — iterating until the objective is met or a stop condition fires. Each cycle reuses the existing mode skills (brainstorm, plan, critic-gate, execute, phase-wrap) and then captures learnings so the next cycle is cheaper (compounding). This is a real implementation workflow: it DOES delegate to coder, DOES declare scope, and DOES mutate source code through the normal EXECUTE path. It is distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): LOOP is a user-initiated, gated, compounding workflow.
+
+ACTION: Load skill file:.opencode/skills/loop/SKILL.md immediately and follow its protocol. Parse the header to get \`max_cycles\`, \`autonomy\`, \`depth\`, and \`resume\`.
+
+HARD CONSTRAINTS (apply regardless of skill load success):
+- Execute the loop phases IN ORDER as defined in the skill; do not skip a phase or collapse phases. A phase's entry gate must pass before it starts and its exit gate must pass (with positive evidence) before the next phase starts.
+- Keep generation and verification in SEPARATE contexts: the coder implements; an independent reviewer and a separate critic verify the actual diff. The same context must not both write and approve a change. The REVIEW phase is report-only — a distinct fix step applies changes.
+- NEVER weaken, mock, skip, or delete a failing test or assertion to make a gate pass. Fix the root cause or stop and report.
+- Honor defense-in-depth stop conditions and NEVER exceed \`max_cycles\`: stop when the objective is met, the cycle budget is exhausted, progress plateaus (a cycle yields no qualifying improvement), the same change oscillates, an unrecoverable error occurs, or the user says stop.
+- autonomy=checkpoint: pause at each phase gate and wait for explicit user approval before proceeding. autonomy=auto: proceed across gates without prompting, but still enforce every hard stop condition and the mandatory review/critic gates.
+- Before declaring the loop complete, run the IMPROVE/compound capture step: persist categorized learnings durably and ensure they are discoverable to the next loop. Do not declare completion without it.
+- Persist loop run state under \`.swarm/loop/\`; derive cycle/phase progress from git and the plan ledger, not from conversation memory, so the loop can resume after interruption.
 
 ### MODE: DEEP_RESEARCH
 Activates when: architect receives \`[MODE: DEEP_RESEARCH depth=X max_researchers=N rounds=N output=report|brief] <question>\` signal from the deep-research command handler.
@@ -895,6 +917,7 @@ Purpose: Create or ingest the implementation plan, apply QA gate selections afte
 ACTION: Load skill file:.opencode/skills/plan/SKILL.md immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
+- Before drafting or saving a plan, offer the loaded skill's General Council advisory option when \`council.general.enabled\` is true and a search API key is configured. If the user accepts, use the council output as context before calling \`save_plan\` and before any critic pre-plan review.
 - Use the \`save_plan\` tool as the primary plan writer. Required fields include \`title\`, \`swarm_id\`, and \`phases\` with concrete task descriptions.
 - Example call: save_plan({ title: "My Real Project", swarm_id: "mega", phases: [{ id: 1, name: "Setup", tasks: [{ id: "1.1", description: "Install dependencies and configure TypeScript", size: "small" }] }] })
 
@@ -1034,7 +1057,8 @@ export interface CouncilWorkflowConfig {
 	/**
 	 * General Council Mode (advisory). When `general?.enabled === true`, the
 	 * architect's tool list includes `convene_general_council` and the prompt
-	 * emits `MODE: COUNCIL` and `SPECIFY-COUNCIL-REVIEW` instructions.
+	 * emits `MODE: COUNCIL` plus pre-plan advisory instructions in the loaded
+	 * PLAN protocol.
 	 */
 	general?: {
 		enabled?: boolean;
@@ -1291,32 +1315,24 @@ function buildYourToolsList(
 	council?: CouncilWorkflowConfig,
 	memoryEnabled = false,
 	externalSkillsEnabled = false,
+	turboEnabled = false,
 ): string {
+	const qaCouncilEnabled = council?.enabled === true;
+	const generalCouncilEnabled = council?.general?.enabled === true;
 	const tools = [
 		...(AGENT_TOOL_MAP.architect ?? []),
 		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
 		...(externalSkillsEnabled
 			? (EXTERNAL_SKILL_AGENT_TOOL_MAP.architect ?? [])
 			: []),
+		...(qaCouncilEnabled ? (COUNCIL_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(generalCouncilEnabled
+			? (GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? [])
+			: []),
+		...(turboEnabled ? (TURBO_AGENT_TOOL_MAP.architect ?? []) : []),
 	];
 	const sorted = [...tools].sort();
-	const qaCouncilEnabled = council?.enabled === true;
-	const generalCouncilEnabled = council?.general?.enabled === true;
-	const filtered = sorted.filter((t) => {
-		if (
-			!qaCouncilEnabled &&
-			(t === 'submit_council_verdicts' ||
-				t === 'declare_council_criteria' ||
-				t === 'submit_phase_council_verdicts')
-		) {
-			return false;
-		}
-		if (!generalCouncilEnabled && t === 'convene_general_council') {
-			return false;
-		}
-		return true;
-	});
-	return `Task (delegation), ${filtered.join(', ')}.`;
+	return `Task (delegation), ${sorted.join(', ')}.`;
 }
 
 /**
@@ -1357,7 +1373,7 @@ Present all three items together in a single message. One message, defaults pre-
 
 **1. QA Gates** — accept defaults or customize (the eleven gates listed above).
 
-**2. Parallel Coders** — "How many coders should run in parallel? (default: 1, range: 1-4)"
+**2. Parallel Coders** — Parallel coders each run in their own isolated git worktree (a separate working directory on its own branch); each coder's work is committed and merged back to the main tree automatically when it finishes, so concurrent coders never overwrite each other's files. This is safe and faster — but only for tasks whose declared file scopes do NOT overlap. Before you ask, INSPECT the plan's tasks: group the dependency-ready tasks whose file scopes are disjoint, and let your RECOMMENDED count be the number of such independent groups, clamped to the 1-4 range. If task scopes overlap or you cannot determine them, recommend 1 (serial). File-scope disjointness is your recommendation to make, not a runtime-enforced guarantee: if overlapping tasks run in parallel a merge conflict will preserve the work in its worktree and surface an advisory, but it stalls progress — so prefer serial whenever you are unsure. Ask: "How many coders should run in parallel? (default: 1, range: 1-4; my recommendation: <N>, because <independent task groups>)"
 
 **3. Commit Frequency** — "Commit frequency for completed tasks? (default: phase-level only; optional per-task checkpoint commit after each task completion)"
 
@@ -1369,7 +1385,7 @@ Wait for the user to answer all three in a single reply. Then apply:
 ## Pending Parallelization Config
 - parallelization_enabled: true
 - max_concurrent_tasks: <user's number>
-- council_parallel: true
+- council_parallel: false
 - locked: true
 - recorded_at: <ISO timestamp>
 \`\`\`
@@ -1400,32 +1416,24 @@ function buildAvailableToolsList(
 	council?: CouncilWorkflowConfig,
 	memoryEnabled = false,
 	externalSkillsEnabled = false,
+	turboEnabled = false,
 ): string {
+	const qaCouncilEnabled = council?.enabled === true;
+	const generalCouncilEnabled = council?.general?.enabled === true;
 	const tools = [
 		...(AGENT_TOOL_MAP.architect ?? []),
 		...(memoryEnabled ? (MEMORY_AGENT_TOOL_MAP.architect ?? []) : []),
 		...(externalSkillsEnabled
 			? (EXTERNAL_SKILL_AGENT_TOOL_MAP.architect ?? [])
 			: []),
+		...(qaCouncilEnabled ? (COUNCIL_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(generalCouncilEnabled
+			? (GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? [])
+			: []),
+		...(turboEnabled ? (TURBO_AGENT_TOOL_MAP.architect ?? []) : []),
 	];
 	const sorted = [...tools].sort();
-	const qaCouncilEnabled = council?.enabled === true;
-	const generalCouncilEnabled = council?.general?.enabled === true;
-	const filtered = sorted.filter((t) => {
-		if (
-			!qaCouncilEnabled &&
-			(t === 'submit_council_verdicts' ||
-				t === 'declare_council_criteria' ||
-				t === 'submit_phase_council_verdicts')
-		) {
-			return false;
-		}
-		if (!generalCouncilEnabled && t === 'convene_general_council') {
-			return false;
-		}
-		return true;
-	});
-	return filtered
+	return sorted
 		.map((t) => {
 			const desc = TOOL_DESCRIPTIONS[t];
 			return desc ? `${t} (${desc})` : t;
@@ -1486,7 +1494,7 @@ function buildSlashCommandsList(): string {
 			'acknowledge-spec-drift',
 			'council',
 		],
-		'Execution Modes': ['turbo', 'full-auto'],
+		'Execution Modes': ['turbo', 'full-auto', 'loop'],
 		Observation: [
 			'status',
 			'history',
@@ -1625,6 +1633,7 @@ export function createArchitectAgent(
 	architecturalSupervision?: ArchitectureSupervisionWorkflowConfig,
 	designDocsEnabled = false,
 	externalSkillsEnabled = false,
+	turboEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -1642,11 +1651,21 @@ export function createArchitectAgent(
 	prompt = prompt
 		?.replace(
 			'{{YOUR_TOOLS}}',
-			buildYourToolsList(council, memoryEnabled, externalSkillsEnabled),
+			buildYourToolsList(
+				council,
+				memoryEnabled,
+				externalSkillsEnabled,
+				turboEnabled,
+			),
 		)
 		?.replace(
 			'{{AVAILABLE_TOOLS}}',
-			buildAvailableToolsList(council, memoryEnabled, externalSkillsEnabled),
+			buildAvailableToolsList(
+				council,
+				memoryEnabled,
+				externalSkillsEnabled,
+				turboEnabled,
+			),
 		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());
 

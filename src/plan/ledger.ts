@@ -141,6 +141,12 @@ function getPlanJsonPath(directory: string): string {
  * Compute a SHA-256 hash of the plan state.
  * Uses deterministic JSON serialization for consistent hashing.
  *
+ * IMPORTANT: Intentionally excludes `specMtime` and `specHash` fields.
+ * These fields track changes to spec.md but do not affect plan execution or structure.
+ * Including them would cause the plan hash to change whenever spec metadata changes,
+ * invalidating cached plan state unnecessarily. Spec changes are tracked separately
+ * in the ledger via `spec_updated` and acknowledgment events.
+ *
  * @param plan - The plan to hash
  * @returns Hex-encoded SHA-256 hash
  */

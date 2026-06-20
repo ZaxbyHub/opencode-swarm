@@ -38,7 +38,11 @@ import { declare_council_criteria } from './declare-council-criteria';
 import { declare_scope } from './declare-scope';
 import { diff } from './diff';
 import { diff_summary } from './diff-summary';
-import { dispatch_lanes } from './dispatch-lanes';
+import {
+	collect_lane_results,
+	dispatch_lanes,
+	dispatch_lanes_async,
+} from './dispatch-lanes';
 import { doc_extract, doc_scan } from './doc-scan';
 import { detect_domains } from './domain-detector';
 import { evidence_check } from './evidence-check';
@@ -56,7 +60,6 @@ import { get_qa_gate_profile } from './get-qa-gate-profile';
 import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
-import { knowledge_ack } from './knowledge-ack';
 import { knowledge_add } from './knowledge-add';
 import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
@@ -202,13 +205,14 @@ export const TOOL_MANIFEST = defineHandlers({
 	skill_retire: () => skill_retire,
 	skill_improve: () => skill_improve,
 	spec_write: () => spec_write,
-	knowledge_ack: () => knowledge_ack,
 	knowledge_receipt: () => knowledge_receipt,
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,
 	swarm_command: () => swarm_command,
 	dispatch_lanes: () => dispatch_lanes,
+	dispatch_lanes_async: () => dispatch_lanes_async,
+	collect_lane_results: () => collect_lane_results,
 	summarize_work: () => summarize_work,
 	write_architecture_supervisor_evidence: () =>
 		write_architecture_supervisor_evidence,

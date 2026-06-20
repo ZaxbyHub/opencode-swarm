@@ -116,7 +116,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 				.enum(['general', 'spec_review'])
 				.optional()
 				.describe(
-					'"general" for /swarm council; "spec_review" for SPECIFY-COUNCIL-REVIEW gate.',
+					'"general" for /swarm council or pre-save PLAN advisory; "spec_review" for manual /swarm council --spec-review.',
 				),
 			members: z
 				.array(z.string())

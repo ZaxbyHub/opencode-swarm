@@ -23,6 +23,11 @@ export interface TaskEnvelope {
 	/** The subagent session id from `<task id="...">` — the cross-event correlation key. */
 	sessionId: string;
 	state: TaskEnvelopeState;
+	summary?: string;
+	resultText?: string;
+	errorText?: string;
+	resultChars?: number;
+	resultTruncated?: boolean;
 }
 
 // Anchored to the opening tag only; tolerant of arbitrary body/whitespace after it.
@@ -30,6 +35,7 @@ export interface TaskEnvelope {
 // known set so unrelated `<task ...>` text cannot masquerade as an envelope.
 const TASK_ENVELOPE_RE =
 	/<task\s+id="([^"]+)"\s+state="(running|completed|error)"\s*>/;
+const MAX_TASK_ENVELOPE_TEXT_CHARS = 20_000;
 
 /**
  * Parse a task envelope from arbitrary text. Returns null when the text does not contain
@@ -42,7 +48,55 @@ export function parseTaskEnvelope(text: unknown): TaskEnvelope | null {
 	const sessionId = match[1];
 	const state = match[2] as TaskEnvelopeState;
 	if (!sessionId) return null;
-	return { sessionId, state };
+	const summary = extractTagText(text, 'summary');
+	const resultRaw =
+		state === 'error'
+			? extractTagText(text, 'task_error')
+			: extractTagText(text, 'task_result');
+	const bounded = boundEnvelopeText(resultRaw);
+	return {
+		sessionId,
+		state,
+		...(summary !== undefined ? { summary } : {}),
+		...(state === 'error' && bounded
+			? {
+					errorText: bounded.text,
+					resultChars: bounded.chars,
+					resultTruncated: bounded.truncated,
+				}
+			: {}),
+		...(state !== 'error' && bounded
+			? {
+					resultText: bounded.text,
+					resultChars: bounded.chars,
+					resultTruncated: bounded.truncated,
+				}
+			: {}),
+	};
+}
+
+function extractTagText(text: string, tag: string): string | undefined {
+	const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+	const match = text.match(re);
+	if (!match) return undefined;
+	return match[1];
+}
+
+function boundEnvelopeText(
+	text: string | undefined,
+): { text: string; chars: number; truncated: boolean } | undefined {
+	if (text === undefined) return undefined;
+	if (text.length <= MAX_TASK_ENVELOPE_TEXT_CHARS) {
+		return { text, chars: text.length, truncated: false };
+	}
+	const omitted = text.length - MAX_TASK_ENVELOPE_TEXT_CHARS;
+	const suffix = `\n[... ${omitted} chars truncated by task-envelope ...]`;
+	const maxContent = Math.max(0, MAX_TASK_ENVELOPE_TEXT_CHARS - suffix.length);
+	return {
+		text: `${text.slice(0, maxContent)}${suffix}`,
+		chars: text.length,
+		truncated: true,
+	};
 }
 
 /**

@@ -237,6 +237,7 @@ async function executeWithTimeout(
 		let stderrTruncated = false;
 		let settled = false;
 		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let escalation: ReturnType<typeof setTimeout> | undefined;
 
 		/**
 		 * Resolve exactly once, always clearing the timeout and guaranteeing a
@@ -253,18 +254,29 @@ async function executeWithTimeout(
 			if (settled) return;
 			settled = true;
 			if (timeout) clearTimeout(timeout);
+			// Clear any pending SIGKILL escalation timer. On first settle() call,
+			// escalation is undefined, so this is a no-op; but the defensive clear
+			// ensures safety if settle() were ever called from multiple paths (it isn't,
+			// due to the settled guard above, but this makes the intent explicit).
+			if (escalation) clearTimeout(escalation);
 			const truncated = stdoutTruncated || stderrTruncated;
 			if (child.exitCode === null && child.signalCode === null) {
 				try {
 					child.kill('SIGTERM');
-				} catch {
-					// process may already be gone
+				} catch (e) {
+					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
+					if (e instanceof Error && !e.message.includes('ESRCH')) {
+						console.error('[semgrep] child.kill failed:', e.message);
+					}
 				}
-				const escalation = setTimeout(() => {
+				escalation = setTimeout(() => {
 					try {
 						child.kill('SIGKILL');
-					} catch {
-						// process may already be gone
+					} catch (e) {
+						// Only log non-ESRCH errors (ESRCH = process already gone, expected)
+						if (e instanceof Error && !e.message.includes('ESRCH')) {
+							console.error('[semgrep] child.kill failed:', e.message);
+						}
 					}
 				}, KILL_GRACE_MS);
 				if (
@@ -304,10 +316,18 @@ async function executeWithTimeout(
 				stdoutTruncated = true;
 				// Runaway output — terminate so we stop accumulating. The close
 				// event then settles with the truncated buffer.
+				settle({
+					stdout,
+					stderr,
+					exitCode: -1, // Overflow termination
+				});
 				try {
 					child.kill('SIGTERM');
-				} catch {
-					// already gone
+				} catch (e) {
+					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
+					if (e instanceof Error && !e.message.includes('ESRCH')) {
+						console.error('[semgrep] child.kill failed:', e.message);
+					}
 				}
 			} else {
 				stdout += chunk;
@@ -328,10 +348,18 @@ async function executeWithTimeout(
 				stderrBytes = maxOutputBytes;
 				stderrTruncated = true;
 				// Runaway stderr — terminate so we stop accumulating (F-001).
+				settle({
+					stdout,
+					stderr,
+					exitCode: -1, // Overflow termination
+				});
 				try {
 					child.kill('SIGTERM');
-				} catch {
-					// already gone
+				} catch (e) {
+					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
+					if (e instanceof Error && !e.message.includes('ESRCH')) {
+						console.error('[semgrep] child.kill failed:', e.message);
+					}
 				}
 			} else {
 				stderr += chunk;

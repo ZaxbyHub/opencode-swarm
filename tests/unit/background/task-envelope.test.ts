@@ -19,15 +19,39 @@ describe('parseTaskEnvelope', () => {
 		expect(parseTaskEnvelope(runningEnvelope)).toEqual({
 			sessionId: 'ses_abc123',
 			state: 'running',
+			summary: 'Background task started',
+			resultText: '...',
+			resultChars: 3,
+			resultTruncated: false,
 		});
 	});
 
 	it('parses completed and error envelopes', () => {
-		expect(parseTaskEnvelope(completedEnvelope)?.state).toBe('completed');
+		expect(parseTaskEnvelope(completedEnvelope)).toMatchObject({
+			sessionId: 'ses_abc123',
+			state: 'completed',
+			summary: 'Background task completed: review',
+			resultText: 'looks good',
+			resultChars: 10,
+			resultTruncated: false,
+		});
 		expect(parseTaskEnvelope(errorEnvelope)).toEqual({
 			sessionId: 'ses_xyz',
 			state: 'error',
+			errorText: 'boom',
+			resultChars: 4,
+			resultTruncated: false,
 		});
+	});
+
+	it('bounds oversized result text', () => {
+		const long = 'x'.repeat(25_000);
+		const parsed = parseTaskEnvelope(
+			`<task id="ses_long" state="completed"><task_result>${long}</task_result></task>`,
+		);
+		expect(parsed?.resultChars).toBe(25_000);
+		expect(parsed?.resultTruncated).toBe(true);
+		expect(parsed?.resultText).toContain('truncated by task-envelope');
 	});
 
 	it('returns null for non-envelope text', () => {
@@ -44,6 +68,17 @@ describe('parseTaskEnvelope', () => {
 
 	it('rejects empty id', () => {
 		expect(parseTaskEnvelope('<task id="" state="completed">')).toBeNull();
+	});
+
+	it('documents embedded envelope parsing as trust-gated by the observer', () => {
+		const parsed = parseTaskEnvelope(
+			`untrusted prefix ${completedEnvelope} untrusted suffix`,
+		);
+		expect(parsed).toMatchObject({
+			sessionId: 'ses_abc123',
+			state: 'completed',
+			resultText: 'looks good',
+		});
 	});
 });
 

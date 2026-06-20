@@ -15,6 +15,7 @@ import {
 	PluginConfigSchema,
 	ScoringConfigSchema,
 	ScoringWeightsSchema,
+	SummaryConfigSchema,
 	SwarmConfigSchema,
 	stripKnownSwarmPrefix,
 	TokenRatiosSchema,
@@ -1542,16 +1543,12 @@ describe('LeanTurboConfigSchema', () => {
 		).toBe(true);
 	});
 
-	it('rejects worktree_isolation: true (not yet implemented)', () => {
+	it('accepts worktree_isolation: true (now implemented in lean runner)', () => {
 		const result = LeanTurboConfigSchema.safeParse({
 			worktree_isolation: true,
 		});
-		expect(result.success).toBe(false);
-		if (!result.success) {
-			const msg = JSON.stringify(result.error.issues);
-			expect(msg).toContain('worktree_isolation');
-			expect(msg).toContain('not yet implemented');
-		}
+		expect(result.success).toBe(true);
+		expect(result.data?.worktree_isolation).toBe(true);
 	});
 
 	it('accepts worktree_isolation: false', () => {
@@ -1573,5 +1570,113 @@ describe('LeanTurboConfigSchema', () => {
 			max_parallel_coders: 3.5,
 		});
 		expect(result.success).toBe(false);
+	});
+});
+
+describe('SummaryConfigSchema', () => {
+	it('accepts empty object and applies all defaults', () => {
+		const result = SummaryConfigSchema.safeParse({});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.enabled).toBe(true);
+			expect(result.data.threshold_bytes).toBe(16384);
+			expect(result.data.max_summary_chars).toBe(1000);
+			expect(result.data.max_stored_bytes).toBe(10485760);
+			expect(result.data.retention_days).toBe(7);
+			expect(result.data.exempt_tools).toEqual([
+				'retrieve_summary',
+				'task',
+				'read',
+			]);
+		}
+	});
+
+	it('threshold_bytes default is exactly 16384 (16 KB)', () => {
+		// Regression test: was 102400, changed to 16384 so that tool outputs
+		// in the 10-60 KB range are summarized in-context.
+		const result = SummaryConfigSchema.safeParse({});
+		expect(result.success).toBe(true);
+		expect(result.data?.threshold_bytes).toBe(16384);
+	});
+
+	it('accepts enabled: true', () => {
+		const result = SummaryConfigSchema.safeParse({ enabled: true });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.enabled).toBe(true);
+			expect(result.data.threshold_bytes).toBe(16384); // Default unchanged
+		}
+	});
+
+	it('accepts enabled: false', () => {
+		const result = SummaryConfigSchema.safeParse({ enabled: false });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.enabled).toBe(false);
+		}
+	});
+
+	it('rejects enabled as non-boolean', () => {
+		const result = SummaryConfigSchema.safeParse({ enabled: 'true' });
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts threshold_bytes at minimum boundary (1024)', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: 1024 });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.threshold_bytes).toBe(1024);
+		}
+	});
+
+	it('accepts threshold_bytes at maximum boundary (1048576)', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: 1048576 });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.threshold_bytes).toBe(1048576);
+		}
+	});
+
+	it('rejects threshold_bytes below minimum (1023)', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: 1023 });
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects threshold_bytes above maximum (1048577)', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: 1048577 });
+		expect(result.success).toBe(false);
+	});
+
+	it('rejects threshold_bytes as non-number', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: '16384' });
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts custom exempt_tools array', () => {
+		const result = SummaryConfigSchema.safeParse({
+			exempt_tools: ['retrieve_summary', 'custom_tool'],
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.exempt_tools).toEqual([
+				'retrieve_summary',
+				'custom_tool',
+			]);
+		}
+	});
+
+	it('merges partial config with defaults', () => {
+		const result = SummaryConfigSchema.safeParse({ threshold_bytes: 32768 });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.threshold_bytes).toBe(32768);
+			expect(result.data.enabled).toBe(true); // Default
+			expect(result.data.max_summary_chars).toBe(1000); // Default
+			expect(result.data.exempt_tools).toEqual([
+				'retrieve_summary',
+				'task',
+				'read',
+			]); // Default
+		}
 	});
 });

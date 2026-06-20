@@ -2,7 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 // @ts-expect-error - .mjs script exports runtime helpers without declarations.
-import { validatePackageFiles } from '../../../scripts/package-smoke.mjs';
+import {
+	REQUIRED_PROJECT_SKILL_SLUGS,
+	validatePackageFiles,
+} from '../../../scripts/package-smoke.mjs';
+import { BUNDLED_PROJECT_SKILLS } from '../../../src/config/bundled-skills.ts';
 
 const expectedGrammars = [
 	'dist/lang/grammars/tree-sitter.wasm',
@@ -30,6 +34,7 @@ const requiredProjectSkillSlugs = [
 	'critic-gate',
 	'execute',
 	'phase-wrap',
+	'loop',
 ];
 
 const expectedProjectSkillFiles = [
@@ -51,6 +56,25 @@ const baseFiles = [
 	'package.json',
 	...expectedGrammars,
 ].map((path) => ({ path }));
+
+describe('package-smoke skill-list sync', () => {
+	// Regression: the package:smoke gate keeps its own slug allowlist. When a
+	// new bundled skill was added to BUNDLED_PROJECT_SKILLS (and package.json
+	// files) without updating this script, the packed tarball contained an
+	// "unexpected bundled skill package file" and package-check failed in CI.
+	// These assertions fail fast at unit time instead.
+	test('REQUIRED_PROJECT_SKILL_SLUGS matches BUNDLED_PROJECT_SKILLS exactly', () => {
+		expect([...REQUIRED_PROJECT_SKILL_SLUGS].sort()).toEqual(
+			[...BUNDLED_PROJECT_SKILLS].sort(),
+		);
+	});
+
+	test('test fixture slug list matches the script allowlist', () => {
+		expect([...requiredProjectSkillSlugs].sort()).toEqual(
+			[...REQUIRED_PROJECT_SKILL_SLUGS].sort(),
+		);
+	});
+});
 
 describe('package-smoke validatePackageFiles', () => {
 	test('package export map preserves the root plugin boundary without exporting the Bun-targeted CLI', () => {

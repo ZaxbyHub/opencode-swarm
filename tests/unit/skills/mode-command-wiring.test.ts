@@ -48,6 +48,8 @@ const NON_COMMAND_SKILLS = new Set([
  */
 const KNOWN_SIGNAL_MODES_WITHOUT_ARCHITECT_SECTION = new Set(['ANALYZE']);
 
+const OPENCODE_ONLY_SKILLS = new Set(['loop']);
+
 /** Command-layer files that are not mode-emitting handlers (utils/registry). */
 const NON_HANDLER_COMMAND_FILES = new Set([
 	'index.ts',
@@ -121,7 +123,10 @@ describe('signal-triggered command wiring parity (drift prevention)', () => {
 			if (!existsSync(join(ROOT, '.opencode/skills', slug, 'SKILL.md'))) {
 				dangling.push(`.opencode/skills/${slug}/SKILL.md`);
 			}
-			if (!existsSync(join(ROOT, '.claude/skills', slug, 'SKILL.md'))) {
+			if (
+				!OPENCODE_ONLY_SKILLS.has(slug) &&
+				!existsSync(join(ROOT, '.claude/skills', slug, 'SKILL.md'))
+			) {
 				dangling.push(`.claude/skills/${slug}/SKILL.md`);
 			}
 		}

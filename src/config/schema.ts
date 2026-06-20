@@ -209,12 +209,12 @@ export const HooksConfigSchema = z.object({
 	delegation_gate: z.boolean().default(true),
 	delegation_max_chars: z.number().min(500).max(20000).default(4000),
 	/**
-	 * Issue #1151 PR 2 (Stage A): opt-in support for OpenCode background subagents.
+	 * Opt-in support for OpenCode background subagents.
 	 * When false (default) swarm fail-closed-blocks background swarm `Task` dispatches
 	 * (PR 1 behavior). When true, background swarm dispatches are allowed and tracked as
-	 * durable pending records under `.swarm/background-delegations.jsonl`, and a read-only
-	 * completion observer logs the upstream completion signal — but NO workflow gate is
-	 * advanced from a background completion in Stage A (gate-affecting ingestion is Stage B).
+	 * durable records under `.swarm/background-delegations.jsonl`, and the completion
+	 * observer ingests trusted upstream completion signals into that advisory ledger. NO
+	 * workflow gate is advanced and NO gate evidence is recorded from a background completion.
 	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` to have any effect.
 	 */
 	background_subagents: z.boolean().default(false),
@@ -415,7 +415,7 @@ export type PhaseCompleteConfig = z.infer<typeof PhaseCompleteConfigSchema>;
 // Summary configuration (reversible summaries for oversized tool outputs)
 export const SummaryConfigSchema = z.object({
 	enabled: z.boolean().default(true),
-	threshold_bytes: z.number().min(1024).max(1048576).default(102400),
+	threshold_bytes: z.number().min(1024).max(1048576).default(16384),
 	max_summary_chars: z.number().min(100).max(5000).default(1000),
 	max_stored_bytes: z.number().min(10240).max(104857600).default(10485760),
 	retention_days: z.number().min(1).max(365).default(7),
@@ -936,6 +936,27 @@ export const ContextMapConfigSchema = z.object({
 
 export type ContextMapConfig = z.infer<typeof ContextMapConfigSchema>;
 
+// Repo dependency-graph configuration (issue #1448)
+export const RepoGraphConfigSchema = z.object({
+	/**
+	 * Extra directory names to skip when the repo dependency graph is built,
+	 * in addition to the built-in defaults (node_modules, .git, dist, build,
+	 * out, coverage, .next, .nuxt, .cache, vendor, .svn, .hg, .svelte-kit).
+	 *
+	 * Matching is by directory basename at any depth — the same mechanism the
+	 * built-in defaults use — so `".svelte-kit"` excludes every `.svelte-kit`
+	 * directory in the workspace. Entries are not glob/path patterns.
+	 *
+	 * Matching is case-sensitive: specify each name exactly as it appears on
+	 * disk (the built-in defaults are lowercase). Surrounding whitespace is
+	 * trimmed, and whitespace-only entries are rejected at config load rather
+	 * than silently ignored.
+	 */
+	exclude_dirs: z.array(z.string().trim().min(1)).default([]),
+});
+
+export type RepoGraphConfig = z.infer<typeof RepoGraphConfigSchema>;
+
 // Checkpoint configuration
 export const CheckpointConfigSchema = z
 	.object({
@@ -1079,6 +1100,7 @@ export const KnowledgeConfigSchema = z.object({
 		.object({
 			max_calls_per_day: z.number().int().min(0).max(1000).default(30),
 			quota_window: z.enum(['utc', 'local']).default('utc'),
+			batch_size: z.number().int().min(1).max(100).optional(),
 		})
 		.default({ max_calls_per_day: 30, quota_window: 'utc' }),
 });
@@ -1428,12 +1450,13 @@ export type AuthorityConfig = z.infer<typeof AuthorityConfigSchema>;
 
 // General Council Mode configuration (advisory deliberation — distinct from the
 // verdict-based Work Complete Council below). Off by default. When enabled,
-// `/swarm council <question>` and the SPECIFY-COUNCIL-REVIEW gate convene a
-// fixed three-agent council (council_generalist / council_skeptic /
-// council_domain_expert). The architect runs a curated pre-search pass via
-// `web_search`, dispatches the three agents in parallel with the gathered
-// RESEARCH CONTEXT, routes disagreements back for one reconciliation round,
-// and synthesizes the final answer directly via inline output rules.
+// `/swarm council <question>`, `/swarm council --spec-review`, and the
+// MODE: PLAN pre-save advisory option convene a fixed three-agent council
+// (council_generalist / council_skeptic / council_domain_expert). The architect
+// runs a curated pre-search pass via `web_search`, dispatches the three agents
+// in parallel with the gathered RESEARCH CONTEXT, routes disagreements back for
+// one reconciliation round, and synthesizes the final answer directly via
+// inline output rules.
 //
 // Backward compatibility: `members`, `presets`, `moderator`, and
 // `moderatorModel` are retained on the schema but are no longer used at
@@ -1519,7 +1542,8 @@ export const CouncilConfigSchema = z
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
-		// `/swarm council` and the SPECIFY-COUNCIL-REVIEW gate.
+		// `/swarm council`, manual spec review, and the MODE: PLAN pre-save
+		// advisory option.
 		general: GeneralCouncilConfigSchema.optional(),
 	})
 	.strict();
@@ -1981,6 +2005,9 @@ export const PluginConfigSchema = z.object({
 
 	// Context Map configuration (issue #1104, FR-006 — opt-in)
 	context_map: ContextMapConfigSchema.optional(),
+
+	// Repo dependency-graph configuration (issue #1448 — directory excludes)
+	repo_graph: RepoGraphConfigSchema.optional(),
 
 	// Evidence configuration
 	evidence: EvidenceConfigSchema.optional(),

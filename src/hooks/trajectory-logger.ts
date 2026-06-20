@@ -13,6 +13,11 @@ import * as path from 'node:path';
 import { sanitizeTaskId } from '../evidence/manager';
 import { appendTrajectoryEntry } from '../prm/trajectory-store';
 import { swarmState } from '../state';
+import {
+	clearTrajectoryStepCounters,
+	nextTrajectoryStep,
+	resetTrajectoryStepCounter,
+} from './trajectory-step-state.js';
 import { validateSwarmPath } from './utils';
 
 export interface TrajectoryConfig {
@@ -39,12 +44,6 @@ export interface TrajectoryEntry {
  * Populated by toolBefore (via recordToolCallStart), consumed by toolAfter.
  */
 const callStartTimes = new Map<string, number>();
-
-/**
- * Module-level map for tracking step counters per session.
- * Incremented on each tool call to provide sequential step numbers.
- */
-const sessionStepCounters = new Map<string, number>();
 
 /**
  * Sensitive field names to redact in args summaries.
@@ -315,9 +314,7 @@ export function createTrajectoryLoggerHook(
 			const verdict = deriveVerdict(output);
 
 			// Derive step counter for this session
-			const currentStep = sessionStepCounters.get(sessionId) ?? 0;
-			const step = currentStep + 1;
-			sessionStepCounters.set(sessionId, step);
+			const step = nextTrajectoryStep(sessionId);
 
 			// Derive action type from tool name
 			const action = deriveAction(input.tool);
@@ -381,7 +378,16 @@ export function createTrajectoryLoggerHook(
  * @param sessionId - Session identifier
  */
 export function resetTrajectoryStep(sessionId: string): void {
-	sessionStepCounters.set(sessionId, 0);
+	resetTrajectoryStepCounter(sessionId);
+}
+
+/**
+ * Clears trajectory step counters for one session, or all sessions when omitted.
+ *
+ * @param sessionId - Optional session identifier
+ */
+export function clearTrajectoryStep(sessionId?: string): void {
+	clearTrajectoryStepCounters(sessionId);
 }
 
 /**

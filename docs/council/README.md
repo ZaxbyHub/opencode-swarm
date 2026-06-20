@@ -312,11 +312,14 @@ feeds the council's consensus and disagreements back into the draft spec.
 ### General Council as an early workflow option
 
 General Council advisory input is available as an early workflow option in
-MODE: BRAINSTORM (Phase 1b) when `council.general.enabled` is true and a
-search API key is configured. The architect offers to convene the General
-Council for advisory deliberation on the topic before approach selection.
-This is a manual option, not a QA gate — it does not appear in the gate
-selection list and does not block any workflow step.
+MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before `save_plan` when
+`council.general.enabled` is true and a search API key is configured. The
+architect offers to convene the General Council for advisory deliberation
+before approach selection in BRAINSTORM, or before drafting/saving the
+implementation plan in PLAN so current input can inform plan writing before the
+critic gate. This is a manual option, not a QA gate — it does not appear in the
+gate selection list and does not block any workflow step unless the user
+explicitly requests council input and the required config/key is unavailable.
 
 ### Workflow stages (in plain language)
 

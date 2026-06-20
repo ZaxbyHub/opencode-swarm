@@ -1,13 +1,13 @@
 # Council Gate Overhaul
 
 ## Breaking Changes
-- `council_general_review` QA gate removed. General Council is now an early workflow option in MODE: BRAINSTORM, not a QA gate.
+- `council_general_review` QA gate removed. General Council is now an early workflow option in MODE: BRAINSTORM and MODE: PLAN before `save_plan`, not a QA gate.
 - `council_mode` behavior changed: now replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council. Previously was additive at the phase level.
 
 ## New Features
 - `phase_council` QA gate: full 5-member council reviews all work in a phase holistically at phase_complete time.
-- General Council advisory input offered as Phase 1b in MODE: BRAINSTORM when council.general.enabled is true.
-- QA gate selection section unified: gates, parallel coders, and commit frequency presented together.
+- General Council advisory input offered as Phase 1b in MODE: BRAINSTORM and before `save_plan` in MODE: PLAN when council.general.enabled is true.
+- QA gate selection section unified: gates, parallel coders, commit frequency, and auto_proceed presented together.
 
 ## Clarifications
 - `final_council` explicitly documented as using the full 5-member council, not the General Council.

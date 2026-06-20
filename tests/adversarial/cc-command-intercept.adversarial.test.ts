@@ -271,6 +271,65 @@ describe('ADVERSARIAL: cc-command-intercept hook evasion tests', () => {
 		});
 	});
 
+	describe('ATTACK VECTOR: /clear alias for /reset (PR #1245 regression guard)', () => {
+		// /clear is documented in CLAUDE_CODE_CONFLICTS as "Alias for /clear —
+		// wipes the entire conversation context window" (see the /reset entry's
+		// `ccBehavior` field). PR #1245 wired CC_COMMAND_MAP from the registry,
+		// so /clear must be registered as a key in the map (not just the
+		// description text on /reset) for the hard-block path to be reachable.
+		// This test guards the regression.
+		test('/clear is hard-blocked as alias for /reset', async () => {
+			const hook = createCcCommandInterceptHook();
+			const output = createMessage('/clear the conversation');
+
+			await hook.messagesTransform({}, output);
+
+			expect(output.messages![0].parts[0].text).toContain(
+				'[CC_COMMAND_INTERCEPT] BLOCKED: /clear',
+			);
+			expect(output.messages![0].parts[0].text).toContain(
+				'this wipes conversation context',
+			);
+		});
+
+		test('/CLEAR (uppercase) is hard-blocked', async () => {
+			const hook = createCcCommandInterceptHook();
+			const output = createMessage('/CLEAR the conversation');
+
+			await hook.messagesTransform({}, output);
+
+			expect(output.messages![0].parts[0].text).toContain(
+				'[CC_COMMAND_INTERCEPT] BLOCKED: /clear',
+			);
+		});
+
+		test('/clear with leading whitespace is hard-blocked', async () => {
+			const hook = createCcCommandInterceptHook();
+			const output = createMessage('  /clear the conversation');
+
+			await hook.messagesTransform({}, output);
+
+			expect(output.messages![0].parts[0].text).toContain(
+				'[CC_COMMAND_INTERCEPT] BLOCKED: /clear',
+			);
+		});
+
+		test('triple-backtick block containing /clear is NOT detected', async () => {
+			const hook = createCcCommandInterceptHook();
+			const output = createMessage('```\n/clear everything\n```');
+
+			await hook.messagesTransform({}, output);
+
+			// Should NOT be modified - /clear is inside a code fence
+			expect(output.messages![0].parts[0].text).toBe(
+				'```\n/clear everything\n```',
+			);
+			expect(output.messages![0].parts[0].text).not.toContain(
+				'[CC_COMMAND_INTERCEPT]',
+			);
+		});
+	});
+
 	describe('ATTACK VECTOR: Code fence evasion', () => {
 		test('triple-backtick block containing /reset is NOT detected', async () => {
 			const hook = createCcCommandInterceptHook();

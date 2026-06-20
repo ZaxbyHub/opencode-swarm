@@ -1,18 +1,184 @@
 import { describe, expect, test } from 'bun:test';
 import { getAgentConfigs } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
+import {
+	COUNCIL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
+	TURBO_AGENT_TOOL_MAP,
+} from '../../../src/config/constants';
 
 /**
- * Hardening regression: when council.enabled === true, a user-supplied
- * tool_filter.overrides.architect that omits submit_council_verdicts or
- * declare_council_criteria is a CONFLICTING CONFIG. Rather than silently
- * force-including the tools (which overrides explicit user intent) or
- * silently dropping them (which re-creates the original 6.66.0 bug class),
- * getAgentConfigs throws a clear error requiring the user to resolve the
- * conflict explicitly.
+ * General Council tools (convene_general_council, web_search, web_fetch) are
+ * gated by council.general.enabled. Unlike council.enabled (QA gate tools),
+ * general council is a research/synthesis opt-in.
+ */
+describe('council.general.enabled feature-gate', () => {
+	test('architect has GENERAL_COUNCIL tools when council.general.enabled is true', () => {
+		const config: PluginConfig = {
+			council: { general: { enabled: true } },
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
+	});
+
+	test('architect does NOT have GENERAL_COUNCIL tools when council.general.enabled is false', () => {
+		const config: PluginConfig = {
+			council: { general: { enabled: false } },
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+	});
+
+	test('architect does NOT have GENERAL_COUNCIL tools when council.general is absent', () => {
+		const config: PluginConfig = {
+			council: { enabled: true }, // council.enabled=true but no general.enabled
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+	});
+
+	test('swarm-prefixed architect has GENERAL_COUNCIL tools when council.general.enabled is true', () => {
+		const config: PluginConfig = {
+			council: { general: { enabled: true } },
+			swarms: {
+				cloud: { name: 'cloud', agents: {} },
+			},
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['cloud_architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
+	});
+});
+
+/**
+ * Lean Turbo tools (lean_turbo_*) are gated by turbo config block presence.
+ * The mere existence of config.turbo (regardless of inner values) opts in.
+ */
+describe('turbo config feature-gate', () => {
+	test('architect has TURBO tools when turbo config is present', () => {
+		const config: PluginConfig = {
+			turbo: { enabled: true },
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
+	});
+
+	test('architect does NOT have TURBO tools when turbo config is absent', () => {
+		const config: PluginConfig = {} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+	});
+
+	test('swarm-prefixed architect has TURBO tools when turbo config is present', () => {
+		const config: PluginConfig = {
+			turbo: { enabled: true },
+			swarms: {
+				cloud: { name: 'cloud', agents: {} },
+			},
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['cloud_architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
+	});
+
+	test('architect does NOT have TURBO tools when turbo is explicitly undefined', () => {
+		const config: PluginConfig = {
+			turbo: undefined,
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+	});
+});
+
+/**
+ * Combined scenario: verify architect does NOT have council or turbo tools
+ * when ALL feature flags are OFF.
+ */
+describe('all feature flags OFF — architect has no gated tools', () => {
+	test('architect has no council, general council, or turbo tools when all flags are off', () => {
+		const config: PluginConfig = {
+			council: { enabled: false, general: { enabled: false } },
+		} as PluginConfig;
+
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+
+		// No COUNCIL_AGENT_TOOL_MAP tools
+		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+		// No GENERAL_COUNCIL_AGENT_TOOL_MAP tools
+		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+		// No TURBO_AGENT_TOOL_MAP tools
+		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBeUndefined();
+		}
+	});
+});
+
+/**
+ * Hardening regression: when council.enabled === true, council-mode tools
+ * are auto-merged ON TOP of any architect override via the conditional
+ * merge in getAgentConfigs. This means the override cannot accidentally
+ * exclude council tools — they are always present when council.enabled=true.
+ * The previous behavior (throwing a conflict error) was removed in the
+ * opt-in gating refactor.
  */
 describe('tool_filter override + council conflict detection', () => {
-	test('throws when architect override omits council tools and council is enabled', () => {
+	test('council tools are auto-merged into architect override when council is enabled', () => {
 		const config: PluginConfig = {
 			council: { enabled: true },
 			tool_filter: {
@@ -23,16 +189,17 @@ describe('tool_filter override + council conflict detection', () => {
 			},
 		} as PluginConfig;
 
-		expect(() => getAgentConfigs(config)).toThrow(
-			/council\.enabled=true but tool_filter\.overrides\.architect omits/,
-		);
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+		// Council tools are auto-merged on top of the override
+		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
 	});
 
-	test('throws for swarm-prefixed architect too (e.g. cloud_architect)', () => {
-		// Swarm-prefixed architect (cloud_architect, local_architect, etc.) must
-		// follow the same rule — the base name is stripped and the override is
-		// keyed by the base name. Any swarm whose architect override omits the
-		// council tools should fail the same conflict check.
+	test('swarm-prefixed architect: council tools auto-merged when council is enabled', () => {
 		const config: PluginConfig = {
 			council: { enabled: true },
 			swarms: {
@@ -49,9 +216,13 @@ describe('tool_filter override + council conflict detection', () => {
 			},
 		} as PluginConfig;
 
-		expect(() => getAgentConfigs(config)).toThrow(
-			/council\.enabled=true but tool_filter\.overrides\.architect omits/,
-		);
+		const agents = getAgentConfigs(config);
+		const architect = agents['cloud_architect'];
+		expect(architect).toBeDefined();
+		const tools = architect.tools as Record<string, boolean> | undefined;
+		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
 	});
 
 	test('architect override containing council tools passes unchanged', () => {
@@ -111,10 +282,9 @@ describe('tool_filter override + council conflict detection', () => {
 		expect(tools?.declare_council_criteria).toBe(true);
 	});
 
-	test('throws on empty override list when council is enabled', () => {
-		// Empty list = user explicitly removed all tools from architect, including
-		// both council tools. This is the degenerate case of the conflict and
-		// must still throw rather than silently losing council.
+	test('empty override list when council enabled: council tools still present (auto-merged)', () => {
+		// Empty list + council.enabled=true: council tools are auto-merged
+		// on top, so they remain available (no throw, no silent loss).
 		const config: PluginConfig = {
 			council: { enabled: true },
 			tool_filter: {
@@ -125,15 +295,17 @@ describe('tool_filter override + council conflict detection', () => {
 			},
 		} as PluginConfig;
 
-		expect(() => getAgentConfigs(config)).toThrow(
-			/council\.enabled=true but tool_filter\.overrides\.architect omits/,
-		);
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
+			expect(tools?.[tool]).toBe(true);
+		}
 	});
 
-	test('throws on partial override (only one of two council tools present)', () => {
+	test('partial override when council enabled: missing council tools are auto-merged', () => {
 		// Override includes submit_council_verdicts but omits declare_council_criteria.
-		// Both tools are required by the council workflow — a partial override
-		// is still a silent-failure path and must throw.
+		// With auto-merge, both are present in the final tool set.
 		const config: PluginConfig = {
 			council: { enabled: true },
 			tool_filter: {
@@ -144,6 +316,10 @@ describe('tool_filter override + council conflict detection', () => {
 			},
 		} as PluginConfig;
 
-		expect(() => getAgentConfigs(config)).toThrow(/declare_council_criteria/);
+		const agents = getAgentConfigs(config);
+		const architect = agents['architect'];
+		const tools = architect.tools as Record<string, boolean> | undefined;
+		expect(tools?.submit_council_verdicts).toBe(true);
+		expect(tools?.declare_council_criteria).toBe(true);
 	});
 });

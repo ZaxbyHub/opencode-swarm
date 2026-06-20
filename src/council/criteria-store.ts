@@ -5,9 +5,10 @@
  * read back during council evaluation.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { atomicWriteFile } from '../evidence/task-file.js';
 import type { CouncilCriteria, CouncilCriteriaItem } from './types';
 
 const COUNCIL_DIR = '.swarm/council';
@@ -28,11 +29,11 @@ const CouncilCriteriaSchema = z.object({
 // persisted .swarm/council/*.json files. (council-evidence-writer.ts
 // uses safeAssignOwnProps for the same purpose on evidence files.)
 
-export function writeCriteria(
+export async function writeCriteria(
 	workingDir: string,
 	taskId: string,
 	criteria: CouncilCriteriaItem[],
-): void {
+): Promise<void> {
 	const dir = join(workingDir, COUNCIL_DIR);
 	mkdirSync(dir, { recursive: true });
 	const payload: CouncilCriteria = {
@@ -40,7 +41,8 @@ export function writeCriteria(
 		criteria,
 		declaredAt: new Date().toISOString(),
 	};
-	writeFileSync(
+	// F-05: Use atomic write (temp + rename) instead of direct writeFileSync
+	await atomicWriteFile(
 		join(dir, `${safeId(taskId)}.json`),
 		JSON.stringify(payload, null, 2),
 	);

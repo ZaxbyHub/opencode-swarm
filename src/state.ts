@@ -33,10 +33,13 @@ import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
+import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { loadPlanJsonOnly, updateTaskStatus } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
+import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
+import { recordSessionStart } from './session/session-start-store.js';
 import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
 import * as logger from './utils/logger';
@@ -498,6 +501,8 @@ export function resetSwarmState(): void {
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetPct = 0;
 	swarmState.agentSessions.clear();
+	clearTrajectoryCache();
+	clearTrajectoryStepCounters();
 	swarmState.pendingRehydrations.clear();
 	swarmState.opencodeClient = null;
 	swarmState.curatorInitAgentNames = [];
@@ -664,6 +669,17 @@ export function startAgentSession(
 	};
 
 	swarmState.agentSessions.set(sessionId, sessionState);
+
+	// Persist session start timestamp for cross-process session-scoping (#444 item 9).
+	// Best-effort — fail-open if disk write fails.
+	if (directory) {
+		try {
+			recordSessionStart(directory, now);
+		} catch {
+			// non-fatal — fail-open
+		}
+	}
+
 	telemetry.sessionStarted(sessionId, agentName);
 	// Keep activeAgent map in sync so guardrails can always resolve the agent name
 	// without falling back to ORCHESTRATOR_NAME for legitimately-named sessions.

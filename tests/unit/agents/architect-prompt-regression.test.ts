@@ -97,4 +97,43 @@ describe('architect prompt — critical rules regression (Task 3.3)', () => {
 			expect(hasNamedInterpreters).toBe(true);
 		});
 	});
+
+	describe('4. PREFERRED AGGREGATOR — pre_check_batch guidance', () => {
+		test('prompt contains PREFERRED AGGREGATOR directive', () => {
+			// The prompt MUST contain an explicit "PREFERRED AGGREGATOR" directive
+			// directing agents to use pre_check_batch over running lint, secretscan,
+			// sast_scan, and quality_budget individually.
+			const hasPreferredAggregator = /PREFERRED AGGREGATOR/i.test(
+				ARCHITECT_SOURCE,
+			);
+			expect(hasPreferredAggregator).toBe(true);
+		});
+
+		test('prompt references pre_check_batch as the recommended post-implementation verification approach', () => {
+			// The PREFERRED AGGREGATOR text must reference pre_check_batch explicitly
+			// as the recommended way to run lint:check + secretscan + sast_scan +
+			// quality_budget in parallel.
+			const mentionsPreCheckBatch =
+				/pre_check_batch.{0,300}lint.{0,50}secretscan.{0,50}sast_scan.{0,50}quality_budget/i.test(
+					ARCHITECT_SOURCE,
+				) ||
+				(/pre_check_batch/i.test(ARCHITECT_SOURCE) &&
+					/PREFERRED AGGREGATOR/i.test(ARCHITECT_SOURCE));
+			expect(mentionsPreCheckBatch).toBe(true);
+		});
+
+		test('prompt describes pre_check_batch as running tools in PARALLEL', () => {
+			// The guidance must convey that pre_check_batch runs tools concurrently
+			// (up to 4 concurrent) so agents understand the performance benefit.
+			const describesParallel =
+				/pre_check_batch.{0,100}PARALLEL/i.test(ARCHITECT_SOURCE) ||
+				/PARALLEL.{0,100}pre_check_batch/i.test(ARCHITECT_SOURCE);
+			expect(describesParallel).toBe(true);
+		});
+
+		test('prompt clarifies pre_check_batch does NOT expose capture_baseline, changed_files scoping, or per-tool severity_threshold', () => {
+			expect(ARCHITECT_SOURCE).toMatch(/does NOT expose capture_baseline/);
+			expect(ARCHITECT_SOURCE).toMatch(/call sast_scan or secretscan directly/);
+		});
+	});
 });

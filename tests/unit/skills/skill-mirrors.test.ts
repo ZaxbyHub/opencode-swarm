@@ -66,6 +66,11 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 		'.claude/skills/deep-dive/SKILL.md',
 	],
 	[
+		'deep-research',
+		'.opencode/skills/deep-research/SKILL.md',
+		'.claude/skills/deep-research/SKILL.md',
+	],
+	[
 		'issue-ingest',
 		'.opencode/skills/issue-ingest/SKILL.md',
 		'.claude/skills/issue-ingest/SKILL.md',
@@ -94,7 +99,7 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 ] as const;
 
 // Skills where .opencode is the full operative protocol loaded by architect.ts and
-// .claude is an intentionally condensed variant for Claude Code sessions.
+// .claude is an intentionally different surface.
 // Both files must exist; byte-identity is not required but divergence is documented here.
 const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
 	slug: string;
@@ -103,25 +108,56 @@ const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
 	reason: string;
 }> = [
 	{
-		slug: 'swarm-pr-review',
-		opencodePath: '.opencode/skills/swarm-pr-review/SKILL.md',
-		claudePath: '.claude/skills/swarm-pr-review/SKILL.md',
-		reason:
-			'.claude is a 6-phase condensed variant; .opencode is the 12-phase full protocol loaded by architect.ts MODE: PR_REVIEW',
-	},
-	{
-		slug: 'swarm-pr-feedback',
-		opencodePath: '.opencode/skills/swarm-pr-feedback/SKILL.md',
-		claudePath: '.claude/skills/swarm-pr-feedback/SKILL.md',
-		reason:
-			'.claude/.agents are thin adapters that delegate to canonical; .opencode is the full protocol loaded by architect.ts MODE: PR_FEEDBACK',
-	},
-	{
 		slug: 'codebase-review-swarm',
 		opencodePath: '.opencode/skills/codebase-review-swarm/SKILL.md',
 		claudePath: '.claude/skills/codebase-review-swarm/SKILL.md',
 		reason:
 			'.opencode is the full portable package loaded by architect.ts MODE: CODEBASE_REVIEW; .claude is a thin adapter',
+	},
+];
+
+const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	canonicalPath: string;
+	adapterPaths: string[];
+	expectedCanonicalRef: string;
+}> = [
+	{
+		slug: 'swarm-pr-review',
+		canonicalPath: '.opencode/skills/swarm-pr-review/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-pr-review/SKILL.md',
+			'.agents/skills/swarm-pr-review/SKILL.md',
+		],
+		expectedCanonicalRef: '../../../.opencode/skills/swarm-pr-review/SKILL.md',
+	},
+	{
+		slug: 'swarm-pr-feedback',
+		canonicalPath: '.opencode/skills/swarm-pr-feedback/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-pr-feedback/SKILL.md',
+			'.agents/skills/swarm-pr-feedback/SKILL.md',
+		],
+		expectedCanonicalRef:
+			'../../../.opencode/skills/swarm-pr-feedback/SKILL.md',
+	},
+];
+
+// Skills whose architect mode stub loads a .opencode protocol that is
+// intentionally NOT mirrored to .claude. Used when a .claude mirror would
+// collide with a Claude Code built-in skill of the same name, or when the mode
+// is only reachable through the OpenCode plugin runtime (not a Claude Code
+// command). Both facts are asserted below so the intent is durable.
+const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	opencodePath: string;
+	reason: string;
+}> = [
+	{
+		slug: 'loop',
+		opencodePath: '.opencode/skills/loop/SKILL.md',
+		reason:
+			"MODE: LOOP is reachable only through the OpenCode /swarm loop command; a .claude/skills/loop mirror would shadow Claude Code's built-in /loop (recurring-interval) skill, so it is intentionally not mirrored.",
 	},
 ];
 
@@ -159,6 +195,47 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		});
 	}
 
+	for (const {
+		slug,
+		canonicalPath,
+		adapterPaths,
+		expectedCanonicalRef,
+	} of ADAPTER_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} adapters delegate back to the canonical .opencode skill`, () => {
+			expect(existsSync(join(process.cwd(), canonicalPath))).toBe(true);
+
+			for (const adapterPath of adapterPaths) {
+				const adapterSource = readFileSync(
+					join(process.cwd(), adapterPath),
+					'utf-8',
+				);
+				const lineCount = adapterSource.trimEnd().split(/\r?\n/).length;
+
+				expect(adapterSource).toContain(expectedCanonicalRef);
+				expect(lineCount).toBeLessThan(60);
+				expect(adapterSource).toContain('canonical workflow');
+				expect(adapterSource).not.toContain('## Phase ');
+				expect(adapterSource).not.toContain('## Multi-Round');
+				expect(adapterSource).not.toContain('### Bot Review');
+			}
+		});
+	}
+
+	for (const {
+		slug,
+		opencodePath,
+		reason,
+	} of OPENCODE_ONLY_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} skill: .opencode exists and is intentionally NOT mirrored to .claude (${reason})`, () => {
+			expect(existsSync(join(process.cwd(), opencodePath))).toBe(true);
+			const claudePath = opencodePath.replace(
+				'.opencode/skills/',
+				'.claude/skills/',
+			);
+			expect(existsSync(join(process.cwd(), claudePath))).toBe(false);
+		});
+	}
+
 	it('keeps mirrored skill list in sync with architect mode stubs', () => {
 		// Previous coverage used only this hardcoded list, so a new architect
 		// stub could reference a skill that was never checked for mirror parity.
@@ -170,6 +247,8 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		const mirroredSlugs = [
 			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 		];
 
 		// Deduplicate both sides — architect.ts may reference a slug in multiple

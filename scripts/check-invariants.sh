@@ -2,7 +2,11 @@
 # Engineering invariant checks for opencode-swarm.
 # Runs three grep-based checks corresponding to AGENTS.md invariants 3, 4, and 7.
 # Compatible with GitHub Actions (ubuntu-latest, bash).
+# NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
 set -euo pipefail
+
+# Load shared normalization routine
+source "$(dirname "$0")/lib/normalize-mock-target.sh"
 
 violations=0
 
@@ -15,7 +19,8 @@ echo "=== Check 1: Subprocess timeout required (advisory) ==="
 timeout_warnings=0
 while IFS= read -r file; do
   # Exempt the Bun compatibility layer — allowed to use Bun.spawn without timeout
-  if [[ "$file" == *"bun-compat.ts" ]]; then
+  basename_file="$(basename "$file")"
+  if [[ "$basename_file" == "bun-compat.ts" ]]; then
     continue
   fi
   has_timeout=$(grep -cE "timeout:|timeoutMs" "$file" || true)
@@ -34,6 +39,9 @@ echo "=== Check 2: process.cwd() ban in tools/hooks ==="
 # Grep for process.cwd() in src/tools/ and src/hooks/ (excluding test files).
 # Exempt known legacy usages — these predate the ctx.directory convention and
 # are wrapped in explicit fallback patterns (cwd ?? process.cwd()).
+# LEGACY_EXEMPTS — full file paths matched by exact equality (not substring).
+# Adding a substring-style entry (e.g., "guardrails" to match
+# "src/hooks/guardrails.ts") will silently fail to exempt.
 LEGACY_EXEMPTS=(
   "src/tools/create-tool.ts"
   "src/tools/test-runner.ts"
@@ -49,7 +57,7 @@ LEGACY_EXEMPTS=(
 while IFS= read -r file; do
   exempt=false
   for legacy in "${LEGACY_EXEMPTS[@]}"; do
-    if [[ "$file" == *"$legacy" ]]; then
+    if [[ "$file" == "$legacy" ]]; then
       exempt=true
       break
     fi
@@ -70,9 +78,16 @@ echo "=== Check 3: mock.module allowlist ==="
 ALLOWLIST_FILE="$(dirname "$0")/mock-allowlist.txt"
 if [ ! -f "$ALLOWLIST_FILE" ]; then
   echo "ERROR: $ALLOWLIST_FILE not found — mock.module allowlist is required for Check 3"
-  echo "       To add a new mock target: append the normalized target to $ALLOWLIST_FILE with a comment"
+  echo "       Run: scripts/generate-mock-allowlist.sh to regenerate, or manually add targets to $ALLOWLIST_FILE"
   violations=$((violations + 1))
 else
+  # Pre-load allowlist into associative array once so lookup is O(1) instead of O(N·M)
+  declare -A allowlist
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+    allowlist["$pattern"]=1
+  done < "$ALLOWLIST_FILE"
+
   while IFS= read -r file; do
     # Filter: only non-comment lines containing mock.module(
     # This avoids false positives from commented-out code.
@@ -92,36 +107,29 @@ else
       # Skip empty lines
       [ -n "$target" ] || continue
 
-      # Normalize: strip all ../ segments, then leading src/, then .js extension
+      # Normalize: strip leading ../ and ./ segments, then leading src/, then .js extension
       # ../../../src/plan/manager.js -> src/plan/manager
       # ../../src/tools/co-change-analyzer.js -> src/tools/co-change-analyzer
+      # ../../../src/tools/../tools/bar.js -> src/tools/bar (handles middle ..)
+      # ./ledger -> ledger (handles relative imports in same dir)
       # node:child_process -> node:child_process (unchanged)
-      normalized="$(echo "$target" | sed 's|^\(\.\.\/\)\+||; s|^src/||; s|\.js$||')"
-      # Prepend src/ only for relative targets (not node: builtins)
-      if [[ "$normalized" != node:* ]]; then
-        normalized="src/$normalized"
-      fi
+      normalized="$(normalize_mock_target "$target")"
 
-      # Check against allowlist (exact match on normalized target)
+      # O(1) lookup in pre-loaded associative array
       allowed=false
-      while IFS= read -r pattern; do
-        # Skip empty lines and comments in allowlist
-        [[ -z "$pattern" || "$pattern" == \#* ]] && continue
-        if [ "$normalized" = "$pattern" ]; then
-          allowed=true
-          break
-        fi
-      done < "$ALLOWLIST_FILE"
+      if [[ ${allowlist["$normalized"]:-} == 1 ]]; then
+        allowed=true
+      fi
 
       if ! $allowed; then
         echo "ERROR: $file mocks '$target' (normalized: '$normalized') — not in allowlist."
-        echo "       Use _internals DI seam, or add '$normalized' to $ALLOWLIST_FILE"
+        echo "       Use _internals DI seam, or run: scripts/generate-mock-allowlist.sh"
         violations=$((violations + 1))
       fi
     done < <(echo "$active_lines" \
       | grep -oP 'mock\.module\(\s*["\x27][^"\x27]+["\x27]' \
       | sed "s/^mock\.module(\s*[\"']//;s/[\"']$//" || true)
-  done < <(grep -rl 'mock\.module(' tests/ --include="*.test.ts" \
+  done < <(grep -rl 'mock\.module(' tests/ src/ --include="*.test.ts" \
     --exclude-dir=node_modules --exclude-dir=dist || true)
 fi
 

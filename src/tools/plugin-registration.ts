@@ -35,7 +35,6 @@ export function buildPluginToolObject(
 		'knowledge_recall',
 		'knowledge_remove',
 		'knowledge_query',
-		'knowledge_ack',
 		'knowledge_receipt',
 		'knowledge_archive',
 	]);

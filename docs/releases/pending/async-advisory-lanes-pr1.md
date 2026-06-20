@@ -1,0 +1,3 @@
+Adds asynchronous advisory lane dispatch for swarm workflows. Architects can now launch read-only lane batches with `dispatch_lanes_async`, continue non-dependent inspection work, and later join results with `collect_lane_results`.
+
+The advisory lane ledger records batch/lane metadata, prompt hashes, workspace provenance, terminal results, stale/cancelled states, and trusted synthetic background completions without advancing workflow gates. PR-review, deep-dive, deep-research, council, codebase-review, and PR-feedback guidance now routes independent read-only work through this launch/collect pattern with blocking dispatch fallbacks.

@@ -34,7 +34,15 @@ const MODE_SKILLS = [
 		['Step 0 — Parse Header', 'Step 7 — Final Report'],
 	],
 	['ISSUE_INGEST', 'issue-ingest', ['Phase 1: INTAKE', 'Phase 4: TRANSITION']],
-	['PLAN', 'plan', ['SPEC GATE', 'POST-SAVE_PLAN']],
+	[
+		'PLAN',
+		'plan',
+		[
+			'SPEC GATE',
+			'GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)',
+			'POST-SAVE_PLAN',
+		],
+	],
 	[
 		'CRITIC-GATE',
 		'critic-gate',

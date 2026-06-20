@@ -126,9 +126,9 @@ Before writing under `.swarm/`, verify `.swarm/` is ignored or locally excluded.
 ## Phase 0 safe ordering
 
 1. Run 0A alone.
-2. After 0A, run 0B and 0C in parallel only if the repository is large enough to benefit.
-3. After 0B, run 0D and 0E in parallel only if 0E can leave `linked_claims` blank for Architect linking in 0J. Otherwise run 0D before 0E.
-4. Preferred batch order: batch 1 = 0F and 0G; batch 2 = 0H and 0I. Never exceed two Phase 0 agents.
+2. After 0A, run 0B and 0C through `dispatch_lanes_async` only if the repository is large enough to benefit. While those lanes run, the Architect continues deterministic inventory work that does not depend on their results.
+3. After 0B, run 0D and 0E through `dispatch_lanes_async` only if 0E can leave `linked_claims` blank for Architect linking in 0J. Otherwise run 0D before 0E.
+4. Preferred async batch order: batch 1 = 0F and 0G; batch 2 = 0H and 0I. Never exceed two Phase 0 agents.
 5. Run 0F after 0E when possible.
 6. Run 0G after 0B and 0C.
 7. Run 0H and 0I after 0B and 0C.
@@ -136,7 +136,7 @@ Before writing under `.swarm/`, verify `.swarm/` is ignored or locally excluded.
 9. Run 0K after 0J. Stop for user track selection unless preselected.
 10. Run 0L after track selection and before Phase 1 candidate generation. 0L is the last Phase 0 step before Phase 1.
 
-Do not run dependent inventory passes merely to keep agents busy. Missing dependency context is `unknown`, not guessed.
+Collect every async batch with `collect_lane_results` before consuming its ledger output or advancing to a dependent step. If `dispatch_lanes_async` or `collect_lane_results` is unavailable, fall back to blocking `dispatch_lanes`; if deterministic dispatch is unavailable, run isolated local passes and record that fallback. Do not run dependent inventory passes merely to keep agents busy. Missing dependency context is `unknown`, not guessed.
 
 ## Phase 0 inventory
 
@@ -205,7 +205,7 @@ Rules:
 
 ## Phase 1 — Candidate generation
 
-Every dispatch includes selected track(s), exact file list or surface IDs, source-of-truth packet, repository-context packet, relevant ledgers, the applicable `TRACK_DEPTH_PLAN`, candidate format, `out_of_scope_note` rule, and anti-cursory/non-dilution reminder.
+Every dispatch includes selected track(s), exact file list or surface IDs, source-of-truth packet, repository-context packet, relevant ledgers, the applicable `TRACK_DEPTH_PLAN`, candidate format, `out_of_scope_note` rule, and anti-cursory/non-dilution reminder. Prefer `dispatch_lanes_async` for independent candidate-generation coverage units so the Architect can continue building the review ledger, coverage map, and validation routing while lanes inspect subsystems. Call `collect_lane_results` before Phase 2 reviewer validation; no candidate may be routed, counted, or synthesized until its async batch has settled or been explicitly marked blocked/skipped.
 
 File-size rule: no more than 15 files per deep pass; no more than 8 dense files per deep pass. Dense = >300 logical lines, multiple unrelated responsibilities, or interleaved UI/state/network/security logic. No sampling inside assigned scope. Large selections require more deep passes, not larger batches or lower depth.
 

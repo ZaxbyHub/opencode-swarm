@@ -1,14 +1,15 @@
 /**
  * macOS sandbox-exec sandbox executor.
  *
- * Wraps shell commands with sandbox-exec(8) to restrict process capabilities
- * using a profile-based deny-by-default policy.
+ * Wraps shell commands with sandbox-exec(8) to enforce file-write containment.
  *
- * Profile allows:
+ * Profile scope:
+ *   - Non-file operations (network, IPC, process creation, sysctl reads) are
+ *     ALLOWED via `(allow default)`. This executor enforces file-write
+ *     containment only — it is not a full-process sandbox.
  *   - Read-only access to essential system paths (/usr, /bin, /sbin, /lib)
- *   - Read-write access to each scope path
- *   - Read-write access to the temp directory (500MB bounded)
- *   - Denies all other file writes
+ *   - Read-write access to each scope path and the temp directory
+ *   - All other file writes are denied
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
@@ -119,7 +120,8 @@ function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
 		.map((p) => `(allow file-write* (subpath "${sbplEscapePath(p)}"))`)
 		.join('\n');
 
-	// Core profile: deny-by-default, allow system ro paths, allow scoped rw paths
+	// Core profile: allow non-file ops (network, IPC, process creation) via (allow default),
+	// allow system ro paths, deny file-writes outside the declared scope paths
 	const profile = `(version 1)
 (allow default)
 (allow file-read* (subpath "/usr"))

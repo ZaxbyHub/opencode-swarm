@@ -1,20 +1,22 @@
 /**
  * Handle /swarm pr-feedback command.
  *
- * Triggers the architect to enter MODE: PR_FEEDBACK — the swarm workflow for
+ * Triggers the architect to enter MODE: PR_FEEDBACK â€” the swarm workflow for
  * ingesting and closing KNOWN pull-request feedback (review comments, requested
  * changes, CI failures, merge conflicts, stale branches, pasted notes). This is
  * distinct from /swarm pr-review, which discovers NEW findings.
  *
  * Input contract (PR reference is optional):
- *   /swarm pr-feedback 155                         → feedback pass on PR 155
- *   /swarm pr-feedback 155 also fix the lint errors → PR 155 + extra instructions
- *   /swarm pr-feedback owner/repo#155               → shorthand
+ *   /swarm pr-feedback 155                         â†’ feedback pass on PR 155
+ *   /swarm pr-feedback 155 also fix the lint errors â†’ PR 155 + extra instructions
+ *   /swarm pr-feedback 155 continue from .swarm/pr-review/<run_id>/feedback-handoff.md
+ *                                                   -> PR 155 + handoff path instructions
+ *   /swarm pr-feedback owner/repo#155               â†’ shorthand
  *   /swarm pr-feedback https://github.com/.../pull/155
- *   /swarm pr-feedback                              → bare signal; architect builds
+ *   /swarm pr-feedback                              â†’ bare signal; architect builds
  *                                                     the ledger from current PR/branch
  *   /swarm pr-feedback address the review notes about error handling
- *                                                   → no parseable PR ref ⇒ the whole
+ *                                                   â†’ no parseable PR ref â‡’ the whole
  *                                                     input is forwarded as instructions
  *
  * PR-reference parsing and injection-hardening are shared with /swarm pr-review
@@ -33,7 +35,7 @@ export function handlePrFeedbackCommand(
 ): string {
 	const rest = args.filter((t) => t.trim().length > 0);
 
-	// No args → bare signal. The architect/skill assembles the feedback ledger
+	// No args â†’ bare signal. The architect/skill assembles the feedback ledger
 	// from the current PR, branch state, and any pasted context.
 	if (rest.length === 0) {
 		return '[MODE: PR_FEEDBACK]';
@@ -51,7 +53,7 @@ export function handlePrFeedbackCommand(
 	}
 
 	// The leading token is shaped like a PR reference (bare number, shorthand, or
-	// URL) but could not be resolved — e.g. a bare number with no reachable
+	// URL) but could not be resolved â€” e.g. a bare number with no reachable
 	// `origin` remote, or a rejected URL. Surface the error instead of silently
 	// demoting an intended PR reference to free-text feedback.
 	if (resolved && 'error' in resolved && looksLikePrRef(rest[0])) {

@@ -159,3 +159,9 @@ export async function recordReplayEntry(
 		console.warn(`[replay] Failed to record entry: ${err}`);
 	}
 }
+
+export const _test_exports = {
+	isPathSafe,
+	isWithinReplaysDir,
+	sanitizeFilename,
+} as const;

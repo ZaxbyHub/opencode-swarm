@@ -39,6 +39,22 @@ This is a SOFT gate. When the user chooses "Skip and plan directly", proceed to 
 
 Run CODEBASE REALITY CHECK scoped to codebase elements referenced in spec.md or user constraints. Discrepancies must be reflected in the generated plan.
 
+### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)
+
+Before drafting or saving the plan, the architect MUST offer General Council advisory input when `council.general.enabled` is true in the resolved opencode-swarm config and a search API key is configured.
+
+- Ask the user: "Use General Council advisory input before I write the plan? The 3-agent council (generalist, skeptic, domain expert) will gather current external context and provide perspectives that I will fold into the plan before critic review. (default: no)"
+- If the user declines, proceed to the clarification funnel and planning normally.
+- If the user accepts:
+  1. Run the General Council Research Phase: formulate 1-3 targeted `web_search` queries grounded in the work being planned.
+  2. Dispatch `the active swarm's council_generalist agent`, `the active swarm's council_skeptic agent`, and `the active swarm's council_domain_expert agent` in PARALLEL with the RESEARCH CONTEXT.
+  3. Collect responses and call `convene_general_council` with mode `general`.
+  4. Record the council consensus, disagreements, cited sources, and any plan-impacting assumptions in `.swarm/context.md` under `## Decisions`.
+  5. Use that recorded council input as planning context before calling `save_plan`.
+- If General Council is unavailable and the user explicitly requested council input, surface the config/key requirement and stop before `save_plan` rather than writing an ungrounded plan.
+
+General Council is advisory and distinct from `council_mode`, `phase_council`, and `final_council`. It is not a QA gate. Its purpose here is to make current external context available before the architect writes any plan and before any critic pre-plan review.
+
 ### CLARIFICATION FUNNEL (pre-save_plan)
 
 Before calling `save_plan` — whether creating a new plan or finalizing an external plan ingestion — the architect MUST run this four-stage clarification funnel. The goal is to limit unnecessary user interruption, not planning completeness.
@@ -198,7 +214,7 @@ After `save_plan` succeeds, read `.swarm/context.md`:
   - drift_check (default: ON) - mandatory per-phase drift verification at PHASE-WRAP
   - final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) -- NOT the General Council -- at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
   Additionally, present these two sub-items as part of the same exchange:
-  - Parallel coders (default: 1, range: 1-4) - how many coders should run in parallel.
+  - Parallel coders (default: 1, range: 1-4) - how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files - safe and faster, but only for tasks whose file scopes do NOT overlap. Inspect the plan and recommend a count equal to the number of dependency-ready, file-disjoint task groups (clamped 1-4); recommend 1 (serial) when scopes overlap or are unknown. State your recommendation and reasoning when you ask.
   - Commit frequency (default: phase-level only) - optional per-task checkpoint commit after each task completion.
   The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
   If the user says parallel coders > 1, write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:

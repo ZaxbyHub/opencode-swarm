@@ -18,10 +18,21 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect.js';
 import {
 	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	TOOL_DESCRIPTIONS,
 } from '../../../src/config/constants.js';
 
-const ARCHITECT_TOOL_COUNT = AGENT_TOOL_MAP['architect'].length;
+const BASE_ARCHITECT_TOOL_COUNT = AGENT_TOOL_MAP['architect'].length;
+const COUNCIL_ARCHITECT_TOOL_COUNT = (COUNCIL_AGENT_TOOL_MAP['architect'] ?? [])
+	.length;
+const GENERAL_COUNCIL_ARCHITECT_TOOL_COUNT = (
+	GENERAL_COUNCIL_AGENT_TOOL_MAP['architect'] ?? []
+).length;
+const ARCHITECT_TOOL_COUNT =
+	BASE_ARCHITECT_TOOL_COUNT +
+	COUNCIL_ARCHITECT_TOOL_COUNT +
+	GENERAL_COUNCIL_ARCHITECT_TOOL_COUNT;
 
 let resolvedPrompt: string;
 
@@ -135,7 +146,13 @@ describe('Available Tools generation from AGENT_TOOL_MAP', () => {
 	});
 
 	it('has descriptions for tools that have TOOL_DESCRIPTIONS entries', () => {
-		for (const tool of ['build_check', 'checkpoint', 'dispatch_lanes']) {
+		for (const tool of [
+			'build_check',
+			'checkpoint',
+			'collect_lane_results',
+			'dispatch_lanes',
+			'dispatch_lanes_async',
+		]) {
 			const description =
 				TOOL_DESCRIPTIONS[tool as keyof typeof TOOL_DESCRIPTIONS];
 			expect(description).toBeTruthy();

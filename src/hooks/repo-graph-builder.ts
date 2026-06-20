@@ -44,6 +44,7 @@ export interface RepoGraphDeps {
 			maxFiles?: number;
 			walkBudgetMs?: number;
 			followSymlinks?: boolean;
+			excludeDirs?: readonly string[];
 		},
 	) => Promise<RepoGraph>;
 	saveGraph: (
@@ -103,12 +104,19 @@ function isSupportedSourceFile(filePath: string): boolean {
 export function createRepoGraphBuilderHook(
 	workspaceRoot: string,
 	deps?: Partial<RepoGraphDeps>,
+	options?: { excludeDirs?: readonly string[] },
 ): RepoGraphBuilderHook {
 	const _buildWorkspaceGraph =
 		deps?.buildWorkspaceGraph ?? buildWorkspaceGraphAsync;
 	const _saveGraph = deps?.saveGraph ?? saveGraph;
 	const _updateGraphForFiles = deps?.updateGraphForFiles ?? updateGraphForFiles;
 	const _safeRealpathSync = deps?.safeRealpathSync ?? safeRealpathSync;
+
+	// User-configured directory excludes (issue #1448). Empty entries are
+	// dropped; the Set is used both to scope the initial scan and to keep
+	// incremental write-triggered updates consistent with the scan.
+	const _excludeDirs = (options?.excludeDirs ?? []).filter((d) => d.length > 0);
+	const _excludeDirSet = new Set<string>(_excludeDirs);
 
 	let initStarted = false;
 	let initPromise: Promise<void> = Promise.resolve();
@@ -175,7 +183,9 @@ export function createRepoGraphBuilderHook(
 		// even if the scan itself takes seconds.
 		await yieldToEventLoop();
 		try {
-			const graph = await _buildWorkspaceGraph(workspaceRoot);
+			const graph = await _buildWorkspaceGraph(workspaceRoot, {
+				excludeDirs: _excludeDirs,
+			});
 			await _saveGraph(workspaceRoot, graph);
 			logger.log(
 				`[repo-graph] Built graph: ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
@@ -226,6 +236,17 @@ export function createRepoGraphBuilderHook(
 			if (filePath.includes('\0')) return;
 
 			if (!isSupportedSourceFile(filePath)) return;
+
+			// Keep incremental updates consistent with the initial scan: a write
+			// to a file under a user-excluded directory must not re-add it to the
+			// graph (issue #1448). Match by path segment, mirroring the basename
+			// semantics of the scan's skip set.
+			if (
+				_excludeDirSet.size > 0 &&
+				filePath.split(/[/\\]/).some((segment) => _excludeDirSet.has(segment))
+			) {
+				return;
+			}
 
 			const absoluteFilePath = path.isAbsolute(filePath)
 				? filePath

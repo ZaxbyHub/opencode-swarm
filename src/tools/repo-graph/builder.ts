@@ -77,7 +77,24 @@ const SKIP_DIRECTORIES = new Set([
 	'vendor',
 	'.svn',
 	'.hg',
+	// SvelteKit build output (issue #1448): minified chunks here are generated
+	// artifacts, never source, and previously crashed the graph build.
+	'.svelte-kit',
 ]);
+
+/**
+ * Build the effective set of directory basenames to skip during a walk:
+ * the built-in {@link SKIP_DIRECTORIES} defaults plus any caller-provided
+ * `excludeDirs` (issue #1448). When no excludes are supplied, the shared
+ * constant is returned directly to avoid a per-walk allocation.
+ */
+function resolveSkipDirectories(
+	excludeDirs?: readonly string[],
+): ReadonlySet<string> {
+	const extras = excludeDirs?.filter((d) => d.length > 0) ?? [];
+	if (extras.length === 0) return SKIP_DIRECTORIES;
+	return new Set<string>([...SKIP_DIRECTORIES, ...extras]);
+}
 
 /**
  * Supported source file extensions for graph scanning.
@@ -649,6 +666,8 @@ interface WalkContext {
 	walkBudgetMs: number;
 	maxFiles: number;
 	followSymlinks: boolean;
+	/** Directory basenames to skip (built-in defaults ∪ caller excludeDirs). */
+	skipDirs: ReadonlySet<string>;
 	abortReason?: 'budget' | 'cap';
 }
 
@@ -692,6 +711,7 @@ function findSourceFiles(
 		walkBudgetMs?: number;
 		maxFiles?: number;
 		followSymlinks?: boolean;
+		excludeDirs?: readonly string[];
 	},
 ): string[] {
 	const ctx: WalkContext = {
@@ -701,6 +721,7 @@ function findSourceFiles(
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
+		skipDirs: resolveSkipDirectories(options?.excludeDirs),
 	};
 	const files: string[] = [];
 	walkSyncInto(dir, ctx, files);
@@ -740,7 +761,7 @@ function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
 		if (isWalkBudgetExceeded(ctx) || isFileCapReached(ctx, files.length)) {
 			return;
 		}
-		if (SKIP_DIRECTORIES.has(entry.name)) {
+		if (ctx.skipDirs.has(entry.name)) {
 			ctx.stats.skippedDirs++;
 			continue;
 		}
@@ -781,6 +802,7 @@ async function findSourceFilesAsync(
 		walkBudgetMs?: number;
 		maxFiles?: number;
 		followSymlinks?: boolean;
+		excludeDirs?: readonly string[];
 	},
 ): Promise<string[]> {
 	const ctx: WalkContext = {
@@ -790,6 +812,7 @@ async function findSourceFilesAsync(
 		walkBudgetMs: options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS,
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
+		skipDirs: resolveSkipDirectories(options?.excludeDirs),
 	};
 	const files: string[] = [];
 	const queue: string[] = [dir];
@@ -822,7 +845,7 @@ async function findSourceFilesAsync(
 			if (isWalkBudgetExceeded(ctx) || isFileCapReached(ctx, files.length)) {
 				break;
 			}
-			if (SKIP_DIRECTORIES.has(entry.name)) {
+			if (ctx.skipDirs.has(entry.name)) {
 				ctx.stats.skippedDirs++;
 				continue;
 			}
@@ -1058,6 +1081,7 @@ export function buildWorkspaceGraph(
 		walkBudgetMs,
 		maxFiles,
 		followSymlinks,
+		excludeDirs: options?.excludeDirs,
 	});
 
 	// Sort files for deterministic processing order
@@ -1147,7 +1171,17 @@ export function buildWorkspaceGraph(
 			}),
 		};
 
-		appendNodeFast(graph, node);
+		// A node that fails validation (e.g. control characters in ontology
+		// evidence extracted from a minified/generated file) must skip that one
+		// file, not abort the whole graph build (issue #1448). Drop it entirely —
+		// no node, no edges — and account it as skipped rather than scanned.
+		try {
+			appendNodeFast(graph, node);
+		} catch {
+			stats.filesScanned--;
+			stats.skippedFiles++;
+			continue;
+		}
 
 		// Sort imports deterministically by specifier for stable edge ordering
 		const sortedImports = [...parsedImports].sort((a, b) =>
@@ -1169,7 +1203,14 @@ export function buildWorkspaceGraph(
 					importType: parsed.importType,
 					importedSymbols: parsed.importedSymbols,
 				};
-				appendEdgeFast(graph, edge, seenEdges);
+				// The node is already valid; an individual invalid edge (e.g. a
+				// control character in an import specifier) drops just that edge
+				// rather than aborting the build (issue #1448).
+				try {
+					appendEdgeFast(graph, edge, seenEdges);
+				} catch {
+					/* skip malformed edge */
+				}
 			}
 		}
 	}
@@ -1237,6 +1278,7 @@ export async function buildWorkspaceGraphAsync(
 		walkBudgetMs,
 		maxFiles,
 		followSymlinks,
+		excludeDirs: options?.excludeDirs,
 	});
 
 	sourceFiles.sort((a, b) => {
@@ -1261,11 +1303,28 @@ export async function buildWorkspaceGraphAsync(
 	for (const filePath of sourceFiles) {
 		const result = scanFile(filePath, absoluteRoot, maxFileSize);
 		if (result.node) {
-			appendNodeFast(graph, result.node);
-			for (const edge of result.edges) {
-				appendEdgeFast(graph, edge, seenEdges);
+			// A node that fails validation (e.g. control characters in ontology
+			// evidence from a minified/generated file) must skip that one file,
+			// not abort the whole graph build (issue #1448). This is the path the
+			// startup hook uses, so it is the one the reported crash hits.
+			let appended = false;
+			try {
+				appendNodeFast(graph, result.node);
+				appended = true;
+			} catch {
+				stats.skippedFiles++;
 			}
-			stats.filesScanned++;
+			if (appended) {
+				for (const edge of result.edges) {
+					// Node already valid; drop only an individual invalid edge.
+					try {
+						appendEdgeFast(graph, edge, seenEdges);
+					} catch {
+						/* skip malformed edge */
+					}
+				}
+				stats.filesScanned++;
+			}
 		} else {
 			stats.skippedFiles++;
 		}

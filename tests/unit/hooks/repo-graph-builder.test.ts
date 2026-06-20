@@ -6,6 +6,7 @@
 import {
 	afterAll,
 	afterEach,
+	beforeAll,
 	beforeEach,
 	describe,
 	expect,
@@ -19,6 +20,19 @@ import * as path from 'node:path';
 
 import { createRepoGraphBuilderHook } from '../../../src/hooks/repo-graph-builder';
 import * as logger from '../../../src/utils/logger';
+
+// Workaround for Bun #32056: on Windows, a pending promise that leaves the
+// event loop idle prevents bun's per-test --timeout from firing. A 1s
+// keepalive interval ensures the event loop wakes regularly, allowing the
+// timeout mechanism to work correctly. Without this, the test file hangs
+// indefinitely on Windows CI runners.
+let _keepalive: ReturnType<typeof setInterval> | undefined;
+beforeAll(() => {
+	_keepalive = setInterval(() => {}, 1000);
+});
+afterAll(() => {
+	if (_keepalive) clearInterval(_keepalive);
+});
 
 // Create a real temp workspace directory for cross-platform compatibility.
 // Use os.tmpdir() (AGENTS.md invariant 7) so a cleanup failure cannot leave

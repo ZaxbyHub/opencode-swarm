@@ -4,14 +4,17 @@ import {
 	ALL_AGENT_NAMES,
 	ALL_SUBAGENT_NAMES,
 	CLAUDE_CODE_NATIVE_COMMANDS,
+	COUNCIL_AGENT_TOOL_MAP,
 	DEFAULT_MODELS,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	isQAAgent,
 	isSubagent,
 	MEMORY_AGENT_TOOL_MAP,
 	ORCHESTRATOR_NAME,
 	PIPELINE_AGENTS,
 	QA_AGENTS,
+	TURBO_AGENT_TOOL_MAP,
 } from '../../../src/config/constants';
 import { TOOL_NAMES } from '../../../src/tools/tool-names';
 
@@ -179,6 +182,15 @@ describe('constants.ts', () => {
 			}
 			for (const tools of Object.values(EXTERNAL_SKILL_AGENT_TOOL_MAP)) {
 				if (tools) for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(COUNCIL_AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(GENERAL_COUNCIL_AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(TURBO_AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tool of TOOL_NAMES) {
 				expect(assignedTools.has(tool)).toBe(true);

@@ -84,7 +84,7 @@ function makeSession(id: string): void {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('swarm-pr-review and swarm-issue shortcut routing', () => {
+describe('swarm PR shortcut routing', () => {
 	let tempDir: string;
 	let sessionId: string;
 
@@ -207,6 +207,86 @@ describe('swarm-pr-review and swarm-issue shortcut routing', () => {
 			const text = (output.parts[0] as { text: string }).text;
 			expect(text).toContain('[MODE: PR_REVIEW');
 			expect(text).toContain('github.com/owner/repo/pull/42');
+		});
+	});
+
+	// -------------------------------------------------------------------------
+	// swarm-pr-feedback shortcut
+	// -------------------------------------------------------------------------
+
+	describe('swarm-pr-feedback shortcut routes to pr-feedback handler', () => {
+		it('returns a bare MODE signal when no arguments are provided', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const output = { parts: [] as unknown[] };
+
+			await handler(
+				{ command: 'swarm-pr-feedback', arguments: '', sessionID: sessionId },
+				output,
+			);
+
+			expect(output.parts).toHaveLength(1);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('[MODE: PR_FEEDBACK]');
+			expect(text).toContain('Enter the mode named');
+		});
+
+		it('returns MODE signal when given a valid GitHub PR URL', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const output = { parts: [] as unknown[] };
+
+			await handler(
+				{
+					command: 'swarm-pr-feedback',
+					arguments: 'https://github.com/owner/repo/pull/42',
+					sessionID: sessionId,
+				},
+				output,
+			);
+
+			expect(output.parts).toHaveLength(1);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('[MODE: PR_FEEDBACK');
+			expect(text).toContain('github.com/owner/repo/pull/42');
+		});
+
+		it('accepts owner/repo#N shorthand format', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const output = { parts: [] as unknown[] };
+
+			await handler(
+				{
+					command: 'swarm-pr-feedback',
+					arguments: 'owner/repo#42',
+					sessionID: sessionId,
+				},
+				output,
+			);
+
+			expect(output.parts).toHaveLength(1);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('[MODE: PR_FEEDBACK');
+			expect(text).toContain('github.com/owner/repo/pull/42');
+		});
+
+		it('treats free text as pasted feedback instructions', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const output = { parts: [] as unknown[] };
+
+			await handler(
+				{
+					command: 'swarm-pr-feedback',
+					arguments: 'address the review notes about error handling',
+					sessionID: sessionId,
+				},
+				output,
+			);
+
+			expect(output.parts).toHaveLength(1);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain(
+				'[MODE: PR_FEEDBACK] address the review notes about error handling',
+			);
+			expect(text).toContain('Enter the mode named');
 		});
 	});
 
@@ -369,6 +449,38 @@ describe('swarm-pr-review and swarm-issue shortcut routing', () => {
 			);
 			expect((out2.parts[0] as { text: string }).text).toContain(
 				'[MODE: PR_REVIEW',
+			);
+		});
+
+		it('swarm-pr-feedback shortcut and /swarm pr-feedback with URL produce same MODE signal', async () => {
+			const handler = createSwarmCommandHandler(tempDir, {});
+			const out1 = { parts: [] as unknown[] };
+			const out2 = { parts: [] as unknown[] };
+
+			await handler(
+				{
+					command: 'swarm-pr-feedback',
+					arguments: 'https://github.com/owner/repo/pull/42',
+					sessionID: sessionId,
+				},
+				out1,
+			);
+			await handler(
+				{
+					command: 'swarm',
+					arguments: 'pr-feedback https://github.com/owner/repo/pull/42',
+					sessionID: sessionId,
+				},
+				out2,
+			);
+
+			expect(out1.parts).toHaveLength(1);
+			expect(out2.parts).toHaveLength(1);
+			expect((out1.parts[0] as { text: string }).text).toContain(
+				'[MODE: PR_FEEDBACK',
+			);
+			expect((out2.parts[0] as { text: string }).text).toContain(
+				'[MODE: PR_FEEDBACK',
 			);
 		});
 

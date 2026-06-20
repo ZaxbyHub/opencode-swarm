@@ -9,9 +9,12 @@ import {
 import {
 	AGENT_TOOL_MAP,
 	ALL_AGENT_NAMES,
+	COUNCIL_AGENT_TOOL_MAP,
 	DEFAULT_MODELS,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
+	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { addDeferredWarning } from '../services/warning-buffer.js';
@@ -405,6 +408,7 @@ function createSwarmAgents(
 			pluginConfig?.architectural_supervision,
 			pluginConfig?.design_docs?.enabled === true,
 			pluginConfig?.external_skills?.curation_enabled === true,
+			pluginConfig?.turbo !== undefined,
 		);
 		architect.name = prefixName('architect');
 
@@ -1119,29 +1123,41 @@ export function getAgentConfigs(
 				}
 			}
 
-			// Feature-gate: when council is enabled, the architect's system prompt
-			// instructs the model to call `declare_council_criteria` and
-			// `submit_council_verdicts`. A user-supplied tool_filter.overrides.architect
-			// that omits these tools would silently break the council workflow
-			// (same class as the original 6.66.0 bug: tools present in
-			// AGENT_TOOL_MAP but not usable). We refuse to silently override
-			// explicit user intent and refuse to silently lose the feature —
-			// throw a clear conflict error and make the user resolve it.
-			if (
-				baseAgentName === 'architect' &&
-				config?.council?.enabled === true &&
-				override !== undefined
-			) {
-				const required = [
-					'declare_council_criteria',
-					'submit_council_verdicts',
-				];
-				const missing = required.filter((t) => !override.includes(t));
-				if (missing.length > 0) {
-					throw new Error(
-						`[opencode-swarm] Conflicting config: council.enabled=true but tool_filter.overrides.architect omits ${missing.join(', ')}. ` +
-							`Either set council.enabled=false, remove the architect override entirely to fall back on AGENT_TOOL_MAP, or add the missing council tools to the override. ` +
-							`Refusing to silently override your explicit tool_filter.overrides.architect.`,
+			// Feature-gate: council-mode tools (declare_council_criteria, submit_*_verdicts, write_final_council_evidence)
+			if (config?.council?.enabled === true) {
+				const councilTools =
+					COUNCIL_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof COUNCIL_AGENT_TOOL_MAP
+					] ?? [];
+				if (councilTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...councilTools]),
+					);
+				}
+			}
+
+			// Feature-gate: general council research tools (convene_general_council, web_search, web_fetch)
+			if (config?.council?.general?.enabled === true) {
+				const generalCouncilTools =
+					GENERAL_COUNCIL_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof GENERAL_COUNCIL_AGENT_TOOL_MAP
+					] ?? [];
+				if (generalCouncilTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...generalCouncilTools]),
+					);
+				}
+			}
+
+			// Feature-gate: lean turbo tools
+			if (config?.turbo !== undefined) {
+				const turboTools =
+					TURBO_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof TURBO_AGENT_TOOL_MAP
+					] ?? [];
+				if (turboTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...turboTools]),
 					);
 				}
 			}
@@ -1159,6 +1175,8 @@ export function getAgentConfigs(
 				const councilTools = [
 					'declare_council_criteria',
 					'submit_council_verdicts',
+					'submit_phase_council_verdicts',
+					'write_final_council_evidence',
 				];
 				const present = councilTools.filter((t) => override.includes(t));
 				if (present.length > 0 && !quiet) {
