@@ -898,6 +898,16 @@ export async function activateProposal(
 			reason: `proposal not found or already activated: ${readErr instanceof Error ? readErr.message : String(readErr)}`,
 		};
 	}
+	// Check rejection ledger BEFORE the status flip: generateSkills stores
+	// draft-content hashes, so the lookup must use the same form.
+	if (await isRejectedSkillContent(directory, cleanSlug, proposalContent)) {
+		return {
+			activated: false,
+			from,
+			to,
+			reason: 'previously rejected equivalent content',
+		};
+	}
 	// Re-stamp status: active in frontmatter (proposals carry status: draft).
 	const flipped = proposalContent.replace(
 		/^status:\s*draft\s*$/m,
@@ -925,7 +935,7 @@ export async function activateProposal(
 				{
 					directory,
 					slug: cleanSlug,
-					candidateContent: flipped,
+					candidateContent: proposalContent,
 					incumbentContent,
 					operation: options.operation ?? 'skill_apply',
 				},

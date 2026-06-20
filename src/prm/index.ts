@@ -8,9 +8,9 @@
  * - Escalation tracking via escalation
  *
  * This module provides the createPrmHook factory that returns the toolAfter
- * handler used by the swarm hook system. PRM replaces loop-detector.ts for
- * repetition_loop detection, but loop-detector.ts is kept as a fast circuit
- * breaker for backward compatibility.
+ * handler used by the swarm hook system. PRM complements loop-detector.ts:
+ * loop-detector.ts remains the fast circuit breaker in guardrails/tool-before,
+ * while PRM provides deeper multi-pattern detection and escalation.
  */
 
 // Course correction

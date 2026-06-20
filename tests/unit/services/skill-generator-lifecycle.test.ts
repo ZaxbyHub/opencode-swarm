@@ -11,11 +11,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { appendRejectedSkillEdit } from '../../../src/services/skill-evaluator';
 import {
 	_internals,
 	activateProposal,
@@ -387,6 +388,50 @@ describe('activateProposal proposal deletion', () => {
 		expect(result.activated).toBe(true);
 
 		_internals.unlinkSync = original;
+	});
+});
+
+describe('activateProposal rejects previously rejected content', () => {
+	it('blocks activation of content matching a rejection ledger entry', async () => {
+		const entries = [makeEntry('rej1'), makeEntry('rej2')];
+		await seed(entries);
+		const slug = clusterEntries(entries)[0].slug;
+
+		const draft = await generateSkills({
+			directory: tmp,
+			mode: 'draft',
+		});
+		expect(draft.written.length).toBeGreaterThan(0);
+
+		const proposalFile = path.join(
+			tmp,
+			'.swarm',
+			'skills',
+			'proposals',
+			`${slug}.md`,
+		);
+		expect(existsSync(proposalFile)).toBe(true);
+		const proposalContent = await readFile(proposalFile, 'utf-8');
+
+		await appendRejectedSkillEdit(
+			{
+				directory: tmp,
+				slug,
+				candidateContent: proposalContent,
+				operation: 'skill_apply',
+			},
+			{
+				passed: false,
+				reason: 'missing required phrase',
+				candidateScore: 0,
+				caseCount: 1,
+				evalFiles: [],
+			},
+		);
+
+		const result = await activateProposal(tmp, slug);
+		expect(result.activated).toBe(false);
+		expect(result.reason).toBe('previously rejected equivalent content');
 	});
 });
 

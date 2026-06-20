@@ -133,15 +133,27 @@ describe('handleLearningCommand', () => {
 		expect(result).toContain('Learning Summary');
 	});
 
-	it('returns error message on failure', async () => {
-		const result = await handleLearningCommand(
-			'/nonexistent/path/unlikely',
-			[],
-		);
-		expect(
-			result.includes('Learning Summary') ||
-				result.includes('No learning data'),
-		).toBe(true);
+	describe('error handling', () => {
+		it('returns error message when computeLearningMetrics throws', async () => {
+			_internals.computeLearningMetrics = async () => {
+				throw new Error('disk failure');
+			};
+			const result = await handleLearningCommand(tmp, []);
+			expect(result).toContain(
+				'Error computing learning metrics: disk failure',
+			);
+			expect(result).toContain('Run /swarm diagnose');
+		});
+
+		it('handles non-Error throw values', async () => {
+			_internals.computeLearningMetrics = async () => {
+				throw 'unexpected string error';
+			};
+			const result = await handleLearningCommand(tmp, []);
+			expect(result).toContain(
+				'Error computing learning metrics: unexpected string error',
+			);
+		});
 	});
 
 	it('returns a structured markdown timeout when metric computation hangs', async () => {
