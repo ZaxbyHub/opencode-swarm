@@ -412,16 +412,12 @@ describe('activateProposal rejects previously rejected content', () => {
 		);
 		expect(existsSync(proposalFile)).toBe(true);
 		const proposalContent = await readFile(proposalFile, 'utf-8');
-		const flipped = proposalContent.replace(
-			/^status:\s*draft\s*$/m,
-			'status: active',
-		);
 
 		await appendRejectedSkillEdit(
 			{
 				directory: tmp,
 				slug,
-				candidateContent: flipped,
+				candidateContent: proposalContent,
 				operation: 'skill_apply',
 			},
 			{
