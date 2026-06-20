@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.81.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.81.0...v7.81.1) (2026-06-20)
+
+
+### Bug Fixes
+
+* **planning-system:** resolve audit findings F-03 through F-12 ([2adc105](https://github.com/ZaxbyHub/opencode-swarm/commit/2adc105dafa84541aaeccc43cd0b2282a190180b))
+
 ## [7.81.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.80.0...v7.81.0) (2026-06-20)
 
 
