@@ -2,7 +2,7 @@
 
 ## What changed
 
-Five low-severity hardening gaps identified in the PR #1142 review are addressed:
+Five low-severity hardening gaps identified in the PR #1142 review are addressed. All 17 follow-up items from the PR #1194 review are also covered:
 
 - **F-001 / F-003 — `src/sast/semgrep.ts`:** The stderr truncation handler now calls
   `child.kill('SIGTERM')` immediately upon cap breach (matching the existing stdout

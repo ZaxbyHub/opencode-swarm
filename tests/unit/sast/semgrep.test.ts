@@ -98,7 +98,7 @@ describe('executeWithTimeout subprocess hardening', () => {
 			{ timeoutMs: 10_000, maxOutputBytes: 1024 },
 		);
 		// Byte count assertion: stdout must not exceed byte cap
-		const stdoutBytes = Buffer.byteLength(result.stdout, 'utf8');
+		const stdoutBytes = Buffer.byteLength(result.stdout ?? '', 'utf8');
 		expect(stdoutBytes).toBeLessThanOrEqual(1024);
 		// Note: emoji "😀" is 4 bytes in UTF-8 but 2 UTF-16 code units in JavaScript
 		// So max 256 emojis fit in 1024 bytes = 512 JavaScript string length
@@ -133,7 +133,7 @@ describe('executeWithTimeout subprocess hardening', () => {
 			{ timeoutMs: 10_000, maxOutputBytes: 1024 },
 		);
 		// Byte count assertion: stderr must not exceed byte cap
-		const stderrBytes = Buffer.byteLength(result.stderr, 'utf8');
+		const stderrBytes = Buffer.byteLength(result.stderr ?? '', 'utf8');
 		expect(stderrBytes).toBeLessThanOrEqual(1024);
 		// Note: emoji "😀" is 4 bytes in UTF-8 but 2 UTF-16 code units in JavaScript
 		// So max 256 emojis fit in 1024 bytes = 512 JavaScript string length
@@ -167,7 +167,7 @@ describe('executeWithTimeout subprocess hardening', () => {
 		// Must detect truncation
 		expect(result.truncated).toBe(true);
 		// Byte count must be bounded
-		const stdoutBytes = Buffer.byteLength(result.stdout, 'utf8');
+		const stdoutBytes = Buffer.byteLength(result.stdout ?? '', 'utf8');
 		expect(stdoutBytes).toBeLessThanOrEqual(1024);
 		// Child must have been killed (exit code or signal)
 		expect(result.exitCode).not.toBe(0);
