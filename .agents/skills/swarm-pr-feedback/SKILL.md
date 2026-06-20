@@ -14,26 +14,21 @@ canonical workflow.
 
 ## Codex Execution Notes
 
-- Check out the PR branch locally before verifying or fixing anything: fetch the
-  head ref if absent, confirm the working tree is clean (`git status --porcelain`),
-  then check it out. Verification and fixes must run against the PR branch.
-- Use GitHub connector tools when available, or `gh`, to inspect PR metadata,
-  review threads, comments, requested changes, checks, conflicts, and head SHA.
-- Treat every feedback item as a claim until verified against source, tests,
-  logs, or PR metadata.
-- Use `rg`, focused file reads, and targeted tests to classify each item as
-  `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, or `NEEDS_USER_DECISION`.
-- Use `apply_patch` for manual edits and keep patches scoped to confirmed root
-  causes.
+- Check out the PR branch locally before verifying or fixing anything. Fetch the
+  head ref if absent, confirm the working tree is clean, then verify against the
+  PR branch rather than the base branch.
+- Build the complete feedback ledger before editing: pasted feedback, GitHub
+  comments/threads, requested changes, CI/check failures, merge conflicts,
+  stale branch state, PR body claims, linked issues, commits, and any validated
+  `swarm-pr-review` handoff artifact.
+- Treat every feedback item as a claim until source evidence, tests, logs, or
+  PR metadata prove or disprove it.
+- Preserve original finding IDs and reviewer/critic provenance from review
+  handoff artifacts.
 - Do not resolve GitHub review threads unless the user explicitly instructs it.
-- Load `$writing-tests` when adding or modifying tests.
-- Load `$engineering-conventions` when feedback touches plugin initialization,
-  subprocesses, `.swarm/` containment, runtime portability, tool registration,
-  plan durability, guardrails, or chat/system hooks.
-- Load `$commit-pr` before committing, pushing, updating a PR body, marking ready,
-  or closing out CI.
+- Load `$writing-tests` before changing tests and `$commit-pr` before pushing or
+  updating the PR.
 
-Final responses must include a closure ledger that maps every original feedback
-item to `fixed`, `disproved`, `pre-existing`, or `needs user decision`. Include
-merge conflicts, stale branch state, obsolete older-head CI, and generated-output
-drift as ledger items when they affected the PR.
+Final responses must include a closure ledger for every original feedback item,
+including conflicts, stale branch state, obsolete CI, and generated-output drift
+when they affected the PR.

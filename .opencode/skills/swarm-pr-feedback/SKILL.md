@@ -16,6 +16,13 @@ Use this skill to close known PR feedback. This is not a fresh broad PR review.
 feedback surfaces, verifies each claim, clusters related problems, fixes confirmed
 issues, validates the branch, and reports closure status for every item.
 
+When the work starts from a prior `swarm-pr-review` run, ingest the review's
+handoff artifact (for example
+`.swarm/pr-review/<run_id>/feedback-handoff.md` or `.json`) before triage.
+Carry forward the original review finding IDs, classifications, reviewer/critic
+provenance, and any operational blockers instead of renumbering them as new
+discoveries.
+
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
 The repository's bot reviewer (`hermes-pr-review` / Qwen3.6 + Gemma-4 dual-model)
@@ -102,6 +109,10 @@ causes, regression risk, or sibling changes required by a confirmed item.
 GitHub review-thread resolution is user-controlled. Do not resolve or mark review
 threads resolved unless the user explicitly instructs you to do so.
 
+Do not act on review-discovered findings from a prior `swarm-pr-review` run
+unless the user has explicitly approved the transition into `swarm-pr-feedback`.
+The handoff artifact is triage input, not standing authorization to change code.
+
 ## Pre-flight: Check Out the PR Branch Locally
 
 Before verifying any claim or making any fix, ensure the PR branch is the working
@@ -130,6 +141,7 @@ tree:
 
 Build a complete feedback ledger before editing. Include every available source:
 
+- validated findings and operational blockers handed off from `swarm-pr-review`,
 - pasted user or reviewer feedback,
 - GitHub review threads, inline review comments, and review summaries,
 - PR issue comments and requested-changes reviews,
@@ -206,6 +218,11 @@ FB-001 | source | author/tool | status: UNTRIAGED | location | claim | raw link/
 
 Rules:
 
+- Preserve prior `F-###`, `CI-###`, `CONFLICT-###`, `STALE-###`, and similar
+  IDs from a review handoff when they already exist. Only mint fresh `FB-###`
+  IDs for new feedback discovered after the handoff.
+- Preserve reviewer/critic provenance from the handoff artifact so the closure
+  ledger can show which items were review-validated before fix work began.
 - Preserve exact reviewer wording or log summary when practical.
 - Split compound comments into separate ledger items only when they require
   different evidence or fixes.

@@ -106,6 +106,7 @@ describe('CommandEntry — category field', () => {
 			'brainstorm',
 			'council',
 			'pr-review',
+			'pr-feedback',
 			'issue',
 			'deep-dive',
 			'codebase-review',

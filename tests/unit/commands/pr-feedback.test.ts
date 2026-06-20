@@ -60,6 +60,19 @@ describe('handlePrFeedbackCommand', () => {
 				'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/155"] also fix the lint errors',
 			);
 		});
+
+		test('PR ref + continue-from handoff path is forwarded to the feedback session', () => {
+			expect(
+				handlePrFeedbackCommand(DIR, [
+					'owner/repo#155',
+					'continue',
+					'from',
+					'.swarm/pr-review/run-123/feedback-handoff.md',
+				]),
+			).toBe(
+				'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/155"] continue from .swarm/pr-review/run-123/feedback-handoff.md',
+			);
+		});
 	});
 
 	describe('pasted feedback (no parseable PR ref)', () => {

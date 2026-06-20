@@ -80,7 +80,7 @@ Additionally, present these two sub-items as part of the same exchange:
 - Commit frequency (default: phase-level only) -- optional per-task checkpoint commit after each task completion.
 - auto_proceed (boolean, default: false) -- when true, auto-advance to the next phase without asking "Ready for Phase N+1?"; runtime toggle via /swarm auto-proceed on|off.
 
-The user answers all three (gates, parallel coders, commit frequency) in one exchange. Wait for the user's response.
+The user answers all four items (gates, parallel coders, commit frequency, auto_proceed) in one exchange. Wait for the user's response.
 
 If the user says parallel coders > 1, write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:
 ```

@@ -11,7 +11,7 @@ First-class MODE commands are repo-agnostic. The npm package ships the built-in 
 ## Claude Code Command Conflicts
 
 Several swarm subcommands share exact names with Claude Code built-in slash commands.
-This is a known source of model confusion — AI agents trained on Claude Code may try
+This is a known source of model confusion â€” AI agents trained on Claude Code may try
 to invoke the CC built-in instead of the swarm subcommand.
 
 All swarm commands must use the full `/swarm <subcommand>` form. Never reference a
@@ -19,15 +19,15 @@ conflicting swarm subcommand by its bare name when inside a swarm agent context.
 
 | Swarm Command | Conflicts With | Severity | CC Behavior |
 |---|---|---|---|
-| `/swarm show-plan` | `/plan` | 🔴 CRITICAL | Enters plan mode — Claude proposes before executing |
-| `/swarm reset` | `/reset` | 🔴 CRITICAL | Alias for `/clear` — wipes entire conversation |
-| `/swarm checkpoint` | `/checkpoint` | 🔴 CRITICAL | Alias for `/rewind` — restores prior conversation state |
-| `/swarm status` | `/status` | 🟠 HIGH | Shows Claude version, model, account info |
-| `/swarm agents` | `/agents` | 🟠 HIGH | Manages Claude subagent configurations |
-| `/swarm config` | `/config` | 🟠 HIGH | Opens Claude Code settings interface |
-| `/swarm export` | `/export` | 🟠 HIGH | Exports conversation as plain text |
-| `/swarm config doctor` | `/doctor` | 🟠 HIGH | Diagnoses Claude Code installation |
-| `/swarm history` | `/history` | 🟡 MEDIUM | Shows Claude Code session history |
+| `/swarm show-plan` | `/plan` | ðŸ”´ CRITICAL | Enters plan mode â€” Claude proposes before executing |
+| `/swarm reset` | `/reset` | ðŸ”´ CRITICAL | Alias for `/clear` â€” wipes entire conversation |
+| `/swarm checkpoint` | `/checkpoint` | ðŸ”´ CRITICAL | Alias for `/rewind` â€” restores prior conversation state |
+| `/swarm status` | `/status` | ðŸŸ  HIGH | Shows Claude version, model, account info |
+| `/swarm agents` | `/agents` | ðŸŸ  HIGH | Manages Claude subagent configurations |
+| `/swarm config` | `/config` | ðŸŸ  HIGH | Opens Claude Code settings interface |
+| `/swarm export` | `/export` | ðŸŸ  HIGH | Exports conversation as plain text |
+| `/swarm config doctor` | `/doctor` | ðŸŸ  HIGH | Diagnoses Claude Code installation |
+| `/swarm history` | `/history` | ðŸŸ¡ MEDIUM | Shows Claude Code session history |
 
 For contributors: Adding a new swarm command that matches a CC built-in requires
 updating `src/commands/conflict-registry.ts` with an explicit severity and
@@ -52,12 +52,12 @@ Agents: 11 registered
 
 Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:
 
-- **Violation trends** — per-directive violation rates over 7-day and 30-day windows with trend direction (improving/worsening/stable)
-- **Application rates by priority** — how often directives are applied when shown, grouped by priority level
-- **Escalation activity** — auto-escalation frequency over recent windows
-- **Entry ROI** — per-entry applied/shown/succeeded/failed counts with ROI classification (high/medium/low/unused)
-- **Never-applied entries** — directives that have never been applied despite being alive for multiple phases
-- **Time to first application** — median/min/max days from directive creation to first application
+- **Violation trends** â€” per-directive violation rates over 7-day and 30-day windows with trend direction (improving/worsening/stable)
+- **Application rates by priority** â€” how often directives are applied when shown, grouped by priority level
+- **Escalation activity** â€” auto-escalation frequency over recent windows
+- **Entry ROI** â€” per-entry applied/shown/succeeded/failed counts with ROI classification (high/medium/low/unused)
+- **Never-applied entries** â€” directives that have never been applied despite being alive for multiple phases
+- **Time to first application** â€” median/min/max days from directive creation to first application
 
 A 3-line learning summary is automatically injected into the curator phase digest after each phase.
 
@@ -108,7 +108,7 @@ Refine an existing `spec.md` by clarifying ambiguous requirements.
 
 ### `/swarm analyze`
 
-Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful before running a phase — identifies requirements not covered by any task.
+Compare `spec.md` against `plan.md` to find requirement coverage gaps. Useful before running a phase â€” identifies requirements not covered by any task.
 
 ### `/swarm sdd ...`
 
@@ -127,21 +127,21 @@ Inspect and project OpenSpec-compatible spec-driven development artifacts into t
 
 ### `/swarm brainstorm [topic]`
 
-Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN → DIALOGUE → APPROACHES → DESIGN → SPEC → SELF-REVIEW → GATE SELECTION → TRANSITION.
+Enter architect BRAINSTORM mode: seven-phase planning workflow for new features needing requirement discovery. Sequence: CONTEXT SCAN â†’ DIALOGUE â†’ APPROACHES â†’ DESIGN â†’ SPEC â†’ SELF-REVIEW â†’ GATE SELECTION â†’ TRANSITION.
 
 ### `/swarm council <question> [--spec-review]`
 
-Enter architect MODE: COUNCIL — convene a fixed three-agent General Council (`council_generalist`, `council_skeptic`, `council_domain_expert`) for an advisory deliberation. The architect runs a web-search pre-pass and supplies all agents with a RESEARCH CONTEXT block; agents answer in parallel without individual web access. The architect routes any disagreements back for one targeted Round 2 reconciliation, then synthesizes the final answer directly using inline output rules (no separate moderator pass).
+Enter architect MODE: COUNCIL â€” convene a fixed three-agent General Council (`council_generalist`, `council_skeptic`, `council_domain_expert`) for an advisory deliberation. The architect runs a web-search pre-pass and supplies all agents with a RESEARCH CONTEXT block; agents answer in parallel without individual web access. The architect routes any disagreements back for one targeted Round 2 reconciliation, then synthesizes the final answer directly using inline output rules (no separate moderator pass).
 
 When enabled in config, the same General Council advisory flow is also offered by BRAINSTORM before spec writing and by PLAN before `save_plan`, so current council input can inform plan writing before critic review.
 
 | Flag | Effect |
 |------|--------|
-| `--spec-review` | Switch to single-pass advisory mode. Can be invoked manually to fold council input into a draft spec — no Round 2 deliberation. |
+| `--spec-review` | Switch to single-pass advisory mode. Can be invoked manually to fold council input into a draft spec â€” no Round 2 deliberation. |
 
-**Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. The deprecated `members`, `presets`, `moderator`, and `moderatorModel` fields are accepted for compatibility but ignored at runtime. See [Council guide — General Council Mode](council/README.md#general-council-mode) for setup.
+**Prerequisites:** `council.general.enabled: true` and a configured search API key (Tavily or Brave) in `opencode-swarm.json`. The deprecated `members`, `presets`, `moderator`, and `moderatorModel` fields are accepted for compatibility but ignored at runtime. See [Council guide â€” General Council Mode](council/README.md#general-council-mode) for setup.
 
-**No-args behavior:** prints a usage string. The command never throws on bad input — unsupported legacy preset arguments and injected `[MODE: ...]` headers are silently dropped.
+**No-args behavior:** prints a usage string. The command never throws on bad input â€” unsupported legacy preset arguments and injected `[MODE: ...]` headers are silently dropped.
 
 ### `/swarm pr-review <pr-url|owner/repo#N|N> [--council] [instructions...]`
 
@@ -150,21 +150,22 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 | Argument | Description |
 |----------|-------------|
 | `<pr-url>` | Full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/42`) |
-| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
-| `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
+| `owner/repo#N` | Shorthand format â€” resolves owner and repo from the reference |
+| `N` | Bare PR number â€” resolves owner and repo from the git remote `origin` |
 | `--council` | Enable adversarial multi-model council review variant |
 | `[instructions...]` | Optional free text after the PR reference, forwarded to the reviewer as extra focus (e.g. `/swarm pr-review 155 focus on the auth refactor`) |
 
 **URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames. Unknown `--flags` are rejected with an explicit error; trailing non-flag words become instructions.
 
 **Workflow:**
-1. **Intent Reconstruction** — Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
-2. **Parallel Explorer Lanes** — 6 lanes launched through deterministic `dispatch_lanes_async` while the architect continues non-dependent PR inspection, then joined with `collect_lane_results`: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
-3. **Independent Reviewer Confirmation** — Validate each finding with file:line evidence
-4. **Critic Challenge** — Adversarial review of HIGH/CRITICAL findings only
-5. **Synthesis** — Obligation assessment, findings table, merge recommendation
+0. **Phase 0A: Existing Signal Ingestion** - Capture PR comments, review summaries, requested changes, bot findings, CI/check failures, merge conflicts, stale branch state, PR body claims, linked issues, and commit messages in the initial evidence ledger before the explorer lanes run
+1. **Intent Reconstruction** â€” Extract obligations from PR body checkboxes, linked issues, commit scopes, test names, and interface changes
+2. **Parallel Explorer Lanes** â€” 6 lanes launched through deterministic `dispatch_lanes_async` while the architect continues non-dependent PR inspection, then joined with `collect_lane_results`: correctness, security, dependencies, docs-vs-intent, tests, performance/architecture
+3. **Independent Reviewer Confirmation** â€” Validate each finding with file:line evidence
+4. **Critic Challenge** â€” Adversarial review of HIGH/CRITICAL findings only
+5. **Synthesis** â€” Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; if async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`.
+The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; if async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -172,32 +173,33 @@ The architect checks out the PR branch locally before launching explorers and ru
 
 ### `/swarm pr-feedback [<pr-url|owner/repo#N|N>] [instructions...]`
 
-Ingest and close **known** PR feedback — review comments, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes — verifying every claim against source before fixing. This is distinct from `/swarm pr-review`, which discovers *new* findings; `pr-feedback` closes *existing* feedback without running a fresh broad review.
+Ingest and close **known** PR feedback â€” review comments, requested changes, CI/check failures, merge conflicts, stale branch state, and pasted notes â€” verifying every claim against source before fixing. This is distinct from `/swarm pr-review`, which discovers *new* findings; `pr-feedback` closes *existing* feedback without running a fresh broad review.
 
 | Argument | Description |
 |----------|-------------|
 | `<pr-url>` | Full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/42`) |
-| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
-| `N` | Bare PR number — resolves owner and repo from the git remote `origin` |
+| `owner/repo#N` | Shorthand format â€” resolves owner and repo from the reference |
+| `N` | Bare PR number â€” resolves owner and repo from the git remote `origin` |
 | `[instructions...]` | Optional free text forwarded to the feedback session |
-| _(none)_ | No PR reference — a pasted-feedback session; the architect builds the ledger from the current PR/branch and any pasted notes |
+| _(none)_ | No PR reference â€” a pasted-feedback session; the architect builds the ledger from the current PR/branch and any pasted notes |
 
 **Command forms:**
-- `/swarm pr-feedback 155` — close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
-- `/swarm pr-feedback owner/repo#155 also fix the lint errors` — PR + extra instructions
-- `/swarm pr-feedback` — pasted-feedback session on the current branch
-- `/swarm pr-feedback address the review notes about error handling` — a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
+- `/swarm pr-feedback 155` â€” close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
+- `/swarm pr-feedback owner/repo#155 also fix the lint errors` â€” PR + extra instructions
+- `/swarm pr-feedback owner/repo#155 continue from .swarm/pr-review/pr-155-20260619203000/feedback-handoff.md` - PR + review handoff artifact
+- `/swarm pr-feedback` â€” pasted-feedback session on the current branch
+- `/swarm pr-feedback address the review notes about error handling` â€” a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
 
-A leading token that **is** shaped like a PR reference (bare number, `owner/repo#N`, or URL) but cannot be resolved — for example a bare number when no `origin` remote is reachable — returns an explicit error rather than silently demoting the intended reference to free-text feedback.
+A leading token that **is** shaped like a PR reference (bare number, `owner/repo#N`, or URL) but cannot be resolved â€” for example a bare number when no `origin` remote is reachable â€” returns an explicit error rather than silently demoting the intended reference to free-text feedback.
 
-**URL sanitization:** identical to `pr-review` — `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames, and strips injected `[MODE: ...]` headers from instructions.
+**URL sanitization:** identical to `pr-review` â€” `https`-only, blocks `localhost`/private IPs, strips credentials/query/fragment, rejects non-ASCII hostnames, and strips injected `[MODE: ...]` headers from instructions.
 
 **Workflow** (`MODE: PR_FEEDBACK`, loads `swarm-pr-feedback/SKILL.md`):
-1. **Check out the PR branch locally** — fetch the head ref, verify the working tree is clean, then check it out so verification and fixes run against the PR branch
-2. **Build the feedback ledger** — collect every feedback surface (review threads, requested-changes reviews, CI failures, conflicts, stale-branch state, PR-body claims, pasted notes) before editing
-3. **Verify each claim** — treat every item as a claim until source evidence proves it; classify as CONFIRMED, DISPROVED, PRE_EXISTING, or NEEDS_USER_DECISION
-4. **Fix confirmed items** — patch only confirmed items plus the tests/docs they require; do not run a fresh broad review
-5. **Closure ledger** — report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
+1. **Check out the PR branch locally** â€” fetch the head ref, verify the working tree is clean, then check it out so verification and fixes run against the PR branch
+2. **Build the feedback ledger** â€” collect every feedback surface (review threads, requested-changes reviews, CI failures, conflicts, stale-branch state, PR-body claims, pasted notes, and any `swarm-pr-review` handoff artifact) before editing
+3. **Verify each claim** â€” treat every item as a claim until source evidence proves it; classify as `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`
+4. **Fix confirmed items** â€” patch only confirmed items plus the tests/docs they require, preserve prior review IDs/provenance from the handoff artifact, and do not run a fresh broad review
+5. **Closure ledger** â€” report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
 
 **No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
 
@@ -211,28 +213,28 @@ Read-only codebase audit using parallel explorer waves with independent reviewer
 | `/swarm deep dive` |
 
 **Command forms:**
-- `/swarm deep-dive auth` — standard profile (default)
-- `/swarm deep-dive src/security --profile security` — security-focused audit
-- `/swarm deep-dive "settings page" --profile full --json` — full audit with machine-readable output
-- `/swarm deep dive src/hooks --max-explorers 4` — alias form with reduced parallelism
+- `/swarm deep-dive auth` â€” standard profile (default)
+- `/swarm deep-dive src/security --profile security` â€” security-focused audit
+- `/swarm deep-dive "settings page" --profile full --json` â€” full audit with machine-readable output
+- `/swarm deep dive src/hooks --max-explorers 4` â€” alias form with reduced parallelism
 
 **Workflow:**
-1. **Repo Readiness** — verify clean git state (unless `--allow-dirty`)
-2. **Scope Resolution** — import proximity grouping with 8-file cap per mission
-3. **Explorer Waves** — parallel explorer lanes covering scope mapping, data flow, runtime behavior, UX, security, testing, performance, and documentation
-4. **Reviewer Verification** — always 2 parallel reviewers confirm each finding with file:line evidence
-5. **Critic Challenge** — sequential adversarial pass on HIGH/CRITICAL findings only
-6. **Final Report** — synthesized findings table with severity, category, and remediation guidance
+1. **Repo Readiness** â€” verify clean git state (unless `--allow-dirty`)
+2. **Scope Resolution** â€” import proximity grouping with 8-file cap per mission
+3. **Explorer Waves** â€” parallel explorer lanes covering scope mapping, data flow, runtime behavior, UX, security, testing, performance, and documentation
+4. **Reviewer Verification** â€” always 2 parallel reviewers confirm each finding with file:line evidence
+5. **Critic Challenge** â€” sequential adversarial pass on HIGH/CRITICAL findings only
+6. **Final Report** â€” synthesized findings table with severity, category, and remediation guidance
 
 **Flags:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--profile <name>` | `standard` | Audit profile: `standard`, `security`, `ux`, `architecture`, `full` |
-| `--max-explorers <n>` | `6` | Parallel explorer lanes (range: 1–8) |
-| `--json` | — | Emit machine-readable JSON output |
-| `--skip-update` | — | Skip OpenCode update check before audit |
-| `--allow-dirty` | — | Allow audit on dirty git state (uncommitted changes) |
+| `--max-explorers <n>` | `6` | Parallel explorer lanes (range: 1â€“8) |
+| `--json` | â€” | Emit machine-readable JSON output |
+| `--skip-update` | â€” | Skip OpenCode update check before audit |
+| `--allow-dirty` | â€” | Allow audit on dirty git state (uncommitted changes) |
 
 **Profiles:**
 
@@ -296,9 +298,9 @@ Generate or sync structured, language-agnostic design docs for the project under
 | `/swarm design docs` |
 
 **Command forms:**
-- `/swarm design-docs "terminal GitHub PR client"` — generate fresh docs under `docs/`
-- `/swarm design-docs auth-service --lang rust` — generate with Rust reference docs
-- `/swarm design docs --update --out design` — sync existing docs in `design/`
+- `/swarm design-docs "terminal GitHub PR client"` â€” generate fresh docs under `docs/`
+- `/swarm design-docs auth-service --lang rust` â€” generate with Rust reference docs
+- `/swarm design docs --update --out design` â€” sync existing docs in `design/`
 
 **Generated layout** (under `<out>`, default `docs/`):
 
@@ -318,9 +320,9 @@ Generate or sync structured, language-agnostic design docs for the project under
 |------|---------|-------------|
 | `--out <dir>` | `docs` | Output directory (project-relative) |
 | `--lang <name>` | inferred | Target language for `reference/` docs |
-| `--update` | — | Sync existing docs to current code/spec instead of generating fresh |
+| `--update` | â€” | Sync existing docs to current code/spec instead of generating fresh |
 
-**Drift sync:** when `design_docs.enabled`, `phase_complete` runs a deterministic, non-blocking design-doc drift check (`.swarm/doc-drift-phase-N.json`) and advises a `docs_design` sync when docs fall behind code/spec. Advisory only — never blocks phase completion.
+**Drift sync:** when `design_docs.enabled`, `phase_complete` runs a deterministic, non-blocking design-doc drift check (`.swarm/doc-drift-phase-N.json`) and advises a `docs_design` sync when docs fall behind code/spec. Advisory only â€” never blocks phase completion.
 
 **No-args behavior:** prints a usage string (unless `--update` is given). The command never throws on bad input.
 
@@ -331,8 +333,8 @@ Ingest a GitHub issue into the swarm workflow for root-cause localization and re
 | Argument | Description |
 |----------|-------------|
 | `<issue-url>` | Full GitHub issue URL (e.g., `https://github.com/owner/repo/issues/42`) |
-| `owner/repo#N` | Shorthand format — resolves owner and repo from the reference |
-| `N` | Bare issue number — resolves owner and repo from the git remote `origin` |
+| `owner/repo#N` | Shorthand format â€” resolves owner and repo from the reference |
+| `N` | Bare issue number â€” resolves owner and repo from the git remote `origin` |
 | `--plan` | Transition to plan creation after spec generation |
 | `--trace` | Run full fix-and-PR workflow (implies `--plan`) |
 | `--no-repro` | Skip reproduction verification step |
@@ -340,10 +342,10 @@ Ingest a GitHub issue into the swarm workflow for root-cause localization and re
 **URL sanitization:** Enforces `https`-only scheme, blocks `localhost`/private IPs, strips credentials and query strings, enforces max 2048 characters, rejects non-ASCII hostnames.
 
 **Workflow:**
-1. **Intake** — Fetch issue body via GitHub CLI, normalize into structured intake note (observed behavior, expected behavior, repro steps, environment)
-2. **Localization** — Build 2–5 root-cause hypotheses with composite scoring (stack-trace 0.4, recency 0.25, call-graph 0.2, test-failure 0.15), validate top-3 in parallel, prune to single root cause
-3. **Spec Generation** — Output resolution spec with root cause, fix strategy, FR/SC numbering, Given/When/Then scenarios
-4. **Transition** — Based on flags: report spec (`no flags`), create plan (`--plan`), or run full fix workflow (`--trace`)
+1. **Intake** â€” Fetch issue body via GitHub CLI, normalize into structured intake note (observed behavior, expected behavior, repro steps, environment)
+2. **Localization** â€” Build 2â€“5 root-cause hypotheses with composite scoring (stack-trace 0.4, recency 0.25, call-graph 0.2, test-failure 0.15), validate top-3 in parallel, prune to single root cause
+3. **Spec Generation** â€” Output resolution spec with root cause, fix strategy, FR/SC numbering, Given/When/Then scenarios
+4. **Transition** â€” Based on flags: report spec (`no flags`), create plan (`--plan`), or run full fix workflow (`--trace`)
 
 **Flag interactions:** `--trace` implies `--plan`. Both flags can be combined with `--no-repro`.
 
@@ -367,8 +369,8 @@ Run preflight automation checks before starting a phase. Validates plan complete
 
 Toggle Turbo Mode for the current session. Supports two strategies:
 
-- **Standard** — skips non-critical QA gates for faster iteration
-- **Lean** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection
+- **Standard** â€” skips non-critical QA gates for faster iteration
+- **Lean** â€” parallel lane execution with per-lane reviewer gates and file-lock conflict detection
 
 Session-scoped; resets on new session.
 
@@ -390,7 +392,7 @@ See [Modes Guide](modes.md) for tradeoffs.
 
 ### `/swarm loop <objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]`
 
-Run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until the objective is met or a budget stop condition fires. Each cycle captures learnings so the next is cheaper.
+Run a compound-engineering loop: brainstorm â†’ plan â†’ build â†’ review â†’ improve, iterating until the objective is met or a budget stop condition fires. Each cycle captures learnings so the next is cheaper.
 
 ```text
 /swarm loop "add rate limiting to the public API"
@@ -403,16 +405,16 @@ Run a compound-engineering loop: brainstorm → plan → build → review → im
 
 | Flag | Values | Default | Effect |
 |------|--------|---------|--------|
-| `--max-cycles` | `1`–`5` | `3` | Outer improvement cycles before budget stop |
+| `--max-cycles` | `1`â€“`5` | `3` | Outer improvement cycles before budget stop |
 | `--autonomy` | `checkpoint`, `auto` | `checkpoint` | `checkpoint` pauses at phase gates; `auto` runs unattended (hard stop conditions still apply) |
 | `--depth` | `standard`, `exhaustive` | `standard` | `exhaustive` widens exploration in brainstorm/review phases |
 | `--resume` | _(boolean)_ | `false` | Resume the most recent unfinished loop run from `.swarm/loop/<run-id>/state.json` |
 
-**Phases per cycle:** BRAINSTORM (cycle 1) or refinement (cycle 2+) → PLAN (with critic gate) → BUILD (execute) → REVIEW (independent reviewer + separate critic, report-only) → IMPROVE (phase-wrap + learning-capture).
+**Phases per cycle:** BRAINSTORM (cycle 1) or refinement (cycle 2+) â†’ PLAN (with critic gate) â†’ BUILD (execute) â†’ REVIEW (independent reviewer + separate critic, report-only) â†’ IMPROVE (phase-wrap + learning-capture).
 
 **Stop conditions (defense-in-depth):** objective met, `--max-cycles` budget exhausted, plateau (no meaningful diff), oscillation (reverting prior changes), unrecoverable error, explicit user stop.
 
-**State directory:** `.swarm/loop/<run-id>/` — contains `state.json` (loop control: cycle counter, phase, gate outcomes, learnings) and `learnings/` (captured per-cycle knowledge). Implementation progress is derived from git and the plan ledger, not conversation memory.
+**State directory:** `.swarm/loop/<run-id>/` â€” contains `state.json` (loop control: cycle counter, phase, gate outcomes, learnings) and `learnings/` (captured per-cycle knowledge). Implementation progress is derived from git and the plan ledger, not conversation memory.
 
 ### `/swarm full-auto [on|off]`
 
@@ -420,7 +422,7 @@ Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts
 
 ### `/swarm auto-proceed [on|off]`
 
-Toggle auto-proceed for phase transitions. When enabled, the swarm skips the "Ready for Phase N+1?" confirmation prompt and advances automatically. Session-scoped — resets to the plan's `execution_profile.auto_proceed` default on new sessions.
+Toggle auto-proceed for phase transitions. When enabled, the swarm skips the "Ready for Phase N+1?" confirmation prompt and advances automatically. Session-scoped â€” resets to the plan's `execution_profile.auto_proceed` default on new sessions.
 
 The effective value is shown to the architect via an injected `AUTO PROCEED STATUS` banner at every phase boundary.
 
@@ -456,7 +458,7 @@ The doctor validates all 62+ top-level schema keys with type checks (string, boo
 
 **Startup auto-fix advisory:** On plugin initialization, if `automation.capabilities.config_doctor_on_startup` is enabled, the config doctor runs automatically. If auto-fixable issues are found and `config_doctor_autofix` capability is not enabled, a chat-visible advisory is emitted suggesting `/swarm config doctor --fix`. When autofix is enabled and fixes are applied, a confirmation advisory is shown.
 
-> **Agent vs. human context:** The `--fix` flag is accepted for human-initiated chat commands. For agent-initiated commands, the `tool-policy` layer blocks `--fix` — auto-fixing config from agent context is a privileged operation requiring explicit user initiation.
+> **Agent vs. human context:** The `--fix` flag is accepted for human-initiated chat commands. For agent-initiated commands, the `tool-policy` layer blocks `--fix` â€” auto-fixing config from agent context is a privileged operation requiring explicit user initiation.
 
 ### `/swarm doctor tools`
 
@@ -474,11 +476,11 @@ Valid gates: `reviewer`, `test_engineer`, `council_mode`, `sme_enabled`, `critic
 
 **Gate descriptions:**
 
-- `council_mode` — Per-task council gate. When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config.
+- `council_mode` â€” Per-task council gate. When enabled, replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Stage A still runs. Requires `council.enabled: true` in config.
 
-- `phase_council` — Phase-level council gate. When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates.
+- `phase_council` â€” Phase-level council gate. When enabled, a full 5-member council reviews all work in a phase holistically at `phase_complete` time. Additive to per-task gates.
 
-- `final_council` — Project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) — NOT the General Council — rerun at project scope. Does not use `convene_general_council`.
+- `final_council` â€” Project-level council gate. When enabled, the last phase requires approved `.swarm/evidence/final-council.json` from the full 5-member council (`critic`, `reviewer`, `sme`, `test_engineer`, `explorer`) â€” NOT the General Council â€” rerun at project scope. Does not use `convene_general_council`.
 ---
 
 ## Evidence and Telemetry
@@ -520,7 +522,7 @@ List knowledge entries in `.swarm/knowledge.jsonl`. Filter by category, confiden
 
 ### `/swarm knowledge migrate`
 
-One-time migration from legacy `.swarm/context.md` SME cache to `.swarm/knowledge.jsonl`. Idempotent — skips if already migrated.
+One-time migration from legacy `.swarm/context.md` SME cache to `.swarm/knowledge.jsonl`. Idempotent â€” skips if already migrated.
 
 ### `/swarm knowledge quarantine <entry-id> [reason]`
 
@@ -607,7 +609,7 @@ Manage the session-scoped runtime concurrency override for plan execution. This 
 
 ### `/swarm reset --confirm`
 
-DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` — without it, shows a warning and a tip to export first.**
+DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` â€” without it, shows a warning and a tip to export first.**
 
 ### `/swarm reset-session`
 
@@ -629,10 +631,10 @@ Restore `.swarm/` to a phase checkpoint (`checkpoints/phase-<N>`). Writes a roll
 ### `/swarm finalize [--prune-branches] [--skill-review]`
 
 Idempotent 4-stage project finalization:
-1. **Finalize** — write retrospectives for in-progress phases.
-2. **Archive** — timestamped bundle of swarm artifacts and evidence.
-3. **Clean** — remove active-state files (see below).
-4. **Align** — aggressive alignment to the default remote branch via `git reset --hard` plus `git clean -fd`, discarding uncommitted changes and untracked files; falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed.
+1. **Finalize** â€” write retrospectives for in-progress phases.
+2. **Archive** â€” timestamped bundle of swarm artifacts and evidence.
+3. **Clean** â€” remove active-state files (see below).
+4. **Align** â€” aggressive alignment to the default remote branch via `git reset --hard` plus `git clean -fd`, discarding uncommitted changes and untracked files; falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed.
 
 Reads `.swarm/close-lessons.md` for explicit lessons and runs curation.
 When close creates knowledge entries, the summary nudges the user to run `skill_improve` or `skill_generate` to compile mature entries into skills.
@@ -640,7 +642,7 @@ Use `--skill-review` to run the quota-bounded `skill_improver` in proposal mode 
 Use `--force` to finalize sessions with in-progress phases. Produces a different retro summary and bypasses the guard against closing active work.
 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
-cycles — cumulative project knowledge survives and is not deleted. Deleted files
+cycles â€” cumulative project knowledge survives and is not deleted. Deleted files
 include `plan.json`, `plan.md`, `plan-ledger.jsonl`, `events.jsonl`, `handoff.*`,
 `escalation-report.md`, `knowledge-rejected.jsonl`, `repo-graph.json`,
 `doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db` (and
@@ -649,9 +651,9 @@ shm/wal variants), and the `evidence/`, `session/`, `scopes/`, `locks/`,
 
 **Hive promotion:** During finalize, lessons in `knowledge.jsonl` are evaluated
 against a three-route eligibility gate before promotion to hive:
-- **Explicit** — `hive_eligible=true` AND ≥3 distinct phases confirmed
-- **Fast-track** — entry tagged `hive-fast-track` (bypasses phase count)
-- **Age-based** — entry age ≥ `auto_promote_days` (default 90, configurable via
+- **Explicit** â€” `hive_eligible=true` AND â‰¥3 distinct phases confirmed
+- **Fast-track** â€” entry tagged `hive-fast-track` (bypasses phase count)
+- **Age-based** â€” entry age â‰¥ `auto_promote_days` (default 90, configurable via
   `knowledge.auto_promote_days` in your project config)
 
 Entries failing all routes are skipped. The `auto_promote_days` threshold is read
@@ -722,15 +724,15 @@ When you type a two-word command like `/swarm config doctor`, Swarm tries the co
 
 ## Command Conflicts
 
-Nine swarm commands share names with Claude Code built-in slash commands. Using the bare CC command instead of `/swarm <command>` has different — sometimes destructive — behavior. Swarm shows a ⚠️ warning in help output for these commands, and a CI gate test (`src/commands/conflict-registry.test.ts`) prevents new CRITICAL conflicts from being added without explicit acknowledgment.
+Nine swarm commands share names with Claude Code built-in slash commands. Using the bare CC command instead of `/swarm <command>` has different â€” sometimes destructive â€” behavior. Swarm shows a âš ï¸ warning in help output for these commands, and a CI gate test (`src/commands/conflict-registry.test.ts`) prevents new CRITICAL conflicts from being added without explicit acknowledgment.
 
 ### Conflict Registry
 
 | Swarm Command | CC Built-in | Severity | CC Behavior | Swarm Behavior |
 |---|---|---|---|---|
-| `/swarm show-plan` | `/plan` | CRITICAL | Enters Claude Code plan mode — Claude proposes all actions before executing | Displays the current `.swarm/plan.md` task list |
-| `/swarm reset` | `/reset` | CRITICAL | Alias for `/clear` — wipes the entire conversation context window | Clears `.swarm` state files (requires `--confirm` flag) |
-| `/swarm checkpoint` | `/checkpoint` | CRITICAL | Alias for `/rewind` — restores conversation and code to a prior state | Manages named swarm project snapshots (save\|restore\|delete\|list) |
+| `/swarm show-plan` | `/plan` | CRITICAL | Enters Claude Code plan mode â€” Claude proposes all actions before executing | Displays the current `.swarm/plan.md` task list |
+| `/swarm reset` | `/reset` | CRITICAL | Alias for `/clear` â€” wipes the entire conversation context window | Clears `.swarm` state files (requires `--confirm` flag) |
+| `/swarm checkpoint` | `/checkpoint` | CRITICAL | Alias for `/rewind` â€” restores conversation and code to a prior state | Manages named swarm project snapshots (save\|restore\|delete\|list) |
 | `/swarm status` | `/status` | HIGH | Shows CC version, model, account, and API connectivity | Shows current swarm state: active phase, task counts, registered agents |
 | `/swarm agents` | `/agents` | HIGH | Manages Claude Code subagent configurations and teams | Lists registered swarm plugin agents with model, temperature, and guardrail info |
 | `/swarm config` | `/config` | HIGH | Opens Claude Code settings interface | Shows the current resolved opencode-swarm plugin configuration |
@@ -768,7 +770,7 @@ opencode-swarm run show-plan 2
 opencode-swarm run evidence 2.1
 ```
 
-Session-scoped commands (`turbo`, `full-auto`) require an active session and only work inside an OpenCode session — invoking them via the standalone CLI will fail.
+Session-scoped commands (`turbo`, `full-auto`) require an active session and only work inside an OpenCode session â€” invoking them via the standalone CLI will fail.
 
 Both routes share the same registry. See `src/commands/registry.ts` for the raw definitions and `src/cli/index.ts` for the standalone dispatcher.
 
@@ -776,8 +778,8 @@ Both routes share the same registry. See `src/commands/registry.ts` for the raw 
 
 ## Related Documentation
 
-- [Getting Started](getting-started.md) — first-run walkthrough
-- [Modes Guide](modes.md) — Balanced vs Turbo vs Full-Auto tradeoffs
-- [Configuration Reference](configuration.md) — all config keys
-- [Knowledge System](knowledge.md) — hive vs swarm knowledge
-- [Evidence and Telemetry](evidence-and-telemetry.md) — observability
+- [Getting Started](getting-started.md) â€” first-run walkthrough
+- [Modes Guide](modes.md) â€” Balanced vs Turbo vs Full-Auto tradeoffs
+- [Configuration Reference](configuration.md) â€” all config keys
+- [Knowledge System](knowledge.md) â€” hive vs swarm knowledge
+- [Evidence and Telemetry](evidence-and-telemetry.md) â€” observability

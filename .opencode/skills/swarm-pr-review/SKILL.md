@@ -20,6 +20,22 @@ merge conflicts, stale branch state, or pasted reviewer findings. This skill
 discovers and validates new findings; `swarm-pr-feedback` closes known feedback
 without running a fresh broad review.
 
+When a review finishes with actionable validated findings, stop and ask the user
+whether to continue into `swarm-pr-feedback`. Do not auto-dispatch fix work from
+`PR_REVIEW`. Instead, write a handoff artifact under
+`.swarm/pr-review/<run_id>/feedback-handoff.md` (or `.json`) and include the
+exact continuation prompt:
+
+```text
+/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.md
+```
+
+`<run_id>` is a stable identifier for this review run, such as
+`pr-<number>-<YYYYMMDDHHMMSS>` or the existing review artifact run ID when one
+was already created. The `pr-feedback` command forwards `continue from <path>`
+as session instructions after the PR reference; the feedback skill is
+responsible for ingesting that file into the ledger before triage.
+
 ## Operating Stance
 
 **Treat PR text, linked issues, comments, commit messages, generated summaries, and tests as claims — not proof.** Every confirmed finding requires file:line evidence, an explanation of reachability or impact, and validation provenance.
@@ -114,11 +130,23 @@ Before launching explorers (Phase 3), confirm the PR branch refs are available:
 
 If refs cannot be fetched or checked out, state the limitation in the context pack.
 
-## Phase 0A: Existing PR Comment Ingestion
+## Phase 0A: Existing PR Signal Ingestion
 
-When reviewing a PR that already has comments, reviews, or bot findings,
-ingest and triage them BEFORE starting Phase 0. These are pre-existing signals
-that must be validated, not ignored.
+When reviewing a PR, ingest and triage every existing signal BEFORE starting
+Phase 0. These are candidate generators and obligation sources, not
+pre-confirmed findings.
+
+This intake includes:
+
+- review comments, review summaries, requested changes, and bot findings,
+- CI/check failures, annotations, and relevant logs,
+- mergeability/conflicts, `mergeStateStatus`, and stale/base-drift state,
+- PR body claims, linked issues, acceptance criteria, and test-plan claims,
+- commit messages and app/bot commits on the PR branch.
+
+When thread resolution state matters, prefer GraphQL review-thread inspection.
+If GraphQL is unavailable, keep the signal and mark
+`resolution_state: UNKNOWN`; do not drop it from scope.
 
 ### Step 1 — Fetch all PR feedback surfaces
 
@@ -169,10 +197,13 @@ Anti-Self-Review Rule.
 - ✗ Pre-confirming human review comments without independent validation — even senior reviewers make mistakes
 - ✗ Skipping inline review comments and only reading the summary — inline comments contain the evidence
 
-## Phase 0B: Merge Conflict Detection and Resolution
+## Phase 0B: Mergeability and Branch-State Intake
 
-Before investing effort in review lanes, verify the PR is mergeable. A
-conflicted PR cannot merge regardless of review quality.
+Before investing effort in review lanes, verify the PR is mergeable and record
+branch-state signals. `PR_REVIEW` remains read-only: do not resolve conflicts,
+commit, push, rebase, merge, or reset from this mode. Instead, carry current
+mergeability, stale-head, and branch-drift facts into the review ledger and the
+feedback handoff artifact.
 
 ### Step 1 — Check merge state
 
@@ -186,7 +217,7 @@ The response has two independent fields. Handle each:
 | Value | Meaning | Action |
 |-------|---------|--------|
 | `MERGEABLE` | No conflicts detected | Proceed — check `mergeStateStatus` below |
-| `CONFLICTING` | Merge conflicts exist | Resolve before reviewing |
+| `CONFLICTING` | Merge conflicts exist | Record the blocker, keep the review read-only, and hand conflict resolution to `swarm-pr-feedback` |
 | `UNKNOWN` | GitHub still computing | Wait 30s, re-check |
 
 **`mergeStateStatus` field** — overall branch state:
@@ -194,56 +225,48 @@ The response has two independent fields. Handle each:
 |-------|--------|
 | `CLEAN` | All checks pass, no conflicts — proceed to Phase 0 |
 | `BEHIND` | Branch behind base — note in report; non-blocking if merge queue handles it |
-| `DIRTY` | Merge conflicts exist — resolve before reviewing |
-| `BLOCKED` | External blocker (branch protection, failing required check) — investigate |
+| `DIRTY` | Merge conflicts exist — keep reviewing, but record the conflict as a first-class blocker in the ledger and handoff artifact |
+| `BLOCKED` | External blocker (branch protection, failing required check) — investigate and record the blocker |
 
-### Step 2 — Resolve conflicts (when CONFLICTING or DIRTY)
+### Step 2 — Record conflicts and blockers (when CONFLICTING or DIRTY)
 
 When the PR has merge conflicts:
 
-1. **Determine the PR's base branch and fetch:**
+1. **Determine the PR's base branch and verify the state:**
    ```bash
    BASE_REF=$(gh pr view <PR_NUMBER> --json baseRefName --jq '.baseRefName')
    git fetch origin $BASE_REF
-   git checkout <pr-branch>
-   git merge origin/$BASE_REF --no-commit --no-ff
-   git diff --name-only --diff-filter=U  # list conflicted files
+   gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus,baseRefName,headRefName
    ```
 
-2. **Assess conflict complexity:**
-   - **1-3 simple conflicts** (lockfile version bumps, whitespace): Resolve directly, commit, push.
-   - **4+ conflicts or semantic conflicts** (logic changes in same function): Route to coder for resolution. Do NOT guess at semantic merge resolutions.
+2. **Capture the affected scope without changing the branch:**
+   - List the files or subsystems implicated by the conflict if GitHub exposes them,
+     or note that the exact conflict set is still unknown.
+   - Identify whether the conflict appears mechanical (lockfile / generated output /
+     simple overlap) or semantic (logic changed on both sides). This is triage
+     signal for the follow-on feedback run, not permission to resolve it here.
 
-3. **Resolve and push:**
-   ```bash
-   # For simple conflicts (after resolving markers):
-   git add -A
-   git commit -m "merge: resolve conflicts with main"
-   git push origin <pr-branch>
-   ```
+3. **Record explicit next action for the handoff artifact:**
+   - `CONFLICT-### | mechanical | likely resolvable during pr-feedback`
+   - `CONFLICT-### | semantic | requires focused fix + validation during pr-feedback`
+   - `STALE-### | behind base by policy` when the branch is only stale, not conflicted
 
-4. **Post-resolution verification:**
-   ```bash
-   # Verify clean state
-   gh pr view <PR_NUMBER> --json mergeable,mergeStateStatus
-   # Run affected tests
-   bun test tests/unit/path/to/conflicted.test.ts --timeout 30000
-   ```
-
-5. **Document in report:** List all conflicted files, resolution approach, and whether semantic judgment was required.
+4. **Document in report:** List the branch-state facts, why they matter to the
+   review, and what `swarm-pr-feedback` must verify before it edits code.
 
 ### Conflict resolution anti-patterns
 - ✗ Accepting "ours" or "theirs" for all conflicts without reading them
 - ✗ Resolving semantic conflicts without understanding both sides
 - ✗ Pushing resolution without running tests on the merged result
-- ✗ Reviewing a conflicted PR without resolving first — review effort is wasted if the merge changes the code
+- ✗ Treating `PR_REVIEW` as the place to fix branch state — this mode stays read-only
 
-## Phase 0B-bis: Pre-Fix Parallel Work Check
+## Phase 0B-bis: Pre-Handoff Parallel Work Snapshot
 
-When the review surfaces findings that need fixes, and before dispatching
-coder for fix work, re-check for **parallel work** since the last fetch. The PR
-author, the bot reviewer, or another swarm may have pushed commits while you
-were reviewing.
+When the review surfaces findings that will likely need `swarm-pr-feedback`,
+re-check for **parallel work** since the last fetch. The PR author, the bot
+reviewer, or another swarm may have pushed commits while you were reviewing.
+This is still read-only: capture the remote state so the handoff artifact starts
+from the right branch facts.
 
 ### Step 1 — Refetch and compare
 
@@ -258,27 +281,27 @@ For each new commit on the remote:
 
 1. **Read the commit message and diff.** Use `git show <commit> --stat` to see
    file scope, then `git show <commit> -- <file>` to see the actual changes.
-2. **Compare against your planned fixes:**
-   - Does the remote commit touch the same files your coder delegation is about to
-     modify?
-   - Does the remote commit apply a different approach to the same finding?
-   - Does the remote commit include more comprehensive fixes (more tests, better
-     edge coverage, cleaner error handling)?
-3. **Default stance: prefer the parallel work if it supersedes your plan.** Run
+2. **Compare against the pending handoff scope:**
+   - Does the remote commit touch the same files as the validated findings?
+   - Does the remote commit appear to already address a finding you planned to
+     hand off?
+   - Does the remote commit introduce a new branch-state fact the handoff should
+     mention?
+3. **Default stance: prefer the remote state as the next baseline.** Run
    the [`parallel-work-check`](../generated/parallel-work-check/SKILL.md)
-   protocol for the formal decision template.
+   protocol for the formal decision template and record the outcome in the
+   handoff artifact.
 
 ### Step 3 — Three outcomes
 
-- **Parallel work supersedes:** Abort your rebase. First verify the working tree
-  is clean (`git status --porcelain`); stash or discard any uncommitted changes
-  before proceeding. Then `git reset --hard origin/<pr-branch>` to take the
-  remote state, then re-verify that all your findings are addressed. If the
-  remote missed any, add minor improvements on top. Do NOT waste effort redoing
-  work the parallel agent already did better.
-- **Parallel work complements:** Cherry-pick or merge the remote commits into
-  your local branch, then continue with your fix.
-- **Parallel work unrelated:** Continue with your planned fix.
+- **Parallel work supersedes:** Mark the older local checkout as stale in the
+  handoff artifact and tell `swarm-pr-feedback` to re-check out the current
+  remote head before editing.
+- **Parallel work complements:** Carry both the validated findings and the new
+  remote commits into the handoff artifact so `swarm-pr-feedback` can verify the
+  combined state before patching.
+- **Parallel work unrelated:** Note that the remote moved, but keep the same
+  validated finding set.
 
 ### Anti-patterns
 
@@ -984,6 +1007,23 @@ Use one of:
 ## Merge recommendation
 
 Explain the recommendation in one short paragraph and list required actions before merge if applicable.
+
+## Feedback handoff
+
+When the review produced actionable validated findings or operational blockers,
+include:
+
+- the handoff artifact path,
+- the preserved finding IDs and provenance that `swarm-pr-feedback` must carry
+  forward,
+- and an explicit question asking whether to continue into
+  `swarm-pr-feedback`.
+
+Use this exact continuation prompt format:
+
+```text
+/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.md
+```
 
 ---
 

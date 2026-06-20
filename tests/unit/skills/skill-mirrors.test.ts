@@ -99,7 +99,7 @@ const MIRRORED_ARCHITECT_MODE_SKILLS = [
 ] as const;
 
 // Skills where .opencode is the full operative protocol loaded by architect.ts and
-// .claude is an intentionally condensed variant for Claude Code sessions.
+// .claude is an intentionally different surface.
 // Both files must exist; byte-identity is not required but divergence is documented here.
 const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
 	slug: string;
@@ -108,25 +108,38 @@ const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
 	reason: string;
 }> = [
 	{
-		slug: 'swarm-pr-review',
-		opencodePath: '.opencode/skills/swarm-pr-review/SKILL.md',
-		claudePath: '.claude/skills/swarm-pr-review/SKILL.md',
-		reason:
-			'.claude is a 6-phase condensed variant; .opencode is the 12-phase full protocol loaded by architect.ts MODE: PR_REVIEW',
-	},
-	{
-		slug: 'swarm-pr-feedback',
-		opencodePath: '.opencode/skills/swarm-pr-feedback/SKILL.md',
-		claudePath: '.claude/skills/swarm-pr-feedback/SKILL.md',
-		reason:
-			'.claude/.agents are thin adapters that delegate to canonical; .opencode is the full protocol loaded by architect.ts MODE: PR_FEEDBACK',
-	},
-	{
 		slug: 'codebase-review-swarm',
 		opencodePath: '.opencode/skills/codebase-review-swarm/SKILL.md',
 		claudePath: '.claude/skills/codebase-review-swarm/SKILL.md',
 		reason:
 			'.opencode is the full portable package loaded by architect.ts MODE: CODEBASE_REVIEW; .claude is a thin adapter',
+	},
+];
+
+const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
+	slug: string;
+	canonicalPath: string;
+	adapterPaths: string[];
+	expectedCanonicalRef: string;
+}> = [
+	{
+		slug: 'swarm-pr-review',
+		canonicalPath: '.opencode/skills/swarm-pr-review/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-pr-review/SKILL.md',
+			'.agents/skills/swarm-pr-review/SKILL.md',
+		],
+		expectedCanonicalRef: '../../../.opencode/skills/swarm-pr-review/SKILL.md',
+	},
+	{
+		slug: 'swarm-pr-feedback',
+		canonicalPath: '.opencode/skills/swarm-pr-feedback/SKILL.md',
+		adapterPaths: [
+			'.claude/skills/swarm-pr-feedback/SKILL.md',
+			'.agents/skills/swarm-pr-feedback/SKILL.md',
+		],
+		expectedCanonicalRef:
+			'../../../.opencode/skills/swarm-pr-feedback/SKILL.md',
 	},
 ];
 
@@ -184,6 +197,32 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 
 	for (const {
 		slug,
+		canonicalPath,
+		adapterPaths,
+		expectedCanonicalRef,
+	} of ADAPTER_ARCHITECT_MODE_SKILLS) {
+		it(`${slug} adapters delegate back to the canonical .opencode skill`, () => {
+			expect(existsSync(join(process.cwd(), canonicalPath))).toBe(true);
+
+			for (const adapterPath of adapterPaths) {
+				const adapterSource = readFileSync(
+					join(process.cwd(), adapterPath),
+					'utf-8',
+				);
+				const lineCount = adapterSource.trimEnd().split(/\r?\n/).length;
+
+				expect(adapterSource).toContain(expectedCanonicalRef);
+				expect(lineCount).toBeLessThan(60);
+				expect(adapterSource).toContain('canonical workflow');
+				expect(adapterSource).not.toContain('## Phase ');
+				expect(adapterSource).not.toContain('## Multi-Round');
+				expect(adapterSource).not.toContain('### Bot Review');
+			}
+		});
+	}
+
+	for (const {
+		slug,
 		opencodePath,
 		reason,
 	} of OPENCODE_ONLY_ARCHITECT_MODE_SKILLS) {
@@ -208,6 +247,7 @@ describe('architect mode skill mirrors - regression: prevent mirror drift (F-001
 		const mirroredSlugs = [
 			...MIRRORED_ARCHITECT_MODE_SKILLS.map(([skillName]) => skillName),
 			...DIVERGENT_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
+			...ADAPTER_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 			...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 		];
 
