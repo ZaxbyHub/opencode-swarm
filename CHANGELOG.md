@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.82.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.1...v7.82.2) (2026-06-20)
+
+
+### Bug Fixes
+
+* **knowledge:** close PR [#1207](https://github.com/ZaxbyHub/opencode-swarm/issues/1207) review gaps (issue [#1219](https://github.com/ZaxbyHub/opencode-swarm/issues/1219) F-002/F-003/F-004) ([9c03e7d](https://github.com/ZaxbyHub/opencode-swarm/commit/9c03e7dee9146690671479a4b63b8c847ff1db1e))
+* **pr-1450:** add release fragment and fix invalid test status ([badbdd6](https://github.com/ZaxbyHub/opencode-swarm/commit/badbdd6bad808ac1b0377fd07654fde0de3e995c))
+
 ## [7.82.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.0...v7.82.1) (2026-06-20)
 
 
