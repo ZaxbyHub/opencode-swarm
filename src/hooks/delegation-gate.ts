@@ -1360,8 +1360,10 @@ export function createDelegationGateHook(
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { recordPendingDelegation } = await import(
-							'../background/pending-delegations.js'
+						const { buildPromptSnapshot, recordPendingDelegation } =
+							await import('../background/pending-delegations.js');
+						const { captureWorkspaceSnapshot } = await import(
+							'../background/workspace-snapshot.js'
 						);
 						const { subagentSessionId, jobId } = extractDispatchIds(_output);
 						if (subagentSessionId) {
@@ -1371,6 +1373,15 @@ export function createDelegationGateHook(
 								session,
 								directory,
 							);
+							const scope =
+								session.declaredCoderScope &&
+								session.declaredCoderScope.length > 0
+									? session.declaredCoderScope.join(',')
+									: evidenceTaskId;
+							const prHeadShaRaw =
+								mergedArgs.prHeadSha ?? mergedArgs.pr_head_sha;
+							const prHeadSha =
+								typeof prHeadShaRaw === 'string' ? prHeadShaRaw : null;
 							await recordPendingDelegation(
 								directory,
 								{
@@ -1383,6 +1394,18 @@ export function createDelegationGateHook(
 									swarmPrefixedAgent: subagentType,
 									planTaskId: evidenceTaskId,
 									evidenceTaskId,
+									workspace: captureWorkspaceSnapshot(directory, {
+										prHeadSha,
+										scope,
+									}),
+									prompt:
+										typeof mergedArgs.prompt === 'string'
+											? buildPromptSnapshot(
+													mergedArgs.prompt,
+													delegationMaxChars,
+												)
+											: undefined,
+									generation: 1,
 								},
 								{ staleTimeoutMs: backgroundPendingTimeoutMs },
 							);

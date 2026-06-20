@@ -1007,7 +1007,10 @@ function buildCollectResult(
 		)
 		.map(recordToLaneResult);
 	const completed = records.filter((record) => record.status === 'completed');
-	const failed = records.filter((record) => record.status === 'error');
+	const failed = records.filter(
+		(record) =>
+			record.status === 'error' || record.status === 'ingestion_error',
+	);
 	const cancelled = records.filter((record) => record.status === 'cancelled');
 	const stale = records.filter((record) => record.status === 'stale');
 	const pending = records.filter(
@@ -1039,9 +1042,11 @@ function recordToLaneResult(
 	const status =
 		record.status === 'error'
 			? 'failed'
-			: record.status === 'running'
-				? 'pending'
-				: record.status;
+			: record.status === 'ingestion_error'
+				? 'failed'
+				: record.status === 'running'
+					? 'pending'
+					: record.status;
 	return {
 		id: record.laneId ?? record.correlationId,
 		agent: record.swarmPrefixedAgent,

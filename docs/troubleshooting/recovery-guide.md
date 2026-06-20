@@ -89,11 +89,15 @@ await importCheckpoint()
 A background `Task` returns a **running placeholder immediately** and delivers the real
 result **later** via a synthetic parent message. Swarm's delegation gate treats a `Task`
 result as completion, so consuming the placeholder would advance Stage B and record gate
-evidence **before any review/test output exists**. Until swarm can correlate the deferred
-completion safely (tracked as a separate, spike-gated change), swarm **fail-closed-blocks**
+evidence **before any review/test output exists**. By default, swarm **fail-closed-blocks**
 background delegations for any swarm role (reviewer, test_engineer, coder, explorer, etc.).
 Swarm never silently rewrites `background` to `false` — the unsupported capability is
 surfaced explicitly.
+
+With `hooks.background_subagents: true`, this is no longer future work for
+Stage B reviewer/test_engineer gates: swarm tracks the background dispatch and
+waits for trusted terminal completion ingestion instead of treating the running
+placeholder as completion.
 
 **Action needed (default):** Re-issue the delegation **without** `background` (or with
 `background: false`). Foreground swarm delegations are unaffected. Non-swarm OpenCode
@@ -102,7 +106,7 @@ in `tool.execute.before`, so OpenCode rejects the call before the background tas
 a belt-and-suspenders check in `tool.execute.after` ensures a running placeholder never
 advances workflow state even if it slips through.
 
-### Opt-in tracking and advisory ingestion
+### Opt-in tracking and Stage B ingestion
 
 Setting `hooks.background_subagents: true` lifts the block: background swarm dispatches are
 **allowed and tracked** as durable pending records in `.swarm/background-delegations.jsonl`,
@@ -110,10 +114,11 @@ and the observer ingests trusted `synthetic` task envelopes into that advisory l
 they correlate to a real dispatch. Unresolved pendings are transitioned to `stale` after
 `hooks.background_pending_timeout_minutes` (default 30); the on-disk log is append-only.
 
-> **Advisory only:** a background completion does **not** advance workflow gates or
-> record gate evidence yet. Background swarm delegations are tracked and collectable, but they
-> do not satisfy reviewer/test_engineer gates — use foreground delegations when you
-> need a gate to advance. Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`.
+For Stage B reviewer/test_engineer background delegations, the completion is no
+longer advisory-only after PR2: it must correlate to a pending record, match the
+parent session, pass workspace freshness checks, and record durable gate evidence
+before live workflow state can advance. Requires upstream
+`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`.
 
 ---
 
@@ -150,6 +155,41 @@ fresh `batch_id`.
 session when the tool context supplies one. If a batch was launched in a
 different session, collect it from that parent session, or relaunch the advisory
 lanes in the current session.
+
+## 9. Recovering from Background Stage B Gate Batches
+
+When `hooks.background_subagents: true` is enabled, native background `Task`
+dispatches to gate-bearing agents are tracked in `.swarm/background-delegations.jsonl`.
+Reviewer and `test_engineer` completions are correctness-critical: they only
+advance `.swarm/evidence/{taskId}.json` and `taskWorkflowStates` after the
+trusted synthetic terminal envelope is correlated to the original parent
+session and the workspace snapshot still matches.
+
+**Pending reviewer/test gate:** do not mark the task complete while the matching
+background row is `pending` or `running`. Wait for the synthetic completion. The
+task should remain before `tests_run`, so `update_task_status(... completed)`
+continues to block.
+
+**Consumed Stage B row:** `consumed` means the terminal background completion was
+accepted and applied to gate evidence, review receipts when applicable, and the
+live Stage B state machine. If both reviewer and `test_engineer` evidence rows
+exist, completion can proceed normally.
+
+**Stale workspace:** a Stage B row becomes `stale` when the git head, dirty-tree
+hash, PR head SHA, or project directory no longer matches the dispatch snapshot.
+Treat the stale result as not reviewed. Re-dispatch the affected reviewer or
+`test_engineer` gate against the current workspace; do not reuse the stale gate
+as evidence.
+
+**Error row:** terminal `error` records do not advance gates. Inspect the stored
+result/error text, fix the underlying problem, and re-run the missing Stage B
+agent. The task is not complete until the required gate evidence is present.
+
+**Ingestion error:** `ingestion_error` means the terminal background result was
+trusted and stored, but swarm could not apply the evidence, receipt, or workflow
+state update. Fix the reported local storage/problem and replay the trusted
+completion event if available, or re-dispatch the missing Stage B gate. Do not
+count the gate as satisfied until the row becomes `consumed`.
 
 ---
 

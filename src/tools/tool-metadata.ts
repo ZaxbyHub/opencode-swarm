@@ -553,7 +553,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async advisory batch without advancing workflow gates',
+			'collect or poll results for a dispatch_lanes_async batch; this is the required join barrier for advisory lane workflows and does not advance workflow gates',
 		agents: ['architect'],
 	},
 	summarize_work: {

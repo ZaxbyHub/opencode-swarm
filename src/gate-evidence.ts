@@ -87,6 +87,14 @@ export function deriveRequiredGates(agentType: string): string[] {
 			return ['test_engineer'];
 		case 'critic':
 			return ['critic'];
+		case 'critic_sounding_board':
+			return ['critic_sounding_board'];
+		case 'critic_drift_verifier':
+			return ['critic_drift_verifier'];
+		case 'critic_hallucination_verifier':
+			return ['critic_hallucination_verifier'];
+		case 'critic_architecture_supervisor':
+			return ['critic_architecture_supervisor'];
 		default:
 			return ['reviewer', 'test_engineer'];
 	}

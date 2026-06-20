@@ -12,8 +12,8 @@
  *
  * Scope: dispatch records `pending`/`running` snapshots, collection or trusted synthetic
  * completions record terminal snapshots, and the stale sweep records `stale` snapshots.
- * This store still has NO gate advancement and NO gate evidence side effect; it is an
- * advisory result ledger only.
+ * This store itself has no gate-advancement side effect. Stage B gate ingestion is a
+ * separate consumer of trusted terminal snapshots.
  *
  * Concurrency: all writes (append, sweep) run under a single project-scoped lock via
  * `withEvidenceLock`, so concurrent dispatches/sweeps cannot interleave appends. Reads are
@@ -23,6 +23,7 @@
  * `.swarm/` (Invariant 4).
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -39,6 +40,7 @@ const STORE_LOCK_TASK = 'background-delegations';
 export type BackgroundDelegationStatus =
 	| 'pending'
 	| 'running'
+	| 'ingestion_error'
 	| 'completed'
 	| 'error'
 	| 'cancelled'
@@ -77,6 +79,7 @@ export interface BackgroundDelegationRecord {
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
 	workspace?: BackgroundWorkspaceSnapshot;
+	prompt?: BackgroundPromptSnapshot;
 	generation?: number;
 	result?: BackgroundDelegationResult;
 	completedAt?: number;
@@ -88,6 +91,13 @@ export interface BackgroundWorkspaceSnapshot {
 	dirtyHash: string | null;
 	prHeadSha: string | null;
 	scope: string | null;
+}
+
+export interface BackgroundPromptSnapshot {
+	text: string;
+	chars: number;
+	truncated: boolean;
+	digest: string;
 }
 
 export interface BackgroundDelegationResult {
@@ -118,6 +128,15 @@ const WorkspaceSchema = z
 	})
 	.strict();
 
+const PromptSchema = z
+	.object({
+		text: z.string(),
+		chars: z.number(),
+		truncated: z.boolean(),
+		digest: z.string(),
+	})
+	.strict();
+
 const RecordSchema = z
 	.object({
 		schemaVersion: z.union([z.literal(1), z.literal(2)]),
@@ -133,6 +152,7 @@ const RecordSchema = z
 		status: z.enum([
 			'pending',
 			'running',
+			'ingestion_error',
 			'completed',
 			'error',
 			'cancelled',
@@ -146,6 +166,7 @@ const RecordSchema = z
 		mode: z.string().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
+		prompt: PromptSchema.optional(),
 		generation: z.number().optional(),
 		result: ResultSchema.optional(),
 		completedAt: z.number().optional(),
@@ -240,6 +261,7 @@ export interface RecordPendingInput {
 	mode?: string;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
+	prompt?: BackgroundPromptSnapshot;
 	generation?: number;
 }
 
@@ -275,6 +297,7 @@ export async function recordPendingDelegation(
 		...(input.mode ? { mode: input.mode } : {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
+		...(input.prompt ? { prompt: input.prompt } : {}),
 		...(input.generation !== undefined ? { generation: input.generation } : {}),
 	};
 
@@ -300,6 +323,21 @@ export async function recordPendingDelegation(
 	}
 }
 
+export function buildPromptSnapshot(
+	text: string,
+	maxChars: number,
+): BackgroundPromptSnapshot {
+	const boundedMax = Math.max(0, Math.min(maxChars, 20_000));
+	const truncated = text.length > boundedMax;
+	const bounded = truncated ? text.slice(0, boundedMax) : text;
+	return {
+		text: bounded,
+		chars: text.length,
+		truncated,
+		digest: createHash('sha256').update(text).digest('hex'),
+	};
+}
+
 export async function appendDelegationTransition(
 	directory: string,
 	correlationId: string,
@@ -320,7 +358,11 @@ export async function appendDelegationTransition(
 			async () => {
 				const current = findByCorrelationId(directory, correlationId);
 				if (!current) return;
-				if (isTerminal(current.status) && transition.status !== 'consumed') {
+				if (
+					isTerminal(current.status) &&
+					transition.status !== 'consumed' &&
+					transition.status !== 'ingestion_error'
+				) {
 					next = current;
 					return;
 				}
@@ -394,7 +436,12 @@ function sweepStaleLocked(
 ): number {
 	let swept = 0;
 	for (const record of readDelegations(directory)) {
-		if (record.status !== 'pending' && record.status !== 'running') continue;
+		if (
+			record.status !== 'pending' &&
+			record.status !== 'running' &&
+			record.status !== 'ingestion_error'
+		)
+			continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
 		appendRecord(directory, {
 			...record,
