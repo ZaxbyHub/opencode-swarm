@@ -13,7 +13,7 @@ export function recordSessionStart(directory: string, startMs: number): void {
 		const filePath = path.join(sessionDir, SESSION_START_FILE);
 		const line = JSON.stringify({ startMs, ts: Date.now() });
 		mkdirSync(sessionDir, { recursive: true });
-		writeFileSync(filePath, line + '\n', { flag: 'a' });
+		writeFileSync(filePath, `${line}\n`, { flag: 'a' });
 	} catch {
 		// non-fatal — fail-open
 	}
