@@ -75,6 +75,8 @@ Explorer missions are dispatched in parallel waves. Launch the wave promptly —
 
 At the Step 4 boundary, call `collect_lane_results` with `wait: true` for every open wave batch. Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps; do not silently proceed past a required lane. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes` or parallel Task calls and record that async advisory lanes were unavailable.
 
+When a collected or blocking lane result includes `output_ref`, treat `output` as a preview and call `retrieve_lane_output` before extracting candidate findings or declaring a lane clean. If the result is `output_degraded`, `transcript_incomplete`, truncated without a usable ref, missing, stale, cancelled, or failed, record the lane as a coverage gap and re-dispatch a narrower lane or mark the affected findings/coverage UNVERIFIED.
+
 Explorers generate CANDIDATE FINDINGS only — they do NOT make verdicts. All findings are unverified until Step 5.
 
 ## Step 4 — Normalize Candidates

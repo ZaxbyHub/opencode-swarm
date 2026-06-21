@@ -138,6 +138,8 @@ Before writing under `.swarm/`, verify `.swarm/` is ignored or locally excluded.
 
 Collect every async batch with `collect_lane_results` before consuming its ledger output or advancing to a dependent step. If `dispatch_lanes_async` or `collect_lane_results` is unavailable, fall back to blocking `dispatch_lanes`; if deterministic dispatch is unavailable, run isolated local passes and record that fallback. Do not run dependent inventory passes merely to keep agents busy. Missing dependency context is `unknown`, not guessed.
 
+For every collected or blocking lane result, treat `output` as a preview when `output_ref` is present. Call `retrieve_lane_output` and use the full artifact before consuming inventory ledgers, linking claims, deciding that a unit produced no candidates, or advancing a dependent step. If a lane is degraded, incomplete, truncated without a usable ref, missing, stale, cancelled, or failed, record the affected coverage unit as a limitation and re-dispatch a narrower lane or mark it UNVERIFIED; do not infer absence from preview text.
+
 ## Phase 0 inventory
 
 ### 0A — Bootstrap and prior context
@@ -206,6 +208,8 @@ Rules:
 ## Phase 1 — Candidate generation
 
 Every dispatch includes selected track(s), exact file list or surface IDs, source-of-truth packet, repository-context packet, relevant ledgers, the applicable `TRACK_DEPTH_PLAN`, candidate format, `out_of_scope_note` rule, and anti-cursory/non-dilution reminder. Prefer `dispatch_lanes_async` for independent candidate-generation coverage units so the Architect can continue building the review ledger, coverage map, and validation routing while lanes inspect subsystems. Call `collect_lane_results` before Phase 2 reviewer validation; no candidate may be routed, counted, or synthesized until its async batch has settled or been explicitly marked blocked/skipped.
+
+If candidate-generation lane results include `output_ref`, retrieve and parse the full artifact before candidate counting, deduplication, routing, or synthesis. Preview-only, degraded, or incomplete lane output is a coverage limitation, not negative evidence.
 
 File-size rule: no more than 15 files per deep pass; no more than 8 dense files per deep pass. Dense = >300 logical lines, multiple unrelated responsibilities, or interleaved UI/state/network/security logic. No sampling inside assigned scope. Large selections require more deep passes, not larger batches or lower depth.
 

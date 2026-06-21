@@ -46,6 +46,9 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('dispatch_lanes_async');
 		expect(phase3Section).toContain('collect_lane_results');
 		expect(phase3Section).toContain('lane_results');
+		expect(phase3Section).toContain('output_ref');
+		expect(phase3Section).toContain('retrieve_lane_output');
+		expect(phase3Section).toContain('UNVERIFIED');
 		expect(phase3Section).toContain('dispatch_lanes');
 		expect(phase3Section).not.toContain('run_in_background');
 		expect(phase3Section).not.toContain(
@@ -88,6 +91,8 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			expect(source).toContain('read-only');
 			expect(source).toContain('dispatch_lanes_async');
 			expect(source).toContain('collect_lane_results');
+			expect(source).toContain('retrieve_lane_output');
+			expect(source).toContain('output_ref');
 			expect(source).not.toContain('## Phase 0A:');
 			expect(source).not.toContain('## Phase 0B:');
 			expect(source).not.toContain(

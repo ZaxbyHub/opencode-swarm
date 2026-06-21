@@ -18,6 +18,10 @@ the canonical workflow.
 - Run Phase 0 inventory first and stop for review-mode selection unless the
   user already selected tracks and explicitly authorized continuing.
 - Preserve the skill's evidence rule: no quote, no claim.
+- For dispatch lanes, treat `output` as a preview and call
+  `retrieve_lane_output` for full `output_ref` artifacts before consuming
+  ledgers, counting candidates, routing validation, or declaring coverage clean;
+  degraded or incomplete lane output is an explicit coverage limitation.
 - Use `rg`, focused file reads, targeted shell commands, and independent
   validation to close coverage units before writing the final report.
 - If the user asks for fixes after the report, start a separate implementation

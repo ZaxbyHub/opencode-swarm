@@ -25,6 +25,10 @@ canonical workflow.
   PR metadata prove or disprove it.
 - Preserve original finding IDs and reviewer/critic provenance from review
   handoff artifacts.
+- For async verification lanes, treat `output` as a preview and call
+  `retrieve_lane_output` for full `output_ref` artifacts before classifying or
+  resolving feedback; degraded or incomplete lane outputs keep the affected
+  items open as evidence gaps.
 - Do not resolve GitHub review threads unless the user explicitly instructs it.
 - Load `$writing-tests` before changing tests and `$commit-pr` before pushing or
   updating the PR.

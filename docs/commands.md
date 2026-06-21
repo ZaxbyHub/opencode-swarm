@@ -221,7 +221,7 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 4. **Critic Challenge** â€” Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** â€” Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; if async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
+The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs the skill's triggered micro-lanes automatically. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; if async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`. Lane results expose bounded `output` previews plus `output_ref` for full artifact retrieval; the review protocol retrieves `output_ref` before candidate extraction or routing. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -567,6 +567,11 @@ Show performance metrics: tool call rates, delegation chains, evidence pass rate
 ### `/swarm retrieve <summary-id>`
 
 Load the full tool output that was previously summarized (IDs like `S1`, `S2`). Use when the summary is insufficient and you need the raw data.
+
+Dispatch lane output uses separate opaque `output_ref` values returned by
+`dispatch_lanes`, `dispatch_lanes_async`, and `collect_lane_results`. Agents with
+access use `retrieve_lane_output` to page through those full lane artifacts; `/swarm
+retrieve` remains for summary IDs only.
 
 ---
 

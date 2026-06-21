@@ -82,6 +82,7 @@ import { pre_check_batch } from './pre-check-batch';
 import { quality_budget } from './quality-budget';
 import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
+import { retrieve_lane_output } from './retrieve-lane-output';
 import { retrieve_summary } from './retrieve-summary';
 import { sast_scan } from './sast-scan';
 import { save_plan } from './save-plan';
@@ -167,6 +168,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	git_blame: () => git_blame,
 	gitingest: () => gitingest,
 	retrieve_summary: () => retrieve_summary,
+	retrieve_lane_output: () => retrieve_lane_output,
 	extract_code_blocks: () => extract_code_blocks,
 	phase_complete: () => phase_complete,
 	save_plan: () => save_plan,

@@ -106,6 +106,12 @@ export interface BackgroundDelegationResult {
 	chars: number;
 	truncated: boolean;
 	digest: string;
+	outputRef?: string;
+	outputPreviewChars?: number;
+	outputDegraded?: boolean;
+	outputArtifactError?: string;
+	transcriptIncomplete?: boolean;
+	messageCount?: number;
 }
 
 const ResultSchema = z
@@ -115,6 +121,12 @@ const ResultSchema = z
 		chars: z.number(),
 		truncated: z.boolean(),
 		digest: z.string(),
+		outputRef: z.string().optional(),
+		outputPreviewChars: z.number().optional(),
+		outputDegraded: z.boolean().optional(),
+		outputArtifactError: z.string().optional(),
+		transcriptIncomplete: z.boolean().optional(),
+		messageCount: z.number().optional(),
 	})
 	.strict();
 

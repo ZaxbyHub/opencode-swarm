@@ -50,6 +50,7 @@ export function createToolSummarizerHook(
 		// creates a retrieval loop where the summary itself gets summarized.
 		const exemptTools = config.exempt_tools ?? [
 			'retrieve_summary',
+			'retrieve_lane_output',
 			'task',
 			'read',
 		];

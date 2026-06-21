@@ -172,6 +172,12 @@ Missing, stale, cancelled, or failed lanes remain explicit ledger limitations.
 If `dispatch_lanes_async` is unavailable, use blocking verification and record
 that async advisory lanes were unavailable.
 
+When a verification lane result includes `output_ref`, treat `output` as a
+preview and call `retrieve_lane_output` before using it to classify, resolve,
+disprove, or group feedback items. If the result is `output_degraded`,
+`transcript_incomplete`, or truncated without a usable ref, keep the affected
+ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
+
 ### CI matrix cascade check (do this before fixing)
 
 When the PR's `unit` job is a matrix across multiple OSes and downstream jobs

@@ -257,6 +257,11 @@ export const TOOL_METADATA = {
 			'test_engineer',
 		],
 	},
+	retrieve_lane_output: {
+		description:
+			'retrieve paged full dispatch lane output by output_ref; use before consuming truncated lane previews or routing candidates from lane results',
+		agents: ['architect'],
+	},
 	extract_code_blocks: {
 		description: 'extract code blocks from text content and save them to files',
 		agents: [

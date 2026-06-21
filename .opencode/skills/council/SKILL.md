@@ -113,7 +113,12 @@ Do NOT share other agents' responses at this stage.
    unavailable. The `round1Responses` array will contain
    entries with `memberId` of `council_generalist`, `council_skeptic`, and
    `council_domain_expert` and `role` of `generalist`, `skeptic`, and
-   `domain_expert` respectively. These come from the agents' JSON output; no
+   `domain_expert` respectively. If any lane result has `output_ref`, call
+   `retrieve_lane_output` and parse the full artifact rather than the preview.
+   If a lane is degraded, incomplete, truncated without a usable ref, missing,
+   stale, cancelled, or failed, treat the council round as blocked or incomplete;
+   do not synthesize from partial member JSON.
+   These come from the agents' JSON output; no
    manual construction is needed.
 
 #### Synthesis and Deliberation (when council.general.deliberate is true; default true)

@@ -128,6 +128,12 @@ that async advisory lanes were unavailable.
 
 ## Step 5 — Dual-Reviewer Claim Verification
 
+When a lane result includes `output_ref`, treat `output` as a preview and call
+`retrieve_lane_output` before extracting claims, summarizing a subtopic, or marking
+the subtopic clean. If the result is `output_degraded`, `transcript_incomplete`, or
+truncated without a usable ref, mark the affected subtopic UNVERIFIED or
+re-dispatch a narrower lane; do not treat preview absence as evidence absence.
+
 Split the candidate findings into 2 shards. Dispatch 2 parallel
 `the active swarm's reviewer agent` calls. Each reviewer receives its shard plus
 the relevant RESEARCH CONTEXT and the instruction:

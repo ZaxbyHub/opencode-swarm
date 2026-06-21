@@ -156,6 +156,14 @@ session when the tool context supplies one. If a batch was launched in a
 different session, collect it from that parent session, or relaunch the advisory
 lanes in the current session.
 
+**Preview or truncated output:** `dispatch_lanes`, `dispatch_lanes_async`, and
+`collect_lane_results` return bounded `output` previews. When a lane result has
+`output_ref`, recover the full text with `retrieve_lane_output` before parsing
+findings, candidates, JSON member responses, or verification conclusions. If a
+lane result is `output_degraded`, `transcript_incomplete`, truncated without a
+usable ref, stale, cancelled, or failed, treat it as missing advisory evidence and
+re-dispatch a narrower lane or mark the affected coverage UNVERIFIED.
+
 ## 9. Recovering from Background Stage B Gate Batches
 
 When `hooks.background_subagents: true` is enabled, native background `Task`

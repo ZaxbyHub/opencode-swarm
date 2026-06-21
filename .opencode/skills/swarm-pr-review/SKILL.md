@@ -495,6 +495,8 @@ Launch all base lanes with `dispatch_lanes_async` when available. Pass the six l
 
 Before Phase 4 or synthesis, call `collect_lane_results` with `wait: true` for the base-lane batch and treat the collected `lane_results` as the join barrier. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
 
+When any collected or blocking `lane_results[]` item has `output_ref`, treat `output` as a preview only. Call `retrieve_lane_output` and consume the full artifact before extracting candidates, deciding that a lane produced no candidates, or routing work to reviewers. If a lane has `output_truncated: true`, `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, record an explicit coverage gap and re-dispatch a narrower lane or mark affected candidates/coverage UNVERIFIED; never infer candidate absence from a preview.
+
 **lane id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, every `dispatch_lanes_async` or `dispatch_lanes` lane `id` MUST be unique within that dispatch batch and should include lane and attempt suffixes (e.g. `pr_review_explore_lane1_attempt2`). Never reuse an id in the same batch unless intentionally replacing that exact lane before dispatch.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
@@ -534,6 +536,8 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
 After `collect_lane_results` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Collect every micro-lane batch with `wait: true` before reviewer classification. Do not launch irrelevant micro-lanes.
+
+Apply the same `output_ref` rule to micro-lanes: retrieve full output before candidate routing, and treat degraded or incomplete lane artifacts as UNVERIFIED coverage rather than as clean negative evidence.
 
 Each micro-lane receives:
 

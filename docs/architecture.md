@@ -103,6 +103,8 @@ Current signal-triggered modes: `DEEP_DIVE`, `PR_REVIEW`, `PR_FEEDBACK`, `DESIGN
 Current contract: PR review starts with Phase 0A signal ingestion before the explorer lanes run. The architect captures PR comments, review summaries, requested changes, bot findings, CI/check failures, merge conflicts, stale branch state, PR body claims, linked issues, and commit messages in the initial evidence ledger, then validates those signals alongside explorer findings. The workflow stays read-only, writes a handoff artifact under `.swarm/pr-review/<run_id>/`, and stops to ask whether to continue into `/swarm pr-feedback`.
 Triggered by `/swarm pr-review`. A read-only, structured review: intent reconstruction -> 6 parallel explorer lanes launched with `dispatch_lanes_async` while the architect continues non-dependent PR inspection -> `collect_lane_results` join barrier -> independent reviewer confirmation -> critic challenge on HIGH/CRITICAL -> synthesis. The architect checks out the PR branch locally before exploring (explorers read the working tree, not git history) and launches the skill's triggered micro-lanes for risk categories present in the diff. Does NOT mutate source or delegate to the coder. If async collection is unavailable, the workflow falls back to blocking `dispatch_lanes`.
 
+Dispatch lane joins return bounded previews in `lane_results[].output` and durable full-output refs in `lane_results[].output_ref`. The architect retrieves full artifacts with `retrieve_lane_output` before candidate extraction, JSON response parsing, or reviewer routing. Degraded, incomplete, stale, cancelled, failed, or preview-only lanes are explicit coverage gaps rather than negative evidence.
+
 #### PR_FEEDBACK Protocol
 Current contract: PR feedback ingests all known feedback sources plus any validated handoff artifact from `PR_REVIEW`, preserves prior IDs/provenance, and uses the broader closure statuses `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, and `NEEDS_USER_DECISION`.
 Triggered by `/swarm pr-feedback`. Ingests and closes **known** feedback (review threads, requested changes, CI failures, conflicts, pasted notes) rather than discovering new findings. The architect checks out the PR branch, builds a complete feedback ledger, verifies every item against source (CONFIRMED / PARTIAL / DISPROVED / PRE_EXISTING / NEEDS_MORE_EVIDENCE / NEEDS_USER_DECISION), fixes confirmed items plus their tests/docs, and reports a closure ledger for every item. GitHub review threads are resolved only on explicit user instruction.
@@ -1304,6 +1306,8 @@ Registered on `experimental.session.compacting`:
 - When `.swarm/summaries/` exists and contains files:
   - Injects `[CONTEXT OPTIMIZATION]` hint: instructs LLM to replace large tool output blocks (bash, test_runner, lint, diff) with retrieve references, preserving tool name, exit status, and errors
   - Injects `[STORED OUTPUTS]` count showing how many tool outputs are stored
+- Dispatch lane artifacts are stored separately under `.swarm/lane-results/` and
+  are retrieved with `retrieve_lane_output`, not `retrieve_summary`.
 - Guides OpenCode's built-in compaction to preserve swarm-relevant context
 
 ### System Prompt Enhancement

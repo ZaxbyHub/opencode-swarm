@@ -435,14 +435,27 @@ function shouldMaskToolOutput(
 		return false;
 	}
 
-	// Exempt tools: retrieve_summary, task
-	// - retrieve_summary: already a summary, no value to mask
+	// Exempt retrieval tools and small read/task outputs.
+	// - retrieve_lane_output / retrieve_summary: paged artifacts must stay visible so the
+	//   architect can page through them; masking defeats the delivery mechanism.
 	// - task: results are already summarized by the agent that created the task call
-	const toolName = extractToolName(text);
+	// Check structured tool name first (reliable); fall back to text heuristic for
+	// legacy tool result formats that may not carry toolName in msg.info.
+	const structuredToolName = msg.info.toolName as string | undefined;
+	const exemptList = [
+		'retrieve_summary',
+		'retrieve_lane_output',
+		'task',
+		'read',
+	];
 	if (
-		toolName &&
-		['retrieve_summary', 'task', 'read'].includes(toolName.toLowerCase())
+		structuredToolName &&
+		exemptList.includes(structuredToolName.toLowerCase())
 	) {
+		return false;
+	}
+	const toolName = extractToolName(text);
+	if (toolName && exemptList.includes(toolName.toLowerCase())) {
 		return false;
 	}
 

@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
 import {
+	buildLaneOutputPreview,
+	storeLaneOutput,
+} from '../background/lane-output-store.js';
+import {
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
 	findByBatchId,
@@ -24,6 +28,7 @@ const COMMON_PROMPT_SEPARATOR = '\n\n';
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const MAX_LANE_OUTPUT_CHARS = 20_000;
+const ASYNC_MESSAGE_FETCH_LIMIT = 50;
 const MAX_ERROR_CHARS = 200;
 const ERROR_TRUNCATION_SUFFIX = '...';
 const MAX_BATCH_ID_CHARS = 120;
@@ -205,6 +210,13 @@ export interface DispatchLaneResult {
 	output?: string;
 	output_chars?: number;
 	output_truncated?: boolean;
+	output_ref?: string;
+	output_digest?: string;
+	output_preview_chars?: number;
+	output_degraded?: boolean;
+	output_artifact_error?: string;
+	transcript_incomplete?: boolean;
+	message_count?: number;
 	error?: string;
 }
 
@@ -312,7 +324,7 @@ export const _internals: {
 
 export const _test_exports = {
 	applyCommonPrompt,
-	extractLastAssistantText,
+	extractAssistantTranscript,
 	formatError,
 	nextCollectPollInterval,
 	promptHash,
@@ -804,40 +816,72 @@ async function collectOnce(
 		try {
 			messages = await session.messages!({
 				path: { id: record.subagentSessionId },
-				query: { directory, limit: 50 },
+				query: { directory, limit: ASYNC_MESSAGE_FETCH_LIMIT },
 			});
 		} catch {
 			continue;
 		}
 		if (!messages.data) continue;
-		const text = extractLastAssistantText(messages.data);
-		if (!text) continue;
-		const bounded = boundLaneOutput(text);
+		const transcript = extractAssistantTranscript(messages.data);
+		if (!transcript.text) continue;
+		const output = prepareLaneOutput({
+			directory,
+			batchId: record.batchId ?? record.callID,
+			laneId: record.laneId ?? record.correlationId,
+			agent: record.swarmPrefixedAgent,
+			role: record.normalizedAgent,
+			sessionId: record.subagentSessionId,
+			parentSessionId: record.parentSessionId,
+			mode: record.mode,
+			source: 'collect_lane_results',
+			text: transcript.text,
+			messageCount: transcript.messageCount,
+			transcriptIncomplete: transcript.transcriptIncomplete,
+		});
 		await appendDelegationTransition(directory, record.correlationId, {
 			status: 'completed',
 			result: {
-				text: bounded.output,
-				chars: bounded.output_chars,
-				truncated: bounded.output_truncated,
-				digest: digestText(text),
+				text: output.output,
+				chars: output.output_chars,
+				truncated: output.output_truncated,
+				digest: output.output_digest,
+				...(output.output_ref ? { outputRef: output.output_ref } : {}),
+				outputPreviewChars: output.output.length,
+				...(output.output_degraded !== undefined
+					? { outputDegraded: output.output_degraded }
+					: {}),
+				...(output.output_artifact_error
+					? { outputArtifactError: output.output_artifact_error }
+					: {}),
+				...(output.transcript_incomplete !== undefined
+					? { transcriptIncomplete: output.transcript_incomplete }
+					: {}),
+				messageCount: transcript.messageCount,
 			},
 		});
 	}
 }
 
-function extractLastAssistantText(
+function extractAssistantTranscript(
 	messages: Array<{
 		info?: { role?: string };
 		parts?: Array<{ type: string; text?: string }>;
 	}>,
-): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
+): { text: string; messageCount: number; transcriptIncomplete: boolean } {
+	const assistantTexts: string[] = [];
+	for (const message of messages) {
 		if (message.info?.role !== 'assistant') continue;
 		const text = extractText(message.parts);
-		if (text.trim().length > 0) return text;
+		if (text.trim().length > 0) assistantTexts.push(text);
 	}
-	return '';
+	return {
+		text: assistantTexts.join('\n\n'),
+		messageCount: assistantTexts.length,
+		// Total message count (not just assistant) is the correct signal: the API
+		// limit is applied to all message types, so hitting it means there may be
+		// earlier messages of any role — including assistant — that were not fetched.
+		transcriptIncomplete: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
+	};
 }
 
 function nextCollectPollInterval(currentMs: number): number {
@@ -942,7 +986,17 @@ async function runLane(
 			);
 		}
 
-		const boundedOutput = boundLaneOutput(extractText(promptResult.data.parts));
+		const laneOutput = prepareLaneOutput({
+			directory,
+			batchId: `blocking:${sessionId}`,
+			laneId: lane.id,
+			agent: lane.agent,
+			role,
+			sessionId,
+			parentSessionId: context.sessionID,
+			source: 'dispatch_lanes',
+			text: extractText(promptResult.data.parts),
+		});
 		return {
 			id: lane.id,
 			agent: lane.agent,
@@ -953,7 +1007,7 @@ async function runLane(
 			run_id: decision.slot.runId,
 			started_at: startedAt,
 			completed_at: isoNow(),
-			...boundedOutput,
+			...laneOutput,
 		};
 	} catch (error) {
 		return failedLane(
@@ -1062,6 +1116,25 @@ function recordToLaneResult(
 					output: record.result.text,
 					output_chars: record.result.chars,
 					output_truncated: record.result.truncated,
+					output_digest: record.result.digest,
+					...(record.result.outputRef
+						? { output_ref: record.result.outputRef }
+						: {}),
+					...(record.result.outputPreviewChars !== undefined
+						? { output_preview_chars: record.result.outputPreviewChars }
+						: {}),
+					...(record.result.outputDegraded !== undefined
+						? { output_degraded: record.result.outputDegraded }
+						: {}),
+					...(record.result.outputArtifactError
+						? { output_artifact_error: record.result.outputArtifactError }
+						: {}),
+					...(record.result.transcriptIncomplete !== undefined
+						? { transcript_incomplete: record.result.transcriptIncomplete }
+						: {}),
+					...(record.result.messageCount !== undefined
+						? { message_count: record.result.messageCount }
+						: {}),
 				}
 			: {}),
 		...(record.result?.error !== undefined
@@ -1165,25 +1238,63 @@ function buildReadOnlyTools(): ReadOnlyToolPermissions {
 	return tools as ReadOnlyToolPermissions;
 }
 
-function boundLaneOutput(output: string): {
+function prepareLaneOutput(args: {
+	directory: string;
+	batchId: string;
+	laneId: string;
+	agent: string;
+	role: string;
+	sessionId?: string;
+	parentSessionId?: string;
+	mode?: string;
+	source: 'dispatch_lanes' | 'collect_lane_results';
+	text: string;
+	messageCount?: number;
+	transcriptIncomplete?: boolean;
+}): {
 	output: string;
 	output_chars: number;
 	output_truncated: boolean;
+	output_ref?: string;
+	output_digest: string;
+	output_preview_chars: number;
+	output_degraded?: boolean;
+	output_artifact_error?: string;
+	transcript_incomplete?: boolean;
+	message_count?: number;
 } {
-	if (output.length <= MAX_LANE_OUTPUT_CHARS) {
-		return {
-			output,
-			output_chars: output.length,
-			output_truncated: false,
-		};
-	}
-	const omitted = output.length - MAX_LANE_OUTPUT_CHARS;
-	const suffix = `\n[... ${omitted} chars truncated by dispatch_lanes ...]`;
-	const maxContent = Math.max(0, MAX_LANE_OUTPUT_CHARS - suffix.length);
+	const stored = storeLaneOutput(args.directory, {
+		batchId: args.batchId,
+		laneId: args.laneId,
+		agent: args.agent,
+		role: args.role,
+		sessionId: args.sessionId,
+		parentSessionId: args.parentSessionId,
+		mode: args.mode,
+		source: args.source,
+		text: args.text,
+		messageCount: args.messageCount,
+		transcriptIncomplete: args.transcriptIncomplete,
+	});
+	const preview = buildLaneOutputPreview({
+		text: args.text,
+		ref: stored.ref,
+		degraded: stored.degraded,
+		maxChars: MAX_LANE_OUTPUT_CHARS,
+	});
 	return {
-		output: `${output.slice(0, maxContent)}${suffix}`,
-		output_chars: output.length,
-		output_truncated: true,
+		...preview,
+		output_ref: stored.ref,
+		output_digest: stored.digest,
+		output_preview_chars: preview.output.length,
+		...(stored.degraded ? { output_degraded: true } : {}),
+		...(stored.error ? { output_artifact_error: stored.error } : {}),
+		...(args.transcriptIncomplete !== undefined
+			? { transcript_incomplete: args.transcriptIncomplete }
+			: {}),
+		...(args.messageCount !== undefined
+			? { message_count: args.messageCount }
+			: {}),
 	};
 }
 

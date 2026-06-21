@@ -1242,7 +1242,7 @@ describe('context-budget hook', () => {
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
 				{
-					info: { role: 'assistant', toolName: 'read' },
+					info: { role: 'assistant', toolName: 'bash' },
 					parts: [{ type: 'text', text: originalOutput }],
 				}, // Large output, index 1
 				{
@@ -1298,7 +1298,7 @@ describe('context-budget hook', () => {
 					parts: [{ type: 'text', text: 'user' }],
 				},
 				{
-					info: { role: 'assistant', toolName: 'read' },
+					info: { role: 'assistant', toolName: 'bash' },
 					parts: [{ type: 'text', text: largeToolOutput }],
 				}, // Index 1, age = 4 > recent_window (3)
 				{
@@ -1414,6 +1414,57 @@ describe('context-budget hook', () => {
 			};
 
 			expect(config.context_budget.enforce_on_agent_switch).toBe(false);
+		});
+
+		test('[Task 4.2] retrieve_lane_output messages are NOT masked during enforcement', async () => {
+			// Verify the structured-toolName exemption path: when msg.info.toolName is
+			// 'retrieve_lane_output', shouldMaskToolOutput must return false even when
+			// enforcement fires and the message is large/old.
+			const config = {
+				context_budget: {
+					enabled: true,
+					model_limits: { default: 60 },
+					critical_threshold: 0.5,
+					enforce: true,
+					prune_target: 0.3,
+					recent_window: 1,
+					preserve_last_n_turns: 1,
+					tool_output_mask_threshold: 50,
+				},
+				max_iterations: 5,
+				qa_retry_limit: 3,
+				inject_phase_reminders: true,
+			};
+
+			const handler = createContextBudgetHandler(config);
+
+			const largeText = 'z'.repeat(600);
+			const messages = [
+				// Old, large retrieve_lane_output result — must NOT be masked
+				{
+					info: { role: 'assistant', toolName: 'retrieve_lane_output' },
+					parts: [{ type: 'text', text: largeText }],
+				},
+				// Old, large generic tool result — eligible for masking
+				{
+					info: { role: 'assistant', toolName: 'bash' },
+					parts: [{ type: 'text', text: largeText }],
+				},
+				// Recent user message (preserves the turn)
+				{
+					info: { role: 'user', agent: 'architect' },
+					parts: [{ type: 'text', text: 'retrieve the lane output' }],
+				},
+			];
+
+			const output = { messages: JSON.parse(JSON.stringify(messages)) };
+			await handler({}, output);
+
+			const retrieveMsg = output.messages[0];
+			const retrieveText = retrieveMsg.parts[0].text as string;
+			expect(retrieveText).not.toContain('[Tool output masked');
+			expect(retrieveText).not.toContain('[Context pruned');
+			expect(retrieveText).toBe(largeText);
 		});
 	});
 });

@@ -421,7 +421,7 @@ export const SummaryConfigSchema = z.object({
 	retention_days: z.number().min(1).max(365).default(7),
 	exempt_tools: z
 		.array(z.string())
-		.default(['retrieve_summary', 'task', 'read']),
+		.default(['retrieve_summary', 'retrieve_lane_output', 'task', 'read']),
 });
 
 export type SummaryConfig = z.infer<typeof SummaryConfigSchema>;

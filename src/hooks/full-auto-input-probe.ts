@@ -33,6 +33,7 @@ const PROBED_TOOLS = new Set<string>([
 	'gitingest',
 	'extract_code_blocks',
 	'retrieve_summary',
+	'retrieve_lane_output',
 	'search',
 	'read',
 	'view',

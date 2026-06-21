@@ -10,6 +10,7 @@ import {
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readLaneOutput } from '../../../src/background/lane-output-store';
 import {
 	findByBatchId,
 	recordPendingDelegation,
@@ -526,9 +527,9 @@ describe('executeDispatchLanes', () => {
 		});
 	});
 
-	test('truncates oversized lane output with metadata', async () => {
+	test('returns bounded preview and durable ref for oversized lane output', async () => {
 		const directory = makeTempDir();
-		const hugeOutput = 'x'.repeat(25_000);
+		const hugeOutput = `head-${'x'.repeat(24_980)}-tail`;
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-1' },
@@ -550,15 +551,26 @@ describe('executeDispatchLanes', () => {
 		);
 
 		expect(result.success).toBe(true);
-		expect(result.lane_results[0].output_chars).toBe(25_000);
+		expect(result.lane_results[0].output_chars).toBe(24_990);
 		expect(result.lane_results[0].output_truncated).toBe(true);
+		expect(result.lane_results[0].output_ref).toMatch(
+			/^L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}$/,
+		);
+		expect(result.lane_results[0].output_digest).toMatch(/^[a-f0-9]{64}$/);
 		expect(result.lane_results[0].output?.length).toBeLessThan(
 			hugeOutput.length,
 		);
 		expect(result.lane_results[0].output?.length).toBe(20_000);
 		expect(result.lane_results[0].output).toContain(
-			'chars truncated by dispatch_lanes',
+			'retrieve_lane_output ref=',
 		);
+		expect(result.lane_results[0].output).toContain('-tail');
+		const loaded = readLaneOutput(
+			directory,
+			result.lane_results[0].output_ref!,
+		);
+		expect(loaded?.artifact.text).toBe(hugeOutput);
+		expect(loaded?.artifact.source).toBe('dispatch_lanes');
 	});
 
 	test('fails closed when the OpenCode session client is unavailable', async () => {
@@ -1025,6 +1037,61 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(result.completed).toBe(1);
 		expect(result.pending).toBe(0);
 		expect(result.lane_results[0].output).toBe('lane output');
+		expect(result.lane_results[0].output_ref).toMatch(
+			/^L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}$/,
+		);
+		expect(
+			readLaneOutput(directory, result.lane_results[0].output_ref!)?.artifact
+				.text,
+		).toBe('lane output');
+	});
+
+	test('collects all assistant transcript messages and marks message-limit incompleteness', async () => {
+		const directory = makeTempDir();
+		const messages = Array.from({ length: 50 }, (_, index) => ({
+			info: { role: 'assistant' },
+			parts: [{ type: 'text', text: `part-${index}` }],
+		}));
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-transcript' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			messages: mock(async () => ({
+				data: messages,
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-transcript',
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-transcript', wait: false },
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.lane_results[0].message_count).toBe(50);
+		expect(result.lane_results[0].transcript_incomplete).toBe(true);
+		const artifact = readLaneOutput(
+			directory,
+			result.lane_results[0].output_ref!,
+		)?.artifact;
+		expect(artifact?.text).toContain('part-0\n\npart-1');
+		expect(artifact?.text).toContain('part-49');
+		expect(artifact?.transcriptIncomplete).toBe(true);
 	});
 
 	test('collects only the current parent session when context is available', async () => {
@@ -1425,7 +1492,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		}
 	});
 
-	test('collects only text parts and returns the last non-empty assistant message', async () => {
+	test('collects only assistant text parts into a chronological transcript', async () => {
 		const directory = makeTempDir();
 		const ops: SessionOps = {
 			create: mock(async () => ({
@@ -1478,16 +1545,16 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		);
 
 		expect(result.success).toBe(true);
-		expect(result.lane_results[0].output).toBe('newer output');
+		expect(result.lane_results[0].output).toBe('older output\n\nnewer output');
 		expect(
-			_test_exports.extractLastAssistantText([
+			_test_exports.extractAssistantTranscript([
 				{
 					info: { role: 'assistant' },
 					parts: [{ type: 'text', text: 'first' }],
 				},
 				{ info: { role: 'assistant' }, parts: [{ type: 'text', text: '   ' }] },
 				{ info: { role: 'user' }, parts: [{ type: 'text', text: 'user' }] },
-			]),
+			]).text,
 		).toBe('first');
 	});
 });

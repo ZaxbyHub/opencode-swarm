@@ -83,6 +83,7 @@ export {
 } from './repo-graph';
 export { repo_map } from './repo-map';
 export { req_coverage } from './req-coverage';
+export { retrieve_lane_output } from './retrieve-lane-output';
 export { retrieve_summary } from './retrieve-summary';
 export {
 	type SastScanFinding,

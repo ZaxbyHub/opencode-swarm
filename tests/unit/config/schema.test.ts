@@ -1585,6 +1585,7 @@ describe('SummaryConfigSchema', () => {
 			expect(result.data.retention_days).toBe(7);
 			expect(result.data.exempt_tools).toEqual([
 				'retrieve_summary',
+				'retrieve_lane_output',
 				'task',
 				'read',
 			]);
@@ -1674,6 +1675,7 @@ describe('SummaryConfigSchema', () => {
 			expect(result.data.max_summary_chars).toBe(1000); // Default
 			expect(result.data.exempt_tools).toEqual([
 				'retrieve_summary',
+				'retrieve_lane_output',
 				'task',
 				'read',
 			]); // Default
