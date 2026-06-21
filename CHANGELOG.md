@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.84.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.83.0...v7.84.0) (2026-06-21)
+
+
+### Features
+
+* **guardrails:** add transparency suite (explain, decision log, diagnose sandbox) ([d56adc7](https://github.com/ZaxbyHub/opencode-swarm/commit/d56adc7f7e3a4fe522e21f6a6ea71857dc68b083))
+* **guardrails:** add transparency suite (explain, decision log, diagnose sandbox) ([617c008](https://github.com/ZaxbyHub/opencode-swarm/commit/617c008fe8ca9d73a42ad958767eca5d9df2e40a))
+
+
+### Bug Fixes
+
+* **cli:** split bundle and lazy-load guardrail handlers ([df7b6a6](https://github.com/ZaxbyHub/opencode-swarm/commit/df7b6a6bdfb5d84587374bf059d156c9139b09f3))
+* **cli:** split bundle and lazy-load guardrail handlers ([7b7e5f7](https://github.com/ZaxbyHub/opencode-swarm/commit/7b7e5f7c60deb5d16b193d9f00362f40338f9431))
+* close guardrail transparency feedback ([98c6c64](https://github.com/ZaxbyHub/opencode-swarm/commit/98c6c6485db62229f758bc9127d8c4d22e4a7de3))
+
 ## [7.83.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.82.2...v7.83.0) (2026-06-20)
 
 
