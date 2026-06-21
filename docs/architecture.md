@@ -83,6 +83,11 @@ actions include:
 - `package_boundaries` for inferred package/layer summaries across the graph.
 - `preflight_packet` for a bounded agent packet covering target files,
   ontology facts, findings, and a target-local package-boundary summary.
+- `callers` for the files that reference a specific exported symbol (call-site
+  granularity) and `dead_exports` for advisory unreferenced-export candidates.
+  Both rely on conservative, regex-based usage analysis (TS/JS/Python) recorded
+  at graph schema 1.1.0; see `docs/repo-graph-call-graph.md` for scope and
+  limitations.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.

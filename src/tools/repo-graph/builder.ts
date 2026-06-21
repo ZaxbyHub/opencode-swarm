@@ -51,12 +51,16 @@ export const _internals: {
 	extractPythonSymbols: typeof extractPythonSymbols;
 	parseFileImports: typeof parseFileImports;
 	extractFileOntology: typeof extractFileOntology;
+	stripComments: typeof stripComments;
+	computeUsedSymbols: typeof computeUsedSymbols;
 } = {
 	safeRealpathSync,
 	extractTSSymbols,
 	extractPythonSymbols,
 	parseFileImports,
 	extractFileOntology,
+	stripComments,
+	computeUsedSymbols,
 } as const;
 
 // ============ Constants ============
@@ -402,6 +406,17 @@ interface ScanStats {
 /**
  * A parsed import with its specifier and type.
  */
+/**
+ * A single imported binding: the symbol's *exported* name in the target file
+ * and the *local* name it is bound to in the importing file (differs when an
+ * `as` alias or default import is used). Used to attribute call-site usage back
+ * to the correct exported symbol.
+ */
+interface ImportBinding {
+	imported: string;
+	local: string;
+}
+
 interface ParsedImport {
 	/** The module specifier (e.g., './foo', 'lodash') */
 	specifier: string;
@@ -409,6 +424,10 @@ interface ParsedImport {
 	importType: 'default' | 'named' | 'namespace' | 'require' | 'sideeffect';
 	/** Named imported symbols when statically detectable */
 	importedSymbols: string[];
+	/** Alias-aware imported→local bindings for usage attribution */
+	bindings: ImportBinding[];
+	/** True for `export { x } from '...'` re-exports (symbols are re-exposed). */
+	reExport: boolean;
 }
 
 /**
@@ -610,10 +629,154 @@ function parseFileImports(rawContent: string): ParsedImport[] {
 			specifier: modulePath,
 			importType,
 			importedSymbols: parseImportedSymbols(matchedString, importType),
+			bindings: parseImportBindings(matchedString, importType),
+			reExport: /^\s*export\b/.test(matchedString),
 		});
 	}
 
 	return imports;
+}
+
+/**
+ * Parse alias-aware imported→local bindings from a matched import statement.
+ *
+ * Unlike {@link parseImportedSymbols} (which returns only exported names, plus
+ * the sentinels '*'/'default'), this returns the *local* binding name actually
+ * referenced at call sites, so usage can be attributed to the correct exported
+ * symbol. Returns [] for namespace/side-effect/require imports, where per-symbol
+ * usage is not statically resolvable.
+ */
+function parseImportBindings(
+	matchedString: string,
+	importType: ParsedImport['importType'],
+): ImportBinding[] {
+	if (importType === 'namespace') return [];
+	if (importType === 'default') {
+		const defaultMatch = matchedString.match(/^import\s+(\w+)\s+from\s+['"`]/);
+		return defaultMatch
+			? [{ imported: 'default', local: defaultMatch[1] }]
+			: [];
+	}
+	if (importType !== 'named') return [];
+
+	const braceMatch = matchedString.match(/\{\s*([\s\S]*?)\s*\}/);
+	if (!braceMatch) return [];
+	const bindings: ImportBinding[] = [];
+	const seen = new Set<string>();
+	for (const rawPart of braceMatch[1].split(',')) {
+		const part = rawPart.trim().replace(/^type\s+/, '');
+		if (!part) continue;
+		const aliasSplit = part.split(/\s+as\s+/i);
+		const imported = aliasSplit[0].trim();
+		const local = (aliasSplit[1] ?? aliasSplit[0]).trim();
+		if (!/^[A-Za-z_$][\w$]*$/.test(imported)) continue;
+		if (!/^[A-Za-z_$][\w$]*$/.test(local)) continue;
+		if (seen.has(imported)) continue;
+		seen.add(imported);
+		bindings.push({ imported, local });
+	}
+	return bindings;
+}
+
+/**
+ * Identifier pattern safe to embed in a `\b...\b` word-boundary regex.
+ * Excludes `$`-containing identifiers, which interact badly with `\b`.
+ */
+const SAFE_USAGE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Conservatively determine which imported bindings are actually referenced in
+ * the importing file's body.
+ *
+ * Heuristic: in a well-formed import statement, each local binding name appears
+ * exactly once. Counting occurrences of the local name across the
+ * comment-stripped file content, a count > 1 means at least one body reference.
+ * Strings are intentionally *not* stripped, so the bias is toward "used" — a
+ * conservative direction that avoids false dead-export positives. Bindings whose
+ * local name cannot be safely word-boundary matched are assumed used.
+ *
+ * @returns the *exported* names (binding.imported) judged to be used.
+ */
+function computeUsedSymbols(
+	strippedContent: string,
+	bindings: readonly ImportBinding[],
+): string[] {
+	if (bindings.length === 0) return [];
+	const used = new Set<string>();
+	for (const binding of bindings) {
+		if (!SAFE_USAGE_IDENTIFIER.test(binding.local)) {
+			used.add(binding.imported); // cannot analyze safely → assume used
+			continue;
+		}
+		const re = new RegExp(`\\b${binding.local}\\b`, 'g');
+		let count = 0;
+		for (const _match of strippedContent.matchAll(re)) {
+			count++;
+			if (count > 1) break;
+		}
+		if (count > 1) used.add(binding.imported);
+	}
+	return [...used].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Compute the `usedSymbols` value for a single import's edge, or `undefined`
+ * when per-symbol usage is not statically resolvable (namespace/side-effect/
+ * require/dynamic imports). Named re-exports treat all imported symbols as used,
+ * since re-exporting exposes them to downstream consumers.
+ */
+function usedSymbolsForImport(
+	parsed: ParsedImport,
+	strippedContent: string,
+): string[] | undefined {
+	if (
+		parsed.importType === 'namespace' ||
+		parsed.importType === 'sideeffect' ||
+		parsed.importType === 'require'
+	) {
+		return undefined;
+	}
+	if (parsed.reExport) {
+		return [...new Set(parsed.bindings.map((b) => b.imported))].sort((a, b) =>
+			a.localeCompare(b),
+		);
+	}
+	return computeUsedSymbols(strippedContent, parsed.bindings);
+}
+
+/**
+ * Collect a file's exported symbol names and their definition lines.
+ *
+ * A default export (`export default function go` / `export default class Foo`)
+ * is extracted by `extractTSSymbols` under its *local* declaration name, but is
+ * only ever referenced cross-file via the `default` sentinel that the import
+ * side records. Normalizing it to `'default'` here keeps node `exports` /
+ * `exportLines` reconciled with edge `usedSymbols` / `importedSymbols`, so the
+ * `callers` / `dead_exports` queries do not mis-handle default exports
+ * (issue #1409 review). Non-default exports are preserved verbatim, including
+ * order and duplicates, so output stays byte-identical to the prior behavior.
+ */
+function collectExports(symbols: ReturnType<typeof extractTSSymbols>): {
+	exports: string[];
+	exportLines: Record<string, number>;
+} {
+	const exported = symbols.filter((s) => s.exported);
+	const exports = exported.map((s) =>
+		s.signature === `default ${s.name}` ? 'default' : s.name,
+	);
+	const exportLines: Record<string, number> = {};
+	for (let i = 0; i < exported.length; i++) {
+		const s = exported[i];
+		const name = exports[i];
+		if (
+			typeof s.line === 'number' &&
+			Number.isFinite(s.line) &&
+			exportLines[name] === undefined
+		) {
+			exportLines[name] = s.line;
+		}
+	}
+	return { exports, exportLines };
 }
 
 function parseImportedSymbols(
@@ -960,23 +1123,28 @@ export function scanFile(
 	// Extract symbol exports based on file extension
 	const ext = path.extname(filePath).toLowerCase();
 	let exports: string[] = [];
+	let exportLines: Record<string, number> = {};
 
 	try {
 		if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
 			const relativePath = path.relative(absoluteRoot, filePath);
-			const symbols = _internals.extractTSSymbols(relativePath, absoluteRoot);
-			exports = symbols.filter((s) => s.exported).map((s) => s.name);
+			({ exports, exportLines } = collectExports(
+				_internals.extractTSSymbols(relativePath, absoluteRoot),
+			));
 		} else if (ext === '.py') {
 			const relativePath = path.relative(absoluteRoot, filePath);
-			const symbols = _internals.extractPythonSymbols(
-				relativePath,
-				absoluteRoot,
-			);
-			exports = symbols.filter((s) => s.exported).map((s) => s.name);
+			({ exports, exportLines } = collectExports(
+				_internals.extractPythonSymbols(relativePath, absoluteRoot),
+			));
 		}
 
 		// Parse imports to get specifiers with types
 		const parsedImports = _internals.parseFileImports(content);
+
+		// Comment-stripped content for conservative call-site usage detection.
+		// Computed once per file; only needed when there are imports to attribute.
+		const strippedForUsage =
+			parsedImports.length > 0 ? _internals.stripComments(content) : '';
 
 		const moduleName = toModuleName(filePath, absoluteRoot);
 		// Create the graph node
@@ -984,6 +1152,7 @@ export function scanFile(
 			filePath,
 			moduleName,
 			exports,
+			...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
 			imports: parsedImports.map((p) => p.specifier),
 			language: getLanguage(filePath),
 			mtime: fileStats.mtime.toISOString(),
@@ -1011,12 +1180,14 @@ export function scanFile(
 			);
 
 			if (resolvedTarget !== null) {
+				const usedSymbols = usedSymbolsForImport(parsed, strippedForUsage);
 				edges.push({
 					source: filePath,
 					target: resolvedTarget,
 					importSpecifier: parsed.specifier,
 					importType: parsed.importType,
 					importedSymbols: parsed.importedSymbols,
+					...(usedSymbols !== undefined ? { usedSymbols } : {}),
 				});
 			}
 		}
@@ -1127,23 +1298,24 @@ export function buildWorkspaceGraph(
 
 		stats.filesScanned++;
 
-		// Extract symbol exports based on file extension
+		// Extract symbol exports based on file extension. Mirrors scanFile() so
+		// the sync and async builders stay byte-for-byte equivalent (issue #1144).
 		const ext = path.extname(filePath).toLowerCase();
 		let exports: string[] = [];
+		let exportLines: Record<string, number> = {};
 		let parsedImports: ParsedImport[] = [];
 
 		try {
 			if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
 				const relativePath = path.relative(absoluteRoot, filePath);
-				const symbols = _internals.extractTSSymbols(relativePath, absoluteRoot);
-				exports = symbols.filter((s) => s.exported).map((s) => s.name);
+				({ exports, exportLines } = collectExports(
+					_internals.extractTSSymbols(relativePath, absoluteRoot),
+				));
 			} else if (ext === '.py') {
 				const relativePath = path.relative(absoluteRoot, filePath);
-				const symbols = _internals.extractPythonSymbols(
-					relativePath,
-					absoluteRoot,
-				);
-				exports = symbols.filter((s) => s.exported).map((s) => s.name);
+				({ exports, exportLines } = collectExports(
+					_internals.extractPythonSymbols(relativePath, absoluteRoot),
+				));
 			}
 
 			parsedImports = _internals.parseFileImports(content);
@@ -1152,12 +1324,16 @@ export function buildWorkspaceGraph(
 			continue;
 		}
 
+		const strippedForUsage =
+			parsedImports.length > 0 ? _internals.stripComments(content) : '';
+
 		const moduleName = toModuleName(filePath, absoluteRoot);
 		const language = getLanguage(filePath);
 		const node: GraphNode = {
 			filePath,
 			moduleName,
 			exports,
+			...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
 			imports: parsedImports.map((p) => p.specifier),
 			language,
 			mtime: fileStats.mtime.toISOString(),
@@ -1196,12 +1372,14 @@ export function buildWorkspaceGraph(
 			);
 
 			if (resolvedTarget !== null) {
+				const usedSymbols = usedSymbolsForImport(parsed, strippedForUsage);
 				const edge: GraphEdge = {
 					source: filePath,
 					target: resolvedTarget,
 					importSpecifier: parsed.specifier,
 					importType: parsed.importType,
 					importedSymbols: parsed.importedSymbols,
+					...(usedSymbols !== undefined ? { usedSymbols } : {}),
 				};
 				// The node is already valid; an individual invalid edge (e.g. a
 				// control character in an import specifier) drops just that edge

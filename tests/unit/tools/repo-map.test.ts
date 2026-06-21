@@ -377,3 +377,52 @@ describe('repo_map: validation', () => {
 		expect(r.error).toContain('requires `file`');
 	});
 });
+
+describe('repo_map: callers / dead_exports', () => {
+	it('callers reports files that reference an exported symbol', async () => {
+		await call({ action: 'build' });
+		const out = await call({
+			action: 'callers',
+			file: 'src/util.ts',
+			symbol: 'add',
+		});
+		const r = JSON.parse(out) as {
+			success: boolean;
+			count: number;
+			callers: Array<{ file: string; resolution: string }>;
+		};
+		expect(r.success).toBe(true);
+		// main.ts both imports and calls add(1, 2) -> 'used' resolution.
+		expect(r.callers).toEqual([{ file: 'src/main.ts', resolution: 'used' }]);
+	});
+
+	it('callers requires a symbol', async () => {
+		await call({ action: 'build' });
+		const out = await call({ action: 'callers', file: 'src/util.ts' });
+		const r = JSON.parse(out) as { success: boolean; error: string };
+		expect(r.success).toBe(false);
+		expect(r.error).toContain('requires `symbol`');
+	});
+
+	it('dead_exports flags an unreferenced export but not a used one', async () => {
+		// util.ts gains an extra export that main.ts never references.
+		fs.writeFileSync(
+			path.join(tmp, 'src/util.ts'),
+			'export function add(a: number, b: number) { return a + b; }\n' +
+				'export function orphan() { return 0; }\n',
+		);
+		await call({ action: 'build' });
+		const out = await call({ action: 'dead_exports' });
+		const r = JSON.parse(out) as {
+			success: boolean;
+			schemaSupported: boolean;
+			candidates: Array<{ file: string; symbol: string }>;
+		};
+		expect(r.success).toBe(true);
+		expect(r.schemaSupported).toBe(true);
+		const symbols = r.candidates.map((c) => c.symbol);
+		expect(r.candidates.length).toBe(1);
+		expect(symbols).toContain('orphan');
+		expect(symbols).not.toContain('add');
+	});
+});

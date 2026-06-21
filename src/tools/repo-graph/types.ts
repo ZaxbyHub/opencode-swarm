@@ -12,7 +12,43 @@ import * as path from 'node:path';
 // ============ Constants ============
 
 export const REPO_GRAPH_FILENAME = 'repo-graph.json';
-export const GRAPH_SCHEMA_VERSION = '1.0.0';
+/**
+ * Graph schema version.
+ *
+ * 1.1.0 added per-edge `usedSymbols` (imported symbols actually referenced in
+ * the importing file) and per-node `exportLines`, enabling the `callers` and
+ * `dead_exports` queries. Both fields are optional, so graphs written by older
+ * versions (1.0.0) still load — but `dead_exports` requires >= 1.1.0 data and
+ * self-gates via {@link isSchemaVersionAtLeast} rather than relying on the
+ * loader (which only checks that a version string is present, not its value).
+ */
+export const GRAPH_SCHEMA_VERSION = '1.1.0';
+
+/**
+ * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
+ * Missing/non-numeric segments are treated as 0. Returns true when `version`
+ * is greater than or equal to `minimum`.
+ */
+export function isSchemaVersionAtLeast(
+	version: string | undefined,
+	minimum: string,
+): boolean {
+	const parse = (v: string): number[] =>
+		v.split('.').map((part) => {
+			const n = Number.parseInt(part, 10);
+			return Number.isFinite(n) ? n : 0;
+		});
+	const a = parse(version ?? '');
+	const b = parse(minimum);
+	const len = Math.max(a.length, b.length);
+	for (let i = 0; i < len; i++) {
+		const av = a[i] ?? 0;
+		const bv = b[i] ?? 0;
+		if (av > bv) return true;
+		if (av < bv) return false;
+	}
+	return true;
+}
 
 // ============ Types ============
 
@@ -148,6 +184,13 @@ export interface GraphNode {
 	moduleName: string;
 	/** Exported symbols from this file */
 	exports: string[];
+	/**
+	 * Definition line for each exported symbol, keyed by symbol name (1-based).
+	 * Optional and best-effort: present on graphs built at schema >= 1.1.0,
+	 * absent for symbols whose line could not be determined. Used to point
+	 * `dead_exports` candidates at a location.
+	 */
+	exportLines?: Record<string, number>;
 	/** Imported module specifiers */
 	imports: string[];
 	/** Language/extension of the file */
@@ -181,6 +224,14 @@ export interface GraphEdge {
 	importType: ImportType;
 	/** Named symbols imported from the target, when statically detectable */
 	importedSymbols?: string[];
+	/**
+	 * The subset of the target's exported symbols (by their *exported* name)
+	 * that are actually referenced in the source file's body — not merely
+	 * imported. Computed at build time via a conservative, alias-aware textual
+	 * scan (schema >= 1.1.0). Absent on namespace/side-effect/require/dynamic
+	 * imports, where individual symbol usage is not statically resolvable.
+	 */
+	usedSymbols?: string[];
 }
 
 export interface FileReference {
@@ -193,6 +244,50 @@ export interface SymbolReference {
 	file: string;
 	line?: number;
 	importedAs: string;
+}
+
+/**
+ * A file that references a specific exported symbol of a target file.
+ * `resolution` records how confidently the usage was attributed:
+ *   - 'used'     → the symbol was found referenced in the source body
+ *   - 'imported' → fallback for graphs predating usedSymbols (schema < 1.1.0);
+ *                  the symbol is imported but body usage was not analyzed
+ */
+export interface CallerReference {
+	file: string;
+	resolution: 'used' | 'imported';
+}
+
+/**
+ * An exported symbol with no detected in-repo reference. Advisory only —
+ * regex-based analysis cannot see dynamic dispatch, string-keyed access, or
+ * usage through namespace/barrel re-exports, so this is a *candidate* for
+ * review, never a directive to delete.
+ */
+export interface DeadExportCandidate {
+	/** Module name (workspace-relative) of the file that owns the export */
+	file: string;
+	/** The exported symbol name */
+	symbol: string;
+	/** Definition line, when known (from exportLines) */
+	line?: number;
+	/** How many other in-repo files import this file at all */
+	importerCount: number;
+}
+
+export interface DeadExportsResult {
+	/** False when the graph predates schema 1.1.0 (rebuild required). */
+	schemaSupported: boolean;
+	/** Files whose exports were analyzed (imported by >= 1 other file). */
+	analyzedFiles: number;
+	/**
+	 * Files skipped because at least one importer used a namespace/side-effect/
+	 * require/dynamic import, making per-symbol usage unresolvable.
+	 */
+	skippedUnresolvable: number;
+	candidates: DeadExportCandidate[];
+	/** Human-readable note describing scope and limitations of the result. */
+	note: string;
 }
 
 export interface BlastRadiusResult {

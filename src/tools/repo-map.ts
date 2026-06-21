@@ -10,6 +10,8 @@ import {
 	buildOntologyPreflightPacket,
 	buildWorkspaceGraphAsync,
 	getBlastRadius,
+	getCallers,
+	getDeadExports,
 	getDependencies,
 	getFileOntology,
 	getImporters,
@@ -54,6 +56,8 @@ const VALID_ACTIONS = [
 	'ontology',
 	'package_boundaries',
 	'preflight_packet',
+	'callers',
+	'dead_exports',
 ] as const;
 
 type RepoMapAction = (typeof VALID_ACTIONS)[number];
@@ -149,8 +153,12 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"dependencies" (what a file imports), "blast_radius" (transitive dependents + risk), ' +
 		'"localization" (compact context block for a target file), "key_files" (top-N most-imported files), ' +
 		'"ontology" (file roles/routes/data/security/findings), "package_boundaries" (inferred package/layer boundaries), ' +
-		'"preflight_packet" (bounded ontology packet for planning). ' +
-		'Use this before refactoring shared modules to avoid breaking unseen consumers.',
+		'"preflight_packet" (bounded ontology packet for planning), ' +
+		'"callers" (files that reference an exported symbol, call-site granularity; needs file+symbol), ' +
+		'"dead_exports" (advisory: exported symbols with no detected in-repo reference). ' +
+		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
+		'Note: "callers"/"dead_exports" use conservative regex analysis (TS/JS/Python) and cannot see ' +
+		'dynamic dispatch or namespace/barrel re-export usage; "dead_exports" results are review candidates, not delete directives.',
 	args: {
 		action: z
 			.enum([
@@ -163,9 +171,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'ontology',
 				'package_boundaries',
 				'preflight_packet',
+				'callers',
+				'dead_exports',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports"',
 			),
 		file: z
 			.string()
@@ -183,7 +193,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'When provided alongside `file` on action="importers", restrict to consumers of this exported symbol.',
+				'Exported symbol name. Restricts consumers on action="importers"; required for action="callers".',
 			),
 		top_n: z
 			.number()
@@ -192,7 +202,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.max(100)
 			.optional()
 			.describe(
-				'For action="key_files" or "package_boundaries": number of entries to return (default 10).',
+				'For action="key_files"/"package_boundaries": entries to return (default 10). For action="dead_exports": max candidates (default 100).',
 			),
 		max_depth: z
 			.number()
@@ -278,6 +288,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			});
 		}
 
+		if (action === 'dead_exports') {
+			const result = getDeadExports(graph, { maxCandidates: a.top_n ?? 100 });
+			return ok(action, { ...result, stale });
+		}
+
 		if (action === 'preflight_packet') {
 			const inputs =
 				a.files && a.files.length > 0 ? a.files : a.file ? [a.file] : [];
@@ -336,6 +351,22 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				target,
 				count: importers.length,
 				importers,
+				stale,
+			});
+		}
+
+		if (action === 'callers') {
+			if (a.symbol === undefined) {
+				return err(action, 'callers requires `symbol` (the exported name)');
+			}
+			const sErr = validateSymbol(a.symbol);
+			if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			const callers = getCallers(graph, target, a.symbol);
+			return ok(action, {
+				target,
+				symbol: a.symbol,
+				count: callers.length,
+				callers,
 				stale,
 			});
 		}

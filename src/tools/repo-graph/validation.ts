@@ -133,6 +133,27 @@ export function validateGraphNode(node: GraphNode): void {
 			);
 		}
 	}
+	if (node.exportLines !== undefined) {
+		if (
+			typeof node.exportLines !== 'object' ||
+			node.exportLines === null ||
+			Array.isArray(node.exportLines)
+		) {
+			throw new Error('Invalid node: exportLines must be an object');
+		}
+		for (const [name, line] of Object.entries(node.exportLines)) {
+			if (containsControlChars(name)) {
+				throw new Error(
+					'Invalid node: exportLines key contains control characters',
+				);
+			}
+			if (typeof line !== 'number' || !Number.isFinite(line) || line < 0) {
+				throw new Error(
+					'Invalid node: exportLines values must be non-negative numbers',
+				);
+			}
+		}
+	}
 	if (node.ontology !== undefined) {
 		validateOntologyStrings(node);
 	}
@@ -312,6 +333,23 @@ export function validateGraphEdge(edge: GraphEdge): void {
 			if (containsControlChars(symbol)) {
 				throw new Error(
 					'Invalid edge: importedSymbols contains control characters',
+				);
+			}
+		}
+	}
+	if (edge.usedSymbols !== undefined) {
+		if (!Array.isArray(edge.usedSymbols)) {
+			throw new Error('Invalid edge: usedSymbols must be an array');
+		}
+		for (const symbol of edge.usedSymbols) {
+			if (typeof symbol !== 'string') {
+				throw new Error(
+					'Invalid edge: usedSymbols must be an array of strings',
+				);
+			}
+			if (containsControlChars(symbol)) {
+				throw new Error(
+					'Invalid edge: usedSymbols contains control characters',
 				);
 			}
 		}

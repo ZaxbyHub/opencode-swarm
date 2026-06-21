@@ -16,6 +16,7 @@ import {
 	buildWorkspaceGraphAsync,
 	clearCache,
 	createEmptyGraph,
+	GRAPH_SCHEMA_VERSION,
 	type GraphEdge,
 	type GraphNode,
 	getCachedGraph,
@@ -958,7 +959,7 @@ describe('atomic create fallback', () => {
 		expect(graph).not.toBeNull();
 		// workspaceRoot is normalized but not resolved to absolute
 		expect(graph.workspaceRoot).toBe(path.normalize(workspaceName));
-		expect(graph.schema_version).toBe('1.0.0');
+		expect(graph.schema_version).toBe(GRAPH_SCHEMA_VERSION);
 		expect(graph.nodes).toEqual({});
 		expect(graph.edges).toEqual([]);
 	});

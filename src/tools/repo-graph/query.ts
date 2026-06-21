@@ -1,8 +1,12 @@
 import * as path from 'node:path';
 import type {
 	BlastRadiusResult,
+	CallerReference,
+	DeadExportCandidate,
+	DeadExportsResult,
 	FileOntology,
 	FileReference,
+	FileRole,
 	GraphEdge,
 	GraphNode,
 	LocalizationBlock,
@@ -10,7 +14,7 @@ import type {
 	RepoGraph,
 	SymbolReference,
 } from './types';
-import { normalizeGraphPath } from './types';
+import { isSchemaVersionAtLeast, normalizeGraphPath } from './types';
 
 let cachedReverseIndex: {
 	graph: RepoGraph;
@@ -175,6 +179,157 @@ export function getSymbolConsumers(
 	}
 	refs.sort((a, b) => a.file.localeCompare(b.file));
 	return refs;
+}
+
+/**
+ * Files that actually *reference* an exported symbol of `filePath` — call-site
+ * granularity, not just "imports the file". On schema >= 1.1.0 graphs this uses
+ * per-edge `usedSymbols`; on older graphs (or namespace imports) it falls back
+ * to import-level matching, flagged via `resolution: 'imported'`.
+ */
+export function getCallers(
+	graph: RepoGraph,
+	filePath: string,
+	symbolName: string,
+): CallerReference[] {
+	const node = getGraphNode(graph, filePath);
+	if (!node) return [];
+	const targetKey = normalizeGraphPath(node.filePath);
+	const refs: CallerReference[] = [];
+	const seen = new Set<string>();
+	for (const edge of graph.edges) {
+		if (normalizeGraphPath(edge.target) !== targetKey) continue;
+		const file = moduleNameForEdgePath(graph, edge.source);
+		if (seen.has(file)) continue;
+		if (edge.usedSymbols !== undefined) {
+			if (edge.usedSymbols.includes(symbolName)) {
+				seen.add(file);
+				refs.push({ file, resolution: 'used' });
+			}
+			continue;
+		}
+		// Fallback: schema < 1.1.0, or an import type without resolvable usage.
+		const imported = edge.importedSymbols ?? [];
+		if (edge.importType === 'namespace' || imported.includes(symbolName)) {
+			seen.add(file);
+			refs.push({ file, resolution: 'imported' });
+		}
+	}
+	refs.sort((a, b) => a.file.localeCompare(b.file));
+	return refs;
+}
+
+/**
+ * Roles whose exports are invoked by frameworks/tooling rather than in-repo
+ * imports (entry points, routes, tests), so their unused-export signal is noise.
+ */
+const DEAD_EXPORT_EXCLUDED_ROLES = new Set<FileRole>([
+	'api_route',
+	'cli_command',
+	'test_file',
+	'agent',
+	'hook',
+	'middleware',
+]);
+
+export interface DeadExportsOptions {
+	/** Max candidates returned (default 100). */
+	maxCandidates?: number;
+}
+
+/**
+ * Conservatively detect exported symbols with no detected in-repo reference.
+ *
+ * Scoping for precision (advisory "candidate" output, never a delete directive):
+ *   - Requires schema >= 1.1.0 (per-edge usedSymbols); otherwise returns
+ *     schemaSupported=false so the caller can prompt a rebuild.
+ *   - Only considers files imported by >= 1 other file — a file with no
+ *     importers is a likely public-API entry / CLI / test, not dead code.
+ *   - Skips files imported anywhere via namespace/side-effect/require/dynamic
+ *     imports, where per-symbol usage is unresolvable.
+ *   - Excludes framework-invoked roles (routes, CLIs, tests, agents, hooks,
+ *     middleware) and the synthetic 'default' export.
+ */
+export function getDeadExports(
+	graph: RepoGraph,
+	options?: DeadExportsOptions,
+): DeadExportsResult {
+	if (!isSchemaVersionAtLeast(graph.schema_version, '1.1.0')) {
+		return {
+			schemaSupported: false,
+			analyzedFiles: 0,
+			skippedUnresolvable: 0,
+			candidates: [],
+			note: 'Graph predates schema 1.1.0 (no usedSymbols data). Run repo_map action="build" to enable dead_exports.',
+		};
+	}
+
+	// One O(edges) pass: per target, union of used symbols + unresolvable flag.
+	const usage = new Map<string, { used: Set<string>; unresolvable: boolean }>();
+	for (const edge of graph.edges) {
+		const target = normalizeGraphPath(edge.target);
+		let entry = usage.get(target);
+		if (!entry) {
+			entry = { used: new Set<string>(), unresolvable: false };
+			usage.set(target, entry);
+		}
+		if (
+			edge.importType === 'namespace' ||
+			edge.importType === 'sideeffect' ||
+			edge.importType === 'require'
+		) {
+			entry.unresolvable = true;
+		} else if (edge.usedSymbols) {
+			for (const symbol of edge.usedSymbols) entry.used.add(symbol);
+		}
+	}
+
+	const reverse = getReverseIndex(graph);
+	const candidates: DeadExportCandidate[] = [];
+	let analyzedFiles = 0;
+	let skippedUnresolvable = 0;
+
+	for (const node of Object.values(graph.nodes)) {
+		if (node.exports.length === 0) continue;
+		const key = normalizeGraphPath(node.filePath);
+		const importerCount = reverse.get(key)?.length ?? 0;
+		if (importerCount === 0) continue;
+		const roles = node.ontology?.roles ?? [];
+		if (roles.some((r) => DEAD_EXPORT_EXCLUDED_ROLES.has(r))) continue;
+		const entry = usage.get(key);
+		if (entry?.unresolvable) {
+			skippedUnresolvable++;
+			continue;
+		}
+		analyzedFiles++;
+		const used = entry?.used ?? new Set<string>();
+		for (const symbol of node.exports) {
+			if (symbol === 'default') continue;
+			if (used.has(symbol)) continue;
+			candidates.push({
+				file: node.moduleName,
+				symbol,
+				line: node.exportLines?.[symbol],
+				importerCount,
+			});
+		}
+	}
+
+	candidates.sort(
+		(a, b) => a.file.localeCompare(b.file) || a.symbol.localeCompare(b.symbol),
+	);
+	const limit = options?.maxCandidates ?? 100;
+	const truncated = candidates.length > limit;
+	return {
+		schemaSupported: true,
+		analyzedFiles,
+		skippedUnresolvable,
+		candidates: candidates.slice(0, limit),
+		note:
+			'Advisory: exported symbols with no detected in-repo reference, limited to files imported by >=1 other file. ' +
+			'Regex analysis cannot see dynamic dispatch, string-keyed access, or namespace/barrel re-export usage; verify before removing.' +
+			(truncated ? ` Showing ${limit} of ${candidates.length}.` : ''),
+	};
 }
 
 export function getBlastRadius(
