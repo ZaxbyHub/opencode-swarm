@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.86.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.85.0...v7.86.0) (2026-06-21)
+
+
+### Features
+
+* **repo-graph:** native call-site usage + dead-export detection ([5154541](https://github.com/ZaxbyHub/opencode-swarm/commit/5154541c94557cf91577a8af200b0528b7679c0d))
+
+
+### Bug Fixes
+
+* **repo-graph:** fix biome ci import sorting and useTemplate lint ([ebe6acf](https://github.com/ZaxbyHub/opencode-swarm/commit/ebe6acf0b523639a5e871171e41132b9fc852820))
+
 ## [7.85.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.84.0...v7.85.0) (2026-06-21)
 
 
