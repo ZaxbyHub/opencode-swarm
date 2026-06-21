@@ -41,6 +41,14 @@ describe('isSchemaVersionAtLeast', () => {
 		expect(isSchemaVersionAtLeast('1.1.0-alpha', '1.1.0')).toBe(true);
 		expect(isSchemaVersionAtLeast('1.0.0-rc1', '1.1.0')).toBe(false);
 	});
+
+	test('handles multi-digit version segments (numeric, not lexicographic)', () => {
+		// '1.10.0' > '1.9.0' numerically but NOT lexicographically ('10' < '9' as strings).
+		// parseInt ensures numeric comparison so the ordering is correct.
+		expect(isSchemaVersionAtLeast('1.10.0', '1.9.0')).toBe(true);
+		expect(isSchemaVersionAtLeast('1.9.0', '1.10.0')).toBe(false);
+		expect(isSchemaVersionAtLeast('2.0.0', '1.10.0')).toBe(true);
+	});
 });
 
 describe('builder: usedSymbols + exportLines', () => {
@@ -304,6 +312,39 @@ describe('getCallers / getDeadExports (synthetic graphs)', () => {
 		const result = getDeadExports(graph);
 		expect(result.candidates).toEqual([]);
 		expect(result.skippedUnresolvable).toBe(1);
+	});
+
+	test('getDeadExports skips entire file when ANY importer uses namespace (mixed importers)', () => {
+		// Conservative design: if lib.ts has 1 named importer and 1 namespace importer,
+		// the entire file is excluded even though the named importer has precise usedSymbols.
+		// This avoids false positives at the cost of skipping files with partial evidence.
+		// The skippedUnresolvable counter exposes what was omitted.
+		const graph = graphOf(
+			[node('lib.ts', ['a', 'b']), node('named.ts', []), node('ns.ts', [])],
+			[
+				{
+					source: '/ws/named.ts',
+					target: '/ws/lib.ts',
+					importSpecifier: './lib',
+					importType: 'named',
+					importedSymbols: ['a'],
+					usedSymbols: ['a'],
+				},
+				{
+					source: '/ws/ns.ts',
+					target: '/ws/lib.ts',
+					importSpecifier: './lib',
+					importType: 'namespace',
+					importedSymbols: ['*'],
+				},
+			],
+		);
+		const result = getDeadExports(graph);
+		// 'b' has no evidence of usage from named.ts, but lib.ts is still skipped
+		// because ns.ts uses a namespace import (we cannot know which symbols it uses).
+		expect(result.candidates).toEqual([]);
+		expect(result.skippedUnresolvable).toBe(1);
+		expect(result.analyzedFiles).toBe(0);
 	});
 
 	test('getDeadExports excludes framework-invoked roles', () => {
