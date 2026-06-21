@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.87.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.86.0...v7.87.0) (2026-06-21)
+
+
+### Features
+
+* **epic:** port Epic Mode from fork onto 7.85.0 + worktree merge-back guard ([3077f15](https://github.com/ZaxbyHub/opencode-swarm/commit/3077f15a4baf5403876929d0478a83381094c217))
+* **epic:** port Epic Mode from fork onto 7.85.0 + worktree merge-back guard ([6889ba1](https://github.com/ZaxbyHub/opencode-swarm/commit/6889ba1c84c7f0710a1153818bd81e3d5f12c84e))
+
+
+### Bug Fixes
+
+* **epic:** harden durable merge-back registry per second review pass ([fd1a403](https://github.com/ZaxbyHub/opencode-swarm/commit/fd1a4032c5ddf683510b330589eeaaf0b54e7591))
+* **epic:** make worktree merge-back registry durable across plugin restarts ([bd511ad](https://github.com/ZaxbyHub/opencode-swarm/commit/bd511ad73c08040075df0f60df752586cf9d27ac))
+* restore main's repo-graph call-graph feature accidentally reverted by fork port ([d7f7e9f](https://github.com/ZaxbyHub/opencode-swarm/commit/d7f7e9ff41a4640a67f532fae789c79027dfdca2))
+
 ## [7.86.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.85.0...v7.86.0) (2026-06-21)
 
 
