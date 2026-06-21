@@ -7,7 +7,12 @@ import {
 	_internals as mergeStatus,
 	recordWorktreeMergeFailure,
 } from '../hooks/delegation-gate/worktree-merge-status';
-import { _internals, savePlan, updateTaskStatus } from './manager';
+import {
+	_internals,
+	loadPlanJsonOnly,
+	savePlan,
+	updateTaskStatus,
+} from './manager';
 
 /**
  * Tests for the Epic Mode Rule 2 worktree-isolation guard: when a
@@ -117,6 +122,14 @@ describe('updateTaskStatus — Rule 2 worktree merge-back guard', () => {
 		// Plan ledger is authoritative: the status advance must still happen.
 		const task = updated.phases[0].tasks.find((t) => t.id === '1.1');
 		expect(task?.status).toBe('completed');
+		// And the marker was NOT written (guard skipped it).
+		expect(commitCalls).toEqual([]);
+		// Durability: re-load from disk to prove the LEDGER persisted the
+		// status, not merely the in-memory return value — this is the
+		// "ledger is authoritative" property the guard depends on.
+		const reloaded = await loadPlanJsonOnly(tempDir);
+		const reloadedTask = reloaded?.phases[0].tasks.find((t) => t.id === '1.1');
+		expect(reloadedTask?.status).toBe('completed');
 	});
 
 	it('a different task’s recorded failure does not block this task', async () => {
