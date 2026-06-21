@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.85.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.84.0...v7.85.0) (2026-06-21)
+
+
+### Features
+
+* **dispatch:** persist full lane outputs ([7ae4c06](https://github.com/ZaxbyHub/opencode-swarm/commit/7ae4c06c99833ac4cdc91fe4c9965edcc8632a9b))
+
 ## [7.84.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.83.0...v7.84.0) (2026-06-21)
 
 
