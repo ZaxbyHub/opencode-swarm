@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -110,6 +111,7 @@ export interface CloseStageContext {
 	archivedFileCount: number;
 	archivedActiveStateFiles: Set<string>;
 	archivedActiveStateDirs: Set<string>;
+	archiveFailureReasons: Map<string, string>;
 	timestamp: string;
 	archiveDir: string;
 	archiveSuffix: string;
@@ -162,8 +164,12 @@ function countSessionKnowledgeEntries(
 	}).length;
 }
 
-async function copyDirRecursive(src: string, dest: string): Promise<number> {
+async function copyDirRecursiveWithFailures(
+	src: string,
+	dest: string,
+): Promise<{ copied: number; failures: string[] }> {
 	let count = 0;
+	const failures: string[] = [];
 	const entries = await fs.readdir(src);
 	await fs.mkdir(dest, { recursive: true });
 	for (const entry of entries) {
@@ -172,23 +178,45 @@ async function copyDirRecursive(src: string, dest: string): Promise<number> {
 		try {
 			const stat = await fs.stat(srcEntry);
 			if (stat.isDirectory()) {
-				const subCount = await copyDirRecursive(srcEntry, destEntry).catch(
-					() => 0,
+				const subResult = await copyDirRecursiveWithFailures(
+					srcEntry,
+					destEntry,
 				);
-				count += subCount;
+				count += subResult.copied;
+				failures.push(...subResult.failures);
 			} else {
 				try {
 					await fs.copyFile(srcEntry, destEntry);
 					count++;
-				} catch {
-					// Per-file copy failure is non-blocking; not counted
+				} catch (err) {
+					const errno = (err as NodeJS.ErrnoException)?.code;
+					if (errno !== 'ENOENT') {
+						failures.push(
+							`${srcEntry}: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
 				}
 			}
-		} catch {
-			// Per-entry failure is non-blocking (matches prior inline behavior)
+		} catch (err) {
+			const errno = (err as NodeJS.ErrnoException)?.code;
+			if (errno !== 'ENOENT') {
+				failures.push(
+					`${srcEntry}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 		}
 	}
-	return count;
+	return { copied: count, failures };
+}
+
+/**
+ * Backward-compatible wrapper that returns only the copied count.
+ * Direct callers (including tests) that expect a number continue to work.
+ * Use copyDirRecursiveWithFailures when per-file failure tracking is needed.
+ */
+async function copyDirRecursive(src: string, dest: string): Promise<number> {
+	const result = await copyDirRecursiveWithFailures(src, dest);
+	return result.copied;
 }
 
 /**
@@ -753,6 +781,124 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 }
 
 /**
+ * Copies a WAL-mode SQLite database to a destination path using a safe
+ * two-step mechanism that avoids capturing uncommitted WAL pages:
+ *
+ *   1. Run PRAGMA wal_checkpoint(TRUNCATE) to flush all WAL pages into the
+ *      main DB file and truncate the WAL to zero length.
+ *   2. Copy only the .db file (skip -shm/-wal, which are transient by design).
+ *
+ * Falls back to raw copyFile if the sqlite3 CLI is not available, logging
+ * a warning so operators know the copy may include uncommitted WAL state.
+ *
+ * Returns `{ success, skipped?, reason? }` so callers can distinguish a
+ * silent ENOENT skip from a real failure.
+ */
+async function copySqliteSafe(
+	srcPath: string,
+	destPath: string,
+): Promise<
+	| { success: true; skipped?: true; reason?: string }
+	| { success: false; reason: string; skipped?: boolean }
+> {
+	// Source must exist before invoking sqlite3 — sqlite3 will silently CREATE
+	// an empty DB for a missing path, which would cause a fabricated file to
+	// be archived instead of a clean ENOENT skip.
+	if (!fsSync.existsSync(srcPath)) {
+		return {
+			success: true,
+			skipped: true,
+			reason: 'source does not exist (ENOENT)',
+		};
+	}
+
+	// Step 1 — flush WAL → main DB via sqlite3 CLI (no SQLite library dep).
+	let checkpointVerified = false;
+	try {
+		const result = spawnSync(
+			'sqlite3',
+			[srcPath, 'PRAGMA wal_checkpoint(TRUNCATE);'],
+			{
+				cwd: path.dirname(srcPath),
+				encoding: 'utf-8',
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 10_000,
+				windowsHide: true,
+				maxBuffer: 1024,
+			},
+		);
+		if (result.error) {
+			const code = (result.error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT') {
+				// sqlite3 CLI not installed — fall back to raw copy with warning
+				try {
+					await fs.copyFile(srcPath, destPath);
+					return {
+						success: true,
+						reason: 'copied without WAL checkpoint (sqlite3 CLI unavailable)',
+					};
+				} catch (copyErr) {
+					return {
+						success: false,
+						reason: `fallback copy failed: ${copyErr instanceof Error ? copyErr.message : String(copyErr)}`,
+					};
+				}
+			}
+			// Other spawnSync errors (ETIMEDOUT, etc.)
+			return {
+				success: false,
+				reason: `wal_checkpoint failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`,
+			};
+		}
+		if (result.status !== 0) {
+			return {
+				success: false,
+				reason: `wal_checkpoint exited with code ${result.status}`,
+			};
+		}
+
+		// PRAGMA wal_checkpoint(TRUNCATE) output format:
+		//   busy|log|checkpointed
+		//   0|0|0          ← busy=0 means checkpoint completed
+		//   1|104|103      ← busy=1 means checkpoint incomplete
+		const output = (result.stdout || '').trim();
+		const lines = output.split('\n').filter((l) => l.trim());
+		if (lines.length >= 1) {
+			const dataLine = lines[0];
+			const columns = dataLine.split('|');
+			const busyFlag = parseInt(columns[0], 10);
+			checkpointVerified = !Number.isNaN(busyFlag) && busyFlag === 0;
+		}
+	} catch (err) {
+		return {
+			success: false,
+			reason: `wal_checkpoint error: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+
+	// Step 2 — copy only the .db file; -shm/-wal are transient and intentionally skipped.
+	// Only mark as "safe to clean" (no reason) when the WAL checkpoint was verified complete.
+	// In all other cases, preserve the original by including a reason so the caller
+	// knows not to delete the source swarm.db.
+	try {
+		await fs.copyFile(srcPath, destPath);
+		if (checkpointVerified) {
+			return { success: true };
+		}
+		return {
+			success: true,
+			reason:
+				'WAL checkpoint incomplete (busy) — archive copy may be stale, original preserved',
+		};
+	} catch (err) {
+		return {
+			success: false,
+			reason: `copy failed: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}
+
+/**
  * STAGE 2: ARCHIVE
  *
  * Creates a timestamped archive bundle under .swarm/archive/, copies flat-file
@@ -772,18 +918,77 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 	try {
 		await fs.mkdir(ctx.archiveDir, { recursive: true });
 
-		// Copy swarm artifacts to archive
+		// Copy swarm artifacts to archive.
+		// Tracks per-artifact failures so the clean-stage "Preserved …" message
+		// can distinguish "file absent" (ENOENT, silent) from lock/perm/space
+		// errors (surfaced as warnings with the actual errno code).
+		// WAL sidecar files (-shm/-wal) are transient SQLite internals.
+		// They are NOT archived (SQLite recreates them on next open) and
+		// are NOT cleaned (the clean-stage "Preserved" warning is correct).
+		// swarm.db itself is handled by copySqliteSafe below.
+		const WAL_SIDECAR_FILES = new Set(['swarm.db-shm', 'swarm.db-wal']);
+
 		for (const artifact of ARCHIVE_ARTIFACTS) {
+			// Skip WAL sidecars — they are ephemeral and not user data.
+			if (WAL_SIDECAR_FILES.has(artifact)) {
+				continue;
+			}
+
 			const srcPath = path.join(ctx.swarmDir, artifact);
 			const destPath = path.join(ctx.archiveDir, artifact);
-			try {
-				await fs.copyFile(srcPath, destPath);
-				ctx.archivedFileCount++;
-				if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
-					ctx.archivedActiveStateFiles.add(artifact);
+
+			if (artifact === 'swarm.db') {
+				// SQLite-safe path: checkpoint WAL first, then copy only the .db file.
+				// Sidecar files (-shm/-wal) are transient SQLite internals and are
+				// intentionally NOT archived or cleaned — SQLite recreates them on
+				// next open. The user will see benign "Preserved" warnings for these
+				// files in the clean stage, which is correct and informational.
+				const result = await copySqliteSafe(srcPath, destPath);
+				if (result.skipped) {
+					// ENOENT — file absent; treat as silent skip, same as other artifacts.
+				} else if (result.success) {
+					ctx.archivedFileCount++;
+					if (result.reason) {
+						// Fallback path — WAL checkpoint NOT performed (sqlite3 CLI unavailable,
+						// or other non-fatal issue). Archive copy was created, but original is
+						// PRESERVED to prevent data loss (uncheckpointed WAL pages in swarm.db-wal
+						// would be orphaned if base is deleted).
+						ctx.warnings.push(
+							`Archived ${artifact}: ${result.reason}. Original preserved to prevent data loss.`,
+						);
+						// DON'T add to archivedActiveStateFiles — original swarm.db is preserved
+					} else {
+						// WAL checkpoint succeeded — safe to clean the original
+						ctx.archivedActiveStateFiles.add(artifact);
+					}
+				} else {
+					ctx.archiveFailureReasons.set(artifact, result.reason);
+					ctx.warnings.push(
+						`Failed to archive ${artifact}: ${result.reason}. File preserved (not cleaned up).`,
+					);
 				}
-			} catch {
-				// File may not exist — skip silently
+			} else {
+				try {
+					await fs.copyFile(srcPath, destPath);
+					ctx.archivedFileCount++;
+					if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
+						ctx.archivedActiveStateFiles.add(artifact);
+					}
+				} catch (err: unknown) {
+					const errno = (err as NodeJS.ErrnoException)?.code;
+					if (errno === 'ENOENT') {
+						// File absent — expected for optional artifacts; silent skip.
+					} else {
+						const reason = err instanceof Error ? err.message : String(err);
+						ctx.archiveFailureReasons.set(
+							artifact,
+							`${errno ?? 'unknown'}: ${reason}`,
+						);
+						ctx.warnings.push(
+							`Failed to archive ${artifact} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
+						);
+					}
+				}
 			}
 		}
 
@@ -792,11 +997,28 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			const srcDir = path.join(ctx.swarmDir, dirName);
 			const destDir = path.join(ctx.archiveDir, dirName);
 			try {
-				const copied = await copyDirRecursive(srcDir, destDir);
-				ctx.archivedFileCount += copied;
-				ctx.archivedActiveStateDirs.add(dirName);
-			} catch {
-				// Directory may not exist — skip silently
+				const result = await copyDirRecursiveWithFailures(srcDir, destDir);
+				ctx.archivedFileCount += result.copied;
+				if (result.failures.length === 0) {
+					// All files copied (or skipped via ENOENT) — safe to clean source.
+					ctx.archivedActiveStateDirs.add(dirName);
+				} else {
+					// Non-ENOENT failures occurred — preserve source to prevent data loss.
+					ctx.warnings.push(
+						`Directory ${dirName} not fully archived (${result.failures.length} failure(s)). Source preserved.`,
+					);
+					for (const failure of result.failures) {
+						ctx.warnings.push(`  - ${failure}`);
+					}
+				}
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code !== 'ENOENT') {
+					ctx.warnings.push(
+						`Failed to archive directory ${dirName} [${code ?? 'unknown'}]: ${(err as Error).message}. Source preserved.`,
+					);
+				}
+				// ENOENT = directory doesn't exist = silent skip
 			}
 		}
 
@@ -874,9 +1096,14 @@ export async function runCleanStage(
 	if (ctx.archivedActiveStateFiles.size > 0) {
 		for (const artifact of ACTIVE_STATE_TO_CLEAN) {
 			if (!ctx.archivedActiveStateFiles.has(artifact)) {
-				// This file was NOT successfully archived — do not delete it
+				// This file was NOT successfully archived — do not delete it.
+				// Include the failure reason when one was recorded (e.g. EBUSY,
+				// EPERM, ENOSPC) so operators can diagnose without digging into logs.
+				const reason = ctx.archiveFailureReasons?.get(artifact);
 				ctx.warnings.push(
-					`Preserved ${artifact} because it was not successfully archived.`,
+					reason
+						? `Preserved ${artifact} because it was not successfully archived: ${reason}.`
+						: `Preserved ${artifact} because it was not successfully archived.`,
 				);
 				continue;
 			}
@@ -884,8 +1111,16 @@ export async function runCleanStage(
 			try {
 				await fs.unlink(filePath);
 				cleanedFiles.push(artifact);
-			} catch {
-				// File may not exist
+			} catch (err) {
+				const errno = (err as NodeJS.ErrnoException)?.code;
+				if (errno === 'ENOENT') {
+					// File already absent — expected after archive-first cleanup; silent skip.
+				} else {
+					const reason = err instanceof Error ? err.message : String(err);
+					ctx.warnings.push(
+						`Failed to clean active-state file ${artifact} [${errno ?? 'unknown'}]: ${reason}`,
+					);
+				}
 			}
 		}
 	} else {
@@ -927,8 +1162,16 @@ export async function runCleanStage(
 			try {
 				await fs.unlink(path.join(ctx.swarmDir, backup));
 				configBackupsRemoved++;
-			} catch {
-				// Per-file failure is non-blocking
+			} catch (err) {
+				const errno = (err as NodeJS.ErrnoException)?.code;
+				if (errno === 'ENOENT') {
+					// Stale backup already absent — silent skip.
+				} else {
+					const reason = err instanceof Error ? err.message : String(err);
+					ctx.warnings.push(
+						`Failed to clean config-backup ${backup} [${errno ?? 'unknown'}]: ${reason}`,
+					);
+				}
 			}
 		}
 		const ledgerSiblings = swarmFiles.filter(
@@ -940,12 +1183,28 @@ export async function runCleanStage(
 		for (const sibling of ledgerSiblings) {
 			try {
 				await fs.unlink(path.join(ctx.swarmDir, sibling));
-			} catch {
-				// Per-file failure is non-blocking
+			} catch (err) {
+				const errno = (err as NodeJS.ErrnoException)?.code;
+				if (errno === 'ENOENT') {
+					// Stale ledger sibling already absent — silent skip.
+				} else {
+					const reason = err instanceof Error ? err.message : String(err);
+					ctx.warnings.push(
+						`Failed to clean ledger sibling ${sibling} [${errno ?? 'unknown'}]: ${reason}`,
+					);
+				}
 			}
 		}
-	} catch {
-		// readdir failure is non-blocking
+	} catch (err) {
+		const errno = (err as NodeJS.ErrnoException)?.code;
+		if (errno === 'ENOENT') {
+			// swarmDir absent — nothing to clean; silent skip.
+		} else {
+			const reason = err instanceof Error ? err.message : String(err);
+			ctx.warnings.push(
+				`Failed to read ${ctx.swarmDir} for stale-file cleanup [${errno ?? 'unknown'}]: ${reason}`,
+			);
+		}
 	}
 
 	// Remove SWARM_PLAN checkpoint artifacts written by writeCheckpoint().
@@ -984,12 +1243,28 @@ export async function runCleanStage(
 			try {
 				await fs.unlink(path.join(ctx.swarmDir, tmp));
 				tmpFilesRemoved++;
-			} catch {
-				// Per-file failure is non-blocking
+			} catch (err) {
+				const errno = (err as NodeJS.ErrnoException)?.code;
+				if (errno === 'ENOENT') {
+					// Stale tmp file already absent — silent skip.
+				} else {
+					const reason = err instanceof Error ? err.message : String(err);
+					ctx.warnings.push(
+						`Failed to clean tmp file ${tmp} [${errno ?? 'unknown'}]: ${reason}`,
+					);
+				}
 			}
 		}
-	} catch {
-		// readdir failure is non-blocking
+	} catch (err) {
+		const errno = (err as NodeJS.ErrnoException)?.code;
+		if (errno === 'ENOENT') {
+			// swarmDir absent — nothing to clean; silent skip.
+		} else {
+			const reason = err instanceof Error ? err.message : String(err);
+			ctx.warnings.push(
+				`Failed to read ${ctx.swarmDir} for tmp-file cleanup [${errno ?? 'unknown'}]: ${reason}`,
+			);
+		}
 	}
 	if (tmpFilesRemoved > 0) {
 		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
@@ -1013,9 +1288,19 @@ export async function runCleanStage(
 		'No active plan. Next session starts fresh.',
 		'',
 	].join('\n');
+	const contextTempPath = path.join(
+		path.dirname(contextPath),
+		`${path.basename(contextPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+	);
 	try {
-		await fs.writeFile(contextPath, contextContent, 'utf-8');
+		await fs.writeFile(contextTempPath, contextContent, 'utf-8');
+		fsSync.renameSync(contextTempPath, contextPath);
 	} catch (error) {
+		try {
+			fsSync.unlinkSync(contextTempPath);
+		} catch {
+			// best-effort cleanup
+		}
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Failed to reset context.md: ${msg}`);
 		console.warn('[close-command] Failed to write context.md:', error);
@@ -1161,26 +1446,56 @@ export async function handleCloseCommand(
 		return `❌ Another /swarm finalize is already running for this project. If you are certain no other run is active, wait for the lock to expire or remove the stale lock and retry.`;
 	}
 
-	const phases = planData.phases ?? [];
-	const inProgressPhases = phases.filter((p) => p.status === 'in_progress');
-	const isForced = args.includes('--force');
-	const runSkillReview = args.includes('--skill-review');
-
-	// planAlreadyDone: skip retro writing and plan mutation, but still run all cleanup steps
-	let planAlreadyDone = false;
-	if (planExists) {
-		planAlreadyDone =
-			phases.length > 0 &&
-			phases.every(
-				(p) =>
-					p.status === 'complete' ||
-					p.status === 'completed' ||
-					p.status === 'blocked' ||
-					p.status === 'closed',
-			);
-	}
-
 	try {
+		// Idempotency check — first thing inside try/finally so finalizeLock is released on all paths.
+		// If plan.json is gone and an archive bundle exists AND no active state files remain,
+		// this project was already finalized in a prior run. Return a clean no-op so a second
+		// /swarm finalize invocation does not produce a degraded "Plan not found" run.
+		// CRITICAL: only short-circuit when there is truly nothing left to clean. If any
+		// ACTIVE_STATE_TO_CLEAN files still exist in .swarm/, fall through to plan-free close
+		// so they get archived and removed (fixes re-finalization after partial cleanup).
+		if (!planExists) {
+			const archiveDir = path.join(swarmDir, 'archive');
+			try {
+				const archiveEntries = await fs.readdir(archiveDir);
+				const hasArchiveBundle = archiveEntries.some((entry) =>
+					entry.startsWith('swarm-'),
+				);
+				if (hasArchiveBundle) {
+					const hasActiveState = [
+						...ACTIVE_STATE_TO_CLEAN,
+						...ACTIVE_STATE_DIRS_TO_CLEAN,
+					].some((entry) => fsSync.existsSync(path.join(swarmDir, entry)));
+					if (!hasActiveState) {
+						return `✅ Already finalized — nothing to do.\n\nThis project was already finalized in a previous /swarm close run. The plan has been archived and cleaned up. No further action is needed.`;
+					}
+					// Active state files still exist — fall through to normal plan-free close
+					// so they get archived and cleaned up properly.
+				}
+			} catch {
+				// ENOENT or other read error → no archive present, fall through to normal flow
+			}
+		}
+
+		const phases = planData.phases ?? [];
+		const inProgressPhases = phases.filter((p) => p.status === 'in_progress');
+		const isForced = args.includes('--force');
+		const runSkillReview = args.includes('--skill-review');
+
+		// planAlreadyDone: skip retro writing and plan mutation, but still run all cleanup steps
+		let planAlreadyDone = false;
+		if (planExists) {
+			planAlreadyDone =
+				phases.length > 0 &&
+				phases.every(
+					(p) =>
+						p.status === 'complete' ||
+						p.status === 'completed' ||
+						p.status === 'blocked' ||
+						p.status === 'closed',
+				);
+		}
+
 		const { config: loadedConfig } =
 			_internals.loadPluginConfigWithMeta(directory);
 		const config = KnowledgeConfigSchema.parse(loadedConfig.knowledge ?? {});
@@ -1219,6 +1534,7 @@ export async function handleCloseCommand(
 			archivedFileCount: 0,
 			archivedActiveStateFiles: new Set(),
 			archivedActiveStateDirs: new Set(),
+			archiveFailureReasons: new Map(),
 			timestamp: '',
 			archiveDir: '',
 			archiveSuffix: '',
@@ -1320,9 +1636,19 @@ export async function handleCloseCommand(
 				: []),
 		].join('\n');
 
+		const closeSummaryTempPath = path.join(
+			path.dirname(closeSummaryPath),
+			`${path.basename(closeSummaryPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+		);
 		try {
-			await fs.writeFile(closeSummaryPath, summaryContent, 'utf-8');
+			await fs.writeFile(closeSummaryTempPath, summaryContent, 'utf-8');
+			fsSync.renameSync(closeSummaryTempPath, closeSummaryPath);
 		} catch (error) {
+			try {
+				fsSync.unlinkSync(closeSummaryTempPath);
+			} catch {
+				// best-effort cleanup
+			}
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			console.warn('[close-command] Failed to write close-summary.md:', error);

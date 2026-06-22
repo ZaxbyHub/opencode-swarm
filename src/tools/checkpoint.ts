@@ -4,12 +4,18 @@ import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import {
+	isTransientSpawnError,
+	MAX_TRANSIENT_RETRIES,
+	transientBackoff,
+} from '../utils/transient-retry.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
 const CHECKPOINT_LOG_PATH = '.swarm/checkpoints.json';
 const MAX_LABEL_LENGTH = 100;
 const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
 // Shell metacharacters that could enable injection
 const SHELL_METACHARACTERS = /[;|&$`(){}<>!'"]/;
@@ -19,6 +25,11 @@ const SHELL_METACHARACTERS = /[;|&$`(){}<>!'"]/;
 const SAFE_LABEL_PATTERN = /^[a-zA-Z0-9_ -]+$/;
 
 // ============ Types ============
+interface GitRepoProbe {
+	isRepo: boolean;
+	warning?: string;
+}
+
 interface CheckpointEntry {
 	label: string;
 	sha: string;
@@ -153,27 +164,48 @@ function writeCheckpointLog(log: CheckpointLog, directory: string): void {
 // ============ Git Operations ============
 
 /**
- * Execute git command safely using spawnSync with argument array (no shell interpolation)
+ * Execute git command safely using spawnSync with argument array (no shell interpolation).
+ * Retries bounded transient failures (ETIMEDOUT / timed-out spawn errors) with backoff.
  */
 function gitExec(args: string[], cwd: string): string {
-	const result = child_process.spawnSync('git', args, {
-		cwd,
-		encoding: 'utf-8',
-		timeout: GIT_TIMEOUT_MS,
-		stdio: ['ignore', 'pipe', 'pipe'],
-		windowsHide: true,
-	});
-	if (result.error) {
-		throw new Error(
-			`git failed to start: ${(result.error as NodeJS.ErrnoException).code ?? 'unknown'} — ${result.error.message}`,
-		);
-	}
-	if (result.status !== 0) {
+	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+		const result = child_process.spawnSync('git', args, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			windowsHide: true,
+			maxBuffer: GIT_MAX_BUFFER_BYTES,
+		});
+
+		if (result.error) {
+			const code = (result.error as NodeJS.ErrnoException).code;
+			const message = result.error.message ?? '';
+			const isTransient =
+				isTransientSpawnError(result.error) ||
+				/ETIMEDOUT|timed out/i.test(message);
+
+			if (!isTransient || attempt >= MAX_TRANSIENT_RETRIES - 1) {
+				throw new Error(
+					`git failed to start: ${code ?? 'unknown'} — ${message}`,
+				);
+			}
+
+			transientBackoff(attempt);
+			continue;
+		}
+
+		if (result.status === 0) {
+			return result.stdout ?? '';
+		}
+
+		// Non-zero exit status is a permanent git failure.
 		throw new Error(
 			result.stderr?.trim() || `git exited with code ${result.status}`,
 		);
 	}
-	return result.stdout;
+
+	throw new Error('git command failed after transient retries');
 }
 
 function appendRetentionEvent(directory: string, event: RetentionEvent): void {
@@ -195,18 +227,33 @@ function getCurrentSha(directory: string): string {
 }
 
 /**
- * Check if we're in a git repository
+ * Check if we're in a git repository.
+ * Returns { isRepo: true } on success, or { isRepo: false, warning } on permanent failure.
  */
-function isGitRepo(directory: string): boolean {
+function isGitRepo(directory: string): GitRepoProbe {
 	try {
 		gitExec(['rev-parse', '--git-dir'], directory);
-		return true;
-	} catch {
-		return false;
+		return { isRepo: true };
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		const isTransient =
+			/ETIMEDOUT|timed out/i.test(message) &&
+			!/not a git repository/i.test(message);
+
+		if (isTransient) {
+			return {
+				isRepo: false,
+				warning:
+					'git probe failed after retry exhaustion — treating as not a git repository',
+			};
+		}
+
+		return {
+			isRepo: false,
+			warning: 'git probe failed — directory may not be a git repository',
+		};
 	}
 }
-
-// ============ Action Handlers ============
 
 /**
  * Handle 'save' action - create checkpoint commit and log it
@@ -337,7 +384,7 @@ function handleSave(label: string, directory: string): string {
 export function saveCheckpointRecord(
 	label: string,
 	directory: string,
-): { success: boolean; sha?: string; error?: string } {
+): { success: boolean; sha?: string; error?: string; warning?: string } {
 	const labelError = validateLabel(label);
 	if (labelError) {
 		return { success: false, error: labelError };
@@ -348,7 +395,8 @@ export function saveCheckpointRecord(
 			return { success: false, error: `duplicate label: "${label}"` };
 		}
 		let sha = '';
-		if (isGitRepo(directory)) {
+		const repoProbe = isGitRepo(directory);
+		if (repoProbe.isRepo) {
 			try {
 				sha = getCurrentSha(directory);
 			} catch {
@@ -361,7 +409,20 @@ export function saveCheckpointRecord(
 			timestamp: new Date().toISOString(),
 		});
 		writeCheckpointLog(log, directory);
-		return { success: true, sha };
+		const result: {
+			success: boolean;
+			sha?: string;
+			error?: string;
+			warning?: string;
+		} = {
+			success: true,
+			sha,
+		};
+		if (!sha) {
+			result.warning =
+				'no git restore target — checkpoint recorded without a SHA (directory may not be a git repository or HEAD is unavailable)';
+		}
+		return result;
 	} catch (e) {
 		return {
 			success: false,
@@ -450,6 +511,7 @@ function handleList(directory: string): string {
  */
 function handleDelete(label: string, directory: string): string {
 	try {
+		// Find the checkpoint
 		const log = readCheckpointLog(directory);
 		const initialLength = log.checkpoints.length;
 
@@ -516,13 +578,13 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 			.describe('Checkpoint label (required for save, restore, delete)'),
 	},
 	execute: async (args, directory) => {
-		// Validate we're in a git repository
-		if (!isGitRepo(directory)) {
+		const repoProbe = isGitRepo(directory);
+		if (!repoProbe.isRepo) {
 			return JSON.stringify(
 				{
 					action: 'unknown',
 					success: false,
-					error: 'not a git repository',
+					error: `${repoProbe.warning ?? 'not a git repository'} — checkpoint tools require a git repository`,
 				},
 				null,
 				2,

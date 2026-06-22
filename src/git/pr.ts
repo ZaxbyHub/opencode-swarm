@@ -4,6 +4,11 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { warn } from '../utils/logger.js';
 import {
+	isTransientSpawnError,
+	MAX_TRANSIENT_RETRIES,
+	transientBackoff,
+} from '../utils/transient-retry.js';
+import {
 	commitChanges,
 	getChangedFiles,
 	getCurrentBranch,
@@ -54,21 +59,101 @@ export function sanitizeInput(input: string): string {
 
 /**
  * Execute gh CLI command
+ *
+ * Follows canonical gitExec safety pattern from branch.ts:
+ * - result.error check before result.status
+ * - maxBuffer to prevent ERR_CHILD_PROCESS_STDIO_MAXBUFFER on large output
+ * - windowsHide: true to prevent console window flash on Windows
+ * - Bounded transient retry for ETIMEDOUT per AGENTS.md invariant 9
  */
 export function ghExec(args: string[], cwd: string): string {
-	const result = child_process.spawnSync('gh', args, {
-		cwd,
-		encoding: 'utf-8',
-		timeout: GIT_TIMEOUT_MS,
-		stdio: ['ignore', 'pipe', 'pipe'],
-	});
-	if (result.status !== 0) {
-		throw new Error(result.stderr || `gh exited with ${result.status}`);
+	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+		const result = child_process.spawnSync('gh', args, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: MAX_OUTPUT_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		});
+
+		if (result.error) {
+			if (
+				isTransientSpawnError(result.error) &&
+				attempt < MAX_TRANSIENT_RETRIES - 1
+			) {
+				transientBackoff(attempt);
+				continue;
+			}
+
+			if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+				throw new Error(
+					`gh failed to start: ENOENT — gh not installed or not on PATH`,
+				);
+			}
+			throw new Error(
+				`gh failed to start: ${(result.error as NodeJS.ErrnoException).code} — ${result.error.message}`,
+			);
+		}
+
+		if (result.status !== 0) {
+			throw new Error(
+				result.stderr || result.stdout || `gh exited with ${result.status}`,
+			);
+		}
+		return result.stdout;
 	}
-	return result.stdout;
+
+	// Should not reach here; loop exits via return or throw
+	throw new Error('gh exited with null');
 }
 
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024; // 5MB cap per stream
+
+/**
+ * Shared spawnSync wrapper with bounded ETIMEDOUT-only transient retry.
+ *
+ * Mirrors the retry shape from ghExec (invariant 9):
+ * - Up to MAX_TRANSIENT_RETRIES attempts with exponential backoff on ETIMEDOUT
+ * - ENOENT and non-zero exit are thrown immediately (not retried)
+ * - On success, returns the raw spawnSync result transparently
+ */
+function spawnSyncWithTransientRetry(
+	command: string,
+	args: string[],
+	options: child_process.SpawnSyncOptions,
+): child_process.SpawnSyncReturns<string> {
+	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+		const result = child_process.spawnSync(command, args, options);
+
+		if (result.error) {
+			if (
+				isTransientSpawnError(result.error) &&
+				attempt < MAX_TRANSIENT_RETRIES - 1
+			) {
+				transientBackoff(attempt);
+				continue;
+			}
+
+			throw new Error(
+				`${command} failed: ${(result.error as NodeJS.ErrnoException).code} — ${result.error.message}`,
+			);
+		}
+
+		if (result.status !== 0) {
+			const reason =
+				(result.stderr as string) ||
+				(result.stdout as string) ||
+				`${command} exited with ${result.status}`;
+			throw new Error(`${command} failed: ${reason}`);
+		}
+
+		return result as child_process.SpawnSyncReturns<string>;
+	}
+
+	// Unreachable — loop exits via return or throw
+	throw new Error(`${command} exited with null`);
+}
 
 /**
  * Execute gh CLI command asynchronously (non-blocking).
@@ -173,7 +258,8 @@ export async function ghExecAsync(
 export const _internals: {
 	ghExec: typeof ghExec;
 	ghExecAsync: typeof ghExecAsync;
-} = { ghExec, ghExecAsync };
+	spawnSyncWithTransientRetry: typeof spawnSyncWithTransientRetry;
+} = { ghExec, ghExecAsync, spawnSyncWithTransientRetry };
 
 /**
  * Check if gh CLI is available
@@ -294,10 +380,19 @@ export function commitAndPush(cwd: string, message: string): void {
 	stageAll(cwd);
 
 	// Check if there are changes to commit
-	const status = child_process.spawnSync('git', ['status', '--porcelain'], {
-		cwd,
-		encoding: 'utf-8',
-	}).stdout;
+	const statusResult = spawnSyncWithTransientRetry(
+		'git',
+		['status', '--porcelain'],
+		{
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: MAX_OUTPUT_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		},
+	);
+	const status = statusResult.stdout;
 
 	if (!status.trim()) {
 		throw new Error('No changes to commit');
@@ -308,19 +403,19 @@ export function commitAndPush(cwd: string, message: string): void {
 
 	// Push
 	const branch = getCurrentBranch(cwd);
-	const pushResult = child_process.spawnSync(
+	const pushResult = spawnSyncWithTransientRetry(
 		'git',
 		['push', '-u', 'origin', branch],
 		{
 			cwd,
 			encoding: 'utf-8',
 			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: MAX_OUTPUT_BYTES,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		},
 	);
-	if (pushResult.status !== 0) {
-		throw new Error(pushResult.stderr || 'Push failed');
-	}
+	// spawnSyncWithTransientRetry throws on non-zero exit, so no status check needed here
 }
 
 // ── gh CLI PR status wrapper types ──────────────────────────────────

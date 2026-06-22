@@ -195,6 +195,9 @@ export function validateAndSanitizeGithubUrl(
 
 		return { sanitized };
 	} catch {
+		// Justification: URL constructor throws TypeError for malformed URLs.
+		// This catch is part of the validation flow — converting the throw
+		// into a structured { error } result keeps the API consistent.
 		return { error: 'Invalid URL format' };
 	}
 }
@@ -223,6 +226,10 @@ export function detectGitRemote(cwd?: string): string | null {
 
 		return remoteUrl || null;
 	} catch {
+		// Justification: best-effort remote detection — git may not be
+		// installed, the cwd may not be a git repo, or the spawn may fail
+		// for any reason. Returning null signals "unknown" to the caller,
+		// which is the safest fallback for URL validation.
 		return null;
 	}
 }

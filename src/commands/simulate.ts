@@ -1,3 +1,4 @@
+import { renameSync, unlinkSync } from 'node:fs';
 import { _internals as coChangeAnalyzer } from '../tools/co-change-analyzer';
 import { warn } from '../utils';
 
@@ -74,7 +75,21 @@ export async function handleSimulateCommand(
 		const path = await import('node:path');
 		const reportPath = path.join(directory, '.swarm', 'simulate-report.md');
 		await fs.mkdir(path.dirname(reportPath), { recursive: true });
-		await fs.writeFile(reportPath, report, 'utf-8');
+		const reportTempPath = path.join(
+			path.dirname(reportPath),
+			`${path.basename(reportPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+		);
+		try {
+			await fs.writeFile(reportTempPath, report, 'utf-8');
+			renameSync(reportTempPath, reportPath);
+		} catch (err) {
+			try {
+				unlinkSync(reportTempPath);
+			} catch {
+				// best-effort cleanup
+			}
+			throw err;
+		}
 	} catch (err) {
 		const writeErr = err instanceof Error ? err.message : String(err);
 		warn(

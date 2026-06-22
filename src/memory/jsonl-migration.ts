@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, renameSync, unlinkSync } from 'node:fs';
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
@@ -114,8 +114,36 @@ export async function writeJsonlExport(
 	await mkdir(exportDir, { recursive: true });
 	const memoriesPath = path.join(exportDir, 'memories.jsonl');
 	const proposalsPath = path.join(exportDir, 'proposals.jsonl');
-	await writeFile(memoriesPath, toJsonl(memories), 'utf-8');
-	await writeFile(proposalsPath, toJsonl(proposals), 'utf-8');
+	const memoriesTempPath = path.join(
+		path.dirname(memoriesPath),
+		`${path.basename(memoriesPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+	);
+	try {
+		await writeFile(memoriesTempPath, toJsonl(memories), 'utf-8');
+		renameSync(memoriesTempPath, memoriesPath);
+	} catch (err) {
+		try {
+			unlinkSync(memoriesTempPath);
+		} catch {
+			// best-effort cleanup
+		}
+		throw err;
+	}
+	const proposalsTempPath = path.join(
+		path.dirname(proposalsPath),
+		`${path.basename(proposalsPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+	);
+	try {
+		await writeFile(proposalsTempPath, toJsonl(proposals), 'utf-8');
+		renameSync(proposalsTempPath, proposalsPath);
+	} catch (err) {
+		try {
+			unlinkSync(proposalsTempPath);
+		} catch {
+			// best-effort cleanup
+		}
+		throw err;
+	}
 	return { directory: exportDir, memoriesPath, proposalsPath };
 }
 
@@ -129,7 +157,25 @@ export async function writeMigrationReport(
 		'migration-report.json',
 	);
 	await mkdir(path.dirname(reportPath), { recursive: true });
-	await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+	const reportTempPath = path.join(
+		path.dirname(reportPath),
+		`${path.basename(reportPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+	);
+	try {
+		await writeFile(
+			reportTempPath,
+			`${JSON.stringify(report, null, 2)}\n`,
+			'utf-8',
+		);
+		renameSync(reportTempPath, reportPath);
+	} catch (err) {
+		try {
+			unlinkSync(reportTempPath);
+		} catch {
+			// best-effort cleanup
+		}
+		throw err;
+	}
 	return reportPath;
 }
 

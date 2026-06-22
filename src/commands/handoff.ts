@@ -38,7 +38,10 @@ export async function handleHandoffCommand(
 			try {
 				unlinkSync(tempPath);
 			} catch {
-				/* best effort cleanup */
+				/* Justification: best-effort cleanup of a temp file that was just
+				 * successfully written. Failure here means the OS or an external
+				 * process already removed it — nothing actionable to report, and
+				 * the renameErr (rethrown below) is the real signal. */
 			}
 			throw renameErr;
 		}
@@ -56,7 +59,10 @@ export async function handleHandoffCommand(
 			try {
 				unlinkSync(promptTempPath);
 			} catch {
-				/* best effort cleanup */
+				/* Justification: best-effort cleanup of a temp file that was just
+				 * successfully written. Failure here means the OS or an external
+				 * process already removed it — nothing actionable to report, and
+				 * the renameErr (rethrown below) is the real signal. */
 			}
 			throw renameErr;
 		}

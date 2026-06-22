@@ -764,6 +764,173 @@ describe('PR Creation - Comprehensive Tests', () => {
 		});
 	});
 
+	// ========== GROUP 8.5: ghExec Safety — ENOENT error message (SC-005) ==========
+	describe('Group 8.5: ghExec result.error check — ENOENT identifies failure mode', () => {
+		it('throws ENOENT message not "gh exited with null" when gh not installed', () => {
+			const { ghExec } = require('../../../src/git/pr');
+
+			// ghExec retries MAX_RETRIES(5) times; ENOENT is transient only on
+			// attempts < MAX_RETRIES-1, so the 5th attempt throws with specific msg.
+			// Chain 5 ENOENT errors so the 5th triggers the throw.
+			mockSpawnSync
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'spawn gh ENOENT' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'spawn gh ENOENT' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'spawn gh ENOENT' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'spawn gh ENOENT' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'spawn gh ENOENT' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}));
+
+			expect(() => ghExec(['pr', 'list'], tmpDir)).toThrow(
+				'gh failed to start: ENOENT — gh not installed or not on PATH',
+			);
+		});
+
+		it('throws accurate error for other result.error codes', () => {
+			const { ghExec } = require('../../../src/git/pr');
+
+			mockSpawnSync.mockImplementationOnce(() => ({
+				error: { code: 'EACCES', message: 'Permission denied' },
+				status: null,
+				stdout: '',
+				stderr: '',
+			}));
+
+			expect(() => ghExec(['pr', 'list'], tmpDir)).toThrow(
+				'gh failed to start: EACCES — Permission denied',
+			);
+		});
+	});
+
+	// ========== GROUP 8.6: ghExec Safety — maxBuffer (SC-004) ==========
+	describe('Group 8.6: ghExec maxBuffer prevents ERR_CHILD_PROCESS_STDIO_MAXBUFFER', () => {
+		it('passes 5MB maxBuffer to spawnSync to handle large output', () => {
+			const { ghExec } = require('../../../src/git/pr');
+
+			// Track the options passed to spawnSync
+			let capturedOptions: Record<string, unknown> = {};
+			mockSpawnSync.mockImplementationOnce(
+				(_cmd: string, _args: string[], options: Record<string, unknown>) => {
+					capturedOptions = options as Record<string, unknown>;
+					return { status: 0, stdout: 'ok', stderr: '' };
+				},
+			);
+
+			ghExec(['pr', 'list'], tmpDir);
+
+			// maxBuffer should be 5MB (5 * 1024 * 1024 = 5242880), not the default 1MB
+			expect(capturedOptions.maxBuffer).toBe(5 * 1024 * 1024);
+		});
+	});
+
+	// ========== GROUP 8.7: ghExec Safety — transient retry (SC-006) ==========
+	describe('Group 8.7: ghExec transient retry for ETIMEDOUT', () => {
+		it('retries up to MAX_RETRIES before throwing on persistent ETIMEDOUT', () => {
+			const { ghExec } = require('../../../src/git/pr');
+
+			// First 2 attempts return ETIMEDOUT, 3rd succeeds
+			mockSpawnSync
+				.mockImplementationOnce(() => ({
+					error: { code: 'ETIMEDOUT', message: 'connection timed out' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockImplementationOnce(() => ({
+					error: { code: 'ETIMEDOUT', message: 'connection timed out' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}))
+				.mockReturnValueOnce({ status: 0, stdout: 'success', stderr: '' });
+
+			const result = ghExec(['pr', 'list'], tmpDir);
+
+			expect(result).toBe('success');
+			expect(mockSpawnSync).toHaveBeenCalledTimes(3);
+		});
+
+		it('returns immediately on success without retrying', () => {
+			const { ghExec } = require('../../../src/git/pr');
+
+			mockSpawnSync.mockReturnValueOnce({
+				status: 0,
+				stdout: 'immediate success',
+				stderr: '',
+			});
+
+			const result = ghExec(['pr', 'list'], tmpDir);
+
+			expect(result).toBe('immediate success');
+			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	// ========== GROUP 8.8: commitAndPush result.error surfacing ==========
+	describe('Group 8.8: commitAndPush result.error surfaces accurate messages', () => {
+		it('throws accurate error when git status spawnSync returns error object', () => {
+			const { commitAndPush } = require('../../../src/git/pr');
+
+			// stageAll succeeds, git status returns error object
+			mockSpawnSync
+				.mockReturnValueOnce({ status: 0, stdout: '', stderr: '' }) // stageAll
+				.mockImplementationOnce(() => ({
+					error: { code: 'ENOENT', message: 'git not found' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				}));
+
+			expect(() => commitAndPush(tmpDir, 'Test commit')).toThrow(
+				'git failed: ENOENT — git not found',
+			);
+		});
+
+		it('throws accurate error when git push spawnSync returns error object', () => {
+			const { commitAndPush } = require('../../../src/git/pr');
+
+			// stageAll succeeds, status shows changes, commit succeeds, push returns error object
+			mockSpawnSync
+				.mockReturnValueOnce({ status: 0, stdout: '', stderr: '' }) // stageAll
+				.mockReturnValueOnce({ status: 0, stdout: 'M file.txt', stderr: '' }) // git status --porcelain
+				.mockReturnValueOnce({ status: 0, stdout: '', stderr: '' }) // commitChanges
+				.mockReturnValueOnce({ status: 0, stdout: 'feature/test', stderr: '' }) // getCurrentBranch
+				.mockImplementationOnce(() => ({
+					error: { code: 'ECONNREFUSED', message: 'Connection refused' },
+					status: null,
+					stdout: '',
+					stderr: '',
+				})); // git push
+
+			expect(() => commitAndPush(tmpDir, 'Test commit')).toThrow(
+				'git failed: ECONNREFUSED — Connection refused',
+			);
+		});
+	});
+
 	// ========== GROUP 8: Edge Cases ==========
 	describe('Group 8: Edge Cases', () => {
 		it('handles empty branch name', async () => {

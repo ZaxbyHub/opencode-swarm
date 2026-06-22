@@ -472,14 +472,19 @@ export async function runCuratorPostMortem(
 	}
 
 	// Check for existing report (dedup protection)
-	const reportFilename = `post-mortem-${planId}.md`;
+	// When planId is 'unknown' (plan.json absent/unreadable), use a distinct
+	// timestamped identifier so a stale post-mortem-unknown.md from a prior
+	// run cannot permanently block regeneration.
+	const effectivePlanId =
+		planId === 'unknown' ? `unknown-${Date.now()}` : planId;
+	const reportFilename = `post-mortem-${effectivePlanId}.md`;
 	let reportPath: string;
 	try {
 		reportPath = validateSwarmPath(directory, reportFilename);
 	} catch {
 		return {
 			success: false,
-			planId,
+			planId, // unknown planId: path validation failed before dedup check
 			reportPath: null,
 			summary: null,
 			warnings: [...warnings, 'Invalid report path.'],
@@ -489,7 +494,7 @@ export async function runCuratorPostMortem(
 	if (!options.force && isReportValid(reportPath)) {
 		return {
 			success: true,
-			planId,
+			planId: effectivePlanId, // effectivePlanId
 			reportPath,
 			summary: 'Post-mortem report already exists (idempotent skip).',
 			warnings,
@@ -498,16 +503,19 @@ export async function runCuratorPostMortem(
 
 	// FR-009: Acquire a non-blocking advisory lock to prevent concurrent
 	// post-mortem runs from silently overwriting each other's output.
-	const lock = await _internals.acquirePostMortemLock(directory, planId);
+	const lock = await _internals.acquirePostMortemLock(
+		directory,
+		effectivePlanId,
+	); // effectivePlanId
 	if (!lock.acquired) {
 		return {
 			success: false,
-			planId,
+			planId: effectivePlanId, // effectivePlanId
 			reportPath,
 			summary: null,
 			warnings: [
 				...warnings,
-				`Concurrent post-mortem run in progress for plan ${planId}; skipped.`,
+				`Concurrent post-mortem run in progress for plan ${effectivePlanId}; skipped.`,
 			],
 		};
 	}
@@ -581,7 +589,7 @@ export async function runCuratorPostMortem(
 					'../agents/explorer.js'
 				);
 				const userInput = assembleLLMInput(
-					planId,
+					effectivePlanId,
 					planSummary,
 					knowledgeSummary,
 					curatorDigest,
@@ -613,14 +621,14 @@ export async function runCuratorPostMortem(
 				} finally {
 					clearTimeout(timer);
 				}
-				reportContent = `# Post-Mortem Report: ${planId}\nGenerated: ${new Date().toISOString()}\n\n${llmOutput}`;
+				reportContent = `# Post-Mortem Report: ${effectivePlanId}\nGenerated: ${new Date().toISOString()}\n\n${llmOutput}`;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				warnings.push(
 					`LLM delegate failed, falling back to data-only report: ${msg}`,
 				);
 				reportContent = _internals.buildDataOnlyReport(
-					planId,
+					effectivePlanId,
 					planSummary,
 					knowledgeSummary,
 					curatorDigest,
@@ -632,7 +640,7 @@ export async function runCuratorPostMortem(
 			}
 		} else {
 			reportContent = _internals.buildDataOnlyReport(
-				planId,
+				effectivePlanId,
 				planSummary,
 				knowledgeSummary,
 				curatorDigest,
@@ -652,7 +660,7 @@ export async function runCuratorPostMortem(
 			const msg = err instanceof Error ? err.message : String(err);
 			return {
 				success: false,
-				planId,
+				planId: effectivePlanId,
 				reportPath: null,
 				summary: null,
 				warnings: [...warnings, `Failed to write report: ${msg}`],
@@ -669,14 +677,14 @@ export async function runCuratorPostMortem(
 			0,
 		);
 		const summary = [
-			`Post-mortem for plan "${planId}": ${totalEntries} knowledge entries reviewed.`,
+			`Post-mortem for plan "${effectivePlanId}": ${totalEntries} knowledge entries reviewed.`,
 			`${neverAppliedCount} never-applied entries flagged; ${totalViolations} total violations recorded.`,
 			`${proposals.length} pending proposals, ${unactionable.length} quarantined entries.`,
 		].join(' ');
 
 		return {
 			success: true,
-			planId,
+			planId: effectivePlanId,
 			reportPath,
 			summary,
 			warnings,
