@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.87.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.87.1...v7.87.2) (2026-06-22)
+
+
+### Bug Fixes
+
+* **commands:** harden finalize, checkpoint, and subprocess safety ([4e8b3ea](https://github.com/ZaxbyHub/opencode-swarm/commit/4e8b3ea2d15fb797962fde45583ad58f3caa2493))
+* **commands:** harden finalize, checkpoint, and subprocess safety ([ff22c7a](https://github.com/ZaxbyHub/opencode-swarm/commit/ff22c7af2f517432c7e96a7ed86e527b254c2b79)), closes [#1461](https://github.com/ZaxbyHub/opencode-swarm/issues/1461)
+
 ## [7.87.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.87.0...v7.87.1) (2026-06-21)
 
 
