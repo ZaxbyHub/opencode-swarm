@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.88.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.87.3...v7.88.0) (2026-06-22)
+
+
+### Features
+
+* **tools:** add parse_lane_candidates for durable lane output parsing ([ef7ebd5](https://github.com/ZaxbyHub/opencode-swarm/commit/ef7ebd5f2ded206af351eb295eba64f1416bdc4f))
+* **tools:** add parse_lane_candidates for durable lane output parsing ([0cfdd6b](https://github.com/ZaxbyHub/opencode-swarm/commit/0cfdd6bbba07b5c8e17bdd75c760134fd548c1b3))
+
 ## [7.87.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.87.2...v7.87.3) (2026-06-22)
 
 
