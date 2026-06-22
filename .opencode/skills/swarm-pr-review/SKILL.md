@@ -78,6 +78,8 @@ The orchestrator may:
 - determine scope,
 - build or request the context pack,
 - launch explorers and triggered micro-lanes,
+- extract candidates from lane artifacts via `parse_lane_candidates` or equivalent parser,
+- filter, group, and chunk candidates for reviewer dispatch,
 - route candidates to reviewers,
 - route reviewer-confirmed findings to critics,
 - group validated findings,
@@ -88,7 +90,8 @@ The orchestrator MUST NOT:
 - re-read a candidate's target code to decide if it is valid,
 - silently downgrade or discard an explorer candidate,
 - treat tool output as a confirmed finding,
-- report a finding that no reviewer validated.
+- report a finding that no reviewer validated,
+- classify or judge candidates based on preview text alone — always use the structured parser output.
 
 If the orchestrator catches itself validating code, it must stop and delegate validation to a reviewer subagent.
 
@@ -495,9 +498,43 @@ Launch all base lanes with `dispatch_lanes_async` when available. Pass the six l
 
 Before Phase 4 or synthesis, call `collect_lane_results` with `wait: true` for the base-lane batch and treat the collected `lane_results` as the join barrier. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
 
-When any collected or blocking `lane_results[]` item has `output_ref`, treat `output` as a preview only. Call `retrieve_lane_output` and consume the full artifact before extracting candidates, deciding that a lane produced no candidates, or routing work to reviewers. If a lane has `output_truncated: true`, `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, record an explicit coverage gap and re-dispatch a narrower lane or mark affected candidates/coverage UNVERIFIED; never infer candidate absence from a preview.
+### Candidate extraction via parser
 
-**lane id uniqueness for parallel dispatches:** When re-dispatching failed or re-running explorer lanes, every `dispatch_lanes_async` or `dispatch_lanes` lane `id` MUST be unique within that dispatch batch and should include lane and attempt suffixes (e.g. `pr_review_explore_lane1_attempt2`). Never reuse an id in the same batch unless intentionally replacing that exact lane before dispatch.
+After `collect_lane_results` returns for base lanes, process each lane result
+that carries an `output_ref`. The orchestrator MUST use the candidate parser
+rather than preview-text extraction:
+
+1. For each `output_ref` (or batched), call `parse_lane_candidates` (or the
+   internal `parseAndPersist` module function) with `output_ref` and `producer`
+   flags; the parser auto-detects the format family per row. The parser reads
+   the full artifact from disk (no preview truncation issue) and returns
+   structured `ParseResultWithSidecar` records.
+2. Filter the returned `candidates[]` array by `producer: "swarm-pr-review"` and
+   the relevant `row_format_family` (e.g., `base_explorer` for base lanes,
+   `micro_lane` for micro-lanes). Filtering happens on the parsed results, NOT
+   on the tool input.
+3. Group the filtered candidates into reviewer-sized chunks:
+   - by file area (group by the directory or module of the `file_line` field),
+   - by category (group by the `category` field),
+   - by count (target max 50 candidates per chunk; smaller chunks are fine).
+4. Dispatch reviewer lanes (one per chunk) with bounded in-context candidate
+   lists. Each reviewer lane receives only the candidates from its assigned
+   chunk.
+
+If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, record an explicit
+coverage gap and re-dispatch a narrower lane or mark affected candidates
+UNVERIFIED. Never infer candidate absence from a preview.
+
+**Fallback convention:** If the parser is unavailable, the explorer MAY emit
+`[CANDIDATE]` rows in the lane output as a fallback convention (see the
+Explorer Prompt Template at the end of this skill), but the orchestrator
+SHOULD use the parser as the primary extraction mechanism.
+
+**lane id uniqueness for parallel dispatches:** When re-dispatching failed or
+re-running explorer lanes, every `dispatch_lanes_async` or `dispatch_lanes`
+lane `id` MUST be unique within that dispatch batch and should include lane and
+attempt suffixes (e.g., `pr_review_explore_lane1_attempt2`). Never reuse an id
+in the same batch unless intentionally replacing that exact lane before dispatch.
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
@@ -507,7 +544,7 @@ Explorers optimize for recall. Over-reporting is expected. Explorers produce can
 | Lane 2: Security and trust boundaries | Injection, authz/authn bypass, SSRF, path traversal, secret exposure, unsafe deserialization, prompt injection | untrusted input sources, sanitization, credential handling, permission boundary, private network access, output escaping |
 | Lane 3: Dependencies and deployment safety | Import changes, version bumps, lockfile drift, breaking APIs, package scripts, runtime assumptions | lockfile consistency, new transitive deps, Node/Bun/runtime compatibility, platform assumptions, license red flags |
 | Lane 4: Docs, intent, and drift | PR claims vs implementation, docs mismatch, migration/changelog gaps, stale examples | obligation mapping, changed behavior not documented, docs promising behavior not implemented |
-| Lane 5: Tests and falsifiability | Weak assertions, missing edge tests, flaky patterns, mock leakage, fixture drift | assertion strength, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks, `assertDoesNotThrow` wrapping trivial code), negative paths, isolation, deterministic timing, cross-platform path coverage |
+| Lane 5: Tests and falsifiability | Weak assertions, missing edge tests, flaky patterns, mock leakage, fixture drift | assertion strength, tautology patterns (`expect(true).toBe(true)`, `expect(res).toBeDefined()` without further checks), `assertDoesNotThrow` wrapping trivial code), negative paths, isolation, deterministic timing, cross-platform path coverage |
 | Lane 6: Performance and architecture | Complexity regressions, memory leaks, over-coupling, inefficient graph scans, global mutable state | algorithmic deltas, caching, resource lifecycle, state ownership, architectural boundary violations |
 
 ### Explorer context contract
@@ -523,11 +560,18 @@ Every explorer must inspect or explicitly mark unavailable:
 7. relevant Swarm knowledge/evidence entries, if present.
 8. the commit range to analyze (`base_ref..head_ref`),
 
-Explorer output format:
+### Explorer output format
+
+Explorers emit structured candidate records. The parser reads the full lane
+artifact and extracts these records. The canonical record shape is:
 
 ```text
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence: LOW/MEDIUM/HIGH
 ```
+
+The parser normalizes this into a structured `candidates[]` array. If the
+parser is unavailable, the explorer MAY emit the `[CANDIDATE]` row format
+directly in the lane output as a fallback convention.
 
 Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
@@ -537,7 +581,7 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 After `collect_lane_results` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Collect every micro-lane batch with `wait: true` before reviewer classification. Do not launch irrelevant micro-lanes.
 
-Apply the same `output_ref` rule to micro-lanes: retrieve full output before candidate routing, and treat degraded or incomplete lane artifacts as UNVERIFIED coverage rather than as clean negative evidence.
+Apply the same parser-based extraction to micro-lanes: call `parse_lane_candidates` on each micro-lane `output_ref` (filter the returned `candidates[]` array by `row_format_family === "micro_lane"` after parsing), and treat degraded or incomplete lane artifacts as UNVERIFIED coverage rather than as clean negative evidence.
 
 Each micro-lane receives:
 
@@ -547,7 +591,8 @@ Each micro-lane receives:
 - relevant deterministic signals,
 - related historical knowledge with quarantine/staleness status,
 - expected invariants,
-- output format as `[CANDIDATE]` only.
+- structured candidate output (parser-extracted). If the parser is unavailable,
+  the micro-lane MAY emit `[CANDIDATE]` rows as a fallback convention.
 
 ### Swarm plugin risk trigger map
 
@@ -596,7 +641,12 @@ Verifier output is advisory until incorporated by the independent reviewer or cr
 
 ## Phase 6: Independent Reviewer Confirmation
 
-Route candidates to reviewer subagents. The reviewer must re-read the candidate's file:line evidence and relevant context pack entries directly.
+Route candidates to reviewer subagents. The orchestrator routes candidates
+in bounded chunks produced by the parser-based extraction in Phase 3-4. Each
+reviewer lane receives a bounded list of candidates from a single chunk — by
+file area, category, or count — not the full candidate set. The reviewer must
+re-read the candidate's file:line evidence and relevant context pack entries
+directly.
 
 ### Noise budget and universal validation
 
@@ -810,6 +860,245 @@ Only re-verify findings the author claims to have fixed. Do not re-run the full 
 - `NEW_ISSUE`: the fix introduced a new problem at the same location.
 
 Update the verdict only after re-verifying all previously blocking findings.
+
+---
+
+## Dry-Run: Parser-Based Candidate Extraction
+
+This section demonstrates the new parser-based extraction path end-to-end
+using synthetic data. It is concrete enough to implement the same pattern in
+another skill.
+
+### Scenario
+
+A PR review has dispatched six base explorer lanes via `dispatch_lanes_async`.
+The batch completed and `collect_lane_results` returned:
+
+```json
+{
+  "batch_id": "batch-a1b2c3",
+  "lane_results": [
+    {
+      "lane_id": "pr_review_lane1_correctness",
+      "status": "completed",
+      "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "output_degraded": false
+    },
+    {
+      "lane_id": "pr_review_lane2_security",
+      "status": "completed",
+      "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-2/out-def456.json",
+      "output_degraded": false
+    }
+  ]
+}
+```
+
+### Step 1 — Call the parser
+
+The orchestrator calls `parse_lane_candidates` for each `output_ref`:
+
+```json
+{
+  "tool": "parse_lane_candidates",
+  "arguments": {
+    "output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+    "producer": "swarm-pr-review"
+  }
+}
+```
+
+### Step 2 — Structured response
+
+The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_code` are absent:
+
+```json
+{
+  "candidates": [
+    {
+      "record_type": "candidate",
+      "row_format_family": "base_explorer",
+      "row_format_version": 1,
+      "record_version": { "major": 1, "minor": 0 },
+      "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "source_batch_id": "B-2025-06-22-001",
+      "source_lane_id": "explorer-1",
+      "source_agent": "paid_explorer",
+      "source_digest": "sha256:abc123def456...",
+      "extracted_from_partial_source": false,
+      "sessionId": "ses_01HXYZ...",
+      "parentSessionId": "ses_01HABC...",
+      "producer": "swarm-pr-review",
+      "candidate_id": "C-001",
+      "lane": "Lane 1: Correctness and edge cases",
+      "micro_lane": null,
+      "severity": "HIGH",
+      "category": "null-safety",
+      "file_line": "src/utils/cache.ts:142",
+      "claim": "Uncached getter may return undefined on cold start",
+      "evidence_summary": "The `getCached` function returns `cache[key]` without a fallback when the cache is empty.",
+      "impact_context": "Downstream callers in `src/handlers/*.ts` expect a defined value and call `.toString()` directly.",
+      "invariant_violated": null,
+      "confidence": "HIGH"
+    },
+    {
+      "record_type": "candidate",
+      "row_format_family": "base_explorer",
+      "row_format_version": 1,
+      "record_version": { "major": 1, "minor": 0 },
+      "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+      "source_batch_id": "B-2025-06-22-001",
+      "source_lane_id": "explorer-1",
+      "source_agent": "paid_explorer",
+      "source_digest": "sha256:abc123def456...",
+      "extracted_from_partial_source": false,
+      "sessionId": "ses_01HXYZ...",
+      "parentSessionId": "ses_01HABC...",
+      "producer": "swarm-pr-review",
+      "candidate_id": "C-002",
+      "lane": "Lane 1: Correctness and edge cases",
+      "micro_lane": null,
+      "severity": "MEDIUM",
+      "category": "async-ordering",
+      "file_line": "src/services/queue.ts:88",
+      "claim": "Race between `drain` and `processNext` may drop items",
+      "evidence_summary": "`drain` sets `active = false` before awaiting `processNext`, which also checks `active`.",
+      "impact_context": "Items submitted during the drain window are silently dropped.",
+      "invariant_violated": null,
+      "confidence": "MEDIUM"
+    }
+  ],
+  "invocation_envelope": {
+    "record_type": "invocation",
+    "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/out-abc123.json",
+    "source_batch_id": "B-2025-06-22-001",
+    "source_lane_id": "explorer-1",
+    "source_agent": "paid_explorer",
+    "source_digest": "sha256:abc123def456...",
+    "row_format_version": 1,
+    "record_version": { "major": 1, "minor": 0 },
+    "sessionId": "ses_01HXYZ...",
+    "parentSessionId": "ses_01HABC...",
+    "producer": "swarm-pr-review",
+    "produced_at": "2025-06-22T14:30:00.000Z",
+     "format_families_detected": ["base_explorer"],
+     "candidate_count": 2,
+     "parse_errors": 2,
+     "malformed_rows": 0
+  },
+  "diagnostics": {
+    "candidate_count": 2,
+    "parse_errors": 2,
+    "parse_error_details": [
+      {
+        "row_index": 0,
+        "field": "row",
+        "message": "Both format-family discriminators present; defaulting to base_explorer"
+      },
+      {
+        "row_index": 1,
+        "field": "row",
+        "message": "Both format-family discriminators present; defaulting to base_explorer"
+      }
+    ],
+    "malformed_rows": 0,
+    "duplicate_id_count": 0,
+    "duplicate_id_warnings": [],
+    "degraded_source_count": 0,
+    "incomplete_source_count": 0,
+     "format_families_detected": ["base_explorer"]
+   }
+}
+```
+> **Note**: `parse_errors: 2` reflects FR-017/SC-017 position-based detection: when a `[CANDIDATE]` row has both `evidence_summary` and `impact_context` populated, the parser emits a `parse_error_details` entry per row with `field: "row"` and `message: "Both format-family discriminators present; defaulting to base_explorer"`. This is documented behavior, not a parser bug. To get `parse_errors: 0` with the row format, leave one of the two fields empty; to silence the warning entirely, emit structured JSON candidate records.
+
+On refusal (e.g. `output_ref` does not exist), `error` and `error_code` are present; `candidates` is `[]`; `invocation_envelope` and `diagnostics` are populated with empty fields for traceability:
+
+```json
+{
+  "error": "Artifact reference not found in store",
+  "error_code": "ref-not-found",
+  "candidates": [],
+  "invocation_envelope": {
+    "record_type": "invocation",
+    "source_output_ref": ".swarm/lane-results/batch-a1b2c3/lane-1/missing.json",
+    "source_batch_id": "",
+    "source_lane_id": "",
+    "source_agent": "",
+    "source_digest": "",
+    "row_format_version": 1,
+    "record_version": { "major": 1, "minor": 0 },
+    "produced_at": "2025-06-22T14:30:00.000Z",
+    "format_families_detected": [],
+    "candidate_count": 0,
+    "parse_errors": 0,
+    "malformed_rows": 0
+  },
+  "diagnostics": {
+    "candidate_count": 0,
+    "parse_errors": 0,
+    "parse_error_details": [],
+    "malformed_rows": 0,
+    "duplicate_id_count": 0,
+    "duplicate_id_warnings": [],
+    "degraded_source_count": 0,
+    "incomplete_source_count": 0,
+     "format_families_detected": []
+   }
+}
+```
+
+### Step 3 — Filter and group
+
+The orchestrator filters the returned `candidates[]` array by `producer: "swarm-pr-review"` and `row_format_family` (e.g. `base_explorer` or `micro_lane`), then groups
+the candidates. In this synthetic example, the two candidates above are grouped
+by file area:
+
+- **Chunk A — `src/utils/`** (1 candidate): C-001
+- **Chunk B — `src/services/`** (1 candidate): C-002
+
+If there were more candidates, the orchestrator would also group by category
+(e.g., `null-safety`, `async-ordering`) and cap each chunk at 50 candidates.
+
+### Step 4 — Dispatch reviewer lanes
+
+The orchestrator dispatches one reviewer lane per chunk:
+
+```text
+You are the independent reviewer. Validate only the candidates assigned below.
+Do not search for new issues except where needed to validate reachability or
+mitigation. Do not trust explorer severity.
+
+Context pack summary:
+- scope: ...
+- obligations: ...
+- impact cone: ...
+- deterministic signals: ...
+- relevant Swarm artifacts / knowledge: ...
+- base_ref: <commit SHA of base branch>
+- head_ref: <commit SHA of PR head branch>
+
+Candidates (Chunk A — src/utils/):
+- C-001 | HIGH | null-safety | src/utils/cache.ts:142 | Uncached getter may return undefined on cold start
+
+For each candidate, return:
+[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
+
+You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
+
+IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you MUST read the equivalent code on the base branch (git show <base_ref>:<file>) to verify it was not present before. A reviewer claim of "this is new" is invalid without base-branch evidence. Do not compare the new code to an idealized baseline — compare it to what actually existed on the base branch at the time of the PR.
+```
+
+### Key invariants
+
+- The parser reads the **full artifact**, not a preview. Truncation in the
+  `dispatch_lanes` preview does not affect candidate extraction.
+- The orchestrator never classifies candidates — it only filters, groups, and
+  routes them.
+- Each reviewer receives a bounded chunk. A chunk with more than 50 candidates
+  is split before dispatch.
+- The `invocation_envelope` in the parser response provides audit provenance
+  for every extracted candidate.
 
 ---
 
@@ -1115,5 +1404,11 @@ You must inspect or mark unavailable:
 Return:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 ```
+
+The orchestrator extracts candidates from the full lane artifact via
+`parse_lane_candidates` as the primary mechanism. The `[CANDIDATE]` row
+format above is a fallback convention for environments where the parser is
+unavailable. Explorers should still emit structured records regardless of
+whether the parser is present.
 
 Do not let speed degrade validation quality.

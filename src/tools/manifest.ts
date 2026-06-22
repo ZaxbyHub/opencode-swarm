@@ -78,6 +78,7 @@ import { lean_turbo_status } from './lean-turbo-status';
 import { lint } from './lint';
 import { lint_spec } from './lint-spec';
 import { mutation_test } from './mutation-test';
+import { parse_lane_candidates } from './parse-lane-candidates';
 import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
 import { placeholder_scan } from './placeholder-scan';
@@ -163,6 +164,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	sbom_generate: () => sbom_generate,
 	checkpoint: () => checkpoint,
 	pkg_audit: () => pkg_audit,
+	parse_lane_candidates: () => parse_lane_candidates,
 	test_runner: () => test_runner,
 	test_impact: () => test_impact,
 	mutation_test: () => mutation_test,

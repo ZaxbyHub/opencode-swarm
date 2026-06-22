@@ -193,6 +193,11 @@ export const TOOL_METADATA = {
 			'test_engineer',
 		],
 	},
+	parse_lane_candidates: {
+		description:
+			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
+		agents: ['architect'],
+	},
 	test_runner: {
 		description: 'auto-detect and run tests',
 		agents: ['architect', 'reviewer', 'test_engineer'],

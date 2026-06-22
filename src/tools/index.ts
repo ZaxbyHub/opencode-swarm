@@ -46,6 +46,7 @@ export { knowledge_recall } from './knowledge-recall';
 export { knowledge_receipt } from './knowledge-receipt';
 export { knowledge_remove } from './knowledge-remove';
 export { lint } from './lint';
+export { parse_lane_candidates } from './parse-lane-candidates';
 // Phase completion tracking
 export { phase_complete } from './phase-complete';
 export { pkg_audit } from './pkg-audit';
