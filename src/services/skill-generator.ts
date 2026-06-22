@@ -213,7 +213,9 @@ export function isSkillMaturityEligible(
 	// Must have sufficient confirmations (counting distinct phases), strong
 	// outcomes, or qualify via the high-priority path.
 	return (
-		distinctPhases >= opts.minConfirmations || strongOutcomes || highPriorityPath
+		distinctPhases >= opts.minConfirmations ||
+		strongOutcomes ||
+		highPriorityPath
 	);
 }
 

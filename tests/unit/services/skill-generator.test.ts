@@ -673,7 +673,9 @@ describe('isSkillMaturityEligible — high-priority directive path (issue #1477)
 	});
 
 	it('critical-priority + 1 distinct phase + 0.6 confidence → eligible', () => {
-		expect(isSkillMaturityEligible(entryWith('critical', 0.6), opts)).toBe(true);
+		expect(isSkillMaturityEligible(entryWith('critical', 0.6), opts)).toBe(
+			true,
+		);
 	});
 
 	it('medium-priority + 1 phase + 0.6 → still blocked (targeted, not a blanket loosening)', () => {
@@ -689,7 +691,9 @@ describe('isSkillMaturityEligible — high-priority directive path (issue #1477)
 	});
 
 	it('high-priority with zero distinct phases → blocked (needs ≥1 confirmation)', () => {
-		expect(isSkillMaturityEligible(entryWith('high', 0.6, []), opts)).toBe(false);
+		expect(isSkillMaturityEligible(entryWith('high', 0.6, []), opts)).toBe(
+			false,
+		);
 	});
 
 	it('high-priority with a net-negative outcome record → blocked (negative gate precedes the path)', () => {

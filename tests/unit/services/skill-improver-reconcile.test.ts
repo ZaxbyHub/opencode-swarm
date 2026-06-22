@@ -22,7 +22,10 @@ afterEach(() => {
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-async function writeActiveSkill(slug: string, content: string): Promise<string> {
+async function writeActiveSkill(
+	slug: string,
+	content: string,
+): Promise<string> {
 	const dir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
 	await mkdir(dir, { recursive: true });
 	const file = path.join(dir, 'SKILL.md');
@@ -144,6 +147,8 @@ describe('gatherInventory detection blind spot (issue #1477)', () => {
 
 		const inv = await _internals.gatherInventory(tmp);
 
-		expect(inv.staleActiveSkills.find((s) => s.slug === 'my-shim')).toBeUndefined();
+		expect(
+			inv.staleActiveSkills.find((s) => s.slug === 'my-shim'),
+		).toBeUndefined();
 	});
 });

@@ -21,9 +21,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
-	_internals as readerInternals,
 	type ProjectContext,
 	type RankedEntry,
+	_internals as readerInternals,
 	readMergedKnowledge,
 	updateRetrievalOutcome,
 } from '../../../src/hooks/knowledge-reader.js';
