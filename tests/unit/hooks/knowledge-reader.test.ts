@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	type ProjectContext,
 	type RankedEntry,
+	_internals as readerInternals,
 	readMergedKnowledge,
 	updateRetrievalOutcome,
 } from '../../../src/hooks/knowledge-reader.js';
@@ -132,6 +133,12 @@ const mockWarn = mock();
 mock.module('../../../src/utils/logger.js', () => ({
 	warn: mockWarn,
 }));
+
+// updateRetrievalOutcome now records shown→outcome attribution as immutable
+// 'outcome' events (issue #1477) rather than mutating entry.retrieval_outcomes.
+// We spy via the _internals DI seam (per the mock.module allowlist invariant)
+// instead of mocking the knowledge-events module.
+const mockRecordKnowledgeEvent = mock(async () => null);
 
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -656,6 +663,9 @@ describe('updateRetrievalOutcome', () => {
 	beforeEach(() => {
 		mock.clearAllMocks();
 		transactKnowledgeResults.length = 0;
+		// Spy on outcome-event emission via the _internals DI seam (issue #1477).
+		readerInternals.recordKnowledgeEvent =
+			mockRecordKnowledgeEvent as unknown as typeof readerInternals.recordKnowledgeEvent;
 		(readKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue([]);
 		(rewriteKnowledge as unknown as ReturnType<typeof mock>).mockResolvedValue(
 			undefined,
@@ -669,113 +679,62 @@ describe('updateRetrievalOutcome', () => {
 
 		await updateRetrievalOutcome('/proj', 'phase-5', true);
 
-		expect(transactKnowledge).not.toHaveBeenCalled();
+		// Issue #1477: no shown file → no outcome attribution event emitted.
+		expect(mockRecordKnowledgeEvent).not.toHaveBeenCalled();
 	});
 
-	it('Test 11: increments succeeded_after_shown_count on success', async () => {
+	it('Test 11: emits a success outcome event on success', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
 		};
 
-		const swarmEntry = makeSwarmEntry({
-			id: 'id-1',
-			lesson: 'Test lesson',
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_shown_count: 0,
-				failed_after_shown_count: 0,
-			},
-		});
-
 		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
 		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
 			JSON.stringify(shownData),
-		);
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
 		);
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true); // phaseSucceeded
 
-		// transactKnowledge should be called for the swarm file (LF-1 fix: replaces rewriteKnowledge)
-		expect(transactKnowledge).toHaveBeenCalledTimes(1);
-
-		const swarmResult = transactKnowledgeResults.find((r) =>
-			r.path.includes('swarm'),
+		// Issue #1477: success attribution is now an immutable 'outcome' event keyed
+		// by knowledge_id (the event log is the single source of truth, folded into
+		// the rollup on read), NOT an in-place entry mutation.
+		expect(mockRecordKnowledgeEvent).toHaveBeenCalledTimes(1);
+		expect(mockRecordKnowledgeEvent).toHaveBeenCalledWith(
+			'/proj',
+			expect.objectContaining({
+				type: 'outcome',
+				knowledge_id: 'id-1',
+				outcome: 'success',
+				phase: phaseInfo,
+			}),
 		);
-		expect(swarmResult).toBeDefined();
-		const updatedEntries = swarmResult!.entries as SwarmKnowledgeEntry[];
-		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
-
-		expect(updatedEntry).toBeDefined();
-		// v2: applied_count is FROZEN (not auto-incremented from shown)
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
-		expect(
-			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
-				.succeeded_after_shown_count,
-		).toBe(1);
-		expect(
-			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
-				.failed_after_shown_count,
-		).toBe(0);
 	});
 
-	it('Test 12: increments failed_after_shown_count on failure', async () => {
+	it('Test 12: emits a failure outcome event on failure', async () => {
 		const phaseInfo = 'phase-5';
 		const shownData = {
 			[phaseInfo]: ['id-1'],
 		};
 
-		const swarmEntry = makeSwarmEntry({
-			id: 'id-1',
-			lesson: 'Test lesson',
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_shown_count: 0,
-				failed_after_shown_count: 0,
-			},
-		});
-
 		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
 		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
 			JSON.stringify(shownData),
 		);
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
-		);
 
 		await updateRetrievalOutcome('/proj', phaseInfo, false); // phaseSucceeded = false
 
-		// transactKnowledge should be called for the swarm file (LF-1 fix: replaces rewriteKnowledge)
-		expect(transactKnowledge).toHaveBeenCalledTimes(1);
-
-		const swarmResult = transactKnowledgeResults.find((r) =>
-			r.path.includes('swarm'),
+		// Issue #1477: failure attribution is now an immutable 'outcome' event.
+		expect(mockRecordKnowledgeEvent).toHaveBeenCalledTimes(1);
+		expect(mockRecordKnowledgeEvent).toHaveBeenCalledWith(
+			'/proj',
+			expect.objectContaining({
+				type: 'outcome',
+				knowledge_id: 'id-1',
+				outcome: 'failure',
+				phase: phaseInfo,
+			}),
 		);
-		expect(swarmResult).toBeDefined();
-		const updatedEntries = swarmResult!.entries as SwarmKnowledgeEntry[];
-		const updatedEntry = updatedEntries.find((e) => e.id === 'id-1');
-
-		expect(updatedEntry).toBeDefined();
-		// v2: applied_count is FROZEN (not auto-incremented from shown)
-		expect(updatedEntry?.retrieval_outcomes.applied_count).toBe(0);
-		expect(
-			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
-				.succeeded_after_shown_count,
-		).toBe(0);
-		expect(
-			(updatedEntry?.retrieval_outcomes as Record<string, unknown>)
-				.failed_after_shown_count,
-		).toBe(1);
 	});
 
 	it('Test 13: cleans up phase key from shown file after update', async () => {
@@ -784,26 +743,9 @@ describe('updateRetrievalOutcome', () => {
 			[phaseInfo]: ['id-1'],
 		};
 
-		const swarmEntry = makeSwarmEntry({
-			id: 'id-1',
-			lesson: 'Test lesson',
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
-			},
-		});
-
 		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
 		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
 			JSON.stringify(shownData),
-		);
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				if (path.includes('hive')) return [];
-				return [];
-			},
 		);
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
@@ -819,43 +761,35 @@ describe('updateRetrievalOutcome', () => {
 		expect(writtenData[phaseInfo]).toBeUndefined();
 	});
 
-	it('Test 14: skips hive update when all shown IDs found in swarm', async () => {
+	it('Test 14: attributes outcomes tier-agnostically without reading knowledge files', async () => {
+		// Issue #1477: outcome attribution is now event-sourced by knowledge_id, so
+		// updateRetrievalOutcome no longer reads/mutates the swarm or hive stores —
+		// it emits one 'outcome' event per shown id regardless of which tier the
+		// entry lives in (the fold attributes by id).
 		const phaseInfo = 'phase-5';
 		const shownData = {
-			[phaseInfo]: ['id-1'],
+			[phaseInfo]: ['swarm-id', 'hive-id'],
 		};
-
-		const swarmEntry = makeSwarmEntry({
-			id: 'id-1',
-			lesson: 'Test lesson',
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_count: 0,
-				failed_after_count: 0,
-			},
-		});
 
 		(existsSync as unknown as ReturnType<typeof mock>).mockReturnValue(true);
 		(readFile as unknown as ReturnType<typeof mock>).mockResolvedValue(
 			JSON.stringify(shownData),
 		);
-		(readKnowledge as unknown as ReturnType<typeof mock>).mockImplementation(
-			async (path: string) => {
-				if (path.includes('swarm')) return [swarmEntry];
-				// Hive should NOT be called
-				throw new Error('Hive readKnowledge should not be called');
-			},
-		);
 
 		await updateRetrievalOutcome('/proj', phaseInfo, true);
 
-		// transactKnowledge should only be called once (for swarm, not hive) since
-		// all shown IDs were found in swarm (LF-1 fix: replaces rewriteKnowledge)
-		expect(transactKnowledge).toHaveBeenCalledTimes(1);
-
-		// Verify it was called for swarm path
-		const swarmResult = transactKnowledgeResults[0];
-		expect(swarmResult?.path).toContain('swarm');
-		expect(swarmResult?.path).not.toContain('hive');
+		// No knowledge-store reads at all (tier lookup is gone).
+		expect(readKnowledge).not.toHaveBeenCalled();
+		expect(transactKnowledge).not.toHaveBeenCalled();
+		// One event per shown id.
+		expect(mockRecordKnowledgeEvent).toHaveBeenCalledTimes(2);
+		const ids = (
+			mockRecordKnowledgeEvent.mock.calls as Array<
+				[string, { knowledge_id: string }]
+			>
+		)
+			.map(([, e]) => e.knowledge_id)
+			.sort();
+		expect(ids).toEqual(['hive-id', 'swarm-id']);
 	});
 });

@@ -15,6 +15,11 @@ set -euo pipefail
 # the expected sum. When it reaches the sum, remove the entry entirely.
 PAIRS=(
   "tests/unit/diff/ast-diff.test.ts|src/hooks/__tests__/semantic-diff-injection.test.ts|41|16|33"
+  # knowledge-reader.test.ts uses file-scoped mock.module('node:fs'...) which leaks
+  # into skill-generator.test.ts when run in the same Bun process, causing 9 spurious
+  # failures. Tracked here so a new leak (count drop below 63) triggers a regression
+  # alert. Resolved when knowledge-reader migrates to the _internals DI seam.
+  "tests/unit/hooks/knowledge-reader.test.ts|tests/unit/services/skill-generator.test.ts|20|52|63"
 )
 
 regression=0

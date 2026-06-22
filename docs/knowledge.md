@@ -432,6 +432,22 @@ trigger phrases. The propagation scorer treats those phrases as bounded literal
 hints, so a task such as "fix the biome lint config" can surface a skill whose
 frontmatter includes `triggers: ["biome", "lint config"]`.
 
+### High-priority directive maturity path
+
+Entries with `directive_priority: critical` or `directive_priority: high` are eligible
+for a fast-track maturity path (added in issue #1477):
+
+- Minimum **1 distinct phase confirmation** (not the standard 2), AND
+- Confidence ≥ **0.60** (`HIGH_PRIORITY_SKILL_MIN_CONFIDENCE`, vs. the standard 0.70 floor)
+
+Without this path, a `critical` entry that was only auto-generated (1 phase, 0.6 confidence)
+would fail the standard gate on both dimensions simultaneously — the 0.7 confidence floor
+AND the 2-phase confirmation requirement — making it impossible to mature regardless of
+how valuable the directive is.
+
+Net-negative outcome signal (`computeOutcomeSignal < 0`) still blocks even high-priority
+entries. The standard gate for `medium`/`low` entries is unchanged.
+
 ### Validation fixtures
 
 Optional eval fixtures under `.swarm/skills/evals/<slug>/*.json` gate generated

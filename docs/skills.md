@@ -112,15 +112,35 @@ Mature, high-confidence knowledge can be compiled into reusable **SKILL.md** fil
 An entry passes the maturity gate if:
 
 1. **Not negatively evidenced** — `computeOutcomeSignal >= 0` (no strong negative outcome)
- 2. **Strong outcome bypass** — (`applied_explicit_count >= 3` OR `succeeded_after_shown_count >= 3`) AND `computeOutcomeSignal > 0`
+2. **Strong outcome bypass** — (`applied_explicit_count >= 3` OR `succeeded_after_shown_count >= 3`) AND `computeOutcomeSignal > 0`
    - Bypasses confidence floor and confirmation count
    - Allows well-evidenced singletons to become skills early
-3. **Legacy AND gates** — for other entries:
+3. **High-priority path** (issue #1477) — `directive_priority` is `critical` or `high`, AND:
+   - At least 1 distinct phase confirmation (`confirmed_by` count ≥ 1), AND
+   - Confidence ≥ `HIGH_PRIORITY_SKILL_MIN_CONFIDENCE` (default 0.60)
+   - Provides a fast-track for highest-value directives that would otherwise be stranded by the coupled confidence+confirmation requirement in the standard gate
+4. **Standard gate** — for other entries:
    - Confidence >= `min_skill_confidence` (default 0.70)
-   - Either `confirmed_by` count >= `min_skill_confirmations` (default 2 distinct phases) OR strong outcome record
-    - Both conditions must independently hold (neither alone is sufficient)
+   - `confirmed_by` count >= `min_skill_confirmations` (default 2 distinct phases)
+   - Both conditions must independently hold (neither alone is sufficient)
 
 > **Note:** `confirmed_by` tracks distinct phase numbers where the entry was actually applied (recorded via `KNOWLEDGE_APPLIED` markers). Only phases with evidence of use count toward the threshold.
+
+> **Note on outcomes:** Outcome events (`'outcome'` type in the event log) are folded into per-entry `CounterRollup` records by `recomputeCounters`. The `effectiveRetrievalOutcomes` function merges the stored entry counts (historical) with the event-derived rollup (new) additively — never overwriting either source. A net-negative `computeOutcomeSignal` always blocks maturation regardless of path.
+
+#### Hand-authored skill shims (`skill_origin: shim`)
+
+Skills that were hand-authored outside the knowledge compilation pipeline (compatibility shims, manually written SKILL.md files) can be marked with `skill_origin: shim` in their YAML frontmatter. The skill-improver's stale-detection and reconciliation pass skips shim-marked skills — they are never flagged as stale and never auto-regenerated or auto-retired.
+
+```yaml
+---
+name: my-hand-authored-skill
+description: A skill written manually, not generated from knowledge entries
+skill_origin: shim
+---
+```
+
+Any skill without this field (or with `skill_origin: generated`) is subject to stale-detection: if the YAML frontmatter is unparseable, if source knowledge IDs are missing, or if `generated_at` is absent, the skill-improver will attempt to regenerate it from its source knowledge IDs or retire it if regeneration is not possible.
 
 #### Generation Workflow
 

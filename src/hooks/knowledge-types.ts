@@ -57,6 +57,9 @@ export interface RetrievalOutcome {
 	succeeded_after_shown_count?: number;
 	/** v2: phase-failure count after a "shown" (replaces failed_after_count). */
 	failed_after_shown_count?: number;
+	/** v3: partial-success count after a "shown" (outcome: 'partial'). Event-only
+	 *  field — never written to the entry, folded from the event log rollup. */
+	partial_after_shown_count?: number;
 	/** v3: recent violation timestamps (newest-first, capped) folded from the
 	 *  event-derived rollup. Surfaced for the repeat-mistake escalator. */
 	violation_timestamps?: string[];

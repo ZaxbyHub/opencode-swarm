@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	appendKnowledgeEvent,
+	effectiveRetrievalOutcomes,
 	KNOWLEDGE_EVENT_SCHEMA_VERSION,
 	type KnowledgeEvent,
 	MAX_EVENT_LOG_ENTRIES,
@@ -20,7 +21,10 @@ import {
 	resolveKnowledgeCounterBaselinePath,
 	resolveKnowledgeEventsPath,
 } from '../../../src/hooks/knowledge-events';
-import type { KnowledgeApplicationRecord } from '../../../src/hooks/knowledge-types';
+import type {
+	KnowledgeApplicationRecord,
+	RetrievalOutcome,
+} from '../../../src/hooks/knowledge-types';
 
 function tmp(): string {
 	const dir = join(
@@ -241,6 +245,45 @@ describe('knowledge-events: append + read', () => {
 		expect(rollups.get('new')?.shown_count).toBe(1);
 	});
 
+	it('survives a corrupted counter baseline by replaying live events (issue #1477)', async () => {
+		// A corrupt baseline must not nuke the live event log — that is where all
+		// post-event-sourcing outcomes live, so losing it would zero every entry's
+		// outcome signal and stall skill maturation.
+		await appendKnowledgeEvent(dir, {
+			type: 'outcome',
+			trace_id: 't-live',
+			knowledge_id: 'k-live',
+			outcome: 'success',
+			evidence_summary: 'phase passed',
+			session_id: 's',
+			agent: 'coder',
+		} as unknown as KnowledgeEvent);
+		// Also emit a retrieved event so shown_count is exercised (F-007c).
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-shown',
+			session_id: 's',
+			agent: 'architect',
+			query: 'q',
+			retrieval_mode: 'manual',
+			result_ids: ['k-live'],
+			ranks: { 'k-live': 1 },
+			scores: { 'k-live': 0.9 },
+		} as unknown as KnowledgeEvent);
+
+		// Corrupt the baseline file on disk.
+		const baselinePath = resolveKnowledgeCounterBaselinePath(dir);
+		mkdirSync(join(dir, '.swarm'), { recursive: true });
+		writeFileSync(baselinePath, '{ this is not valid json', 'utf-8');
+
+		const rollups = await readKnowledgeCounterRollups(dir);
+		// Outcome event survived (the primary concern — stall risk).
+		expect(rollups.get('k-live')?.succeeded_after_shown_count).toBe(1);
+		// shown_count from retrieved event also survived (F-007c: corrupt baseline
+		// must not discard any live event, not just outcome events).
+		expect(rollups.get('k-live')?.shown_count).toBe(1);
+	});
+
 	it('memoizes counter rollups while isolating callers and invalidating on writes', async () => {
 		await appendKnowledgeEvent(dir, {
 			type: 'retrieved',
@@ -435,6 +478,87 @@ describe('knowledge-events: recomputeCounters', () => {
 		const b = recomputeCounters([...events].reverse()).get('k');
 		expect(a).toEqual(b);
 		expect(a?.last_applied_at).toBe('2024-01-02T00:00:00.000Z');
+	});
+});
+
+describe('effectiveRetrievalOutcomes — additive outcome merge (issue #1477)', () => {
+	const mkOutcome = (
+		knowledge_id: string,
+		outcome: 'success' | 'failure' | 'partial',
+		ts: string,
+	): KnowledgeEvent => ({
+		type: 'outcome',
+		event_id: `o-${knowledge_id}-${ts}`,
+		knowledge_id,
+		timestamp: ts,
+		outcome,
+		evidence_summary: 'test',
+	});
+
+	it('sums frozen historical entry counts with event-derived rollup counts (no overwrite, no double-count)', () => {
+		// Counts written into the entry before outcomes were event-sourced.
+		const stored: RetrievalOutcome = {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+			succeeded_after_shown_count: 2,
+			failed_after_shown_count: 1,
+		};
+		// Event-derived rollup: 3 success + 1 failure + 1 partial for k1.
+		const rollup = recomputeCounters([
+			mkOutcome('k1', 'success', '2025-01-01T00:00:00.000Z'),
+			mkOutcome('k1', 'success', '2025-01-02T00:00:00.000Z'),
+			mkOutcome('k1', 'success', '2025-01-03T00:00:00.000Z'),
+			mkOutcome('k1', 'failure', '2025-01-04T00:00:00.000Z'),
+			mkOutcome('k1', 'partial', '2025-01-05T00:00:00.000Z'),
+		]).get('k1');
+		const eff = effectiveRetrievalOutcomes(stored, rollup);
+		// 2 historical + 3 events = 5 ; 1 historical + 1 event = 2.
+		expect(eff.succeeded_after_shown_count).toBe(5);
+		expect(eff.failed_after_shown_count).toBe(2);
+		// partial is event-only (never written to the entry) → carried via the spread.
+		expect(
+			(eff as { partial_after_shown_count?: number }).partial_after_shown_count,
+		).toBe(1);
+	});
+
+	it('REGRESSION (RC-OUTCOMES): an all-zero rollup no longer clobbers real historical entry counts', () => {
+		const stored: RetrievalOutcome = {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+			succeeded_after_shown_count: 4,
+			failed_after_shown_count: 0,
+		};
+		// A 'retrieved' event creates a rollup entry for k1 whose outcome counts are
+		// all zero — exactly the production state before the emitter was wired. The
+		// old `{ ...base, ...rollup }` spread overwrote stored counts with 0; the
+		// additive merge must preserve them.
+		const rollup = recomputeCounters([
+			{
+				type: 'retrieved',
+				event_id: 'r1',
+				trace_id: 't',
+				timestamp: '2025-01-01T00:00:00.000Z',
+				query: 'q',
+				result_ids: ['k1'],
+			} as KnowledgeEvent,
+		]).get('k1');
+		expect(rollup?.succeeded_after_shown_count).toBe(0);
+		const eff = effectiveRetrievalOutcomes(stored, rollup);
+		expect(eff.succeeded_after_shown_count).toBe(4);
+	});
+
+	it('returns base unchanged when there is no rollup', () => {
+		const stored: RetrievalOutcome = {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+			succeeded_after_shown_count: 7,
+		};
+		expect(
+			effectiveRetrievalOutcomes(stored, undefined).succeeded_after_shown_count,
+		).toBe(7);
 	});
 });
 

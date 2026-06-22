@@ -94,6 +94,16 @@ export interface CandidateSelectionOptions {
 export const DEFAULT_SKILL_MIN_CONFIDENCE = 0.7;
 export const DEFAULT_SKILL_MIN_CONFIRMATIONS = 2;
 export const STRONG_SKILL_OUTCOME_COUNT = 3;
+/**
+ * Confidence floor for the high-priority directive maturity path. `critical`/
+ * `high` directives confirmed in only one phase land at `computeConfidence(1,
+ * true) = 0.6`, which is below {@link DEFAULT_SKILL_MIN_CONFIDENCE}. That couples
+ * the confidence gate to the confirmation gate and permanently strands the
+ * highest-value knowledge (issue #1477). This floor gives those directives a
+ * defensible maturity path without lowering the gate for ordinary entries, while
+ * still rejecting sub-0.6 (e.g. single unverified) junk.
+ */
+export const HIGH_PRIORITY_SKILL_MIN_CONFIDENCE = 0.6;
 
 export interface KnowledgeCluster {
 	slug: string;
@@ -160,7 +170,8 @@ export function isSkillMaturityEligible(
 ): boolean {
 	const outcomeSignal = computeOutcomeSignal(outcomes);
 
-	// Negative track record always blocks
+	// Negative track record always blocks — evaluated FIRST so the high-priority
+	// path below can never resurrect an entry with a net-negative outcome record.
 	if (outcomeSignal < 0) return false;
 
 	const strongOutcomes = hasStrongSkillOutcomeRecord(outcomes);
@@ -169,19 +180,43 @@ export function isSkillMaturityEligible(
 	// (allows low-confidence or few-confirmation entries if they have strong outcomes)
 	if (outcomeSignal > 0 && strongOutcomes) return true;
 
-	// LEGACY GATES (for entries without strong positive outcomes):
-	// Entries must have adequate confidence; strong outcomes alone don't bypass confidence
-	if (entry.confidence < opts.minConfidence && !strongOutcomes) return false;
-
-	// Count distinct phase numbers (not total confirmations)
+	// Count distinct phase numbers (not total confirmations). Computed before the
+	// confidence sub-gate so the high-priority path can consult it.
 	const distinctPhases = new Set(
 		(entry.confirmed_by ?? [])
 			.map((c) => c.phase_number)
 			.filter((p): p is number => typeof p === 'number'),
 	).size;
 
-	// Must have sufficient confirmations (counting distinct phases) OR strong outcomes
-	return distinctPhases >= opts.minConfirmations || strongOutcomes;
+	// HIGH-PRIORITY DIRECTIVE PATH (issue #1477): critical/high directives that
+	// are confirmed in at least one phase and clear the 0.6 confidence floor get a
+	// maturity route that does NOT require the 0.7 confidence floor or 2 distinct
+	// phases. This decouples the confidence and confirmation gates for the
+	// highest-value knowledge without loosening the gate for ordinary entries.
+	// (outcomeSignal < 0 already returned above, so negative-record directives stay blocked.)
+	const highPriorityPath =
+		isHighPriorityDirective(entry) &&
+		distinctPhases >= 1 &&
+		entry.confidence >= HIGH_PRIORITY_SKILL_MIN_CONFIDENCE;
+
+	// LEGACY GATES (for entries without strong positive outcomes):
+	// Entries must have adequate confidence; strong outcomes or the high-priority
+	// path bypass the confidence floor.
+	if (
+		entry.confidence < opts.minConfidence &&
+		!strongOutcomes &&
+		!highPriorityPath
+	) {
+		return false;
+	}
+
+	// Must have sufficient confirmations (counting distinct phases), strong
+	// outcomes, or qualify via the high-priority path.
+	return (
+		distinctPhases >= opts.minConfirmations ||
+		strongOutcomes ||
+		highPriorityPath
+	);
 }
 
 // ============================================================================
@@ -512,9 +547,20 @@ export async function generateSkills(
 		const hive = existsSync(hivePath)
 			? await readKnowledge<HiveKnowledgeEntry>(hivePath)
 			: [];
-		pool = [...swarm, ...hive].filter(
-			(e) => idSet.has(e.id) && e.status !== 'archived',
-		);
+		// Substitute event-sourced effective outcomes onto the pool (mirrors
+		// selectCandidateEntries:133) so downstream singleton/strong-outcome checks
+		// read the same merged values as the default path, not the raw entry
+		// counters. Defensive consistency for issue #1477's outcome accrual.
+		const rollups = await readKnowledgeCounterRollups(req.directory);
+		pool = [...swarm, ...hive]
+			.filter((e) => idSet.has(e.id) && e.status !== 'archived')
+			.map((e) => ({
+				...e,
+				retrieval_outcomes: effectiveRetrievalOutcomes(
+					e.retrieval_outcomes,
+					rollups.get(e.id),
+				),
+			}));
 	} else {
 		pool = candidates;
 	}

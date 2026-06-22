@@ -5,6 +5,7 @@ description: >
   swarm-pr-feedback instead for new work; this shim exists so older references
   still route to the canonical feedback-closure workflow.
 effort: medium
+skill_origin: shim
 ---
 
 # PR Review Fix Compatibility Shim

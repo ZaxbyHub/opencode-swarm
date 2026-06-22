@@ -78,11 +78,6 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => {
 });
 
 import { updateRetrievalOutcome } from '../../../src/hooks/knowledge-reader.js';
-import {
-	readKnowledge,
-	rewriteKnowledge,
-	transactKnowledge,
-} from '../../../src/hooks/knowledge-store.js';
 
 // ============================================================================
 // Helpers
@@ -116,139 +111,108 @@ function readShownFile(): Record<string, string[]> {
 	return JSON.parse(fs.readFileSync(shownFile, 'utf-8'));
 }
 
+// Read the 'outcome' events updateRetrievalOutcome appended to the real temp
+// .swarm event log (issue #1477: outcome attribution is event-sourced).
+interface OutcomeEventLine {
+	type: string;
+	knowledge_id?: string;
+	outcome?: string;
+	phase?: string;
+	evidence_summary?: string;
+}
+function readOutcomeEvents(): OutcomeEventLine[] {
+	const eventsFile = path.join(tmpDir, '.swarm', 'knowledge-events.jsonl');
+	if (!fs.existsSync(eventsFile)) return [];
+	return fs
+		.readFileSync(eventsFile, 'utf-8')
+		.split('\n')
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as OutcomeEventLine)
+		.filter((e) => e.type === 'outcome');
+}
+
 // ============================================================================
 // Tests for updateRetrievalOutcome with canonical Phase N keys
 // ============================================================================
 
 describe('updateRetrievalOutcome — Phase N key lookup', () => {
-	it('finds entries stored under canonical "Phase N" key', async () => {
+	it('finds ids stored under canonical "Phase N" key and emits an outcome event', async () => {
 		// Simulate what the fixed recordLessonsShown writes: canonical 'Phase 1'
 		const lessonId = 'lesson-abc-123';
 		writeShownFile({ 'Phase 1': [lessonId] });
 
-		// Mock readKnowledge to return a swarm entry with that id
-		const entry = {
-			id: lessonId,
-			schema_version: 1,
-			tier: 'swarm',
-			lesson: 'Use TypeScript strict mode',
-			category: 'tooling',
-			tags: ['typescript'],
-			scope: 'global',
-			confidence: 0.7,
-			status: 'candidate',
-			confirmed_by: [],
-			retrieval_outcomes: {
-				applied_count: 0,
-				succeeded_after_shown_count: 0,
-				failed_after_shown_count: 0,
-			},
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
-		};
-		(readKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
-
 		await updateRetrievalOutcome(tmpDir, 'Phase 1', true);
 
-		// transactKnowledge mock mutates entries in-place via readKnowledge mock
-		expect(transactKnowledge).toHaveBeenCalled();
-		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
-		const updated = mutatedEntries.find((e: typeof entry) => e.id === lessonId);
-		expect(updated).toBeDefined();
-		// v2: applied_count is FROZEN (not auto-incremented from shown)
-		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(1);
+		// Issue #1477: attribution is now an immutable 'outcome' event keyed by
+		// knowledge_id, not an in-place entry mutation.
+		const events = readOutcomeEvents();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			type: 'outcome',
+			knowledge_id: lessonId,
+			outcome: 'success',
+			phase: 'Phase 1',
+		});
 	});
 
-	it('increments succeeded_after_shown_count when outcome is true', async () => {
+	it('emits a success outcome event with non-empty evidence when the phase succeeded', async () => {
 		const id = 'lesson-xyz';
 		writeShownFile({ 'Phase 2': [id] });
 
-		const entry = {
-			id,
-			schema_version: 1,
-			tier: 'swarm',
-			lesson: 'Always validate inputs',
-			category: 'security',
-			tags: [],
-			scope: 'global',
-			confidence: 0.6,
-			status: 'candidate',
-			confirmed_by: [],
-			retrieval_outcomes: {
-				applied_count: 2,
-				succeeded_after_shown_count: 1,
-				failed_after_shown_count: 0,
-			},
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
-		};
-		(readKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
-
 		await updateRetrievalOutcome(tmpDir, 'Phase 2', true);
 
-		// transactKnowledge mock mutates entries in-place via readKnowledge mock
-		expect(transactKnowledge).toHaveBeenCalled();
-		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
-		const updated = mutatedEntries.find((e: typeof entry) => e.id === id);
-		// v2: applied_count is FROZEN — should stay at 2
-		expect(updated.retrieval_outcomes.applied_count).toBe(2);
-		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(2); // was 1
+		const events = readOutcomeEvents();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			type: 'outcome',
+			knowledge_id: id,
+			outcome: 'success',
+		});
+		expect(typeof events[0].evidence_summary).toBe('string');
+		expect((events[0].evidence_summary ?? '').length).toBeGreaterThan(0);
 	});
 
-	it('increments failed_after_shown_count when outcome is false', async () => {
+	it('emits a failure outcome event when the phase failed', async () => {
 		const id = 'lesson-fail';
 		writeShownFile({ 'Phase 3': [id] });
 
-		const entry = {
-			id,
-			schema_version: 1,
-			tier: 'swarm',
-			lesson: 'Avoid inline SQL',
-			category: 'security',
-			tags: [],
-			scope: 'global',
-			confidence: 0.5,
-			status: 'candidate',
-			confirmed_by: [],
-			retrieval_outcomes: {
-				applied_count: 1,
-				succeeded_after_shown_count: 1,
-				failed_after_shown_count: 0,
-			},
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
-		};
-		(readKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([entry]);
-
 		await updateRetrievalOutcome(tmpDir, 'Phase 3', false);
 
-		// transactKnowledge mock mutates entries in-place via readKnowledge mock
-		expect(transactKnowledge).toHaveBeenCalled();
-		const mutatedEntries = await readKnowledge('/mock/.swarm/knowledge.jsonl');
-		const updated = mutatedEntries.find((e: typeof entry) => e.id === id);
-		// v2: applied_count is FROZEN — should stay at 1
-		expect(updated.retrieval_outcomes.applied_count).toBe(1);
-		expect(updated.retrieval_outcomes.failed_after_shown_count).toBe(1);
-		expect(updated.retrieval_outcomes.succeeded_after_shown_count).toBe(1); // unchanged
+		const events = readOutcomeEvents();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			type: 'outcome',
+			knowledge_id: id,
+			outcome: 'failure',
+			phase: 'Phase 3',
+		});
+	});
+
+	it('emits one event per shown id for the phase', async () => {
+		writeShownFile({ 'Phase 4': ['a', 'b', 'c'] });
+
+		await updateRetrievalOutcome(tmpDir, 'Phase 4', true);
+
+		const ids = readOutcomeEvents()
+			.map((e) => e.knowledge_id)
+			.sort();
+		expect(ids).toEqual(['a', 'b', 'c']);
 	});
 
 	it('does nothing when no lessons were shown for the given phase', async () => {
 		writeShownFile({ 'Phase 1': ['some-other-id'] });
-		(readKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
 		await updateRetrievalOutcome(tmpDir, 'Phase 2', true);
 
-		// No lessons shown for Phase 2, so transactKnowledge should not be called
-		expect(transactKnowledge).not.toHaveBeenCalled();
+		// No ids shown for Phase 2 → no outcome event emitted.
+		expect(readOutcomeEvents()).toHaveLength(0);
 	});
 
 	it('does nothing when .knowledge-shown.json does not exist', async () => {
 		// No file written
-		(readKnowledge as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-
 		await updateRetrievalOutcome(tmpDir, 'Phase 1', true);
 
-		expect(transactKnowledge).not.toHaveBeenCalled();
+		expect(readOutcomeEvents()).toHaveLength(0);
 	});
 });
 

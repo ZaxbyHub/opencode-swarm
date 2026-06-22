@@ -36,6 +36,7 @@ import {
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
 import { hasActiveFullAuto } from '../state.js';
+import { warn } from '../utils/logger.js';
 import {
 	type AutoApplyResult,
 	autoApplyProposals,
@@ -44,6 +45,8 @@ import {
 	generateSkills,
 	listSkills,
 	parseDraftFrontmatter,
+	regenerateSkill,
+	retireSkill,
 	selectCandidateEntries,
 } from './skill-generator.js';
 import {
@@ -132,6 +135,10 @@ export interface SkillImproveResult {
 		motifs: number;
 		proposalsWritten: number;
 	};
+	/** Issue #1477: self-healing reconciliation of stale active generated skills
+	 *  (regenerate-or-retire). In proposal-only runs this is a dry run (the
+	 *  `retired` list holds retire-candidates that were not actually mutated). */
+	staleSkillReconciliation?: StaleSkillReconciliationResult;
 	/** #1234 Part 3D: critic-gated auto-apply of proposals in full-auto mode. */
 	autoApply?: AutoApplyResult;
 }
@@ -185,7 +192,19 @@ async function gatherInventory(directory: string): Promise<InventorySnapshot> {
 			continue;
 		}
 		const fm = parseDraftFrontmatter(content);
-		if (!fm) continue;
+		if (!fm) {
+			// Detection blind spot (issue #1477): a SKILL.md with no parseable YAML
+			// frontmatter was silently skipped and never surfaced as stale. Record a
+			// distinct reason so reconciliation can act on it instead of ignoring it.
+			staleActiveSkills.push({
+				slug: skill.slug,
+				reasons: ['unparseable_frontmatter'],
+			});
+			continue;
+		}
+		// Hand-authored compatibility shims (skill_origin: shim) are intentionally
+		// not generated from knowledge entries — never flag or reconcile them.
+		if (fm.skillOrigin === 'shim') continue;
 		metadataReadable += 1;
 		const reasons: string[] = [];
 		if (fm.sourceKnowledgeIds.length === 0) {
@@ -376,6 +395,98 @@ function buildLLMProposalFrame(args: {
 	lines.push(args.body.trim());
 	lines.push('');
 	return lines.join('\n');
+}
+
+export interface StaleSkillReconciliationResult {
+	regenerated: string[];
+	retired: string[];
+	skipped: string[];
+	checked: number;
+}
+
+/**
+ * Self-healing reconciliation for active generated skills (issue #1477). Detects
+ * skills that are stale — no parseable frontmatter, or no `source_knowledge_ids`
+ * anchoring them to live knowledge — and either regenerates them from their
+ * source entries or retires them when no live source remains. Hand-authored
+ * shims (`skill_origin: shim`) are skipped. Deterministic: no LLM, no quota draw;
+ * intended to run on the skill_improver cadence. Fail-open per skill — one bad
+ * skill never aborts the sweep.
+ */
+export async function reconcileStaleActiveSkills(
+	directory: string,
+	options: { dryRun?: boolean } = {},
+): Promise<StaleSkillReconciliationResult> {
+	const result: StaleSkillReconciliationResult = {
+		regenerated: [],
+		retired: [],
+		skipped: [],
+		checked: 0,
+	};
+	let skills: Awaited<ReturnType<typeof listSkills>>;
+	try {
+		skills = await listSkills(directory);
+	} catch {
+		return result;
+	}
+	for (const skill of skills.active) {
+		let content: string;
+		try {
+			content = await readFile(skill.path, 'utf-8');
+		} catch {
+			continue;
+		}
+		const fm = parseDraftFrontmatter(content);
+		// Skip hand-authored shims regardless of (missing) source ids.
+		if (fm?.skillOrigin === 'shim') {
+			result.skipped.push(skill.slug);
+			continue;
+		}
+		// Stale = unparseable frontmatter (the closed blind spot), no source ids
+		// to anchor the skill to live knowledge, or no generated_at timestamp
+		// (gatherInventory flags missing_generated_at; reconcile must match).
+		// Note: updated_after_generation staleness requires a live knowledge
+		// lookup (not available here without loading the full store) — those
+		// skills are detected by gatherInventory but reconciliation for them
+		// is deferred to a future pass that loads the store.
+		const stale = !fm || fm.sourceKnowledgeIds.length === 0 || !fm.generatedAt;
+		if (!stale) continue;
+		result.checked += 1;
+		if (options.dryRun) {
+			// Report-only: surface the slug without mutating anything.
+			result.retired.push(skill.slug);
+			continue;
+		}
+		try {
+			const regen = await _internals.regenerateSkill(directory, skill.slug, {
+				evaluate: false,
+			});
+			if (regen.regenerated) {
+				result.regenerated.push(skill.slug);
+			} else if (regen.retired) {
+				// regenerateSkill auto-retired (all source knowledge archived).
+				result.retired.push(skill.slug);
+			} else {
+				// Could not re-derive (no parseable source ids and no slug-token
+				// re-cluster match) → retire as the deterministic terminal state.
+				const retire = await retireSkill(
+					directory,
+					skill.slug,
+					'stale_no_source_knowledge',
+				);
+				if (retire.retired) result.retired.push(skill.slug);
+			}
+		} catch (err) {
+			// fail-open: skip this skill, continue the sweep.
+			warn(
+				`[skill-improver] reconcileStaleActiveSkills: failed to reconcile '${skill.slug}': ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+			result.skipped.push(skill.slug);
+		}
+	}
+	return result;
 }
 
 export async function runSkillImprover(
@@ -637,6 +748,15 @@ export async function runSkillImprover(
 		proposalsWritten: successMotifResult.proposalsWritten.length,
 	};
 
+	// Issue #1477: self-healing reconciliation of stale active generated skills.
+	// Deterministic, no LLM/quota. Only mutates skills when this run is allowed to
+	// write skills (draft_skills mode); otherwise reports retire-candidates via a
+	// dry run so a proposal-only run never silently rewrites/retires skills.
+	const staleSkillReconciliation = await reconcileStaleActiveSkills(
+		req.directory,
+		{ dryRun: writeMode !== 'draft_skills' },
+	);
+
 	// #1234 Part 3D: critic-gated auto-apply of proposals in full-auto mode.
 	// Only runs when THIS session is in full-auto AND an LLM delegate is available
 	// (the delegate acts as the critic gate). The explicit `req.sessionId` check
@@ -671,6 +791,7 @@ export async function runSkillImprover(
 		unactionableHardening,
 		macroMotifs,
 		successMotifs,
+		staleSkillReconciliation,
 		autoApply,
 	};
 }
@@ -682,4 +803,6 @@ export const _internals = {
 	buildSystemPrompt,
 	buildUserPrompt,
 	gatherInventory,
+	reconcileStaleActiveSkills,
+	regenerateSkill,
 };
