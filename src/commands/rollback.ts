@@ -32,6 +32,10 @@ export async function handleRollbackCommand(
 		try {
 			manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
 		} catch {
+			// Justification: fs.existsSync confirmed the manifest file exists
+			// before entering this block, so a parse failure means the file is
+			// corrupted — not absent. We surface a clear corruption message
+			// rather than silently ignoring the error.
 			return 'Error: Checkpoint manifest is corrupted. Delete .swarm/checkpoints/manifest.json and re-checkpoint.';
 		}
 		const checkpoints = manifest.checkpoints || [];
@@ -72,6 +76,9 @@ export async function handleRollbackCommand(
 	try {
 		manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
 	} catch {
+		// Justification: fs.existsSync confirmed the manifest file exists
+		// before entering this block, so a parse failure means the file is
+		// corrupted. Surface a clear corruption message to guide recovery.
 		return `Error: Checkpoint manifest is corrupted. Delete .swarm/checkpoints/manifest.json and re-checkpoint.`;
 	}
 	const checkpoint = manifest.checkpoints?.find((c) => c.phase === targetPhase);
@@ -108,6 +115,7 @@ export async function handleRollbackCommand(
 
 	const successes: string[] = [];
 	const failures: { file: string; error: string }[] = [];
+	const warnings: string[] = [];
 
 	for (const file of checkpointFiles) {
 		// Skip ledger files — we'll reinitialize the ledger fresh
@@ -140,35 +148,49 @@ export async function handleRollbackCommand(
 	// Delete any existing ledger unconditionally — we're rolling back to a
 	// checkpoint state and the old ledger belongs to the pre-rollback state.
 	const existingLedgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
+	let ledgerDeletionFailed = false;
 	if (fs.existsSync(existingLedgerPath)) {
-		fs.unlinkSync(existingLedgerPath);
+		try {
+			fs.unlinkSync(existingLedgerPath);
+		} catch (err) {
+			ledgerDeletionFailed = true;
+			const errMsg = err instanceof Error ? err.message : String(err);
+			warnings.push(
+				`⚠️ Warning: Could not delete stale ledger (${errMsg}). The ledger may be inconsistent with the restored plan. Run /swarm reset-session to clean up session state.`,
+			);
+		}
 	}
 
-	// Initialize a fresh ledger with the restored plan (if available)
-	// We excluded plan-ledger.jsonl from the checkpoint copy above and
-	// create a brand-new ledger here so the ledger matches the restored state.
-	try {
-		const planJsonPath = path.join(swarmDir, 'plan.json');
-		if (fs.existsSync(planJsonPath)) {
-			const planRaw = fs.readFileSync(planJsonPath, 'utf-8');
-			const plan = PlanSchema.parse(JSON.parse(planRaw) as Plan);
-			const planId = derivePlanId(plan);
+	// Only re-initialize ledger if deletion succeeded (or ledger didn't exist).
+	// If deletion failed, the stale ledger remains and initLedger would throw
+	// "Ledger already initialized" — skipping preserves the warning path above.
+	if (!ledgerDeletionFailed) {
+		// Initialize a fresh ledger with the restored plan (if available)
+		// We excluded plan-ledger.jsonl from the checkpoint copy above and
+		// create a brand-new ledger here so the ledger matches the restored state.
+		try {
+			const planJsonPath = path.join(swarmDir, 'plan.json');
+			if (fs.existsSync(planJsonPath)) {
+				const planRaw = fs.readFileSync(planJsonPath, 'utf-8');
+				const plan = PlanSchema.parse(JSON.parse(planRaw) as Plan);
+				const planId = derivePlanId(plan);
 
-			const planHash = computePlanHash(plan);
-			await initLedger(directory, planId, planHash, plan);
+				const planHash = computePlanHash(plan);
+				await initLedger(directory, planId, planHash, plan);
 
-			await appendLedgerEvent(directory, {
-				event_type: 'plan_rebuilt',
-				source: 'rollback',
-				plan_id: planId,
-			});
+				await appendLedgerEvent(directory, {
+					event_type: 'plan_rebuilt',
+					source: 'rollback',
+					plan_id: planId,
+				});
+			}
+		} catch (initError) {
+			return [
+				`Rollback restored files but failed to initialize ledger: ${initError instanceof Error ? initError.message : String(initError)}`,
+				'The .swarm/plan.json has been restored but the ledger may be out of sync.',
+				'Run /swarm reset-session to reinitialize the ledger.',
+			].join('\n');
 		}
-	} catch (initError) {
-		return [
-			`Rollback restored files but failed to initialize ledger: ${initError instanceof Error ? initError.message : String(initError)}`,
-			'The .swarm/plan.json has been restored but the ledger may be out of sync.',
-			'Run /swarm reset-session to reinitialize the ledger.',
-		].join('\n');
 	}
 
 	// Write rollback event to JSONL
@@ -189,5 +211,12 @@ export async function handleRollbackCommand(
 		);
 	}
 
+	if (warnings.length > 0) {
+		return [
+			...warnings,
+			'',
+			`Rolled back to phase ${targetPhase}: ${checkpoint.label || 'no label'}`,
+		].join('\n');
+	}
 	return `Rolled back to phase ${targetPhase}: ${checkpoint.label || 'no label'}`;
 }

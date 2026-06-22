@@ -5,6 +5,11 @@ import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
 import { swarmState } from '../state';
 
+function errorMessage(err: unknown): string {
+	if (err instanceof Error) return err.message;
+	return String(err);
+}
+
 /**
  * Handles the /swarm reset-session command.
  * Deletes only the session state file (.swarm/session/state.json)
@@ -27,29 +32,37 @@ export async function handleResetSessionCommand(
 			results.push('⏭️ state.json not found (already clean)');
 		}
 	} catch {
+		// Justification: best-effort session cleanup — state.json may be
+		// locked by an active session or concurrently removed. The report
+		// records the failure; reset-session continues to clean remaining files.
 		results.push('❌ Failed to delete state.json');
 	}
 
 	// Clean all files in .swarm/session/ except state.json
-	try {
-		const sessionDir = path.dirname(
-			validateSwarmPath(directory, 'session/state.json'),
-		);
-		if (fs.existsSync(sessionDir)) {
-			const files = fs.readdirSync(sessionDir);
-			const otherFiles = files.filter((f) => f !== 'state.json');
-			let deletedCount = 0;
-			for (const file of otherFiles) {
-				const filePath = path.join(sessionDir, file);
-				if (fs.lstatSync(filePath).isFile()) {
-					fs.unlinkSync(filePath);
-					deletedCount++;
-				}
-			}
-			results.push(`✅ Cleaned ${deletedCount} additional session file(s)`);
+	const sessionDir = path.dirname(
+		validateSwarmPath(directory, 'session/state.json'),
+	);
+	let sessionFiles: string[] = [];
+	if (fs.existsSync(sessionDir)) {
+		try {
+			sessionFiles = fs.readdirSync(sessionDir);
+		} catch (err) {
+			results.push(`❌ Failed to read session directory: ${errorMessage(err)}`);
 		}
-	} catch {
-		// Non-blocking - session directory cleanup is best effort
+	}
+	// If sessionDir doesn't exist, sessionFiles stays [] — nothing to clean, no error
+
+	for (const file of sessionFiles) {
+		if (file === 'state.json') continue; // handled separately
+		const filePath = path.join(sessionDir, file);
+		try {
+			if (!fs.existsSync(filePath)) continue;
+			if (!fs.lstatSync(filePath).isFile()) continue;
+			fs.unlinkSync(filePath);
+			results.push(`✓ Deleted ${file}`);
+		} catch (err) {
+			results.push(`❌ Failed to delete ${file}: ${errorMessage(err)}`);
+		}
 	}
 
 	// Clear in-memory agent sessions

@@ -463,7 +463,20 @@ describe('Git Branch Module', () => {
 			const timedOut = Object.assign(new Error('spawnSync git ETIMEDOUT'), {
 				code: 'ETIMEDOUT',
 			}) as NodeJS.ErrnoException;
-			setupMock({ status: null, stdout: '', stderr: '', error: timedOut });
+			// getGitRepositoryStatus → gitExec loops over all Windows git candidates
+			// (7 on Windows: 'git' + 2 per ProgramFiles root × 2 roots) and retries
+			// each up to MAX_TRANSIENT_RETRIES (5) times. Provide enough ETIMEDOUT
+			// values so every candidate exhausts its retries and the function throws
+			// GitBinaryMissingError, which getGitRepositoryStatus maps to 'git_error'.
+			const etimedoutResult: MockSpawnResult = {
+				status: null,
+				stdout: '',
+				stderr: '',
+				error: timedOut,
+			};
+			returnValues = Array.from({ length: 35 }, () => etimedoutResult);
+			callIndex = 0;
+			mockSpawnSync.mockClear();
 
 			const result = branch.getGitRepositoryStatus(testCwd);
 
@@ -483,6 +496,138 @@ describe('Git Branch Module', () => {
 			expect(opts.windowsHide).toBe(true);
 			expect(opts.maxBuffer).toBe(5 * 1024 * 1024);
 			expect((opts.stdio as string[])[0]).toBe('ignore');
+		});
+	});
+
+	describe('gitExec transient retry — regression: RC1 spawnSync under-load (ETIMEDOUT)', () => {
+		const testCwd = '/test/repo';
+
+		// ETIMEDOUT error object (transient)
+		const etimedoutErr = Object.assign(new Error('spawnSync ETIMEDOUT'), {
+			code: 'ETIMEDOUT',
+		}) as NodeJS.ErrnoException;
+
+		// ENOENT error simulating git binary missing
+		const enoentErr = Object.assign(new Error('spawn git ENOENT'), {
+			code: 'ENOENT',
+		}) as NodeJS.ErrnoException;
+
+		test('1. ETIMEDOUT retried: spawnSync returns ETIMEDOUT, gitExec retries up to MAX_TRANSIENT_RETRIES then throws', () => {
+			// All 5 attempts return ETIMEDOUT → after 5 retries, throws
+			const etimedoutResult = {
+				status: null as number | null,
+				stdout: '',
+				stderr: '',
+				error: etimedoutErr,
+			};
+			setupMock(
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+			);
+
+			expect(() =>
+				branch._internals.gitExec(['rev-parse', '--git-dir'], testCwd),
+			).toThrow();
+			// MAX_TRANSIENT_RETRIES = 5 attempts total
+			expect(mockSpawnSync).toHaveBeenCalledTimes(5);
+		});
+
+		test('2. Permanent error not retried: spawnSync returns status=1 (non-zero exit), gitExec throws immediately with NO retry', () => {
+			// Only 1 call should happen — status=1 is a permanent git error, not transient
+			setupMock({
+				status: 1,
+				stdout: '',
+				stderr: 'merge conflict',
+				error: undefined,
+			});
+
+			expect(() =>
+				branch._internals.gitExec(['merge', 'feature'], testCwd),
+			).toThrow('merge conflict');
+			// Must be exactly 1 call — no retries for permanent errors
+			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+		});
+
+		test('3. GitBinaryMissingError not retried: spawnSync returns git-binary-missing ENOENT, gitExec continues to next candidate (not retried as transient)', () => {
+			// ENOENT is classified as git-binary-missing by isGitBinaryMissing → breaks to next candidate.
+			// On Windows there are 7 git candidates; over-provision so the fallback default
+			// { status: 0, stdout: '', stderr: '' } never gets used (which would return '' instead of throwing).
+			const enoentResult = {
+				status: null as number | null,
+				stdout: '',
+				stderr: '',
+				error: enoentErr,
+			};
+			returnValues = Array.from({ length: 10 }, () => enoentResult);
+			callIndex = 0;
+			mockSpawnSync.mockClear();
+
+			expect(() =>
+				branch._internals.gitExec(['rev-parse', '--git-dir'], testCwd),
+			).toThrow();
+			// ENOENT git-missing is NOT retried as transient — each candidate breaks immediately
+			const expectedCandidates = process.platform === 'win32' ? 7 : 1;
+			expect(mockSpawnSync).toHaveBeenCalledTimes(expectedCandidates);
+		});
+
+		test('4. Success path transparent: spawnSync succeeds on FIRST attempt, gitExec returns immediately with NO retry delay', () => {
+			setupMock({ status: 0, stdout: '.git\n', stderr: '' });
+
+			const result = branch._internals.gitExec(
+				['rev-parse', '--git-dir'],
+				testCwd,
+			);
+
+			expect(result).toBe('.git\n');
+			// Exactly 1 call — no wasted retries on first-attempt success
+			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+		});
+
+		test('5. Retry exhaustion: spawnSync returns ETIMEDOUT on ALL attempts, gitExec throws after MAX_TRANSIENT_RETRIES attempts', () => {
+			const etimedoutResult = {
+				status: null as number | null,
+				stdout: '',
+				stderr: '',
+				error: etimedoutErr,
+			};
+			// 5 attempts (MAX_TRANSIENT_RETRIES), all ETIMEDOUT
+			setupMock(
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+			);
+
+			expect(() =>
+				branch._internals.gitExec(['rev-parse', '--git-dir'], testCwd),
+			).toThrow();
+			expect(mockSpawnSync).toHaveBeenCalledTimes(5);
+		});
+
+		test('6. Retry succeeds on second attempt: spawnSync returns ETIMEDOUT once then succeeds, gitExec returns the successful result', () => {
+			const etimedoutResult = {
+				status: null as number | null,
+				stdout: '',
+				stderr: '',
+				error: etimedoutErr,
+			};
+			setupMock(
+				etimedoutResult, // attempt 1: ETIMEDOUT → transient retry
+				{ status: 0, stdout: 'main\n', stderr: '' }, // attempt 2: success
+			);
+
+			const result = branch._internals.gitExec(
+				['rev-parse', '--abbrev-ref', 'HEAD'],
+				testCwd,
+			);
+
+			expect(result).toBe('main\n');
+			// Exactly 2 calls — first failed (transient), second succeeded
+			expect(mockSpawnSync).toHaveBeenCalledTimes(2);
 		});
 	});
 

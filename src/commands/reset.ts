@@ -53,6 +53,10 @@ export async function handleResetCommand(
 				results.push(`- ⏭️ ${filename} not found (skipped)`);
 			}
 		} catch {
+			// Justification: best-effort cleanup — deletion may fail for reasons
+			// other than absence (permissions, concurrent lock, etc.). The file
+			// was already skipped if it didn't exist; this catch records a
+			// generic failure so the reset report reflects the partial result.
 			results.push(`- ❌ Failed to delete ${filename}`);
 		}
 	}
@@ -65,8 +69,10 @@ export async function handleResetCommand(
 				fs.unlinkSync(rootPath);
 				results.push(`- ✅ Deleted ${filename} (root)`);
 			}
-		} catch {
-			// Non-fatal: root-level cleanup is best-effort
+		} catch (err) {
+			results.push(
+				`- ❌ Failed to delete ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 
@@ -77,6 +83,9 @@ export async function handleResetCommand(
 			'- ✅ Stopped background automation (in-memory queues cleared)',
 		);
 	} catch {
+		// Justification: best-effort — background automation may already be
+		// stopped or never started. Failing open here keeps the reset path
+		// usable even when the automation manager is in an unexpected state.
 		results.push('- ⏭️ Background automation not running (skipped)');
 	}
 
@@ -90,6 +99,9 @@ export async function handleResetCommand(
 			results.push('- ⏭️ summaries/ not found (skipped)');
 		}
 	} catch {
+		// Justification: best-effort directory cleanup — summaries/ may be
+		// locked or partially removed by an external process. Swallowing
+		// keeps the reset path fail-open; the report already marks the failure.
 		results.push('- ❌ Failed to delete summaries/');
 	}
 

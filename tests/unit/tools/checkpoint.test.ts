@@ -326,7 +326,14 @@ describe('checkpoint tool', () => {
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('not a git repository');
+			// Error must include the specific isGitRepo warning, not just a generic message.
+			// The entry guard now surfaces: "git probe failed — directory may not be a git repository"
+			expect(parsed.error).toMatch(
+				/git probe failed|may not be a git repository/,
+			);
+			expect(parsed.error).toContain(
+				'checkpoint tools require a git repository',
+			);
 
 			// Restore first, then cleanup
 			process.chdir(prevCwd);

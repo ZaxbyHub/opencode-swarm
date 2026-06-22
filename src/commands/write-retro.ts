@@ -53,6 +53,9 @@ Writes a retrospective evidence bundle for a completed phase.
 		}
 		parsedArgs = jsonObj as WriteRetroArgs;
 	} catch {
+		// Justification: user-supplied JSON may be syntactically invalid.
+		// We return a helpful error message rather than propagating the
+		// parse exception — the command output is the reporting surface.
 		return 'Error: Invalid JSON — expected a JSON object with retro fields. Run `/swarm write-retro` with no arguments to see usage.';
 	}
 
@@ -72,6 +75,10 @@ Writes a retrospective evidence bundle for a completed phase.
 			message?: string;
 		};
 	} catch {
+		// Justification: executeWriteRetro returns a JSON string, but an
+		// unexpected runtime error (e.g. serialization failure) could
+		// produce non-JSON output. We surface a clean error rather than
+		// crashing the command handler.
 		return 'Error: Failed to parse result from write-retro tool.';
 	}
 

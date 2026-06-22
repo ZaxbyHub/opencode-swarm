@@ -214,6 +214,70 @@ describe('runCuratorPostMortem', () => {
 		expect(result2.summary).not.toContain('already exists');
 	});
 
+	// -------------------------------------------------------------------------
+	// Regression: FR-004 / SC-007 — stale post-mortem-unknown.md must not block
+	// future regeneration. When plan.json is absent, effectivePlanId gets a
+	// timestamp suffix so every run uses a fresh filename.
+	// -------------------------------------------------------------------------
+
+	test('stale post-mortem-unknown.md does NOT block regeneration (FR-004 SC-007)', async () => {
+		// Arrange: .swarm dir exists but plan.json does NOT.
+		ensureSwarmDir(dir);
+
+		// Simulate a stale report from a prior run (pre-fix this would be
+		// post-mortem-unknown.md and would permanently block regeneration).
+		const staleReportPath = join(dir, '.swarm', 'post-mortem-unknown.md');
+		writeFileSync(
+			staleReportPath,
+			`# Post-Mortem Report: unknown\nGenerated: ${new Date().toISOString()}\n\nStale content from prior run.`,
+		);
+
+		// Act: run without force.
+		const result = await runCuratorPostMortem(dir);
+
+		// Assert: it regenerates (does NOT skip as idempotent).
+		expect(result.success).toBe(true);
+		expect(result.summary!).not.toContain('already exists');
+		// A new report was written at a timestamped path (not the stale unknown.md).
+		expect(result.reportPath!).not.toBe(staleReportPath);
+		expect(existsSync(result.reportPath!)).toBe(true);
+		const content = readFileSync(result.reportPath!, 'utf-8');
+		expect(content).toContain('Post-Mortem Report');
+		// The stale file is untouched.
+		expect(readFileSync(staleReportPath, 'utf-8')).toContain('Stale content');
+	});
+
+	test('effectivePlanId includes timestamp when plan.json is absent', async () => {
+		ensureSwarmDir(dir);
+
+		const result = await runCuratorPostMortem(dir);
+
+		expect(result.success).toBe(true);
+		// effectivePlanId must carry a timestamp so subquent runs never reuse it.
+		expect(result.planId!).toMatch(/^unknown-\d+$/);
+		// Report filename also reflects the timestamped effectivePlanId.
+		expect(result.reportPath!).toContain(
+			`post-mortem-unknown-${result.planId!.split('-')[1]}`,
+		);
+	});
+
+	test('force:true regenerates even when stale post-mortem-unknown.md exists', async () => {
+		ensureSwarmDir(dir);
+
+		// Pre-create stale report.
+		const staleReportPath = join(dir, '.swarm', 'post-mortem-unknown.md');
+		writeFileSync(
+			staleReportPath,
+			`# Post-Mortem Report: unknown\nGenerated: ${new Date().toISOString()}\n\nStale content.`,
+		);
+
+		const result = await runCuratorPostMortem(dir, { force: true });
+
+		expect(result.success).toBe(true);
+		expect(result.summary!).not.toContain('already exists');
+		expect(result.reportPath!).not.toBe(staleReportPath);
+	});
+
 	test('falls back to data-only when LLM delegate fails', async () => {
 		writePlan(dir, {
 			title: 'Test Project',
@@ -242,7 +306,9 @@ describe('runCuratorPostMortem', () => {
 		const result = await runCuratorPostMortem(dir);
 
 		expect(result.success).toBe(true);
-		expect(result.planId).toBe('unknown');
+		// planId is 'unknown' but effectivePlanId includes a timestamp suffix so
+		// every run generates a fresh report (no stale-unknown.md poisoning).
+		expect(result.planId).toMatch(/^unknown-\d+$/);
 		expect(result.warnings).toContainEqual(
 			expect.stringContaining('Plan not found'),
 		);

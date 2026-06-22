@@ -5,6 +5,11 @@ import {
 	isGitBinaryMissing,
 } from '../utils/git-binary-missing-error.js';
 import { warn } from '../utils/logger.js';
+import {
+	isTransientSpawnError,
+	MAX_TRANSIENT_RETRIES,
+	transientBackoff,
+} from '../utils/transient-retry.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
@@ -72,6 +77,11 @@ function isNotGitRepositoryMessage(message: string): boolean {
  *     signing entirely. This is the single source of truth for
  *     non-interactive git, so the hardening covers every caller
  *     (current and future) uniformly.
+ *
+ * Transient retry: transient spawn errors (e.g. ETIMEDOUT) are retried
+ * with exponential backoff up to MAX_TRANSIENT_RETRIES before throwing.
+ * Permanent errors — non-zero exit, missing git binary, non-transient
+ * spawn errors — throw immediately with no retry.
  */
 function gitExec(args: string[], cwd: string): string {
 	let missingGitError: unknown;
@@ -89,28 +99,44 @@ function gitExec(args: string[], cwd: string): string {
 			: args;
 
 	for (const command of windowsGitCandidates()) {
-		const result = child_process.spawnSync(command, hardenedArgs, {
-			cwd,
-			encoding: 'utf-8',
-			timeout: GIT_TIMEOUT_MS,
-			windowsHide: true,
-			maxBuffer: GIT_MAX_BUFFER_BYTES,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-		});
-		if (result.error) {
-			if (isGitBinaryMissing(result.error)) {
-				missingGitError ??= result.error;
-				continue;
+		for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+			const result = child_process.spawnSync(command, hardenedArgs, {
+				cwd,
+				encoding: 'utf-8',
+				timeout: GIT_TIMEOUT_MS,
+				windowsHide: true,
+				maxBuffer: GIT_MAX_BUFFER_BYTES,
+				stdio: ['ignore', 'pipe', 'pipe'],
+				env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+			});
+
+			if (!result.error && result.status === 0) {
+				return result.stdout;
 			}
-			throw new Error(errorMessage(result.error));
+
+			if (result.error) {
+				if (isGitBinaryMissing(result.error)) {
+					missingGitError ??= result.error;
+					break;
+				}
+
+				if (
+					isTransientSpawnError(result.error) &&
+					attempt < MAX_TRANSIENT_RETRIES - 1
+				) {
+					transientBackoff(attempt);
+					continue;
+				}
+
+				throw new Error(errorMessage(result.error));
+			}
+
+			if (result.status !== 0) {
+				throw new Error(
+					result.stderr || result.stdout || `git exited with ${result.status}`,
+				);
+			}
 		}
-		if (result.status !== 0) {
-			throw new Error(
-				result.stderr || result.stdout || `git exited with ${result.status}`,
-			);
-		}
-		return result.stdout;
 	}
 
 	throw new GitBinaryMissingError(
