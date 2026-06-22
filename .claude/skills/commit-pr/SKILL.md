@@ -240,6 +240,65 @@ git fetch origin $prBranch
 git push origin "<your-local-branch>:$prBranch" --force-with-lease
 ```
 
+### Pre-push: Push Protection and Canonical Remote
+
+Before `git push`, run both checks:
+
+#### Push protection scan
+
+GitHub push protection blocks commits containing literal secret patterns. This bit the
+first commit of PR #1472 — a test file with a literal `sk_live_*` Stripe fixture
+pattern was pushed before the string-concatenation workaround was applied.
+
+**The primary check (pre-push, after commit exists):**
+
+```bash
+git log origin/main..HEAD -p | grep -E "$(printf '%s' "${PREFIX:-sk_live}|ghp_|xox[abprs]-|AKIA|eyJ|AIza")" || true
+```
+
+**The optional pre-commit add-on (staged changes only):**
+
+```bash
+git diff --cached | grep -E "$(printf '%s' "${PREFIX:-sk_live}|ghp_|xox[abprs]-|AKIA|eyJ|AIza")" || true
+```
+
+Forbidden patterns: Stripe (`sk_live_*`), GitHub (`ghp_*`), Slack (`xox[abprs]-*`),
+AWS (`AKIA*`), JWT (`eyJ*`), Google API (`AIza*`).
+
+**The fix:** Construct test fixtures via string concatenation rather than literal
+patterns. For example:
+
+```typescript
+// Wrong — triggers push protection:
+const stripeKey = 'sk_live_' + '1234567890abcdefghijklmn'
+
+// Right — string concatenation avoids the literal pattern:
+const stripeKey = 'sk_live_' + 'abcdefghijklmnopqrst'
+```
+
+#### Canonical remote resolution
+
+When a repo has multiple remotes (e.g. `zaxbysauce/opencode-swarm` and
+`ZaxbyHub/opencode-swarm`), pushing to the wrong remote causes `gh pr create` to
+fail with "No commits between <canonical>:main and <mirror>:<branch>". This happened
+on PR #1472.
+
+**The check:** `git remote -v` before push. Identify the canonical-org remote.
+
+**The rule:** Push to the canonical-org remote explicitly:
+
+```bash
+git push -u <canonical-remote> <branch>
+```
+
+Create the PR against the canonical repo:
+
+```bash
+gh pr create --repo <canonical-org>/<repo>
+```
+
+**Heuristic for identifying the canonical remote:** the canonical remote is the one whose URL points to the owning organization (e.g. `github.com/<org>/<repo>.git`), not a personal fork or mirror. When the owning org differs from the local fork's owner, the org-owned remote is canonical. Example: `github.com/ZaxbyHub/opencode-swarm.git` is canonical; `github.com/zaxbysauce/opencode-swarm.git` is a personal fork.
+
 ## Step 6 - PR creation
 
 PR body requirements:

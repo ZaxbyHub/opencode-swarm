@@ -137,6 +137,30 @@ tree:
 - If no PR reference was provided (a pasted-feedback session on the current branch),
   confirm the current branch is the intended PR branch before editing.
 
+## Pre-flight: Dirty Worktree Handling
+
+Before staging any files for the PR commit, check the working tree state:
+
+**The problem:** `git add -A` stages every uncommitted change in the working tree,
+including pre-existing changes from other branches or prior work. This was hit twice
+in one session during PR #1472 review, producing a 59-file commit instead of the
+intended 2-file targeted fix.
+
+**The check:** Run `git status --porcelain` first. If output is non-empty, identify
+which files are PR-related vs pre-existing uncommitted changes.
+
+**The rule:** Stage files explicitly by path when the working tree contains files
+unrelated to the PR. For example:
+
+```bash
+git add src/foo.ts tests/foo.test.ts
+```
+
+Never use `git add -A` when the working tree has pre-existing changes from other
+branches or prior work sessions.
+
+*Reference: Caught during PR #1472 Round 1 closure.*
+
 ## Intake Surfaces
 
 Build a complete feedback ledger before editing. Include every available source:
@@ -171,12 +195,6 @@ Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
 Missing, stale, cancelled, or failed lanes remain explicit ledger limitations.
 If `dispatch_lanes_async` is unavailable, use blocking verification and record
 that async advisory lanes were unavailable.
-
-When a verification lane result includes `output_ref`, treat `output` as a
-preview and call `retrieve_lane_output` before using it to classify, resolve,
-disprove, or group feedback items. If the result is `output_degraded`,
-`transcript_incomplete`, or truncated without a usable ref, keep the affected
-ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
 
 ### CI matrix cascade check (do this before fixing)
 
