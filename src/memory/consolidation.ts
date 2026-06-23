@@ -374,6 +374,12 @@ export async function runConsolidationPass(
 	if (!deps.llmDelegate) {
 		// No model available: run decay-only and record the pass (still idempotent).
 		result.memoriesDecayed = await applyDecay(existingMemories, input, deps);
+		// applyDecay breaks early on abort with a partial count; do NOT finalize a
+		// partially-decayed pass, or the phase is recorded complete and the
+		// remaining memories permanently miss their decay on rerun.
+		if (deps.signal?.aborted) {
+			return { ...result, skipped: true, skipReason: 'aborted' };
+		}
 		await finalize(input, deps, result, startedAt, processedProposalIds);
 		return { ...result, skipReason: 'no_llm_delegate_decay_only' };
 	}
@@ -420,6 +426,13 @@ export async function runConsolidationPass(
 		return { ...result, skipped: true, skipReason: 'aborted' };
 	}
 	result.memoriesDecayed = await applyDecay(existingMemories, input, deps);
+	// applyDecay breaks early on abort with a partial count; a mid-decay abort
+	// must not finalize, otherwise the phase is recorded complete and the
+	// un-decayed memories permanently miss their decay (rerun short-circuits as
+	// already_consolidated).
+	if (deps.signal?.aborted) {
+		return { ...result, skipped: true, skipReason: 'aborted' };
+	}
 	await finalize(input, deps, result, startedAt, processedProposalIds);
 	return result;
 }

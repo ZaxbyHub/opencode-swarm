@@ -549,6 +549,36 @@ describe('runConsolidationPass', () => {
 		expect(appended).toHaveLength(0);
 	});
 
+	test('abort DURING decay does not finalize a partially-decayed pass (decay-only path)', async () => {
+		// Regression: applyDecay breaks early on abort with a partial count; the
+		// pass must not finalize, or the phase is recorded complete and the
+		// remaining memories permanently miss their decay on rerun.
+		const controller = new AbortController();
+		const gw = new FakeGateway();
+		// Abort after the first decay upsert lands, mid-loop.
+		gw.upsertCurated = async (record: MemoryRecord) => {
+			gw.upserts.push(record);
+			controller.abort();
+			return record;
+		};
+		gw.memories = [
+			makeMemory('First decaying todo.', 'todo'),
+			makeMemory('Second decaying todo.', 'todo'),
+			makeMemory('Third decaying todo.', 'todo'),
+		];
+		const { deps, appended } = makeDeps(gw, { llm: false });
+		const r = await runConsolidationPass(
+			{ directory: '/tmp/x', phaseNumber: 13, config: baseConfig },
+			{ ...deps, signal: controller.signal },
+		);
+		expect(r.skipped).toBe(true);
+		expect(r.skipReason).toBe('aborted');
+		// Exactly one decay write happened before the abort took effect.
+		expect(gw.upserts).toHaveLength(1);
+		// Crucially: NO completion log → rerun retries and decays the rest.
+		expect(appended).toHaveLength(0);
+	});
+
 	test('evidence-required kind without real evidence is downgraded to a proposal (not applied)', async () => {
 		const gw = new FakeGateway();
 		// Seed proposal carries NO real evidence refs.
