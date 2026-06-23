@@ -38,7 +38,6 @@ describe('Scoped and Abbreviated Funnel Protocol Verification', () => {
 			const content = readFileSync(skillPath, 'utf-8');
 
 			it('file exists and is readable', () => {
-				expect(content).toBeDefined();
 				expect(content.length).toBeGreaterThan(0);
 			});
 

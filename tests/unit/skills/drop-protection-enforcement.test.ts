@@ -55,27 +55,31 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 	});
 
 	describe('Implementation guidance in documentation', () => {
-		const clarifyPath = join(
-			process.cwd(),
-			'.opencode/skills/clarify/SKILL.md',
-		);
-		const clarifyContent = readFileSync(clarifyPath, 'utf-8');
+		for (const slug of ['clarify', 'plan']) {
+			const skillPath = join(
+				process.cwd(),
+				'.opencode/skills',
+				slug,
+				'SKILL.md',
+			);
+			const content = readFileSync(skillPath, 'utf-8');
 
-		it('documents validation at decision-packet assembly time', () => {
-			expect(clarifyContent).toContain('decision-packet assembly code');
-		});
+			it(`documents validation at decision-packet assembly time (${slug})`, () => {
+				expect(content).toContain('decision-packet assembly code');
+			});
 
-		it('specifies warning log emission requirement', () => {
-			expect(clarifyContent).toContain('warning log');
-		});
+			it(`specifies warning log emission requirement (${slug})`, () => {
+				expect(content).toContain('warning log');
+			});
 
-		it('explains failure modes prevented by enforcement', () => {
-			expect(clarifyContent).toContain('failure mode');
-		});
+			it(`explains failure modes prevented by enforcement (${slug})`, () => {
+				expect(content).toContain('failure mode');
+			});
 
-		it('references src/agents/critic.ts as relevant code location', () => {
-			expect(clarifyContent).toContain('src/agents/critic.ts');
-		});
+			it(`references src/agents/critic.ts as relevant code location (${slug})`, () => {
+				expect(content).toContain('src/agents/critic.ts');
+			});
+		}
 	});
 
 	describe('Always-surface categories protection across all skills', () => {

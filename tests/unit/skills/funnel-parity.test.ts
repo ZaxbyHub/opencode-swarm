@@ -127,7 +127,7 @@ describe('Cross-skill funnel parity verification', () => {
 		}
 	});
 
-	describe('Always-surface categories consistency', () => {
+	describe('Always-surface categories spot-check (full coverage in clarify-funnel-verify)', () => {
 		const alwaysSurfaceItems = [
 			'Scope boundaries',
 			'Data loss or destructive behavior',

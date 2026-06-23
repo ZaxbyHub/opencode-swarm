@@ -123,6 +123,10 @@ describe('Task 1.2 — clarification funnel protocol', () => {
 			expect(stage3Section).toContain('APPROVED');
 		});
 
+		it('DROP', () => {
+			expect(stage3Section).toContain('DROP');
+		});
+
 		it('verdict mapping table is present in Stage 3', () => {
 			expect(stage3Section).toContain('SoundingBoardVerdict');
 			expect(stage3Section).toContain('Funnel Action');
@@ -239,7 +243,7 @@ describe('Task 1.2 — clarification funnel protocol', () => {
 			);
 			const content = readFileSync(clarifySpecPath, 'utf-8');
 			expect(content).toContain('Scoped Funnel Protocol');
-			expect(content.toLowerCase()).toContain('overconfidence guard');
+			expect(content).toContain('Overconfidence guard');
 			expect(content).toContain('always-surface protection');
 			expect(content).toContain('SoundingBoardVerdict');
 		});
