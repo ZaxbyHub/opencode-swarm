@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.88.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.88.0...v7.88.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* **memory:** address PR review — compaction guard, regex expansion, symbol filter ([1e260de](https://github.com/ZaxbyHub/opencode-swarm/commit/1e260de38e8d33f1724b70d506a278db37dc4def))
+
+
+### Performance Improvements
+
+* **memory:** provider singleton, SQL filtering, auto-compaction, wiring fixes ([aaa5758](https://github.com/ZaxbyHub/opencode-swarm/commit/aaa57584301fbc8a1d307d5a85ee97433a5fd600))
+* **memory:** provider singleton, SQL filtering, auto-compaction, wiring fixes ([4d01852](https://github.com/ZaxbyHub/opencode-swarm/commit/4d01852d1fe669bf54357d7d17f9c035baeac97b))
+
 ## [7.88.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.87.3...v7.88.0) (2026-06-22)
 
 
