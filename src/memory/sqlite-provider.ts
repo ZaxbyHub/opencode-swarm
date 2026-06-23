@@ -1,4 +1,4 @@
-import type { Database } from 'bun:sqlite';
+import type { Database, SQLQueryBindings } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -32,14 +32,19 @@ import type {
 	MemoryRecallUsageEvent,
 	MemoryRecallUsageFilter,
 } from './provider';
-import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
+import {
+	stableScopeKey,
+	validateMemoryProposal,
+	validateMemoryRecordRules,
+} from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
-import { scopeAllowed, scoreMemoryRecordsWithDiagnostics } from './scoring';
+import { scoreMemoryRecordsWithDiagnostics } from './scoring';
 import type {
 	AppliedMemoryChange,
 	MemoryListFilter,
 	MemoryProposal,
 	MemoryRecord,
+	MemoryScopeRef,
 	RecallRequest,
 	RecallResultItem,
 	ResolvedCuratorMemoryDecision,
@@ -63,6 +68,7 @@ type EventOperation =
 	| 'recall'
 	| 'migration'
 	| 'compact'
+	| 'compact_triggered'
 	| 'curator_decision'
 	| 'invalid_load';
 
@@ -82,6 +88,7 @@ interface Migration {
 // so runMigrations sees MAX(version) >= 3 and skips re-applying. The
 // hasMigration(FTS_SCHEMA_MIGRATION_NAME) name-guard plus CREATE VIRTUAL
 // TABLE IF NOT EXISTS in the else branch make this safe.
+const RECALL_CANDIDATE_LIMIT = 1000;
 const FTS_SCHEMA_MIGRATION_VERSION = 3;
 const FTS_SCHEMA_MIGRATION_NAME = 'create_memory_fts5_shadow_index';
 const FTS_TABLE_NAME = 'memory_items_fts';
@@ -186,6 +193,24 @@ export const MIGRATIONS: Migration[] = [
 			);
 		`,
 	},
+	{
+		version: 4,
+		name: 'create_meta_table',
+		sql: `
+			CREATE TABLE IF NOT EXISTS _meta (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			);
+		`,
+	},
+	{
+		version: 5,
+		name: 'create_recall_usage_timestamp_index',
+		sql: `
+			CREATE INDEX IF NOT EXISTS idx_memory_recall_usage_timestamp
+				ON memory_recall_usage(timestamp DESC);
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -239,6 +264,7 @@ export class SQLiteMemoryProvider
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
 	private lastAutomaticJsonlMigration: SQLiteJsonlImportResult | null = null;
+	private recallCountSinceLastCompaction = 0;
 
 	constructor(rootDirectory: string, config: Partial<MemoryConfig> = {}) {
 		this.rootDirectory = rootDirectory;
@@ -302,6 +328,7 @@ export class SQLiteMemoryProvider
 		this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
 		this.db.run('PRAGMA foreign_keys = ON;');
 		this.runMigrations();
+		this.backfillScopeKeys();
 		this.ftsAvailable = this.initializeFtsIndex();
 		this.lastAutomaticJsonlMigration = null;
 		await this.migrateLegacyJsonlIfNeeded();
@@ -389,6 +416,7 @@ export class SQLiteMemoryProvider
 			scopes: request.scopes,
 			kinds: request.kinds,
 			includeExpired: request.includeExpired,
+			limit: RECALL_CANDIDATE_LIMIT,
 		});
 		const candidates = this.selectRecallCandidates(request, scopedRecords);
 		const result = scoreMemoryRecordsWithDiagnostics(
@@ -418,7 +446,40 @@ export class SQLiteMemoryProvider
 			) VALUES (?, ?, ?, ?)`,
 			[randomUUID(), event.bundleId, event.timestamp, JSON.stringify(event)],
 		);
-		await this.event('recall', event.bundleId, JSON.stringify(event));
+		this.recallCountSinceLastCompaction++;
+		const threshold = this.config.maintenance?.autoCompactEveryNRecalls ?? 50;
+		if (threshold > 0 && this.recallCountSinceLastCompaction >= threshold) {
+			this.recallCountSinceLastCompaction = 0;
+			void this.compactMaintenance({ dryRun: false })
+				.then((result) => {
+					const rowsInspected =
+						result.remaining +
+						result.removedDeleted +
+						result.removedSuperseded +
+						result.removedExpiredScratch;
+					const rowsPurged =
+						result.removedDeleted +
+						result.removedSuperseded +
+						result.removedExpiredScratch;
+					return this.insertEvent(
+						'compact_triggered',
+						'memory_items',
+						'auto compaction triggered',
+						JSON.stringify({
+							trigger: 'auto',
+							threshold,
+							rowsInspected,
+							rowsPurged,
+							timestamp: new Date().toISOString(),
+						}),
+					);
+				})
+				.catch((err) => {
+					if (process.env.OPENCODE_SWARM_DEBUG === '1') {
+						console.debug(`[memory] auto-compaction failed: ${err}`);
+					}
+				});
+		}
 	}
 
 	async listRecallUsage(
@@ -462,15 +523,62 @@ export class SQLiteMemoryProvider
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
 		await this.initialize();
-		let records = Array.from(this.memories.values());
+		const db = this.requireDb();
+
+		const conditions: string[] = [];
+		const params: SQLQueryBindings[] = [];
+
 		if (filter.scopes && filter.scopes.length > 0) {
-			records = records.filter((record) =>
-				scopeAllowed(record.scope, filter.scopes ?? []),
-			);
+			const scopeKeys = filter.scopes.map((scope) => stableScopeKey(scope));
+			const placeholders = scopeKeys.map(() => '?').join(', ');
+			conditions.push(`scope_key IN (${placeholders})`);
+			params.push(...scopeKeys);
 		}
+
 		if (filter.kinds && filter.kinds.length > 0) {
-			records = records.filter((record) => filter.kinds?.includes(record.kind));
+			if (filter.kinds.length === 1) {
+				conditions.push('kind = ?');
+				params.push(filter.kinds[0]);
+			} else {
+				const placeholders = filter.kinds.map(() => '?').join(', ');
+				conditions.push(`kind IN (${placeholders})`);
+				params.push(...filter.kinds);
+			}
 		}
+
+		if (!filter.includeInactive) {
+			conditions.push('superseded_by IS NULL');
+			conditions.push('deleted = 0');
+		}
+
+		if (!filter.includeExpired) {
+			const nowIso = new Date().toISOString();
+			conditions.push('(expires_at IS NULL OR expires_at > ?)');
+			params.push(nowIso);
+		}
+
+		const whereClause =
+			conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+		let sql = `SELECT id, record_json FROM memory_items ${whereClause} ORDER BY updated_at DESC`;
+
+		if (typeof filter.limit === 'number') {
+			sql += ' LIMIT ?';
+			params.push(Math.trunc(filter.limit));
+		}
+
+		const rows = db
+			.query<MemoryItemRow, SQLQueryBindings[]>(sql)
+			.all(...params);
+
+		let records: MemoryRecord[] = [];
+		for (const row of rows) {
+			const parsed = this.parseMemoryRow(row);
+			if (parsed) records.push(parsed);
+		}
+
+		// Post-filter: preserve the original includeExpired semantics for
+		// non-finite expiresAt values that SQL date comparison may exclude.
 		if (!filter.includeExpired) {
 			const now = Date.now();
 			records = records.filter((record) => {
@@ -479,13 +587,8 @@ export class SQLiteMemoryProvider
 				return !Number.isFinite(expires) || expires > now;
 			});
 		}
-		if (!filter.includeInactive) {
-			records = records.filter(
-				(record) => !record.supersededBy && record.metadata.deleted !== true,
-			);
-		}
-		records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-		return records.slice(0, filter.limit ?? records.length);
+
+		return records;
 	}
 
 	async createProposal(proposal: MemoryProposal): Promise<MemoryProposal> {
@@ -746,6 +849,54 @@ export class SQLiteMemoryProvider
 		}
 	}
 
+	private backfillScopeKeys(): void {
+		const db = this.requireDb();
+
+		// One-time guard: skip if backfill was already completed in a prior init.
+		const metaRow = db
+			.query<{ value: string }, [string]>(
+				"SELECT value FROM _meta WHERE key = 'scope_key_backfilled'",
+			)
+			.get('scope_key_backfilled');
+		if (metaRow?.value === '1') return;
+
+		const rows = db
+			.query<{ id: string; record_json: string; scope_key: string }, []>(
+				'SELECT id, record_json, scope_key FROM memory_items',
+			)
+			.all();
+		let backfillCount = 0;
+		for (const row of rows) {
+			try {
+				const record = JSON.parse(row.record_json) as {
+					scope: MemoryScopeRef;
+				};
+				const canonicalKey = stableScopeKey(record.scope);
+				if (row.scope_key !== canonicalKey) {
+					db.run('UPDATE memory_items SET scope_key = ? WHERE id = ?', [
+						canonicalKey,
+						row.id,
+					]);
+					backfillCount++;
+				}
+			} catch {
+				// Skip unparseable records — they'll be handled by normal validation
+			}
+		}
+		if (backfillCount > 0) {
+			this.insertEvent(
+				'migration',
+				'backfill_scope_keys',
+				`${backfillCount} memory item(s) scope_key backfilled to canonical form`,
+			);
+		}
+
+		// Stamp completion so this full-table scan runs only once.
+		db.run(
+			"INSERT OR REPLACE INTO _meta (key, value) VALUES ('scope_key_backfilled', '1')",
+		);
+	}
+
 	private initializeFtsIndex(): boolean {
 		const db = this.requireDb();
 		try {
@@ -883,7 +1034,7 @@ export class SQLiteMemoryProvider
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				record.id,
-				JSON.stringify(record.scope),
+				stableScopeKey(record.scope),
 				record.kind,
 				record.updatedAt,
 				record.expiresAt ?? null,

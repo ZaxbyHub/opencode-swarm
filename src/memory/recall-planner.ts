@@ -36,7 +36,7 @@ export function buildMemoryRecallPlan(
 ): MemoryRecallPlan {
 	const profile =
 		options.profile ?? resolveMemoryRecallProfile(input.agentRole);
-	const scopes = options.scopes ?? buildScopesFromInput(input);
+	const scopes = options.scopes ?? [];
 	return {
 		query: buildRecallQuery(input),
 		scopes,
@@ -62,29 +62,4 @@ function buildRecallQuery(input: MemoryRecallPlannerInput): string {
 		lines.push(`current plan: ${input.currentPlanSummary.trim()}`);
 	}
 	return lines.join('\n');
-}
-
-function buildScopesFromInput(
-	input: MemoryRecallPlannerInput,
-): MemoryScopeRef[] {
-	const scopes: MemoryScopeRef[] = [];
-	if (input.projectId) {
-		scopes.push({ type: 'project', projectId: input.projectId });
-	}
-	if (input.repoId || input.repoRoot) {
-		scopes.push({
-			type: 'repository',
-			repoId: input.repoId,
-			repoRoot: input.repoRoot,
-		});
-	}
-	if (input.runId) scopes.push({ type: 'run', runId: input.runId });
-	if (input.agentId) {
-		scopes.push({
-			type: 'agent',
-			agentId: input.agentId,
-			runId: input.runId,
-		});
-	}
-	return scopes;
 }

@@ -83,6 +83,7 @@ async function injectIntoMessages(
 	const agentRole = resolveMessageAgent(messages, options, sessionID);
 	const latestUserText = latestTextForRole(messages, 'user');
 	if (!latestUserText) return;
+	const agentTask = extractTaskToolPrompt(messages) ?? latestUserText;
 	const result = await recallForAgent({
 		directory: options.directory,
 		config: options.config,
@@ -90,7 +91,7 @@ async function injectIntoMessages(
 		agentRole,
 		agentId: agentRole,
 		userGoal: latestUserText,
-		agentTask: latestUserText,
+		agentTask,
 		createGateway: internals.createGateway,
 		appendRunLog: internals.appendRunLog,
 	});
@@ -487,6 +488,38 @@ function latestTextForRole(messages: unknown[], role: string): string | null {
 			.join('\n')
 			.trim();
 		if (text) return text;
+	}
+	return null;
+}
+
+function extractTaskToolPrompt(messages: unknown[]): string | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i] as Record<string, unknown>;
+
+		// Support both message shapes
+		const role =
+			msg.role ?? (msg.info as Record<string, unknown> | undefined)?.role;
+		if (role !== 'assistant') continue;
+
+		const content = Array.isArray(msg.content)
+			? msg.content
+			: Array.isArray(msg.parts)
+				? msg.parts
+				: [];
+
+		for (let j = content.length - 1; j >= 0; j--) {
+			const block = content[j];
+			if (block && typeof block === 'object') {
+				const b = block as Record<string, unknown>;
+				if (b.type === 'tool_use' && b.name === 'Task') {
+					const input = b.input as Record<string, unknown> | undefined;
+					const prompt = input?.prompt;
+					if (typeof prompt === 'string' && prompt.length > 0) {
+						return prompt;
+					}
+				}
+			}
+		}
 	}
 	return null;
 }

@@ -29,6 +29,7 @@ export interface MemoryConfig {
 	maintenance: {
 		lowUtilityMaxConfidence: number;
 		lowUtilityMinAgeDays: number;
+		autoCompactEveryNRecalls?: number; // default 50, 0 disables
 	};
 	hardDelete: boolean;
 }
@@ -62,6 +63,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	maintenance: {
 		lowUtilityMaxConfidence: 0.45,
 		lowUtilityMinAgeDays: 30,
+		autoCompactEveryNRecalls: 50,
 	},
 	hardDelete: false,
 };

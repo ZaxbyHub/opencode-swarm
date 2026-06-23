@@ -10,6 +10,7 @@ import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 import { toRecallBundle } from './prompt-block';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
+import { getOrCreateProvider } from './provider-pool';
 import { redactSecrets } from './redaction';
 import {
 	computeMemoryContentHash,
@@ -21,7 +22,6 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
-import { SQLiteMemoryProvider } from './sqlite-provider';
 import type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
@@ -72,6 +72,7 @@ export class MemoryGateway {
 	private readonly config: MemoryConfig;
 	private readonly provider: MemoryProvider & Partial<MemoryProposalStore>;
 	private readonly now: () => Date;
+	private disposed = false;
 
 	constructor(
 		private readonly context: MemoryContext,
@@ -89,6 +90,8 @@ export class MemoryGateway {
 	}
 
 	async dispose(): Promise<void> {
+		if (this.disposed) return;
+		this.disposed = true;
 		await this.provider.close?.();
 	}
 
@@ -253,11 +256,21 @@ export class MemoryGateway {
 			proposalText = input.text;
 			const normalizedText = normalizeMemoryText(input.text);
 			const redactedText = redactProposalField('text', normalizedText);
+			const extractedPaths = extractFilePaths(evidenceRefs);
+			const extractedSymbols = extractSymbols(evidenceRefs);
+			const recordMetadata: Record<string, unknown> = {};
+			if (extractedPaths.length > 0) {
+				recordMetadata.files = extractedPaths;
+			}
+			if (extractedSymbols.length > 0) {
+				recordMetadata.symbols = extractedSymbols;
+			}
 			proposedRecord = this.createRecord({
 				kind: input.kind,
 				text: redactedText,
 				evidenceRefs,
 				source: sourceFromEvidence(evidenceRefs, this.context),
+				metadata: recordMetadata,
 			});
 			validateMemoryRecordRules(proposedRecord, {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
@@ -476,7 +489,7 @@ export function createConfiguredMemoryProvider(
 	config: MemoryConfig,
 ): MemoryProvider & MemoryProposalStore {
 	if (config.provider === 'sqlite') {
-		return new SQLiteMemoryProvider(directory, config);
+		return getOrCreateProvider(directory, config);
 	}
 	return new LocalJsonlMemoryProvider(directory, config);
 }
@@ -492,6 +505,16 @@ function sourceFromEvidence(
 	if (/^https?:\/\//i.test(first)) return { type: 'web', url: first };
 	if (/^[a-f0-9]{40}$/i.test(first))
 		return { type: 'commit', commitSha: first };
+	const filePaths = extractFilePaths(evidenceRefs);
+	const filePath = filePaths[0] ?? first;
+	if (
+		filePath !== first &&
+		(filePath.includes('/') ||
+			filePath.includes('\\') ||
+			filePath.includes('.'))
+	) {
+		return { type: 'file', filePath };
+	}
 	if (first.includes('/') || first.includes('\\') || first.includes('.')) {
 		return { type: 'file', filePath: first };
 	}
@@ -623,4 +646,101 @@ function inferTags(text: string): string[] {
 		if (pattern.test(lower)) tags.push(tag);
 	}
 	return tags;
+}
+
+const FILE_PATH_REGEX =
+	/\b(?:src|tests|test|docs|scripts|packages)\/[A-Za-z0-9._/@+-]+/g;
+
+const RESERVED_IDENTIFIERS = new Set([
+	'const',
+	'let',
+	'var',
+	'function',
+	'class',
+	'interface',
+	'type',
+	'async',
+	'await',
+	'return',
+	'if',
+	'else',
+	'for',
+	'while',
+	'do',
+	'switch',
+	'case',
+	'break',
+	'continue',
+	'new',
+	'this',
+	'super',
+	'extends',
+	'implements',
+	'import',
+	'export',
+	'from',
+	'default',
+	'try',
+	'catch',
+	'finally',
+	'throw',
+	'typeof',
+	'instanceof',
+	'in',
+	'of',
+	'as',
+	'yield',
+	'static',
+	'get',
+	'set',
+	'readonly',
+	'public',
+	'private',
+	'protected',
+]);
+
+/**
+ * Extract file paths from evidence refs using the same directory-prefix
+ * regex as injector.ts:extractTouchedFiles, deduped and capped at 20.
+ */
+function extractFilePaths(refs: string[]): string[] {
+	const seen = new Set<string>();
+	const paths: string[] = [];
+	for (const ref of refs) {
+		// Re-invoke the regex with the global flag reset per ref
+		FILE_PATH_REGEX.lastIndex = 0;
+		const matches = ref.match(FILE_PATH_REGEX);
+		if (!matches) continue;
+		for (const m of matches) {
+			if (!seen.has(m)) {
+				seen.add(m);
+				paths.push(m);
+				if (paths.length >= 20) return paths;
+			}
+		}
+	}
+	return paths;
+}
+
+/**
+ * Extract symbol-like identifiers (function/class/method names) from
+ * evidence refs using a camelCase/dotted heuristic, filtering reserved words.
+ */
+function extractSymbols(refs: string[]): string[] {
+	const seen = new Set<string>();
+	const symbols: string[] = [];
+	const identRegex = /\b[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*\b/g;
+	for (const ref of refs) {
+		identRegex.lastIndex = 0;
+		const matches = ref.match(identRegex);
+		if (!matches) continue;
+		for (const m of matches) {
+			if (!seen.has(m) && !RESERVED_IDENTIFIERS.has(m)) {
+				seen.add(m);
+				symbols.push(m);
+				if (symbols.length >= 20) return symbols;
+			}
+		}
+	}
+	return symbols;
 }
