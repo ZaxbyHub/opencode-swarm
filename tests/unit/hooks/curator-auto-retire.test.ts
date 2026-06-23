@@ -7,7 +7,7 @@
  * mock-tracking state that can leak across test files in the shared test-runner
  * process (AGENTS.md invariant 7). To eliminate that cross-file pollution
  * surface we use a plain `makeMockFn` helper that records calls without
- * registering a Bun mock — there are no `mock()` or `mock.module()` calls here.
+ * registering a Bun mock — there are no `mock()` or `mock.module` calls here.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
