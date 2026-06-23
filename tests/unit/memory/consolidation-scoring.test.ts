@@ -20,7 +20,9 @@ const THRESHOLD = 0.2;
 
 describe('jaccard', () => {
 	test('identical token sets score 1', () => {
-		expect(jaccard(tokenize('bun runs the tests'), tokenize('bun runs the tests'))).toBe(1);
+		expect(
+			jaccard(tokenize('bun runs the tests'), tokenize('bun runs the tests')),
+		).toBe(1);
 	});
 
 	test('disjoint sets score 0', () => {
@@ -95,11 +97,21 @@ describe('importanceScore (DD-11)', () => {
 
 	test('recency increases importance monotonically (more recent recall scores higher)', () => {
 		const recent = importanceScore(
-			{ confidence: 0.5, retrievalCount: 3, daysSinceLastRecall: 1, daysSinceCreated: 10 },
+			{
+				confidence: 0.5,
+				retrievalCount: 3,
+				daysSinceLastRecall: 1,
+				daysSinceCreated: 10,
+			},
 			WEIGHTS,
 		);
 		const old = importanceScore(
-			{ confidence: 0.5, retrievalCount: 3, daysSinceLastRecall: 100, daysSinceCreated: 10 },
+			{
+				confidence: 0.5,
+				retrievalCount: 3,
+				daysSinceLastRecall: 100,
+				daysSinceCreated: 10,
+			},
 			WEIGHTS,
 		);
 		expect(recent).toBeGreaterThan(old);
@@ -107,11 +119,21 @@ describe('importanceScore (DD-11)', () => {
 
 	test('frequency increases importance monotonically', () => {
 		const more = importanceScore(
-			{ confidence: 0.5, retrievalCount: 20, daysSinceLastRecall: 5, daysSinceCreated: 10 },
+			{
+				confidence: 0.5,
+				retrievalCount: 20,
+				daysSinceLastRecall: 5,
+				daysSinceCreated: 10,
+			},
 			WEIGHTS,
 		);
 		const fewer = importanceScore(
-			{ confidence: 0.5, retrievalCount: 1, daysSinceLastRecall: 5, daysSinceCreated: 10 },
+			{
+				confidence: 0.5,
+				retrievalCount: 1,
+				daysSinceLastRecall: 5,
+				daysSinceCreated: 10,
+			},
 			WEIGHTS,
 		);
 		expect(more).toBeGreaterThan(fewer);
@@ -119,7 +141,12 @@ describe('importanceScore (DD-11)', () => {
 
 	test('never-recalled contributes zero recency and frequency', () => {
 		const score = importanceScore(
-			{ confidence: 0, retrievalCount: 0, daysSinceLastRecall: null, daysSinceCreated: 0 },
+			{
+				confidence: 0,
+				retrievalCount: 0,
+				daysSinceLastRecall: null,
+				daysSinceCreated: 0,
+			},
 			WEIGHTS,
 		);
 		// Only freshness (=1 at age 0) * wFreshness remains.

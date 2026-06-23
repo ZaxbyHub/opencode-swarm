@@ -1,7 +1,7 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { handleMemoryConsolidationLogCommand } from '../../../src/commands/memory';
 import {
 	appendConsolidationLog,
@@ -59,14 +59,20 @@ describe('/swarm memory consolidation-log', () => {
 		await appendConsolidationLog(dir, record(1));
 		await appendConsolidationLog(dir, record(2));
 		await appendConsolidationLog(dir, record(3));
-		const out = await handleMemoryConsolidationLogCommand(dir, ['--limit', '1']);
+		const out = await handleMemoryConsolidationLogCommand(dir, [
+			'--limit',
+			'1',
+		]);
 		expect(out).toContain('Showing: `1`');
 		expect(out).toContain('Phase 3');
 		expect(out).not.toContain('Phase 1 —');
 	});
 
 	test('rejects malformed --limit with usage', async () => {
-		const out = await handleMemoryConsolidationLogCommand(dir, ['--limit', 'x']);
+		const out = await handleMemoryConsolidationLogCommand(dir, [
+			'--limit',
+			'x',
+		]);
 		expect(out).toContain('Usage:');
 	});
 });

@@ -1,20 +1,20 @@
 import { describe, expect, test } from 'bun:test';
 import { resolveMemoryConfig } from '../../../src/memory/config';
-import type { ConsolidationLogRecord } from '../../../src/memory/consolidation-log';
 import {
 	type ConsolidationGateway,
-	deriveDecision,
 	type DistilledFact,
+	deriveDecision,
 	parseDistillationOutput,
 	runConsolidationPass,
 } from '../../../src/memory/consolidation';
+import type { ConsolidationLogRecord } from '../../../src/memory/consolidation-log';
 import type { ProposeMemoryInput } from '../../../src/memory/gateway';
 import type { MemoryRunLogEvent } from '../../../src/memory/run-log';
-import { MEMORY_RECALL_SENTINEL } from '../../../src/memory/sentinel';
 import {
 	computeMemoryContentHash,
 	createMemoryId,
 } from '../../../src/memory/schema';
+import { MEMORY_RECALL_SENTINEL } from '../../../src/memory/sentinel';
 import type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
@@ -29,7 +29,11 @@ function makeProposal(
 	text: string,
 	kind: MemoryRecord['kind'] = 'project_fact',
 ): MemoryProposal {
-	const base = { scope: { type: 'repository' as const, repoId: 'r' }, kind, text };
+	const base = {
+		scope: { type: 'repository' as const, repoId: 'r' },
+		kind,
+		text,
+	};
 	return {
 		id,
 		operation: 'add',
@@ -56,8 +60,15 @@ function makeProposal(
 	};
 }
 
-function makeMemory(text: string, kind: MemoryRecord['kind'] = 'project_fact'): MemoryRecord {
-	const base = { scope: { type: 'repository' as const, repoId: 'r' }, kind, text };
+function makeMemory(
+	text: string,
+	kind: MemoryRecord['kind'] = 'project_fact',
+): MemoryRecord {
+	const base = {
+		scope: { type: 'repository' as const, repoId: 'r' },
+		kind,
+		text,
+	};
 	return {
 		id: createMemoryId(base),
 		scope: base.scope,
@@ -164,11 +175,13 @@ const baseConfig = resolveMemoryConfig({ enabled: true });
 
 describe('parseDistillationOutput', () => {
 	test('parses a fenced json block', () => {
-		const raw = 'Here:\n```json\n{"facts":[{"text":"x","kind":"project_fact","confidence":0.8}]}\n```';
+		const raw =
+			'Here:\n```json\n{"facts":[{"text":"x","kind":"project_fact","confidence":0.8}]}\n```';
 		expect(parseDistillationOutput(raw)).toHaveLength(1);
 	});
 	test('parses bare json with surrounding prose', () => {
-		const raw = 'result {"facts":[{"text":"y","kind":"repo_convention","confidence":0.9}]} done';
+		const raw =
+			'result {"facts":[{"text":"y","kind":"repo_convention","confidence":0.9}]} done';
 		expect(parseDistillationOutput(raw)[0].text).toBe('y');
 	});
 	test('returns [] on garbage', () => {
@@ -183,7 +196,11 @@ describe('deriveDecision', () => {
 	const opts = { autoApplyMinConfidence: 0.6, jaccardThreshold: 0.3 };
 	test('durable high-confidence novel fact → add', () => {
 		const plan = deriveDecision(
-			{ text: 'A clear durable fact about the build.', kind: 'project_fact', confidence: 0.8 },
+			{
+				text: 'A clear durable fact about the build.',
+				kind: 'project_fact',
+				confidence: 0.8,
+			},
 			[],
 			opts,
 		);
@@ -191,7 +208,11 @@ describe('deriveDecision', () => {
 	});
 	test('sentinel-bearing text → skip', () => {
 		const plan = deriveDecision(
-			{ text: `x ${MEMORY_RECALL_SENTINEL}`, kind: 'project_fact', confidence: 0.9 },
+			{
+				text: `x ${MEMORY_RECALL_SENTINEL}`,
+				kind: 'project_fact',
+				confidence: 0.9,
+			},
 			[],
 			opts,
 		);
@@ -224,7 +245,11 @@ describe('deriveDecision', () => {
 	test('near-duplicate of existing memory → dedup', () => {
 		const existing = makeMemory('The build uses bun for tests always');
 		const plan = deriveDecision(
-			{ text: 'The build uses bun for tests always', kind: 'project_fact', confidence: 0.9 },
+			{
+				text: 'The build uses bun for tests always',
+				kind: 'project_fact',
+				confidence: 0.9,
+			},
 			[existing],
 			opts,
 		);
@@ -263,7 +288,9 @@ describe('runConsolidationPass', () => {
 
 	test('is idempotent — a phase already in the log is skipped', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_1111111111111111', 'a fact about x')];
+		gw.seedProposals = [
+			makeProposal('prop_1111111111111111', 'a fact about x'),
+		];
 		const prior: ConsolidationLogRecord = {
 			phaseNumber: 3,
 			startedAt: '',
@@ -292,7 +319,10 @@ describe('runConsolidationPass', () => {
 	test('episodic → semantic add: proposes operation add then applies an add decision', async () => {
 		const gw = new FakeGateway();
 		gw.seedProposals = [
-			makeProposal('prop_1111111111111111', 'The CI pipeline runs bun test per file for isolation.'),
+			makeProposal(
+				'prop_1111111111111111',
+				'The CI pipeline runs bun test per file for isolation.',
+			),
 		];
 		const { deps, appended, events } = makeDeps(gw, {
 			facts: [
@@ -304,7 +334,12 @@ describe('runConsolidationPass', () => {
 			],
 		});
 		const r = await runConsolidationPass(
-			{ directory: '/tmp/x', phaseNumber: 1, runId: 'run1', config: baseConfig },
+			{
+				directory: '/tmp/x',
+				phaseNumber: 1,
+				runId: 'run1',
+				config: baseConfig,
+			},
 			deps,
 		);
 		expect(r.added).toBe(1);
@@ -313,14 +348,18 @@ describe('runConsolidationPass', () => {
 		expect(appended).toHaveLength(1);
 		expect(appended[0].phaseNumber).toBe(1);
 		expect(events.some((e) => e.event === 'consolidation_started')).toBe(true);
-		expect(events.some((e) => e.event === 'consolidation_completed')).toBe(true);
+		expect(events.some((e) => e.event === 'consolidation_completed')).toBe(
+			true,
+		);
 	});
 
 	test('contradiction → supersede with correct target', async () => {
 		const gw = new FakeGateway();
 		const existing = makeMemory('Releases ship every Friday afternoon.');
 		gw.memories = [existing];
-		gw.seedProposals = [makeProposal('prop_2222222222222222', 'release cadence changed')];
+		gw.seedProposals = [
+			makeProposal('prop_2222222222222222', 'release cadence changed'),
+		];
 		const { deps } = makeDeps(gw, {
 			facts: [
 				{
@@ -337,19 +376,29 @@ describe('runConsolidationPass', () => {
 		);
 		expect(r.superseded).toBe(1);
 		expect(r.contradictionsDetected).toBe(1);
-		const proposeCall = gw.proposeCalls.find((c) => c.operation === 'supersede');
+		const proposeCall = gw.proposeCalls.find(
+			(c) => c.operation === 'supersede',
+		);
 		expect(proposeCall?.targetMemoryId).toBe(existing.id);
 		const decision = gw.applied.find((d) => d.action === 'supersede');
-		expect(decision && decision.action === 'supersede' && decision.oldMemoryId).toBe(
-			existing.id,
-		);
+		expect(
+			decision && decision.action === 'supersede' && decision.oldMemoryId,
+		).toBe(existing.id);
 	});
 
 	test('low-confidence fact is filed as a proposal, never applied', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_3333333333333333', 'weak signal note')];
+		gw.seedProposals = [
+			makeProposal('prop_3333333333333333', 'weak signal note'),
+		];
 		const { deps } = makeDeps(gw, {
-			facts: [{ text: 'Possibly the cache is shared.', kind: 'project_fact', confidence: 0.3 }],
+			facts: [
+				{
+					text: 'Possibly the cache is shared.',
+					kind: 'project_fact',
+					confidence: 0.3,
+				},
+			],
 		});
 		const r = await runConsolidationPass(
 			{ directory: '/tmp/x', phaseNumber: 4, config: baseConfig },
@@ -363,10 +412,16 @@ describe('runConsolidationPass', () => {
 
 	test('sentinel-bearing distilled fact is never written', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_4444444444444444', 'note about format')];
+		gw.seedProposals = [
+			makeProposal('prop_4444444444444444', 'note about format'),
+		];
 		const { deps } = makeDeps(gw, {
 			facts: [
-				{ text: `format is ${MEMORY_RECALL_SENTINEL}`, kind: 'project_fact', confidence: 0.9 },
+				{
+					text: `format is ${MEMORY_RECALL_SENTINEL}`,
+					kind: 'project_fact',
+					confidence: 0.9,
+				},
 			],
 		});
 		const r = await runConsolidationPass(
@@ -401,7 +456,10 @@ describe('runConsolidationPass', () => {
 	test('no LLM delegate → decay-only pass still records and is idempotent', async () => {
 		const gw = new FakeGateway();
 		// A decaying-kind memory (todo) created long ago with no expiry yet.
-		const todo = makeMemory('Refactor the recall planner module someday.', 'todo');
+		const todo = makeMemory(
+			'Refactor the recall planner module someday.',
+			'todo',
+		);
 		gw.memories = [todo];
 		const { deps, appended } = makeDeps(gw, { llm: false });
 		const r = await runConsolidationPass(
@@ -422,8 +480,14 @@ describe('runConsolidationPass', () => {
 		const gw = new FakeGateway();
 		const own = makeProposal('prop_7777777777777771', 'self-emitted fact');
 		own.proposedBy = { agentRole: 'curator_consolidation' };
-		const alreadyDone = makeProposal('prop_7777777777777772', 'already distilled');
-		const fresh = makeProposal('prop_7777777777777773', 'brand new episodic note');
+		const alreadyDone = makeProposal(
+			'prop_7777777777777772',
+			'already distilled',
+		);
+		const fresh = makeProposal(
+			'prop_7777777777777773',
+			'brand new episodic note',
+		);
 		gw.seedProposals = [own, alreadyDone, fresh];
 		const prior: ConsolidationLogRecord = {
 			phaseNumber: 1,
@@ -452,7 +516,9 @@ describe('runConsolidationPass', () => {
 
 	test('aborted signal stops the pass without finalizing (phase is retryable)', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_8888888888888888', 'a fact to distill')];
+		gw.seedProposals = [
+			makeProposal('prop_8888888888888888', 'a fact to distill'),
+		];
 		const controller = new AbortController();
 		controller.abort();
 		const { deps, appended } = makeDeps(gw, {
@@ -472,7 +538,10 @@ describe('runConsolidationPass', () => {
 	test('evidence-required kind without real evidence is downgraded to a proposal (not applied)', async () => {
 		const gw = new FakeGateway();
 		// Seed proposal carries NO real evidence refs.
-		const seed = makeProposal('prop_9999999999999999', 'a security observation');
+		const seed = makeProposal(
+			'prop_9999999999999999',
+			'a security observation',
+		);
 		seed.evidenceRefs = [];
 		gw.seedProposals = [seed];
 		const { deps } = makeDeps(gw, {
@@ -495,11 +564,21 @@ describe('runConsolidationPass', () => {
 
 	test('deduplicates identical distilled fact texts within a single pass', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_aaaaaaaaaaaaaaaa', 'topic about builds')];
+		gw.seedProposals = [
+			makeProposal('prop_aaaaaaaaaaaaaaaa', 'topic about builds'),
+		];
 		const { deps } = makeDeps(gw, {
 			facts: [
-				{ text: 'Builds are reproducible.', kind: 'project_fact', confidence: 0.9 },
-				{ text: 'Builds are reproducible.', kind: 'project_fact', confidence: 0.9 },
+				{
+					text: 'Builds are reproducible.',
+					kind: 'project_fact',
+					confidence: 0.9,
+				},
+				{
+					text: 'Builds are reproducible.',
+					kind: 'project_fact',
+					confidence: 0.9,
+				},
 			],
 		});
 		const r = await runConsolidationPass(
@@ -511,14 +590,20 @@ describe('runConsolidationPass', () => {
 
 	test('running the same phase twice is a no-op the second time (idempotency end-to-end)', async () => {
 		const gw = new FakeGateway();
-		gw.seedProposals = [makeProposal('prop_6666666666666666', 'a durable fact about builds')];
+		gw.seedProposals = [
+			makeProposal('prop_6666666666666666', 'a durable fact about builds'),
+		];
 		const log: ConsolidationLogRecord[] = [];
 		const deps = {
 			gateway: gw,
 			llmDelegate: async () =>
 				JSON.stringify({
 					facts: [
-						{ text: 'Builds are reproducible via the lockfile.', kind: 'project_fact', confidence: 0.8 },
+						{
+							text: 'Builds are reproducible via the lockfile.',
+							kind: 'project_fact',
+							confidence: 0.8,
+						},
 					],
 				}),
 			now: () => new Date(),

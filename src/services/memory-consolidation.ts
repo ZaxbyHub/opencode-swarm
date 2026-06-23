@@ -94,8 +94,7 @@ export async function runMemoryConsolidation(
 					logEvent: (event) =>
 						appendMemoryRunLog(req.directory, req.sessionId, event),
 					readLog: () => readConsolidationLog(req.directory),
-					appendLog: (record) =>
-						appendConsolidationLog(req.directory, record),
+					appendLog: (record) => appendConsolidationLog(req.directory, record),
 					signal: controller.signal,
 				},
 			);

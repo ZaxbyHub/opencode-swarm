@@ -1,11 +1,14 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { resolveMemoryConfig } from '../../../src/memory/config';
-import type { ConsolidationLogRecord } from '../../../src/memory/consolidation-log';
 import { runConsolidationPass } from '../../../src/memory/consolidation';
-import { createMemoryGateway, type MemoryGateway } from '../../../src/memory/gateway';
+import type { ConsolidationLogRecord } from '../../../src/memory/consolidation-log';
+import {
+	createMemoryGateway,
+	type MemoryGateway,
+} from '../../../src/memory/gateway';
 import type { MemoryRunLogEvent } from '../../../src/memory/run-log';
 
 let dir: string;
@@ -16,7 +19,12 @@ const config = resolveMemoryConfig({ enabled: true, provider: 'local-jsonl' });
 beforeEach(() => {
 	dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'consol-int-')));
 	gateway = createMemoryGateway(
-		{ directory: dir, sessionID: 'sess1', runId: 'sess1', agentRole: 'explorer' },
+		{
+			directory: dir,
+			sessionID: 'sess1',
+			runId: 'sess1',
+			agentRole: 'explorer',
+		},
 		{ config },
 	);
 });
@@ -78,7 +86,9 @@ describe('consolidation against a real MemoryGateway (local-jsonl)', () => {
 		// The fact is now a real durable memory that passed validateMemoryRecordRules
 		// and validateCuratorPromotableMemory.
 		const memories = await gateway.listMemories({});
-		expect(memories.some((m) => m.text.includes('bun test per file'))).toBe(true);
+		expect(memories.some((m) => m.text.includes('bun test per file'))).toBe(
+			true,
+		);
 	});
 
 	test('low-confidence fact is filed as a pending proposal, not applied', async () => {
@@ -92,7 +102,11 @@ describe('consolidation against a real MemoryGateway (local-jsonl)', () => {
 		const before = (await gateway.listMemories({})).length;
 		const { deps: d } = deps({
 			facts: [
-				{ text: 'Caching might be shared across runs.', kind: 'project_fact', confidence: 0.3 },
+				{
+					text: 'Caching might be shared across runs.',
+					kind: 'project_fact',
+					confidence: 0.3,
+				},
 			],
 		});
 		const r = await runConsolidationPass(

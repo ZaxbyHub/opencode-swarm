@@ -137,7 +137,11 @@ describe('curator_consolidation registration (issue #1464)', () => {
 		expect(def.config.prompt!.length).toBeGreaterThan(50);
 		expect(def.config.prompt).toMatch(/consolidat/i);
 		// Read-only contract preserved.
-		expect(def.config.tools).toEqual({ write: false, edit: false, patch: false });
+		expect(def.config.tools).toEqual({
+			write: false,
+			edit: false,
+			patch: false,
+		});
 	});
 });
 
