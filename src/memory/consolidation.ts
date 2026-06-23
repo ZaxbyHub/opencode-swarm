@@ -341,11 +341,16 @@ export async function runConsolidationPass(
 	// Exclude (a) proposals this consolidation loop itself emitted — otherwise
 	// they are re-clustered as fresh episodic input every phase (reviewer #3) —
 	// and (b) source proposals already distilled in a prior pass (reviewer #2).
-	const pendingProposals = allPending.filter(
-		(p) =>
-			p.proposedBy?.agentRole !== CONSOLIDATION_AGENT_ROLE &&
-			!processedBefore.has(p.id),
-	);
+	const pendingProposals = allPending
+		.filter(
+			(p) =>
+				p.proposedBy?.agentRole !== CONSOLIDATION_AGENT_ROLE &&
+				!processedBefore.has(p.id),
+		)
+		// Sort by the stable proposal id so greedy Jaccard clustering is
+		// deterministic regardless of the order listProposals returns from
+		// storage (clusterByJaccard is order-sensitive by construction).
+		.sort((a, b) => a.id.localeCompare(b.id));
 	const existingMemories = await deps.gateway.listMemories({});
 
 	const clusters = clusterByJaccard(

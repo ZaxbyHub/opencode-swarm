@@ -528,6 +528,36 @@ describe('runConsolidationPass', () => {
 		expect(appended[0].processedProposalIds).toEqual([fresh.id]);
 	});
 
+	test('clustering is deterministic regardless of listProposals storage order', async () => {
+		// Greedy Jaccard clustering is order-sensitive; the engine sorts by stable
+		// proposal id first, so the same proposals in any storage order produce the
+		// same processed order. Three lexically-distinct proposals → three clusters.
+		const ids = [
+			'prop_cccccccccccccc01',
+			'prop_cccccccccccccc02',
+			'prop_cccccccccccccc03',
+		];
+		const texts = [
+			'alpha topic about authentication flow',
+			'beta topic about database indexing',
+			'gamma topic about rendering pipeline',
+		];
+		const runWithOrder = async (order: number[]) => {
+			const gw = new FakeGateway();
+			gw.seedProposals = order.map((i) => makeProposal(ids[i], texts[i]));
+			const { deps, appended } = makeDeps(gw, { facts: [] });
+			await runConsolidationPass(
+				{ directory: '/tmp/x', phaseNumber: 1, config: baseConfig },
+				deps,
+			);
+			return appended[0].processedProposalIds;
+		};
+		const ascending = await runWithOrder([0, 1, 2]);
+		const shuffled = await runWithOrder([2, 0, 1]);
+		expect(shuffled).toEqual(ascending);
+		expect(ascending).toEqual(ids);
+	});
+
 	test('aborted signal stops the pass without finalizing (phase is retryable)', async () => {
 		const gw = new FakeGateway();
 		gw.seedProposals = [
