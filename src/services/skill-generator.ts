@@ -514,6 +514,7 @@ export interface GenerateResult {
 		path: string;
 		mode: GenerateMode;
 		sourceKnowledgeIds: string[];
+		missingSourceKnowledgeIds?: string[];
 		preserved: boolean;
 		evaluation?: SkillEvaluationResult;
 	}>;
@@ -621,7 +622,7 @@ export async function generateSkills(
 			}
 		}
 
-		const content = renderSkillMarkdown(cluster, req.mode);
+		let content = renderSkillMarkdown(cluster, req.mode);
 		if (await isRejectedSkillContent(req.directory, cluster.slug, content)) {
 			result.skipped.push({
 				slug: cluster.slug,
@@ -666,22 +667,37 @@ export async function generateSkills(
 				continue;
 			}
 		}
-		await atomicWrite(targetPath, content);
-
-		// In active mode, stamp source entries with the generated_skill metadata.
+		// In active mode, stamp source entries with the generated_skill metadata
+		// BEFORE writing so that any missing IDs can be surfaced in the
+		// frontmatter at compile time.
+		let missingSourceIds: string[] = [];
 		if (req.mode === 'active') {
-			await stampSourceEntries(
+			// Stamp ALL requested source IDs (not just the ones that survived
+			// filtering into the cluster) so that phantom IDs absent from both
+			// swarm and hive are surfaced in missingSourceKnowledgeIds and the
+			// frontmatter's missing_source_knowledge_ids block.
+			const idsToStamp = req.sourceKnowledgeIds?.length
+				? req.sourceKnowledgeIds
+				: cluster.entries.map((e) => e.id);
+			const { missing } = await stampSourceEntries(
 				req.directory,
 				cluster.slug,
-				cluster.entries.map((e) => e.id),
+				idsToStamp,
 			);
+			missingSourceIds = missing;
+			if (missingSourceIds.length > 0) {
+				content = injectMissingIdsIntoFrontmatter(content, missingSourceIds);
+			}
 		}
+
+		await atomicWrite(targetPath, content);
 
 		result.written.push({
 			slug: cluster.slug,
 			path: targetPath,
 			mode: req.mode,
 			sourceKnowledgeIds: cluster.entries.map((e) => e.id),
+			missingSourceKnowledgeIds: missingSourceIds,
 			preserved,
 			evaluation,
 		});
@@ -691,43 +707,128 @@ export async function generateSkills(
 }
 
 /**
+ * Inject a `missing_source_knowledge_ids:` block into the YAML frontmatter
+ * immediately after the `source_knowledge_ids:` block so that unresolved IDs
+ * are visible at compile time.  Returns the content unchanged when:
+ *   - `missingIds` is empty
+ *   - the frontmatter cannot be parsed (no opening `---` fence or missing
+ *     closing fence)
+ *   - `source_knowledge_ids:` is not found in the frontmatter
+ *
+ * Uses simple string manipulation — no full YAML parser required.
+ */
+function injectMissingIdsIntoFrontmatter(
+	content: string,
+	missingIds: string[],
+): string {
+	if (missingIds.length === 0) return content;
+
+	const stripped =
+		content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+	const openFence = stripped.match(/^---[ \t]*\r?\n/);
+	if (!openFence) return content;
+	const fenceLen = openFence[0].length;
+	const closeFence = stripped.slice(fenceLen).match(/\n---[ \t]*(\r?\n|$)/);
+	if (!closeFence) return content;
+
+	const closeStart = fenceLen + (closeFence.index ?? 0);
+	const body = stripped.slice(fenceLen, closeStart).replace(/\r\n/g, '\n');
+
+	// Find the `source_knowledge_ids:` line so we can insert after its block.
+	const sourceIdx = body.indexOf('source_knowledge_ids:');
+	if (sourceIdx === -1) return content;
+
+	// Walk forward from `source_knowledge_ids:` to find the end of its list
+	// (the next non-indented, non-empty line, or end of frontmatter body).
+	const afterLabel = body.indexOf('\n', sourceIdx);
+	const listStart = afterLabel === -1 ? body.length : afterLabel + 1;
+	const lines = body.split('\n');
+	let insertIdx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].length === 0) continue;
+		// Skip lines that are part of the `source_knowledge_ids:` value block.
+		const relativePos = body.indexOf(lines[i], listStart);
+		if (relativePos >= 0 && relativePos < listStart + 2) continue; // on the label line
+		if (
+			body.slice(listStart, body.indexOf(lines[i], listStart)).match(/^\s+-/)
+		) {
+			// still inside the list block
+			continue;
+		}
+		insertIdx = body.indexOf(lines[i], listStart);
+		break;
+	}
+	if (insertIdx === -1) insertIdx = body.length;
+
+	const missingBlock = [
+		'missing_source_knowledge_ids:',
+		...missingIds.map((id) => `  - ${id}`),
+		'',
+	].join('\n');
+
+	const newBody =
+		body.slice(0, insertIdx) + missingBlock + body.slice(insertIdx);
+
+	const prefix = stripped.slice(0, fenceLen);
+	const suffix = stripped.slice(closeStart);
+	return prefix + newBody + suffix;
+}
+
+/**
  * Stamp source knowledge entries with `generated_skill_slug` and
  * `generated_skill_path` metadata. Refactored in Phase G′ to take
  * `(directory, slug, ids)` so it can be called both from direct active-mode
  * generation AND from `activateProposal` after parsing the draft frontmatter.
+ *
+ * Returns the IDs that were successfully stamped and the IDs that were not
+ * found in swarm/hive knowledge (so callers can surface staleness).
  */
 async function stampSourceEntries(
 	directory: string,
 	slug: string,
 	ids: string[],
-): Promise<void> {
-	if (!ids || ids.length === 0) return;
+): Promise<{ stamped: string[]; missing: string[] }> {
+	if (!ids || ids.length === 0) return { stamped: [], missing: [] };
 	const swarmPath = resolveSwarmKnowledgePath(directory);
 	const swarm = await readKnowledge<SwarmKnowledgeEntry>(swarmPath);
 	const idSet = new Set(ids);
-	let touched = false;
+	const stamped: string[] = [];
+	const missing: string[] = [];
+	const found = new Set<string>();
 	const repoRel = activeRepoRelativePath(slug);
 	for (const e of swarm) {
 		if (!idSet.has(e.id)) continue;
+		found.add(e.id);
 		(e as KnowledgeEntryBase).generated_skill_slug = slug;
 		(e as KnowledgeEntryBase).generated_skill_path = repoRel;
 		e.updated_at = new Date().toISOString();
-		touched = true;
 	}
-	if (touched) await rewriteKnowledge(swarmPath, swarm);
+	if (found.size > 0) await rewriteKnowledge(swarmPath, swarm);
+	stamped.push(...found);
 
 	const hivePath = resolveHiveKnowledgePath();
-	if (!existsSync(hivePath)) return;
+	if (!existsSync(hivePath)) {
+		for (const id of ids) {
+			if (!found.has(id)) missing.push(id);
+		}
+		return { stamped, missing };
+	}
 	const hive = await readKnowledge<HiveKnowledgeEntry>(hivePath);
-	let touchedHive = false;
+	const foundHive = new Set<string>();
 	for (const e of hive) {
 		if (!idSet.has(e.id)) continue;
+		foundHive.add(e.id);
 		(e as KnowledgeEntryBase).generated_skill_slug = slug;
 		(e as KnowledgeEntryBase).generated_skill_path = repoRel;
 		e.updated_at = new Date().toISOString();
-		touchedHive = true;
 	}
-	if (touchedHive) await rewriteKnowledge(hivePath, hive);
+	if (foundHive.size > 0) await rewriteKnowledge(hivePath, hive);
+	stamped.push(...foundHive);
+	const allFound = new Set([...found, ...foundHive]);
+	for (const id of ids) {
+		if (!allFound.has(id)) missing.push(id);
+	}
+	return { stamped, missing };
 }
 
 /**

@@ -348,6 +348,87 @@ describe('generateSkills active mode', () => {
 	});
 });
 
+// ============================================================================
+// PR #1485 — missing source knowledge IDs
+// ============================================================================
+
+describe('generateSkills active mode — PR #1485 missing source knowledge IDs', () => {
+	it('surfaces missing source knowledge IDs in result.written[].missingSourceKnowledgeIds', async () => {
+		// Two entries with matching tags so clusterEntries produces one skill.
+		// The cluster's sourceKnowledgeIds will be ['e1', 'e2']; the phantom
+		// ID is absent from swarm and will surface in missingSourceKnowledgeIds.
+		await seed([
+			makeEntry('e1', { tags: ['scope', 'pr-1485'] }),
+			makeEntry('e2', { tags: ['scope', 'pr-1485'] }),
+		]);
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'active',
+			sourceKnowledgeIds: ['e1', 'e2', 'does-not-exist-uuid'],
+		});
+		expect(result.written.length).toBeGreaterThan(0);
+		const written = result.written[0];
+		expect(written.missingSourceKnowledgeIds).toBeDefined();
+		expect(written.missingSourceKnowledgeIds).toBeArray();
+		expect(written.missingSourceKnowledgeIds).toContain('does-not-exist-uuid');
+		// e1 and e2 were found in swarm — must NOT appear in missing
+		expect(written.missingSourceKnowledgeIds).not.toContain('e1');
+		expect(written.missingSourceKnowledgeIds).not.toContain('e2');
+		// sourceKnowledgeIds reflects only entries that were actually compiled
+		expect(written.sourceKnowledgeIds).toEqual(['e1', 'e2']);
+	});
+
+	it('writes missing_source_knowledge_ids to the active SKILL.md frontmatter', async () => {
+		await seed([
+			makeEntry('e1', { tags: ['scope', 'pr-1485-fm'] }),
+			makeEntry('e2', { tags: ['scope', 'pr-1485-fm'] }),
+		]);
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'active',
+			sourceKnowledgeIds: ['e1', 'e2', 'does-not-exist-uuid'],
+		});
+		expect(result.written.length).toBeGreaterThan(0);
+		const content = readFileSync(result.written[0].path, 'utf-8');
+		// Frontmatter must contain the missing_source_knowledge_ids key
+		expect(content).toContain('missing_source_knowledge_ids:');
+		// The phantom ID must appear with 2-space indent as a YAML list item
+		expect(content).toContain('  - does-not-exist-uuid');
+		// e1 and e2 were found in swarm — must NOT appear in the missing block
+		const missingBlockMatch = content.match(
+			/missing_source_knowledge_ids:\n(?:[ \t]+-.*\n)*/,
+		);
+		expect(missingBlockMatch).not.toBeNull();
+		expect(missingBlockMatch![0]).not.toContain('  - e1');
+		expect(missingBlockMatch![0]).not.toContain('  - e2');
+	});
+
+	it('hive early-return path is exercised when the hive file is absent', async () => {
+		// No .swarm/hive file exists in tmp — resolveHiveKnowledgePath() returns
+		// a home-directory path, so existsSync is false and stampSourceEntries
+		// returns immediately after the swarm scan with all non-found IDs in `missing`.
+		await seed([
+			makeEntry('e1', { tags: ['scope', 'pr-1485-hive'] }),
+			makeEntry('e2', { tags: ['scope', 'pr-1485-hive'] }),
+		]);
+		const result = await generateSkills({
+			directory: tmp,
+			mode: 'active',
+			sourceKnowledgeIds: ['e1', 'e2', 'phantom-no-hive'],
+		});
+		// Skill was written without throwing (early-return path exercised)
+		expect(result.written.length).toBeGreaterThan(0);
+		const written = result.written[0];
+		expect(written.path.endsWith('SKILL.md')).toBe(true);
+		expect(existsSync(written.path)).toBe(true);
+		// missing contains only the ID absent from swarm (hive doesn't exist)
+		expect(written.missingSourceKnowledgeIds).toBeDefined();
+		expect(written.missingSourceKnowledgeIds).toContain('phantom-no-hive');
+		expect(written.missingSourceKnowledgeIds).not.toContain('e1');
+		expect(written.missingSourceKnowledgeIds).not.toContain('e2');
+	});
+});
+
 describe('listSkills + inspectSkill + activateProposal', () => {
 	it('lists drafts/active and inspects content', async () => {
 		await seed([makeEntry('l1'), makeEntry('l2')]);
