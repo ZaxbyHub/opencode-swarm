@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.90.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.89.0...v7.90.0) (2026-06-24)
+
+
+### Features
+
+* **skills:** bundle missing skills and add CI drift check ([694aa98](https://github.com/ZaxbyHub/opencode-swarm/commit/694aa98127ad44d7894543d1566374958a4c3d07))
+
 ## [7.89.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.88.4...v7.89.0) (2026-06-24)
 
 
