@@ -126,6 +126,13 @@ export const DIVERGENT_ARCHITECT_MODE_SKILLS: Array<{
  * Architect MODE skills whose `.opencode` SKILL.md is canonical and whose
  * `.claude`/`.agents` surfaces are thin adapter shims that delegate back to the
  * canonical `.opencode` skill.
+ *
+ * `expectedCanonicalRef` is the relative path that each adapter SKILL.md must
+ * contain as a reference back to the canonical `.opencode` skill. All adapter
+ * shims live exactly three directory levels deep (`.{runtime}/skills/{slug}/`),
+ * so `../../../` always resolves to the repo root from any adapter path. If
+ * the directory structure changes (e.g., skills are reorganised to a flat
+ * layout), update `expectedCanonicalRef` entries accordingly.
  */
 export const ADAPTER_ARCHITECT_MODE_SKILLS: Array<{
 	slug: string;
