@@ -8,15 +8,19 @@ description: >
   and temp directory cleanup. Prevents mock.module and vi.spyOn leaks across Bun's shared test-runner process.
 effort: medium
 generated_from_knowledge: []
-source_knowledge_ids: ['906f700a-d166-409c-aa64-717d5e56fd63']
+source_knowledge_ids: ['00cc0fba-5ed8-4e2c-9a3c-96675e09d175', 'cc366a49-f097-41a5-847b-ccce077e6c80']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  906f700a... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only the source_knowledge_ids metadata
+  was updated to point to current lessons about lint-script false positives
+  (testing) and upgrade-safety test helpers (testing), which are both
+  directly relevant to the mock-to-internals-migration domain.
 ---
 
 # mock.module / vi.spyOn → _internals DI Seam Migration Protocol

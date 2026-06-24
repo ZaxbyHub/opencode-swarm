@@ -7,15 +7,19 @@ description: >
   conflict detection.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: ['1bed6ebf-f834-4002-ae5c-18e4d7e22c1f']
+source_knowledge_ids: ['f07c1f4d-9bb0-4219-9804-26aa8efe8146', '20f7da40-02e0-4da8-9310-a78eb87ca81e']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  1bed6ebf... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to current lessons about verifying pre-existing state on
+  parent commit and updating test data after fixes, both directly relevant
+  to the PR readiness pre-merge checklist.
 ---
 
 # PR Readiness Skill

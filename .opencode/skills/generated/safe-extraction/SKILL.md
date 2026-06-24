@@ -6,15 +6,19 @@ description: >
   Prevents CI failures, broken imports, and test regressions from code extraction.
 effort: medium
 generated_from_knowledge: []
-source_knowledge_ids: ['c276dc6e-dc46-4390-a616-46321324a5df']
+source_knowledge_ids: ['b02ac9d7-9f2b-4ac0-9afe-5ee5f35f54c3', 'cc366a49-f097-41a5-847b-ccce077e6c80']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  c276dc6e... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to current lessons about refactoring guards to separate
+  functions and upgrade-safety test helpers, both directly relevant to the
+  safe extraction protocol.
 ---
 
 # Safe Extraction Protocol

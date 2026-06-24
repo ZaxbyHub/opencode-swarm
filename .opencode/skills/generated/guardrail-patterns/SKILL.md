@@ -2,14 +2,19 @@
 name: guardrail-patterns
 description: Guardrail patterns for opencode-swarm — pattern structure, bypass surfaces, regex anti-patterns, and test conventions for checkDestructiveCommand()
 source_knowledge_ids:
-  - 098926ef
-  - 2c1e4689
-  - 54c33fa4
-  - 4f51d11a
+  - 00cc0fba-5ed8-4e2c-9a3c-96675e09d175
+  - b02ac9d7-9f2b-4ac0-9afe-5ee5f35f54c3
 generated_at: 2026-06-22T00:00:00.000Z
 status: active
-version: 1
+version: 2
 skill_origin: generated
+provenance_note: >
+  Re-linked to current knowledge entries (version 2). The original 4 source IDs
+  (098926ef, 2c1e4689, 54c33fa4, 4f51d11a) are no longer present in the
+  active knowledge store. The skill body and behavior are unchanged.
+  New source_knowledge_ids reference current lessons about lint-script
+  false positives (testing) and refactoring guards to separate functions
+  (architecture), both directly relevant to guardrail patterns.
 ---
 
 # Skill: Guardrail Patterns for opencode-swarm

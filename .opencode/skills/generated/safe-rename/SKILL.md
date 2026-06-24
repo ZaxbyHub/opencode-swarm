@@ -6,15 +6,19 @@ description: >
   build_check to ensure every consumer is updated and nothing breaks.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: ['1eb9f867-5961-4df9-98b6-569726e63566']
+source_knowledge_ids: ['20f7da40-02e0-4da8-9310-a78eb87ca81e']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  1eb9f867... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to the current lesson about updating test data when a
+  fix changes expectations, which is directly relevant to safe rename
+  verification.
 ---
 
 # Safe Rename Skill

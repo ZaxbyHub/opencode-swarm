@@ -7,15 +7,19 @@ description: >
   guard ordering, and gating tests.
 effort: medium
 generated_from_knowledge: []
-source_knowledge_ids: ['3d4f3ae0-2118-43dc-8a06-e10fb2e035eb']
+source_knowledge_ids: ['b02ac9d7-9f2b-4ac0-9afe-5ee5f35f54c3']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  3d4f3ae0... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to the current lesson about refactoring guards to separate
+  functions, which is directly relevant to opt-in tool registration's
+  guard ordering.
 ---
 
 # Opt-In Tool Registration Pattern

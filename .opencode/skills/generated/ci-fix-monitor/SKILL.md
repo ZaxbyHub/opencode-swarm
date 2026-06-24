@@ -6,15 +6,19 @@ description: >
   test failures, lint), determining the correct fix, and re-pushing.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: ['35eefd00-6f79-495b-8b86-8b95ba9800ce']
+source_knowledge_ids: ['20f7da40-02e0-4da8-9310-a78eb87ca81e', 'f07c1f4d-9bb0-4219-9804-26aa8efe8146']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  35eefd00... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to current lessons about updating test data after fixes
+  and verifying pre-existing state on parent commit, both directly relevant
+  to CI failure handling.
 ---
 
 # CI Fix & Monitor Protocol

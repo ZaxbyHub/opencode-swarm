@@ -6,15 +6,19 @@ description: >
   changes. Prevents wasted effort on stale branches.
 effort: small
 generated_from_knowledge: []
-source_knowledge_ids: ['b8fee776-9d6b-4af1-ae32-a26317a920f7']
+source_knowledge_ids: ['f07c1f4d-9bb0-4219-9804-26aa8efe8146']
 generated_at: 2026-06-14T16:50:00Z
 confidence: 0.8
 status: active
-version: 3
+version: 4
 skill_origin: generated
 provenance_note: >
-  Source knowledge ID backfilled from a new swarm knowledge entry capturing this skill's core lesson.
-  Metadata and body preserved; version bumped to reflect provenance update.
+  Re-linked to current knowledge entries (version 4). The original source ID
+  b8fee776... is no longer present in the active knowledge store. The skill
+  body and behavior are unchanged; only source_knowledge_ids metadata was
+  updated to point to the current lesson about verifying pre-existing state
+  on parent commit, which is directly relevant to the parallel-work-check
+  protocol.
 ---
 
 # Parallel Work Check Protocol
