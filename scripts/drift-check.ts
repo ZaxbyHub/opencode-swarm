@@ -268,6 +268,14 @@ export function detectSkillMirrorDrift(root: string = REPO_ROOT): DriftFinding[]
 					message: `opencode-only skill "${slug}" missing ${opencodePath}`,
 				});
 			}
+			if (fileExists(claudePath)) {
+				findings.push({
+					category,
+					severity: 'warning',
+					file: claudePath,
+					message: `opencode-only skill "${slug}" unexpectedly has a .claude mirror at ${claudePath}`,
+				});
+			}
 		}
 	}
 
@@ -497,13 +505,22 @@ export function runAllDetectors(): DriftFinding[] {
 	return findings;
 }
 
+function escapeAnnotationData(s: string): string {
+	return s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+function escapeAnnotationParam(s: string): string {
+	return escapeAnnotationData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+}
+
 export function annotation(finding: DriftFinding): string {
 	const level = finding.severity === 'notice' ? 'notice' : finding.severity;
 	// GitHub workflow-command syntax: `::level params::message`, or `::level::message`
 	// when there are no params. Every detector currently sets `file`, but guard the
 	// fileless case so it stays valid syntax rather than `::level ::message`.
-	const params = finding.file ? ` file=${finding.file}` : '';
-	return `::${level}${params}::[drift:${finding.category}] ${finding.message}`;
+	// Values are URL-encoded per GitHub docs to prevent annotation injection.
+	const params = finding.file ? ` file=${escapeAnnotationParam(finding.file)}` : '';
+	return `::${level}${params}::[drift:${finding.category}] ${escapeAnnotationData(finding.message)}`;
 }
 
 export function buildReport(findings: DriftFinding[]): string {

@@ -399,7 +399,7 @@ test('...', () => {
 
 The repo maintains several "canonical source + mirror" and "source + registry" surfaces that must stay in sync but are edited independently:
 
-- **Skills:** `.opencode/skills/<name>/SKILL.md` (operative, loaded by the OpenCode plugin / architect MODE stubs) and `.claude/skills/<name>/SKILL.md` (Claude-side), plus `.agents/` and `.github/` adapter shims.
+- **Skills:** `.opencode/skills/<name>/SKILL.md` (operative, loaded by the OpenCode plugin / architect MODE stubs) and `.claude/skills/<name>/SKILL.md` (Claude-side), plus `.agents/` adapter shims.
 - **Bundled skills:** `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`), `package.json#files`, and the `package-smoke` allowlist must all match each other **and** the actual `.opencode/skills/` directory.
 - **Tools / commands / agents:** implementation, registries, and per-agent maps (invariant 11).
 

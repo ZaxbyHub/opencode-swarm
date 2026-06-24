@@ -54,8 +54,11 @@ jobs:
         run: bun run scripts/drift-check.ts --report drift-report.md
       - name: Post drift report comment
         # Only comment on pull requests, and even if the drift step failed under
-        # enforce mode (so the report is always visible).
+        # enforce mode (so the report is always visible). continue-on-error so
+        # fork PRs (which lose pull-requests:write permission) do not cause
+        # the overall workflow to fail — consistent with soft-warn-by-default.
         if: ${{ always() && github.event_name == 'pull_request' }}
+        continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |

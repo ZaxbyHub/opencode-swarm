@@ -132,7 +132,7 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
 |---|---|---|
 | `coder` | Always | Task implementation (coder) |
 | `reviewer` | Always | Task review (reviewer) |
-| `test_engineer` | Always | Test verification (test_engineer) |
+| `test_engineer` | When phase modifies source code/tests (unless explicitly waived) | Test verification (test_engineer) |
 | `docs` | When `require_docs: true` in QA gate profile | Documentation updates |
 
 If any required agent is missing, `phase_complete` returns `{ success: false, status: 'incomplete', message: 'Phase N incomplete: missing required agents: <list>', agentsMissing: [...] }` and the phase is not closed. Dispatch each agent during normal task execution (not only inside optional Phase/Final Councils in steps 5.65/5.7) so the closeout gate is satisfied.
