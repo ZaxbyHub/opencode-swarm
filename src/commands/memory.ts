@@ -20,6 +20,7 @@ import {
 	writeJsonlExport,
 } from '../memory';
 import type { MemoryConfig } from '../memory/config';
+import { readConsolidationLog } from '../memory/consolidation-log';
 import type {
 	MemoryCompactResult,
 	MemoryProposalStore,
@@ -48,7 +49,46 @@ export async function handleMemoryCommand(
 		'- `/swarm memory import` - import `.swarm/memory/{memories,proposals}.jsonl` into SQLite',
 		'- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration',
 		'- `/swarm memory evaluate --json` - run the golden recall evaluation fixtures and emit a JSON report',
+		'- `/swarm memory consolidation-log [--limit <n>]` - summarize recent episodic→semantic consolidation passes (max 50 per query)',
 	].join('\n');
+}
+
+export async function handleMemoryConsolidationLogCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const parsed = parseMaintenanceArgs(args, {
+		usage:
+			'Usage: /swarm memory consolidation-log [--limit <n>]  (max 50 records per query)',
+		allowConfirm: false,
+	});
+	if ('error' in parsed) return parsed.error;
+	const limit = Math.min(parsed.limit, 50);
+	const records = await readConsolidationLog(directory);
+	const recent = records.slice(-limit).reverse();
+	const lines = [
+		'## Swarm Memory Consolidation Log',
+		'',
+		`- Total recorded passes: \`${records.length}\``,
+		`- Showing: \`${recent.length}\``,
+	];
+	if (recent.length === 0) {
+		lines.push('', 'No consolidation passes have been recorded yet.');
+		return lines.join('\n');
+	}
+	for (const record of recent) {
+		lines.push(
+			'',
+			`### Phase ${record.phaseNumber} — ${record.completedAt}`,
+			`- Run: \`${record.runId ?? 'unknown'}\``,
+			`- Clusters: \`${record.clusterCount}\` (deferred \`${record.clustersDeferred}\`)`,
+			`- Decisions applied: \`${record.decisionsEmitted}\` (added \`${record.added}\`, superseded \`${record.superseded}\`)`,
+			`- Contradictions: \`${record.contradictionsDetected}\` | Deduped: \`${record.deduped}\` | Proposed: \`${record.proposed}\``,
+			`- Memories decayed: \`${record.memoriesDecayed}\` | Errored: \`${record.errored}\``,
+			`- Processed proposals: \`${record.processedProposalIds.length}\``,
+		);
+	}
+	return lines.join('\n');
 }
 
 export async function handleMemoryStatusCommand(
@@ -330,13 +370,22 @@ function maintenanceReportOptions(
 	limit: number,
 ): {
 	limit: number;
-	lowUtilityMaxConfidence: number;
-	lowUtilityMinAgeDays: number;
+	importanceWeights: {
+		wRecency: number;
+		wFrequency: number;
+		wFreshness: number;
+		wConfidence: number;
+		lambda: number;
+		mu: number;
+		n: number;
+	};
+	importanceThreshold: number;
 } {
+	const { threshold, ...weights } = config.maintenance.importance;
 	return {
 		limit,
-		lowUtilityMaxConfidence: config.maintenance.lowUtilityMaxConfidence,
-		lowUtilityMinAgeDays: config.maintenance.lowUtilityMinAgeDays,
+		importanceWeights: weights,
+		importanceThreshold: threshold,
 	};
 }
 

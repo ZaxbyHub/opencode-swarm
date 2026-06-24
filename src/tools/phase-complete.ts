@@ -66,6 +66,7 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import { runMemoryConsolidationFireAndForget } from '../services/memory-consolidation.js';
 import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
 import {
@@ -1414,6 +1415,35 @@ export async function executePhaseComplete(
 			safeWarn(
 				'[phase_complete] Scheduled skill consolidation setup error (non-blocking):',
 				skillConsolidationError,
+			);
+		}
+
+		// Memory consolidation (issue #1464): distill the phase's episodic memory
+		// into durable semantic facts. Opportunistic, gated by memory config, and
+		// explicitly non-blocking — it may call an LLM and write memory records.
+		try {
+			const memoryConfig = config.memory;
+			if (memoryConfig?.enabled && memoryConfig.consolidation?.enabled) {
+				runMemoryConsolidationFireAndForget(
+					{
+						directory: dir,
+						config: memoryConfig,
+						phase,
+						sessionId: sessionID,
+					},
+					undefined,
+					(err) => {
+						safeWarn(
+							'[phase_complete] Memory consolidation error (non-blocking):',
+							err,
+						);
+					},
+				);
+			}
+		} catch (memoryConsolidationError) {
+			safeWarn(
+				'[phase_complete] Memory consolidation setup error (non-blocking):',
+				memoryConsolidationError,
 			);
 		}
 

@@ -445,6 +445,7 @@ export const swarmState = {
 	curatorInitAgentNames: [] as string[],
 	curatorPhaseAgentNames: [] as string[],
 	curatorPostmortemAgentNames: [] as string[],
+	curatorConsolidationAgentNames: [] as string[],
 
 	/** All registered skill_improver / spec_writer agent names across swarms,
 	 * mirroring curatorInitAgentNames so the LLM delegate factory can resolve
@@ -513,6 +514,7 @@ export function resetSwarmState(): void {
 	swarmState.curatorInitAgentNames = [];
 	swarmState.curatorPhaseAgentNames = [];
 	swarmState.curatorPostmortemAgentNames = [];
+	swarmState.curatorConsolidationAgentNames = [];
 	swarmState.skillImproverAgentNames = [];
 	swarmState.specWriterAgentNames = [];
 	swarmState.currentCriticalShownIds.clear();
@@ -542,11 +544,12 @@ export function resetSwarmState(): void {
  * The preserved fields are:
  * - opencodeClient (SDK client for curator/full-auto delegation)
  * - fullAutoEnabledInConfig (config flag read at init)
- * - curatorInitAgentNames, curatorPhaseAgentNames, curatorPostmortemAgentNames (curator registry)
+ * - curatorInitAgentNames, curatorPhaseAgentNames, curatorPostmortemAgentNames,
+ *   curatorConsolidationAgentNames (curator registry)
  * - skillImproverAgentNames, specWriterAgentNames (skill/spec registry)
  * - generatedAgentNames (full-auto delegation guard registry)
  *
- * Implementation: save all 8 to locals, call resetSwarmState(), restore all 8.
+ * Implementation: save all to locals, call resetSwarmState(), restore all.
  * Synchronous (matches resetSwarmState contract). Errors from resetSwarmState
  * propagate to caller (no try/catch wrapper).
  */
@@ -557,6 +560,8 @@ export function resetSwarmStatePreservingSingletons(): void {
 	const preservedCuratorPhaseAgentNames = swarmState.curatorPhaseAgentNames;
 	const preservedCuratorPostmortemAgentNames =
 		swarmState.curatorPostmortemAgentNames;
+	const preservedCuratorConsolidationAgentNames =
+		swarmState.curatorConsolidationAgentNames;
 	const preservedSkillImproverAgentNames = swarmState.skillImproverAgentNames;
 	const preservedSpecWriterAgentNames = swarmState.specWriterAgentNames;
 	const preservedGeneratedAgentNames = swarmState.generatedAgentNames;
@@ -568,6 +573,8 @@ export function resetSwarmStatePreservingSingletons(): void {
 	swarmState.curatorInitAgentNames = preservedCuratorInitAgentNames;
 	swarmState.curatorPhaseAgentNames = preservedCuratorPhaseAgentNames;
 	swarmState.curatorPostmortemAgentNames = preservedCuratorPostmortemAgentNames;
+	swarmState.curatorConsolidationAgentNames =
+		preservedCuratorConsolidationAgentNames;
 	swarmState.skillImproverAgentNames = preservedSkillImproverAgentNames;
 	swarmState.specWriterAgentNames = preservedSpecWriterAgentNames;
 	swarmState.generatedAgentNames = preservedGeneratedAgentNames;

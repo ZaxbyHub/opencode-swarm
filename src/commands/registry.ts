@@ -46,6 +46,7 @@ import { handleLoopCommand } from './loop.js';
 import {
 	handleMemoryCommand,
 	handleMemoryCompactCommand,
+	handleMemoryConsolidationLogCommand,
 	handleMemoryEvaluateCommand,
 	handleMemoryExportCommand,
 	handleMemoryImportCommand,
@@ -1280,6 +1281,15 @@ export const COMMAND_REGISTRY = {
 		args: '',
 		category: 'utility',
 		toolPolicy: 'human-only',
+	},
+	'memory consolidation-log': {
+		handler: (ctx) =>
+			handleMemoryConsolidationLogCommand(ctx.directory, ctx.args),
+		description: 'Summarize recent memory consolidation passes and metrics',
+		subcommandOf: 'memory',
+		args: '--limit <n>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
 	},
 	// Aliases for the TUI shortcuts 'swarm-memory-status' / 'swarm-memory-export'
 	// / 'swarm-memory-import' / 'swarm-memory-migrate', which normalize to single

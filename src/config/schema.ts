@@ -1167,12 +1167,114 @@ export const MemoryConfigSchema = z.object({
 		.default({ rejectDurableSecrets: true }),
 	maintenance: z
 		.object({
+			/** @deprecated superseded by maintenance.importance (issue #1464). */
 			lowUtilityMaxConfidence: z.number().min(0).max(1).default(0.45),
+			/** @deprecated superseded by maintenance.importance (issue #1464). */
 			lowUtilityMinAgeDays: z.number().int().min(1).max(3650).default(30),
+			/** Importance-formula weights + low-utility threshold (DD-11). */
+			importance: z
+				.object({
+					wRecency: z.number().min(0).max(1).default(0.2),
+					wFrequency: z.number().min(0).max(1).default(0.2),
+					wFreshness: z.number().min(0).max(1).default(0.15),
+					wConfidence: z.number().min(0).max(1).default(0.25),
+					lambda: z.number().min(0).max(10).default(0.05),
+					mu: z.number().min(0).max(10).default(0.01),
+					n: z.number().int().min(1).max(100000).default(50),
+					threshold: z.number().min(0).max(1).default(0.2),
+				})
+				.default({
+					wRecency: 0.2,
+					wFrequency: 0.2,
+					wFreshness: 0.15,
+					wConfidence: 0.25,
+					lambda: 0.05,
+					mu: 0.01,
+					n: 50,
+					threshold: 0.2,
+				}),
 		})
 		.default({
 			lowUtilityMaxConfidence: 0.45,
 			lowUtilityMinAgeDays: 30,
+			importance: {
+				wRecency: 0.2,
+				wFrequency: 0.2,
+				wFreshness: 0.15,
+				wConfidence: 0.25,
+				lambda: 0.05,
+				mu: 0.01,
+				n: 50,
+				threshold: 0.2,
+			},
+		}),
+	/** Reflection / consolidation pass (issue #1464, Phase 3). */
+	consolidation: z
+		.object({
+			/** Run episodic→semantic consolidation at phase_complete.
+			 * Default to false: consolidation makes LLM calls and auto-applies
+			 * memory records. Users who opt in to memory should explicitly enable
+			 * consolidation to opt in to this sub-feature. */
+			enabled: z.boolean().default(false),
+			/** Max LLM-distilled clusters processed per pass (cost control). */
+			maxClustersPerPass: z.number().int().min(1).max(100).default(10),
+			/** Jaccard token-overlap threshold for lexical clustering. */
+			jaccardThreshold: z.number().min(0).max(1).default(0.3),
+			/** Distilled facts below this confidence are filed as proposals, not auto-applied. */
+			autoApplyMinConfidence: z.number().min(0).max(1).default(0.6),
+			/**
+			 * Kind-specific decay half-lives in days. 0 means "never auto-expire"
+			 * (the issue's 365+ durable kinds).
+			 */
+			decayHalfLifeDays: z
+				.object({
+					user_preference: z.number().int().min(0).max(36500).default(0),
+					project_fact: z.number().int().min(0).max(36500).default(0),
+					architecture_decision: z.number().int().min(0).max(36500).default(0),
+					repo_convention: z.number().int().min(0).max(36500).default(0),
+					api_finding: z.number().int().min(0).max(36500).default(180),
+					code_pattern: z.number().int().min(0).max(36500).default(90),
+					test_pattern: z.number().int().min(0).max(36500).default(90),
+					failure_pattern: z.number().int().min(0).max(36500).default(90),
+					security_note: z.number().int().min(0).max(36500).default(0),
+					evidence: z.number().int().min(0).max(36500).default(180),
+					todo: z.number().int().min(0).max(36500).default(30),
+					scratch: z.number().int().min(0).max(36500).default(7),
+				})
+				.default({
+					user_preference: 0,
+					project_fact: 0,
+					architecture_decision: 0,
+					repo_convention: 0,
+					api_finding: 180,
+					code_pattern: 90,
+					test_pattern: 90,
+					failure_pattern: 90,
+					security_note: 0,
+					evidence: 180,
+					todo: 30,
+					scratch: 7,
+				}),
+		})
+		.default({
+			enabled: false,
+			maxClustersPerPass: 10,
+			jaccardThreshold: 0.3,
+			autoApplyMinConfidence: 0.6,
+			decayHalfLifeDays: {
+				user_preference: 0,
+				project_fact: 0,
+				architecture_decision: 0,
+				repo_convention: 0,
+				api_finding: 180,
+				code_pattern: 90,
+				test_pattern: 90,
+				failure_pattern: 90,
+				security_note: 0,
+				evidence: 180,
+				todo: 30,
+				scratch: 7,
+			},
 		}),
 	hardDelete: z.boolean().default(false),
 });

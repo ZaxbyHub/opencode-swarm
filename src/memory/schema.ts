@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { DURABLE_MEMORY_KINDS, EVIDENCE_REQUIRED_KINDS } from './config';
 import { MemoryValidationError } from './errors';
 import { containsSecret } from './redaction';
+import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
 	CuratorMemoryDecision,
 	MemoryKind,
@@ -298,6 +299,17 @@ export function validateMemoryRecordRules(
 	options: { rejectDurableSecrets: boolean },
 ): MemoryRecord {
 	const parsed = MemoryRecordSchema.parse(record);
+	// DD-14: stored memory text must never contain the recall-injection sentinel
+	// header. `messagesContainRecall` (injector.ts) trusts that substring to
+	// detect an already-injected block; a memory embedding it would, once
+	// injected, cause later recall to be silently skipped. Reject at write time
+	// — this is the single choke point for every write path (propose, upsert,
+	// curator add/supersede all funnel through here).
+	if (parsed.text.includes(MEMORY_RECALL_SENTINEL)) {
+		throw new MemoryValidationError(
+			'memory text cannot contain the recall sentinel header',
+		);
+	}
 	const expectedHash = computeMemoryContentHash(parsed);
 	const expectedId = createMemoryId(parsed);
 	if (parsed.contentHash !== expectedHash) {

@@ -40,6 +40,36 @@ describe('MemoryConfigSchema', () => {
 			maintenance: {
 				lowUtilityMaxConfidence: 0.45,
 				lowUtilityMinAgeDays: 30,
+				importance: {
+					wRecency: 0.2,
+					wFrequency: 0.2,
+					wFreshness: 0.15,
+					wConfidence: 0.25,
+					lambda: 0.05,
+					mu: 0.01,
+					n: 50,
+					threshold: 0.2,
+				},
+			},
+			consolidation: {
+				enabled: false,
+				maxClustersPerPass: 10,
+				jaccardThreshold: 0.3,
+				autoApplyMinConfidence: 0.6,
+				decayHalfLifeDays: {
+					user_preference: 0,
+					project_fact: 0,
+					architecture_decision: 0,
+					repo_convention: 0,
+					api_finding: 180,
+					code_pattern: 90,
+					test_pattern: 90,
+					failure_pattern: 90,
+					security_note: 0,
+					evidence: 180,
+					todo: 30,
+					scratch: 7,
+				},
 			},
 			hardDelete: false,
 		});
@@ -99,13 +129,52 @@ describe('MemoryConfigSchema', () => {
 			},
 		});
 
-		expect(parsed.maintenance).toEqual({
-			lowUtilityMaxConfidence: 0.2,
-			lowUtilityMinAgeDays: 90,
-		});
+		expect(parsed.maintenance.lowUtilityMaxConfidence).toBe(0.2);
+		expect(parsed.maintenance.lowUtilityMinAgeDays).toBe(90);
+		// Importance defaults are still filled in when not overridden.
+		expect(parsed.maintenance.importance.threshold).toBe(0.2);
 		expect(() =>
 			MemoryConfigSchema.parse({
 				maintenance: { lowUtilityMinAgeDays: 0 },
+			}),
+		).toThrow();
+	});
+
+	test('fills importance and consolidation defaults and preserves nested overrides (issue #1464)', () => {
+		const parsed = MemoryConfigSchema.parse({
+			maintenance: { importance: { threshold: 0.4, wConfidence: 0.3 } },
+			consolidation: {
+				jaccardThreshold: 0.5,
+				decayHalfLifeDays: { todo: 14 },
+			},
+		});
+
+		// Overridden nested values survive zod parsing (the dual-config blocker).
+		expect(parsed.maintenance.importance.threshold).toBe(0.4);
+		expect(parsed.maintenance.importance.wConfidence).toBe(0.3);
+		// Sibling defaults inside the same nested object are preserved.
+		expect(parsed.maintenance.importance.wRecency).toBe(0.2);
+		expect(parsed.consolidation.jaccardThreshold).toBe(0.5);
+		// Opt-in default (MED-04): not enabled unless explicitly set.
+		expect(parsed.consolidation.enabled).toBe(false);
+		expect(parsed.consolidation.decayHalfLifeDays.todo).toBe(14);
+		expect(parsed.consolidation.decayHalfLifeDays.scratch).toBe(7);
+	});
+
+	test('rejects out-of-range importance weights and consolidation bounds', () => {
+		expect(() =>
+			MemoryConfigSchema.parse({
+				maintenance: { importance: { wConfidence: 2 } },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				consolidation: { jaccardThreshold: 1.5 },
+			}),
+		).toThrow();
+		expect(() =>
+			MemoryConfigSchema.parse({
+				consolidation: { maxClustersPerPass: 0 },
 			}),
 		).toThrow();
 	});

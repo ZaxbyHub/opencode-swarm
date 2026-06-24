@@ -1,5 +1,6 @@
 import type { AgentDefinition } from './architect';
 import {
+	CURATOR_CONSOLIDATION_PROMPT,
 	CURATOR_INIT_PROMPT,
 	CURATOR_PHASE_PROMPT,
 	CURATOR_POSTMORTEM_PROMPT,
@@ -8,7 +9,8 @@ import {
 export type CuratorRole =
 	| 'curator_init'
 	| 'curator_phase'
-	| 'curator_postmortem';
+	| 'curator_postmortem'
+	| 'curator_consolidation';
 
 const ROLE_CONFIG: Record<
 	CuratorRole,
@@ -31,6 +33,12 @@ const ROLE_CONFIG: Record<
 		description:
 			'Curator (Post-mortem). Synthesizes project-end evidence into an improvement agenda, consolidates knowledge, and triages pending proposals. Read-only.',
 		prompt: CURATOR_POSTMORTEM_PROMPT,
+	},
+	curator_consolidation: {
+		name: 'curator_consolidation',
+		description:
+			'Curator (Consolidation). Distills clusters of episodic memory into durable semantic facts and flags contradictions at phase boundaries. Read-only.',
+		prompt: CURATOR_CONSOLIDATION_PROMPT,
 	},
 };
 

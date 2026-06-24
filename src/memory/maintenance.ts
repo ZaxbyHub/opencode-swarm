@@ -1,6 +1,31 @@
 import type { MemoryProposalStore, MemoryProvider } from './provider';
 import { isExpired } from './schema';
+import { type ImportanceWeights, importanceScore } from './scoring';
 import type { MemoryProposal, MemoryRecord } from './types';
+
+/**
+ * Default importance-formula weights (issue #1464). Match the zod and runtime
+ * config defaults; used when the maintenance report is built without explicit
+ * importance options (e.g. legacy callers).
+ */
+export const DEFAULT_IMPORTANCE_WEIGHTS: ImportanceWeights = {
+	wRecency: 0.2,
+	wFrequency: 0.2,
+	wFreshness: 0.15,
+	wConfidence: 0.25,
+	lambda: 0.05,
+	mu: 0.01,
+	n: 50,
+};
+/**
+ * A never-recalled memory's importance is driven by freshness+confidence
+ * (recency/frequency terms are 0). 0.2 keeps high-confidence durable facts
+ * above the line regardless of age (the DD-11 fix) while still flagging
+ * low-confidence and very stale never-recalled memories. Pinned by tests.
+ */
+export const DEFAULT_IMPORTANCE_THRESHOLD = 0.2;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export interface MemoryRecallUsageByMemory {
 	memoryId: string;
@@ -44,15 +69,16 @@ export interface MemoryMaintenanceReportOptions {
 	limit?: number;
 	lowUtilityMaxConfidence?: number;
 	lowUtilityMinAgeDays?: number;
+	/** Importance-formula weights (DD-11). Defaults to DEFAULT_IMPORTANCE_WEIGHTS. */
+	importanceWeights?: ImportanceWeights;
+	/** A memory is low-utility when importance < threshold. Defaults to DEFAULT_IMPORTANCE_THRESHOLD. */
+	importanceThreshold?: number;
 }
 
 type ObservableProvider = MemoryProvider &
 	Partial<MemoryProposalStore> & {
 		listRecallUsage?: MemoryProvider['listRecallUsage'];
 	};
-
-const DEFAULT_LOW_UTILITY_MAX_CONFIDENCE = 0.45;
-const DEFAULT_LOW_UTILITY_MIN_AGE_DAYS = 30;
 
 export async function buildMemoryMaintenanceReport(
 	provider: ObservableProvider,
@@ -85,10 +111,8 @@ export async function buildMemoryMaintenanceReport(
 	const lowUtilityMemories = activeMemories
 		.filter((memory) =>
 			isLowUtility(memory, usageByMemory, now, {
-				maxConfidence:
-					options.lowUtilityMaxConfidence ?? DEFAULT_LOW_UTILITY_MAX_CONFIDENCE,
-				minAgeDays:
-					options.lowUtilityMinAgeDays ?? DEFAULT_LOW_UTILITY_MIN_AGE_DAYS,
+				weights: options.importanceWeights ?? DEFAULT_IMPORTANCE_WEIGHTS,
+				threshold: options.importanceThreshold ?? DEFAULT_IMPORTANCE_THRESHOLD,
 			}),
 		)
 		.sort(memorySort);
@@ -151,20 +175,38 @@ function isActiveMemory(memory: MemoryRecord, now: Date): boolean {
 	);
 }
 
+/**
+ * DD-11 fix: low-utility is now defined by a continuous importance score rather
+ * than the old `confidence <= max || age >= minAge` OR heuristic, which
+ * mislabeled high-confidence, never-recalled, aged memories as low-utility.
+ *
+ * A recalled memory is, by definition, being used, so it retains the existing
+ * "any recalled memory is never low-utility" contract via the early return.
+ * For never-recalled memories the importance formula reduces to freshness +
+ * confidence (recency/frequency terms are 0), so high-confidence facts stay
+ * above the threshold while low-confidence or very stale ones fall below it.
+ */
 function isLowUtility(
 	memory: MemoryRecord,
 	usageByMemory: Map<string, MemoryRecallUsageByMemory>,
 	now: Date,
-	options: { maxConfidence: number; minAgeDays: number },
+	options: { weights: ImportanceWeights; threshold: number },
 ): boolean {
 	if (usageByMemory.has(memory.id)) return false;
-	const updated = Date.parse(memory.updatedAt);
-	const ageDays = Number.isFinite(updated)
-		? (now.getTime() - updated) / (24 * 60 * 60 * 1000)
+	const created = Date.parse(memory.createdAt);
+	const daysSinceCreated = Number.isFinite(created)
+		? Math.max(0, (now.getTime() - created) / MS_PER_DAY)
 		: 0;
-	return (
-		memory.confidence <= options.maxConfidence || ageDays >= options.minAgeDays
+	const importance = importanceScore(
+		{
+			confidence: memory.confidence,
+			retrievalCount: 0,
+			daysSinceLastRecall: null,
+			daysSinceCreated,
+		},
+		options.weights,
 	);
+	return importance < options.threshold;
 }
 
 function summarizeRecallByMemory(

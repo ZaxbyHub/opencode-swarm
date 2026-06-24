@@ -29,6 +29,7 @@ export const ALL_SUBAGENT_NAMES = [
 	'curator_init',
 	'curator_phase',
 	'curator_postmortem',
+	'curator_consolidation',
 	'council_generalist',
 	'council_skeptic',
 	'council_domain_expert',

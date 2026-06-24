@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getAgentConfigs } from '../../../src/agents';
+import { createCuratorAgent } from '../../../src/agents/curator-agent';
 import { createSkillImproverAgent } from '../../../src/agents/skill-improver';
 import { createSpecWriterAgent } from '../../../src/agents/spec-writer';
 import type { PluginConfig } from '../../../src/config';
@@ -18,6 +19,7 @@ import {
 	ALL_SUBAGENT_NAMES,
 	DEFAULT_AGENT_CONFIGS,
 	DEFAULT_MODELS,
+	MEMORY_AGENT_TOOL_MAP,
 } from '../../../src/config/constants';
 
 describe('skill_improver registration', () => {
@@ -99,6 +101,50 @@ describe('spec_writer registration', () => {
 // regression demoted every `*_architect` to subagent under multi-swarm configs.
 // New subagents (skill_improver, spec_writer) must register correctly under all
 // prefixes and not break the primary-selection invariant for architects.
+describe('curator_consolidation registration (issue #1464)', () => {
+	it('is in ALL_AGENT_NAMES and ALL_SUBAGENT_NAMES', () => {
+		expect(ALL_AGENT_NAMES).toContain('curator_consolidation');
+		expect(ALL_SUBAGENT_NAMES).toContain('curator_consolidation');
+	});
+
+	it('has a memory-tool entry mirroring sibling curators (opt-in map)', () => {
+		// curator_consolidation is read-only and recalls memory for contradiction
+		// context, so it mirrors curator_init/phase/postmortem in MEMORY_AGENT_TOOL_MAP.
+		expect(MEMORY_AGENT_TOOL_MAP.curator_consolidation).toEqual([
+			'swarm_memory_recall',
+		]);
+		// In the base AGENT_TOOL_MAP it is toolless exactly like its sibling
+		// curators (the memory tool is merged in only when memory is enabled).
+		expect(AGENT_TOOL_MAP.curator_consolidation).toEqual(
+			AGENT_TOOL_MAP.curator_postmortem,
+		);
+	});
+
+	it('default (unprefixed) registration produces curator_consolidation as a subagent', () => {
+		const configs = getAgentConfigs();
+		expect(configs.curator_consolidation).toBeDefined();
+		expect(configs.curator_consolidation.mode).toBe('subagent');
+	});
+
+	it('factory produces a definition with the consolidation prompt', () => {
+		const def = createCuratorAgent(
+			'opencode/big-pickle',
+			undefined,
+			undefined,
+			'curator_consolidation',
+		);
+		expect(def.name).toBe('curator_consolidation');
+		expect(def.config.prompt!.length).toBeGreaterThan(50);
+		expect(def.config.prompt).toMatch(/consolidat/i);
+		// Read-only contract preserved.
+		expect(def.config.tools).toEqual({
+			write: false,
+			edit: false,
+			patch: false,
+		});
+	});
+});
+
 describe('multi-swarm prefix registration for new agents', () => {
 	let originalXDG: string | undefined;
 	let tempDir: string | undefined;
@@ -139,6 +185,11 @@ describe('multi-swarm prefix registration for new agents', () => {
 			// Subagents must keep their model
 			expect(configs[skillName].model).toBeDefined();
 			expect(configs[specName].model).toBeDefined();
+			// curator_consolidation (issue #1464) must also be prefixed per swarm so
+			// the LLM delegate can resolve it under multi-swarm configs (invariant #11).
+			const consolidationName = `${prefix}_curator_consolidation`;
+			expect(configs[consolidationName]).toBeDefined();
+			expect(configs[consolidationName].mode).toBe('subagent');
 		}
 
 		// Invariant #11: at least one prefixed architect is primary and has model stripped

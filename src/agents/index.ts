@@ -641,6 +641,21 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		);
 	}
 
+	// 5e. Create Curator Consolidation agent (issue #1464, Phase 3).
+	if (!isAgentDisabled('curator_consolidation', swarmAgents, swarmPrefix)) {
+		const curatorConsolidationPrompts = getPrompts('curator_consolidation');
+		const curatorConsolidation = createCuratorAgent(
+			swarmAgents?.curator_consolidation?.model ?? getModel('explorer'),
+			curatorConsolidationPrompts.prompt,
+			curatorConsolidationPrompts.appendPrompt,
+			'curator_consolidation' as CuratorRole,
+		);
+		curatorConsolidation.name = prefixName('curator_consolidation');
+		agents.push(
+			applyOverrides(curatorConsolidation, swarmAgents, swarmPrefix, quiet),
+		);
+	}
+
 	// 5f. v2: skill_improver — issue #629. Registered when enabled in config.
 	// Always present in agent map (so SDK can dispatch by name) — runtime gating
 	// happens in the skill_improve tool which checks skill_improver.enabled.

@@ -10,7 +10,13 @@ export type MemoryRunLogEventName =
 	| 'proposal_created'
 	| 'proposal_rejected_by_validation'
 	| 'curator_decision_applied'
-	| 'curator_decision_rejected_by_validation';
+	| 'curator_decision_rejected_by_validation'
+	| 'consolidation_started'
+	| 'cluster_count'
+	| 'decisions_emitted'
+	| 'contradictions_detected'
+	| 'memories_decayed'
+	| 'consolidation_completed';
 
 export interface MemoryRunLogEvent {
 	event: MemoryRunLogEventName;
@@ -24,6 +30,13 @@ export interface MemoryRunLogEvent {
 	proposalId?: string;
 	rejectionReason?: string;
 	timestamp?: string;
+	/** Consolidation pass identifier (phase boundary that triggered the pass). */
+	phaseNumber?: number;
+	/** Consolidation metrics (issue #1464). */
+	clusterCount?: number;
+	decisionsEmitted?: number;
+	contradictionsDetected?: number;
+	memoriesDecayed?: number;
 	metadata?: Record<string, unknown>;
 }
 

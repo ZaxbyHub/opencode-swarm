@@ -17,6 +17,7 @@ import {
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
 import { appendMemoryRunLog } from './run-log';
+import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
 	MemoryKind,
 	MemoryScopeRef,
@@ -24,7 +25,7 @@ import type {
 	RecallInjectionSkipReason,
 } from './types';
 
-const MEMORY_SENTINEL = '## Retrieved Swarm Memory';
+const MEMORY_SENTINEL = MEMORY_RECALL_SENTINEL;
 
 export interface MemoryLifecycleHookOptions {
 	directory: string;

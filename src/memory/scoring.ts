@@ -42,7 +42,7 @@ interface RecallScoringContext {
 	roleProfileKinds?: Set<MemoryKind>;
 }
 
-function tokenize(text: string): Set<string> {
+export function tokenize(text: string): Set<string> {
 	return new Set(
 		text
 			.toLowerCase()
@@ -50,6 +50,102 @@ function tokenize(text: string): Set<string> {
 			.split(/\s+/)
 			.map((token) => token.trim())
 			.filter(Boolean),
+	);
+}
+
+/**
+ * True Jaccard similarity |A∩B| / |A∪B| over two token sets. Distinct from the
+ * recall-scoring `overlap` helper (which is a precision-like |A∩B|/max(|A|,|B|)).
+ * Consolidation clustering uses Jaccard per the issue spec (threshold 0.30).
+ */
+export function jaccard(a: Set<string>, b: Set<string>): number {
+	if (a.size === 0 && b.size === 0) return 0;
+	let intersection = 0;
+	for (const token of a) {
+		if (b.has(token)) intersection++;
+	}
+	const union = a.size + b.size - intersection;
+	return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Single-pass greedy lexical clustering by Jaccard token overlap. Each item is
+ * compared against the representative (first member) of each existing cluster;
+ * it joins the first cluster whose representative meets `threshold`, else seeds
+ * a new cluster. Deterministic for a given input order. Sufficient for v1
+ * (embedding-based clustering is Phase 4, out of scope).
+ */
+export function clusterByJaccard<T>(
+	items: T[],
+	getText: (item: T) => string,
+	threshold: number,
+): T[][] {
+	const clusters: { tokens: Set<string>; members: T[] }[] = [];
+	for (const item of items) {
+		const tokens = tokenize(getText(item));
+		let placed = false;
+		for (const cluster of clusters) {
+			if (jaccard(tokens, cluster.tokens) >= threshold) {
+				cluster.members.push(item);
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) {
+			clusters.push({ tokens, members: [item] });
+		}
+	}
+	return clusters.map((cluster) => cluster.members);
+}
+
+/**
+ * Continuous importance score in [0, sum-of-weights]. Replaces the boolean
+ * `isLowUtility` heuristic (DD-11). Implements the issue formula:
+ *
+ *   importance = w_recency  · exp(-λ · days_since_last_recall)
+ *              + w_frequency · log1p(retrieval_count) / log1p(N)
+ *              + w_freshness · exp(-μ · days_since_created)
+ *              + w_confidence · confidence
+ *
+ * A never-recalled memory contributes 0 to the recency and frequency terms
+ * (days_since_last_recall is null, retrieval_count is 0), so for never-recalled
+ * items importance is driven by freshness and confidence — which is exactly why
+ * a high-confidence, never-recalled, aged memory is no longer mislabeled
+ * low-utility under the old OR condition.
+ */
+export interface ImportanceWeights {
+	wRecency: number;
+	wFrequency: number;
+	wFreshness: number;
+	wConfidence: number;
+	lambda: number;
+	mu: number;
+	n: number;
+}
+
+export function importanceScore(
+	input: {
+		confidence: number;
+		retrievalCount: number;
+		daysSinceLastRecall: number | null;
+		daysSinceCreated: number;
+	},
+	weights: ImportanceWeights,
+): number {
+	const recency =
+		input.daysSinceLastRecall === null
+			? 0
+			: Math.exp(-weights.lambda * Math.max(0, input.daysSinceLastRecall));
+	const denom = Math.log1p(Math.max(1, weights.n));
+	const frequency =
+		denom === 0 ? 0 : Math.log1p(Math.max(0, input.retrievalCount)) / denom;
+	const freshness = Math.exp(-weights.mu * Math.max(0, input.daysSinceCreated));
+	const confidence = Math.min(1, Math.max(0, input.confidence));
+	return (
+		weights.wRecency * recency +
+		weights.wFrequency * frequency +
+		weights.wFreshness * freshness +
+		weights.wConfidence * confidence
 	);
 }
 

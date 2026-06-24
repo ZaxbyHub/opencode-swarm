@@ -9,7 +9,12 @@ import {
 import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 import { toRecallBundle } from './prompt-block';
-import type { MemoryProposalStore, MemoryProvider } from './provider';
+import type {
+	MemoryProposalStore,
+	MemoryProvider,
+	MemoryRecallUsageEvent,
+	MemoryRecallUsageFilter,
+} from './provider';
 import { getOrCreateProvider } from './provider-pool';
 import { redactSecrets } from './redaction';
 import {
@@ -27,6 +32,7 @@ import type {
 	CuratorMemoryDecision,
 	MemoryContext,
 	MemoryKind,
+	MemoryListFilter,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
@@ -327,6 +333,38 @@ export class MemoryGateway {
 			metadata: {},
 		};
 		return this.provider.createProposal(proposal);
+	}
+
+	/**
+	 * Read-only passthroughs used by the consolidation engine. They assert the
+	 * feature is enabled and that the underlying provider supports the
+	 * capability (mirroring the `createProposal` guard), so the engine can
+	 * depend on a stable gateway surface rather than the `Partial` provider.
+	 */
+	async listMemories(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
+		this.assertEnabled();
+		return this.provider.list(filter);
+	}
+
+	async listProposals(filter?: {
+		status?: MemoryProposal['status'];
+		limit?: number;
+	}): Promise<MemoryProposal[]> {
+		this.assertEnabled();
+		if (!this.provider.listProposals) {
+			throw new MemoryValidationError(
+				'memory provider does not support proposals',
+			);
+		}
+		return this.provider.listProposals(filter);
+	}
+
+	async listRecallUsage(
+		filter?: MemoryRecallUsageFilter,
+	): Promise<MemoryRecallUsageEvent[]> {
+		this.assertEnabled();
+		if (!this.provider.listRecallUsage) return [];
+		return this.provider.listRecallUsage(filter);
 	}
 
 	async upsertCurated(record: MemoryRecord): Promise<MemoryRecord> {

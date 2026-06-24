@@ -22,19 +22,21 @@ import type { CuratorLLMDelegate } from './curator.js';
  * when both are registered (prefix-collision avoidance).
  */
 function resolveCuratorAgentName(
-	mode: 'init' | 'phase' | 'postmortem',
+	mode: 'init' | 'phase' | 'postmortem' | 'consolidation',
 	sessionId?: string,
 ): string {
 	const suffixMap = {
 		init: 'curator_init',
 		phase: 'curator_phase',
 		postmortem: 'curator_postmortem',
+		consolidation: 'curator_consolidation',
 	} as const;
 	const suffix = suffixMap[mode];
 	const registeredNamesMap = {
 		init: swarmState.curatorInitAgentNames,
 		phase: swarmState.curatorPhaseAgentNames,
 		postmortem: swarmState.curatorPostmortemAgentNames,
+		consolidation: swarmState.curatorConsolidationAgentNames,
 	} as const;
 	const registeredNames = registeredNamesMap[mode];
 
@@ -118,7 +120,7 @@ function resolveCuratorAgentName(
  */
 export function createCuratorLLMDelegate(
 	directory: string,
-	mode: 'init' | 'phase' | 'postmortem' = 'init',
+	mode: 'init' | 'phase' | 'postmortem' | 'consolidation' = 'init',
 	sessionId?: string,
 ): CuratorLLMDelegate | undefined {
 	const client = swarmState.opencodeClient;
