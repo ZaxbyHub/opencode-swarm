@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.88.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.88.2...v7.88.3) (2026-06-24)
+
+
+### Bug Fixes
+
+* **test:** remove parens from mock.module in comment for lint pass (F-001) ([8c83bfc](https://github.com/ZaxbyHub/opencode-swarm/commit/8c83bfc98c0d1d66acee5114b1d3a0565cf77995))
+* **test:** restore makeMockFn pattern in curator-auto-retire.test.ts ([440d0df](https://github.com/ZaxbyHub/opencode-swarm/commit/440d0df3339bd44615266d73eda3b9cbc860d10b))
+
 ## [7.88.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.88.1...v7.88.2) (2026-06-23)
 
 
