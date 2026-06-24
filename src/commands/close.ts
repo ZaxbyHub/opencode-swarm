@@ -1123,6 +1123,20 @@ export async function runCleanStage(
 	// This prevents data loss when a partial archive succeeds for some files but
 	// fails for others — only the backed-up files are safe to remove.
 	const linkedKnowledgeShared = isLinked(ctx.directory);
+	if (linkedKnowledgeShared) {
+		// Defensive check: if the archive stage unexpectedly backed up a shared
+		// knowledge-family artifact (indicates a bug in runArchiveStage), warn so
+		// operators can diagnose. The artifact is still NOT deleted (guard below).
+		for (const artifact of KNOWLEDGE_FAMILY_ARTIFACTS) {
+			if (ctx.archivedActiveStateFiles.has(artifact)) {
+				ctx.warnings.push(
+					`[link-guard] Shared knowledge artifact "${artifact}" appears in ` +
+						'the archive set while this worktree is linked — archive stage ' +
+						'should have skipped it. Artifact will NOT be deleted.',
+				);
+			}
+		}
+	}
 	if (ctx.archivedActiveStateFiles.size > 0) {
 		for (const artifact of ACTIVE_STATE_TO_CLEAN) {
 			// Never delete cohort-shared knowledge state from a single worktree's

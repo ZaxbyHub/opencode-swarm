@@ -253,7 +253,10 @@ export function resolveKnowledgeStoreDir(directory: string): string {
 	try {
 		const pointer = readLinkPointer(directory);
 		if (pointer) {
-			linkDir = resolveLinkDir(pointer.linkId);
+			// path.resolve() canonicalizes the shared store path (removes any relative
+			// components, resolves symlinks in the base dir) so callers never operate
+			// on a non-canonical path even if the data directory has unexpected shape.
+			linkDir = path.resolve(resolveLinkDir(pointer.linkId));
 		}
 	} catch {
 		linkDir = null;
