@@ -3,9 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	addTelemetryListener,
 	emit,
 	initTelemetry,
+	ROTATION_CHECK_INTERVAL,
 	resetTelemetryForTesting,
 	rotateTelemetryIfNeeded,
 	type TelemetryEvent,
@@ -357,5 +359,99 @@ describe('telemetry', () => {
 			expect(() => emit('session_ended', { sessionId: 'test' })).not.toThrow();
 			await sleep(200);
 		});
+	});
+});
+
+describe('emit rotation wiring — regression: rotateTelemetryIfNeeded was never called from production code (#1273)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		resetTelemetryForTesting();
+		tempDir = getTempDir();
+	});
+
+	afterEach(() => {
+		resetTelemetryForTesting();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// ignore cleanup errors
+		}
+	});
+
+	test('emit() calls rotateTelemetryIfNeeded every ROTATION_CHECK_INTERVAL emits', async () => {
+		initTelemetry(tempDir);
+		await sleep(100);
+
+		// Previous code: rotateTelemetryIfNeeded was never invoked from any
+		// production path. Now emit() calls it on a counter throttle.
+		let rotationCalls = 0;
+		const original = _internals.rotateTelemetryIfNeeded;
+		_internals.rotateTelemetryIfNeeded = () => {
+			rotationCalls++;
+		};
+
+		try {
+			// Emit ROTATION_CHECK_INTERVAL - 1 events: rotation should NOT fire yet
+			for (let i = 0; i < ROTATION_CHECK_INTERVAL - 1; i++) {
+				emit('heartbeat', { sessionId: 'test' });
+			}
+			expect(rotationCalls).toBe(0);
+
+			// One more emit: rotation should fire exactly once
+			emit('heartbeat', { sessionId: 'test' });
+			expect(rotationCalls).toBe(1);
+
+			// Another full cycle triggers a second rotation check
+			for (let i = 0; i < ROTATION_CHECK_INTERVAL; i++) {
+				emit('heartbeat', { sessionId: 'test' });
+			}
+			expect(rotationCalls).toBe(2);
+		} finally {
+			_internals.rotateTelemetryIfNeeded = original;
+		}
+	});
+
+	test('emit() triggers rotateTelemetryIfNeeded() which renames the file and re-opens a stream (wiring verification, requires pre-populated file)', async () => {
+		initTelemetry(tempDir);
+		await sleep(100);
+
+		const telemetryPath = getTelemetryPath(tempDir);
+		const rotatedPath = getRotatedPath(tempDir);
+
+		// Pre-populate the file beyond a small rotation threshold. This is
+		// required because Node/Bun WriteStream buffers data in memory and does
+		// not flush to disk before rotateTelemetryIfNeeded reads the file size
+		// via fs.statSync. Without pre-population, the on-disk size would be
+		// smaller than the buffered size and rotation would not fire.
+		fs.appendFileSync(telemetryPath, 'x'.repeat(200) + os.EOL);
+
+		// Use a small threshold so the pre-populated data triggers rotation.
+		// NOTE: This test cannot directly prove that "stream-driven growth
+		// triggers rotation" without changing production code to use a sync
+		// write path or awaiting stream flush before the stat check. The
+		// pre-population works around WriteStream buffering to verify the
+		// wiring: counter-throttle fires, file is renamed, and stream reopens.
+		const original = _internals.rotateTelemetryIfNeeded;
+		_internals.rotateTelemetryIfNeeded = () => rotateTelemetryIfNeeded(100);
+
+		try {
+			// Emit exactly ROTATION_CHECK_INTERVAL events to trigger one rotation
+			for (let i = 0; i < ROTATION_CHECK_INTERVAL; i++) {
+				emit('heartbeat', { sessionId: 'test' });
+			}
+			await sleep(200);
+
+			// Old file should have been renamed to .jsonl.1
+			expect(fs.existsSync(rotatedPath)).toBe(true);
+
+			// New file should exist and accept subsequent writes
+			emit('heartbeat', { sessionId: 'after-rotate' });
+			await sleep(100);
+			const content = fs.readFileSync(telemetryPath, 'utf-8');
+			expect(content).toContain('after-rotate');
+		} finally {
+			_internals.rotateTelemetryIfNeeded = original;
+		}
 	});
 });

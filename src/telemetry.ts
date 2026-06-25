@@ -56,11 +56,26 @@ let _projectDirectory: string | null = null;
 const _listeners: TelemetryListener[] = [];
 let _disabled: boolean = false;
 
+/**
+ * Emit counter for rotation throttling. Rotation is checked every
+ * `ROTATION_CHECK_INTERVAL` emits so the hot path never pays a `statSync`
+ * on every call — satisfying the "no per-tool-call hot-path cost" contract.
+ */
+let _emitCount = 0;
+
+/**
+ * Number of emits between rotation checks. 50 keeps the overhead at one
+ * `statSync` per 50 telemetry writes (~once per few seconds in a busy
+ * session, roughly once per minute in a quiet one).
+ */
+export const ROTATION_CHECK_INTERVAL = 50;
+
 /** @internal - For testing only */
 export function resetTelemetryForTesting(): void {
 	_disabled = false;
 	_projectDirectory = null;
 	_listeners.length = 0;
+	_emitCount = 0;
 	if (_writeStream !== null) {
 		_writeStream.end();
 		_writeStream = null;
@@ -139,6 +154,16 @@ export function emit(
 			} catch {
 				// Listener errors must NOT propagate
 			}
+		}
+
+		// Throttled rotation check — only every ROTATION_CHECK_INTERVAL emits,
+		// so the hot path pays a single integer increment per call and the
+		// statSync only fires occasionally. rotateTelemetryIfNeeded is safe
+		// to call opportunistically: it guards on size and swallows errors.
+		_emitCount++;
+		if (_emitCount >= ROTATION_CHECK_INTERVAL) {
+			_emitCount = 0;
+			_internals.rotateTelemetryIfNeeded();
 		}
 	} catch {
 		// emit() must never throw to the caller
@@ -442,4 +467,5 @@ export const telemetry = {
 export const _internals: {
 	telemetry: typeof telemetry;
 	emit: typeof emit;
-} = { telemetry, emit };
+	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
+} = { telemetry, emit, rotateTelemetryIfNeeded };
