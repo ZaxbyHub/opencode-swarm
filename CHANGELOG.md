@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.90.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.90.0...v7.90.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* **telemetry:** address PR [#1503](https://github.com/ZaxbyHub/opencode-swarm/issues/1503) review feedback ([a86f4ff](https://github.com/ZaxbyHub/opencode-swarm/commit/a86f4ff3311d26f5d63e6d505b447cfb657d7d7a))
+* **telemetry:** wire rotateTelemetryIfNeeded into emit path with counter throttle ([59e55f4](https://github.com/ZaxbyHub/opencode-swarm/commit/59e55f45ca93102669969436f1a6f0fc477f715e))
+* **telemetry:** wire rotateTelemetryIfNeeded into emit path with counter throttle ([4453ff5](https://github.com/ZaxbyHub/opencode-swarm/commit/4453ff5edd9973cb72223492cc8899229d7d5fa2))
+
 ## [7.90.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.89.0...v7.90.0) (2026-06-24)
 
 
