@@ -392,8 +392,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			});
 			// Normalize absolute paths to workspace-relative (Phase 4 SME caveat).
 			// If the input is already relative (e.g. from a pre-1.2.0 graph fallback
-			// that returns the original target), pass it through unchanged — calling
-			// path.relative(directory, relativePath) would resolve against process.cwd().
+			// that returns the original target), pass it through unchanged —
+			// path.relative(directory, relativePath) would resolve against
+			// the process's current working directory.
 			const toRel = (p: string) => {
 				if (!path.isAbsolute(p)) return p.replace(/\\/g, '/');
 				try {

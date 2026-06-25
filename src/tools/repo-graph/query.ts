@@ -525,8 +525,10 @@ export function getContextPack(
 	visited.set(targetKey, 0);
 	const reached: { file: string; symbol: string; depth: number }[] = [];
 
-	while (queue.length > 0) {
-		const { key, depth } = queue.shift()!;
+	let queueHead = 0;
+	while (queueHead < queue.length) {
+		const { key, depth } = queue[queueHead]!;
+		queueHead++;
 		const [curFile, curSymbol] = key.split('\0', 2);
 		reached.push({ file: curFile, symbol: curSymbol, depth });
 
