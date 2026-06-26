@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.91.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.91.0...v7.91.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **skills:** address PR [#1509](https://github.com/ZaxbyHub/opencode-swarm/issues/1509) review feedback (F-001, F-002, F-003) ([c25acdf](https://github.com/ZaxbyHub/opencode-swarm/commit/c25acdf564c40a52988587a9e43046e7224c2cc5))
+
 ## [7.91.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.90.1...v7.91.0) (2026-06-26)
 
 
