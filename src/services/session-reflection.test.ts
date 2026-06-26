@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	setDefaultTimeout,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -7,6 +14,15 @@ import {
 	runSessionReflection,
 	writeSessionReflection,
 } from './session-reflection';
+
+// These tests perform real filesystem I/O (mkdtemp + read/write evidence files).
+// The async reads can be starved well past Bun's default 5s per-test timeout when
+// this file shares a single Bun process with CPU-heavy sibling test files — e.g. a
+// developer running `bun test src/` whole-tree. CI runs each file in its own
+// process (per-file isolation in the `unit` job), so this only bites local
+// whole-tree runs. A generous default keeps those reliable without weakening any
+// assertion.
+setDefaultTimeout(30_000);
 
 describe('session-reflection — gatherToolProblems', () => {
 	test('returns empty when no aggregates', () => {
