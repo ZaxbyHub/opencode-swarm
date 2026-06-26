@@ -1831,7 +1831,8 @@ export async function handleCloseCommand(
 				d.totalToolFailures > 0 ||
 				d.gateFailures.length > 0 ||
 				d.lessonsFromRetros.length > 0 ||
-				Object.keys(d.errorTaxonomy).length > 0;
+				Object.keys(d.errorTaxonomy).length > 0 ||
+				d.agentDispatches.length > 0;
 			if (hasSignals) {
 				reflectionOutput = `\n\n---\n\n**Architect Session Review** (${ctx.sessionReflection.source}):\n\n${ctx.sessionReflection.architectReport}`;
 			}

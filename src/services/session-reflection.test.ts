@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { _internals, runSessionReflection } from './session-reflection';
+import { _internals, runSessionReflection, writeSessionReflection } from './session-reflection';
 
 describe('session-reflection — gatherToolProblems', () => {
 	test('returns empty when no aggregates', () => {
@@ -384,5 +384,48 @@ describe('session-reflection — runSessionReflection', () => {
 			'Always validate before writing',
 		);
 		expect(result.data.errorTaxonomy.planning_error).toBe(2);
+	});
+});
+
+describe('session-reflection — writeSessionReflection', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-reflect-write-'));
+		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	test('writes session-reflection.md into .swarm/', async () => {
+		const result = await runSessionReflection({
+			directory: tempDir,
+			toolAggregates: new Map(),
+			agentSessions: new Map(),
+		});
+		const filePath = await writeSessionReflection(tempDir, result);
+		expect(filePath).toContain('session-reflection.md');
+		const content = fs.readFileSync(filePath, 'utf-8');
+		expect(content).toContain('# Session Reflection');
+		expect(content).toContain('Source: deterministic');
+		expect(content).toContain('## Problems Encountered');
+	});
+
+	test('throws when directory lacks .swarm (fs.writeFile ENOENT)', async () => {
+		const noSwarmDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'session-reflect-noswarm-'),
+		);
+		try {
+			const result = await runSessionReflection({
+				directory: noSwarmDir,
+				toolAggregates: new Map(),
+				agentSessions: new Map(),
+			});
+			await expect(writeSessionReflection(noSwarmDir, result)).rejects.toThrow();
+		} finally {
+			fs.rmSync(noSwarmDir, { recursive: true, force: true });
+		}
 	});
 });
