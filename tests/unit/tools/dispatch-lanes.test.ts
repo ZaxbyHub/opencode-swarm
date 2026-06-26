@@ -5,6 +5,7 @@ import {
 	describe,
 	expect,
 	mock,
+	spyOn,
 	test,
 } from 'bun:test';
 import fs from 'node:fs';
@@ -1939,5 +1940,39 @@ describe('applyExplorerFormatSuffix', () => {
 		const lanes = [{ id: 'L1', agent: 'swarm_explorer', prompt: longPrompt }];
 		const result = _test_exports.applyExplorerFormatSuffix(lanes);
 		expect(result[0].prompt).toBe(longPrompt);
+	});
+
+	test('emits console.warn when skipping due to MAX_PROMPT_CHARS (F-001)', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const longPrompt = 'x'.repeat(MAX_PROMPT_CHARS - 10);
+		const lanes = [
+			{ id: 'lane-too-long', agent: 'swarm_explorer', prompt: longPrompt },
+		];
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			_test_exports.applyExplorerFormatSuffix(lanes);
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0][0]).toContain('lane-too-long');
+			expect(warnSpy.mock.calls[0][0]).toContain('format enforcement skipped');
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test('appended suffix includes both base_explorer and micro_lane format variants (F-002)', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const lanes = [
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
+		];
+		const result = _test_exports.applyExplorerFormatSuffix(lanes);
+		const prompt = result[0].prompt;
+		// Standard base_explorer variant (9 fields after [CANDIDATE])
+		expect(prompt).toContain(
+			'candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+		);
+		// Micro-lane variant (9 fields after [CANDIDATE], different field names)
+		expect(prompt).toContain(
+			'candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+		);
 	});
 });
