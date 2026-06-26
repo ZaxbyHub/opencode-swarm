@@ -139,6 +139,15 @@ When reviewing a PR, ingest and triage every existing signal BEFORE starting
 Phase 0. These are candidate generators and obligation sources, not
 pre-confirmed findings.
 
+### PR title and body compliance check
+
+Before deeper analysis, verify the PR meets the commit-pr skill's publication contract (the CI `pr-standards` check enforces the same requirements server-side — this step surfaces issues earlier):
+
+- **Title format:** `<type>(<scope>): <description>` — lowercase description, no trailing period, allowed types: `feat`, `fix`, `perf`, `revert`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`.
+- **Body contract:** `Closes #<issue-number>` as the first line (when the PR resolves an issue), followed by `## Summary`, `## Invariant audit` (all 12 invariants), and `## Test plan` sections.
+
+Non-compliance is a ledger item (advisory, not blocking — CI will catch it). If the PR is from an external contributor, note the compliance gap for the maintainer to address before merge.
+
 This intake includes:
 
 - review comments, review summaries, requested changes, and bot findings,
@@ -498,7 +507,16 @@ Launch all base lanes with `dispatch_lanes_async` when available. Pass the six l
 
 **Incremental collection:** While base lanes are running, poll with `collect_lane_results` (without `wait` or `wait: false`) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains.
 
-Before Phase 4 or synthesis, all base lanes must be settled. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
+Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
+
+**COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:
+- **Mode A (empty output):** Lane returns 0 chars, `status: cancelled`, `output_digest` matches SHA-256 of empty string (`e3b0c442...b855`).
+- **Mode B (intermediate reasoning only):** Lane reports `status: completed` with non-empty output, but the output is preliminary reasoning ("Now let me check...") with zero `[CANDIDATE]` rows. The `output_digest` does NOT match the empty-string hash. `parse_lane_candidates` returns 0 candidates. This mode is MORE dangerous — the lane appears successful but produced no findings.
+
+For ANY lane that failed (either mode):
+1. **Retry** (max 2 attempts) with materially different parameters — different session, different prompt decomposition, or blocking `dispatch_lanes`.
+2. If retries fail, **deploy an equivalent alternative** and **verify equivalence**: same agent type, same prompt, same scope, same isolation. State the equivalence verification explicitly. Different dispatch mechanism (e.g., Task tool instead of `dispatch_lanes_async`) IS acceptable when these criteria are met. Use `retrieve_lane_output` to inspect the full artifact before declaring equivalence or failure.
+3. If no equivalent alternative can be verified, **report to the user as INCOMPLETE**. Present partial findings from successful lanes alongside the INCOMPLETE verdict. The user decides whether to accept reduced coverage. The architect NEVER makes that call.
 
 ### Candidate extraction via parser
 
@@ -581,9 +599,9 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After base lanes are settled, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Use the same incremental collection pattern: poll with `collect_lane_results` (without `wait`) to process settled micro-lanes while continuing independent work, falling back to `wait: true` only when no independent work remains. All micro-lanes must be settled before reviewer classification. Do not launch irrelevant micro-lanes.
+After base lanes are settled, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed (`dispatch_lanes_async` accepts max 8 lanes per call — micro-lanes are dispatched in a separate batch from base lanes). Use the same incremental collection pattern: poll with `collect_lane_results` (without `wait`) to process settled micro-lanes while continuing independent work, falling back to `wait: true` only when no independent work remains. All micro-lanes must be settled before reviewer classification. Do not launch irrelevant micro-lanes.
 
-Apply the same parser-based extraction to micro-lanes: call `parse_lane_candidates` on each micro-lane `output_ref` (filter the returned `candidates[]` array by `row_format_family === "micro_lane"` after parsing), and treat degraded or incomplete lane artifacts as UNVERIFIED coverage rather than as clean negative evidence.
+Apply the same parser-based extraction to micro-lanes: call `parse_lane_candidates` on each micro-lane `output_ref` (filter the returned `candidates[]` array by `row_format_family === "micro_lane"` after parsing). Apply the COVERAGE GATE from Phase 3 to micro-lanes: degraded, incomplete, or candidate-less lane artifacts are coverage gaps that must be closed by retry, verified equivalent alternative, or reported as INCOMPLETE — not treated as clean negative evidence.
 
 Each micro-lane receives:
 
@@ -1178,8 +1196,9 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 11. Obligation precedence is deterministic. Do not skip higher-precedence sources to fill gaps with LLM synthesis.
 12. Do not leak secrets from logs, evidence bundles, config files, URLs, or scanner output.
 13. Do not recommend destructive git or filesystem actions as fixes unless they are clearly scoped, safe, and necessary.
-14. If subagents fail, timeout, or return malformed output, mark affected candidates `UNVERIFIED`; do not fabricate validation results.
-15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, state that limitation and continue with best available evidence.
+14. If subagents fail, timeout, or return malformed output, retry with corrected parameters (max 2 attempts). If retries fail, deploy a provably equivalent alternative (same agent type, same prompt, same scope, same isolation — different dispatch mechanism acceptable) and verify equivalence. If no equivalent alternative exists, the affected coverage dimension is INCOMPLETE and must be reported to the user before synthesis. Do not fabricate validation results, and do not silently mark candidates UNVERIFIED to proceed past the gap.
+
+15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, retry with alternative access paths. If unavailable after retry, the affected coverage dimension is INCOMPLETE and must be reported to the user. Do not proceed to synthesis with unclosed coverage gaps under a "best available evidence" rationale — the user decides whether to accept reduced coverage, not the architect.
 
 ---
 
@@ -1221,6 +1240,8 @@ Before writing the final output, print this checklist with filled values. Every 
 ```
 
 If the reviewer returned `REJECTED` or `CONCERNS`, route the issue back to implementation context or mark the candidate invalid with reason. Do not silently downgrade a rejection.
+
+**COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage (lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry), the Pre-Synthesis Gate FAILS. Do not proceed to final output. Report the unclosed gaps to the user as INCOMPLETE with the partial findings from successful dimensions. The architect is NEVER authorized to silently accept reduced coverage.
 
 ---
 
