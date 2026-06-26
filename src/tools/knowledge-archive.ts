@@ -16,17 +16,24 @@
  *  - 'hive':            archives a shared hive entry (cross-project knowledge).
  */
 
+import * as path from 'node:path';
 import { z } from 'zod';
 import {
 	recordHiveKnowledgeEvent,
 	recordKnowledgeEvent,
 } from '../hooks/knowledge-events.js';
 import {
+	getArchivedKnowledgeIds,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import {
+	findSkillsBySourceKnowledgeId,
+	findStaleSkillsBySourceKnowledgeId,
+	retireOrMarkStale,
+} from '../services/skill-generator.js';
 import { warn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -171,6 +178,64 @@ export const knowledge_archive: ReturnType<typeof createSwarmTool> =
 			} else {
 				await recordKnowledgeEvent(directory, tombstone);
 			}
+
+			// Fire-and-forget: invalidate derived skills after archival.
+			// SC-004: async/deferred after tombstone write — archive returns immediately.
+			//
+			// Read the full set of already-archived/quarantined IDs BEFORE queuing
+			// the microtask so retireOrMarkStale can correctly determine if ALL
+			// sources for a multi-source skill are archived (Issue 1 fix).
+			const allArchivedIds = await getArchivedKnowledgeIds(directory);
+			allArchivedIds.add(id);
+
+			queueMicrotask(async () => {
+				try {
+					const affectedSkillDirs = await findSkillsBySourceKnowledgeId(
+						directory,
+						id,
+					);
+					const staleSkillDirs = await findStaleSkillsBySourceKnowledgeId(
+						directory,
+						allArchivedIds,
+					);
+					const allSkillDirs = new Set([
+						...affectedSkillDirs,
+						...staleSkillDirs,
+					]);
+					if (allSkillDirs.size === 0) return;
+
+					const slugSet = new Set<string>();
+					let retiredCount = 0;
+					let staleCount = 0;
+
+					for (const skillDir of allSkillDirs) {
+						const slug = path.basename(skillDir);
+						if (slugSet.has(slug)) continue;
+						slugSet.add(slug);
+						const result = await retireOrMarkStale(
+							directory,
+							skillDir,
+							allArchivedIds,
+						);
+						if (result.action === 'retire') retiredCount++;
+						else staleCount++;
+					}
+
+					// Emit batch event (fire-and-forget, fail-open)
+					const batchEvent = {
+						type: 'skill-stale-batch' as const,
+						skillIds: Array.from(slugSet),
+						archivedIds: Array.from(allArchivedIds),
+						retiredCount,
+						staleCount,
+					};
+					await recordKnowledgeEvent(directory, batchEvent);
+				} catch (err) {
+					warn(
+						`[knowledge-archive] post-archive skill invalidation failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			});
 
 			return JSON.stringify({
 				success: true,

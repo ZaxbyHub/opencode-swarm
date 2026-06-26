@@ -338,8 +338,11 @@ export function discoverAvailableSkills(directory: string): string[] {
 		for (const entry of entries) {
 			if (entry.startsWith('.')) continue;
 			const skillDir = path.join(rootPath, entry);
-			// Skip retired skills
-			if (_internals.existsSync(path.join(skillDir, 'retired.marker')))
+			// Skip retired or stale skills
+			if (
+				_internals.existsSync(path.join(skillDir, 'retired.marker')) ||
+				_internals.existsSync(path.join(skillDir, 'stale.marker'))
+			)
 				continue;
 			const skillFile = path.join(skillDir, 'SKILL.md');
 			try {
@@ -720,9 +723,12 @@ export async function skillPropagationGateBefore(
 			// Create a set of existing paths for fast lookup
 			const existingPaths = new Set(scored.map((s) => s.skillPath));
 			for (const routingPath of routingPaths) {
-				// Skip retired skills (retired.marker in containing directory)
+				// Skip retired or stale skills (marker in containing directory)
 				const routedSkillDir = path.dirname(path.join(directory, routingPath));
-				if (_internals.existsSync(path.join(routedSkillDir, 'retired.marker')))
+				if (
+					_internals.existsSync(path.join(routedSkillDir, 'retired.marker')) ||
+					_internals.existsSync(path.join(routedSkillDir, 'stale.marker'))
+				)
 					continue;
 				if (!existingPaths.has(routingPath)) {
 					scored.push({

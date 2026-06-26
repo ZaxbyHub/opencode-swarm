@@ -103,6 +103,7 @@ import { skill_list } from './skill-list';
 import { skill_regenerate } from './skill-regenerate';
 import { skill_retire } from './skill-retire';
 import { spec_write } from './spec-write';
+import { run_stale_reconciliation } from './stale-reconciliation';
 import { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 import { suggestPatch } from './suggest-patch';
 import { summarize_work } from './summarize-work';
@@ -208,6 +209,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	skill_list: () => skill_list,
 	skill_apply: () => skill_apply,
 	skill_inspect: () => skill_inspect,
+	run_stale_reconciliation: () => run_stale_reconciliation,
 	skill_regenerate: () => skill_regenerate,
 	skill_retire: () => skill_retire,
 	skill_improve: () => skill_improve,

@@ -176,12 +176,25 @@ export interface EscalationEvent {
 	enforcement_mode?: string;
 }
 
+/** A batch of skills were invalidated after a knowledge entry was archived/purged. */
+export interface SkillStaleBatchEvent {
+	type: 'skill-stale-batch';
+	schema_version?: number;
+	event_id?: string;
+	timestamp?: string;
+	skillIds: string[];
+	archivedIds: string[];
+	retiredCount: number;
+	staleCount: number;
+}
+
 export type KnowledgeEvent =
 	| RetrievedEvent
 	| ReceiptEvent
 	| OutcomeEvent
 	| ArchivedEvent
-	| EscalationEvent;
+	| EscalationEvent
+	| SkillStaleBatchEvent;
 
 export type KnowledgeEventType = KnowledgeEvent['type'];
 

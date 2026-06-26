@@ -116,6 +116,7 @@ export { skill_list } from './skill-list';
 export { skill_regenerate } from './skill-regenerate';
 export { skill_retire } from './skill-retire';
 export { spec_write } from './spec-write';
+export { run_stale_reconciliation } from './stale-reconciliation';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 export { summarize_work } from './summarize-work';
 export { createSwarmCommandTool, swarm_command } from './swarm-command';

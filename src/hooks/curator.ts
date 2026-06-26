@@ -43,6 +43,7 @@ import {
 	DEFAULT_SKILL_MIN_CONFIDENCE,
 	listSkills,
 	parseDraftFrontmatter,
+	retireOrMarkStale,
 	retireSkill,
 } from '../services/skill-generator.js';
 import {
@@ -66,13 +67,12 @@ import type {
 } from './curator-types.js';
 import {
 	appendKnowledge,
+	getArchivedKnowledgeIds,
 	readKnowledge,
-	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from './knowledge-store.js';
 import type {
-	HiveKnowledgeEntry,
 	KnowledgeConfig,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
@@ -118,7 +118,9 @@ export const _internals = {
 	readSkillUsageEntries,
 	listSkills,
 	parseDraftFrontmatter,
+	retireOrMarkStale,
 	retireSkill,
+	getArchivedKnowledgeIds,
 	readFileAsync: (filePath: string, encoding: string) =>
 		import('node:fs/promises').then((fs) =>
 			fs.readFile(filePath, encoding as BufferEncoding),
@@ -160,18 +162,22 @@ function buildDigestFromPhaseDigests(digests: PhaseDigestEntry[]): string {
  * Auto-retire generated skills whose violation rate exceeds 30% or
  * whose source knowledge entries are all archived.
  *
+ * Also marks skills stale when some (but not all) source knowledge entries
+ * are archived.
+ *
  * Non-blocking: errors are caught and logged but never propagated.
  * Returns an array of observation strings to include in the phase digest.
  */
 async function autoRetireSkills(
 	directory: string,
-	curatorKnowledgePath: string,
+	_curatorKnowledgePath: string,
 	excludeSlugs?: ReadonlySet<string>,
 ): Promise<string[]> {
 	const observations: string[] = [];
 	try {
 		const skillListResult = await _internals.listSkills(directory);
 		const usageEntries = _internals.readSkillUsageEntries(directory);
+		const allArchivedIds = await _internals.getArchivedKnowledgeIds(directory);
 
 		for (const active of skillListResult.active) {
 			if (excludeSlugs?.has(active.slug)) continue;
@@ -194,44 +200,29 @@ async function autoRetireSkills(
 			const violationRate =
 				skillUsage.length > 0 ? violations / skillUsage.length : 0;
 
-			// Check if all source knowledge is archived
-			let allArchived = false;
-			try {
-				const content = await _internals.readFileAsync(active.path, 'utf-8');
-				const fm = _internals.parseDraftFrontmatter(content);
-				if (fm && fm.sourceKnowledgeIds.length > 0) {
-					const swarmKnowledge =
-						await _internals.readKnowledge<SwarmKnowledgeEntry>(
-							curatorKnowledgePath,
-						);
-					let hiveKnowledge: HiveKnowledgeEntry[] = [];
-					try {
-						const hivePath = resolveHiveKnowledgePath();
-						if (fs.existsSync(hivePath)) {
-							hiveKnowledge =
-								await _internals.readKnowledge<HiveKnowledgeEntry>(hivePath);
-						}
-					} catch {
-						/* hive not available — non-blocking */
-					}
-					const allKnowledge = [...swarmKnowledge, ...hiveKnowledge];
-					const sourceIds = new Set(fm.sourceKnowledgeIds);
-					const sources = allKnowledge.filter((e) => sourceIds.has(e.id));
-					allArchived =
-						sources.length === sourceIds.size &&
-						sources.every((e) => e.status === 'archived');
-				}
-			} catch {
-				/* best effort frontmatter read */
-			}
-
-			if (violationRate > 0.3 || allArchived) {
-				const reason =
-					violationRate > 0.3
-						? `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`
-						: 'auto-retire: all source knowledge entries archived';
+			if (violationRate > 0.3) {
+				const reason = `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`;
 				await _internals.retireSkill(directory, active.slug, reason);
 				observations.push(`Skill '${active.slug}' auto-retired: ${reason}`);
+				logger.warn(`[curator] ${observations[observations.length - 1]}`);
+				continue;
+			}
+
+			// Delegate archive-based retirement/stale decision to retireOrMarkStale
+			const result = await _internals.retireOrMarkStale(
+				directory,
+				path.dirname(active.path),
+				allArchivedIds,
+			);
+			if (result.action === 'retire') {
+				observations.push(
+					`Skill '${active.slug}' auto-retired: all source knowledge entries archived`,
+				);
+				logger.warn(`[curator] ${observations[observations.length - 1]}`);
+			} else if (result.action === 'stale') {
+				observations.push(
+					`Skill '${active.slug}' marked stale: some source knowledge entries archived`,
+				);
 				logger.warn(`[curator] ${observations[observations.length - 1]}`);
 			}
 		}
@@ -1493,6 +1484,47 @@ export async function runCuratorPhase(
 		if (autoRetireObservations.length > 0) {
 			const retireNote = ` [${autoRetireObservations.length} skill(s) auto-retired]`;
 			phaseDigest.summary += retireNote;
+		}
+
+		// 9a. Process skill-stale-batch events as curator notifications.
+		// These are emitted by the archive/purge hooks when multiple rapid
+		// archives affect skills. We log/acknowledge them here — the actual
+		// retire/stale action is already performed by the hooks that emitted
+		// the events, so this is best-effort audit only.
+		try {
+			const eventsContent = await readSwarmFileAsync(
+				directory,
+				'knowledge-events.jsonl',
+			);
+			if (eventsContent) {
+				const lines = eventsContent.split('\n').filter((l) => l.trim());
+				const batchEvents: {
+					skillIds: string[];
+					retiredCount: number;
+					staleCount: number;
+				}[] = [];
+				for (const line of lines) {
+					try {
+						const event = JSON.parse(line);
+						if (event.type === 'skill-stale-batch') {
+							batchEvents.push({
+								skillIds: event.skillIds ?? [],
+								retiredCount: event.retiredCount ?? 0,
+								staleCount: event.staleCount ?? 0,
+							});
+						}
+					} catch {
+						// skip malformed lines
+					}
+				}
+				for (const batch of batchEvents) {
+					logger.warn(
+						`[curator] skill-stale-batch: ${batch.skillIds.length} skills affected (${batch.retiredCount} retired, ${batch.staleCount} stale)`,
+					);
+				}
+			}
+		} catch {
+			// best effort — events are already emitted by hooks
 		}
 
 		// 9b. Learning summary: compute lightweight learning metrics and

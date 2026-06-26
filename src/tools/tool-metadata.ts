@@ -496,6 +496,11 @@ export const TOOL_METADATA = {
 		description: 'inspect the content and source entries of a skill file',
 		agents: ['architect', 'skill_improver'],
 	},
+	run_stale_reconciliation: {
+		description:
+			'reconcile skills against the knowledge store: mark skills stale when source knowledge is archived or deleted, or clear stale markers',
+		agents: ['architect'],
+	},
 	skill_regenerate: {
 		description:
 			'regenerate an active skill by re-clustering its source knowledge entries and updating the SKILL.md in place',

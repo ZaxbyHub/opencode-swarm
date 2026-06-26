@@ -436,6 +436,55 @@ export async function transactKnowledge<T>(
 	);
 }
 
+// Read all archived/quarantined entry IDs from the swarm AND hive knowledge stores.
+// Returns a Set of IDs whose status is 'archived' or 'quarantined'.
+// Returns an empty set if neither file exists or is unreadable.
+export async function getArchivedKnowledgeIds(
+	directory: string,
+): Promise<Set<string>> {
+	const archived = new Set<string>();
+
+	// Swarm entries
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	try {
+		const content = await readFile(swarmPath, 'utf-8');
+		const lines = content.split('\n').filter((l) => l.trim());
+		for (const line of lines) {
+			try {
+				const entry = JSON.parse(line);
+				if (entry.status === 'archived' || entry.status === 'quarantined') {
+					archived.add(entry.id);
+				}
+			} catch {
+				// skip malformed lines
+			}
+		}
+	} catch {
+		// file doesn't exist yet — continue to hive check
+	}
+
+	// Hive entries
+	const hivePath = resolveHiveKnowledgePath();
+	try {
+		const content = await readFile(hivePath, 'utf-8');
+		const lines = content.split('\n').filter((l) => l.trim());
+		for (const line of lines) {
+			try {
+				const entry = JSON.parse(line);
+				if (entry.status === 'archived' || entry.status === 'quarantined') {
+					archived.add(entry.id);
+				}
+			} catch {
+				// skip malformed lines
+			}
+		}
+	} catch {
+		// file doesn't exist yet — return whatever we have
+	}
+
+	return archived;
+}
+
 // Append a knowledge entry and enforce the cap in a single atomic transaction.
 // This prevents the race condition where entry is appended but cap enforcement fails.
 // Returns true if entry was appended and cap enforced, false if entry was not appended
@@ -920,6 +969,7 @@ export const _internals: {
 	selectKnowledgeCapSurvivors: typeof selectKnowledgeCapSurvivors;
 	inferTags: typeof inferTags;
 	bumpKnowledgeConfidenceBatch: typeof bumpKnowledgeConfidenceBatch;
+	getArchivedKnowledgeIds: typeof getArchivedKnowledgeIds;
 } = {
 	getPlatformConfigDir,
 	resolveSwarmKnowledgePath,
@@ -946,4 +996,5 @@ export const _internals: {
 	selectKnowledgeCapSurvivors,
 	inferTags,
 	bumpKnowledgeConfidenceBatch,
+	getArchivedKnowledgeIds,
 };

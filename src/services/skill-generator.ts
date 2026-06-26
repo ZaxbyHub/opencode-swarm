@@ -14,7 +14,7 @@
  */
 
 import { existsSync, unlinkSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	effectiveRetrievalOutcomes,
@@ -1141,13 +1141,89 @@ export async function activateProposal(
 	}
 }
 
+export async function findSkillsBySourceKnowledgeId(
+	directory: string,
+	sourceId: string,
+): Promise<string[]> {
+	const activeDir = path.join(directory, '.opencode', 'skills', 'generated');
+	const fs = await import('node:fs/promises');
+	if (!existsSync(activeDir)) return [];
+	const entries = await fs.readdir(activeDir, { withFileTypes: true });
+	const matches: string[] = [];
+	for (const e of entries) {
+		if (!e.isDirectory()) continue;
+		const skillDir = path.join(activeDir, e.name);
+		const retiredMarker = path.join(skillDir, 'retired.marker');
+		if (existsSync(retiredMarker)) continue;
+		const staleMarker = path.join(skillDir, 'stale.marker');
+		if (existsSync(staleMarker)) continue;
+		const skillPath = path.join(skillDir, 'SKILL.md');
+		if (!existsSync(skillPath)) continue;
+		let content: string;
+		try {
+			content = await fs.readFile(skillPath, 'utf-8');
+		} catch {
+			continue;
+		}
+		const fm = parseDraftFrontmatter(content);
+		if (fm?.sourceKnowledgeIds.includes(sourceId)) {
+			matches.push(skillDir);
+		}
+	}
+	return matches;
+}
+
+/**
+ * Scan for stale skills (those with a stale.marker) whose ALL sourceKnowledgeIds
+ * are in the archivedIds set. These skills should be retired rather than left stale.
+ *
+ * This handles the case where a multi-source skill was marked stale after one
+ * source was archived, but all sources are now archived.
+ */
+export async function findStaleSkillsBySourceKnowledgeId(
+	directory: string,
+	archivedIds: Set<string>,
+): Promise<string[]> {
+	const activeDir = path.join(directory, '.opencode', 'skills', 'generated');
+	if (!existsSync(activeDir)) return [];
+	const fs = await import('node:fs/promises');
+	const entries = await fs.readdir(activeDir, { withFileTypes: true });
+	const matches: string[] = [];
+	for (const e of entries) {
+		if (!e.isDirectory()) continue;
+		const skillDir = path.join(activeDir, e.name);
+		const retiredMarker = path.join(skillDir, 'retired.marker');
+		if (existsSync(retiredMarker)) continue;
+		const staleMarker = path.join(skillDir, 'stale.marker');
+		if (!existsSync(staleMarker)) continue;
+		const skillPath = path.join(skillDir, 'SKILL.md');
+		if (!existsSync(skillPath)) continue;
+		let content: string;
+		try {
+			content = await fs.readFile(skillPath, 'utf-8');
+		} catch {
+			continue;
+		}
+		const fm = parseDraftFrontmatter(content);
+		const sourceIds = fm?.sourceKnowledgeIds ?? [];
+		if (sourceIds.length === 0) continue;
+		const allArchived = sourceIds.every((id) => archivedIds.has(id));
+		if (allArchived) {
+			matches.push(skillDir);
+		}
+	}
+	return matches;
+}
+
 export async function listSkills(directory: string): Promise<{
 	proposals: Array<{ slug: string; path: string }>;
 	active: Array<{ slug: string; path: string }>;
+	stale: Array<{ slug: string; reason: string }>;
 }> {
 	const result = {
 		proposals: [] as Array<{ slug: string; path: string }>,
 		active: [] as Array<{ slug: string; path: string }>,
+		stale: [] as Array<{ slug: string; reason: string }>,
 	};
 	const proposalsDir = path.join(directory, '.swarm', 'skills', 'proposals');
 	const activeDir = path.join(directory, '.opencode', 'skills', 'generated');
@@ -1169,6 +1245,17 @@ export async function listSkills(directory: string): Promise<{
 			if (!e.isDirectory()) continue;
 			const retiredMarker = path.join(activeDir, e.name, 'retired.marker');
 			if (existsSync(retiredMarker)) continue;
+			const staleMarker = path.join(activeDir, e.name, 'stale.marker');
+			if (existsSync(staleMarker)) {
+				let reason = 'stale';
+				try {
+					reason = await fs.readFile(staleMarker, 'utf-8');
+				} catch {
+					/* best-effort: default to "stale" if unreadable */
+				}
+				result.stale.push({ slug: e.name, reason: reason.trim() });
+				continue;
+			}
 			const skillPath = path.join(activeDir, e.name, 'SKILL.md');
 			if (existsSync(skillPath)) {
 				result.active.push({
@@ -1300,6 +1387,11 @@ export async function inspectSkill(
 	path?: string;
 	content?: string;
 	mode?: GenerateMode;
+	source_knowledge_status?: Array<{
+		id: string;
+		status: 'active' | 'archived' | 'deleted';
+	}>;
+	stale_reason?: string;
 }> {
 	const cleanSlug = sanitizeSlug(slug);
 	if (!isValidSlug(cleanSlug)) return { found: false };
@@ -1311,7 +1403,61 @@ export async function inspectSkill(
 	for (const c of candidates) {
 		if (existsSync(c.p)) {
 			const content = await readFile(c.p, 'utf-8');
-			return { found: true, path: c.p, content, mode: c.m };
+			const result: {
+				found: boolean;
+				path?: string;
+				content?: string;
+				mode?: GenerateMode;
+				source_knowledge_status?: Array<{
+					id: string;
+					status: 'active' | 'archived' | 'deleted';
+				}>;
+				stale_reason?: string;
+			} = { found: true, path: c.p, content, mode: c.m };
+
+			// Parse frontmatter for source knowledge IDs and resolve their status.
+			const fm = parseDraftFrontmatter(content);
+			if (fm && fm.sourceKnowledgeIds.length > 0) {
+				const swarm = await readKnowledge<SwarmKnowledgeEntry>(
+					resolveSwarmKnowledgePath(directory),
+				);
+				const hivePath = resolveHiveKnowledgePath();
+				const hive = existsSync(hivePath)
+					? await readKnowledge<HiveKnowledgeEntry>(hivePath)
+					: [];
+				const allEntries = [...swarm, ...hive];
+				const entryMap = new Map(allEntries.map((e) => [e.id, e] as const));
+
+				result.source_knowledge_status = fm.sourceKnowledgeIds.map((id) => {
+					const entry = entryMap.get(id);
+					if (!entry) return { id, status: 'deleted' };
+					if (entry.status === 'archived' || entry.status === 'quarantined') {
+						return { id, status: 'archived' };
+					}
+					return { id, status: 'active' };
+				});
+			}
+
+			// Check for stale.marker (only for active skills).
+			if (c.m === 'active') {
+				const skillDir = path.join(
+					directory,
+					'.opencode',
+					'skills',
+					'generated',
+					cleanSlug,
+				);
+				const staleMarker = path.join(skillDir, 'stale.marker');
+				if (existsSync(staleMarker)) {
+					try {
+						result.stale_reason = await readFile(staleMarker, 'utf-8');
+					} catch {
+						/* best-effort: leave undefined if unreadable */
+					}
+				}
+			}
+
+			return result;
 		}
 	}
 	return { found: false };
@@ -1383,6 +1529,98 @@ export async function retireSkill(
 		markerPath,
 		reason,
 	};
+}
+
+/**
+ * Mark a skill as stale by writing a stale.marker file in its directory.
+ */
+export async function markSkillStale(
+	skillDir: string,
+	reason: string,
+): Promise<void> {
+	await mkdir(skillDir, { recursive: true });
+	await writeFile(path.join(skillDir, 'stale.marker'), reason, 'utf-8');
+}
+
+/**
+ * Remove the stale.marker file from a skill directory.
+ * Succeeds silently if the marker does not exist.
+ */
+export async function clearSkillStale(skillDir: string): Promise<void> {
+	const markerPath = path.join(skillDir, 'stale.marker');
+	try {
+		await unlink(markerPath);
+	} catch (err) {
+		if (
+			err instanceof Error &&
+			'code' in err &&
+			(err as NodeJS.ErrnoException & { code: string }).code === 'ENOENT'
+		) {
+			return;
+		}
+		warn(
+			`[skill-generator] failed to remove stale.marker at ${markerPath}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+}
+
+/**
+ * Determine whether to retire or mark stale a skill whose source knowledge ID was archived,
+ * then perform the action.
+ *
+ * Reads the skill's SKILL.md frontmatter to check all its sourceKnowledgeIds.
+ * If ALL source knowledge IDs are now archived/deleted → retireSkill
+ * Otherwise → markSkillStale
+ *
+ * Returns { action: 'retire' | 'stale', slug, skillDir }
+ */
+export async function retireOrMarkStale(
+	directory: string,
+	skillDir: string,
+	archivedKnowledgeIds: Set<string>,
+): Promise<{ action: 'retire' | 'stale'; slug: string; skillDir: string }> {
+	const fs = await import('node:fs/promises');
+	const skillPath = path.join(skillDir, 'SKILL.md');
+	if (!existsSync(skillPath)) {
+		// No SKILL.md means nothing to check — treat as fully stale
+		await markSkillStale(
+			skillDir,
+			'source knowledge archived, no SKILL.md found',
+		);
+		const slug = path.basename(skillDir);
+		return { action: 'stale', slug, skillDir };
+	}
+	let content: string;
+	try {
+		content = await fs.readFile(skillPath, 'utf-8');
+	} catch {
+		await markSkillStale(
+			skillDir,
+			'source knowledge archived, could not read SKILL.md',
+		);
+		const slug = path.basename(skillDir);
+		return { action: 'stale', slug, skillDir };
+	}
+	const fm = parseDraftFrontmatter(content);
+	const sourceIds: string[] = fm?.sourceKnowledgeIds ?? [];
+	const allArchived =
+		sourceIds.length > 0 &&
+		sourceIds.every((id) => archivedKnowledgeIds.has(id));
+	const slug = path.basename(skillDir);
+	if (allArchived) {
+		await retireSkill(
+			directory,
+			slug,
+			'all source knowledge entries archived or deleted',
+		);
+		return { action: 'retire', slug, skillDir };
+	} else {
+		await markSkillStale(
+			skillDir,
+			'one or more source knowledge entries archived',
+		);
+		return { action: 'stale', slug, skillDir };
+	}
 }
 
 // ============================================================================
@@ -1634,6 +1872,8 @@ export async function regenerateSkill(
 			cleanSlug,
 			matchedEntries.map((e) => e.id),
 		);
+		// Clear stale.marker on successful regeneration
+		await clearSkillStale(path.dirname(activePath(directory, cleanSlug)));
 	} catch (writeErr) {
 		return {
 			regenerated: false,
@@ -1677,11 +1917,15 @@ export const _internals = {
 	generateSkills,
 	activateProposal,
 	listSkills,
+	findSkillsBySourceKnowledgeId,
+	findStaleSkillsBySourceKnowledgeId,
 	inspectSkill,
 	stampSourceEntries,
 	parseDraftFrontmatter,
 	retireSkill,
+	retireOrMarkStale,
 	regenerateSkill,
+	clearSkillStale,
 	autoApplyProposals,
 	unlinkSync,
 };
