@@ -107,18 +107,23 @@ RESEARCH CONTEXT
 
 Do NOT share other agents' responses at this stage.
 
-4. Call `collect_lane_results` with `wait: true` for the Round 1 batch and collect
-   all three JSON responses. If `dispatch_lanes_async` is unavailable, use
-   blocking parallel dispatch and record that async advisory lanes were
-   unavailable. The `round1Responses` array will contain
-   entries with `memberId` of `council_generalist`, `council_skeptic`, and
-   `council_domain_expert` and `role` of `generalist`, `skeptic`, and
-   `domain_expert` respectively. If any lane result has `output_ref`, call
-   `retrieve_lane_output` and parse the full artifact rather than the preview.
-   If a lane is degraded, incomplete, truncated without a usable ref, missing,
-   stale, cancelled, or failed, treat the council round as blocked or incomplete;
-   do not synthesize from partial member JSON.
-   These come from the agents' JSON output; no
+4. While council lanes are running, poll with `collect_lane_results` (without
+   `wait` or `wait: false`) to check progress and process any settled member
+   responses as they complete — extract the JSON, verify `output_ref`, and
+   pre-validate structure — while continuing independent architect work
+   (synthesis outline, citation normalization, disagreement categories). Only
+   use `wait: true` if lanes are still pending and no more independent work
+   remains. All three lanes must be settled before proceeding to synthesis.
+   If `dispatch_lanes_async` is unavailable, use blocking parallel dispatch
+   and record that async advisory lanes were unavailable. The
+   `round1Responses` array will contain entries with `memberId` of
+   `council_generalist`, `council_skeptic`, and `council_domain_expert` and
+   `role` of `generalist`, `skeptic`, and `domain_expert` respectively. If
+   any lane result has `output_ref`, call `retrieve_lane_output` and parse
+   the full artifact rather than the preview. If a lane is degraded,
+   incomplete, truncated without a usable ref, missing, stale, cancelled, or
+   failed, treat the council round as blocked or incomplete; do not synthesize
+   from partial member JSON. These come from the agents' JSON output; no
    manual construction is needed.
 
 #### Synthesis and Deliberation (when council.general.deliberate is true; default true)

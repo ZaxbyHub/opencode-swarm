@@ -69,11 +69,21 @@ Each explorer mission receives:
 - Lane template name and description
 - Assigned files (8 max, grouped by import proximity)
 - The scope map context from Step 2
-- Instruction: "You are performing a [LANE] audit. Report findings as candidate observations with severity (INFO/LOW/MEDIUM/HIGH/CRITICAL), location, and evidence."
+- Instruction: "You are performing a [LANE] audit. Report ALL findings as pipe-delimited [CANDIDATE] rows. Header row first, then one row per finding:
+
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+
+- candidate_id: unique within this lane (e.g. C-001, C-002)
+- severity: INFO | LOW | MEDIUM | HIGH | CRITICAL
+- confidence: LOW | MEDIUM | HIGH
+- If you find zero issues, emit the header row with no data rows.
+- Do NOT emit findings as prose or free text — the downstream parser requires pipe-delimited rows."
 
 Explorer missions are dispatched in parallel waves. Launch the wave promptly — do not accumulate extensive planning prose before the call, or output truncation may swallow the tool call itself. Launch the wave, record the returned `batch_id`, then continue deterministic architect work that does not depend on lane output: refine the scope map, build the candidate ledger shell, inspect local evidence with read-only tools, and prepare reviewer shard structure. Do not synthesize findings from running lanes. Keep each lane `prompt` compact: send shared context ONCE via the `common_prompt` field, or have lanes read it from a file by absolute path, instead of inlining the same large blob into every lane prompt — oversized inline prompts produce malformed or truncated tool-call JSON.
 
-At the Step 4 boundary, call `collect_lane_results` with `wait: true` for every open wave batch. Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps; do not silently proceed past a required lane. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes` or parallel Task calls and record that async advisory lanes were unavailable.
+**Incremental collection pattern:** While lanes are running, use `collect_lane_results` without `wait` (or `wait: false`) to poll progress. Process any settled lanes immediately — extract candidates, check `output_ref`, update the candidate ledger — while continuing independent architect work (scope refinement, local evidence reads, reviewer preparation) between polls. This avoids idle waiting and lets you pipeline candidate normalization with lane completion. Only use `wait: true` at the Step 4 boundary if lanes are still pending and no more independent work remains.
+
+At the Step 4 boundary, all lanes must be settled before proceeding. If non-blocking polls show lanes still running and you have exhausted independent work, call `collect_lane_results` with `wait: true` to block on the remaining lanes. Treat missing, stale, cancelled, or failed lanes as explicit coverage gaps; do not silently proceed past a required lane. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes` or parallel Task calls and record that async advisory lanes were unavailable.
 
 When a collected or blocking lane result includes `output_ref`, treat `output` as a preview and call `retrieve_lane_output` before extracting candidate findings or declaring a lane clean. If the result is `output_degraded`, `transcript_incomplete`, truncated without a usable ref, missing, stale, cancelled, or failed, record the lane as a coverage gap and re-dispatch a narrower lane or mark the affected findings/coverage UNVERIFIED.
 

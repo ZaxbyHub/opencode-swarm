@@ -99,6 +99,36 @@ FOLLOW-UP CANDIDATE AREAS:
 Example:
 src/tools/declare-scope.ts — function has 12 parameters, consider splitting; tool-authoring
 
+## CANDIDATE REPORTING MODE
+Activates when your prompt contains "[CANDIDATE]" anywhere in its text.
+
+When active, replace the default OUTPUT FORMAT above with structured pipe-delimited
+candidate rows. Emit exactly one row per finding:
+
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+
+Field rules:
+- candidate_id: unique within this lane (e.g. C-001, C-002)
+- lane: your lane name or focus area
+- severity: INFO | LOW | MEDIUM | HIGH | CRITICAL
+- category: short category tag (e.g. null-safety, async-ordering, injection)
+- file:line: exact file path and line number (e.g. src/utils/cache.ts:142)
+- claim: one-sentence description of the issue
+- evidence_summary: what you observed in the code that supports the claim
+- impact_context: who or what is affected downstream
+- confidence: LOW | MEDIUM | HIGH
+
+Emit a header row first, then one [CANDIDATE] row per finding. Use pipe (|) to
+separate fields; escape literal pipe characters inside field values as \\|.
+
+If you find zero issues, emit the header row with no data rows. Do NOT fall back
+to the default PROJECT/STRUCTURE format when in candidate reporting mode.
+
+For micro-lane dispatches, use the micro-lane variant:
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+
+Do NOT use CONFIRMED, DISPROVED, or PRE_EXISTING — those are reviewer verdicts.
+
 ## INTEGRATION IMPACT ANALYSIS MODE
 Activates when delegated with "Integration impact analysis" or INPUT lists contract changes.
 

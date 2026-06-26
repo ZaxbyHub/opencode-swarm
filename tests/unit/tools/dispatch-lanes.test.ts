@@ -979,9 +979,13 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(records[0].generation).toBe(1);
 		expect(records[0].workspace?.scope).toBe('src');
 		expect(records[0].promptHash).toMatch(/^[a-f0-9]{64}$/);
+		// promptHash is computed after applyExplorerFormatSuffix, so for
+		// explorer-role lanes the hash covers the prompt + format suffix.
+		const sentPromptText = (ops.promptAsync as ReturnType<typeof mock>).mock
+			.calls[0][0].body.parts[0].text;
 		expect(records[0].promptHash).toBe(
 			_test_exports.promptHash(
-				{ id: 'runtime', agent: 'explorer', prompt: 'inspect runtime' },
+				{ id: 'runtime', agent: 'explorer', prompt: sentPromptText },
 				directory,
 				'batch-async-1',
 			),
@@ -1795,7 +1799,10 @@ describe('common_prompt (shared lane context)', () => {
 		const texts = (ops.prompt as ReturnType<typeof mock>).mock.calls.map(
 			(call) => call[0].body.parts[0].text,
 		);
-		expect(texts).toContain('PR DIFF + LEDGER\n\ncorrectness focus');
+		const explorerText = texts.find((t) => t.includes('correctness focus'));
+		expect(explorerText).toBeDefined();
+		expect(explorerText).toContain('PR DIFF + LEDGER\n\ncorrectness focus');
+		expect(explorerText).toContain('[CANDIDATE]');
 		expect(texts).toContain('PR DIFF + LEDGER\n\nsecurity focus');
 	});
 
@@ -1856,7 +1863,8 @@ describe('common_prompt (shared lane context)', () => {
 		expect(ops.promptAsync).toHaveBeenCalledTimes(1);
 		const sentText = (ops.promptAsync as ReturnType<typeof mock>).mock
 			.calls[0][0].body.parts[0].text;
-		expect(sentText).toBe('SHARED ASYNC CONTEXT\n\ninspect runtime');
+		expect(sentText).toContain('SHARED ASYNC CONTEXT\n\ninspect runtime');
+		expect(sentText).toContain('[CANDIDATE]');
 	});
 
 	test('executeDispatchLanesAsync rejects oversized common_prompt + prompt without dispatching', async () => {
@@ -1884,5 +1892,52 @@ describe('common_prompt (shared lane context)', () => {
 		expect(result.success).toBe(false);
 		expect(result.failure_class).toBe('invalid_args');
 		expect(ops.promptAsync).toHaveBeenCalledTimes(0);
+	});
+});
+
+describe('applyExplorerFormatSuffix', () => {
+	afterEach(() => {
+		Object.assign(_internals, originalInternals);
+	});
+
+	test('appends format suffix to explorer-role lanes', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const lanes = [
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
+		];
+		const result = _test_exports.applyExplorerFormatSuffix(lanes);
+		expect(result[0].prompt).toContain('inspect runtime');
+		expect(result[0].prompt).toContain('[CANDIDATE]');
+	});
+
+	test('skips non-explorer lanes', () => {
+		_internals.getGeneratedAgentNames = () => [
+			'swarm_explorer',
+			'swarm_reviewer',
+		];
+		const lanes = [
+			{ id: 'L1', agent: 'swarm_reviewer', prompt: 'review findings' },
+		];
+		const result = _test_exports.applyExplorerFormatSuffix(lanes);
+		expect(result[0].prompt).toBe('review findings');
+		expect(result[0].prompt).not.toContain('[CANDIDATE]');
+	});
+
+	test('skips lanes that already contain [CANDIDATE]', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const originalPrompt = 'inspect with [CANDIDATE] format already';
+		const lanes = [
+			{ id: 'L1', agent: 'swarm_explorer', prompt: originalPrompt },
+		];
+		const result = _test_exports.applyExplorerFormatSuffix(lanes);
+		expect(result[0].prompt).toBe(originalPrompt);
+	});
+
+	test('skips when appending would exceed MAX_PROMPT_CHARS', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const longPrompt = 'x'.repeat(MAX_PROMPT_CHARS - 10);
+		const lanes = [{ id: 'L1', agent: 'swarm_explorer', prompt: longPrompt }];
+		const result = _test_exports.applyExplorerFormatSuffix(lanes);
+		expect(result[0].prompt).toBe(longPrompt);
 	});
 });
