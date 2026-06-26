@@ -429,4 +429,62 @@ describe('scope-guard mixed-args bypass — regression: first-match-wins bypass 
 			);
 		}).toThrow(/SCOPE VIOLATION/);
 	});
+
+	// ─────────────────────────────────────────────────────────────
+	// swarm_apply_patch — renamed tool must also be guarded
+	// ─────────────────────────────────────────────────────────────
+
+	it('swarm_apply_patch: out-of-scope files[] triggers SCOPE VIOLATION', async () => {
+		ensureAgentSession(SESSION_ID, 'coder');
+		const session = swarmState.agentSessions.get(SESSION_ID)!;
+		session.declaredCoderScope = ['/workspace/src/hooks'];
+
+		const hook = createScopeGuardHook(
+			{ enabled: true },
+			WORKSPACE_DIR,
+			() => {},
+		);
+
+		await expect(async () => {
+			await hook.toolBefore(
+				{
+					tool: 'swarm_apply_patch',
+					sessionID: SESSION_ID,
+					callID: 'call-swarm-out',
+				},
+				{
+					args: {
+						files: ['/workspace/src/tools/evil.ts'],
+					},
+				},
+			);
+		}).toThrow(/SCOPE VIOLATION.*src\/tools\/evil\.ts/);
+	});
+
+	it('swarm_apply_patch: in-scope files[] does not trigger violation', async () => {
+		ensureAgentSession(SESSION_ID, 'coder');
+		const session = swarmState.agentSessions.get(SESSION_ID)!;
+		session.declaredCoderScope = ['/workspace/src/hooks'];
+
+		const hook = createScopeGuardHook(
+			{ enabled: true },
+			WORKSPACE_DIR,
+			() => {},
+		);
+
+		await expect(async () => {
+			await hook.toolBefore(
+				{
+					tool: 'swarm_apply_patch',
+					sessionID: SESSION_ID,
+					callID: 'call-swarm-in',
+				},
+				{
+					args: {
+						files: ['/workspace/src/hooks/safe.ts'],
+					},
+				},
+			);
+		}).not.toThrow();
+	});
 });

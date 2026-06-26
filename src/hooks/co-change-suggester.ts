@@ -141,9 +141,14 @@ export function createCoChangeSuggesterHook(
 
 		// Only fire on file-write tools
 		if (
-			!['write', 'edit', 'apply_patch', 'patch', 'create_file'].includes(
-				toolName,
-			)
+			![
+				'write',
+				'edit',
+				'apply_patch',
+				'swarm_apply_patch',
+				'patch',
+				'create_file',
+			].includes(toolName)
 		) {
 			return;
 		}

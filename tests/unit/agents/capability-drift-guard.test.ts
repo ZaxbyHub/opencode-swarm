@@ -158,12 +158,18 @@ describe('WRITE_TOOL_NAMES is the canonical write-tool set', () => {
 		}
 	});
 
-	test('WRITE_TOOL_NAMES.length is 9 (canonical count)', () => {
-		expect(WRITE_TOOL_NAMES.length).toBe(9);
+	test('WRITE_TOOL_NAMES.length is 10 (canonical count — includes both apply_patch and swarm_apply_patch)', () => {
+		expect(WRITE_TOOL_NAMES.length).toBe(10);
 	});
 
-	test('WRITE_TOOL_NAMES contains the 4 core write tools', () => {
-		const coreWriteTools = ['write', 'edit', 'patch', 'apply_patch'] as const;
+	test('WRITE_TOOL_NAMES contains the 5 core write tools', () => {
+		const coreWriteTools = [
+			'write',
+			'edit',
+			'patch',
+			'apply_patch',
+			'swarm_apply_patch',
+		] as const;
 		for (const tool of coreWriteTools) {
 			expect(WRITE_TOOL_NAMES).toContain(tool);
 		}

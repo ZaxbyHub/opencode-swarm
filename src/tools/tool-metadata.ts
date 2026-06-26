@@ -615,9 +615,9 @@ export const TOOL_METADATA = {
 			'returns Lean Turbo configuration and active status for the current session',
 		agents: [],
 	},
-	apply_patch: {
+	swarm_apply_patch: {
 		description:
-			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation',
+			'Apply a unified diff patch to workspace files with exact context matching, atomic writes, and path validation. Use standard unified diff format only — does NOT support *** Begin Patch / *** Update File payloads (use native apply_patch for those).',
 		agents: ['coder', 'test_engineer'],
 	},
 	external_skill_discover: {

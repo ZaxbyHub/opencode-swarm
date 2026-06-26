@@ -33,6 +33,7 @@ const FORBIDDEN_WRITE_TOOLS = [
 	'edit',
 	'patch',
 	'apply_patch',
+	'swarm_apply_patch',
 	'create_file',
 	'insert',
 	'replace',

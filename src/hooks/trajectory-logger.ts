@@ -129,7 +129,8 @@ export async function truncateTrajectoryFile(
 function deriveAction(tool: string): string {
 	const toolLower = tool.toLowerCase();
 	if (toolLower === 'task') return 'delegate';
-	if (['write', 'edit', 'apply_patch'].includes(toolLower)) return 'edit';
+	if (['write', 'edit', 'apply_patch', 'swarm_apply_patch'].includes(toolLower))
+		return 'edit';
 	if (['read', 'glob', 'search'].includes(toolLower)) return 'read';
 	if (['bash', 'shell'].includes(toolLower)) return 'execute';
 	if (toolLower === 'test_runner') return 'test';

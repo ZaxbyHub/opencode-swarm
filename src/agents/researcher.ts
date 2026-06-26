@@ -146,6 +146,7 @@ export function createResearcherAgent(
 				edit: false,
 				patch: false,
 				apply_patch: false,
+				swarm_apply_patch: false,
 				create_file: false,
 				insert: false,
 				replace: false,

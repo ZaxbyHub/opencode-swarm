@@ -13,6 +13,7 @@ const WRITE_EDIT_TOOLS = new Set([
 	'write',
 	'edit',
 	'apply_patch',
+	'swarm_apply_patch',
 	'create_file',
 ]);
 

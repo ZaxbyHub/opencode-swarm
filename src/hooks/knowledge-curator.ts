@@ -128,7 +128,8 @@ function isWriteToSwarmPlan(input: unknown): boolean {
 	const toolName = record.toolName as string | undefined;
 
 	if (typeof toolName !== 'string') return false;
-	if (!['write', 'edit', 'apply_patch'].includes(toolName)) return false;
+	if (!['write', 'edit', 'apply_patch', 'swarm_apply_patch'].includes(toolName))
+		return false;
 
 	// Normalize path separators (Windows uses backslash)
 	const rawPath = record.path as string | undefined;
@@ -159,7 +160,8 @@ export function isWriteToEvidenceFile(input: unknown): boolean {
 	const toolName = record.toolName as string | undefined;
 
 	if (typeof toolName !== 'string') return false;
-	if (!['write', 'edit', 'apply_patch'].includes(toolName)) return false;
+	if (!['write', 'edit', 'apply_patch', 'swarm_apply_patch'].includes(toolName))
+		return false;
 
 	// Normalize path separators (Windows uses backslash)
 	const rawPath = record.path as string | undefined;

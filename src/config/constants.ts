@@ -308,6 +308,7 @@ export const WRITE_TOOL_NAMES = [
 	'edit',
 	'patch',
 	'apply_patch',
+	'swarm_apply_patch',
 	'create_file',
 	'insert',
 	'replace',

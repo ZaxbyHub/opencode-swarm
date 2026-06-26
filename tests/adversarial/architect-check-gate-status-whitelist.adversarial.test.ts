@@ -120,7 +120,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',
-				'apply_patch',
+				'swarm_apply_patch',
 			];
 			expect(AGENT_TOOL_MAP['coder']).toEqual(expected);
 		});
@@ -143,7 +143,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'search',
 				'swarm_command',
 				'summarize_work',
-				'apply_patch',
+				'swarm_apply_patch',
 			];
 			expect(AGENT_TOOL_MAP['test_engineer']).toEqual(expected);
 		});

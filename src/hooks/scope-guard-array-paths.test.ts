@@ -808,4 +808,71 @@ describe('scope-guard array-path parameter handling', () => {
 			}).not.toThrow();
 		});
 	});
+
+	// ─────────────────────────────────────────────────────────────
+	// swarm_apply_patch: renamed plugin patch tool must also be guarded
+	// Regression: if scope-guard only checked 'apply_patch', the renamed
+	// swarm_apply_patch would bypass array-path scope enforcement.
+	// ─────────────────────────────────────────────────────────────
+	describe('swarm_apply_patch array-path scope enforcement', () => {
+		it('swarm_apply_patch: out-of-scope path in files[] triggers SCOPE VIOLATION', async () => {
+			ensureAgentSession(SESSION_ID, 'coder');
+			const session = swarmState.agentSessions.get(SESSION_ID)!;
+			session.declaredCoderScope = ['/workspace/src/hooks'];
+
+			const hook = createScopeGuardHook(
+				{ enabled: true },
+				WORKSPACE_DIR,
+				() => {},
+			);
+
+			await expect(async () => {
+				await hook.toolBefore(
+					{
+						tool: 'swarm_apply_patch',
+						sessionID: SESSION_ID,
+						callID: 'call-sap-1',
+					},
+					{
+						args: {
+							files: [
+								'/workspace/src/hooks/scope-guard.ts', // in scope
+								'/workspace/src/tools/out.ts', // out of scope
+							],
+						},
+					},
+				);
+			}).toThrow(/SCOPE VIOLATION.*src\/tools\/out\.ts/);
+		});
+
+		it('swarm_apply_patch: all in-scope files[] does not throw', async () => {
+			ensureAgentSession(SESSION_ID, 'coder');
+			const session = swarmState.agentSessions.get(SESSION_ID)!;
+			session.declaredCoderScope = ['/workspace/src/hooks'];
+
+			const hook = createScopeGuardHook(
+				{ enabled: true },
+				WORKSPACE_DIR,
+				() => {},
+			);
+
+			await expect(async () => {
+				await hook.toolBefore(
+					{
+						tool: 'swarm_apply_patch',
+						sessionID: SESSION_ID,
+						callID: 'call-sap-2',
+					},
+					{
+						args: {
+							files: [
+								'/workspace/src/hooks/scope-guard.ts',
+								'/workspace/src/hooks/another.ts',
+							],
+						},
+					},
+				);
+			}).not.toThrow();
+		});
+	});
 });

@@ -1104,11 +1104,35 @@ function buildErrorResult(message: string): ApplyPatchResult {
 	};
 }
 
+// ============ Unsupported Format Detection ============
+
+/**
+ * Detect the *** Begin Patch / *** Update File style payload that opencode's
+ * native apply_patch tool uses. The Swarm unified-diff tool does NOT support
+ * this format and must hard-fail rather than silently returning no-op success.
+ */
+function isUnsupportedPatchFormat(patchText: string): boolean {
+	const trimmed = patchText.trimStart();
+	return (
+		trimmed.startsWith('*** Begin Patch') ||
+		trimmed.startsWith('*** Update File') ||
+		trimmed.startsWith('*** Add File') ||
+		trimmed.startsWith('*** Delete File') ||
+		trimmed.startsWith('*** End Patch')
+	);
+}
+
 // ============ Tool Definition ============
 
-export const applyPatch: ToolDefinition = createSwarmTool({
+/**
+ * Swarm unified-diff patch tool (formerly registered as apply_patch).
+ * Renamed to swarm_apply_patch so it no longer shadows the native opencode
+ * apply_patch tool. The native tool handles *** Begin Patch / *** Update File
+ * style payloads; this tool handles standard unified diffs only.
+ */
+export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 	description:
-		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool.',
+		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool. Use standard unified diff format (--- a/file / +++ b/file / @@ hunks). Does NOT support *** Begin Patch / *** Update File payloads — use the native apply_patch tool for those.',
 	args: {
 		patch: z.string().min(1).describe('Unified diff text to parse and apply'),
 		files: z
@@ -1141,7 +1165,7 @@ export const applyPatch: ToolDefinition = createSwarmTool({
 		// Safe args extraction
 		if (!args || typeof args !== 'object') {
 			return JSON.stringify(
-				buildErrorResult('Could not parse apply_patch arguments'),
+				buildErrorResult('Could not parse swarm_apply_patch arguments'),
 				null,
 				2,
 			);
@@ -1176,6 +1200,21 @@ export const applyPatch: ToolDefinition = createSwarmTool({
 		if (!patchText || patchText.trim() === '') {
 			return JSON.stringify(
 				buildErrorResult('patch text cannot be empty'),
+				null,
+				2,
+			);
+		}
+
+		// Hard-fail unsupported *** Begin Patch / *** Update File format payloads.
+		// These are produced by opencode's native apply_patch tool and are NOT
+		// unified diffs. Returning success/no-op for them would silently swallow
+		// the payload. Callers must use the native apply_patch tool instead.
+		if (isUnsupportedPatchFormat(patchText)) {
+			return JSON.stringify(
+				buildErrorResult(
+					'Unsupported patch format: *** Begin Patch / *** Update File style payloads are not supported by swarm_apply_patch. ' +
+						'Use the native apply_patch tool for this format, or provide a standard unified diff (--- a/file / +++ b/file / @@ hunks).',
+				),
 				null,
 				2,
 			);

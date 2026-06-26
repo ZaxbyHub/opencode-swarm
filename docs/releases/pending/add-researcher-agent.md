@@ -16,8 +16,8 @@
 - **Tool access**: the `researcher` agent is granted `web_search`,
   `swarm_command`, `summarize_work`, `symbols`, `imports`,
   `complexity_hotspots`, `schema_drift`, and `todo_extract`. All write tools
-  are disabled: `write`, `edit`, `patch`, `apply_patch`, `create_file`,
-  `insert`, `replace`, `append`, `prepend`.
+  are disabled: `write`, `edit`, `patch`, `apply_patch`, `swarm_apply_patch`,
+  `create_file`, `insert`, `replace`, `append`, `prepend`.
 
 - **Structured output contract**: the agent always emits CONFIDENCE, SUMMARY,
   FINDINGS (with per-finding confidence and source URLs), CONTRADICTIONS,

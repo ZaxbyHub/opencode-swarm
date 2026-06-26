@@ -1191,7 +1191,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					}
 				}
 			}
-			if (tool === 'apply_patch' || tool === 'patch') {
+			if (
+				tool === 'apply_patch' ||
+				tool === 'swarm_apply_patch' ||
+				tool === 'patch'
+			) {
 				const agentName = swarmState.activeAgent.get(sessionID) ?? 'unknown';
 				const cwd = effectiveDirectory;
 				for (const p of extractPatchTargetPaths(tool, args)) {
@@ -1427,24 +1431,43 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	}
 
 	/**
-	 * Extracts target file paths from apply_patch / patch tool arguments.
+	 * Extracts target file paths from apply_patch / swarm_apply_patch / patch tool arguments.
+	 * For native apply_patch (no files[] arg), extracts paths from the patch text itself.
+	 * For swarm_apply_patch, the files[] arg is required and is the primary source.
 	 */
 	function extractPatchTargetPaths(tool: string, args: unknown): string[] {
-		if (tool !== 'apply_patch' && tool !== 'patch') return [];
+		if (
+			tool !== 'apply_patch' &&
+			tool !== 'swarm_apply_patch' &&
+			tool !== 'patch'
+		)
+			return [];
 		const toolArgs = args as Record<string, unknown> | undefined;
+
+		// For swarm_apply_patch, the files[] arg is the declared scope — include it
+		// as the primary source of target paths (it is required by the tool schema).
+		// For native apply_patch, files[] may not be present; fall back to patch text.
+		const paths = new Set<string>();
+		if (Array.isArray(toolArgs?.files)) {
+			for (const f of toolArgs.files as unknown[]) {
+				if (typeof f === 'string' && f.length > 0 && f !== '/dev/null') {
+					paths.add(f);
+				}
+			}
+		}
+
 		const patchText = (toolArgs?.input ??
 			toolArgs?.patch ??
 			toolArgs?.diff ??
 			(Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined)) as
 			| string
 			| undefined;
-		if (typeof patchText !== 'string') return [];
+		if (typeof patchText !== 'string') return Array.from(paths);
 		if (patchText.length > 1_000_000) {
 			throw new Error(
 				'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
 			);
 		}
-		const paths = new Set<string>();
 		const patchPathPattern = /\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)/gi;
 		const diffPathPattern = /\+\+\+\s+b\/(.+)/gm;
 		const gitDiffPathPattern = /^diff --git a\/(.+?) b\/(.+?)$/gm;
@@ -1495,10 +1518,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			toolArgs?.file ??
 			toolArgs?.target;
 
-		if (tool === 'apply_patch' || tool === 'patch') {
+		if (
+			tool === 'apply_patch' ||
+			tool === 'swarm_apply_patch' ||
+			tool === 'patch'
+		) {
 			if (patchPayloadHasHumanOnlyInvocation(args)) {
 				throw new Error(
-					'BLOCKED: apply_patch would introduce a script invoking a human-only swarm CLI subcommand. ' +
+					'BLOCKED: apply_patch/swarm_apply_patch would introduce a script invoking a human-only swarm CLI subcommand. ' +
 						'Present the situation to the user and ask them to run the command themselves.',
 				);
 			}
@@ -1552,7 +1579,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 
-		if (!targetPath && (tool === 'apply_patch' || tool === 'patch')) {
+		if (
+			!targetPath &&
+			(tool === 'apply_patch' ||
+				tool === 'swarm_apply_patch' ||
+				tool === 'patch')
+		) {
 			for (const p of extractPatchTargetPaths(tool, args)) {
 				const resolvedP = path.resolve(effectiveDirectory, p);
 				const planMdPath = path
@@ -1590,7 +1622,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					const session = swarmState.agentSessions.get(sessionID);
 					if (session) {
 						session.architectWriteCount++;
-						warn('Architect direct code edit detected via apply_patch', {
+						warn('Architect direct code edit detected via patch tool', {
 							tool,
 							sessionID,
 							targetPath: p,
@@ -2108,8 +2140,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 
-		// Authority + lstat + universal-deny for apply_patch / patch
-		if (input.tool === 'apply_patch' || input.tool === 'patch') {
+		// Authority + lstat + universal-deny for apply_patch / swarm_apply_patch / patch
+		if (
+			input.tool === 'apply_patch' ||
+			input.tool === 'swarm_apply_patch' ||
+			input.tool === 'patch'
+		) {
 			const patchAgentName =
 				swarmState.activeAgent.get(input.sessionID) ?? 'unknown';
 			if (!swarmState.activeAgent.has(input.sessionID)) {

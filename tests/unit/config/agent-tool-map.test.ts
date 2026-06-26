@@ -68,6 +68,7 @@ describe('AGENT_TOOL_MAP', () => {
 		expect(smeTools).toContain('web_search');
 		expect(smeTools).not.toContain('knowledge_add');
 		expect(smeTools).not.toContain('apply_patch');
+		expect(smeTools).not.toContain('swarm_apply_patch');
 	});
 
 	it('researcher has all 8 assigned tools and remains read-only', () => {
@@ -89,6 +90,7 @@ describe('AGENT_TOOL_MAP', () => {
 		// Read-only invariant: no write tools
 		const writeTools = [
 			'apply_patch',
+			'swarm_apply_patch',
 			'knowledge_add',
 			'save_plan',
 			'update_task_status',

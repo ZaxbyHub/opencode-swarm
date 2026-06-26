@@ -420,4 +420,65 @@ describe('scope-guard single-path multi-key iteration — regression: first-matc
 			);
 		}).toThrow(/SCOPE VIOLATION.*src\/tools\/evil\.ts/);
 	});
+
+	// ─────────────────────────────────────────────────────────────
+	// swarm_apply_patch: renamed plugin patch tool must also be guarded
+	// Regression: if scope-guard only checked 'apply_patch', the renamed
+	// swarm_apply_patch would bypass single-path-key scope enforcement.
+	// ─────────────────────────────────────────────────────────────
+	it('swarm_apply_patch: path in-scope + filePath out-of-scope → SCOPE VIOLATION', async () => {
+		ensureAgentSession(SESSION_ID, 'coder');
+		const session = swarmState.agentSessions.get(SESSION_ID)!;
+		session.declaredCoderScope = ['/workspace/src/hooks'];
+
+		const hook = createScopeGuardHook(
+			{ enabled: true },
+			WORKSPACE_DIR,
+			() => {},
+		);
+
+		await expect(async () => {
+			await hook.toolBefore(
+				{
+					tool: 'swarm_apply_patch',
+					sessionID: SESSION_ID,
+					callID: 'call-sap-sp-1',
+				},
+				{
+					args: {
+						path: '/workspace/src/hooks/safe.ts', // in-scope (cover)
+						filePath: '/workspace/src/tools/evil.ts', // out-of-scope (bypass attempt)
+					},
+				},
+			);
+		}).toThrow(/SCOPE VIOLATION.*src\/tools\/evil\.ts/);
+	});
+
+	it('swarm_apply_patch: all single-path keys in-scope → no violation', async () => {
+		ensureAgentSession(SESSION_ID, 'coder');
+		const session = swarmState.agentSessions.get(SESSION_ID)!;
+		session.declaredCoderScope = ['/workspace/src/hooks'];
+
+		const hook = createScopeGuardHook(
+			{ enabled: true },
+			WORKSPACE_DIR,
+			() => {},
+		);
+
+		await expect(async () => {
+			await hook.toolBefore(
+				{
+					tool: 'swarm_apply_patch',
+					sessionID: SESSION_ID,
+					callID: 'call-sap-sp-2',
+				},
+				{
+					args: {
+						path: '/workspace/src/hooks/a.ts', // in-scope
+						filePath: '/workspace/src/hooks/b.ts', // in-scope
+					},
+				},
+			);
+		}).not.toThrow();
+	});
 });

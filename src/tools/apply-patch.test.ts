@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ApplyPatchResult } from './apply-patch';
-import { applyPatch } from './apply-patch';
+import { swarmApplyPatch } from './apply-patch';
 
 // Helper: create a temp directory
 function createTempDir(): string {
@@ -126,7 +126,7 @@ function buildDeleteDiff(delPath: string, content: string): string {
 	return `--- ${delPath}\n+++ /dev/null\n@@ -1,${lines.length} +0,0 @@\n${hunkLines.join('\n')}\n`;
 }
 
-// Helper: call applyPatch.execute with correct ctx argument
+// Helper: call swarmApplyPatch.execute with correct ctx argument
 async function applyPatchExec(args: {
 	patch: string;
 	files: string[];
@@ -137,7 +137,7 @@ async function applyPatchExec(args: {
 }): Promise<string> {
 	// The createSwarmTool wrapper expects ctx as second arg, not directory
 	// It extracts directory from ctx.directory
-	return applyPatch.execute(args, { directory: args.directory } as any);
+	return swarmApplyPatch.execute(args, { directory: args.directory } as any);
 }
 
 // Helper: workspace for execute call
@@ -145,7 +145,7 @@ function workspaceOf(dir: string) {
 	return { directory: dir };
 }
 
-describe('apply-patch tool', () => {
+describe('swarm_apply_patch tool', () => {
 	let workspace: string;
 
 	beforeEach(() => {
@@ -172,7 +172,7 @@ describe('apply-patch tool', () => {
 			'line1\nline2-modified\nline3\n',
 		);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -202,7 +202,7 @@ describe('apply-patch tool', () => {
 		);
 
 		const combinedPatch = patch1 + patch2;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: combinedPatch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -225,7 +225,7 @@ describe('apply-patch tool', () => {
 		const patchA = buildDiff(fileA, fileA, 'hello\nworld\n', 'hello\nswarm\n');
 		const patchB = buildDiff(fileB, fileB, 'foo\nbar\n', 'foo\nbaz\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: patchA + patchB, files: [fileA, fileB] },
 			workspaceOf(workspace) as any,
 		);
@@ -245,7 +245,7 @@ describe('apply-patch tool', () => {
 
 		const patch = buildDiff(targetFile, targetFile, 'original\n', 'modified\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile], dryRun: true },
 			workspaceOf(workspace) as any,
 		);
@@ -264,7 +264,7 @@ describe('apply-patch tool', () => {
 
 		const patch = buildDiff(targetFile, targetFile, 'old\n', 'new\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: ['other.txt'] },
 			workspaceOf(workspace) as any,
 		);
@@ -291,7 +291,7 @@ describe('apply-patch tool', () => {
 			'line1\nline2-modified\nline3\n',
 		);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile, extraFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -311,7 +311,7 @@ describe('apply-patch tool', () => {
 
 		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,3 +1,3 @@\n line1\n-old\n+new\n line3\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -328,7 +328,7 @@ describe('apply-patch tool', () => {
 	test('rejects absolute paths', async () => {
 		const patch = '--- /etc/passwd\n+++ /etc/passwd\n@@ -1 +1 @@\n-old\n+new\n';
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: ['/etc/passwd'] },
 			workspaceOf(workspace) as any,
 		);
@@ -342,7 +342,7 @@ describe('apply-patch tool', () => {
 	test('rejects ../ traversal', async () => {
 		const patch = `--- ../secret.txt\n+++ ../secret.txt\n@@ -1 +1 @@\n-old\n+new\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: ['../secret.txt'] },
 			workspaceOf(workspace) as any,
 		);
@@ -355,7 +355,7 @@ describe('apply-patch tool', () => {
 	// ===== Test 10: Rejects .git/ and .swarm/ targets =====
 	test('rejects .git/ and .swarm/ protected directory targets', async () => {
 		const gitPatch = `--- .git/config\n+++ .git/config\n@@ -1 +1 @@\n-old\n+new\n`;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: gitPatch, files: ['.git/config'] },
 			workspaceOf(workspace) as any,
 		);
@@ -366,7 +366,7 @@ describe('apply-patch tool', () => {
 		);
 
 		const swarmPatch = `--- .swarm/secret.txt\n+++ .swarm/secret.txt\n@@ -1 +1 @@\n-old\n+new\n`;
-		const resultStr2 = await applyPatch.execute(
+		const resultStr2 = await swarmApplyPatch.execute(
 			{ patch: swarmPatch, files: ['.swarm/secret.txt'] },
 			workspaceOf(workspace) as any,
 		);
@@ -383,7 +383,7 @@ describe('apply-patch tool', () => {
 	// segments.some() to check ALL segments, correctly rejecting nested protected dirs.
 	test('rejects .git/ hidden inside a subdirectory path (src/.git/config)', async () => {
 		const nestedGitPatch = `--- src/.git/config\n+++ src/.git/config\n@@ -1 +1 @@\n-old\n+new\n`;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: nestedGitPatch, files: ['src/.git/config'] },
 			workspaceOf(workspace) as any,
 		);
@@ -396,7 +396,7 @@ describe('apply-patch tool', () => {
 
 	test('rejects .swarm/ hidden inside a subdirectory path (src/.swarm/state)', async () => {
 		const nestedSwarmPatch = `--- src/.swarm/state\n+++ src/.swarm/state\n@@ -1 +1 @@\n-old\n+new\n`;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: nestedSwarmPatch, files: ['src/.swarm/state'] },
 			workspaceOf(workspace) as any,
 		);
@@ -409,7 +409,7 @@ describe('apply-patch tool', () => {
 
 	test('rejects .git/ at arbitrary depth (a/b/.git/c)', async () => {
 		const deepGitPatch = `--- a/b/.git/c\n+++ a/b/.git/c\n@@ -1 +1 @@\n-old\n+new\n`;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: deepGitPatch, files: ['a/b/.git/c'] },
 			workspaceOf(workspace) as any,
 		);
@@ -426,7 +426,7 @@ describe('apply-patch tool', () => {
 		const content = 'brand new content\n';
 		const patch = buildCreateDiff(newFile, content);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [newFile], allowCreates: true },
 			workspaceOf(workspace) as any,
 		);
@@ -443,7 +443,7 @@ describe('apply-patch tool', () => {
 		const newFile = 'not-created.txt';
 		const patch = buildCreateDiff(newFile, 'some content\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [newFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -461,7 +461,7 @@ describe('apply-patch tool', () => {
 		createFile(workspace, targetFile, 'content to delete\n');
 		const patch = buildDeleteDiff(targetFile, 'content to delete\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -479,7 +479,7 @@ describe('apply-patch tool', () => {
 		createFile(workspace, targetFile, 'content to delete\n');
 		const patch = buildDeleteDiff(targetFile, 'content to delete\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile], allowDeletes: true },
 			workspaceOf(workspace) as any,
 		);
@@ -497,7 +497,7 @@ describe('apply-patch tool', () => {
 
 		const binaryPatch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\nGIT binary patch\nliteral 1\nH Pf\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: binaryPatch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -516,7 +516,7 @@ describe('apply-patch tool', () => {
 
 		const renamePatch = `--- ${oldFile}\n+++ ${newFile}\nrename from ${oldFile}\nrename to ${newFile}\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: renamePatch, files: [oldFile, newFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -540,7 +540,7 @@ describe('apply-patch tool', () => {
 			'line1\nmodified\nline3\n',
 		);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [patchedFile, unrelatedFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -559,7 +559,7 @@ describe('apply-patch tool', () => {
 
 		const patch = buildDiff(targetFile, targetFile, 'original\n', 'modified\n');
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -588,7 +588,7 @@ describe('apply-patch tool', () => {
 			'line1\r\nline2-modified\r\nline3\r\n',
 		);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -619,7 +619,7 @@ describe('apply-patch tool', () => {
 			'line1\nline2-modified\nline3',
 		);
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -639,7 +639,7 @@ describe('apply-patch tool', () => {
 		// Patch with no hunks (just headers)
 		const emptyPatch = `--- ${targetFile}\n+++ ${targetFile}\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: emptyPatch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -666,7 +666,7 @@ describe('apply-patch tool', () => {
 		const badPatch = `--- ${badFile}\n+++ ${badFile}\n@@ -1 +1 @@\n-old\n+new\n`;
 
 		const combinedPatch = goodPatch + badPatch;
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch: combinedPatch, files: [goodFile, badFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -686,7 +686,7 @@ describe('apply-patch tool', () => {
 		for (const name of reservedNames) {
 			const patch = `--- ${name}.txt\n+++ ${name}.txt\n@@ -1 +1 @@\n-old\n+new\n`;
 
-			const resultStr = await applyPatch.execute(
+			const resultStr = await swarmApplyPatch.execute(
 				{ patch, files: [`${name}.txt`] },
 				workspaceOf(workspace) as any,
 			);
@@ -704,7 +704,7 @@ describe('apply-patch tool', () => {
 		const badPath = 'file\x00with\x01control.txt';
 		const patch = `--- ${badPath}\n+++ ${badPath}\n@@ -1 +1 @@\n-old\n+new\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [badPath] },
 			workspaceOf(workspace) as any,
 		);
@@ -724,7 +724,7 @@ describe('apply-patch tool', () => {
 		// Replace all content with spaces/tabs/newlines
 		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1 +1 @@\n-some content\n+   \t  \n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -743,7 +743,7 @@ describe('apply-patch tool', () => {
 
 		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,3 +0,0 @@\n-line1\n-line2\n-line3\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -765,7 +765,7 @@ describe('apply-patch tool', () => {
 
 		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,3 +0,0 @@\n-line1\n-line2\n-line3\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile], allowDeletes: true },
 			workspaceOf(workspace) as any,
 		);
@@ -793,7 +793,7 @@ describe('apply-patch tool', () => {
 		// With exact-match-only, it should fail if the context at line 1 differs.
 		const patch = `--- ${targetFile}\n+++ ${targetFile}\n@@ -1,2 +1,2 @@\n block-x\n block-x\n+added\n`;
 
-		const resultStr = await applyPatch.execute(
+		const resultStr = await swarmApplyPatch.execute(
 			{ patch, files: [targetFile] },
 			workspaceOf(workspace) as any,
 		);
@@ -802,5 +802,46 @@ describe('apply-patch tool', () => {
 		expect(result.success).toBe(false);
 		expect(result.files[0]?.status).toBe('error');
 		expect(result.files[0]?.errors?.[0]?.type).toBe('context-mismatch');
+	});
+
+	// ===== Test 28: Hard-fail on unsupported *** Begin Patch / *** Update File format =====
+	test('rejects *** Begin Patch / *** Update File style payload with hard error', async () => {
+		const unsupportedPayload = [
+			'*** Begin Patch',
+			'*** Update File: src/foo.ts',
+			'@@',
+			'-old line',
+			'+new line',
+			'*** End Patch',
+		].join('\n');
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch: unsupportedPayload, files: ['src/foo.ts'] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+
+		expect(result.success).toBe(false);
+		expect(result.files[0]?.errors?.[0]?.message).toContain(
+			'Unsupported patch format',
+		);
+		expect(result.files[0]?.errors?.[0]?.message).toContain(
+			'swarm_apply_patch',
+		);
+	});
+
+	test('rejects *** Update File style payload (no Begin Patch header)', async () => {
+		const unsupportedPayload = '*** Update File: src/bar.ts\n@@\n-old\n+new\n';
+
+		const resultStr = await swarmApplyPatch.execute(
+			{ patch: unsupportedPayload, files: ['src/bar.ts'] },
+			workspaceOf(workspace) as any,
+		);
+		const result = parseResult(resultStr);
+
+		expect(result.success).toBe(false);
+		expect(result.files[0]?.errors?.[0]?.message).toContain(
+			'Unsupported patch format',
+		);
 	});
 });

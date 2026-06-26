@@ -407,7 +407,7 @@ function extractMessageText(msg: MessageWithParts): string {
 function extractToolName(text: string): string | undefined {
 	// Try to extract tool name from common patterns
 	const match = text.match(
-		/^(read_file|write|edit|apply_patch|task|bun|npm|git|bash|glob|grep|mkdir|cp|mv|rm)\b/i,
+		/^(read_file|write|edit|apply_patch|swarm_apply_patch|task|bun|npm|git|bash|glob|grep|mkdir|cp|mv|rm)\b/i,
 	);
 	return match?.[1];
 }

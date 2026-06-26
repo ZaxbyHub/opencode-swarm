@@ -3,7 +3,7 @@
 ## What changed
 
 - **New `git_blame` tool** — per-line git blame metadata via `git blame --porcelain`; returns sha (abbreviated), author, date (ISO), summary, and content for each line; supports optional `start`/`end` line range filtering; rejects binary files and validates paths
-- **`suggest_patch`** — added `format` parameter (`'json'`|`'unified'`); unified mode outputs valid unified diff with `diff --git` headers, hunks, and context lines for `apply_patch` parser compatibility
+- **`suggest_patch`** — added `format` parameter (`'json'`|`'unified'`); unified mode outputs valid unified diff with `diff --git` headers, hunks, and context lines for `swarm_apply_patch` parser compatibility
 - **`test_runner`** — added `bail` parameter (boolean, default false); injects framework-specific bail flags for early exit on first test failure
 - **`symbols`** — added `workspace` (boolean) and `name` (string) parameters for multi-file symbol search across the workspace
 - **`diff`** — added `summaryOnly` parameter; returns file list with additions/deletions counts without full diff content
