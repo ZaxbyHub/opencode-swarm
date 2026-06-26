@@ -29,11 +29,14 @@ canonical workflow.
 - Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
   comments, review threads, checks, conflicts, and head SHA.
 - Use the canonical deterministic lane flow: `dispatch_lanes_async` plus
-  `collect_lane_results`, falling back to blocking `dispatch_lanes` only when
-  async collection is unavailable.
-- When lane results include `output_ref`, call `parse_lane_candidates` and use
-  the structured candidates for reviewer dispatch; degraded or incomplete
-  outputs are coverage gaps.
+  incremental `collect_lane_results` polling (without `wait`) to process
+  settled lanes while continuing independent work; fall back to `wait: true`
+  only when no independent work remains, and to blocking `dispatch_lanes`
+  only when async collection is unavailable. All lanes must be settled
+  before synthesis or phase transitions.
+- When lane results include `output_ref`, call `retrieve_lane_output` for
+  full text, then `parse_lane_candidates` to extract structured candidates
+  for reviewer dispatch; degraded or incomplete outputs are coverage gaps.
 - If actionable findings remain, write the handoff artifact described by the
   canonical skill and ask the user whether to continue with
   `swarm-pr-feedback`.

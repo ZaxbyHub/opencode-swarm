@@ -558,12 +558,12 @@ export const TOOL_METADATA = {
 	},
 	dispatch_lanes_async: {
 		description:
-			'launch read-only advisory lanes non-blockingly and return a batch id immediately so you can keep working; join later with collect_lane_results',
+			'launch read-only advisory lanes non-blockingly and return a batch id immediately so you can keep working; poll incrementally with collect_lane_results (wait omitted or false) while doing independent investigation, or join with wait: true when you need all results',
 		agents: ['architect'],
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; this is the required join barrier for advisory lane workflows and does not advance workflow gates',
+			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Use non-blocking polls to check progress and process settled lanes incrementally while continuing independent work; use blocking join only when you need all lanes settled before proceeding. Does not advance workflow gates.',
 		agents: ['architect'],
 	},
 	summarize_work: {

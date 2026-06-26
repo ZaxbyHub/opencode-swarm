@@ -1295,3 +1295,78 @@ describe('refusalResult — refusal shape via artifact_status:ref-not-found', ()
 		expect(result.diagnostics.candidate_count).toBe(0);
 	});
 });
+
+describe('format_mismatch_hint diagnostics', () => {
+	test('returns hint when text has uppercase severity keywords and file:line but no candidates', () => {
+		const result = parseCandidates(
+			{
+				...BASE_INPUT,
+				text: 'Found a HIGH severity issue at src/utils/cache.ts:142 with null access',
+			},
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(0);
+		expect(result.diagnostics.format_mismatch_hint).toContain(
+			'severity keywords and file:line references',
+		);
+	});
+
+	test('returns hint for severity-only (no file:line) with uppercase keywords', () => {
+		const result = parseCandidates(
+			{
+				...BASE_INPUT,
+				text: 'This has CRITICAL problems and MEDIUM concerns throughout',
+			},
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(0);
+		expect(result.diagnostics.format_mismatch_hint).toContain(
+			'severity keywords but no parseable [CANDIDATE] rows',
+		);
+	});
+
+	test('returns undefined when text has no severity keywords', () => {
+		const result = parseCandidates(
+			{
+				...BASE_INPUT,
+				text: 'Everything looks good, no issues found in the codebase.',
+			},
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(0);
+		expect(result.diagnostics.format_mismatch_hint).toBeUndefined();
+	});
+
+	test('returns undefined for empty text', () => {
+		const result = parseCandidates(
+			{ ...BASE_INPUT, text: '' },
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(0);
+		expect(result.diagnostics.format_mismatch_hint).toBeUndefined();
+	});
+
+	test('does not fire on lowercase severity words in prose', () => {
+		const result = parseCandidates(
+			{
+				...BASE_INPUT,
+				text: 'This provides high performance and low latency for info retrieval at src/main.ts:1',
+			},
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(0);
+		expect(result.diagnostics.format_mismatch_hint).toBeUndefined();
+	});
+
+	test('not present when valid candidates are parsed', () => {
+		const result = parseCandidates(
+			{
+				...BASE_INPUT,
+				text: buildBeText([beRow('C-001')]),
+			},
+			BASE_FLAGS,
+		);
+		expect(result.candidates).toHaveLength(1);
+		expect(result.diagnostics.format_mismatch_hint).toBeUndefined();
+	});
+});

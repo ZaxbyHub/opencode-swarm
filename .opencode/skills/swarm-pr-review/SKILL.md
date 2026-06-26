@@ -496,7 +496,9 @@ Tool candidate rules:
 
 Launch all base lanes with `dispatch_lanes_async` when available. Pass the six lane specs together, set `max_concurrent` to `6`, record the returned `batch_id`, and continue only non-dependent architect work: refine the obligation ledger, inspect PR metadata, prepare micro-lane trigger checks, and run deterministic read-only local tools. Do not synthesize findings from running lanes. Keep each lane `prompt` compact: send the shared review context (PR diff, obligation ledger, scope) ONCE via the `common_prompt` field, or have lanes read it from a file by absolute path, instead of inlining the same large blob into all six prompts — oversized inline prompts produce malformed or truncated tool-call JSON and force clumsy file workarounds.
 
-Before Phase 4 or synthesis, call `collect_lane_results` with `wait: true` for the base-lane batch and treat the collected `lane_results` as the join barrier. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
+**Incremental collection:** While base lanes are running, poll with `collect_lane_results` (without `wait` or `wait: false`) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains.
+
+Before Phase 4 or synthesis, all base lanes must be settled. Missing, stale, cancelled, or failed base lanes are explicit review coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`; if that is also unavailable, simulate isolated passes. Do not let one lane's conclusions bias another lane, and record unavailable deterministic dispatch in the validation gate.
 
 ### Candidate extraction via parser
 
@@ -579,7 +581,7 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 ## Phase 4: Triggered Swarm Plugin Micro-Lanes
 
-After `collect_lane_results` returns for base lanes, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Collect every micro-lane batch with `wait: true` before reviewer classification. Do not launch irrelevant micro-lanes.
+After base lanes are settled, inspect the context pack risk triggers. Launch focused micro-lanes for triggered categories only, using `dispatch_lanes_async` again when more than one read-only micro-lane is needed. Use the same incremental collection pattern: poll with `collect_lane_results` (without `wait`) to process settled micro-lanes while continuing independent work, falling back to `wait: true` only when no independent work remains. All micro-lanes must be settled before reviewer classification. Do not launch irrelevant micro-lanes.
 
 Apply the same parser-based extraction to micro-lanes: call `parse_lane_candidates` on each micro-lane `output_ref` (filter the returned `candidates[]` array by `row_format_family === "micro_lane"` after parsing), and treat degraded or incomplete lane artifacts as UNVERIFIED coverage rather than as clean negative evidence.
 
@@ -1109,7 +1111,7 @@ Council mode is opt-in only and adversarial.
 When triggered:
 
 1. Build the same context pack as default mode.
-2. Launch all council agents with one `dispatch_lanes_async` call when available; continue only non-dependent context preparation while they run, then use `collect_lane_results` with `wait: true` as the join barrier before reviewer classification. Fall back to blocking `dispatch_lanes` when async launch is unavailable.
+2. Launch all council agents with one `dispatch_lanes_async` call when available; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally. Use `wait: true` only when no independent work remains and agents are still pending. All agents must be settled before reviewer classification. Fall back to blocking `dispatch_lanes` when async launch is unavailable.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
 5. Agents return evidence states only: `EVIDENCE_FOUND`, `SUSPICIOUS`, or `CLEAN`.

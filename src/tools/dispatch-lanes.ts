@@ -40,6 +40,15 @@ const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
+const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
+
+IMPORTANT — OUTPUT FORMAT REQUIREMENT:
+You MUST emit your findings as pipe-delimited [CANDIDATE] rows.
+Header row first, then one row per finding:
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+If you find zero issues, emit the header row with no data rows.
+Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
+
 const READ_ONLY_LANE_ROLES: ReadonlySet<string> = new Set([
 	'explorer',
 	'reviewer',
@@ -172,7 +181,12 @@ const CollectLaneResultsArgsSchema = z.object({
 		.max(MAX_COLLECT_TIMEOUT_MS)
 		.optional()
 		.describe('Total wait budget when wait=true'),
-	include_pending: z.boolean().optional(),
+	include_pending: z
+		.boolean()
+		.optional()
+		.describe(
+			'Include pending/running lanes in results with partial output; useful for progress checks during non-blocking polls',
+		),
 	cancel_pending: z
 		.boolean()
 		.optional()
@@ -324,6 +338,7 @@ export const _internals: {
 
 export const _test_exports = {
 	applyCommonPrompt,
+	applyExplorerFormatSuffix,
 	extractAssistantTranscript,
 	formatError,
 	nextCollectPollInterval,
@@ -387,7 +402,7 @@ export async function executeDispatchLanes(
 			errors: common.errors,
 		});
 	}
-	const lanes = common.lanes;
+	const lanes = applyExplorerFormatSuffix(common.lanes);
 	const maxConcurrent = Math.min(
 		parsed.data.max_concurrent ?? lanes.length,
 		lanes.length,
@@ -459,7 +474,7 @@ export async function executeDispatchLanesAsync(
 			errors: common.errors,
 		});
 	}
-	const lanes = common.lanes;
+	const lanes = applyExplorerFormatSuffix(common.lanes);
 	const batchId = parsed.data.batch_id ?? makeBatchId();
 	if (findByBatchId(directory, batchId).length > 0) {
 		return asyncFailureResult({
@@ -1398,6 +1413,20 @@ function applyCommonPrompt(
 	return { ok: true, lanes: merged };
 }
 
+function applyExplorerFormatSuffix(
+	lanes: DispatchLaneSpec[],
+): DispatchLaneSpec[] {
+	const generatedAgentNames = _internals.getGeneratedAgentNames();
+	return lanes.map((lane) => {
+		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
+		if (role !== 'explorer') return lane;
+		if (lane.prompt.includes('[CANDIDATE]')) return lane;
+		const prompt = `${lane.prompt}${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
+		if (prompt.length > MAX_PROMPT_CHARS) return lane;
+		return { ...lane, prompt };
+	});
+}
+
 function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 	const seen = new Set<string>();
 	const duplicates = new Set<string>();
@@ -1521,7 +1550,7 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id (non-blocking). After launching, keep working on non-dependent tasks while the lanes run, then call collect_lane_results to join. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id (non-blocking). After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
 		args: {
 			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
@@ -1544,7 +1573,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch; this is the required join barrier for advisory lane workflows and does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or timeout. Use non-blocking polls to check progress incrementally; use blocking join only at workflow boundaries where all results are required. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

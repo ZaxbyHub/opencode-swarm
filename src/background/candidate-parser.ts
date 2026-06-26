@@ -135,6 +135,7 @@ export interface DiagnosticsSummary {
 	degraded_source_count: number;
 	incomplete_source_count: number;
 	format_families_detected: string[];
+	format_mismatch_hint?: string;
 }
 
 /**
@@ -429,12 +430,32 @@ function refusalResult(
 	};
 }
 
+function detectFormatMismatchHint(text: string): string | undefined {
+	if (text.trim() === '') return undefined;
+	const severityPattern = /\b(CRITICAL|HIGH|MEDIUM|LOW|INFO)\b/;
+	const fileLinePattern = /\b\S+\.[a-z]{1,4}:\d+\b/;
+	const hasSeverity = severityPattern.test(text);
+	const hasFileLine = fileLinePattern.test(text);
+	if (hasSeverity && hasFileLine) {
+		return 'Lane output contains severity keywords and file:line references but no parseable [CANDIDATE] rows. The explorer may have emitted findings in prose format instead of pipe-delimited candidate rows.';
+	}
+	if (hasSeverity) {
+		return 'Lane output contains severity keywords but no parseable [CANDIDATE] rows. The explorer may have emitted findings in an unstructured format.';
+	}
+	return undefined;
+}
+
 function emptyTextResult(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	const envelope = buildInvocationEnvelope(input, flags, [], 0, 0, 0);
+	const diagnostics = buildEmptyDiagnostics(input, flags);
+	const hint = detectFormatMismatchHint(input.text);
+	if (hint) {
+		diagnostics.format_mismatch_hint = hint;
+	}
 	return {
 		candidates: [],
 		invocation_envelope: envelope,
-		diagnostics: buildEmptyDiagnostics(input, flags),
+		diagnostics,
 	};
 }
 
@@ -752,20 +773,27 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		malformedRows,
 	);
 
+	const diagnostics: DiagnosticsSummary = {
+		candidate_count: candidates.length,
+		parse_errors: parseErrors,
+		parse_error_details: parseErrorDetails,
+		malformed_rows: malformedRows,
+		duplicate_id_count: duplicateIdCount,
+		duplicate_id_warnings: duplicateIdWarnings,
+		degraded_source_count: flags.degraded ? 1 : 0,
+		incomplete_source_count: input.transcriptIncomplete ? 1 : 0,
+		format_families_detected: Array.from(formatFamiliesDetected),
+	};
+	if (candidates.length === 0) {
+		const hint = detectFormatMismatchHint(input.text);
+		if (hint) {
+			diagnostics.format_mismatch_hint = hint;
+		}
+	}
 	return {
 		candidates,
 		invocation_envelope: envelope,
-		diagnostics: {
-			candidate_count: candidates.length,
-			parse_errors: parseErrors,
-			parse_error_details: parseErrorDetails,
-			malformed_rows: malformedRows,
-			duplicate_id_count: duplicateIdCount,
-			duplicate_id_warnings: duplicateIdWarnings,
-			degraded_source_count: flags.degraded ? 1 : 0,
-			incomplete_source_count: input.transcriptIncomplete ? 1 : 0,
-			format_families_detected: Array.from(formatFamiliesDetected),
-		},
+		diagnostics,
 	};
 }
 
