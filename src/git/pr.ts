@@ -403,7 +403,7 @@ export function commitAndPush(cwd: string, message: string): void {
 
 	// Push
 	const branch = getCurrentBranch(cwd);
-	const pushResult = spawnSyncWithTransientRetry(
+	const _pushResult = spawnSyncWithTransientRetry(
 		'git',
 		['push', '-u', 'origin', branch],
 		{

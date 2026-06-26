@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { _internals, runSessionReflection, writeSessionReflection } from './session-reflection';
+import {
+	_internals,
+	runSessionReflection,
+	writeSessionReflection,
+} from './session-reflection';
 
 describe('session-reflection — gatherToolProblems', () => {
 	test('returns empty when no aggregates', () => {
@@ -423,7 +427,9 @@ describe('session-reflection — writeSessionReflection', () => {
 				toolAggregates: new Map(),
 				agentSessions: new Map(),
 			});
-			await expect(writeSessionReflection(noSwarmDir, result)).rejects.toThrow();
+			await expect(
+				writeSessionReflection(noSwarmDir, result),
+			).rejects.toThrow();
 		} finally {
 			fs.rmSync(noSwarmDir, { recursive: true, force: true });
 		}
