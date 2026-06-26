@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.93.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.92.0...v7.93.0) (2026-06-26)
+
+
+### Features
+
+* **swarm-finalize:** add architect session review to /swarm close ([4a8bf40](https://github.com/ZaxbyHub/opencode-swarm/commit/4a8bf406beecc4375f854fd568aaf83a096eb72d))
+
 ## [7.92.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.91.1...v7.92.0) (2026-06-26)
 
 
