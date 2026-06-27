@@ -78,6 +78,12 @@ use:
   graphs, and missing optional fields.
 - Cross-platform CI proves build, query, storage, and path normalization behavior.
 
+The MVP milestone is satisfied once KG-01 through KG-08 are merged (this contract,
+cross-platform runtime, provenance and freshness, confidence and warnings, schema
+compatibility tests, language-tier guarantees, source-grounded context packs, and
+retrieval helpers). KG-09 through KG-18 then harden, broaden, and promote graph
+memory from MVP to the default agent path.
+
 ## OS support matrix
 
 | OS | Required support | Release proof |
@@ -221,7 +227,7 @@ validation.
 | KG-15/18 | Add performance budgets and large-repo gates | Build/query/context-pack budgets are tested at representative scale. |
 | KG-16/18 | Add docs and examples for graph-first workflows | User docs show graph-first, search-fallback patterns. |
 | KG-17/18 | Run full cross-platform release validation | CI proves all supported OS and language-tier gates. |
-| KG-18/18 | Promote graph memory from MVP to default-capable | Agent behavior may depend on graph memory without hidden fallback or overclaims. |
+| KG-18/18 | Promote graph memory from MVP to default-capable | Promotion is gated on KG-13 enabling the agent-context gate and KG-17 cross-platform CI being green; agent behavior may then depend on graph memory without hidden fallback or overclaims. |
 
 ## Release criteria
 
@@ -232,7 +238,7 @@ The graph-memory series is not complete until:
   issue;
 - Windows, macOS, and Linux CI prove graph build/load/query behavior;
 - old graph fixtures prove backward compatibility and self-gating;
-- all 12 language profiles have documented tier behavior and test coverage;
+- all 12 language profiles have documented tier behavior and at least one graph-build test plus one query or `context_pack` test per profile in CI;
 - context packs include required output fields and remain source-grounded;
 - agent-facing retrieval records graph-first use and search fallback provenance;
 - release notes explain migrations, caveats, and any remaining unsupported cases.
