@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.94.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.93.1...v7.94.0) (2026-06-27)
+
+
+### Features
+
+* **skills:** add stale.marker infrastructure for knowledge archive invalidation ([d32a95e](https://github.com/ZaxbyHub/opencode-swarm/commit/d32a95e1c64a7c7e8427ff7d610e4958ab4a1ffe))
+* **skills:** add stale.marker infrastructure for knowledge archive invalidation ([705826d](https://github.com/ZaxbyHub/opencode-swarm/commit/705826dcdc2998bd42376337f3ae40cd8f261819))
+
+
+### Bug Fixes
+
+* **skills:** resolve stale.marker review findings (F-001, F-002, F-003, F-008, F-009) ([5e15a52](https://github.com/ZaxbyHub/opencode-swarm/commit/5e15a52f36e995d22258375b7b89224b59a019cb))
+* **types:** resolve latent TS errors exposed by stale.marker infrastructure ([26bf6b1](https://github.com/ZaxbyHub/opencode-swarm/commit/26bf6b1860cece28a82997c0af7549cb388e9ca3))
+
 ## [7.93.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.93.0...v7.93.1) (2026-06-27)
 
 
