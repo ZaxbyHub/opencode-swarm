@@ -125,7 +125,13 @@ describe('skill-list-stale', () => {
 
 	it('skill without SKILL.md excluded from active[] and stale[]', async () => {
 		// Create just a directory without SKILL.md
-		const emptyDir = path.join(tmp, '.opencode', 'skills', 'generated', 'no-skill-file');
+		const emptyDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'no-skill-file',
+		);
 		await fs.promises.mkdir(emptyDir, { recursive: true });
 
 		// Create a real active skill
@@ -158,13 +164,22 @@ describe('skill-list-stale', () => {
 		// Reason should be 'stale' (default when empty/unreadable)
 		const staleEntry = result.stale.find((s) => s.slug === 'empty-stale-skill');
 		expect(staleEntry).toBeDefined();
-		expect(staleEntry?.reason.trim()).toBe('');
+		expect(staleEntry?.reason).toBe('stale');
 	});
 
 	it('multiple stale skills all appear in stale[] with their reasons', async () => {
-		await makeSkillDir('stale-one', { sourceIds: ['s1'], staleMarker: 'reason one' });
-		await makeSkillDir('stale-two', { sourceIds: ['s2'], staleMarker: 'reason two' });
-		await makeSkillDir('stale-three', { sourceIds: ['s3'], staleMarker: 'reason three' });
+		await makeSkillDir('stale-one', {
+			sourceIds: ['s1'],
+			staleMarker: 'reason one',
+		});
+		await makeSkillDir('stale-two', {
+			sourceIds: ['s2'],
+			staleMarker: 'reason two',
+		});
+		await makeSkillDir('stale-three', {
+			sourceIds: ['s3'],
+			staleMarker: 'reason three',
+		});
 		await makeSkillDir('still-active', { sourceIds: ['s4'] });
 
 		// List skills
@@ -214,7 +229,9 @@ describe('skill-list-stale', () => {
 		expect(result.active.map((s) => s.slug)).toContain('active-skill');
 
 		// stale skill should not be in active
-		expect(result.active.map((s) => s.slug)).not.toContain('stale-proposal-like');
+		expect(result.active.map((s) => s.slug)).not.toContain(
+			'stale-proposal-like',
+		);
 
 		// stale skill should be in stale
 		expect(result.stale.map((s) => s.slug)).toContain('stale-proposal-like');

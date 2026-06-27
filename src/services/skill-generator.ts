@@ -1249,11 +1249,12 @@ export async function listSkills(directory: string): Promise<{
 			if (existsSync(staleMarker)) {
 				let reason = 'stale';
 				try {
-					reason = await fs.readFile(staleMarker, 'utf-8');
+					const content = await fs.readFile(staleMarker, 'utf-8');
+					reason = content.trim() || 'stale';
 				} catch {
 					/* best-effort: default to "stale" if unreadable */
 				}
-				result.stale.push({ slug: e.name, reason: reason.trim() });
+				result.stale.push({ slug: e.name, reason });
 				continue;
 			}
 			const skillPath = path.join(activeDir, e.name, 'SKILL.md');
@@ -1585,7 +1586,7 @@ export async function retireOrMarkStale(
 		// No SKILL.md means nothing to check — treat as fully stale
 		await markSkillStale(
 			skillDir,
-			'source knowledge archived, no SKILL.md found',
+			'source knowledge archived, SKILL.md missing',
 		);
 		const slug = path.basename(skillDir);
 		return { action: 'stale', slug, skillDir };
@@ -1596,16 +1597,22 @@ export async function retireOrMarkStale(
 	} catch {
 		await markSkillStale(
 			skillDir,
-			'source knowledge archived, could not read SKILL.md',
+			'source knowledge archived, SKILL.md unreadable',
 		);
 		const slug = path.basename(skillDir);
 		return { action: 'stale', slug, skillDir };
 	}
 	const fm = parseDraftFrontmatter(content);
 	const sourceIds: string[] = fm?.sourceKnowledgeIds ?? [];
-	const allArchived =
-		sourceIds.length > 0 &&
-		sourceIds.every((id) => archivedKnowledgeIds.has(id));
+	if (sourceIds.length === 0) {
+		await markSkillStale(
+			skillDir,
+			'source knowledge archived, no source_knowledge_ids in frontmatter',
+		);
+		const slug = path.basename(skillDir);
+		return { action: 'stale', slug, skillDir };
+	}
+	const allArchived = sourceIds.every((id) => archivedKnowledgeIds.has(id));
 	const slug = path.basename(skillDir);
 	if (allArchived) {
 		await retireSkill(

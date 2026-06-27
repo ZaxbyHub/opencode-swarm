@@ -3,19 +3,36 @@
  * Marks skills stale when their source knowledge entries are archived or deleted.
  */
 
-import { z } from 'zod';
 import { existsSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { z } from 'zod';
+import {
+	getArchivedKnowledgeIds,
+	readKnowledge,
+	resolveHiveKnowledgePath,
+	resolveSwarmKnowledgePath,
+} from '../hooks/knowledge-store.js';
 import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
+import {
+	clearSkillStale,
+	parseDraftFrontmatter,
+	retireOrMarkStale,
+} from '../services/skill-generator.js';
 import { createSwarmTool } from './create-tool.js';
 
 export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Reconcile skills against the knowledge store: mark skills stale when source knowledge is archived or deleted, or clear stale markers.',
+			'Reconcile skills against the knowledge store. clear=false: mark skills stale when source knowledge is archived or deleted. clear=true: clear stale.marker on affected active skills (proposal files under .swarm/skills/proposals are scanned but not modified — they are drafts, not yet active skills).',
 		args: {
-			clear: z.boolean().optional().default(false).describe(
-				'If true, clear stale markers for affected skills. If false (default), mark affected skills stale.',
-			),
+			clear: z
+				.boolean()
+				.optional()
+				.default(false)
+				.describe(
+					'If true, clear stale markers for affected skills. If false (default), mark affected skills stale.',
+				),
 		},
 		execute: async (args, directory): Promise<string> => {
 			// Guard against invalid directory
@@ -23,36 +40,24 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 				return JSON.stringify({ found: 0, skills: [] }, null, 2);
 			}
 
-			const { getArchivedKnowledgeIds } = await import(
-				'../hooks/knowledge-store.js'
-			);
-			const { retireOrMarkStale, parseDraftFrontmatter } = await import(
-				'../services/skill-generator.js'
-			);
-			const { readdir, readFile } = await import('node:fs/promises');
-			const { join } = await import('node:path');
-			const {
-				readKnowledge,
-				resolveSwarmKnowledgePath,
-				resolveHiveKnowledgePath,
-			} = await import('../hooks/knowledge-store.js');
-
 			// Get all archived/deleted knowledge IDs
-			const archivedIds = await getArchivedKnowledgeIds(directory);
+			const archivedIds = await _internals.getArchivedKnowledgeIds(directory);
 			const archivedSet = new Set(archivedIds);
 
 			// Build set of all known knowledge IDs (to detect deleted ones)
 			const allKnownIds = new Set<string>();
-			const swarmPath = resolveSwarmKnowledgePath(directory);
-			const hivePath = resolveHiveKnowledgePath();
+			const swarmPath = _internals.resolveSwarmKnowledgePath(directory);
+			const hivePath = _internals.resolveHiveKnowledgePath();
 			try {
-				const swarmEntries = await readKnowledge<KnowledgeEntryBase>(swarmPath);
+				const swarmEntries =
+					await _internals.readKnowledge<KnowledgeEntryBase>(swarmPath);
 				for (const e of swarmEntries) allKnownIds.add(e.id);
 			} catch {
 				/* ignore */
 			}
 			try {
-				const hiveEntries = await readKnowledge<KnowledgeEntryBase>(hivePath);
+				const hiveEntries =
+					await _internals.readKnowledge<KnowledgeEntryBase>(hivePath);
 				for (const e of hiveEntries) allKnownIds.add(e.id);
 			} catch {
 				/* ignore */
@@ -68,8 +73,8 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 				join(directory, '.opencode', 'skills', 'generated'),
 				join(directory, '.swarm', 'skills', 'proposals'),
 			]) {
-				if (!existsSync(dir)) continue;
-				const entries = await readdir(dir, { withFileTypes: true });
+				if (!_internals.existsSync(dir)) continue;
+				const entries = await _internals.readdir(dir, { withFileTypes: true });
 				for (const entry of entries) {
 					if (entry.isDirectory()) {
 						skillEntries.push({
@@ -92,10 +97,10 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 
 			for (const { slug, path, isProposal } of skillEntries) {
 				const skillMdPath = isProposal ? path : join(path, 'SKILL.md');
-				if (!existsSync(skillMdPath)) continue;
+				if (!_internals.existsSync(skillMdPath)) continue;
 
-				const content = await readFile(skillMdPath, 'utf-8');
-				const fm = parseDraftFrontmatter(content);
+				const content = await _internals.readFile(skillMdPath, 'utf-8');
+				const fm = _internals.parseDraftFrontmatter(content);
 				const sourceIds = fm?.sourceKnowledgeIds ?? [];
 
 				if (sourceIds.length === 0) continue;
@@ -110,12 +115,9 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 					// Clear existing stale marker (only for active skills)
 					if (!isProposal) {
 						const markerPath = join(path, 'stale.marker');
-						if (existsSync(markerPath)) {
-							const { clearSkillStale } = await import(
-								'../services/skill-generator.js'
-							);
+						if (_internals.existsSync(markerPath)) {
 							try {
-								await clearSkillStale(path);
+								await _internals.clearSkillStale(path);
 								results.push({
 									slug,
 									reason: affected.join(', '),
@@ -130,7 +132,7 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 					// Mark stale or retire (only for active skills)
 					if (!isProposal) {
 						try {
-							await retireOrMarkStale(directory, path, archivedSet);
+							await _internals.retireOrMarkStale(directory, path, archivedSet);
 							results.push({
 								slug,
 								reason: affected.join(', '),
@@ -153,4 +155,26 @@ export const run_stale_reconciliation: ReturnType<typeof createSwarmTool> =
 
 export const _internals: {
 	run_stale_reconciliation: typeof run_stale_reconciliation;
-} = { run_stale_reconciliation };
+	clearSkillStale: typeof clearSkillStale;
+	retireOrMarkStale: typeof retireOrMarkStale;
+	parseDraftFrontmatter: typeof parseDraftFrontmatter;
+	getArchivedKnowledgeIds: typeof getArchivedKnowledgeIds;
+	readKnowledge: typeof readKnowledge;
+	resolveSwarmKnowledgePath: typeof resolveSwarmKnowledgePath;
+	resolveHiveKnowledgePath: typeof resolveHiveKnowledgePath;
+	readdir: typeof readdir;
+	readFile: typeof readFile;
+	existsSync: typeof existsSync;
+} = {
+	run_stale_reconciliation,
+	clearSkillStale,
+	retireOrMarkStale,
+	parseDraftFrontmatter,
+	getArchivedKnowledgeIds,
+	readKnowledge,
+	resolveSwarmKnowledgePath,
+	resolveHiveKnowledgePath,
+	readdir,
+	readFile,
+	existsSync,
+};

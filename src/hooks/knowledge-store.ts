@@ -452,7 +452,11 @@ export async function getArchivedKnowledgeIds(
 		for (const line of lines) {
 			try {
 				const entry = JSON.parse(line);
-				if (entry.status === 'archived' || entry.status === 'quarantined') {
+				if (
+					entry.status === 'archived' ||
+					entry.status === 'quarantined' ||
+					entry.status === 'quarantined_unactionable'
+				) {
 					archived.add(entry.id);
 				}
 			} catch {
@@ -471,7 +475,11 @@ export async function getArchivedKnowledgeIds(
 		for (const line of lines) {
 			try {
 				const entry = JSON.parse(line);
-				if (entry.status === 'archived' || entry.status === 'quarantined') {
+				if (
+					entry.status === 'archived' ||
+					entry.status === 'quarantined' ||
+					entry.status === 'quarantined_unactionable'
+				) {
 					archived.add(entry.id);
 				}
 			} catch {
