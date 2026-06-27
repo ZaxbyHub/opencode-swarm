@@ -191,8 +191,7 @@ Build a complete feedback ledger before editing. Include every available source:
 - PR body checkboxes, test-plan claims, linked issues, and acceptance criteria,
 - commit history and bot/app commits on the PR branch.
 
-If a source is unavailable, record that limitation. Do not treat missing access as
-evidence that no feedback exists.
+If a source is unavailable, retry with alternative access paths. If unavailable after retry, the source is a coverage gap that must be reported to the user — do not silently "record that limitation" and proceed as if the source doesn't matter.
 
 ### Async advisory verification lanes
 
@@ -208,9 +207,12 @@ from running lanes.
 Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
 `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, call
 `collect_lane_results` with `wait: true` for every open verification batch.
-Missing, stale, cancelled, or failed lanes remain explicit ledger limitations.
-If `dispatch_lanes_async` is unavailable, use blocking verification and record
-that async advisory lanes were unavailable.
+Missing, stale, cancelled, or failed lanes are coverage gaps that must be closed
+before marking any item RESOLVED/DISPROVED/PRE_EXISTING. Apply the COVERAGE GATE:
+retry failed lanes (max 2), deploy a verified equivalent alternative (same agent
+type, same prompt, same scope, same isolation), or report INCOMPLETE to the user.
+Do not proceed with "blocking verification and record that async advisory lanes
+were unavailable" — record-and-continue is not coverage closure.
 
 ### CI matrix cascade check (do this before fixing)
 

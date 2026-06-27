@@ -96,3 +96,14 @@ Examples:
 The `commit-pr` skill Tier 1 - quality section pins the biome command to the package.json version; this is the canonical pattern for any tool where local and CI versions could diverge. Apply the same discipline to ESLint, Prettier, TypeScript, and any other versioned dev dependency.
 
 **Why this matters:** PR #1503 (telemetry rotation fix) had a biome 2.3.14 `organizeImports` failure on the `./telemetry` import block that was invisible to local `bunx biome` (which resolved to 0.3.3 with no equivalent rule). The reviewer caught it from CI logs, not local validation. Pin tool versions to close the local/CI parity gap.
+
+## Skill mirror contract
+
+The cross-tree skill mirror contract is the authoritative registry at `src/config/skill-mirrors.ts`. If your PR modifies `.opencode/skills/<X>/SKILL.md` or `.claude/skills/<X>/SKILL.md`, consult that file to determine the contract kind for skill `<X>`:
+
+- **`identical`:** `.opencode` and `.claude` SKILL.md must be byte-identical (the `canonical` field records which side wins when they drift). Update both trees byte-for-byte in the same commit. Verify with `bun run drift:check`. PR #1512 (lane-dispatch) introduced drift in council/deep-dive by only updating `.opencode` — a contract violation.
+- **`divergent`:** both must exist but content intentionally differs per runtime. Examples: `engineering-conventions` is divergent (different frontmatter, different conventions per Claude Code vs OpenCode); `writing-tests` is divergent pending maintainer confirmation (#1497).
+- **`opencode-only`:** `.opencode` exists; no `.claude` mirror expected. Examples: `loop` (would shadow Claude Code's built-in `/loop`), `running-tests` (OpenCode-runtime guidance).
+- **Adapter shim pattern:** for architect MODE skills like `swarm-pr-review` and `swarm-pr-feedback`, the `.claude` and `.agents` files are thin adapter shims that delegate to the canonical `.opencode` file via `expectedCanonicalRef`. When updating these, the canonical content goes in `.opencode`; the adapter shim typically needs no change unless the cross-tree delegation interface changes.
+
+**If your PR modifies a `.opencode/skills/<X>/SKILL.md` file:** check `src/config/skill-mirrors.ts` for the contract, then run `bun run drift:check` locally before pushing. Mirror drift is currently a soft-warn (`DRIFT_CHECK_ENFORCE=1` would make it hard-fail). The drift-check CI job surfaces drift as an issue comment, not a blocking check — but a drift between canonical and mirror means Claude Code agents reading the mirror get stale instructions.
