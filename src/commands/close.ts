@@ -1326,11 +1326,14 @@ export async function runCleanStage(
 	}
 
 	// Remove SWARM_PLAN checkpoint artifacts written by writeCheckpoint().
-	// Cleans both the canonical .swarm/ location and any legacy root-level
-	// artifacts from pre-7.0 sessions. These are redundant copies of
-	// plan.json/plan.md (already archived) and should not be left behind.
+	// Cleans the new .swarm/plan-export/ location, the canonical .swarm/
+	// location, and any legacy root-level artifacts from pre-7.0 sessions.
+	// These are redundant copies of plan.json/plan.md (already archived)
+	// and should not be left behind.
 	let swarmPlanFilesRemoved = 0;
 	const candidates = [
+		path.join(ctx.directory, '.swarm', 'plan-export', 'SWARM_PLAN.json'),
+		path.join(ctx.directory, '.swarm', 'plan-export', 'SWARM_PLAN.md'),
 		path.join(ctx.directory, '.swarm', 'SWARM_PLAN.json'),
 		path.join(ctx.directory, '.swarm', 'SWARM_PLAN.md'),
 		path.join(ctx.directory, 'SWARM_PLAN.json'),
@@ -1745,7 +1748,7 @@ export async function handleCloseCommand(
 				: []),
 			...(cleanResult.swarmPlanFilesRemoved > 0
 				? [
-						`- Removed ${cleanResult.swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s)`,
+						`- Removed ${cleanResult.swarmPlanFilesRemoved} SWARM_PLAN checkpoint artifact(s) from .swarm/plan-export/ and legacy locations`,
 					]
 				: []),
 			...(ctx.planExists && !ctx.planAlreadyDone

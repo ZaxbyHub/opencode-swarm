@@ -1,8 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { importCheckpoint, writeCheckpoint } from './checkpoint';
+import { _fsInternals, importCheckpoint, writeCheckpoint } from './checkpoint';
 import { savePlan } from './manager';
 
 function createTempDir(): string {
@@ -60,7 +66,12 @@ describe('writeCheckpoint', () => {
 				await writeCheckpoint(tmpDir);
 
 				// Verify SWARM_PLAN.json exists and contains valid JSON
-				const jsonPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
+				const jsonPath = join(
+					tmpDir,
+					'.swarm',
+					'plan-export',
+					'SWARM_PLAN.json',
+				);
 				expect(existsSync(jsonPath)).toBe(true);
 
 				const content = readFileSync(jsonPath, 'utf8');
@@ -82,7 +93,7 @@ describe('writeCheckpoint', () => {
 		});
 	});
 
-	describe('writes SWARM_PLAN.md inside .swarm/', () => {
+	describe('writes SWARM_PLAN.md inside .swarm/plan-export/', () => {
 		test('writes markdown content with plan details', async () => {
 			const tmpDir = createTempDir();
 			try {
@@ -91,7 +102,7 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const mdPath = join(tmpDir, '.swarm', 'SWARM_PLAN.md');
+				const mdPath = join(tmpDir, '.swarm', 'plan-export', 'SWARM_PLAN.md');
 				expect(existsSync(mdPath)).toBe(true);
 
 				const content = readFileSync(mdPath, 'utf8');
@@ -99,6 +110,27 @@ describe('writeCheckpoint', () => {
 				expect(content).toContain('Swarm: test-swarm');
 				expect(content).toContain('Phase 1');
 				expect(content).toContain('Test task');
+			} finally {
+				cleanupTempDir(tmpDir);
+			}
+		});
+
+		test('SWARM_PLAN.md contains self-documenting auto-generated header', async () => {
+			const tmpDir = createTempDir();
+			try {
+				mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+				await savePlan(tmpDir, validPlan);
+
+				await writeCheckpoint(tmpDir);
+
+				const mdPath = join(tmpDir, '.swarm', 'plan-export', 'SWARM_PLAN.md');
+				const content = readFileSync(mdPath, 'utf8');
+
+				expect(content).toContain('AUTO-GENERATED');
+				expect(content).toContain('NOT the live plan');
+				expect(content).toContain('.swarm/plan-ledger.jsonl');
+				expect(content).toContain('.swarm/plan.json');
+				expect(content).toContain('.swarm/plan.md');
 			} finally {
 				cleanupTempDir(tmpDir);
 			}
@@ -133,7 +165,12 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const jsonPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
+				const jsonPath = join(
+					tmpDir,
+					'.swarm',
+					'plan-export',
+					'SWARM_PLAN.json',
+				);
 				const originalContent = readFileSync(jsonPath, 'utf8');
 
 				// Modify the plan and save again
@@ -160,7 +197,7 @@ describe('writeCheckpoint', () => {
 
 				await writeCheckpoint(tmpDir);
 
-				const mdPath = join(tmpDir, '.swarm', 'SWARM_PLAN.md');
+				const mdPath = join(tmpDir, '.swarm', 'plan-export', 'SWARM_PLAN.md');
 				const originalContent = readFileSync(mdPath, 'utf8');
 
 				// Modify the plan and save again
@@ -190,7 +227,12 @@ describe('writeCheckpoint', () => {
 				await writeCheckpoint(tmpDir);
 
 				// Read both files
-				const checkpointPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
+				const checkpointPath = join(
+					tmpDir,
+					'.swarm',
+					'plan-export',
+					'SWARM_PLAN.json',
+				);
 				const planPath = join(tmpDir, '.swarm', 'plan.json');
 
 				const checkpointContent = readFileSync(checkpointPath, 'utf8');
@@ -324,6 +366,163 @@ describe('importCheckpoint', () => {
 			// Verify the savePlan side effect created .swarm/plan.json
 			const savedPlanPath = join(tmpDir, '.swarm', 'plan.json');
 			expect(existsSync(savedPlanPath)).toBe(true);
+		} finally {
+			cleanupTempDir(tmpDir);
+		}
+	});
+
+	test('imports legacy flat .swarm/SWARM_PLAN.json (tier 2) with deprecation warning', async () => {
+		const tmpDir = createTempDir();
+		try {
+			// Note: do NOT create .swarm/plan-export/SWARM_PLAN.json — we're testing
+			// the tier 2 fallback to the legacy flat .swarm/ location.
+			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+			const { writeFileSync } = await import('node:fs');
+			const legacyPath = join(tmpDir, '.swarm', 'SWARM_PLAN.json');
+			writeFileSync(legacyPath, JSON.stringify(validPlan, null, 2), 'utf8');
+
+			const result = await importCheckpoint(tmpDir);
+			expect(result.success).toBe(true);
+			expect(result.plan).not.toBeNull();
+			expect(result.plan!.title).toBe('Import Test Plan');
+
+			// Verify the savePlan side effect created .swarm/plan.json
+			const savedPlanPath = join(tmpDir, '.swarm', 'plan.json');
+			expect(existsSync(savedPlanPath)).toBe(true);
+		} finally {
+			cleanupTempDir(tmpDir);
+		}
+	});
+});
+
+// ============================================================================
+// Adversarial path-handling edge cases
+// ============================================================================
+
+describe('writeCheckpoint — adversarial edge cases', () => {
+	const validPlan = {
+		schema_version: '1.0.0' as const,
+		title: 'Adv Test Plan',
+		swarm: 'test-swarm',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'pending' as const,
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending' as const,
+						size: 'small' as const,
+						description: 'Adv task',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+		],
+	};
+
+	// Vector 1: read-only parent — mkdirSync fails; writeCheckpoint stays non-blocking
+	test('writeCheckpoint returns normally when mkdirSync throws (non-blocking property)', async () => {
+		const tmpDir = createTempDir();
+		try {
+			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+			await savePlan(tmpDir, validPlan);
+
+			// Force mkdirSync to throw via _fsInternals DI seam, simulating a read-only parent.
+			const original = _fsInternals.mkdirSync;
+			_fsInternals.mkdirSync = () => {
+				throw new Error('EACCES: permission denied');
+			};
+
+			// Must NOT throw — non-blocking contract: catch block swallows the error
+			await writeCheckpoint(tmpDir);
+
+			// Restore
+			_fsInternals.mkdirSync = original;
+		} finally {
+			cleanupTempDir(tmpDir);
+		}
+	});
+
+	// Vector 3: malformed JSON at new plan-export path returns {success:false} cleanly
+	test('importCheckpoint returns failure when new plan-export SWARM_PLAN.json is malformed JSON', async () => {
+		const tmpDir = createTempDir();
+		try {
+			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+			mkdirSync(join(tmpDir, '.swarm', 'plan-export'), { recursive: true });
+
+			// Write malformed JSON at the new location
+			writeFileSync(
+				join(tmpDir, '.swarm', 'plan-export', 'SWARM_PLAN.json'),
+				'{"schema_version": "1.0.0", this is not valid JSON',
+				'utf8',
+			);
+
+			const result = await importCheckpoint(tmpDir);
+			expect(result.success).toBe(false);
+			expect(result.error).toBeDefined();
+			expect(result.error).toContain('JSON');
+		} finally {
+			cleanupTempDir(tmpDir);
+		}
+	});
+});
+
+describe('importCheckpoint — adversarial edge cases', () => {
+	const validPlan = {
+		schema_version: '1.0.0' as const,
+		title: 'Adv Test Plan',
+		swarm: 'test-swarm',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'pending' as const,
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending' as const,
+						size: 'small' as const,
+						description: 'Adv task',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+		],
+	};
+
+	// Vector 2: new location preferred over legacy — stale legacy must NOT shadow new
+	test('new .swarm/plan-export/SWARM_PLAN.json is preferred over stale legacy tiers', async () => {
+		const tmpDir = createTempDir();
+		try {
+			mkdirSync(join(tmpDir, '.swarm'), { recursive: true });
+			mkdirSync(join(tmpDir, '.swarm', 'plan-export'), { recursive: true });
+
+			// Put a valid plan at NEW location
+			writeFileSync(
+				join(tmpDir, '.swarm', 'plan-export', 'SWARM_PLAN.json'),
+				JSON.stringify({ ...validPlan, title: 'New Location Plan' }, null, 2),
+				'utf8',
+			);
+
+			// Put a DIFFERENT (stale) plan at legacy tier-2 location
+			writeFileSync(
+				join(tmpDir, '.swarm', 'SWARM_PLAN.json'),
+				JSON.stringify({ ...validPlan, title: 'Legacy Stale Plan' }, null, 2),
+				'utf8',
+			);
+
+			const result = await importCheckpoint(tmpDir);
+			expect(result.success).toBe(true);
+			// Must load from NEW location, NOT legacy
+			expect(result.plan!.title).toBe('New Location Plan');
 		} finally {
 			cleanupTempDir(tmpDir);
 		}

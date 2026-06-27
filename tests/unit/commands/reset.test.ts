@@ -254,6 +254,30 @@ describe('handleResetCommand', () => {
 		expect(existsSync(join(tempDir, '.swarm', 'SWARM_PLAN.md'))).toBe(false);
 	});
 
+	test('With --confirm - deletes SWARM_PLAN artifacts from .swarm/plan-export/', async () => {
+		await mkdir(join(tempDir, '.swarm', 'plan-export'), { recursive: true });
+		await writeFile(
+			join(tempDir, '.swarm', 'plan-export', 'SWARM_PLAN.json'),
+			'{}',
+		);
+		await writeFile(
+			join(tempDir, '.swarm', 'plan-export', 'SWARM_PLAN.md'),
+			'# Plan',
+		);
+
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+
+		expect(result).toContain('## Swarm Reset Complete');
+		expect(result).toContain('✅ Deleted plan-export/SWARM_PLAN.json');
+		expect(result).toContain('✅ Deleted plan-export/SWARM_PLAN.md');
+		expect(
+			existsSync(join(tempDir, '.swarm', 'plan-export', 'SWARM_PLAN.json')),
+		).toBe(false);
+		expect(
+			existsSync(join(tempDir, '.swarm', 'plan-export', 'SWARM_PLAN.md')),
+		).toBe(false);
+	});
+
 	test('With --confirm - deletes legacy root-level SWARM_PLAN artifacts', async () => {
 		await writeFile(join(tempDir, 'SWARM_PLAN.json'), '{}');
 		await writeFile(join(tempDir, 'SWARM_PLAN.md'), '# Plan');

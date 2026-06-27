@@ -23,7 +23,7 @@ export async function handleResetCommand(
 		return [
 			'## Swarm Reset',
 			'',
-			'⚠️ This will delete all swarm state from .swarm/ (plan, context, checkpoints, SWARM_PLAN artifacts)',
+			'⚠️ This will delete all swarm state from .swarm/ (plan, context, checkpoints, SWARM_PLAN artifacts including .swarm/plan-export/)',
 			'',
 			'**Tip**: Run `/swarm export` first to backup your state.',
 			'',
@@ -38,6 +38,8 @@ export async function handleResetCommand(
 		'context.md',
 		'SWARM_PLAN.md',
 		'SWARM_PLAN.json',
+		'plan-export/SWARM_PLAN.md',
+		'plan-export/SWARM_PLAN.json',
 		'checkpoints.json',
 		'events.jsonl',
 	];

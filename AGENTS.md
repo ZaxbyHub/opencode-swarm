@@ -64,7 +64,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
 ### 5. Plan durability — ledger is authoritative
 
 - `.swarm/plan-ledger.jsonl` is the authoritative source of plan state. `.swarm/plan.json` and `.swarm/plan.md` are derived projections.
-- `SWARM_PLAN.{json,md}` files are checkpoint / export artifacts, scoped to `.swarm/` (v7.0.1 / `#583`).
+- `SWARM_PLAN.{json,md}` files are checkpoint / export artifacts, scoped to `.swarm/plan-export/` (issue #852). Legacy reads from flat `.swarm/` and project root are supported with deprecation warnings; cleanup removes all three locations.
 - Do not hand-edit `plan.md` as a source of truth. Do not write to `plan.json` outside the ledger replay path.
 - Any plan-schema or status-shape change must update **all six** of: ledger replay, projection, checkpoint import/export, `get_approved_plan`, tests, and docs (`docs/plan-durability.md`).
 

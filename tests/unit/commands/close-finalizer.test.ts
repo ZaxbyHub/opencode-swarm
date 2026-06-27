@@ -566,6 +566,26 @@ describe('handleCloseCommand — finalizer stages', () => {
 			expect(existsSync(path.join(swarmDir(), 'SWARM_PLAN.md'))).toBe(false);
 		});
 
+		it('removes SWARM_PLAN.{json,md} from .swarm/plan-export/ after close', async () => {
+			await writePlan();
+			// Create the new plan-export/ SWARM_PLAN checkpoint artifacts
+			const planExportDir = path.join(swarmDir(), 'plan-export');
+			mkdirSync(planExportDir, { recursive: true });
+			writeFileSync(
+				path.join(planExportDir, 'SWARM_PLAN.json'),
+				'{"title":"Test"}',
+			);
+			writeFileSync(path.join(planExportDir, 'SWARM_PLAN.md'), '# Test Plan');
+
+			await handleCloseCommand(testDir, []);
+
+			// plan-export/ SWARM_PLAN artifacts must be removed
+			expect(existsSync(path.join(planExportDir, 'SWARM_PLAN.json'))).toBe(
+				false,
+			);
+			expect(existsSync(path.join(planExportDir, 'SWARM_PLAN.md'))).toBe(false);
+		});
+
 		it('SWARM_PLAN cleanup is non-blocking — close succeeds even if removal fails', async () => {
 			await writePlan();
 
