@@ -11,11 +11,11 @@
 | `.swarm/plan-ledger.jsonl` | Durable runtime record of all plan events | **Authoritative** — append-only, never delete |
 | `.swarm/plan.json` | Machine-readable projection of current plan state | Derived — can be rebuilt from ledger |
 | `.swarm/plan.md` | Human-readable plan view | Derived — generated from plan.json |
-| `.swarm/SWARM_PLAN.md` | Operator checkpoint artifact | Export-only — not live source of truth |
-| `.swarm/SWARM_PLAN.json` | Machine-readable checkpoint artifact | Export-only — for import/export workflows |
+| `.swarm/plan-export/SWARM_PLAN.md` | Operator checkpoint artifact | Export-only — not live source of truth |
+| `.swarm/plan-export/SWARM_PLAN.json` | Machine-readable checkpoint artifact | Export-only — for import/export workflows |
 | `.swarm/.plan-write-marker` | Advisory write counter for PlanSyncWorker | Advisory — used to detect unauthorized writes |
 
-> **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/` instead of the project root. The `/swarm close` command cleans up both locations during the transition window.
+> **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/plan-export/` instead of the project root. The `/swarm close` and `/swarm reset --confirm` commands clean up all three locations (`.swarm/plan-export/`, flat `.swarm/`, and project root) during the transition window.
 
 ### Ledger Event Types
 
@@ -29,7 +29,7 @@
 {"type":"phase_completed","phase":1,"ts":"ISO8601"}
 {"type":"snapshot","data":{"plan":{...},"payload_hash":"abc123"},"ts":"ISO8601"}
 {"type":"plan_rebuilt","source":"rebuildPlan","plan_id":"...","payload":{"reason":"ledger_replay_recovery | approved_snapshot_fallback | validation_failure_recovery | ...","phases_count":1,"tasks_count":3},"ts":"ISO8601"}
-{"type":"plan_exported","path":".swarm/SWARM_PLAN.json","ts":"ISO8601"}
+{"type":"plan_exported","path":".swarm/plan-export/SWARM_PLAN.json","ts":"ISO8601"}
 {"type":"plan_reset","ts":"ISO8601"}
 {"type":"execution_profile_set","data":{"execution_profile":{...}},"ts":"ISO8601"}
 {"type":"execution_profile_locked","ts":"ISO8601"}
@@ -116,10 +116,10 @@ loadPlan()
 
 ### Import
 
-`importCheckpoint()` reads `.swarm/SWARM_PLAN.json` (falling back to a legacy root-level `SWARM_PLAN.json` with a deprecation warning) → validates schema → calls `savePlan()` → appends `plan_rebuilt` event to ledger.
+`importCheckpoint()` reads `.swarm/plan-export/SWARM_PLAN.json` (with backward-compat fallback to flat `.swarm/` then project root, each with a deprecation warning) → validates schema → calls `savePlan()` → appends `plan_rebuilt` event to ledger.
 
 ```
-importCheckpoint(.swarm/SWARM_PLAN.json)
+importCheckpoint(.swarm/plan-export/SWARM_PLAN.json)
   → validateSchema()
   → savePlan(planData)
   → append {type:"plan_rebuilt"} to plan-ledger.jsonl
@@ -132,7 +132,7 @@ importCheckpoint(.swarm/SWARM_PLAN.json)
 - `phase_complete` command  
 - `/swarm close` command
 
-Writes `.swarm/SWARM_PLAN.md` and `.swarm/SWARM_PLAN.json` inside the working directory's `.swarm/` folder.
+Writes `.swarm/plan-export/SWARM_PLAN.md` and `.swarm/plan-export/SWARM_PLAN.json` inside the working directory's `.swarm/plan-export/` subfolder.
 
 ## Snapshot System
 
@@ -236,7 +236,7 @@ once pre-check succeeds.
 - **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
 - **Hash coverage**: `execution_profile` is included in `computePlanHash`, so profile changes are always reflected in the ledger's `plan_hash_after` chain.
-- **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
+- **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/plan-export/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
 
 ### Lifecycle
 
@@ -256,7 +256,7 @@ once pre-check succeeds.
 | `plan.json` | ✅ Persisted in schema |
 | Ledger replay | ✅ Via `execution_profile_set` events |
 | Snapshot events | ✅ Embedded in Plan payload |
-| `.swarm/SWARM_PLAN.json` checkpoint | ✅ Via full Plan payload |
+| `.swarm/plan-export/SWARM_PLAN.json` checkpoint | ✅ Via full Plan payload |
 | `get_approved_plan` tool | ✅ Explicit `execution_profile` field |
 | Handoff data | ✅ In `HandoffData.execution_profile` |
 | Export data | ✅ In `ExportData.execution_profile` |
