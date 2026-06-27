@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.93.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.93.0...v7.93.1) (2026-06-27)
+
+
+### Bug Fixes
+
+* **skills:** align critic retry cap with COVERAGE GATE principle ([2519f88](https://github.com/ZaxbyHub/opencode-swarm/commit/2519f88fa9d97b42931b1966bcccb8efe1d9ec35))
+* **skills:** remove last permissive UNVERIFIED language from parser section ([5e75792](https://github.com/ZaxbyHub/opencode-swarm/commit/5e75792c1a2111e0db03a2314e4b690c8c740d86))
+
 ## [7.93.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.92.0...v7.93.0) (2026-06-26)
 
 
