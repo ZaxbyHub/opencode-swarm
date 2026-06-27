@@ -565,18 +565,32 @@ Added as the default structured search path for workspace pattern lookup. Replac
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `pattern` | `string` | required | Search pattern (literal or regex) |
-| `workspace` | `string` | required | Root directory to search |
+| `query` | `string` | required | Search query (literal or regex depending on `mode`) |
 | `mode` | `"literal" \| "regex"` | `"literal"` | Match mode |
-| `glob` | `string[]` | `[]` | Include globs (e.g. `["**/*.ts"]`) |
-| `exclude` | `string[]` | `[]` | Exclude globs |
-| `maxResults` | `number` | `100` | Hard cap on returned matches |
-| `maxLines` | `number` | `10` | Max lines per match snippet |
-| `context` | `number` | `0` | Surrounding lines per match (only when > 0) |
+| `include` | `string` | unset | Comma-separated include globs (e.g. `"src/**/*.ts"`) |
+| `exclude` | `string` | unset | Comma-separated exclude globs |
+| `max_results` | `number` | `100` | Hard cap on returned matches |
+| `max_lines` | `number` | `200` | Max characters per matched line |
 
-Returns structured JSON with `file`, `line`, `text`, and `truncated` fields per hit. Falls back to a graceful error when ripgrep is unavailable. **Not a structural AST search** — combine with `symbols` and `imports` for full module analysis.
+Returns structured JSON with normalized match metadata. **Not a structural AST search** — use `ast_grep` for syntax-aware pattern matching, or combine with `symbols` and `imports` for full module analysis.
 
 **Registered for**: architect, coder, reviewer, explorer, test_engineer.
+
+Current output includes `matches[].file`, `matches[].lineNumber`, `matches[].lineText`, `truncated`, `total`, `query`, `mode`, `maxResults`, and `engine`. The ripgrep path uses a bounded subprocess runner with explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and cleanup. Its argv places options and globs before `--`, then the query and `.` path operand, so dash-prefixed queries cannot become flags. If ripgrep is unavailable, the fallback engine performs bounded filesystem traversal, skips heavy runtime directories such as `.git`, `.swarm`, `node_modules`, build outputs, and coverage directories, and discloses that it does not fully emulate ripgrep gitignore semantics.
+
+### Structural AST Search Tool - `ast_grep`
+
+Read-only structural search using the ast-grep CLI. The tool resolves `ast-grep` or `sg` lazily at call time, never during plugin initialization, and runs `ast-grep run --pattern <pattern> --json=stream` through the bounded external-tool runner. It supports optional `language`, comma-separated `include` and `exclude` globs, and `max_results`. Output normalizes ast-grep's JSON stream into workspace-relative `matches[]` entries with 1-based line and column numbers. It does not rewrite files.
+
+### External QA CLI Tools
+
+Three read-only wrappers expose high-yield external project checks without adding plugin-init probes or package dependencies:
+
+- `actionlint_scan` runs `actionlint -format '{{json .}}'` against `.github/workflows/**/*.yml,yaml` or explicit workspace-relative workflow files, returning structured findings.
+- `osv_scan` runs `osv-scanner scan --format json <path>` against a workspace-relative path and normalizes OSV vulnerability records.
+- `gh_evidence` runs `gh pr view` or `gh issue view` with a bounded JSON field allowlist for review and CI evidence.
+
+All three tools resolve their executable lazily at call time and share the bounded external-tool runner: explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and best-effort cleanup. Missing binaries return structured guidance instead of failing plugin registration.
 
 ### Reviewer-Safe Patch Suggestion Tool — `suggest_patch` (v6.45.0)
 

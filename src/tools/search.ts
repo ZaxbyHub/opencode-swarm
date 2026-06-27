@@ -1,15 +1,21 @@
 // Structured workspace search tool — workspace-scoped ripgrep-style search with structured JSON output
 
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import { bunSpawn } from '../utils/bun-compat';
+import {
+	resolveExecutableFromPath,
+	runExternalTool,
+} from '../utils/external-tool-runner';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
+
+const require = createRequire(import.meta.url);
 
 // ============ Types ============
 
@@ -27,6 +33,9 @@ export interface SearchResult {
 	query: string;
 	mode: 'literal' | 'regex';
 	maxResults: number;
+	engine: 'ripgrep' | 'fallback';
+	outputTruncated?: boolean;
+	warning?: string;
 }
 
 export interface SearchError {
@@ -57,6 +66,25 @@ const REGEX_TIMEOUT_MS = 5000;
 const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1MB per file
 const HARD_CAP_RESULTS = 10000;
 const HARD_CAP_LINES = 10000;
+const MAX_QUERY_LENGTH = 20_000;
+const MAX_RG_STDOUT_BYTES = 8 * 1024 * 1024;
+const MAX_RG_STDERR_BYTES = 64 * 1024;
+const FALLBACK_MAX_FILES = 20_000;
+const FALLBACK_MAX_DIRS = 5_000;
+const FALLBACK_MAX_DEPTH = 40;
+const FALLBACK_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const DEFAULT_SKIP_DIRS = new Set([
+	'.git',
+	'.swarm',
+	'node_modules',
+	'dist',
+	'build',
+	'out',
+	'coverage',
+	'.next',
+	'.turbo',
+	'.cache',
+]);
 
 // ============ Glob Pattern Matching (Fallback) ============
 
@@ -134,40 +162,59 @@ function validatePathForRead(filePath: string, workspace: string): boolean {
 	return isPathInWorkspace(filePath, workspace);
 }
 
-// ============ Ripgrep Detection ============
+// ============ Helpers ============
 
-/**
- * Find ripgrep binary by scanning process.env.PATH directories.
- * Bun.which does not pick up runtime changes to process.env.PATH.
- */
-function findRgInEnvPath(): string | null {
-	const searchPath = process.env.PATH ?? '';
-	for (const dir of searchPath.split(path.delimiter)) {
-		if (!dir) continue;
-		const isWindows = process.platform === 'win32';
-		const candidate = path.join(dir, isWindows ? 'rg.exe' : 'rg');
-		if (fs.existsSync(candidate)) return candidate;
-	}
-	return null;
+function splitGlobPatterns(value?: string): string[] {
+	return value
+		? value
+				.split(',')
+				.map((p) => p.trim())
+				.filter(Boolean)
+		: [];
 }
 
-/**
- * Check if ripgrep is available.
- */
-async function isRipgrepAvailable(): Promise<boolean> {
-	const rgPath = findRgInEnvPath();
-	if (!rgPath) return false;
-
+function toWorkspaceRelativePath(
+	filePath: string,
+	workspace: string,
+): string | null {
 	try {
-		const proc = bunSpawn([rgPath, '--version'], {
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
-		const exitCode = await proc.exited;
-		return exitCode === 0;
+		const resolved = path.resolve(workspace, filePath);
+		const realWorkspace = fs.realpathSync(workspace);
+		const realResolved = fs.realpathSync(resolved);
+		const relative = path.relative(realWorkspace, realResolved);
+		if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+			return null;
+		}
+		return relative.split(path.sep).join('/');
 	} catch {
-		return false;
+		return null;
 	}
+}
+
+function truncateLine(line: string, maxLines: number): string {
+	const trimmed = line.trimEnd();
+	if (trimmed.length > maxLines) {
+		return `${trimmed.substring(0, maxLines)}...`;
+	}
+	return trimmed;
+}
+
+// ============ Ripgrep Detection ============
+
+function resolvePackagedRipgrep(): string | null {
+	try {
+		const mod = require('@vscode/ripgrep') as { rgPath?: unknown };
+		return typeof mod.rgPath === 'string' && mod.rgPath ? mod.rgPath : null;
+	} catch {
+		return null;
+	}
+}
+
+function resolveRipgrepBinary(): string | null {
+	return (
+		_internals.resolvePackagedRipgrep() ??
+		_internals.resolveExecutableFromPath(['rg'])
+	);
 }
 
 // ============ Ripgrep Search ============
@@ -188,30 +235,27 @@ interface RipgrepSearchOptions {
 async function ripgrepSearch(
 	opts: RipgrepSearchOptions,
 ): Promise<SearchResult | SearchError> {
-	const rgPath = findRgInEnvPath();
+	const rgPath = _internals.resolveRipgrepBinary();
 	if (!rgPath) {
 		return {
 			error: true,
 			type: 'rg-not-found',
-			message: 'ripgrep (rg) not found in PATH',
+			message: 'ripgrep (rg) not found; using fallback search was not possible',
 		};
 	}
 
 	const args: string[] = [
 		'--json',
+		'--no-config',
 		'-n', // line numbers
 	];
 
 	// Add glob patterns for include/exclude
-	if (opts.include) {
-		for (const pattern of opts.include.split(',')) {
-			args.push('--glob', pattern.trim());
-		}
+	for (const pattern of splitGlobPatterns(opts.include)) {
+		args.push('--glob', pattern);
 	}
-	if (opts.exclude) {
-		for (const pattern of opts.exclude.split(',')) {
-			args.push('--glob', `!${pattern.trim()}`); // ! negates glob in ripgrep
-		}
+	for (const pattern of splitGlobPatterns(opts.exclude)) {
+		args.push('--glob', `!${pattern}`); // ! negates glob in ripgrep
 	}
 
 	// Set search mode
@@ -219,46 +263,46 @@ async function ripgrepSearch(
 		args.push('--fixed-strings');
 	}
 
-	// Add the query
-	args.push(opts.query);
+	// Keep all options before `--`; query and path operands cannot be flags.
+	args.push('--', opts.query, '.');
 
-	// Search in workspace root
-	args.push(opts.workspace);
+	const run = await _internals.runExternalTool({
+		executable: rgPath,
+		args,
+		cwd: opts.workspace,
+		timeoutMs: REGEX_TIMEOUT_MS,
+		maxStdoutBytes: MAX_RG_STDOUT_BYTES,
+		maxStderrBytes: MAX_RG_STDERR_BYTES,
+	});
 
 	try {
-		const proc = bunSpawn([rgPath, ...args], {
-			stdout: 'pipe',
-			stderr: 'pipe',
-			cwd: opts.workspace,
-		});
-
-		// Set up regex timeout
-		const timeout = new Promise<'timeout'>((resolve) =>
-			setTimeout(() => resolve('timeout'), REGEX_TIMEOUT_MS),
-		);
-
-		const exitPromise = proc.exited;
-		const result = await Promise.race([exitPromise, timeout]);
-
-		if (result === 'timeout') {
-			proc.kill();
+		if (run.status === 'timeout') {
 			return {
 				error: true,
 				type: 'regex-timeout',
-				message: `Regex search timed out after ${REGEX_TIMEOUT_MS}ms`,
+				message: `Search timed out after ${REGEX_TIMEOUT_MS}ms`,
 			};
 		}
 
-		const stdout = await proc.stdout.text();
-		const stderr = await proc.stderr.text();
+		if (run.status === 'spawn-error') {
+			return {
+				error: true,
+				type: 'unknown',
+				message: run.message ?? 'ripgrep failed to start',
+			};
+		}
 
 		// If ripgrep exited with non-zero and has stderr, it might be an invalid regex
-		if (proc.exitCode !== 0 && stderr) {
-			if (stderr.includes('Invalid regex') || stderr.includes('SyntaxError')) {
+		if (run.exitCode !== 0 && run.stderr) {
+			if (
+				run.stderr.includes('Invalid regex') ||
+				run.stderr.includes('regex parse error') ||
+				run.stderr.includes('SyntaxError')
+			) {
 				return {
 					error: true,
 					type: 'invalid-query',
-					message: `Invalid query: ${stderr.split('\n')[0]}`,
+					message: `Invalid query: ${run.stderr.split('\n')[0]}`,
 				};
 			}
 		}
@@ -267,7 +311,7 @@ async function ripgrepSearch(
 		let total = 0;
 
 		// Parse ripgrep JSON output (line per match)
-		for (const line of stdout.split('\n')) {
+		for (const line of run.stdout.split('\n')) {
 			if (!line.trim()) continue;
 
 			try {
@@ -275,16 +319,19 @@ async function ripgrepSearch(
 
 				// ripgrep outputs different message types; we only care about matches
 				if (entry.type === 'match') {
+					const rawPath = entry.data?.path?.text ?? entry.data?.path;
+					const relativePath =
+						typeof rawPath === 'string'
+							? toWorkspaceRelativePath(rawPath, opts.workspace)
+							: null;
+					if (!relativePath) continue;
+
 					total++;
 					if (matches.length < opts.maxResults) {
-						let lineText = entry.data.lines.text.trimEnd();
-						if (lineText.length > opts.maxLines) {
-							lineText = `${lineText.substring(0, opts.maxLines)}...`;
-						}
 						const match: SearchMatch = {
-							file: entry.data.path.text || entry.data.path,
+							file: relativePath,
 							lineNumber: entry.data.line_number,
-							lineText,
+							lineText: truncateLine(entry.data.lines.text, opts.maxLines),
 						};
 						matches.push(match);
 					}
@@ -296,11 +343,14 @@ async function ripgrepSearch(
 
 		return {
 			matches,
-			truncated: total > opts.maxResults,
+			truncated:
+				total > opts.maxResults || run.stdoutTruncated || run.stderrTruncated,
 			total,
 			query: opts.query,
 			mode: opts.mode,
 			maxResults: opts.maxResults,
+			engine: 'ripgrep',
+			outputTruncated: run.stdoutTruncated || run.stderrTruncated,
 		};
 	} catch (err) {
 		return {
@@ -323,6 +373,13 @@ interface FallbackSearchOptions {
 	workspace: string;
 }
 
+interface CollectFilesState {
+	files: string[];
+	seenRealPaths: Set<string>;
+	dirCount: number;
+	truncated: boolean;
+}
+
 /**
  * Escape regex special characters for literal search.
  */
@@ -338,17 +395,45 @@ function collectFiles(
 	workspace: string,
 	includeGlobs: string[],
 	excludeGlobs: string[],
+	state: CollectFilesState,
+	depth = 0,
 ): string[] {
-	const files: string[] = [];
+	if (
+		depth > FALLBACK_MAX_DEPTH ||
+		state.files.length >= FALLBACK_MAX_FILES ||
+		state.dirCount >= FALLBACK_MAX_DIRS
+	) {
+		state.truncated = true;
+		return state.files;
+	}
+
+	try {
+		const realDir = fs.realpathSync(dir);
+		if (state.seenRealPaths.has(realDir)) {
+			return state.files;
+		}
+		state.seenRealPaths.add(realDir);
+		state.dirCount++;
+	} catch {
+		return state.files;
+	}
 
 	if (!validatePathForRead(dir, workspace)) {
-		return files;
+		return state.files;
 	}
 
 	try {
 		const entries = fs.readdirSync(dir, { withFileTypes: true });
 
 		for (const entry of entries) {
+			if (
+				state.files.length >= FALLBACK_MAX_FILES ||
+				state.dirCount >= FALLBACK_MAX_DIRS
+			) {
+				state.truncated = true;
+				break;
+			}
+
 			const fullPath = path.join(dir, entry.name);
 			const relativePath = path.relative(workspace, fullPath);
 
@@ -357,14 +442,17 @@ function collectFiles(
 			}
 
 			if (entry.isDirectory()) {
-				// Recurse into subdirectories
-				const subFiles = collectFiles(
+				if (DEFAULT_SKIP_DIRS.has(entry.name)) {
+					continue;
+				}
+				collectFiles(
 					fullPath,
 					workspace,
 					includeGlobs,
 					excludeGlobs,
+					state,
+					depth + 1,
 				);
-				files.push(...subFiles);
 			} else if (entry.isFile()) {
 				// Check against glob patterns
 				if (
@@ -379,14 +467,16 @@ function collectFiles(
 				) {
 					continue;
 				}
-				files.push(relativePath);
+				const normalized = toWorkspaceRelativePath(fullPath, workspace);
+				if (!normalized) continue;
+				state.files.push(normalized);
 			}
 		}
 	} catch {
 		// Skip directories we can't read
 	}
 
-	return files;
+	return state.files;
 }
 
 /**
@@ -409,12 +499,20 @@ async function fallbackSearch(
 				.filter(Boolean)
 		: [];
 
+	const collectState: CollectFilesState = {
+		files: [],
+		seenRealPaths: new Set(),
+		dirCount: 0,
+		truncated: false,
+	};
+
 	// Collect all matching files
 	const files = collectFiles(
 		opts.workspace,
 		opts.workspace,
 		includeGlobs,
 		excludeGlobs,
+		collectState,
 	);
 
 	// Compile regex based on mode
@@ -435,6 +533,8 @@ async function fallbackSearch(
 
 	const matches: SearchMatch[] = [];
 	let total = 0;
+	let totalBytesRead = 0;
+	let truncated = collectState.truncated;
 
 	for (const file of files) {
 		const fullPath = path.join(opts.workspace, file);
@@ -451,6 +551,11 @@ async function fallbackSearch(
 			if (stats.size > MAX_FILE_SIZE_BYTES) {
 				continue;
 			}
+			if (totalBytesRead + stats.size > FALLBACK_MAX_TOTAL_BYTES) {
+				truncated = true;
+				break;
+			}
+			totalBytesRead += stats.size;
 		} catch {
 			continue;
 		}
@@ -473,15 +578,10 @@ async function fallbackSearch(
 
 				if (matches.length < opts.maxResults) {
 					// Truncate line if too long
-					let lineText = line.trimEnd();
-					if (lineText.length > opts.maxLines) {
-						lineText = `${lineText.substring(0, opts.maxLines)}...`;
-					}
-
 					matches.push({
 						file,
 						lineNumber: i + 1,
-						lineText,
+						lineText: truncateLine(line, opts.maxLines),
 					});
 				}
 
@@ -493,11 +593,14 @@ async function fallbackSearch(
 
 	return {
 		matches,
-		truncated: total > opts.maxResults,
+		truncated: truncated || total > opts.maxResults,
 		total,
 		query: opts.query,
 		mode: opts.mode,
 		maxResults: opts.maxResults,
+		engine: 'fallback',
+		warning:
+			'Fallback search uses bounded filesystem traversal and does not fully emulate ripgrep gitignore behavior.',
 	};
 }
 
@@ -552,8 +655,8 @@ export const search: ToolDefinition = createSwarmTool({
 			const obj = args as Record<string, unknown>;
 			query = String(obj.query ?? '');
 			mode = obj.mode === 'regex' ? 'regex' : 'literal';
-			include = obj.include as string | undefined;
-			exclude = obj.exclude as string | undefined;
+			include = typeof obj.include === 'string' ? obj.include : undefined;
+			exclude = typeof obj.exclude === 'string' ? obj.exclude : undefined;
 			const rawMaxResults =
 				typeof obj.max_results === 'number'
 					? obj.max_results
@@ -588,6 +691,18 @@ export const search: ToolDefinition = createSwarmTool({
 					error: true,
 					type: 'invalid-query',
 					message: 'Query cannot be empty',
+				} satisfies SearchError,
+				null,
+				2,
+			);
+		}
+
+		if (query.length > MAX_QUERY_LENGTH) {
+			return JSON.stringify(
+				{
+					error: true,
+					type: 'invalid-query',
+					message: `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
 				} satisfies SearchError,
 				null,
 				2,
@@ -670,12 +785,9 @@ export const search: ToolDefinition = createSwarmTool({
 			);
 		}
 
-		// Try ripgrep first, fall back to Node.js search
-		const rgAvailable = await isRipgrepAvailable();
-
 		let result: SearchResult | SearchError;
 
-		if (rgAvailable) {
+		if (_internals.resolveRipgrepBinary()) {
 			result = await ripgrepSearch({
 				query,
 				mode,
@@ -705,3 +817,17 @@ export const search: ToolDefinition = createSwarmTool({
 		return JSON.stringify(result, null, 2);
 	},
 });
+
+export const _internals: {
+	resolvePackagedRipgrep: typeof resolvePackagedRipgrep;
+	resolveExecutableFromPath: typeof resolveExecutableFromPath;
+	resolveRipgrepBinary: typeof resolveRipgrepBinary;
+	runExternalTool: typeof runExternalTool;
+	fallbackSearch: typeof fallbackSearch;
+} = {
+	resolvePackagedRipgrep,
+	resolveExecutableFromPath,
+	resolveRipgrepBinary,
+	runExternalTool,
+	fallbackSearch,
+};

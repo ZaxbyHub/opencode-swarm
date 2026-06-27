@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import type { ToolResult } from './create-tool';
-import { search } from './search';
+import { search, _internals as searchInternals } from './search';
 
 // Helper to extract string from ToolResult
 function resultToString(result: ToolResult): string {
@@ -29,6 +29,9 @@ async function executeSearch(
 }
 
 let tmpDir: string;
+const realResolveRipgrepBinary = searchInternals.resolveRipgrepBinary;
+const realRunExternalTool = searchInternals.runExternalTool;
+const realFallbackSearch = searchInternals.fallbackSearch;
 
 beforeEach(() => {
 	tmpDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'search-test-')));
@@ -41,6 +44,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	searchInternals.resolveRipgrepBinary = realResolveRipgrepBinary;
+	searchInternals.runExternalTool = realRunExternalTool;
+	searchInternals.fallbackSearch = realFallbackSearch;
 	try {
 		rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -403,6 +409,74 @@ describe('search - glob filtering', () => {
 	});
 });
 
+// ============ Ripgrep Execution Contract Tests ============
+
+describe('search - ripgrep execution contract', () => {
+	it('uses bounded runner options, safe argv ordering, and relative result paths', async () => {
+		createTestFile('src/rg.ts', 'needle\n');
+		const rgPath = path.join(
+			tmpDir,
+			process.platform === 'win32' ? 'rg.exe' : 'rg',
+		);
+		let captured: Parameters<typeof realRunExternalTool>[0] | undefined;
+
+		searchInternals.resolveRipgrepBinary = () => rgPath;
+		searchInternals.runExternalTool = mock(async (options) => {
+			captured = options;
+			return {
+				status: 'completed',
+				exitCode: 0,
+				stdout: `${JSON.stringify({
+					type: 'match',
+					data: {
+						path: { text: path.join(tmpDir, 'src', 'rg.ts') },
+						line_number: 1,
+						lines: { text: 'needle\n' },
+					},
+				})}\n`,
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
+
+		const result = await executeSearch(
+			{
+				query: '-needle',
+				mode: 'literal',
+				include: 'src/**',
+				exclude: '**/*.test.ts',
+			},
+			tmpDir,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(captured).toBeDefined();
+		expect(captured?.executable).toBe(rgPath);
+		expect(captured?.cwd).toBe(tmpDir);
+		expect(captured?.timeoutMs).toBe(5000);
+		expect(captured?.maxStdoutBytes).toBeGreaterThan(0);
+		expect(captured?.maxStderrBytes).toBeGreaterThan(0);
+		expect(captured?.args).toEqual([
+			'--json',
+			'--no-config',
+			'-n',
+			'--glob',
+			'src/**',
+			'--glob',
+			'!**/*.test.ts',
+			'--fixed-strings',
+			'--',
+			'-needle',
+			'.',
+		]);
+		expect(parsed.engine).toBe('ripgrep');
+		expect(parsed.matches).toEqual([
+			{ file: 'src/rg.ts', lineNumber: 1, lineText: 'needle' },
+		]);
+	});
+});
+
 // ============ Empty Query Validation Tests ============
 
 describe('search - query validation', () => {
@@ -500,6 +574,7 @@ describe('search - rg-not-found fallback', () => {
 	it('fallback search works when ripgrep not available', async () => {
 		// This tests the fallback path - even if rg IS available,
 		// the fallback should produce valid structured output
+		searchInternals.resolveRipgrepBinary = () => null;
 		createTestFile('src/fallback.ts', 'fallback search content\n');
 
 		const result = await executeSearch({ query: 'fallback' }, tmpDir);
@@ -512,7 +587,28 @@ describe('search - rg-not-found fallback', () => {
 		} else {
 			// If success, should have matches
 			expect(parsed.matches).toBeDefined();
+			expect(parsed.engine).toBe('fallback');
 		}
+	});
+
+	it('fallback search skips heavy runtime directories by default', async () => {
+		searchInternals.resolveRipgrepBinary = () => null;
+		createTestFile('src/app.ts', 'DEFAULT_SKIP_MARKER\n');
+		createTestFile('node_modules/pkg/index.js', 'DEFAULT_SKIP_MARKER\n');
+		createTestFile('.git/hooks/pre-commit', 'DEFAULT_SKIP_MARKER\n');
+		createTestFile('.swarm/cache/output.txt', 'DEFAULT_SKIP_MARKER\n');
+
+		const result = await executeSearch(
+			{ query: 'DEFAULT_SKIP_MARKER' },
+			tmpDir,
+		);
+		const parsed = JSON.parse(result);
+		const files = parsed.matches.map((m: { file: string }) => m.file);
+
+		expect(parsed.error).toBeUndefined();
+		expect(parsed.engine).toBe('fallback');
+		expect(files).toEqual(['src/app.ts']);
+		expect(parsed.warning).toContain('Fallback search');
 	});
 });
 
