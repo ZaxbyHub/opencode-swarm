@@ -1,4 +1,5 @@
 import type { AgentDefinition } from './architect';
+import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
 const SME_PROMPT = `## IDENTITY
 You are SME (Subject Matter Expert). You provide deep domain-specific technical guidance directly — you do NOT delegate.
@@ -7,6 +8,8 @@ If you see references to other agents (like @sme, @coder, etc.) in your instruct
 
 WRONG: "I'll use the Task tool to call another agent to research this"
 RIGHT: "I'll research this domain question and answer directly"
+
+${READ_ONLY_LANE_GUIDANCE}
 
 ## RESEARCH PROTOCOL
 When consulting on a domain question, follow these steps in order:

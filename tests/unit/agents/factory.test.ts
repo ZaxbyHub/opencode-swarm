@@ -25,9 +25,9 @@ afterEach(() => {
 
 describe('createAgents', () => {
 	describe('no config', () => {
-		it('returns 17 agents (docs enabled by default, designer opt-in)', () => {
+		it('returns 20 agents (docs enabled by default, designer opt-in)', () => {
 			const agents = createAgents();
-			expect(agents).toHaveLength(17);
+			expect(agents).toHaveLength(20);
 		});
 
 		it('agent names are correct', () => {
@@ -42,10 +42,13 @@ describe('createAgents', () => {
 				'critic_hallucination_verifier',
 				'critic_oversight',
 				'critic_sounding_board',
+				'curator_consolidation',
 				'curator_init',
 				'curator_phase',
+				'curator_postmortem',
 				'docs',
 				'explorer',
+				'researcher',
 				'reviewer',
 				'skill_improver',
 				'sme',
@@ -376,8 +379,8 @@ describe('createAgents', () => {
 			const agents = createAgents(config as unknown as PluginConfig);
 			const sme = agents.find((a) => a.name === 'sme');
 			expect(sme).toBeUndefined();
-			// 17 agents - 1 disabled = 16 agents (docs still included by default)
-			expect(agents).toHaveLength(16);
+			// 20 agents - 1 disabled = 19 agents (docs still included by default)
+			expect(agents).toHaveLength(19);
 		});
 	});
 
@@ -400,10 +403,13 @@ describe('createAgents', () => {
 				'critic_hallucination_verifier',
 				'critic_oversight',
 				'critic_sounding_board',
+				'curator_consolidation',
 				'curator_init',
 				'curator_phase',
+				'curator_postmortem',
 				'docs',
 				'explorer',
+				'researcher',
 				'reviewer',
 				'skill_improver',
 				'sme',
@@ -433,10 +439,13 @@ describe('createAgents', () => {
 				'local_critic_hallucination_verifier',
 				'local_critic_oversight',
 				'local_critic_sounding_board',
+				'local_curator_consolidation',
 				'local_curator_init',
 				'local_curator_phase',
+				'local_curator_postmortem',
 				'local_docs',
 				'local_explorer',
+				'local_researcher',
 				'local_reviewer',
 				'local_skill_improver',
 				'local_sme',
@@ -769,7 +778,7 @@ describe('getAgentConfigs', () => {
 
 		const configs = getAgentConfigs(config as unknown as PluginConfig);
 		expect(configs.sme).toBeUndefined();
-		// 17 agents - 1 disabled = 16 agents (docs included by default)
-		expect(Object.keys(configs)).toHaveLength(16);
+		// 20 agents - 1 disabled = 19 agents (docs included by default)
+		expect(Object.keys(configs)).toHaveLength(19);
 	});
 });

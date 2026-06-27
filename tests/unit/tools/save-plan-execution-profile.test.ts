@@ -77,7 +77,7 @@ describe('execution_profile: setting a profile on a new plan', () => {
 		const result = await executeSavePlan(args);
 		expect(result.success).toBe(true);
 		expect(result.execution_profile?.parallelization_enabled).toBe(true);
-		expect(result.execution_profile?.max_concurrent_tasks).toBe(1);
+		expect(result.execution_profile?.max_concurrent_tasks).toBe(10);
 		expect(result.execution_profile?.locked).toBe(false);
 	});
 
@@ -458,5 +458,31 @@ describe('execution_profile: disk round-trip', () => {
 			execution_profile?: { auto_proceed?: boolean };
 		};
 		expect(planData.execution_profile?.auto_proceed).toBe(false);
+	});
+});
+
+describe('F-002: explicit max_concurrent_tasks:1 is preserved (backward-compat)', () => {
+	test('explicit max_concurrent_tasks:1 survives save and disk round-trip', async () => {
+		const profile = {
+			parallelization_enabled: true,
+			max_concurrent_tasks: 1,
+		};
+		const result = await executeSavePlan(
+			makeArgs({ working_directory: tmpDir, execution_profile: profile }),
+		);
+
+		// Assert result carries the explicit 1 (not coerced to default 10)
+		expect(result.success).toBe(true);
+		expect(result.execution_profile?.max_concurrent_tasks).toBe(1);
+
+		// Assert disk persistence also preserves 1 (not coerced on write)
+		const planJson = await readFile(
+			join(tmpDir, '.swarm', 'plan.json'),
+			'utf8',
+		);
+		const planData = JSON.parse(planJson) as {
+			execution_profile?: { max_concurrent_tasks?: number };
+		};
+		expect(planData.execution_profile?.max_concurrent_tasks).toBe(1);
 	});
 });

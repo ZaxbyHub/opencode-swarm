@@ -226,8 +226,8 @@ once pre-check succeeds.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `parallelization_enabled` | boolean | `false` | Enables parallel task dispatch for this plan |
-| `max_concurrent_tasks` | integer 1–64 | `1` | Max simultaneous tasks when parallel is enabled |
-| `council_parallel` | boolean | `false` | Allows council review phases to parallelise |
+| `max_concurrent_tasks` | integer 1–64 | `10` | Max simultaneous tasks when parallel is enabled |
+| `council_parallel` | boolean | `true` | Allows council review phases to parallelise |
 | `locked` | boolean | `false` | When true, profile is immutable (fail-closed enforcement) |
 
 ### Invariants

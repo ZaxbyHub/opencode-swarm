@@ -4,6 +4,8 @@ import {
 	AGENT_TOOL_MAP,
 	type AgentName,
 	ALL_SUBAGENT_NAMES,
+	COUNCIL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	ORCHESTRATOR_NAME,
 	TOOL_DESCRIPTIONS,
 	WRITE_TOOL_NAMES,
@@ -65,7 +67,12 @@ function extractAvailableToolsNames(prompt: string): string[] {
 // ---------------------------------------------------------------------------
 // Shared setup: resolved architect prompt
 // ---------------------------------------------------------------------------
-const ARCHITECT_TOOL_COUNT = AGENT_TOOL_MAP.architect.length;
+const EXPECTED_ARCHITECT_TOOLS = [
+	...AGENT_TOOL_MAP.architect,
+	...(COUNCIL_AGENT_TOOL_MAP.architect ?? []),
+	...(GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []),
+];
+const ARCHITECT_TOOL_COUNT = EXPECTED_ARCHITECT_TOOLS.length;
 
 // Render with both councils enabled so the full AGENT_TOOL_MAP.architect
 // surface (including `submit_council_verdicts`, `declare_council_criteria`, AND
@@ -90,14 +97,14 @@ const resolvedPrompt = (() => {
 describe('YOUR TOOLS prompt list matches AGENT_TOOL_MAP.architect', () => {
 	test('every tool in AGENT_TOOL_MAP.architect appears in YOUR TOOLS line', () => {
 		const yourTools = extractYourToolsNames(resolvedPrompt);
-		for (const tool of AGENT_TOOL_MAP.architect) {
+		for (const tool of EXPECTED_ARCHITECT_TOOLS) {
 			expect(yourTools).toContain(tool);
 		}
 	});
 
 	test('no tool appears in YOUR TOOLS that is NOT in AGENT_TOOL_MAP.architect (except Task delegation)', () => {
 		const yourTools = extractYourToolsNames(resolvedPrompt);
-		const mapSet = new Set<string>(AGENT_TOOL_MAP.architect);
+		const mapSet = new Set<string>(EXPECTED_ARCHITECT_TOOLS);
 		for (const tool of yourTools) {
 			expect(
 				mapSet.has(tool),
@@ -118,7 +125,7 @@ describe('YOUR TOOLS prompt list matches AGENT_TOOL_MAP.architect', () => {
 describe('Available Tools prompt list matches AGENT_TOOL_MAP.architect', () => {
 	test('every tool in AGENT_TOOL_MAP.architect appears in Available Tools section', () => {
 		const availableTools = extractAvailableToolsNames(resolvedPrompt);
-		for (const tool of AGENT_TOOL_MAP.architect) {
+		for (const tool of EXPECTED_ARCHITECT_TOOLS) {
 			expect(availableTools).toContain(tool);
 		}
 	});
@@ -227,6 +234,8 @@ describe('No unknown agents in AGENT_TOOL_MAP', () => {
 			'council_generalist',
 			'council_skeptic',
 			'council_domain_expert',
+			'curator_postmortem',
+			'curator_consolidation',
 		]);
 
 		for (const subagent of ALL_SUBAGENT_NAMES) {

@@ -24,13 +24,15 @@ describe('PRE-PHASE BRIEFING Verification (Task 2.5)', () => {
 		expect(prompt).toContain('MODE: PRE-PHASE BRIEFING');
 	});
 
-	test('3. PRE-PHASE BRIEFING stub appears before PLAN execution modes', () => {
-		const prePhaseBriefingIndex = prompt.indexOf('MODE: PRE-PHASE BRIEFING');
-		const planIndex = prompt.indexOf('MODE: PLAN');
+	test('3. PRE-PHASE BRIEFING stub appears before COUNCIL modes', () => {
+		const prePhaseBriefingIndex = prompt.indexOf(
+			'### MODE: PRE-PHASE BRIEFING',
+		);
+		const councilIndex = prompt.indexOf('### MODE: COUNCIL');
 
 		expect(prePhaseBriefingIndex).not.toBe(-1);
-		expect(planIndex).not.toBe(-1);
-		expect(prePhaseBriefingIndex).toBeLessThan(planIndex);
+		expect(councilIndex).not.toBe(-1);
+		expect(prePhaseBriefingIndex).toBeLessThan(councilIndex);
 	});
 
 	test('4. "PRE-PHASE BRIEFING" appears AFTER "MODE: CONSULT" (positional check)', () => {

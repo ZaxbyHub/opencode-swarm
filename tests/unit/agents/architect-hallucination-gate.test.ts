@@ -3,14 +3,15 @@ import {
 	buildQaGateSelectionDialogue,
 	createArchitectAgent,
 } from '../../../src/agents/architect';
+import { PHASE_WRAP_PROTOCOL } from './architect-mode-skill-helpers';
 
 describe('Architect prompt: hallucination_guard gate enforcement', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	const getPhaseWrapSection = (): string => {
-		const start = prompt.indexOf('### MODE: PHASE-WRAP');
-		const end = prompt.indexOf('\n###', start + 1);
-		return end > start ? prompt.slice(start, end) : prompt.slice(start);
+		expect(prompt).toContain('### MODE: PHASE-WRAP');
+		expect(prompt).toContain('file:.opencode/skills/phase-wrap/SKILL.md');
+		return PHASE_WRAP_PROTOCOL;
 	};
 
 	describe('PHASE-WRAP step 5.55', () => {

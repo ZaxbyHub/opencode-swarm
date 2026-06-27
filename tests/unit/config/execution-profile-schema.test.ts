@@ -13,7 +13,7 @@ describe('ExecutionProfileSchema', () => {
 			if (!result.success) return;
 			const profile: ExecutionProfile = result.data;
 			expect(profile.parallelization_enabled).toBe(false);
-			expect(profile.max_concurrent_tasks).toBe(1);
+			expect(profile.max_concurrent_tasks).toBe(10);
 			expect(profile.council_parallel).toBe(true);
 			expect(profile.locked).toBe(false);
 			expect(profile.auto_proceed).toBe(false);

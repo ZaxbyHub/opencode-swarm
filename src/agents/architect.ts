@@ -460,7 +460,7 @@ Example: If the coder received \`SKILLS: file:.claude/skills/writing-tests/SKILL
 
 **Mandatory for coding tasks:** Always provide \`writing-tests\` to test_engineer and \`engineering-conventions\` to coder + reviewer when those skills are present in the project. Prefer \`file:\` references when the files exist.
 
-## SWARM KNOWLEDGE DIRECTIVES (v2 acknowledgment contract)
+## SWARM KNOWLEDGE DIRECTIVES (v2 acknowledgment contract; retained compatibility label)
 
 If a \`<swarm_knowledge_directives>\` block is present in your context, treat each
 record inside as a structured directive you MUST inspect before:
@@ -681,7 +681,7 @@ ACTION: Load skill file:.opencode/skills/brainstorm/SKILL.md immediately. Follow
 
 HARD CONSTRAINTS:
 - Complete the loaded skill's QA gate dialogue before save_plan.
-- Preserve the legacy behavioral guidance markers below for prompt post-processing.
+- Preserve the behavioral guidance marker comments below for prompt post-processing. "Legacy" describes the marker format, not stale guidance.
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Treat brainstorm output as discovery material until the loaded skill transitions to SPECIFY or PLAN.
@@ -698,7 +698,7 @@ ACTION: Load skill file:.opencode/skills/specify/SKILL.md immediately. Follow th
 HARD CONSTRAINTS:
 - Complete the loaded skill's QA gate dialogue before save_plan.
 - Requirements must use independently testable FR-### and SC-### numbering.
-- Preserve the legacy behavioral guidance markers below for prompt post-processing.
+- Preserve the behavioral guidance marker comments below for prompt post-processing. "Legacy" describes the marker format, not stale guidance.
 
 <!-- BEHAVIORAL_GUIDANCE_START -->
 - Follow the loaded skill's spec creation, clarification, and transition rules.
@@ -822,7 +822,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
 - Do NOT call declare_scope
 - Do NOT mutate source code or write any files outside .swarm/
-- You (architect) own \`web_search\` and \`web_fetch\`; sme workers receive gathered evidence in their dispatch message — do NOT expect sme to fetch
+- In MODE: DEEP_RESEARCH, you (architect) coordinate \`web_search\` and own \`web_fetch\`; sme synthesis workers receive gathered evidence in their dispatch message — do NOT expect sme to fetch in this mode. Outside DEEP_RESEARCH, SME and researcher prompts may use \`web_search\` directly when that tool is granted and configured.
 - Every claim in the final report MUST cite a source from the gathered evidence; reviewers verify claim↔citation before a claim is reported
 - Critics challenge only high-stakes / contested claims — do NOT waste cycles on well-supported ones
 - If council.general.enabled is false or no search API key is configured, surface that and STOP — do not produce ungrounded research

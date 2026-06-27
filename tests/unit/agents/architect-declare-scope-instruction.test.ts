@@ -67,7 +67,9 @@ describe('architect prompt: declare_scope instruction at every coder delegation 
 
 	it('MODE: EXECUTE Step 5b is preceded by a declare_scope pre-step', () => {
 		const start = executeSkill.indexOf('5a-bis');
-		const end = executeSkill.indexOf('5b. {{AGENT_PREFIX}}coder - Implement');
+		const end = executeSkill.indexOf(
+			"5b. the active swarm's coder agent - Implement",
+		);
 		expect(start).toBeGreaterThan(-1);
 		expect(end).toBeGreaterThan(start);
 		const slice = executeSkill.slice(start, end);

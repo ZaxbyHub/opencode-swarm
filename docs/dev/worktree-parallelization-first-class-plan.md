@@ -21,7 +21,7 @@ plumbing:
    parallel execution being on.
 
 2. **Parallel execution is opt-in and defaulted off.** `parallelization_enabled`
-   defaults `false` (`plan-schema.ts`), `max_concurrent_tasks` defaults `1`. The
+   defaults `false` (`plan-schema.ts`), `max_concurrent_tasks` defaults `10`. The
    flag is only set when the architect writes `## Pending Parallelization Config`
    (`architect.ts:1382`), which it only does when the **user explicitly answers
    >1** to a passive question: *"How many coders should run in parallel?

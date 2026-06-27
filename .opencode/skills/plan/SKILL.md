@@ -174,8 +174,8 @@ The `execution_profile` field in `save_plan` controls plan-scoped concurrency. I
 
 Fields:
 - `parallelization_enabled` (boolean, default false): When true, tasks may run in parallel.
-- `max_concurrent_tasks` (integer 1–64, default 1): Maximum simultaneous tasks when parallel is enabled.
-- `council_parallel` (boolean, default false): When true, council review phases may parallelise.
+- `max_concurrent_tasks` (integer 1–64, default 10): Maximum simultaneous tasks when parallel is enabled.
+- `council_parallel` (boolean, default true): When true, council review phases may parallelise.
 - `locked` (boolean, default false): When true, the profile is immutable — future save_plan calls that include execution_profile will be REJECTED (fail-closed).
 
 WHEN TO SET IT:

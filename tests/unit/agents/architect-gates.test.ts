@@ -171,12 +171,12 @@ describe('ARCHITECT QA GATE: pre_check_batch Tool Reference', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	test('Available Tools includes pre_check_batch', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('pre_check_batch');
 	});
 
 	test('pre_check_batch description includes parallel verification', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		// Should mention it runs verification tools in parallel
 		expect(toolsSection).toContain('parallel');
 		expect(toolsSection).toContain('lint');
@@ -442,12 +442,12 @@ describe('ARCHITECT QA GATE: build_check Tool Reference', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	test('Available Tools includes build_check', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('build_check');
 	});
 
 	test('build_check description includes build verification', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		// Should mention it's for build verification
 		expect(toolsSection).toContain('build');
 	});
@@ -652,7 +652,7 @@ describe('ARCHITECT QA GATE: placeholder_scan Tool Reference', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	test('Available Tools includes placeholder_scan', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('placeholder_scan');
 	});
 });
@@ -771,7 +771,7 @@ describe('ARCHITECT QA GATE: syntax_check Tool Reference', () => {
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	test('Available Tools includes syntax_check', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('syntax_check');
 	});
 
@@ -795,12 +795,12 @@ describe('ARCHITECT QA GATE: secretscan and sast_scan in pre_check_batch', () =>
 	const prompt = createArchitectAgent('test-model').config.prompt;
 
 	test('secretscan is in Available Tools', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('secretscan');
 	});
 
 	test('sast_scan is in Available Tools', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('sast_scan');
 	});
 
@@ -884,7 +884,7 @@ describe('ARCHITECT QA GATE: secretscan and sast_scan in pre_check_batch', () =>
 	});
 
 	test('quality_budget is in Available Tools', () => {
-		const toolsSection = prompt.match(/Available Tools:[^`]*$/m)?.[0] || '';
+		const toolsSection = prompt.match(/^Available Tools:.*$/m)?.[0] || '';
 		expect(toolsSection).toContain('quality_budget');
 	});
 });

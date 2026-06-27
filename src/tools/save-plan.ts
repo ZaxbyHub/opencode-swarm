@@ -999,13 +999,13 @@ export const save_plan: ToolDefinition = createSwarmTool({
 					.max(64)
 					.optional()
 					.describe(
-						'Maximum tasks that may run concurrently when parallelization is enabled. Default 1.',
+						'Maximum tasks that may run concurrently when parallelization is enabled. Default 10.',
 					),
 				council_parallel: z
 					.boolean()
 					.optional()
 					.describe(
-						'When true, council review phases may run in parallel. Default false.',
+						'When true, council review phases may run in parallel. Default true.',
 					),
 				locked: z
 					.boolean()

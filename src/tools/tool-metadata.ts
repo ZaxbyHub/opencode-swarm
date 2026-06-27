@@ -711,8 +711,9 @@ export const TOOL_DESCRIPTIONS: Partial<Record<ToolName, string>> =
 /**
  * Default tool permissions per agent, inverted from each tool's `agents` list.
  * All agent names are initialized (agents with no tools keep an empty array, e.g.
- * the council members). Tools with `agents: []` (the memory tools) stay OUT of
- * this map and are applied only via MEMORY_AGENT_TOOL_MAP.
+ * the council members). Tools with `agents: []` stay OUT of this default map
+ * and are applied only via opt-in maps such as MEMORY_AGENT_TOOL_MAP or
+ * GENERAL_COUNCIL_AGENT_TOOL_MAP.
  */
 export const AGENT_TOOL_MAP: Record<AgentName, ToolName[]> = (() => {
 	const map = Object.fromEntries(

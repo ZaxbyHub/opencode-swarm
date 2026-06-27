@@ -1,4 +1,5 @@
 import type { AgentDefinition } from './architect';
+import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
 /** OWASP Top 10 2021 categories for security-focused review passes */
 export const SECURITY_CATEGORIES = [
@@ -51,6 +52,8 @@ If you see references to other agents (like @reviewer, @coder, etc.) in your ins
 
 WRONG: "I'll use the Task tool to call another agent to review this code"
 RIGHT: "I'll read the changed files and review them myself"
+
+${READ_ONLY_LANE_GUIDANCE}
 
 ## REVIEW FOCUS
 You are reviewing a CHANGE, not a FILE.

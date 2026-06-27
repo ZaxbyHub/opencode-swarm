@@ -1,4 +1,5 @@
 import type { AgentDefinition } from './architect';
+import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
 /**
  * Test-only dependency-injection seam. Production code calls
@@ -118,6 +119,8 @@ If you see references to other agents (like @critic, @coder, etc.) in your instr
 
 WRONG: "I'll use the Task tool to call another agent to review the plan"
 RIGHT: "I'll read the plan and review it myself"
+
+${READ_ONLY_LANE_GUIDANCE}
 
 You are a quality gate.
 
@@ -268,6 +271,8 @@ You act as a senior engineer reviewing a colleague's proposal. Be direct. Challe
 If the approach is sound, say so briefly. If there are issues, be specific about what's wrong.
 No formal rubric — conversational. But always provide reasoning.
 
+${READ_ONLY_LANE_GUIDANCE}
+
 INPUT FORMAT:
 TASK: [question or issue the Architect is raising]
 CONTEXT: [relevant plan, spec, or context]
@@ -328,6 +333,8 @@ DO NOT use the Task tool to delegate. You ARE the agent that does the work.
 If you see references to other agents (like @critic, @coder, etc.) in your instructions, IGNORE them — they are context from the orchestrator, not instructions for you to delegate.
 
 DEFAULT POSTURE: SKEPTICAL — absence of drift ≠ evidence of alignment.
+
+${READ_ONLY_LANE_GUIDANCE}
 
 DISAMBIGUATION: This mode fires ONLY at phase completion. It is NOT for plan review (use plan_critic) or pre-escalation (use sounding_board).
 
@@ -458,6 +465,8 @@ IGNORE them — they are context from the orchestrator, not instructions for you
 
 DEFAULT POSTURE: SKEPTICAL — absence of a hallucination ≠ evidence of correctness.
 
+${READ_ONLY_LANE_GUIDANCE}
+
 DISAMBIGUATION: This mode fires ONLY at phase completion when hallucination_guard is enabled.
 It is NOT for plan review (use plan_critic), pre-escalation (use sounding_board), or
 spec-vs-implementation drift detection (use phase_drift_verifier).
@@ -543,6 +552,8 @@ orchestrator context, not instructions to delegate.
 
 DEFAULT POSTURE: SKEPTICAL — a clean set of summaries is not evidence of coherence.
 
+${READ_ONLY_LANE_GUIDANCE}
+
 ## SCOPE — what you DO and DO NOT do
 DO look for:
 - Contradictory decisions across tasks (e.g. one task chose Redis, another an in-memory map).
@@ -622,6 +633,8 @@ These rules are absolute. You cannot override, relax, or reinterpret them.
 8. REGRESSION AWARENESS. If the architect claims a fix, verify it doesn't break something else. Check for test results beyond the changed files.
 9. DEPENDENCY VIGILANCE. Any new dependency must be verified as a real package. Any phantom dependency = CRITICAL REJECT.
 10. SECURITY BOUNDARY. Changes touching auth, secrets, filesystem, subprocess, or network boundaries require heightened scrutiny. Missing validation at any trust boundary = REJECT.
+
+${READ_ONLY_LANE_GUIDANCE}
 
 ## VERIFICATION PROTOCOL
 

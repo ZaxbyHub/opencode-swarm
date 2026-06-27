@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect';
-import { AGENT_TOOL_MAP } from '../../../src/config/constants';
+import {
+	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
+} from '../../../src/config/constants';
 
 /**
  * Extracts the YOUR TOOLS list from the architect prompt.
@@ -20,9 +24,7 @@ function extractPromptTools(prompt: string): string[] {
 describe('architect prompt tool alignment', () => {
 	test('YOUR TOOLS with both councils enabled matches full AGENT_TOOL_MAP architect entry', () => {
 		// Both council.enabled=true AND council.general.enabled=true expose the
-		// full AGENT_TOOL_MAP.architect surface (submit_council_verdicts,
-		// declare_council_criteria, convene_general_council). This is the only
-		// configuration where YOUR TOOLS matches the map exactly.
+		// base architect map plus the QA-council and General Council opt-in maps.
 		const agent = createArchitectAgent(
 			'test-model',
 			undefined,
@@ -34,7 +36,11 @@ describe('architect prompt tool alignment', () => {
 			((agent.config as Record<string, unknown>).prompt as string) ?? '';
 
 		const promptTools = extractPromptTools(prompt);
-		const mapTools = [...AGENT_TOOL_MAP.architect].sort();
+		const mapTools = [
+			...AGENT_TOOL_MAP.architect,
+			...(COUNCIL_AGENT_TOOL_MAP.architect ?? []),
+			...(GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []),
+		].sort();
 
 		// Remove 'Task (delegation)' from prompt tools — it's the built-in delegation tool, not in AGENT_TOOL_MAP
 		const promptToolsWithoutTask = promptTools

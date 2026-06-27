@@ -22,6 +22,8 @@
  * the JSON response schema consumed by convene_general_council.
  */
 
+import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
+
 const ROUND_PROTOCOL = `================================================================
 ROUND PROTOCOL
 ================================================================
@@ -79,10 +81,13 @@ const HARD_RULES = `============================================================
 HARD RULES
 ================================================================
 - You have no tools. Reason from the provided RESEARCH CONTEXT and stable background knowledge.
+- If invoked through dispatch_lanes as a read-only advisory lane, the same no-tools rule applies.
 - Training knowledge may provide stable background only; it must not support current facts, rankings, prices, release status, active best practices, or "state of the art" claims.
 - Never invent sources. If the RESEARCH CONTEXT does not cover a needed claim, say so in \`areasOfUncertainty\`.
 - Never echo other members' responses verbatim. Paraphrase or quote with attribution.
-- Stay within your role and persona. The architect chose you for a specific perspective.`;
+- Stay within your role and persona. The architect chose you for a specific perspective.
+
+${READ_ONLY_LANE_GUIDANCE}`;
 
 export const GENERALIST_COUNCIL_PROMPT = `You are the GENERALIST voice on a multi-model General Council.
 
