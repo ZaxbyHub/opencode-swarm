@@ -29,6 +29,8 @@ interface BoundedStreamResult {
 
 const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
 
+type ExitRaceResult = { kind: 'exit'; exitCode: number } | { kind: 'timeout' };
+
 function isExecutableFile(candidate: string): boolean {
 	try {
 		const stats = fs.statSync(candidate);
@@ -74,16 +76,32 @@ async function readBoundedStream(
 	stream: BunCompatSubprocess['stdout'],
 	maxBytes: number,
 ): Promise<BoundedStreamResult> {
-	if (maxBytes <= 0) {
+	const reader = stream.getReader();
+	let lockReleased = false;
+	const releaseLock = () => {
+		if (lockReleased) return;
+		lockReleased = true;
 		try {
-			await stream.getReader().cancel();
+			reader.releaseLock();
 		} catch {
 			// best effort
 		}
+	};
+	const cancelAndRelease = async () => {
+		try {
+			await reader.cancel();
+		} catch {
+			// best effort
+		} finally {
+			releaseLock();
+		}
+	};
+
+	if (maxBytes <= 0) {
+		await cancelAndRelease();
 		return { text: '', truncated: true };
 	}
 
-	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let total = 0;
 	let truncated = false;
@@ -101,11 +119,7 @@ async function readBoundedStream(
 					total += remaining;
 				}
 				truncated = true;
-				try {
-					await reader.cancel();
-				} catch {
-					// best effort
-				}
+				await cancelAndRelease();
 				break;
 			}
 
@@ -113,11 +127,7 @@ async function readBoundedStream(
 			total += value.byteLength;
 		}
 	} finally {
-		try {
-			reader.releaseLock();
-		} catch {
-			// best effort
-		}
+		releaseLock();
 	}
 
 	const out = new Uint8Array(total);
@@ -131,6 +141,18 @@ async function readBoundedStream(
 		text: new TextDecoder().decode(out),
 		truncated,
 	};
+}
+
+function timeoutKillSignal(platform: NodeJS.Platform): NodeJS.Signals {
+	return platform === 'win32' ? 'SIGTERM' : 'SIGKILL';
+}
+
+function killProcess(proc: BunCompatSubprocess | undefined): void {
+	try {
+		proc?.kill(timeoutKillSignal(_internals.platform()));
+	} catch {
+		// best effort
+	}
 }
 
 export async function runExternalTool(
@@ -150,7 +172,8 @@ export async function runExternalTool(
 
 	let proc: BunCompatSubprocess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-	let timedOut = false;
+	let exitSettled = false;
+	let settledExitCode: number | null = null;
 
 	try {
 		proc = _internals.bunSpawn([options.executable, ...options.args], {
@@ -162,15 +185,24 @@ export async function runExternalTool(
 			timeout: options.timeoutMs,
 		});
 
-		const timeout = new Promise<'timeout'>((resolve) => {
+		const exitPromise: Promise<ExitRaceResult> = proc.exited.then(
+			(exitCode) => {
+				exitSettled = true;
+				settledExitCode = exitCode;
+				return { kind: 'exit', exitCode };
+			},
+		);
+		const timeout = new Promise<ExitRaceResult>((resolve) => {
 			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				try {
-					proc?.kill('SIGKILL');
-				} catch {
-					// best effort
+				if (exitSettled) {
+					resolve({
+						kind: 'exit',
+						exitCode: settledExitCode ?? proc?.exitCode ?? 0,
+					});
+					return;
 				}
-				resolve('timeout');
+				killProcess(proc);
+				resolve({ kind: 'timeout' });
 			}, options.timeoutMs);
 		});
 
@@ -182,8 +214,8 @@ export async function runExternalTool(
 			proc.stderr,
 			options.maxStderrBytes,
 		);
-		const exitResult = await Promise.race([proc.exited, timeout]);
-		if (exitResult === 'timeout' || timedOut) {
+		const exitResult = await Promise.race([exitPromise, timeout]);
+		if (exitResult.kind === 'timeout') {
 			return {
 				status: 'timeout',
 				exitCode: proc.exitCode,
@@ -197,7 +229,7 @@ export async function runExternalTool(
 
 		return {
 			status: 'completed',
-			exitCode: exitResult,
+			exitCode: exitResult.exitCode,
 			stdout: stdout.text,
 			stderr: stderr.text,
 			stdoutTruncated: stdout.truncated,
@@ -227,6 +259,8 @@ export async function runExternalTool(
 
 export const _internals: {
 	bunSpawn: typeof bunSpawn;
+	platform: () => NodeJS.Platform;
 } = {
 	bunSpawn,
+	platform: () => process.platform,
 };

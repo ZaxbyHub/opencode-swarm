@@ -10,8 +10,15 @@ import {
 } from '../../../src/utils/external-tool-runner';
 
 const realBunSpawn = _internals.bunSpawn;
+const realPlatform = _internals.platform;
 
 function streamFromText(text: string): BunCompatSubprocess['stdout'] {
+	return streamFromChunks([text]);
+}
+
+function streamFromChunks(chunks: string[]): BunCompatSubprocess['stdout'] {
+	const encodedChunks = chunks.map((chunk) => new TextEncoder().encode(chunk));
+	const text = chunks.join('');
 	const bytes = new TextEncoder().encode(text);
 	return {
 		async text() {
@@ -21,15 +28,16 @@ function streamFromText(text: string): BunCompatSubprocess['stdout'] {
 			return bytes;
 		},
 		getReader() {
-			let done = false;
+			let index = 0;
 			return new ReadableStream<Uint8Array>({
 				pull(controller) {
-					if (done) {
+					const chunk = encodedChunks[index];
+					if (!chunk) {
 						controller.close();
 						return;
 					}
-					done = true;
-					controller.enqueue(bytes);
+					index += 1;
+					controller.enqueue(chunk);
 				},
 			}).getReader();
 		},
@@ -38,6 +46,7 @@ function streamFromText(text: string): BunCompatSubprocess['stdout'] {
 
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	_internals.platform = realPlatform;
 });
 
 describe('external-tool-runner', () => {
@@ -103,10 +112,14 @@ describe('external-tool-runner', () => {
 
 	test('returns timeout and kills a never-exiting process', async () => {
 		let killCount = 0;
+		let resolveExit!: (code: number) => void;
+		const exited = new Promise<number>((resolve) => {
+			resolveExit = resolve;
+		});
 		_internals.bunSpawn = (() => ({
 			stdout: streamFromText(''),
 			stderr: streamFromText(''),
-			exited: new Promise<number>(() => {}),
+			exited,
 			exitCode: null,
 			kill: () => {
 				killCount++;
@@ -124,6 +137,62 @@ describe('external-tool-runner', () => {
 
 		expect(result.status).toBe('timeout');
 		expect(killCount).toBeGreaterThanOrEqual(1);
+		resolveExit(143);
+	});
+
+	test('uses SIGTERM for timeout cleanup on Windows', async () => {
+		const signals: Array<NodeJS.Signals | number | undefined> = [];
+		let resolveExit!: (code: number) => void;
+		const exited = new Promise<number>((resolve) => {
+			resolveExit = resolve;
+		});
+		_internals.platform = () => 'win32';
+		_internals.bunSpawn = (() => ({
+			stdout: streamFromText(''),
+			stderr: streamFromText(''),
+			exited,
+			exitCode: null,
+			kill: (signal?: NodeJS.Signals | number) => {
+				signals.push(signal);
+			},
+		})) as typeof realBunSpawn;
+
+		const result = await runExternalTool({
+			executable: 'slow-tool',
+			args: [],
+			cwd: realpathSync(os.tmpdir()),
+			timeoutMs: 5,
+			maxStdoutBytes: 100,
+			maxStderrBytes: 100,
+		});
+
+		expect(result.status).toBe('timeout');
+		expect(signals).toContain('SIGTERM');
+		expect(signals).not.toContain('SIGKILL');
+		resolveExit(143);
+	});
+
+	test('truncates stdout across multiple chunks', async () => {
+		_internals.bunSpawn = (() => ({
+			stdout: streamFromChunks(['abc', 'defgh']),
+			stderr: streamFromText(''),
+			exited: Promise.resolve(0),
+			exitCode: 0,
+			kill: () => {},
+		})) as typeof realBunSpawn;
+
+		const result = await runExternalTool({
+			executable: 'chunky-tool',
+			args: [],
+			cwd: realpathSync(os.tmpdir()),
+			timeoutMs: 1000,
+			maxStdoutBytes: 6,
+			maxStderrBytes: 100,
+		});
+
+		expect(result.status).toBe('completed');
+		expect(result.stdout).toBe('abcdef');
+		expect(result.stdoutTruncated).toBe(true);
 	});
 
 	test('resolves platform executable names from PATH lazily', () => {

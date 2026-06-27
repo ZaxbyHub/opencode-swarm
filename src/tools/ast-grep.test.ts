@@ -154,10 +154,11 @@ describe('ast_grep', () => {
 
 	test('normalizes malformed and outside-workspace JSON stream entries', async () => {
 		createTestFile('src/inside.ts', 'const value = 1\n');
-		const outsideDir = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'ast-grep-outside-')),
-		);
+		let outsideDir: string | undefined;
 		try {
+			outsideDir = realpathSync(
+				mkdtempSync(path.join(os.tmpdir(), 'ast-grep-outside-')),
+			);
 			writeFileSync(path.join(outsideDir, 'outside.ts'), 'const value = 2\n');
 			_internals.resolveAstGrepBinary = () => 'ast-grep';
 			_internals.runExternalTool = mock(async () => ({
@@ -197,7 +198,7 @@ describe('ast_grep', () => {
 			]);
 			expect(parsed.total).toBe(1);
 		} finally {
-			rmSync(outsideDir, { recursive: true, force: true });
+			if (outsideDir) rmSync(outsideDir, { recursive: true, force: true });
 		}
 	});
 });
