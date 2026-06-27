@@ -213,6 +213,46 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		const section = p.slice(idx, next > 0 ? next : idx + 1000);
 		expect(section).toContain('{{AGENT_PREFIX}}');
 	});
+
+	it('DELEGATION FORMAT keeps read-only advisory lanes out of Task-only wording', () => {
+		const idx = p.indexOf('## DELEGATION FORMAT');
+		const next = p.indexOf('\n## ', idx + 1);
+		const section = p.slice(idx, next > 0 ? next : idx + 1000);
+		expect(section).toContain('Mutation delegations');
+		expect(section).toContain(
+			'Read-only advisory lanes are the explicit exception',
+		);
+		expect(section).toContain('dispatch_lanes_async');
+		expect(section).toContain('collect_lane_results');
+		expect(section).toContain('incremental');
+		expect(section).toContain('wait: false');
+		expect(section).toContain('wait: true');
+		expect(section).not.toContain(
+			'Delegations are performed ONLY by calling the **Task** tool',
+		);
+	});
+
+	it('read-only advisory lane rule requires no-wait polling before final join', () => {
+		const idx = p.indexOf('Read-only advisory-lane exception');
+		const section = p.slice(idx, idx + 2500);
+		expect(section).toContain('dispatch_lanes_async');
+		expect(section).toContain('all lane specs in one call');
+		expect(section).toContain(
+			'IMMEDIATELY continue non-dependent architect work',
+		);
+		expect(section).toContain('collect_lane_results');
+		expect(section).toContain('without `wait`');
+		expect(section).toContain('wait: false');
+		expect(section).toContain('harvest lanes as they settle');
+		expect(section).toContain(
+			'process completed lane output immediately while other lanes remain pending/running',
+		);
+		expect(section).toContain('Do NOT sit idle waiting');
+		expect(section).toContain('wait: true');
+		expect(section).toContain('explicit barrier');
+		expect(section).toContain('Use blocking `dispatch_lanes` only');
+		expect(section).toContain('NOT a per-agent Task/run-in-background pattern');
+	});
 });
 
 describe('Architect Agent - Tool References', () => {

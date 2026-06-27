@@ -61,6 +61,19 @@ function deferred<T = void>(): {
 	return { promise, resolve, reject };
 }
 
+async function waitForBatchRecordStatus(
+	directory: string,
+	batchId: string,
+	expected: string,
+): Promise<string | undefined> {
+	for (let attempt = 0; attempt < 50; attempt++) {
+		const status = findByBatchId(directory, batchId)[0]?.status;
+		if (status === expected) return status;
+		await new Promise((resolve) => setTimeout(resolve, 1));
+	}
+	return findByBatchId(directory, batchId)[0]?.status;
+}
+
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
 });
@@ -945,6 +958,16 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: {
+					'session-1': { type: 'busy' },
+					'session-2': { type: 'busy' },
+				},
+				error: undefined,
+			})),
+			messages: mock(async () => {
+				throw new Error('dispatch_lanes_async must not read lane output');
+			}),
 			delete: mock(async () => undefined),
 		};
 		_internals.getSessionOps = () => ops;
@@ -966,12 +989,36 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 		expect(result.success).toBe(true);
 		expect(result.batch_id).toBe('batch-async-1');
+		expect(result.dispatched).toBe(2);
 		expect(result.pending).toBe(2);
+		expect(result.launch_timeout_ms).toBe(
+			_test_exports.DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS,
+		);
+		expect(result.timeout_ms).toBe(
+			_test_exports.DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS,
+		);
 		expect(result.lane_results.map((lane) => lane.status)).toEqual([
 			'pending',
 			'pending',
 		]);
 		expect(ops.promptAsync).toHaveBeenCalledTimes(2);
+		const promptAsyncCalls = (ops.promptAsync as ReturnType<typeof mock>).mock
+			.calls;
+		expect(promptAsyncCalls.map((call) => call[0].path.id)).toEqual([
+			'session-1',
+			'session-2',
+		]);
+		expect(promptAsyncCalls.map((call) => call[0].body.agent)).toEqual([
+			'explorer',
+			'reviewer',
+		]);
+		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
+			'inspect runtime',
+		);
+		expect(promptAsyncCalls[1][0].body.parts[0].text).toBe('inspect tests');
+		expect(ops.prompt).not.toHaveBeenCalled();
+		expect(ops.status).not.toHaveBeenCalled();
+		expect(ops.messages).not.toHaveBeenCalled();
 		const records = findByBatchId(directory, 'batch-async-1');
 		expect(records).toHaveLength(2);
 		expect(records[0].status).toBe('running');
@@ -997,6 +1044,78 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				'batch-async-1',
 			),
 		);
+	});
+
+	test('keeps async launch timeout distinct from lane runtime staleness', () => {
+		expect(_test_exports.DEFAULT_TIMEOUT_MS).toBe(5 * 60_000);
+		expect(_test_exports.DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS).toBe(30_000);
+		expect(_test_exports.DEFAULT_ASYNC_STALE_TIMEOUT_MS).toBe(30 * 60_000);
+		expect(_test_exports.DEFAULT_COLLECT_TIMEOUT_MS).toBe(
+			_test_exports.DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+		);
+	});
+
+	test('returns lane handles before promptAsync resolves so the architect can keep working', async () => {
+		const directory = makeTempDir();
+		const promptStarted = deferred<void>();
+		const promptRelease = deferred<{ data: undefined; error: undefined }>();
+		let promptResolved = false;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-nonblocking' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => {
+				promptStarted.resolve();
+				const result = await promptRelease.promise;
+				promptResolved = true;
+				return result;
+			}),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-nonblocking-launch',
+				launch_timeout_ms: 5_000,
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.batch_id).toBe('batch-nonblocking-launch');
+		expect(result.pending).toBe(1);
+		expect(result.launch_timeout_ms).toBe(5_000);
+		expect(result.timeout_ms).toBe(5_000);
+		expect(result.lane_results[0]).toEqual(
+			expect.objectContaining({
+				id: 'runtime',
+				status: 'pending',
+				session_id: 'session-nonblocking',
+			}),
+		);
+		await promptStarted.promise;
+		expect(promptResolved).toBe(false);
+		expect(findByBatchId(directory, 'batch-nonblocking-launch')[0].status).toBe(
+			'pending',
+		);
+
+		promptRelease.resolve({ data: undefined, error: undefined });
+		await promptRelease.promise;
+		expect(promptResolved).toBe(true);
+		await expect(
+			waitForBatchRecordStatus(
+				directory,
+				'batch-nonblocking-launch',
+				'running',
+			),
+		).resolves.toBe('running');
 	});
 
 	test('collects completed async lane output from child session messages', async () => {
@@ -1048,6 +1167,233 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			readLaneOutput(directory, result.lane_results[0].output_ref!)?.artifact
 				.text,
 		).toBe('lane output');
+	});
+
+	test('does not complete a busy async lane from partial assistant text', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-busy' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-busy': { type: 'busy' } },
+				error: undefined,
+			})),
+			messages: mock(async () => ({
+				data: [
+					{
+						info: { role: 'assistant' },
+						parts: [{ type: 'text', text: 'starting investigation' }],
+					},
+				],
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-busy',
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-busy', wait: false, include_pending: true },
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.completed).toBe(0);
+		expect(result.pending).toBe(1);
+		expect(result.lane_results[0].status).toBe('pending');
+		expect(result.lane_results[0].output).toBeUndefined();
+		expect(ops.status).toHaveBeenCalledTimes(1);
+		expect(ops.messages).not.toHaveBeenCalled();
+	});
+
+	test('does not stale a still-busy async lane after the stale budget elapses', async () => {
+		const directory = makeTempDir();
+		let now = Date.now();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-busy-stale' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-busy-stale': { type: 'busy' } },
+				error: undefined,
+			})),
+			messages: mock(async () => {
+				throw new Error('busy lanes must not be harvested or staled');
+			}),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+		_internals.now = () => now;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-busy-stale',
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+		now += _test_exports.DEFAULT_ASYNC_STALE_TIMEOUT_MS + 1;
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-busy-stale', wait: false },
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.pending).toBe(1);
+		expect(result.stale).toBe(0);
+		expect(result.lane_results[0]).toEqual(
+			expect.objectContaining({
+				id: 'runtime',
+				status: 'pending',
+				session_id: 'session-busy-stale',
+			}),
+		);
+		expect(['pending', 'running']).toContain(
+			findByBatchId(directory, 'batch-busy-stale')[0].status,
+		);
+		expect(ops.status).toHaveBeenCalled();
+		expect(ops.messages).not.toHaveBeenCalled();
+	});
+
+	test('collects async lane output once status map no longer marks it busy', async () => {
+		const directory = makeTempDir();
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: 'session-idle' },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: {},
+				error: undefined,
+			})),
+			messages: mock(async () => ({
+				data: [
+					{
+						info: { role: 'assistant' },
+						parts: [{ type: 'text', text: 'final lane output' }],
+					},
+				],
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-idle',
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-idle', wait: false },
+			directory,
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.completed).toBe(1);
+		expect(result.pending).toBe(0);
+		expect(result.lane_results[0].output).toBe('final lane output');
+		expect(ops.status).toHaveBeenCalledTimes(1);
+		expect(ops.messages).toHaveBeenCalledTimes(1);
+	});
+
+	test('collects ready lanes while leaving still-running lanes pending', async () => {
+		const directory = makeTempDir();
+		let nextSession = 0;
+		const ops: SessionOps = {
+			create: mock(async () => ({
+				data: { id: `session-${++nextSession}` },
+				error: undefined,
+			})),
+			prompt: mock(async () => ({
+				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
+				error: undefined,
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-2': { type: 'busy' } },
+				error: undefined,
+			})),
+			messages: mock(async (args) => ({
+				data: [
+					{
+						info: { role: 'assistant' },
+						parts: [{ type: 'text', text: `final output for ${args.path.id}` }],
+					},
+				],
+				error: undefined,
+			})),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-mixed-readiness',
+				lanes: [
+					{ id: 'ready', agent: 'explorer', prompt: 'inspect ready lane' },
+					{ id: 'running', agent: 'reviewer', prompt: 'inspect running lane' },
+				],
+			},
+			directory,
+		);
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-mixed-readiness', wait: false },
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.completed).toBe(1);
+		expect(result.pending).toBe(1);
+		expect(result.all_settled).toBe(false);
+		const ready = result.lane_results.find((lane) => lane.id === 'ready');
+		const running = result.lane_results.find((lane) => lane.id === 'running');
+		expect(ready).toEqual(
+			expect.objectContaining({
+				id: 'ready',
+				status: 'completed',
+				output: 'final output for session-1',
+			}),
+		);
+		expect(running).toEqual(
+			expect.objectContaining({
+				id: 'running',
+				status: 'pending',
+			}),
+		);
+		expect(running?.output).toBeUndefined();
+		expect(ops.status).toHaveBeenCalledTimes(2);
+		expect(ops.messages).toHaveBeenCalledTimes(1);
+		expect(ops.messages).toHaveBeenCalledWith({
+			path: { id: 'session-1' },
+			query: { directory, limit: 50 },
+		});
 	});
 
 	test('collects all assistant transcript messages and marks message-limit incompleteness', async () => {
@@ -1184,6 +1530,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({ data: {}, error: undefined })),
 			messages: mock(async () => ({ data: null, error: undefined })),
 			delete: mock(async () => undefined),
 		};
@@ -1239,6 +1586,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('records promptAsync failures as terminal async lane rows', async () => {
 		const directory = makeTempDir();
+		const abortCalled = deferred<void>();
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-fail' },
@@ -1249,7 +1597,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ error: 'provider offline' })),
-			abort: mock(async () => undefined),
+			abort: mock(async () => {
+				abortCalled.resolve();
+				return undefined;
+			}),
 			delete: mock(async () => undefined),
 		};
 		_internals.getSessionOps = () => ops;
@@ -1262,21 +1613,21 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			directory,
 		);
 
-		expect(result.success).toBe(false);
+		expect(result.success).toBe(true);
 		expect(result.lane_results[0]).toEqual(
 			expect.objectContaining({
 				id: 'runtime',
-				status: 'failed',
-				error: 'session.promptAsync failed: provider offline',
+				status: 'pending',
 			}),
 		);
+		await abortCalled.promise;
 		const records = findByBatchId(directory, 'batch-prompt-fails');
 		expect(records).toHaveLength(1);
 		expect(records[0]).toEqual(
 			expect.objectContaining({
 				status: 'error',
 				result: expect.objectContaining({
-					error: 'session.promptAsync failed: provider offline',
+					error: 'session.promptAsync launch failed: provider offline',
 				}),
 			}),
 		);
@@ -1331,6 +1682,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('aborts and deletes async sessions when promptAsync times out', async () => {
 		const directory = makeTempDir();
+		const abortCalled = deferred<void>();
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-timeout' },
@@ -1341,7 +1693,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => await new Promise<never>(() => undefined)),
-			abort: mock(async () => undefined),
+			abort: mock(async () => {
+				abortCalled.resolve();
+				return undefined;
+			}),
 			delete: mock(async () => undefined),
 		};
 		_internals.getSessionOps = () => ops;
@@ -1355,14 +1710,14 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			directory,
 		);
 
-		expect(result.success).toBe(false);
+		expect(result.success).toBe(true);
 		expect(result.lane_results[0]).toEqual(
 			expect.objectContaining({
 				id: 'runtime',
-				status: 'failed',
-				error: 'Lane "runtime" session.promptAsync timed out after 10ms',
+				status: 'pending',
 			}),
 		);
+		await abortCalled.promise;
 		expect(ops.abort).toHaveBeenCalledWith({ path: { id: 'session-timeout' } });
 		expect(ops.delete).toHaveBeenCalledWith({
 			path: { id: 'session-timeout' },
@@ -1372,7 +1727,8 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			expect.objectContaining({
 				status: 'error',
 				result: expect.objectContaining({
-					error: 'Lane "runtime" session.promptAsync timed out after 10ms',
+					error:
+						'Lane "runtime" session.promptAsync launch timed out after 10ms',
 				}),
 			}),
 		);
@@ -1454,7 +1810,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('sweeps stale async rows during collection and reports failure', async () => {
 		const directory = makeTempDir();
-		let now = 1_700_000_000_000;
+		let now = Date.now();
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-stale' },
@@ -1470,30 +1826,23 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		};
 		_internals.getSessionOps = () => ops;
 		_internals.now = () => now;
-		const realDateNow = Date.now;
-		Date.now = () => now;
-		try {
-			await executeDispatchLanesAsync(
-				{
-					batch_id: 'batch-stale',
-					lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
-				},
-				directory,
-			);
-			now += 31 * 60_000;
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'batch-stale',
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			directory,
+		);
+		now += 31 * 60_000;
 
-			const result = await executeCollectLaneResults(
-				{ batch_id: 'batch-stale' },
-				directory,
-			);
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'batch-stale' },
+			directory,
+		);
 
-			expect(result.success).toBe(false);
-			expect(result.stale).toBe(1);
-			expect(result.pending).toBe(0);
-			expect(ops.messages).not.toHaveBeenCalled();
-		} finally {
-			Date.now = realDateNow;
-		}
+		expect(result.success).toBe(false);
+		expect(result.stale).toBe(1);
+		expect(result.pending).toBe(0);
 	});
 
 	test('collects only assistant text parts into a chronological transcript', async () => {

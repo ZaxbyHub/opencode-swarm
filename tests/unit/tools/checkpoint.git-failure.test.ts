@@ -102,8 +102,8 @@ describe('gitExec transient retry', () => {
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
-		// Entry guard surfaces the transient failure warning from isGitRepo
-		expect(parsed.error).toMatch(/transient|ETIMEDOUT|timed out/i);
+		// Entry guard surfaces the retry-exhaustion warning from isGitRepo
+		expect(parsed.error).toContain('retry exhaustion');
 		// 5 calls = 1st attempt + 4 retries exhausted
 		expect(callCount).toBe(5);
 	});
@@ -198,8 +198,8 @@ describe('isGitRepo warning on permanent failure', () => {
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
-		// Should be the transient failure warning from isGitRepo's catch block
-		expect(parsed.error).toMatch(/transient|ETIMEDOUT|timed out/i);
+		// Should be the retry-exhaustion warning from isGitRepo's catch block
+		expect(parsed.error).toContain('retry exhaustion');
 	});
 });
 
@@ -250,8 +250,8 @@ describe('Entry guard warning specificity', () => {
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
-		// Should surface the specific transient failure warning, not generic message
-		expect(parsed.error).toContain('transient failure');
+		// Should surface the specific retry-exhaustion warning, not generic message
+		expect(parsed.error).toContain('retry exhaustion');
 		expect(parsed.error).toContain('checkpoint tools require a git repository');
 	});
 });

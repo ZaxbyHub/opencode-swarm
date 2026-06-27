@@ -48,6 +48,12 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('lane_results');
 		expect(phase3Section).toContain('output_ref');
 		expect(phase3Section).toContain('retrieve_lane_output');
+		expect(phase3Section).toContain(
+			'Task is not an early-poll or empty-partial-output fallback',
+		);
+		expect(phase3Section).toContain(
+			'last-resort equivalent dispatch mechanism',
+		);
 		expect(phase3Section).toContain('UNVERIFIED');
 		expect(phase3Section).toContain('dispatch_lanes');
 		expect(phase3Section).not.toContain('run_in_background');

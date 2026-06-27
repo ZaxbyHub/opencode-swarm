@@ -64,5 +64,25 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 			expect(skillContent).not.toContain('{{ADVERSARIAL_TEST_CHECKLIST}}');
 			expect(skillContent).toContain('MODE: EXECUTE architect stub');
 		});
+
+		it('keeps async lane collection from jumping straight to Task fallback', () => {
+			const start = skillContent.indexOf(
+				'## Dispatch-lanes empty-output fallback',
+			);
+			const end = skillContent.indexOf(
+				'## Post-coder write verification',
+				start,
+			);
+			expect(start).toBeGreaterThan(-1);
+			expect(end).toBeGreaterThan(start);
+			const section = skillContent.slice(start, end);
+
+			expect(section).toContain('does **not** apply to `dispatch_lanes_async`');
+			expect(section).toContain('do **not** jump straight to Task');
+			expect(section).toContain('collect_lane_results');
+			expect(section).toContain('retrieve_lane_output');
+			expect(section).toContain('last-resort equivalent dispatch mechanism');
+			expect(section).not.toContain('Immediately retry the **same agent** via');
+		});
 	});
 });
