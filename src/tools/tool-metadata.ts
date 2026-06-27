@@ -401,6 +401,37 @@ export const TOOL_METADATA = {
 			'researcher',
 		],
 	},
+	ast_grep: {
+		description:
+			'Read-only structural AST search using ast-grep patterns with optional language and glob filters. Use for syntax-aware code pattern searches; does not rewrite files.',
+		agents: [
+			'architect',
+			'sme',
+			'docs',
+			'docs_design',
+			'critic_hallucination_verifier',
+			'spec_writer',
+			'explorer',
+			'coder',
+			'test_engineer',
+			'researcher',
+		],
+	},
+	actionlint_scan: {
+		description:
+			'Run actionlint against GitHub Actions workflow YAML files with structured findings. Resolves actionlint lazily and does not modify files.',
+		agents: ['architect', 'test_engineer'],
+	},
+	osv_scan: {
+		description:
+			'Run OSV-Scanner against a workspace path and return structured dependency vulnerability findings. Resolves osv-scanner lazily and does not modify files.',
+		agents: ['architect', 'test_engineer'],
+	},
+	gh_evidence: {
+		description:
+			'Fetch bounded GitHub pull request or issue metadata through gh for review and CI evidence. Resolves gh lazily and is read-only.',
+		agents: ['architect', 'researcher'],
+	},
 	batch_symbols: {
 		description:
 			'Batched symbol extraction across multiple files. Returns per-file symbol summaries with isolated error handling.',

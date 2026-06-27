@@ -3,6 +3,8 @@ import { swarmApplyPatch } from './apply-patch';
 export { swarmApplyPatch };
 // Alias for TOOL_NAMES compliance - swarm_apply_patch and swarmApplyPatch are the same tool
 export const swarm_apply_patch: typeof swarmApplyPatch = swarmApplyPatch;
+export { actionlint_scan } from './actionlint-scan';
+export { ast_grep } from './ast-grep';
 export { batch_symbols } from './batch-symbols';
 export { build_check } from './build-check';
 export { check_gate_status } from './check-gate-status';
@@ -36,6 +38,7 @@ export { external_skill_revoke } from './external-skill-revoke';
 export { extract_code_blocks } from './file-extractor';
 export { get_approved_plan } from './get-approved-plan';
 export { get_qa_gate_profile } from './get-qa-gate-profile';
+export { gh_evidence } from './gh-evidence';
 export { git_blame } from './git-blame';
 export { fetchGitingest, type GitingestArgs, gitingest } from './gitingest';
 export { imports } from './imports';
@@ -46,6 +49,7 @@ export { knowledge_recall } from './knowledge-recall';
 export { knowledge_receipt } from './knowledge-receipt';
 export { knowledge_remove } from './knowledge-remove';
 export { lint } from './lint';
+export { osv_scan } from './osv-scan';
 export { parse_lane_candidates } from './parse-lane-candidates';
 // Phase completion tracking
 export { phase_complete } from './phase-complete';

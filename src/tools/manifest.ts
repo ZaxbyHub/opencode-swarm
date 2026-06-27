@@ -23,7 +23,9 @@
  * Neither is implemented (no current tool needs them). Not tree-shakeable.
  */
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
+import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
+import { ast_grep } from './ast-grep';
 import { batch_symbols } from './batch-symbols';
 import { build_check } from './build-check';
 import { check_gate_status } from './check-gate-status';
@@ -60,6 +62,7 @@ import { extract_code_blocks } from './file-extractor';
 import { generate_mutants } from './generate-mutants';
 import { get_approved_plan } from './get-approved-plan';
 import { get_qa_gate_profile } from './get-qa-gate-profile';
+import { gh_evidence } from './gh-evidence';
 import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
@@ -78,6 +81,7 @@ import { lean_turbo_status } from './lean-turbo-status';
 import { lint } from './lint';
 import { lint_spec } from './lint-spec';
 import { mutation_test } from './mutation-test';
+import { osv_scan } from './osv-scan';
 import { parse_lane_candidates } from './parse-lane-candidates';
 import { phase_complete } from './phase-complete';
 import { pkg_audit } from './pkg-audit';
@@ -194,6 +198,10 @@ export const TOOL_MANIFEST = defineHandlers({
 	knowledge_remove: () => knowledge_remove,
 	co_change_analyzer: () => co_change_analyzer,
 	search: () => search,
+	ast_grep: () => ast_grep,
+	actionlint_scan: () => actionlint_scan,
+	osv_scan: () => osv_scan,
+	gh_evidence: () => gh_evidence,
 	batch_symbols: () => batch_symbols,
 	suggest_patch: () => suggestPatch,
 	req_coverage: () => req_coverage,
