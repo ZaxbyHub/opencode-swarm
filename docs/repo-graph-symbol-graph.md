@@ -3,6 +3,10 @@
 > Status: implemented (schema 1.2.0). Origin: follow-up to issue #1409 / PR #1468 (schema 1.1.0).
 > Audience: contributors implementing the next slice of structural intelligence in opencode-swarm.
 
+For the broader graph-backed repository memory contract, support matrix,
+confidence vocabulary, and ordered roadmap, see
+`docs/repo-memory-graph-plan.md`.
+
 ## Background
 
 PR #1468 (issue #1409) added schema **1.1.0** to the native `src/tools/repo-graph/`
