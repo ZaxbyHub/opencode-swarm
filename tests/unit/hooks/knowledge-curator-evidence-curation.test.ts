@@ -583,6 +583,45 @@ Phase: 1
 			// Expected: curateAndStoreSwarm called twice (different content) — 1 transact per batch
 			expect(mockTransactKnowledge).toHaveBeenCalledTimes(2); // 1 from first call, 1 from second call
 		});
+
+		// FB-003 regression: absolute vs relative paths for same evidence file must share idempotency key
+		test('FB-003: idempotency key is stable for equivalent absolute vs relative evidence paths', async () => {
+			const evidenceContent = JSON.stringify({
+				lessons_learned: ['Stable key lesson'],
+				project_name: 'test-project',
+				phase_number: 1,
+			});
+			mockReadSwarmFileAsync.mockResolvedValue(evidenceContent);
+
+			const hook = createKnowledgeCuratorHook('/project', defaultConfig);
+
+			// First call with absolute path
+			await hook(
+				{
+					tool: 'write',
+					args: {
+						filePath: 'E:/repo/.swarm/evidence/retro-1/evidence.json',
+					},
+					sessionID: 'sess-fb003',
+				},
+				{},
+			);
+
+			// Second call with relative path (same logical file)
+			await hook(
+				{
+					tool: 'write',
+					args: {
+						filePath: '.swarm/evidence/retro-1/evidence.json',
+					},
+					sessionID: 'sess-fb003',
+				},
+				{},
+			);
+
+			// Expected: only one curation (same key used for both)
+			expect(mockTransactKnowledge).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe('error handling', () => {

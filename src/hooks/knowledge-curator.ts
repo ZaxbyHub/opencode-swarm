@@ -187,9 +187,9 @@ function normalizeWriteTrigger(
 	};
 }
 
-function isEvidencePath(filePath: string | undefined | null): boolean {
+export function isEvidencePath(filePath: string | undefined | null): boolean {
 	if (!filePath) return false;
-	return /\.swarm\/+evidence\/+/i.test(filePath);
+	return /(?:^|\/)\.swarm\/+evidence\//i.test(filePath);
 }
 
 function isPlanPath(filePath: string | undefined | null): boolean {
@@ -1371,14 +1371,18 @@ export function createKnowledgeCuratorHook(
 
 		// Handle evidence file trigger
 		if (isEvidenceTrigger) {
-			// Create idempotency key for evidence: evidence:${sessionID}:${filePath}
-			const evidenceKey = `evidence:${trigger.sessionID}:${trigger.filePath}`;
+			// Compute normalized relative path (strip leading path up to and including .swarm/)
+			// Use this for both the read and the idempotency key to ensure stability
+			// across absolute vs relative path representations of the same file.
+			const relativeEvidencePath = trigger.filePath.replace(/^.*\.swarm\//, '');
+			// Create idempotency key for evidence: evidence:${sessionID}:${relativePath}
+			const evidenceKey = `evidence:${trigger.sessionID}:${relativeEvidencePath}`;
 			const lastSeenEvidence = seenRetroSections.get(evidenceKey);
 
 			// Read and parse the evidence JSON file
 			const evidenceContent = await readSwarmFileAsync(
 				directory,
-				trigger.filePath.replace(/^.*\.swarm\//, ''),
+				relativeEvidencePath,
 			);
 			if (!evidenceContent) return;
 

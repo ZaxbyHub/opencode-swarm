@@ -4,7 +4,10 @@
  */
 
 import { describe, expect, test } from 'vitest';
-import { isWriteToEvidenceFile } from '../../../src/hooks/knowledge-curator.js';
+import {
+	isEvidencePath,
+	isWriteToEvidenceFile,
+} from '../../../src/hooks/knowledge-curator.js';
 
 // ============================================================================
 // Positive matches (should return true)
@@ -385,5 +388,27 @@ describe('isWriteToEvidenceFile - case-insensitive path guard', () => {
 			path: '.Swarm/Evidence/Retro-1/evidence.json',
 		};
 		expect(isWriteToEvidenceFile(input)).toBe(true);
+	});
+});
+
+// ============================================================================
+// FB-002 regression: isEvidencePath must not match spurious substring paths
+// ============================================================================
+
+describe('isEvidencePath - FB-002 regression (no spurious substring matches)', () => {
+	test('FB-002: isEvidencePath returns false for foo.swarm/evidence/bar (substring, not directory component)', () => {
+		expect(isEvidencePath('foo.swarm/evidence/bar')).toBe(false);
+	});
+
+	test('FB-002: isEvidencePath returns false for E:/repo/foo.swarm/evidence/a.json (substring)', () => {
+		expect(isEvidencePath('E:/repo/foo.swarm/evidence/a.json')).toBe(false);
+	});
+
+	test('FB-002: isEvidencePath returns true for legitimate .swarm/evidence paths', () => {
+		expect(isEvidencePath('.swarm/evidence/bar')).toBe(true);
+		expect(isEvidencePath('E:/repo/.swarm/evidence/a.json')).toBe(true);
+		expect(
+			isEvidencePath('/project/.swarm/evidence/retro-1/evidence.json'),
+		).toBe(true);
 	});
 });

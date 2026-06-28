@@ -555,6 +555,7 @@ function isRmOption(token: string): boolean {
 
 function isDangerousRemovalTarget(rawTarget: string): boolean {
 	const target = rawTarget.replace(/\\/g, '/');
+	if (/^[A-Za-z]:[/\\]?$/.test(target)) return true;
 	return (
 		target === '/' ||
 		target === '/*' ||
@@ -1056,4 +1057,5 @@ export const _internals = {
 		createHash('sha256').update(content).digest('hex'),
 	splitMarkdownCodeSegments,
 	hasDangerousRemovalTarget,
+	isDangerousRemovalTarget,
 };
