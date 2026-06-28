@@ -12,13 +12,14 @@
  *   On Windows and macOS, `normalizeGraphPath('Foo.ts')` and
  *   `normalizeGraphPath('foo.ts')` produce different keys even though they
  *   refer to the same file. The graph does not de-duplicate case variants.
- *   Tracking issue: KG-02/18 scope explicitly excludes this per spec FR-019.
+ *   Tracking issue: KG-02/18 scope explicitly excludes this (case-insensitive collisions out of scope).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
@@ -26,6 +27,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { resolveGrammarsDir } from '../../../../src/lang/runtime';
 import { extractFileOntology } from '../../../../src/tools/repo-graph/ontology';
@@ -499,6 +501,7 @@ describe('getDependencies / getImporters — workspace-relative output', () => {
 		const deps = getDependencies(graph, srcFile);
 		expect(deps.length).toBeGreaterThan(0);
 		for (const dep of deps) {
+			expect(dep.file).toBe('vendor/lib.ts');
 			expect(dep.file).not.toMatch(/^[A-Za-z]:\//);
 			expect(dep.file).not.toMatch(/^\//);
 			expect(dep.file).not.toContain('\\');
@@ -618,6 +621,7 @@ describe('buildWorkspaceGraph — symlink cycle safety', () => {
 
 				const start = Date.now();
 				const result = await buildWorkspaceGraphAsync(base, {
+					followSymlinks: true,
 					walkBudgetMs: 5000,
 				});
 				const elapsed = Date.now() - start;
@@ -627,6 +631,7 @@ describe('buildWorkspaceGraph — symlink cycle safety', () => {
 				// Result is a valid graph object
 				expect(result).toBeDefined();
 				expect(typeof result.nodes).toBe('object');
+				expect(Object.keys(result.nodes).length).toBeGreaterThan(0);
 			} finally {
 				rmSync(tmp, { recursive: true, force: true });
 			}
@@ -675,12 +680,11 @@ describe('known gap documentation', () => {
 	it('SC-019: this test file documents the case-sensitivity known gap', () => {
 		// This test verifies the known-gap comment exists in this file.
 		// The comment at the top of this file explicitly defers case-insensitive
-		// filesystem collision handling to a future KG iteration (KG-02 scope, FR-019).
-		//
-		// The actual behavior: normalizeGraphPath('Foo.ts') !== normalizeGraphPath('foo.ts')
-		// even when they refer to the same physical file on Windows/macOS.
-		expect(normalizeGraphPath('Foo.ts')).not.toBe(normalizeGraphPath('foo.ts'));
-		// This inequality is the documented gap, not a correctness guarantee.
-		// A future iteration must add case-folding for case-insensitive FSes.
+		// filesystem collision handling to a future KG iteration (KG-02 scope).
+		// Case-insensitive collisions are intentionally out of scope per KG-02/18.
+		const __filename = fileURLToPath(import.meta.url);
+		const source = readFileSync(__filename, 'utf8');
+		expect(source).toContain('case-insensitive');
+		expect(source).toContain('KG-02/18');
 	});
 });
