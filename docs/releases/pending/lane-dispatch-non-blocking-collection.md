@@ -24,7 +24,7 @@ When dispatching lanes with `dispatch_lanes_async`:
 
 2. **Blocking join** (when independent work is exhausted): Use `wait: true` only when all independent work is done and lanes are still pending, to avoid idle waiting.
 
-3. **Settlement boundary**: Before synthesis or phase transitions, all lanes in a batch must be settled. Missing, failed, or timed-out lanes are explicit coverage gaps — mark them `BLOCKED` or `SKIPPED_WITH_REASON`, do not silently ignore them.
+3. **Settlement boundary**: Before synthesis or phase transitions, all lanes in a batch must be settled. Missing, failed, stale, or cancelled lanes are explicit coverage gaps — mark them `BLOCKED` or `SKIPPED_WITH_REASON`, do not silently ignore them.
 
 **Example polling loop:**
 
@@ -32,7 +32,7 @@ When dispatching lanes with `dispatch_lanes_async`:
 const batch = await dispatch_lanes_async(specs);
 while (true) {
   const result = await collect_lane_results(batch.batch_id); // no wait parameter = non-blocking poll
-  for (const lane of result.settled_lanes) {
+  for (const lane of result.lane_results.filter((lane) => lane.status === 'completed')) {
     const text = await retrieve_lane_output(lane.output_ref);
     const candidates = parse_lane_candidates(text);
     // ... process candidates, update ledger ...

@@ -243,6 +243,7 @@ export async function scanDocIndex(
 	const resolvedDirectory = await realpath(directory).catch(() => directory);
 	const discoveredFiles: DocManifestFile[] = [];
 	let rootReadable = false;
+	let truncated = false;
 
 	const walkDir = async (dir: string): Promise<void> => {
 		let entries: fs.Dirent[];
@@ -256,7 +257,10 @@ export async function scanDocIndex(
 		for (const entry of entries) {
 			// Stop processing as soon as the cap is reached — avoids stat-ing and
 			// reading files that will be discarded by the post-walk splice.
-			if (discoveredFiles.length >= MAX_INDEXED_FILES) return;
+			if (discoveredFiles.length >= MAX_INDEXED_FILES) {
+				truncated = true;
+				return;
+			}
 
 			const isDir = entry.isDirectory();
 			let isFile = entry.isFile();
@@ -359,7 +363,6 @@ export async function scanDocIndex(
 	);
 
 	// Limit number of indexed files
-	let truncated = false;
 	if (discoveredFiles.length > MAX_INDEXED_FILES) {
 		discoveredFiles.splice(MAX_INDEXED_FILES);
 		truncated = true;

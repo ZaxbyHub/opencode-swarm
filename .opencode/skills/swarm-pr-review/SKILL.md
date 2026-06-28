@@ -517,7 +517,7 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 
 For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts) with materially different parameters — different session, different prompt decomposition, or blocking `dispatch_lanes`.
-2. If retries fail, **deploy an equivalent alternative** and **verify equivalence**: same agent type, same prompt, same scope, same isolation. State the equivalence verification explicitly. Different dispatch mechanism (e.g., Task tool instead of `dispatch_lanes_async`) IS acceptable when these criteria are met. Use `retrieve_lane_output` to inspect the full artifact before declaring equivalence or failure.
+2. If retries fail, **deploy an equivalent alternative** and **verify equivalence**: same agent type, same prompt, same scope, same isolation. State the equivalence verification explicitly. Task is not an early-poll or empty-partial-output fallback; use it only as a last-resort equivalent dispatch mechanism after `dispatch_lanes_async` is unavailable or a settled lane result is confirmed failed/empty, and after blocking `dispatch_lanes` is unavailable or inappropriate. Use `retrieve_lane_output` to inspect the full artifact before declaring equivalence or failure.
 3. If no equivalent alternative can be verified, **report to the user as INCOMPLETE**. Present partial findings from successful lanes alongside the INCOMPLETE verdict. The user decides whether to accept reduced coverage. The architect NEVER makes that call.
 
 ### Candidate extraction via parser

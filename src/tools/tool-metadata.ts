@@ -594,12 +594,12 @@ export const TOOL_METADATA = {
 	},
 	dispatch_lanes_async: {
 		description:
-			'launch read-only advisory lanes non-blockingly and return a batch id immediately so you can keep working; poll incrementally with collect_lane_results (wait omitted or false) while doing independent investigation, or join with wait: true when you need all results',
+			'launch read-only advisory lanes non-blockingly and return a batch id plus lane session handles immediately so you can keep working; launch_timeout_ms is only a promptAsync acceptance budget, not a lane runtime timeout; poll incrementally with collect_lane_results (wait omitted or false) while doing independent investigation, or join with wait: true when you need all results',
 		agents: ['architect'],
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Use non-blocking polls to check progress and process settled lanes incrementally while continuing independent work; use blocking join only when you need all lanes settled before proceeding. Does not advance workflow gates.',
+			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates.',
 		agents: ['architect'],
 	},
 	summarize_work: {

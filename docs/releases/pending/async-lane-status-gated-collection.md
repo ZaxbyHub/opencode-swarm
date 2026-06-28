@@ -1,0 +1,9 @@
+# fix(lanes): gate async collection on child session status
+
+- `collect_lane_results` now checks OpenCode child-session status when the SDK exposes it. Busy or retrying async lanes remain pending even if the session already contains partial assistant text, so early polling cannot misclassify an in-progress lane as completed.
+- `dispatch_lanes_async` now returns batch and lane session handles immediately after recording the child sessions, while `promptAsync` launch acceptance continues in the background. `launch_timeout_ms` bounds only that acceptance path; running lanes are governed by collection/status semantics instead of a short execution timeout.
+- Non-blocking `collect_lane_results` polls include pending lane identities by default and can return completed lanes while sibling lanes remain pending/running, so architects can process ready lanes and continue independent work before the final `wait: true` join.
+- The architect prompt no longer says all delegations are performed only through Task. It now distinguishes mutation Task delegations from read-only advisory lanes, which must use `dispatch_lanes_async` plus `collect_lane_results` when async launch is available.
+- The execute, council, deep-research, and PR-review skills' fallback guidance no longer sends read-only advisory lanes straight to Task. Async lanes must be re-collected or inspected with `retrieve_lane_output`; Task is only a last-resort equivalent dispatch path after lane tools are unavailable or have produced a confirmed empty settled result.
+
+This closes failure modes where swarms launched advisory lanes successfully, collected too early, saw partial or empty output, or treated async launch as a blocking lane execution path, and then fell back to Task instead of continuing work while async lanes finished and joining their final results.

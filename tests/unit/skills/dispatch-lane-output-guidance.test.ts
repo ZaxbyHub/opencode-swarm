@@ -34,4 +34,24 @@ describe('dispatch lane full-output retrieval guidance', () => {
 			);
 		});
 	}
+
+	for (const filePath of [
+		'.opencode/skills/deep-research/SKILL.md',
+		'.claude/skills/deep-research/SKILL.md',
+		'.opencode/skills/council/SKILL.md',
+		'.claude/skills/council/SKILL.md',
+	] as const) {
+		test(`${filePath} keeps advisory lanes on lane tools before Task fallback`, () => {
+			const source = readRepoFile(filePath);
+
+			expect(source).toContain('dispatch_lanes_async');
+			expect(source).toContain('collect_lane_results');
+			expect(source).toMatch(/without\s+`wait`/);
+			expect(source).toContain('wait: false');
+			expect(source).toContain('wait: true');
+			expect(source).toContain('blocking `dispatch_lanes`');
+			expect(source).toMatch(/do not substitute\s+per-agent Task calls/);
+			expect(source).not.toContain('blocking parallel dispatch');
+		});
+	}
 });

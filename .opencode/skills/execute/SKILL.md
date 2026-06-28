@@ -204,9 +204,9 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
 
 ## Dispatch-lanes empty-output fallback
 
-When an agent dispatched via `dispatch_lanes` returns empty output (0 chars, `output_digest` matching SHA-256 of empty string `e3b0c442...b855`), this indicates a suspected incompatibility between the `dispatch_lanes` code path and that specific agent.
+This fallback applies only to a settled, blocking `dispatch_lanes` result with empty output (0 chars, `output_digest` matching SHA-256 of empty string `e3b0c442...b855`). It does **not** apply to `dispatch_lanes_async` rows that are still pending/running, an early `collect_lane_results` poll, or an async result whose full text is available through `retrieve_lane_output`.
 
-**Do NOT re-dispatch via `dispatch_lanes`** — it will fail again (confirmed pattern). Immediately retry the **same agent** via the **Task tool** (`Task(subagent_type=..., prompt=...)`), which uses a different session-creation code path. Record which dispatch mechanism succeeded for debugging.
+For read-only advisory lanes, do **not** jump straight to Task. First re-collect async lanes with `collect_lane_results` (`wait: true` when no independent work remains) and inspect any `output_ref` with `retrieve_lane_output`. If a settled blocking `dispatch_lanes` lane is genuinely empty, prefer retrying the same agent through `dispatch_lanes_async` when promptAsync is available. Use the **Task tool** (`Task(subagent_type=..., prompt=...)`) only as a last-resort equivalent dispatch mechanism after the lane tools are unavailable or have produced a confirmed empty settled result; record the same agent, same prompt, same scope, and which dispatch mechanism succeeded.
 
 If the Task tool also returns empty, **then** escalate to substitute review (4-member council without the broken agent) or surface to the user. Never fabricate or substitute a verdict for the missing agent.
 

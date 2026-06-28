@@ -114,8 +114,10 @@ Do NOT share other agents' responses at this stage.
    (synthesis outline, citation normalization, disagreement categories). Only
    use `wait: true` if lanes are still pending and no more independent work
    remains. All three lanes must be settled before proceeding to synthesis.
-   If `dispatch_lanes_async` is unavailable, use blocking parallel dispatch
-   and record that async advisory lanes were unavailable. The
+   If `dispatch_lanes_async` is unavailable, use blocking `dispatch_lanes`
+   and record that async advisory lanes were unavailable; do not substitute
+   per-agent Task calls for this fallback unless lane tools are unavailable and
+   you explicitly verify equivalent agent type, prompt, scope, and isolation. The
    `round1Responses` array will contain entries with `memberId` of
    `council_generalist`, `council_skeptic`, and `council_domain_expert` and
    `role` of `generalist`, `skeptic`, and `domain_expert` respectively. If

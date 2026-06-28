@@ -10,7 +10,6 @@ import {
 	type BackgroundDelegationRecord,
 	findByBatchId,
 	recordPendingDelegation,
-	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
@@ -26,6 +25,7 @@ const MAX_LANES = 8;
 export const MAX_PROMPT_CHARS = 80_000;
 const COMMON_PROMPT_SEPARATOR = '\n\n';
 const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const MAX_LANE_OUTPUT_CHARS = 20_000;
 const ASYNC_MESSAGE_FETCH_LIMIT = 50;
@@ -151,10 +151,21 @@ const DispatchLanesArgsSchema = z.object({
 		.min(10)
 		.max(MAX_TIMEOUT_MS)
 		.optional()
-		.describe('Per-lane session create/prompt timeout in milliseconds'),
+		.describe(
+			'Per-lane timeout in milliseconds. For blocking dispatch this covers session create and prompt execution; for async dispatch this covers launch only, never lane runtime.',
+		),
 });
 
 const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
+	launch_timeout_ms: z
+		.number()
+		.int()
+		.min(10)
+		.max(MAX_TIMEOUT_MS)
+		.optional()
+		.describe(
+			'Async launch acceptance timeout in milliseconds. This only bounds session creation and promptAsync acceptance; it is never a lane runtime timeout. Deprecated alias: timeout_ms.',
+		),
 	batch_id: z
 		.string()
 		.min(1)
@@ -191,7 +202,7 @@ const CollectLaneResultsArgsSchema = z.object({
 		.boolean()
 		.optional()
 		.describe(
-			'Include pending/running lanes in results with partial output; useful for progress checks during non-blocking polls',
+			'Include pending/running lanes in lane_results. Defaults to true for non-blocking polls and false for wait=true joins.',
 		),
 	cancel_pending: z
 		.boolean()
@@ -264,6 +275,8 @@ export interface DispatchLanesAsyncResult {
 	failed: number;
 	rejected: number;
 	max_concurrent: number;
+	launch_timeout_ms: number;
+	/** Deprecated alias for launch_timeout_ms; retained for existing callers. */
 	timeout_ms: number;
 	lane_results: DispatchLaneResult[];
 	errors?: string[];
@@ -322,6 +335,10 @@ export interface SessionOps {
 		}> | null;
 		error?: unknown;
 	}>;
+	status?: (args: { query?: { directory?: string } }) => Promise<{
+		data?: Record<string, { type?: string }> | null;
+		error?: unknown;
+	}>;
 	abort?: (args: { path: { id: string } }) => Promise<unknown>;
 	delete(args: { path: { id: string } }): Promise<unknown>;
 }
@@ -351,6 +368,10 @@ export const _test_exports = {
 	promptHash,
 	DispatchLanesArgsSchema,
 	DispatchLanesAsyncArgsSchema,
+	DEFAULT_TIMEOUT_MS,
+	DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS,
+	DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+	DEFAULT_COLLECT_TIMEOUT_MS,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
@@ -494,7 +515,10 @@ export async function executeDispatchLanesAsync(
 		lanes.length,
 		MAX_LANES,
 	);
-	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+	const launchTimeoutMs =
+		parsed.data.launch_timeout_ms ??
+		parsed.data.timeout_ms ??
+		DEFAULT_ASYNC_LAUNCH_TIMEOUT_MS;
 	const dispatcher = _internals.createParallelDispatcher({
 		enabled: true,
 		maxConcurrentTasks: maxConcurrent,
@@ -511,7 +535,7 @@ export async function executeDispatchLanesAsync(
 						dispatcher,
 						lane,
 						directory,
-						timeoutMs,
+						timeoutMs: launchTimeoutMs,
 						context,
 						batchId,
 						mode: parsed.data.mode,
@@ -532,7 +556,8 @@ export async function executeDispatchLanesAsync(
 			failed: failed.length,
 			rejected: rejected.length,
 			max_concurrent: maxConcurrent,
-			timeout_ms: timeoutMs,
+			launch_timeout_ms: launchTimeoutMs,
+			timeout_ms: launchTimeoutMs,
 			lane_results: laneResults,
 		};
 	} finally {
@@ -570,7 +595,6 @@ export async function executeCollectLaneResults(
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
 			: undefined;
-	await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
 	let records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 	if (records.length === 0) {
 		return collectFailureResult({
@@ -589,7 +613,12 @@ export async function executeCollectLaneResults(
 			records,
 			parsed.data.cancel_pending === true,
 		);
-		await sweepStaleDelegations(directory, DEFAULT_ASYNC_STALE_TIMEOUT_MS);
+		await sweepStaleAsyncLaneRecords(
+			session,
+			directory,
+			records,
+			DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+		);
 		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 		if (allSettled(records) || parsed.data.wait !== true) {
 			keepPolling = false;
@@ -608,7 +637,7 @@ export async function executeCollectLaneResults(
 	return buildCollectResult(
 		parsed.data.batch_id,
 		records,
-		parsed.data.include_pending === true,
+		parsed.data.include_pending ?? parsed.data.wait !== true,
 	);
 }
 
@@ -685,34 +714,30 @@ async function launchAsyncLane(args: {
 			);
 		}
 
-		const pendingRecord = await recordPendingDelegation(
-			args.directory,
-			{
-				correlationId: sessionId,
-				jobId: null,
-				subagentSessionId: sessionId,
-				parentSessionId:
-					args.context.sessionID ?? `dispatch_lanes_async:${args.batchId}`,
-				callID: args.batchId,
-				normalizedAgent: role,
-				swarmPrefixedAgent: args.lane.agent,
-				planTaskId: null,
-				evidenceTaskId: null,
-				batchId: args.batchId,
-				laneId: args.lane.id,
-				mode: args.mode ?? 'advisory',
-				promptHash: promptHash(args.lane, args.directory, args.batchId),
-				workspace: {
-					directory: args.directory,
-					gitHead: null,
-					dirtyHash: null,
-					prHeadSha: args.prHeadSha ?? null,
-					scope: args.scope ?? null,
-				},
-				generation: 1,
+		const pendingRecord = await recordPendingDelegation(args.directory, {
+			correlationId: sessionId,
+			jobId: null,
+			subagentSessionId: sessionId,
+			parentSessionId:
+				args.context.sessionID ?? `dispatch_lanes_async:${args.batchId}`,
+			callID: args.batchId,
+			normalizedAgent: role,
+			swarmPrefixedAgent: args.lane.agent,
+			planTaskId: null,
+			evidenceTaskId: null,
+			batchId: args.batchId,
+			laneId: args.lane.id,
+			mode: args.mode ?? 'advisory',
+			promptHash: promptHash(args.lane, args.directory, args.batchId),
+			workspace: {
+				directory: args.directory,
+				gitHead: null,
+				dirtyHash: null,
+				prHeadSha: args.prHeadSha ?? null,
+				scope: args.scope ?? null,
 			},
-			{ staleTimeoutMs: DEFAULT_ASYNC_STALE_TIMEOUT_MS },
-		);
+			generation: 1,
+		});
 		if (!pendingRecord) {
 			cleanupAsyncLaunchSession(args.session, sessionId);
 			return failedLane(
@@ -725,68 +750,12 @@ async function launchAsyncLane(args: {
 			);
 		}
 
-		const promptController = new AbortController();
-		let promptResult: { data?: unknown; error?: unknown };
-		try {
-			promptResult = await withTimeout(
-				args.session.promptAsync!({
-					path: { id: sessionId },
-					query: { directory: args.directory },
-					body: {
-						agent: args.lane.agent,
-						tools: buildReadOnlyTools(),
-						parts: [{ type: 'text', text: args.lane.prompt }],
-					},
-					signal: promptController.signal,
-				}),
-				args.timeoutMs,
-				`Lane "${args.lane.id}" session.promptAsync timed out after ${args.timeoutMs}ms`,
-				promptController,
-			);
-		} catch (error) {
-			const message = formatError(error);
-			await appendDelegationTransition(args.directory, sessionId, {
-				status: 'error',
-				result: {
-					error: message,
-					chars: message.length,
-					truncated: false,
-					digest: digestText(message),
-				},
-			});
-			cleanupAsyncLaunchSession(args.session, sessionId);
-			return failedLane(
-				args.lane,
-				role,
-				startedAt,
-				message,
-				decision.slot.slotId,
-				decision.slot.runId,
-			);
-		}
-		if (promptResult.error) {
-			const error = `session.promptAsync failed: ${formatError(promptResult.error)}`;
-			await appendDelegationTransition(args.directory, sessionId, {
-				status: 'error',
-				result: {
-					error,
-					chars: error.length,
-					truncated: false,
-					digest: digestText(error),
-				},
-			});
-			cleanupAsyncLaunchSession(args.session, sessionId);
-			return failedLane(
-				args.lane,
-				role,
-				startedAt,
-				error,
-				decision.slot.slotId,
-				decision.slot.runId,
-			);
-		}
-		await appendDelegationTransition(args.directory, sessionId, {
-			status: 'running',
+		scheduleAsyncLanePrompt({
+			session: args.session,
+			directory: args.directory,
+			sessionId,
+			lane: args.lane,
+			timeoutMs: args.timeoutMs,
 		});
 
 		return {
@@ -833,6 +802,12 @@ async function collectOnce(
 			});
 			continue;
 		}
+		const readyForCollection = await isLaneReadyForCollection(
+			session,
+			directory,
+			record.subagentSessionId,
+		);
+		if (!readyForCollection) continue;
 		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
 		try {
 			messages = await session.messages!({
@@ -879,6 +854,136 @@ async function collectOnce(
 					: {}),
 				messageCount: transcript.messageCount,
 			},
+		});
+	}
+}
+
+function scheduleAsyncLanePrompt(args: {
+	session: SessionOps;
+	directory: string;
+	sessionId: string;
+	lane: DispatchLaneSpec;
+	timeoutMs: number;
+}): void {
+	queueMicrotask(() => {
+		void startAsyncLanePrompt(args).catch(async (error) => {
+			const message = formatError(error);
+			await appendAsyncLaneLaunchError(
+				args.directory,
+				args.session,
+				args.sessionId,
+				message,
+			);
+		});
+	});
+}
+
+async function startAsyncLanePrompt(args: {
+	session: SessionOps;
+	directory: string;
+	sessionId: string;
+	lane: DispatchLaneSpec;
+	timeoutMs: number;
+}): Promise<void> {
+	const promptController = new AbortController();
+	let promptResult: { data?: unknown; error?: unknown };
+	try {
+		promptResult = await withTimeout(
+			args.session.promptAsync!({
+				path: { id: args.sessionId },
+				query: { directory: args.directory },
+				body: {
+					agent: args.lane.agent,
+					tools: buildReadOnlyTools(),
+					parts: [{ type: 'text', text: args.lane.prompt }],
+				},
+				signal: promptController.signal,
+			}),
+			args.timeoutMs,
+			`Lane "${args.lane.id}" session.promptAsync launch timed out after ${args.timeoutMs}ms`,
+			promptController,
+		);
+	} catch (error) {
+		await appendAsyncLaneLaunchError(
+			args.directory,
+			args.session,
+			args.sessionId,
+			formatError(error),
+		);
+		return;
+	}
+	if (promptResult.error) {
+		await appendAsyncLaneLaunchError(
+			args.directory,
+			args.session,
+			args.sessionId,
+			`session.promptAsync launch failed: ${formatError(promptResult.error)}`,
+		);
+		return;
+	}
+	await appendDelegationTransition(args.directory, args.sessionId, {
+		status: 'running',
+	});
+}
+
+async function appendAsyncLaneLaunchError(
+	directory: string,
+	session: SessionOps,
+	sessionId: string,
+	message: string,
+): Promise<void> {
+	await appendDelegationTransition(directory, sessionId, {
+		status: 'error',
+		result: {
+			error: message,
+			chars: message.length,
+			truncated: false,
+			digest: digestText(message),
+		},
+	});
+	cleanupAsyncLaunchSession(session, sessionId);
+}
+
+async function isLaneReadyForCollection(
+	session: SessionOps,
+	directory: string,
+	sessionId: string,
+): Promise<boolean> {
+	if (typeof session.status !== 'function') return true;
+	try {
+		const status = await session.status({ query: { directory } });
+		if (status.error || !status.data) return false;
+		const current = status.data[sessionId];
+		return current === undefined || current.type === 'idle';
+	} catch {
+		return false;
+	}
+}
+
+async function sweepStaleAsyncLaneRecords(
+	session: SessionOps,
+	directory: string,
+	records: BackgroundDelegationRecord[],
+	staleTimeoutMs: number,
+): Promise<void> {
+	if (staleTimeoutMs <= 0) return;
+	const now = _internals.now();
+	for (const record of records) {
+		if (
+			record.status !== 'pending' &&
+			record.status !== 'running' &&
+			record.status !== 'ingestion_error'
+		)
+			continue;
+		if (now - record.updatedAt <= staleTimeoutMs) continue;
+		const readyForCollection = await isLaneReadyForCollection(
+			session,
+			directory,
+			record.subagentSessionId,
+		);
+		if (!readyForCollection) continue;
+		await appendDelegationTransition(directory, record.correlationId, {
+			status: 'stale',
 		});
 	}
 }
@@ -1354,6 +1459,7 @@ function asyncFailureResult(args: {
 		failed: 0,
 		rejected: 0,
 		max_concurrent: 0,
+		launch_timeout_ms: 0,
 		timeout_ms: 0,
 		lane_results: [],
 		errors: args.errors,
@@ -1563,11 +1669,12 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id (non-blocking). After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id and lane session handles (non-blocking). launch_timeout_ms only bounds session creation and promptAsync acceptance; it is NOT a lane runtime timeout. After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
 		args: {
 			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
 			max_concurrent: DispatchLanesAsyncArgsSchema.shape.max_concurrent,
+			launch_timeout_ms: DispatchLanesAsyncArgsSchema.shape.launch_timeout_ms,
 			timeout_ms: DispatchLanesAsyncArgsSchema.shape.timeout_ms,
 			batch_id: DispatchLanesAsyncArgsSchema.shape.batch_id,
 			mode: DispatchLanesAsyncArgsSchema.shape.mode,
@@ -1586,7 +1693,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or timeout. Use non-blocking polls to check progress incrementally; use blocking join only at workflow boundaries where all results are required. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,
