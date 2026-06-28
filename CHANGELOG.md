@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.96.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.95.0...v7.96.0) (2026-06-28)
+
+
+### Features
+
+* **plan:** relocate SWARM_PLAN exports to .swarm/plan-export ([fd866d5](https://github.com/ZaxbyHub/opencode-swarm/commit/fd866d570a3ec9d7076fa57acd05ffb34a25c96e))
+* **plan:** relocate SWARM_PLAN exports to .swarm/plan-export ([3ae4b77](https://github.com/ZaxbyHub/opencode-swarm/commit/3ae4b77fe9253081b3544be8214798519d16c3b7)), closes [#852](https://github.com/ZaxbyHub/opencode-swarm/issues/852)
+
+
+### Bug Fixes
+
+* **lanes:** restore async lane background parity ([f157a21](https://github.com/ZaxbyHub/opencode-swarm/commit/f157a21f16c9376a24faabd8cbff19d4138612a8))
+* **lanes:** restore async lane background parity ([ab6c4fe](https://github.com/ZaxbyHub/opencode-swarm/commit/ab6c4fefc78292c9f0f0d3d1bcfe55b8010c772a))
+
 ## [7.95.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.94.1...v7.95.0) (2026-06-27)
 
 
