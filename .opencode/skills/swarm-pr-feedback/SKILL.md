@@ -198,15 +198,27 @@ If a source is unavailable, retry with alternative access paths. If unavailable 
 After the complete feedback ledger exists and before editing, use
 `dispatch_lanes_async` when available for independent read-only verification lanes:
 comment classification, CI/log root-cause inspection, test impact mapping,
-release/docs claim checks, and stale-branch/conflict analysis. Record each
-returned `batch_id`, then continue only ledger-safe architect work: normalize
-feedback IDs, gather deterministic PR metadata, prepare reproduction commands,
-and plan likely fix groups. Do not edit, close items, or mark feedback resolved
-from running lanes.
+release/docs claim checks, and stale-branch/conflict analysis. Partition the
+ledger so each `FB-###` item is owned by exactly one verification lane and the
+union of lanes covers the entire ledger — no feedback item may be left
+unassigned to a lane; state each lane's owned `FB-###` range in its prompt. Scale
+the lane count to the ledger size: a 1–3 item round may use a single combined
+lane, while a large multi-round intake may warrant one lane per category above.
+Cap each `dispatch_lanes_async` batch at 8 lanes (`MAX_LANES`); if the ledger
+needs more than 8 verification lanes, dispatch in sequential batches and settle
+each batch's COVERAGE GATE before the next — do not over-spawn lanes for a
+trivial round. Record each returned `batch_id`, then continue only ledger-safe
+architect work: normalize feedback IDs, gather deterministic PR metadata, prepare
+reproduction commands, and plan likely fix groups. Do not edit, close items, or
+mark feedback resolved from running lanes.
 
 Before the Verification step can mark any item `RESOLVED`, `DISPROVED`,
-`PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, call
-`collect_lane_results` with `wait: true` for every open verification batch.
+`PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`, every open
+verification batch must be fully settled. Poll with `collect_lane_results` (wait
+omitted or `false`) to process settled lanes incrementally — clustering confirmed
+items and pre-reading files for settled findings while ledger-safe work remains —
+then issue a final `collect_lane_results` with `wait: true` per batch once
+independent work is exhausted, to confirm every lane is settled.
 Missing, stale, cancelled, or failed lanes are coverage gaps that must be closed
 before marking any item RESOLVED/DISPROVED/PRE_EXISTING. Apply the COVERAGE GATE:
 retry failed lanes (max 2), deploy a verified equivalent alternative (same agent

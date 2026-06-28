@@ -123,14 +123,14 @@ synthesis lanes run, poll with `collect_lane_results` without `wait` (or
 `wait: false`) to process completed worker responses as they settle while
 continuing independent architect work between polls. Before Step 5, call
 `collect_lane_results` with `wait: true` for every open synthesis batch only if
-lanes are still pending and no independent work remains. Collect all completed
-worker responses into a candidate findings set, each finding tagged with its
-subtopic, evidence refs, and the worker's confidence. Treat missing, stale,
-cancelled, or failed lanes as explicit coverage gaps. If `dispatch_lanes_async`
-is unavailable, use blocking `dispatch_lanes` and record that async advisory
-lanes were unavailable; do not substitute per-agent Task calls for this fallback
-unless lane tools are unavailable and you explicitly verify equivalent agent
-type, prompt, scope, and isolation.
+lanes are still pending and no independent work remains. Do not advance to Step 5
+until every synthesis lane is settled. Collect all completed worker responses into
+a candidate findings set, each finding tagged with its subtopic, evidence refs,
+and the worker's confidence. Treat missing, stale, cancelled, or failed lanes as
+explicit coverage gaps. If `dispatch_lanes_async` is unavailable, use blocking
+`dispatch_lanes` and record that async advisory lanes were unavailable; do not
+substitute per-agent Task calls for this fallback unless lane tools are unavailable
+and you explicitly verify equivalent agent type, prompt, scope, and isolation.
 
 ## Step 5 — Dual-Reviewer Claim Verification
 

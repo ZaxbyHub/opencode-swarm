@@ -18,7 +18,7 @@ Read-only deep audit of a specified codebase scope using parallel explorer waves
 Parse the MODE: DEEP_DIVE header to extract:
 - `scope`: the codebase area to audit (e.g., "auth", "payment flow", "src/hooks/")
 - `profile`: one of standard | security | ux | architecture | full (default: standard)
-- `max_explorers`: integer 1..8 (default: 6, or 8 for full profile)
+- `max_explorers`: integer 1..8 — upper bound on explorer waves (default: 6, or 8 for full profile). This is a CAP, not a fixed count: scale the actual wave size to the resolved scope surface — a trivial scope needs 1–2 explorers, a typical scope 3–5, a large multi-module scope up to the cap — never fix the count in advance.
 - `output`: markdown | json (default: markdown)
 - `update_main`: boolean (default: true) — whether to fetch/ff-only main before starting
 - `allow_dirty`: boolean (default: false) — whether to proceed with uncommitted changes
@@ -51,6 +51,8 @@ Dispatch explorer waves with `dispatch_lanes_async` when available. Each wave co
 - 8 files maximum per mission
 - ~3500 total lines across all files in a mission
 - Group files by import proximity (files that import each other go in the same mission)
+
+**Partition is the contract:** missions own non-overlapping file sets — no file appears in two missions — and the union of all missions must cover every file in the Step 2 scope map. Any scope-map file not assigned to a mission is an explicit coverage gap, not an optional skip.
 
 **Profile-based lane selection — each profile activates specific lanes:**
 

@@ -128,7 +128,7 @@ Before writing under `.swarm/`, verify `.swarm/` is ignored or locally excluded.
 1. Run 0A alone.
 2. After 0A, run 0B and 0C through `dispatch_lanes_async` only if the repository is large enough to benefit. While those lanes run, the Architect continues deterministic inventory work that does not depend on their results.
 3. After 0B, run 0D and 0E through `dispatch_lanes_async` only if 0E can leave `linked_claims` blank for Architect linking in 0J. Otherwise run 0D before 0E.
-4. Preferred async batch order: batch 1 = 0F and 0G; batch 2 = 0H and 0I. Never exceed two Phase 0 agents.
+4. Preferred async batch order: batch 1 = 0F and 0G; batch 2 = 0H and 0I. Never exceed two Phase 0 agents — Phase 0 inventory units (0A→0J) form a largely sequential dependency chain, so concurrency is intentionally capped at 2 to respect that ordering rather than scaled toward the 8-lane dispatch limit.
 5. Run 0F after 0E when possible.
 6. Run 0G after 0B and 0C.
 7. Run 0H and 0I after 0B and 0C.

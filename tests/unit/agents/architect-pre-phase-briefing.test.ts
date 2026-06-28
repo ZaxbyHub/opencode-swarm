@@ -90,4 +90,81 @@ describe('PRE-PHASE BRIEFING Verification (Task 2.5)', () => {
 	test('13. skill contains "user_directives" (Phase 1 path mentions user_directives)', () => {
 		expect(skill).toContain('user_directives');
 	});
+
+	// --- Async + fan-out reality-check contract (issue: async-by-default reality report) ---
+
+	test('14. reality check dispatches asynchronously via dispatch_lanes_async', () => {
+		expect(skill).toContain('dispatch_lanes_async');
+	});
+
+	test('15. hard settlement gate joins on all_settled before downstream work', () => {
+		expect(skill).toContain('collect_lane_results');
+		expect(skill).toContain('all_settled');
+		// The gate must explicitly block spec/plan/scope, not only implementation.
+		expect(skill).toContain(
+			'No spec finalization, plan generation, plan ingestion, `declare_scope`',
+		);
+		expect(skill).toMatch(/coder, reviewer, test-engineer/);
+	});
+
+	test('16. fan-out is complexity-scaled, not a fixed count, capped at the dispatch limit', () => {
+		expect(skill).toContain('1 lane');
+		expect(skill).toContain('2–4 lanes');
+		expect(skill).toContain('8 lanes per batch');
+	});
+
+	test('17. lanes carry disjoint boundaries whose union covers every reference', () => {
+		expect(skill).toContain('non-overlapping');
+		expect(skill).toContain(
+			'union of all lanes must cover every referenced item',
+		);
+	});
+
+	test('18. async dispatch does not weaken the gate (explicit when-not-whether clause)', () => {
+		expect(skill).toContain('not fire-and-forget');
+		expect(skill).toMatch(
+			/changes \*when\* the Architect waits, never \*whether\* the gate holds/,
+		);
+	});
+
+	test('19. architect stub gate covers spec/plan/scope, not only implementation', () => {
+		// Use .filter() + exact-count assertion instead of .find() so that
+		// if the phrase is ever duplicated in a future mode stub, the test
+		// fails loudly instead of silently checking the wrong line.
+		const gateLines = prompt
+			.split('\n')
+			.filter((line) => line.includes('Complete the codebase reality report'));
+		expect(gateLines.length).toBe(1);
+		expect(gateLines[0]).toContain('spec finalization');
+		expect(gateLines[0]).toContain('plan generation');
+		expect(gateLines[0]).toContain('declare_scope');
+	});
+
+	test('20. reality-check rewrite introduces no stray template placeholders', () => {
+		const realityCheckSection = skill.slice(
+			skill.indexOf('### CODEBASE REALITY CHECK'),
+		);
+		expect(realityCheckSection).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
+		expect(realityCheckSection).not.toContain('mega_explorer');
+		expect(realityCheckSection).not.toContain('mega_sme');
+	});
+
+	test('21. each forbidden gate keyword is individually present (negative-path regression guard)', () => {
+		// If someone later removes a single keyword (e.g. 'declare_scope') from
+		// the gate line, test 19 might still pass if other keywords remain —
+		// but this test fails on any individual keyword removal.
+		const gateLines = prompt
+			.split('\n')
+			.filter((line) => line.includes('Complete the codebase reality report'));
+		expect(gateLines.length).toBe(1);
+		const gateLine = gateLines[0];
+		for (const keyword of [
+			'spec finalization',
+			'plan generation',
+			'plan ingestion',
+			'declare_scope',
+		]) {
+			expect(gateLine).toContain(keyword);
+		}
+	});
 });

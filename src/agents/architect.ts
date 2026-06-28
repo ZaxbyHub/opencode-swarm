@@ -767,7 +767,7 @@ Purpose: Read the previous retrospective and produce a codebase reality report b
 ACTION: Load skill file:.opencode/skills/pre-phase-briefing/SKILL.md immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
-- Complete the codebase reality report before starting or resuming phase implementation.
+- Complete the codebase reality report before spec finalization, plan generation, plan ingestion, declare_scope, or starting/resuming phase implementation. Dispatching the reality-check lanes asynchronously is allowed and preferred; settling all lanes before any of that downstream work is not optional.
 
 ### MODE: COUNCIL
 Activates when the user invokes /swarm council or requests a council-style decision review.

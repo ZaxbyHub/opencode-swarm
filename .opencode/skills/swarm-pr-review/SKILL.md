@@ -558,6 +558,8 @@ in the same batch unless intentionally replacing that exact lane before dispatch
 
 Explorers optimize for recall. Over-reporting is expected. Explorers produce candidates only.
 
+The six lanes are a fixed **check-type** partition (correctness / security / deps / docs / tests / performance), not an area partition: the count is intentionally constant — every PR needs all six review dimensions — and the lanes deliberately overlap by file, each receiving the same diff via `common_prompt` and viewing it through a different lens. This is the deliberate exception to surface-scaled fan-out: the base wave is a fixed six by design, never collapsed or expanded with the size of the change. Coverage is guaranteed by the six dimensions each reading the whole diff, not by partitioning files across lanes — so the disjoint-partition rule that governs area-split fan-outs does not apply to these check-type lanes.
+
 | Lane | Focus | Required checks |
 |---|---|---|
 | Lane 1: Correctness and edge cases | Logic errors, null/undefined handling, incorrect operators, async ordering, races, off-by-one, error paths | input domain, nullability, async/await, loop termination, exception behavior, backward compatibility |
