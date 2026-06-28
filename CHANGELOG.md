@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.97.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.96.0...v7.97.0) (2026-06-28)
+
+
+### Features
+
+* **architect:** async fan-out reality check and skill alignment ([2bd2541](https://github.com/ZaxbyHub/opencode-swarm/commit/2bd254145daef7949faf480660a33641d6ef355b))
+* **architect:** async fan-out reality check and skill alignment ([0c8668f](https://github.com/ZaxbyHub/opencode-swarm/commit/0c8668f3bd2f6976582097884ad6dbd8b88ed845))
+
+
+### Bug Fixes
+
+* **pr-review:** address advisory findings from swarm-pr-review ([a1e4492](https://github.com/ZaxbyHub/opencode-swarm/commit/a1e44921e32717c2854cfd826b66f7f0653a7dd0))
+
 ## [7.96.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.95.0...v7.96.0) (2026-06-28)
 
 
