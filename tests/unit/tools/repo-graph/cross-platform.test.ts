@@ -15,13 +15,7 @@
  *   Tracking issue: KG-02/18 scope explicitly excludes this per spec FR-019.
  */
 
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -34,7 +28,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { resolveGrammarsDir } from '../../../../src/lang/runtime';
-import { _internals as storageInternals } from '../../../../src/tools/repo-graph/storage';
 import { extractFileOntology } from '../../../../src/tools/repo-graph/ontology';
 import {
 	getDependencies,
@@ -42,8 +35,16 @@ import {
 	resetQueryCache,
 } from '../../../../src/tools/repo-graph/query';
 import { safeRealpathSync } from '../../../../src/tools/repo-graph/safe-realpath';
-import { createEmptyGraph, normalizeGraphPath } from '../../../../src/tools/repo-graph/types';
-import type { GraphEdge, GraphNode, RepoGraph } from '../../../../src/tools/repo-graph/types';
+import { _internals as storageInternals } from '../../../../src/tools/repo-graph/storage';
+import type {
+	GraphEdge,
+	GraphNode,
+	RepoGraph,
+} from '../../../../src/tools/repo-graph/types';
+import {
+	createEmptyGraph,
+	normalizeGraphPath,
+} from '../../../../src/tools/repo-graph/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -170,7 +171,9 @@ describe('safeRealpathSync', () => {
 	// SC-017
 	it('returns null for non-ENOENT errors (EACCES)', () => {
 		const fakeResolver = (_p: string): string => {
-			const err = Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+			const err = Object.assign(new Error('Permission denied'), {
+				code: 'EACCES',
+			});
 			throw err;
 		};
 		const result = safeRealpathSync('/any/path', '/fallback', fakeResolver);
@@ -179,7 +182,9 @@ describe('safeRealpathSync', () => {
 
 	it('returns null for EPERM errors', () => {
 		const fakeResolver = (_p: string): string => {
-			const err = Object.assign(new Error('Operation not permitted'), { code: 'EPERM' });
+			const err = Object.assign(new Error('Operation not permitted'), {
+				code: 'EPERM',
+			});
 			throw err;
 		};
 		const result = safeRealpathSync('/any/path', '/fallback', fakeResolver);
@@ -295,8 +300,14 @@ describe('extractFileOntology — CRLF line numbers', () => {
 			exports: [],
 			imports: [],
 		});
-		const lfSec = (lfResult.security ?? []).map((f) => ({ kind: f.kind, line: f.line }));
-		const crlfSec = (crlfResult.security ?? []).map((f) => ({ kind: f.kind, line: f.line }));
+		const lfSec = (lfResult.security ?? []).map((f) => ({
+			kind: f.kind,
+			line: f.line,
+		}));
+		const crlfSec = (crlfResult.security ?? []).map((f) => ({
+			kind: f.kind,
+			line: f.line,
+		}));
 		// Guard: 'const token = ...' on line 7 must be detected as secret_handling
 		expect(lfSec.length).toBeGreaterThan(0);
 		expect(crlfSec).toEqual(lfSec);
@@ -319,7 +330,10 @@ describe('extractFileOntology — CRLF line numbers', () => {
 			exports: [],
 			imports: [],
 		});
-		const lfRoutes = (lfResult.routes ?? []).map((r) => ({ method: r.method, line: r.line }));
+		const lfRoutes = (lfResult.routes ?? []).map((r) => ({
+			method: r.method,
+			line: r.line,
+		}));
 		const crlfRoutes = (crlfResult.routes ?? []).map((r) => ({
 			method: r.method,
 			line: r.line,
@@ -339,7 +353,9 @@ describe('extractFileOntology — CRLF line numbers', () => {
 			imports: [],
 		});
 		// router.get('/users', ...) is on line 3 (1-based)
-		const getUsersRoute = (result.routes ?? []).find((r) => r.path === '/users');
+		const getUsersRoute = (result.routes ?? []).find(
+			(r) => r.path === '/users',
+		);
 		expect(getUsersRoute).toBeDefined();
 		expect(getUsersRoute?.line).toBe(3);
 	});
@@ -411,7 +427,9 @@ describe('getDependencies / getImporters — workspace-relative output', () => {
 	it('getDependencies returns workspace-relative forward-slash paths', () => {
 		const graph = makeMinimalGraph();
 		const workspaceRoot = path.join(os.tmpdir(), 'graphify-test-workspace');
-		const srcFile = normalizeGraphPath(path.join(workspaceRoot, 'src', 'foo.ts'));
+		const srcFile = normalizeGraphPath(
+			path.join(workspaceRoot, 'src', 'foo.ts'),
+		);
 		const deps = getDependencies(graph, srcFile);
 		expect(deps.length).toBeGreaterThan(0);
 		for (const dep of deps) {
@@ -425,7 +443,9 @@ describe('getDependencies / getImporters — workspace-relative output', () => {
 	it('getImporters returns workspace-relative forward-slash paths', () => {
 		const graph = makeMinimalGraph();
 		const workspaceRoot = path.join(os.tmpdir(), 'graphify-test-workspace');
-		const libFile = normalizeGraphPath(path.join(workspaceRoot, 'lib', 'bar.ts'));
+		const libFile = normalizeGraphPath(
+			path.join(workspaceRoot, 'lib', 'bar.ts'),
+		);
 		const importers = getImporters(graph, libFile);
 		expect(importers.length).toBeGreaterThan(0);
 		for (const imp of importers) {
@@ -438,7 +458,9 @@ describe('getDependencies / getImporters — workspace-relative output', () => {
 	it('getDependencies output paths contain no backslashes', () => {
 		const graph = makeMinimalGraph();
 		const workspaceRoot = path.join(os.tmpdir(), 'graphify-test-workspace');
-		const srcFile = normalizeGraphPath(path.join(workspaceRoot, 'src', 'foo.ts'));
+		const srcFile = normalizeGraphPath(
+			path.join(workspaceRoot, 'src', 'foo.ts'),
+		);
 		const deps = getDependencies(graph, srcFile);
 		for (const dep of deps) {
 			expect(dep.file).not.toContain('\\');
@@ -451,8 +473,12 @@ describe('getDependencies / getImporters — workspace-relative output', () => {
 		const workspaceRoot = path.join(os.tmpdir(), 'graphify-test-workspace');
 		const graph = createEmptyGraph(workspaceRoot);
 
-		const srcFile = normalizeGraphPath(path.join(workspaceRoot, 'src', 'foo.ts'));
-		const unknownTarget = normalizeGraphPath(path.join(workspaceRoot, 'vendor', 'lib.ts'));
+		const srcFile = normalizeGraphPath(
+			path.join(workspaceRoot, 'src', 'foo.ts'),
+		);
+		const unknownTarget = normalizeGraphPath(
+			path.join(workspaceRoot, 'vendor', 'lib.ts'),
+		);
 
 		graph.nodes[srcFile] = {
 			filePath: srcFile,
@@ -501,14 +527,18 @@ describe('storage workspace containment', () => {
 
 	// SC-013: save within workspace succeeds
 	it('saveGraph succeeds when workspace is a real directory on disk', async () => {
-		const { saveGraph } = await import('../../../../src/tools/repo-graph/storage');
+		const { saveGraph } = await import(
+			'../../../../src/tools/repo-graph/storage'
+		);
 		const tmp = mkdtempSync(path.join(os.tmpdir(), 'graph-save-'));
 		const base = realpathSync(tmp);
 		try {
 			const graph = createEmptyGraph(base);
 			await saveGraph(base, graph);
 			const { existsSync } = await import('node:fs');
-			expect(existsSync(path.join(base, '.swarm', 'repo-graph.json'))).toBe(true);
+			expect(existsSync(path.join(base, '.swarm', 'repo-graph.json'))).toBe(
+				true,
+			);
 		} finally {
 			rmSync(tmp, { recursive: true, force: true });
 		}
@@ -516,11 +546,14 @@ describe('storage workspace containment', () => {
 
 	// SC-014: save with path traversal in workspace is rejected
 	it('saveGraph rejects a workspace path containing path traversal (..)', async () => {
-		const { saveGraph } = await import('../../../../src/tools/repo-graph/storage');
+		const { saveGraph } = await import(
+			'../../../../src/tools/repo-graph/storage'
+		);
 		// Use raw concatenation so path.join doesn't normalize away the `..` before
 		// validateWorkspace sees it (path.join('/tmp','ok','..','x') → '/tmp/x').
 		const sep = path.sep;
-		const traversalWorkspace = os.tmpdir() + sep + 'ok' + sep + '..' + sep + 'escape';
+		const traversalWorkspace =
+			os.tmpdir() + sep + 'ok' + sep + '..' + sep + 'escape';
 		let threw = false;
 		try {
 			await saveGraph(traversalWorkspace, createEmptyGraph(traversalWorkspace));
@@ -532,13 +565,18 @@ describe('storage workspace containment', () => {
 
 	// SC-015: symlink workspace escape rejected via DI mock
 	it('rejects when _internals.safeRealpathSync returns null (non-ENOENT error)', async () => {
-		const { saveGraph } = await import('../../../../src/tools/repo-graph/storage');
+		const { saveGraph } = await import(
+			'../../../../src/tools/repo-graph/storage'
+		);
 		const tmp = mkdtempSync(path.join(os.tmpdir(), 'graph-escape-'));
 		const base = realpathSync(tmp);
 		try {
 			const graph = createEmptyGraph(base);
 			// Simulate a non-ENOENT error during realpath resolution — saveGraph must throw
-			storageInternals.safeRealpathSync = (_targetPath: string, _fallback: string) => null;
+			storageInternals.safeRealpathSync = (
+				_targetPath: string,
+				_fallback: string,
+			) => null;
 
 			let threw = false;
 			try {
@@ -579,7 +617,9 @@ describe('buildWorkspaceGraph — symlink cycle safety', () => {
 				symlinkSync(dirA, path.join(dirB, 'linkToA'), 'junction');
 
 				const start = Date.now();
-				const result = await buildWorkspaceGraphAsync(base, { walkBudgetMs: 5000 });
+				const result = await buildWorkspaceGraphAsync(base, {
+					walkBudgetMs: 5000,
+				});
 				const elapsed = Date.now() - start;
 
 				// Must complete (not hang); 5 s budget is very generous
