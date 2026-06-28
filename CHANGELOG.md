@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.98.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.98.0...v7.98.1) (2026-06-28)
+
+
+### Bug Fixes
+
+* **knowledge:** harden curator and validator safety paths ([14456b0](https://github.com/ZaxbyHub/opencode-swarm/commit/14456b05e1d795b711922e8eb552b1329e659ecd))
+* **pr-1554:** address 3 PR feedback items (round 1) ([f79f0bf](https://github.com/ZaxbyHub/opencode-swarm/commit/f79f0bfe2a2ff579716087f1be2b30a72ff1a113))
+
 ## [7.98.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.97.0...v7.98.0) (2026-06-28)
 
 
