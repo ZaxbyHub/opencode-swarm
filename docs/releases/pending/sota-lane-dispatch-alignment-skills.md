@@ -39,13 +39,21 @@ Why:
   that read as magic numbers. Aligning them keeps the dispatch discipline
   consistent across the architect's read-only fan-outs.
 
-Scope: documentation/skill guidance only. Files: .opencode/skills/swarm-pr-feedback,
-.opencode/skills/deep-research, .opencode/skills/deep-dive (+ .claude mirror),
-.opencode/skills/swarm-pr-review, .opencode/skills/codebase-review-swarm/references/review-protocol-v8.2.md.
+Scope: documentation/skill guidance only. Files:
+`.opencode/skills/swarm-pr-feedback/SKILL.md`,
+`.opencode/skills/deep-research/SKILL.md`,
+`.claude/skills/deep-research/SKILL.md` (mirror),
+`.opencode/skills/deep-dive/SKILL.md`,
+`.claude/skills/deep-dive/SKILL.md` (mirror),
+`.opencode/skills/swarm-pr-review/SKILL.md`,
+`.opencode/skills/codebase-review-swarm/references/review-protocol-v8.2.md`.
 
 Deliberately left unchanged (intentional-by-design, not gaps): council's fixed
-three-member General Council, deep-research's bounded max_researchers, and
-codebase-review-swarm's already-SOTA async/settlement discipline.
+three-member General Council (the size is fixed by the NSED peer-review
+protocol: generalist/skeptic/domain-expert triad), deep-research's bounded
+max_researchers (defined as integer 1..6 by the deep-research protocol, below the
+8-lane dispatch cap), and codebase-review-swarm's already-SOTA async/settlement
+discipline.
 
 Migration: none. All settlement gates, COVERAGE GATEs, and fixed-count
 invariants (e.g. swarm-pr-review's six base lanes) are preserved; the edits are

@@ -128,13 +128,16 @@ describe('PRE-PHASE BRIEFING Verification (Task 2.5)', () => {
 	});
 
 	test('19. architect stub gate covers spec/plan/scope, not only implementation', () => {
-		const gateLine = prompt
+		// Use .filter() + exact-count assertion instead of .find() so that
+		// if the phrase is ever duplicated in a future mode stub, the test
+		// fails loudly instead of silently checking the wrong line.
+		const gateLines = prompt
 			.split('\n')
-			.find((line) => line.includes('Complete the codebase reality report'));
-		expect(gateLine).toBeDefined();
-		expect(gateLine).toContain('spec finalization');
-		expect(gateLine).toContain('plan generation');
-		expect(gateLine).toContain('declare_scope');
+			.filter((line) => line.includes('Complete the codebase reality report'));
+		expect(gateLines.length).toBe(1);
+		expect(gateLines[0]).toContain('spec finalization');
+		expect(gateLines[0]).toContain('plan generation');
+		expect(gateLines[0]).toContain('declare_scope');
 	});
 
 	test('20. reality-check rewrite introduces no stray template placeholders', () => {
@@ -144,5 +147,24 @@ describe('PRE-PHASE BRIEFING Verification (Task 2.5)', () => {
 		expect(realityCheckSection).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
 		expect(realityCheckSection).not.toContain('mega_explorer');
 		expect(realityCheckSection).not.toContain('mega_sme');
+	});
+
+	test('21. each forbidden gate keyword is individually present (negative-path regression guard)', () => {
+		// If someone later removes a single keyword (e.g. 'declare_scope') from
+		// the gate line, test 19 might still pass if other keywords remain —
+		// but this test fails on any individual keyword removal.
+		const gateLines = prompt
+			.split('\n')
+			.filter((line) => line.includes('Complete the codebase reality report'));
+		expect(gateLines.length).toBe(1);
+		const gateLine = gateLines[0];
+		for (const keyword of [
+			'spec finalization',
+			'plan generation',
+			'plan ingestion',
+			'declare_scope',
+		]) {
+			expect(gateLine).toContain(keyword);
+		}
 	});
 });
