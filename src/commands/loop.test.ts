@@ -121,10 +121,35 @@ describe('handleLoopCommand', () => {
 		expect(result).toContain('requires a value');
 	});
 
-	test('rejects unknown flags', async () => {
-		const result = await handleLoopCommand(TEST_DIR, ['obj', '--turbo']);
+	test('rejects leading unknown flags', async () => {
+		const result = await handleLoopCommand(TEST_DIR, ['--turbo', 'obj']);
 		expect(result).toContain('Error:');
 		expect(result).toContain('--turbo');
+	});
+
+	test('treats unknown flag-like tokens after objective start as objective text', async () => {
+		const result = await handleLoopCommand(TEST_DIR, [
+			'run',
+			'tests',
+			'with',
+			'`--all`',
+		]);
+		expect(result.startsWith('[MODE: LOOP')).toBe(true);
+		expect(result).toContain('run tests with `--all`');
+	});
+
+	test('supports -- delimiter before objective text', async () => {
+		const result = await handleLoopCommand(TEST_DIR, [
+			'--autonomy',
+			'auto',
+			'--',
+			'--all',
+			'is',
+			'objective',
+			'text',
+		]);
+		expect(result.startsWith('[MODE: LOOP')).toBe(true);
+		expect(result).toContain('--all is objective text');
 	});
 
 	test('strips injected [MODE: ...] headers from objective', async () => {

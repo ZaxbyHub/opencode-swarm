@@ -25,6 +25,9 @@ ends each cycle with a learning-capture step so the next cycle is cheaper.
   in the npm package, and a `MODE: LOOP` dispatch block in the architect prompt.
 - Flags: `--max-cycles 1..5` (default 3), `--autonomy checkpoint|auto`
   (default auto), `--depth standard|exhaustive`, `--resume`.
+- Objective text may contain flag-looking tokens after the objective starts
+  (for example backticked `--all`) without being rejected as unknown loop flags;
+  `--` is also supported as an explicit end-of-options delimiter.
 
 **2. Fix: compound `/swarm <a> <b>` commands were unrecognized via their TUI
 shortcuts.** OpenCode registers each shortcut under a dash-joined name (e.g.

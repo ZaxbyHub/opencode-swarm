@@ -83,7 +83,10 @@ function parseArgs(args: string[]): ParsedArgs {
 	while (i < args.length) {
 		const token = args[i];
 
-		if (token === '--max-cycles') {
+		if (token === '--') {
+			result.rest.push(...args.slice(i + 1));
+			break;
+		} else if (token === '--max-cycles') {
 			if (i + 1 >= args.length) {
 				return { ...result, error: `Flag "${token}" requires a value` };
 			}
@@ -126,6 +129,11 @@ function parseArgs(args: string[]): ParsedArgs {
 		} else if (token === '--resume') {
 			result.resume = true;
 		} else if (token.startsWith('--')) {
+			if (result.rest.length > 0) {
+				result.rest.push(token);
+				i++;
+				continue;
+			}
 			return { ...result, error: `Unknown flag "${token}"` };
 		} else {
 			result.rest.push(token);
