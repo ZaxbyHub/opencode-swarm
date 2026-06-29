@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.98.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.98.1...v7.98.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **pr-1555:** address 4 PR feedback items (round 1) ([f3bfd27](https://github.com/ZaxbyHub/opencode-swarm/commit/f3bfd270dfe668466ffbcb3b83da856b380e3822))
+
+
+### Performance Improvements
+
+* **swarm-hooks:** per-invocation plan read cache and session teardown on close ([8fcce8c](https://github.com/ZaxbyHub/opencode-swarm/commit/8fcce8ce1eb17ad5976dafa5eb9e30e305663242))
+
 ## [7.98.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.98.0...v7.98.1) (2026-06-28)
 
 
