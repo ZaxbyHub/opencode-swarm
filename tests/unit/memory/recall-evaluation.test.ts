@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	computeMemoryContentHash,
+	createConfiguredMemoryProvider,
 	createMemoryGateway,
+	createMemoryId,
+	DEFAULT_MEMORY_CONFIG,
 	evaluateMemoryRecallFixtures,
 	LocalJsonlMemoryProvider,
 	loadRecallEvaluationFixtures,
+	type MemoryRecord,
+	type RecallRequest,
 } from '../../../src/memory';
 
 const fixtureDirectory = path.resolve('tests', 'fixtures', 'memory-recall');
@@ -25,6 +32,9 @@ describe('memory recall evaluation harness', () => {
 		expect(fixtures.map((fixture) => fixture.name).sort()).toEqual([
 			'adversarial-memory',
 			'cross-repo-isolation',
+			'paraphrase-auth',
+			'paraphrase-concurrency',
+			'paraphrase-deployment',
 			'repo-conventions',
 			'stale-memory',
 			'testing-patterns',
@@ -103,8 +113,8 @@ describe('memory recall evaluation harness', () => {
 		);
 		expect(report.providers).toEqual(['local-jsonl', 'sqlite']);
 		expect(report.modes).toEqual(['manual', 'injection', 'curator']);
-		expect(report.summary.fixture_count).toBe(5);
-		expect(report.summary.run_count).toBe(30);
+		expect(report.summary.fixture_count).toBe(8);
+		expect(report.summary.run_count).toBe(48);
 		expect(report.summary.passed_run_count).toBeGreaterThanOrEqual(28);
 		expect(report.summary.injection_count).toBeGreaterThan(0);
 		expect(report.summary.noisy_injection_count).toBe(0);
@@ -112,12 +122,19 @@ describe('memory recall evaluation harness', () => {
 		expect(report.summary.cross_scope_leak_count).toBe(0);
 		expect(report.summary.stale_memory_count).toBe(0);
 		expect(report.summary['precision@k']).toBeGreaterThan(0);
-		expect(report.summary['recall@k']).toBe(1);
+
+		const nonParaphraseRuns = report.runs.filter(
+			(run) => !run.fixture.startsWith('paraphrase-'),
+		);
+		for (const run of nonParaphraseRuns) {
+			expect(run.metrics['recall@k']).toBe(1);
+			expect(run.metrics['precision@k']).toBeGreaterThan(0);
+		}
 
 		const reparsed = JSON.parse(JSON.stringify(report));
 		expect(reparsed.summary).toMatchObject({
-			fixture_count: 5,
-			run_count: 30,
+			fixture_count: 8,
+			run_count: 48,
 			noisy_injection_count: 0,
 			same_scope_noise_count: report.summary.same_scope_noise_count,
 			cross_scope_leak_count: 0,
@@ -228,7 +245,154 @@ describe('memory recall evaluation harness', () => {
 			expect(run.retrieved_labels).toEqual(['current-memory-export']);
 		}
 	});
+
+	test('paraphrase fixtures: precision@k == 0 with embeddings disabled (lexical-only)', async () => {
+		const allFixtures = await loadRecallEvaluationFixtures(fixtureDirectory);
+		const paraphraseFixtures = allFixtures.filter((fixture) =>
+			fixture.name.startsWith('paraphrase-'),
+		);
+		expect(paraphraseFixtures.map((f) => f.name).sort()).toEqual([
+			'paraphrase-auth',
+			'paraphrase-concurrency',
+			'paraphrase-deployment',
+		]);
+
+		for (const fixture of paraphraseFixtures) {
+			const { precisionAtK } = await recallWithConfig(fixture, {
+				...DEFAULT_MEMORY_CONFIG,
+				enabled: true,
+				provider: 'local-jsonl',
+			});
+			expect(precisionAtK).toBe(0);
+		}
+	});
+
+	test('paraphrase fixtures: precision@k > 0 with embeddings enabled (conditional on sqlite-vec)', async () => {
+		if (!isSqliteVecAvailable()) {
+			console.log(
+				'SKIP: sqlite-vec not available locally; embeddings-on paraphrase assertion skipped',
+			);
+			return;
+		}
+
+		const allFixtures = await loadRecallEvaluationFixtures(fixtureDirectory);
+		const paraphraseFixtures = allFixtures.filter((fixture) =>
+			fixture.name.startsWith('paraphrase-'),
+		);
+
+		for (const fixture of paraphraseFixtures) {
+			const { precisionAtK } = await recallWithConfig(fixture, {
+				...DEFAULT_MEMORY_CONFIG,
+				enabled: true,
+				provider: 'sqlite',
+				embeddings: {
+					...DEFAULT_MEMORY_CONFIG.embeddings,
+					enabled: true,
+				},
+			});
+			expect(precisionAtK).toBeGreaterThan(0);
+		}
+	});
 });
+
+const DEFAULT_TIMESTAMP = '2026-05-26T12:00:00.000Z';
+
+function materializeParaphraseRecords(fixture: RecallEvaluationFixture): {
+	records: MemoryRecord[];
+	expectedIds: Set<string>;
+} {
+	const idsByLabel = new Map<string, string>();
+	const records: MemoryRecord[] = [];
+	for (const record of fixture.records) {
+		const base = {
+			scope: record.scope,
+			kind: record.kind,
+			text: record.text,
+		};
+		const id = createMemoryId(base);
+		idsByLabel.set(record.label, id);
+		records.push({
+			id,
+			...base,
+			tags: record.tags ?? [],
+			confidence: record.confidence ?? 0.8,
+			stability: record.stability ?? 'durable',
+			source: record.source ?? { type: 'manual', ref: fixture.name },
+			createdAt: DEFAULT_TIMESTAMP,
+			updatedAt: DEFAULT_TIMESTAMP,
+			contentHash: computeMemoryContentHash(base),
+			metadata: {
+				...(record.metadata ?? {}),
+				fixture: fixture.name,
+				fixtureLabel: record.label,
+			},
+		});
+	}
+	const expectedIds = new Set(
+		fixture.expectedLabels.map((label) => {
+			const id = idsByLabel.get(label);
+			if (!id) {
+				throw new Error(
+					`fixture ${fixture.name} expected unknown label ${label}`,
+				);
+			}
+			return id;
+		}),
+	);
+	return { records, expectedIds };
+}
+
+async function recallWithConfig(
+	fixture: RecallEvaluationFixture,
+	config: MemoryConfig,
+): Promise<{
+	precisionAtK: number;
+	recallAtK: number;
+	retrievedIds: string[];
+}> {
+	const root = await fs.realpath(
+		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-memory-paraphrase-')),
+	);
+	tmpRoots.push(root);
+	const provider = createConfiguredMemoryProvider(root, config);
+	try {
+		await provider.initialize?.();
+		const { records, expectedIds } = materializeParaphraseRecords(fixture);
+		for (const record of records) {
+			await provider.upsert(record);
+		}
+		const request: RecallRequest = {
+			query: fixture.query,
+			task: fixture.task,
+			agentRole: fixture.agentRole,
+			mode: 'manual',
+			scopes: fixture.scopes,
+			kinds: fixture.kinds,
+			maxItems: fixture.maxItems ?? fixture.k ?? 5,
+			tokenBudget: fixture.tokenBudget ?? 1000,
+			minScore: 0,
+		};
+		const items = await provider.recall(request);
+		const retrievedIds = items.map((item) => item.record.id);
+		const topK = retrievedIds.slice(0, request.maxItems);
+		const relevantAtK = topK.filter((id) => expectedIds.has(id)).length;
+		const precisionAtK = relevantAtK / Math.max(request.maxItems, 1);
+		const recallAtK = relevantAtK / Math.max(expectedIds.size, 1);
+		return { precisionAtK, recallAtK, retrievedIds };
+	} finally {
+		await provider.close?.();
+	}
+}
+
+function isSqliteVecAvailable(): boolean {
+	try {
+		const req = createRequire(import.meta.url);
+		req.resolve('@sqlite/sqlite-vec/package.json');
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 async function createFixtureDirectory(
 	files: Record<string, unknown>,

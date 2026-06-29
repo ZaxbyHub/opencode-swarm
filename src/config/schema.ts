@@ -1296,6 +1296,63 @@ export const MemoryConfigSchema = z.object({
 			},
 		}),
 	hardDelete: z.boolean().default(false),
+	embeddings: z
+		.object({
+			/** Enable dense embedding + retrieval-fusion. Default: false (opt-in). */
+			enabled: z.boolean().default(false),
+			/** Embedding model identifier. */
+			model: z.string().default('Xenova/all-MiniLM-L6-v2'),
+			/** Embedding vector dimension. */
+			dimension: z.number().int().min(1).default(384),
+			/** Pinned model version (empty string = latest). */
+			version: z.string().optional(),
+			/** Max cached embedding entries (FR-008). */
+			cacheSize: z.number().int().min(1).default(256),
+		})
+		.default({
+			enabled: false,
+			model: 'Xenova/all-MiniLM-L6-v2',
+			dimension: 384,
+			cacheSize: 256,
+		}),
+	retrieval: z
+		.object({
+			/** RRF (Reciprocal Rank Fusion) k parameter. */
+			rrfK: z.number().int().min(1).default(60),
+			/** Fusion weights for lexical, dense, and metadata signals. */
+			weights: z
+				.object({
+					lexical: z.number().min(0).max(1).default(0.5),
+					dense: z.number().min(0).max(1).default(0.4),
+					metadata: z.number().min(0).max(1).default(0.1),
+				})
+				.default({
+					lexical: 0.5,
+					dense: 0.4,
+					metadata: 0.1,
+				}),
+			/** Optional cross-encoder rerank step. */
+			rerank: z
+				.object({
+					enabled: z.boolean().default(false),
+					model: z.string().optional(),
+				})
+				.default({ enabled: false }),
+			/** Max retrieval latency budget in ms (FR-009). */
+			latencyBudgetMs: z.number().int().min(0).default(250),
+		})
+		.default({
+			rrfK: 60,
+			weights: {
+				lexical: 0.5,
+				dense: 0.4,
+				metadata: 0.1,
+			},
+			rerank: {
+				enabled: false,
+			},
+			latencyBudgetMs: 250,
+		}),
 });
 
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;

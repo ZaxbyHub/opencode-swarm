@@ -1,0 +1,64 @@
+{
+	"name": "paraphrase-deployment",
+	"query": "ship code to production",
+	"task": "Deploy code to production safely.",
+	"agentRole": "devops-engineer",
+	"scopes": [
+		{
+			"type": "repository",
+			"repoId": "opencode-swarm"
+		}
+	],
+	"kinds": ["repo_convention", "code_pattern"],
+	"k": 2,
+	"maxItems": 2,
+	"tokenBudget": 1000,
+	"expectedLabels": ["deployment-cicd-pipeline"],
+	"records": [
+		{
+			"label": "deployment-cicd-pipeline",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "continuous integration deployment pipeline release",
+			"tags": ["deployment", "ci", "cd"],
+			"confidence": 0.95,
+			"source": {
+				"type": "manual",
+				"ref": "deployment-cicd-pipeline"
+			}
+		},
+		{
+			"label": "deployment-noise-1",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "code_pattern",
+			"text": "Ship code to production through the CI/CD pipeline.",
+			"tags": ["ship", "production", "pipeline"],
+			"confidence": 0.9,
+			"source": {
+				"type": "file",
+				"filePath": "src/deploy/pipeline.ts"
+			}
+		},
+		{
+			"label": "deployment-noise-2",
+			"scope": {
+				"type": "repository",
+				"repoId": "opencode-swarm"
+			},
+			"kind": "repo_convention",
+			"text": "Production deployments require manual approval before release.",
+			"tags": ["production", "deployment", "approval"],
+			"confidence": 0.85,
+			"source": {
+				"type": "file",
+				"filePath": "docs/deployment.md"
+			}
+		}
+	]
+}

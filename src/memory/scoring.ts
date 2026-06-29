@@ -15,6 +15,7 @@ export interface RecallScoringDiagnostics {
 	returnedCount: number;
 	noSignalCount: number;
 	belowThresholdCount: number;
+	fusionActive?: boolean;
 }
 
 /**
