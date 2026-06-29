@@ -1,18 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { handleDarkMatterCommand } from '../../../src/commands/dark-matter.js';
 import type {
 	CoChangeEntry,
 	DarkMatterOptions,
 } from '../../../src/tools/co-change-analyzer.js';
 
-const mockDetectDarkMatter = vi.fn();
-const mockFormatDarkMatterOutput = vi.fn();
-const mockDarkMatterToKnowledgeEntries = vi.fn();
-const mockAppendKnowledge = vi.fn();
-const mockResolveSwarmKnowledgePath = vi.fn();
-const mockConsoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+const mockDetectDarkMatter = mock();
+const mockFormatDarkMatterOutput = mock();
+const mockDarkMatterToKnowledgeEntries = mock();
+const mockAppendKnowledge = mock();
+const mockResolveSwarmKnowledgePath = mock();
+const mockConsoleWarn = spyOn(console, 'warn').mockImplementation(() => {});
 
-vi.mock('../../../src/tools/co-change-analyzer.js', () => ({
+mock.module('../../../src/tools/co-change-analyzer.js', () => ({
 	detectDarkMatter: mockDetectDarkMatter,
 	formatDarkMatterOutput: mockFormatDarkMatterOutput,
 	darkMatterToKnowledgeEntries: mockDarkMatterToKnowledgeEntries,
@@ -25,24 +25,24 @@ vi.mock('../../../src/tools/co-change-analyzer.js', () => ({
 	},
 }));
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	resolveSwarmKnowledgePath: mockResolveSwarmKnowledgePath,
-	resolveSwarmRejectedPath: vi.fn(
+	resolveSwarmRejectedPath: mock(
 		() => '/test/dir/.swarm/knowledge-rejected.jsonl',
 	),
-	resolveHiveKnowledgePath: vi.fn(() => '/hive/shared-learnings.jsonl'),
-	resolveHiveRejectedPath: vi.fn(() => '/hive/shared-learnings-rejected.jsonl'),
-	readKnowledge: vi.fn(async () => []),
-	readRejectedLessons: vi.fn(async () => []),
+	resolveHiveKnowledgePath: mock(() => '/hive/shared-learnings.jsonl'),
+	resolveHiveRejectedPath: mock(() => '/hive/shared-learnings-rejected.jsonl'),
+	readKnowledge: mock(async () => []),
+	readRejectedLessons: mock(async () => []),
 	appendKnowledge: mockAppendKnowledge,
-	rewriteKnowledge: vi.fn(async () => {}),
-	appendRejectedLesson: vi.fn(async () => {}),
-	normalize: vi.fn((text: string) => text),
-	wordBigrams: vi.fn(() => new Set()),
-	jaccardBigram: vi.fn(() => 0),
-	findNearDuplicate: vi.fn(() => undefined),
-	computeConfidence: vi.fn(() => 0.5),
-	inferTags: vi.fn(() => []),
+	rewriteKnowledge: mock(async () => {}),
+	appendRejectedLesson: mock(async () => {}),
+	normalize: mock((text: string) => text),
+	wordBigrams: mock(() => new Set()),
+	jaccardBigram: mock(() => 0),
+	findNearDuplicate: mock(() => undefined),
+	computeConfidence: mock(() => 0.5),
+	inferTags: mock(() => []),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -51,7 +51,7 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 
 describe('handleDarkMatterCommand (adversarial)', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 		mockDetectDarkMatter.mockResolvedValue([]);
 		mockFormatDarkMatterOutput.mockReturnValue(
 			'## Dark Matter: Hidden Couplings\n\nNo hidden couplings detected.',
@@ -325,7 +325,7 @@ describe('handleDarkMatterCommand (adversarial)', () => {
 
 describe('Knowledge persistence adversarial tests', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 		mockDetectDarkMatter.mockResolvedValue([]);
 		mockFormatDarkMatterOutput.mockReturnValue(
 			'## Dark Matter: Hidden Couplings\n\nNo hidden couplings detected.',

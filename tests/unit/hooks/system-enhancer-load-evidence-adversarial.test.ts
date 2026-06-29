@@ -13,30 +13,30 @@
  * - What happens when all loadEvidence calls return non-found across many tasks
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Create mock functions before vi.mock to ensure they're available in the mock
-const mockLoadEvidence = vi.fn();
-const mockListEvidenceTaskIds = vi.fn();
-const mockLoadPlan = vi.fn();
-const mockLoadPlanJsonOnly = vi.fn();
+// Create mock functions before mock.module to ensure they're available in the mock
+const mockLoadEvidence = mock();
+const mockListEvidenceTaskIds = mock();
+const mockLoadPlan = mock();
+const mockLoadPlanJsonOnly = mock();
 
 // Mock the evidence/manager module BEFORE importing system-enhancer
-vi.mock('../../../src/evidence/manager.js', () => ({
+mock.module('../../../src/evidence/manager.js', () => ({
 	loadEvidence: mockLoadEvidence,
 	listEvidenceTaskIds: mockListEvidenceTaskIds,
-	validateProjectRoot: vi.fn(),
+	validateProjectRoot: mock(),
 }));
 
 // Mock the plan/manager module
-vi.mock('../../../src/plan/manager.js', () => ({
+mock.module('../../../src/plan/manager.js', () => ({
 	loadPlan: mockLoadPlan,
 	loadPlanJsonOnly: mockLoadPlanJsonOnly,
-	derivePlanMarkdown: vi.fn((plan: any) => '# Derived Plan\n'),
-	savePlan: vi.fn(),
-	updateTaskStatus: vi.fn(),
-	migrateLegacyPlan: vi.fn(),
-	regeneratePlanMarkdown: vi.fn(),
+	derivePlanMarkdown: mock((plan: any) => '# Derived Plan\n'),
+	savePlan: mock(),
+	updateTaskStatus: mock(),
+	migrateLegacyPlan: mock(),
+	regeneratePlanMarkdown: mock(),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));

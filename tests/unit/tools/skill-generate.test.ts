@@ -23,7 +23,7 @@ const mockGenerateSkills = mock(async () => ({
 // Module-level mock — must be before the tool import
 mock.module('../../../src/services/skill-generator.js', () => ({
 	generateSkills: mockGenerateSkills,
-	listSkills: async () => ({ drafts: [], active: [] }),
+	listSkills: async () => ({ drafts: [], active: [], stale: [] }),
 	activateProposal: async () => ({}),
 	inspectSkill: async () => ({}),
 	regenerateSkill: async () => ({}),

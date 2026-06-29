@@ -20,6 +20,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realFs from 'node:fs';
+import * as realFsPromises from 'node:fs/promises';
 import {
 	type ProjectContext,
 	type RankedEntry,
@@ -105,11 +107,13 @@ mock.module('../../../src/hooks/knowledge-store.js', async () => {
 
 // Mock node:fs
 mock.module('node:fs', () => ({
+	...realFs,
 	existsSync: mock(() => false),
 }));
 
 // Mock node:fs/promises
 mock.module('node:fs/promises', () => ({
+	...realFsPromises,
 	mkdir: mock(async () => {}),
 	readFile: mock(async () => ''),
 	writeFile: mock(async () => {}),

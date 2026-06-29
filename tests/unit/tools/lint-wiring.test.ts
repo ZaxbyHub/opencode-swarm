@@ -1,5 +1,14 @@
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
+import * as realFs from 'node:fs';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
 	AdditionalLinter,
 	LintErrorResult,
@@ -12,23 +21,25 @@ import {
 } from '../../../src/tools/lint';
 
 // Mock node:fs
-const mockExistsSync = vi.fn();
-vi.mock('node:fs', () => ({
+const mockExistsSync = mock();
+mock.module('node:fs', () => ({
+	...realFs,
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	default: {
+		...realFs,
 		existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	},
 }));
 
 // Mock isCommandAvailable from build/discovery
-const mockIsCommandAvailable = vi.fn().mockReturnValue(true);
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock(() => true);
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
 }));
 
 // Mock warn from utils
-const mockWarn = vi.fn();
-vi.mock('../../../src/utils', () => ({
+const mockWarn = mock();
+mock.module('../../../src/utils', () => ({
 	warn: (...args: unknown[]) => mockWarn(...args),
 }));
 
@@ -43,9 +54,10 @@ const makeStream = (content: string) =>
 
 describe('getAdditionalLinterCommand', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(true);
-		mockExistsSync.mockReturnValue(false);
+		mock.restore();
+		mock.clearAllMocks();
+		mockIsCommandAvailable.mockImplementation(() => true);
+		mockExistsSync.mockImplementation(() => false);
 	});
 
 	describe('ruff', () => {
@@ -103,13 +115,13 @@ describe('getAdditionalLinterCommand', () => {
 				// Match both gradlew (Unix) and gradlew.bat (Windows)
 				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 			});
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual([gradlewPath, 'checkstyleMain']);
 		});
 
 		it('check mode with no gradlew but gradle available returns gradle checkstyleMain', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'gradle',
 			);
@@ -118,8 +130,8 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode with neither gradlew nor gradle returns mvn checkstyle:check', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual(['mvn', 'checkstyle:check']);
 		});
@@ -136,7 +148,7 @@ describe('getAdditionalLinterCommand', () => {
 			mockExistsSync.mockImplementation((p: string) =>
 				p.endsWith('gradlew.bat'),
 			);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual([gradlewBatPath, 'checkstyleMain']);
 
@@ -154,7 +166,7 @@ describe('getAdditionalLinterCommand', () => {
 			mockExistsSync.mockImplementation((p: string) => {
 				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
 			});
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('checkstyle', 'fix', '/test');
 			expect(result).toEqual([gradlewPath, 'checkstyleMain']);
 		});
@@ -250,13 +262,13 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode without bundle returns rubocop', () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('rubocop', 'check', '/test');
 			expect(result).toEqual(['rubocop']);
 		});
 
 		it('fix mode without bundle returns rubocop -A', () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			const result = getAdditionalLinterCommand('rubocop', 'fix', '/test');
 			expect(result).toEqual(['rubocop', '-A']);
 		});
@@ -267,13 +279,14 @@ describe('runAdditionalLint', () => {
 	let originalSpawn: typeof Bun.spawn;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
-		mockIsCommandAvailable.mockReturnValue(true);
-		mockExistsSync.mockReturnValue(false);
+		mock.restore();
+		mockIsCommandAvailable.mockImplementation(true);
+		mockExistsSync.mockImplementation(false);
 		originalSpawn = Bun.spawn;
 	});
 
 	afterEach(() => {
+		mock.restore();
 		Bun.spawn = originalSpawn;
 	});
 
@@ -283,7 +296,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -301,7 +314,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(1),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -319,7 +332,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'fix', '/test');
 
@@ -332,7 +345,7 @@ describe('runAdditionalLint', () => {
 	});
 
 	it('command execution throws error returns LintErrorResult with success:false and Execution failed error', async () => {
-		Bun.spawn = vi.fn().mockImplementation(() => {
+		Bun.spawn = mock(() => () => {
 			throw new Error('Command not found');
 		}) as typeof Bun.spawn;
 
@@ -350,7 +363,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -369,7 +382,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream('stderr message'),
 			exited: Promise.resolve(0),
 		};
-		Bun.spawn = vi.fn().mockReturnValue(mockProc) as typeof Bun.spawn;
+		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -385,7 +398,7 @@ describe('runAdditionalLint', () => {
 			stderr: makeStream(''),
 			exited: Promise.resolve(0),
 		};
-		const mockSpawn = vi.fn().mockReturnValue(mockProc);
+		const mockSpawn = mock(() => mockProc);
 		Bun.spawn = mockSpawn as typeof Bun.spawn;
 
 		await runAdditionalLint('ruff', 'check', '/custom/cwd');

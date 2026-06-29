@@ -7,33 +7,31 @@
  * - Leakage of unintended data in the summary payload
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
 
 // Mock curator module
-const mockReadCuratorSummary = vi.fn();
-const mockWriteCuratorSummary = vi.fn();
+const mockReadCuratorSummary = mock();
+const mockWriteCuratorSummary = mock();
 
-vi.mock('../../../src/hooks/curator.js', () => ({
+mock.module('../../../src/hooks/curator.js', () => ({
 	readCuratorSummary: (...args: unknown[]) => mockReadCuratorSummary(...args),
 	writeCuratorSummary: (...args: unknown[]) => mockWriteCuratorSummary(...args),
 }));
 
 // Mock knowledge-store module
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	resolveHiveKnowledgePath: vi
-		.fn()
-		.mockReturnValue('/hive/shared-learnings.jsonl'),
-	resolveHiveRejectedPath: vi
-		.fn()
-		.mockReturnValue('/hive/shared-learnings-rejected.jsonl'),
-	resolveSwarmKnowledgePath: vi
-		.fn()
-		.mockReturnValue('/swarm/.swarm/knowledge.jsonl'),
-	readKnowledge: vi.fn().mockResolvedValue([]),
-	appendKnowledge: vi.fn().mockResolvedValue(undefined),
-	rewriteKnowledge: vi.fn().mockResolvedValue(undefined),
-	findNearDuplicate: vi.fn().mockReturnValue(undefined),
-	computeConfidence: vi.fn().mockReturnValue(0.6),
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	resolveHiveKnowledgePath: mock(() => '/hive/shared-learnings.jsonl'),
+	resolveHiveRejectedPath: mock(() => '/hive/shared-learnings-rejected.jsonl'),
+	resolveSwarmKnowledgePath: mock(() => '/swarm/.swarm/knowledge.jsonl'),
+	readKnowledge: mock(async () => []),
+	appendKnowledge: mock(async () => undefined),
+	rewriteKnowledge: mock(async () => undefined),
+	findNearDuplicate: mock(() => undefined),
+	computeConfidence: mock(() => 0.6),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -41,13 +39,13 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 }));
 
 // Mock validateLesson
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
-	validateLesson: vi.fn().mockReturnValue({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
+	validateLesson: mock(() => ({
 		valid: true,
 		layer: 1,
 		reason: '',
 		severity: 'none',
-	}),
+	})),
 }));
 
 // Import after mocking
@@ -58,7 +56,8 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 	let mockConfig: KnowledgeConfig;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 
 		mockConfig = {
 			enabled: true,

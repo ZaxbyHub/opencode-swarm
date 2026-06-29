@@ -23,7 +23,7 @@ const mockActivateProposal = mock(async () => ({
 mock.module('../../../src/services/skill-generator.js', () => ({
 	activateProposal: mockActivateProposal,
 	generateSkills: async () => ({}),
-	listSkills: async () => ({ drafts: [], active: [] }),
+	listSkills: async () => ({ drafts: [], active: [], stale: [] }),
 	inspectSkill: async () => ({}),
 	regenerateSkill: async () => ({}),
 }));

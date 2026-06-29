@@ -7,7 +7,12 @@
  * Happy-path tests are in hive-promoter.test.ts
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import {
 	checkHivePromotions,
 	createHivePromoterHook,
@@ -19,21 +24,15 @@ import type {
 } from '../../../src/hooks/knowledge-types.js';
 
 // Mock knowledge-store module
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
-	resolveHiveKnowledgePath: vi
-		.fn()
-		.mockReturnValue('/hive/shared-learnings.jsonl'),
-	resolveHiveRejectedPath: vi
-		.fn()
-		.mockReturnValue('/hive/shared-learnings-rejected.jsonl'),
-	resolveSwarmKnowledgePath: vi
-		.fn()
-		.mockReturnValue('/swarm/.swarm/knowledge.jsonl'),
-	readKnowledge: vi.fn().mockResolvedValue([]),
-	appendKnowledge: vi.fn().mockResolvedValue(undefined),
-	rewriteKnowledge: vi.fn().mockResolvedValue(undefined),
-	findNearDuplicate: vi.fn().mockReturnValue(undefined),
-	computeConfidence: vi.fn().mockReturnValue(0.6),
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
+	resolveHiveKnowledgePath: mock(() => '/hive/shared-learnings.jsonl'),
+	resolveHiveRejectedPath: mock(() => '/hive/shared-learnings-rejected.jsonl'),
+	resolveSwarmKnowledgePath: mock(() => '/swarm/.swarm/knowledge.jsonl'),
+	readKnowledge: mock(async () => []),
+	appendKnowledge: mock(async () => undefined),
+	rewriteKnowledge: mock(async () => undefined),
+	findNearDuplicate: mock(() => undefined),
+	computeConfidence: mock(() => 0.6),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -51,13 +50,13 @@ import {
 } from '../../../src/hooks/knowledge-store.js';
 
 // Mock validateLesson to pass by default (we'll override in specific tests)
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
-	validateLesson: vi.fn().mockReturnValue({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
+	validateLesson: mock(() => ({
 		valid: true,
 		layer: 1,
 		reason: '',
 		severity: 'none',
-	}),
+	})),
 }));
 
 import { validateLesson } from '../../../src/hooks/knowledge-validator.js';
@@ -69,10 +68,11 @@ describe('hive-promoter adversarial tests', () => {
 
 	beforeEach(() => {
 		// Reset all mocks
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 
 		// Reset validateLesson to pass by default
-		(validateLesson as vi.Mock).mockReturnValue({
+		validateLesson.mockReturnValue({
 			valid: true,
 			layer: 1,
 			reason: '',
@@ -142,7 +142,7 @@ describe('hive-promoter adversarial tests', () => {
 		mockHiveEntries = [];
 
 		// Setup readKnowledge to return hive entries (use a closure to track the current hive entries)
-		(readKnowledge as vi.Mock).mockImplementation((path: string) => {
+		readKnowledge.mockImplementation((path: string) => {
 			if (path === '/hive/shared-learnings.jsonl') {
 				return Promise.resolve([...mockHiveEntries]); // Return a copy
 			}
@@ -150,7 +150,7 @@ describe('hive-promoter adversarial tests', () => {
 		});
 
 		// Setup findNearDuplicate to return undefined by default (no duplicate found)
-		(findNearDuplicate as vi.Mock).mockReturnValue(undefined);
+		findNearDuplicate.mockReturnValue(undefined);
 	});
 
 	describe('SCENARIO 1: Empty swarm entries array', () => {
@@ -248,7 +248,7 @@ describe('hive-promoter adversarial tests', () => {
 
 			// Mock findNearDuplicate to return the entry itself when threshold is 0
 			// (simulating "everything matches everything")
-			(findNearDuplicate as vi.Mock).mockReturnValue(mockHiveEntries[0]);
+			findNearDuplicate.mockReturnValue(mockHiveEntries[0]);
 
 			const entries: SwarmKnowledgeEntry[] = [
 				{
@@ -369,9 +369,9 @@ describe('hive-promoter adversarial tests', () => {
 			await checkHivePromotions([swarmEntry], mockConfig);
 
 			// Should not advance to established (only 1 distinct project, not 3)
-			const hiveModified = (rewriteKnowledge as vi.Mock).mock.calls.length > 0;
+			const hiveModified = rewriteKnowledge.mock.calls.length > 0;
 			if (hiveModified) {
-				const updatedHive = (rewriteKnowledge as vi.Mock).mock
+				const updatedHive = rewriteKnowledge.mock
 					.calls[0][1] as HiveKnowledgeEntry[];
 				const entry = updatedHive[0];
 				expect(entry.status).toBe('candidate'); // Should NOT be established
@@ -389,7 +389,7 @@ describe('hive-promoter adversarial tests', () => {
 				hive_eligible: true,
 			};
 
-			(validateLesson as vi.Mock).mockReturnValue({
+			validateLesson.mockReturnValue({
 				valid: true,
 				layer: 1,
 				reason: '',
@@ -411,7 +411,7 @@ describe('hive-promoter adversarial tests', () => {
 				hive_eligible: true,
 			};
 
-			(validateLesson as vi.Mock).mockReturnValue({
+			validateLesson.mockReturnValue({
 				valid: false,
 				layer: 1,
 				reason: 'Lesson too long',
@@ -436,7 +436,7 @@ describe('hive-promoter adversarial tests', () => {
 				hive_eligible: true,
 			};
 
-			(validateLesson as vi.Mock).mockReturnValue({
+			validateLesson.mockReturnValue({
 				valid: false,
 				layer: 2,
 				reason: 'Control characters detected',
@@ -510,7 +510,7 @@ describe('hive-promoter adversarial tests', () => {
 			expect(appendKnowledge).toHaveBeenCalled();
 
 			// Get the first call's second argument (the hive entry)
-			const calls = (appendKnowledge as vi.Mock).mock.calls;
+			const calls = appendKnowledge.mock.calls;
 			expect(calls.length).toBeGreaterThan(0);
 
 			const appendCall = calls[0]; // Get the first call
@@ -534,7 +534,7 @@ describe('hive-promoter adversarial tests', () => {
 			expect(appendKnowledge).toHaveBeenCalled();
 
 			// Get the first call (the hive append)
-			const calls = (appendKnowledge as vi.Mock).mock.calls;
+			const calls = appendKnowledge.mock.calls;
 			expect(calls.length).toBeGreaterThan(0);
 
 			const appendCall = calls[0];

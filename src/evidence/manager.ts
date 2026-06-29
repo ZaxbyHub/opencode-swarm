@@ -14,6 +14,7 @@ import {
 	type Evidence,
 	type EvidenceBundle,
 	EvidenceBundleSchema,
+	EvidenceSchema,
 	type PlaceholderEvidence,
 	type QualityBudgetEvidence,
 	type SastEvidence,
@@ -229,6 +230,11 @@ export async function saveEvidence(
 	const relativePath = path.join('evidence', sanitizedTaskId, 'evidence.json');
 	// validateSwarmPath throws synchronously on traversal — keep outside lock.
 	validateSwarmPath(directory, relativePath);
+
+	// SC-005: Validate evidence through Zod BEFORE any disk write.
+	// This ensures forged verdicts (SC-005.1), manipulated timestamps (SC-005.2),
+	// and spoofed task_ids (SC-005.3) are rejected at the persistence layer.
+	_internals.validateEvidence(evidence);
 
 	return withEvidenceLock(
 		directory,
@@ -670,6 +676,13 @@ export async function archiveEvidence(
 }
 
 /**
+ * Validates evidence through Zod. Exposed via _internals for DI testing.
+ */
+function validateEvidence(evidence: Evidence): Evidence {
+	return EvidenceSchema.parse(evidence);
+}
+
+/**
  * DI seam for testability. Contains all test-mocked exports.
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
@@ -678,9 +691,11 @@ export const _internals: {
 	loadEvidence: typeof loadEvidence;
 	listEvidenceTaskIds: typeof listEvidenceTaskIds;
 	validateProjectRoot: typeof validateProjectRoot;
+	validateEvidence: typeof validateEvidence;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
 	listEvidenceTaskIds,
 	validateProjectRoot,
+	validateEvidence,
 } as const;

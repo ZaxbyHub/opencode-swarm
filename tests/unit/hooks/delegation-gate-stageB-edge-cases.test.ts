@@ -57,7 +57,7 @@ afterEach(() => {
 describe('Stage B helpers — edge cases', () => {
 	it('EC-1: null taskWorkflowStates — advancement loop is skipped without error', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config);
+		const hook = createDelegationGateHook(config, process.cwd());
 
 		startAgentSession('sess-ec1', 'architect');
 		const session = ensureAgentSession('sess-ec1');
@@ -80,7 +80,7 @@ describe('Stage B helpers — edge cases', () => {
 
 	it('EC-2: exception during advanceTaskState is caught and does not propagate', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config);
+		const hook = createDelegationGateHook(config, process.cwd());
 
 		startAgentSession('sess-ec2', 'architect');
 		const session = ensureAgentSession('sess-ec2');
@@ -109,7 +109,7 @@ describe('Stage B helpers — edge cases', () => {
 
 	it('EC-3: parallel barrier with reviewer only — stays at reviewer_run, not tests_run', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config);
+		const hook = createDelegationGateHook(config, process.cwd());
 
 		startAgentSession('sess-ec3', 'architect');
 		const session = ensureAgentSession('sess-ec3');
@@ -133,7 +133,7 @@ describe('Stage B helpers — edge cases', () => {
 
 	it('EC-4: getSeedTaskId returns null — cross-session seeding is skipped', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config);
+		const hook = createDelegationGateHook(config, process.cwd());
 
 		// Primary session: no currentTaskId and no lastCoderDelegationTaskId → getSeedTaskId = null.
 		startAgentSession('sess-ec4-primary', 'architect');
@@ -165,7 +165,7 @@ describe('Stage B helpers — edge cases', () => {
 
 	it('EC-5: cross-session seeding skipped when task already exists in other session', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config);
+		const hook = createDelegationGateHook(config, process.cwd());
 
 		startAgentSession('sess-ec5-primary', 'architect');
 		const primary = ensureAgentSession('sess-ec5-primary');

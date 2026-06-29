@@ -1,18 +1,18 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { detectTestFramework } from '../../../src/tools/test-runner';
 
 // Mock isCommandAvailable from discovery module
-const mockIsCommandAvailable = vi.fn();
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
 	// Preserve other exports as no-ops
-	clearToolchainCache: vi.fn(),
-	discoverBuildCommands: vi.fn(),
-	discoverBuildCommandsFromProfiles: vi.fn(),
-	getEcosystems: vi.fn(() => []),
+	clearToolchainCache: mock(),
+	discoverBuildCommands: mock(),
+	discoverBuildCommandsFromProfiles: mock(),
+	getEcosystems: mock(() => []),
 }));
 
 describe('Test Framework Detectors (Go, Java, Gradle, .NET, C/C++, Swift, Dart, Ruby)', () => {

@@ -1,32 +1,39 @@
-import * as fs from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
+import * as realFs from 'node:fs';
 import { detectAdditionalLinter } from '../../../src/tools/lint';
 
 // Mock node:fs for filesystem operations
-const mockExistsSync = vi.fn();
-const mockReadFileSync = vi.fn();
-const mockReaddirSync = vi.fn();
-vi.mock('node:fs', () => ({
+const mockExistsSync = mock();
+const mockReadFileSync = mock();
+const mockReaddirSync = mock();
+mock.module('node:fs', () => ({
+	...realFs,
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
 	readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
 }));
 
 // Mock isCommandAvailable from build/discovery
-const mockIsCommandAvailable = vi.fn();
-vi.mock('../../../src/build/discovery', () => ({
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
 }));
 
 describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	describe('Path traversal / injection', () => {
 		it('should not crash on path traversal attempt - "../../etc/passwd"', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('../../etc/passwd');
 
@@ -35,8 +42,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on complex path traversal - "/dev/null/../../../etc"', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('/dev/null/../../../etc');
 
@@ -44,8 +51,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on empty string cwd', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('');
 
@@ -53,8 +60,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on current dir "." (should behave normally)', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('.');
 
@@ -63,8 +70,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on null-byte injection', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('path\x00injection');
 
@@ -72,8 +79,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on deeply nested path traversal', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = detectAdditionalLinter('../../../../../../../etc/passwd');
 
@@ -83,13 +90,13 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 	describe('File system errors', () => {
 		it('should return null when readdirSync throws EACCES (permission denied)', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockReaddirSync.mockImplementation(() => {
 				const error = new Error('EACCES: permission denied');
 				(error as any).code = 'EACCES';
 				throw error;
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -97,13 +104,13 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should return null when readdirSync throws ENOTDIR (path is a file)', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockReaddirSync.mockImplementation(() => {
 				const error = new Error('ENOTDIR: not a directory');
 				(error as any).code = 'ENOTDIR';
 				throw error;
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -111,13 +118,13 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should return null when readdirSync throws ENOENT (no such file)', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockReaddirSync.mockImplementation(() => {
 				const error = new Error('ENOENT: no such file');
 				(error as any).code = 'ENOENT';
 				throw error;
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -125,9 +132,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should return null when readdirSync returns empty array', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -141,7 +148,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockReadFileSync.mockImplementation(() => {
 				throw new Error('EACCES: permission denied reading pyproject.toml');
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -149,11 +156,11 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle generic error from readdirSync gracefully', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockReaddirSync.mockImplementation(() => {
 				throw new Error('Unknown filesystem error');
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -163,9 +170,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 	describe('Malicious filenames in readdirSync results', () => {
 		it('should not trigger false positive for file named "../../etc/passwd"', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['../../etc/passwd']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['../../etc/passwd']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -173,9 +180,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle hidden file ".kt" appropriately', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['.kt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['.kt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -185,9 +192,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not trigger for file "notakotlinfile.txt" with malicious name', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['notakotlinfile.txt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['notakotlinfile.txt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -195,10 +202,10 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle extremely long filename (2000 chars ending in .kt)', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			const longName = 'a'.repeat(1996) + '.kt';
-			mockReaddirSync.mockReturnValue([longName]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockReaddirSync.mockImplementation([longName]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -206,9 +213,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should NOT match "build.gradle.kts.bak" (not exact .kts extension)', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['build.gradle.kts.bak']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['build.gradle.kts.bak']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -219,8 +226,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('build.gradle');
 			});
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -230,9 +237,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should not crash on filename with null byte', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['test\x00.kt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['test\x00.kt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -241,9 +248,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle filename with Unicode characters', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['файл.kt', '中文.kts']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['файл.kt', '中文.kts']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -251,9 +258,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle filename with control characters', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['test\n.kt', 'file\t.kts']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['test\n.kt', 'file\t.kts']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -261,9 +268,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle mixed case extensions (.KT vs .kt)', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['file.KT', 'file.Kts']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['file.KT', 'file.Kts']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -274,9 +281,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 	describe('Boolean edge cases for detectKtlint', () => {
 		it('should handle IIFE returning false with empty dirs', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -287,8 +294,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('build.gradle.kts');
 			});
-			mockReaddirSync.mockReturnValue(['test.kt']);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockReaddirSync.mockImplementation(['test.kt']);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -296,9 +303,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle case where .kts file exists but binary unavailable', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['script.kts']);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['script.kts']);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -306,9 +313,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle only .kt files in readdir', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['file1.kt', 'file2.kt', 'file3.kt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['file1.kt', 'file2.kt', 'file3.kt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -316,9 +323,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle only .kts files in readdir', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['script1.kts', 'script2.kts']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['script1.kts', 'script2.kts']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -326,9 +333,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle mixed .kt and .kts files', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['main.kt', 'script.kts', 'other.kt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['main.kt', 'script.kts', 'other.kt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -371,7 +378,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('build.gradle') || path.includes('gradlew');
 			});
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -382,7 +389,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('pom.xml');
 			});
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -393,7 +400,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('build.gradle');
 			});
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -404,7 +411,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('pom.xml') || path.includes('build.gradle');
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -423,7 +430,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 				}
 				return [];
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -440,7 +447,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 				}
 				return [];
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -459,7 +466,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 				}
 				return [];
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -467,9 +474,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should detect cppcheck when root has C files', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['main.c', 'util.c']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['main.c', 'util.c']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -477,9 +484,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should detect cppcheck when root has .cpp files', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['main.cpp', 'util.cpp']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['main.cpp', 'util.cpp']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -487,9 +494,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should detect cppcheck when root has .cc files', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['main.cc', 'util.cc']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['main.cc', 'util.cc']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -497,9 +504,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should detect cppcheck when root has .cxx files', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['main.cxx', 'util.cxx']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['main.cxx', 'util.cxx']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -510,8 +517,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('CMakeLists.txt');
 			});
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -521,9 +528,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 	describe('Additional adversarial scenarios', () => {
 		it('should not crash on concurrent calls with same path', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['test.kt']);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['test.kt']);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const results = [
 				detectAdditionalLinter('/test/path'),
@@ -538,22 +545,22 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation(() => {
 				throw new Error('Disk error');
 			});
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			// Should crash since existsSync is not wrapped in try-catch in detectors
 			expect(() => detectAdditionalLinter('/test/path')).toThrow('Disk error');
 		});
 
 		it('should handle case where all commands are unavailable', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([
 				'test.kt',
 				'pom.xml',
 				'Cargo.toml',
 				'go.mod',
 			]);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -561,9 +568,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle when readdirSync returns non-array values (null)', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(null as unknown as string[]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation(null as unknown as string[]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			// The catch blocks should handle TypeError from .some() on null and return null
 			const result = detectAdditionalLinter('/test/path');
@@ -580,7 +587,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockReadFileSync.mockImplementation(() => {
 				throw new Error('Invalid UTF-8 sequence');
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -591,10 +598,10 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('pyproject.toml');
 			});
-			mockReadFileSync.mockReturnValue(
+			mockReadFileSync.mockImplementation(
 				'# config\n[tool.ruff]\nline-length = 88',
 			);
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -605,8 +612,8 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation((path: string) => {
 				return path.includes('pyproject.toml');
 			});
-			mockReadFileSync.mockReturnValue('[tool.black]\nline-length = 88');
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockReadFileSync.mockImplementation('[tool.black]\nline-length = 88');
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -616,11 +623,11 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 
 	describe('detectDotnetFormat adversarial tests', () => {
 		it('should handle readdirSync throwing for dotnet detection', () => {
-			mockExistsSync.mockReturnValue(false);
+			mockExistsSync.mockImplementation(false);
 			mockReaddirSync.mockImplementation(() => {
 				throw new Error('ENOTDIR: not a directory');
 			});
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 
@@ -628,9 +635,9 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should handle empty directory listing for dotnet', () => {
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
+			mockIsCommandAvailable.mockImplementation(true);
 
 			const result = detectAdditionalLinter('/test/path');
 

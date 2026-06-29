@@ -9,19 +9,49 @@
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
 #
-# Last updated: 2026-06-20
+# Last updated: 2026-06-29 (normalization in scripts/lib/normalize-mock-target.sh)
 
 # --- Node builtins ---
 node:child_process
+node:crypto
 node:fs
 node:fs/promises
 node:path
 
 # --- src ---
+src/@opencode-ai/plugin
 src/agents/critic
 src/background/event-bus
 src/background/manager
 src/build/discovery
+src/commands/agents
+src/commands/analyze
+src/commands/archive
+src/commands/benchmark
+src/commands/checkpoint
+src/commands/clarify
+src/commands/config
+src/commands/curate
+src/commands/dark-matter
+src/commands/diagnose
+src/commands/doctor
+src/commands/evidence
+src/commands/export
+src/commands/handoff
+src/commands/history
+src/commands/knowledge
+src/commands/plan
+src/commands/preflight
+src/commands/promote
+src/commands/reset
+src/commands/retrieve
+src/commands/rollback
+src/commands/simulate
+src/commands/specify
+src/commands/status
+src/commands/sync-plan
+src/commands/turbo
+src/commands/write_retro
 src/config
 src/config/index
 src/config/index.ts
@@ -32,6 +62,7 @@ src/db/qa-gate-profile
 src/evidence/manager
 src/evidence/task-file
 src/git/branch
+src/git/pr
 src/hooks/curator
 src/hooks/curator-drift
 src/hooks/design-doc-drift
@@ -39,31 +70,36 @@ src/hooks/extractors
 src/hooks/hive-promoter
 src/hooks/knowledge-application
 src/hooks/knowledge-curator
+src/hooks/knowledge-events
 src/hooks/knowledge-migrator
 src/hooks/knowledge-reader
 src/hooks/knowledge-store
 src/hooks/knowledge-validator
+src/hooks/phase-directives
+src/hooks/repo-graph-injection
 src/hooks/review-receipt
 src/hooks/search-knowledge
 src/hooks/skill-usage-log
 src/hooks/utils
 src/lang/detector
+src/lang/profiles
 src/lang/registry
+src/lang/runtime
 src/ledger
 src/mutation/engine
 src/mutation/equivalence
 src/mutation/gate
+src/mutation/generator
 src/parallel/file-locks
+src/path
 src/plan/checkpoint
 src/plan/ledger
 src/plan/manager
 src/proper-lockfile
-src/sandbox/capability-probe
-src/sandbox/executor
 src/sandbox/linux/bubblewrap-executor
-src/sdd/effective-spec
 src/sast/rules/index
 src/sast/semgrep
+src/sdd/effective-spec
 src/services/evidence-summary-service
 src/services/handoff-service
 src/services/preflight-service
@@ -72,8 +108,10 @@ src/services/skill-generator
 src/services/skill-improver
 src/session/snapshot-writer
 src/state
+src/summaries/manager
 src/telemetry
 src/test-impact/analyzer
+src/tools/checkpoint
 src/tools/co-change-analyzer
 src/tools/knowledge-recall
 src/tools/lint
@@ -88,9 +126,3 @@ src/utils/logger
 src/utils/path-security
 src/utils/spec-hash
 
-
-# drift-detection-test-only
-src/does-not-exist
-
-# drift-detection-test-only
-src/does-not-exist

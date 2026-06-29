@@ -14,10 +14,12 @@ import {
 	_internals,
 	activateProposal,
 	clusterEntries,
+	findSkillsBySourceKnowledgeId,
 	generateSkills,
 	inspectSkill,
 	isValidSlug,
 	listSkills,
+	markSkillStale,
 	renderSkillMarkdown,
 	sanitizeSlug,
 	selectCandidateEntries,
@@ -1060,5 +1062,571 @@ describe('clusterEntries (output format)', () => {
 		]);
 		expect(result.length).toBe(1);
 		expect(result[0].avgConfidence).toBeCloseTo(0.9);
+	});
+});
+
+describe('markSkillStale', () => {
+	it('writes stale.marker with the reason in an existing directory', async () => {
+		const skillDir = path.join(tmp, 'existing-skill');
+		await mkdir(skillDir, { recursive: true });
+
+		await markSkillStale(skillDir, 'outdated content');
+
+		const markerPath = path.join(skillDir, 'stale.marker');
+		expect(existsSync(markerPath)).toBe(true);
+		expect(readFileSync(markerPath, 'utf-8')).toBe('outdated content');
+	});
+
+	it('creates the directory if it does not exist', async () => {
+		const skillDir = path.join(tmp, 'new-skill', 'nested');
+
+		await markSkillStale(skillDir, 'needs regeneration');
+
+		const markerPath = path.join(skillDir, 'stale.marker');
+		expect(existsSync(markerPath)).toBe(true);
+		expect(readFileSync(markerPath, 'utf-8')).toBe('needs regeneration');
+	});
+
+	it('propagates write errors instead of swallowing them', async () => {
+		const skillDir = path.join(tmp, 'write-fail-skill');
+		await mkdir(skillDir, { recursive: true });
+
+		// Create a directory at the marker path so writeFile fails cross-platform
+		const markerPath = path.join(skillDir, 'stale.marker');
+		await mkdir(markerPath, { recursive: true }); // file already exists as a directory → EISDIR on write
+
+		await expect(markSkillStale(skillDir, 'should fail')).rejects.toThrow();
+	});
+});
+
+describe('clearSkillStale', () => {
+	const { clearSkillStale } = _internals;
+
+	it('removes an existing stale.marker file', async () => {
+		const skillDir = path.join(tmp, 'skill-to-clear');
+		await mkdir(skillDir, { recursive: true });
+		const markerPath = path.join(skillDir, 'stale.marker');
+		await writeFile(markerPath, 'outdated content', 'utf-8');
+
+		expect(existsSync(markerPath)).toBe(true);
+		await clearSkillStale(skillDir);
+		expect(existsSync(markerPath)).toBe(false);
+	});
+
+	it('does not throw when stale.marker does not exist', async () => {
+		const skillDir = path.join(tmp, 'no-marker-skill');
+		await mkdir(skillDir, { recursive: true });
+
+		// Should not throw
+		await expect(clearSkillStale(skillDir)).resolves.toBeUndefined();
+	});
+
+	it('logs a warning when unlink fails with a non-ENOENT error', async () => {
+		const skillDir = path.join(tmp, 'unlink-fail-skill');
+		await mkdir(skillDir, { recursive: true });
+		const markerPath = path.join(skillDir, 'stale.marker');
+		await writeFile(markerPath, 'marker content', 'utf-8');
+
+		// Replace the unlink function in _internals to simulate a non-ENOENT error
+		const original = _internals.unlinkSync;
+		_internals.unlinkSync = (() => {
+			throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+		}) as typeof import('node:fs').unlinkSync;
+
+		try {
+			// Should not throw — error is logged but swallowed
+			await expect(clearSkillStale(skillDir)).resolves.toBeUndefined();
+		} finally {
+			_internals.unlinkSync = original;
+		}
+	});
+});
+
+describe('findSkillsBySourceKnowledgeId', () => {
+	it('returns empty array when generated directory does not exist', async () => {
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'any-source-id');
+		expect(result).toEqual([]);
+	});
+
+	it('returns empty array when no skills have the given sourceId', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const skillDir = path.join(generatedDir, 'some-skill');
+		await mkdir(skillDir, { recursive: true });
+		await writeFile(
+			path.join(skillDir, 'SKILL.md'),
+			`---
+name: some-skill
+source_knowledge_ids:
+  - other-id-1
+  - other-id-2
+---
+# Some Skill`,
+			'utf-8',
+		);
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'nonexistent-id');
+		expect(result).toEqual([]);
+	});
+
+	it('returns skill directory paths for skills that have the sourceId in source_knowledge_ids', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const skillDir1 = path.join(generatedDir, 'skill-alpha');
+		const skillDir2 = path.join(generatedDir, 'skill-beta');
+		await mkdir(skillDir1, { recursive: true });
+		await mkdir(skillDir2, { recursive: true });
+
+		// skill-alpha has matching sourceId
+		await writeFile(
+			path.join(skillDir1, 'SKILL.md'),
+			`---
+name: skill-alpha
+source_knowledge_ids:
+  - entry-alpha-1
+  - target-source-id
+  - entry-alpha-2
+---
+# Skill Alpha`,
+			'utf-8',
+		);
+
+		// skill-beta does NOT have the target sourceId
+		await writeFile(
+			path.join(skillDir2, 'SKILL.md'),
+			`---
+name: skill-beta
+source_knowledge_ids:
+  - entry-beta-1
+  - entry-beta-2
+---
+# Skill Beta`,
+			'utf-8',
+		);
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'target-source-id');
+		expect(result).toHaveLength(1);
+		// Normalize path separators for cross-platform assertion
+		expect(result[0].replace(/\\/g, '/')).toContain('skill-alpha');
+	});
+
+	it('skips skills with retired.marker (only scans active skills)', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const activeDir = path.join(generatedDir, 'active-skill');
+		const retiredDir = path.join(generatedDir, 'retired-skill');
+		await mkdir(activeDir, { recursive: true });
+		await mkdir(retiredDir, { recursive: true });
+
+		await writeFile(
+			path.join(activeDir, 'SKILL.md'),
+			`---
+name: active-skill
+source_knowledge_ids:
+  - target-id
+---
+# Active Skill`,
+			'utf-8',
+		);
+
+		await writeFile(
+			path.join(retiredDir, 'SKILL.md'),
+			`---
+name: retired-skill
+source_knowledge_ids:
+  - target-id
+---
+# Retired Skill`,
+			'utf-8',
+		);
+
+		await writeFile(
+			path.join(retiredDir, 'retired.marker'),
+			JSON.stringify({ retiredAt: new Date().toISOString() }),
+			'utf-8',
+		);
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'target-id');
+		expect(result).toHaveLength(1);
+		expect(result[0].replace(/\\/g, '/')).toContain('active-skill');
+	});
+
+	it('skips skills with stale.marker (only scans active skills)', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const activeDir = path.join(generatedDir, 'active-skill-2');
+		const staleDir = path.join(generatedDir, 'stale-skill');
+		await mkdir(activeDir, { recursive: true });
+		await mkdir(staleDir, { recursive: true });
+
+		await writeFile(
+			path.join(activeDir, 'SKILL.md'),
+			`---
+name: active-skill-2
+source_knowledge_ids:
+  - stale-target-id
+---
+# Active Skill 2`,
+			'utf-8',
+		);
+
+		await writeFile(
+			path.join(staleDir, 'SKILL.md'),
+			`---
+name: stale-skill
+source_knowledge_ids:
+  - stale-target-id
+---
+# Stale Skill`,
+			'utf-8',
+		);
+
+		await writeFile(
+			path.join(staleDir, 'stale.marker'),
+			'needs regeneration',
+			'utf-8',
+		);
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'stale-target-id');
+		expect(result).toHaveLength(1);
+		expect(result[0].replace(/\\/g, '/')).toContain('active-skill-2');
+	});
+
+	it('skips directories without SKILL.md', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const validDir = path.join(generatedDir, 'valid-skill');
+		const emptyDir = path.join(generatedDir, 'empty-skill');
+		await mkdir(validDir, { recursive: true });
+		await mkdir(emptyDir, { recursive: true });
+
+		await writeFile(
+			path.join(validDir, 'SKILL.md'),
+			`---
+name: valid-skill
+source_knowledge_ids:
+  - orphan-id
+---
+# Valid Skill`,
+			'utf-8',
+		);
+		// emptyDir has no SKILL.md
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'orphan-id');
+		expect(result).toHaveLength(1);
+		expect(result[0].replace(/\\/g, '/')).toContain('valid-skill');
+	});
+
+	it('returns multiple matching skill directories', async () => {
+		const generatedDir = path.join(tmp, '.opencode', 'skills', 'generated');
+		const skillDir1 = path.join(generatedDir, 'multi-skill-1');
+		const skillDir2 = path.join(generatedDir, 'multi-skill-2');
+		await mkdir(skillDir1, { recursive: true });
+		await mkdir(skillDir2, { recursive: true });
+
+		await writeFile(
+			path.join(skillDir1, 'SKILL.md'),
+			`---
+name: multi-skill-1
+source_knowledge_ids:
+  - shared-id
+---
+# Multi Skill 1`,
+			'utf-8',
+		);
+
+		await writeFile(
+			path.join(skillDir2, 'SKILL.md'),
+			`---
+name: multi-skill-2
+source_knowledge_ids:
+  - shared-id
+---
+# Multi Skill 2`,
+			'utf-8',
+		);
+
+		const result = await findSkillsBySourceKnowledgeId(tmp, 'shared-id');
+		expect(result).toHaveLength(2);
+		// Normalize path separators for cross-platform assertion
+		const normalized = result.map((p) => p.replace(/\\/g, '/'));
+		expect(normalized).toContainEqual(expect.stringContaining('multi-skill-1'));
+		expect(normalized).toContainEqual(expect.stringContaining('multi-skill-2'));
+	});
+});
+
+// ============================================================================
+// retireOrMarkStale tests (task 2.2)
+// ============================================================================
+
+describe('retireOrMarkStale', () => {
+	// retireOrMarkStale calls retireSkill and markSkillStale as direct named exports.
+	// We cannot patch named ES module imports, so we verify outcomes via file side effects:
+	// - retire path: retired.marker file created by the real retireSkill
+	// - stale path: stale.marker file created by the real markSkillStale
+
+	async function makeSkillDir(
+		slug: string,
+		sourceIds: string[],
+	): Promise<string> {
+		const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
+		await mkdir(skillDir, { recursive: true });
+		const fm = [
+			'---',
+			`name: ${slug}`,
+			'source_knowledge_ids:',
+			...sourceIds.map((id) => `  - ${id}`),
+			'---',
+			`# ${slug}`,
+		].join('\n');
+		await writeFile(path.join(skillDir, 'SKILL.md'), fm, 'utf-8');
+		return skillDir;
+	}
+
+	it('retireOrStale_allSourcesArchived → retires skill (creates retired.marker)', async () => {
+		// Skill has sources [A, B], both are in archivedIds → retire
+		const skillDir = await makeSkillDir('all-archived', ['src-a', 'src-b']);
+		const result = await _internals.retireOrMarkStale(
+			tmp,
+			skillDir,
+			new Set(['src-a', 'src-b']),
+		);
+		expect(result.action).toBe('retire');
+		expect(result.slug).toBe('all-archived');
+		// retireSkill creates a retired.marker file as side effect
+		expect(existsSync(path.join(skillDir, 'retired.marker'))).toBe(true);
+		// No stale.marker created because we retired instead
+		expect(existsSync(path.join(skillDir, 'stale.marker'))).toBe(false);
+	});
+
+	it('retireOrStale_notAllSourcesArchived → marks stale via stale.marker file', async () => {
+		// Skill has sources [A, B], only A is in archivedIds → mark stale (calls markSkillStale)
+		const skillDir = await makeSkillDir('partial-archived', ['src-a', 'src-b']);
+		const result = await _internals.retireOrMarkStale(
+			tmp,
+			skillDir,
+			new Set(['src-a']),
+		);
+		expect(result.action).toBe('stale');
+		expect(result.slug).toBe('partial-archived');
+		// markSkillStale creates a stale.marker file as side effect
+		expect(existsSync(path.join(skillDir, 'stale.marker'))).toBe(true);
+	});
+
+	it('marks stale when archivedIds is empty', async () => {
+		const skillDir = await makeSkillDir('no-archived', ['src-x']);
+		const result = await _internals.retireOrMarkStale(tmp, skillDir, new Set());
+		expect(result.action).toBe('stale');
+		expect(existsSync(path.join(skillDir, 'stale.marker'))).toBe(true);
+	});
+
+	it('marks stale when SKILL.md does not exist', async () => {
+		const skillDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'no-file',
+		);
+		await mkdir(skillDir, { recursive: true });
+		const result = await _internals.retireOrMarkStale(
+			tmp,
+			skillDir,
+			new Set(['x']),
+		);
+		expect(result.action).toBe('stale');
+		// markSkillStale is called even when SKILL.md doesn't exist
+		expect(existsSync(path.join(skillDir, 'stale.marker'))).toBe(true);
+	});
+
+	it('marks stale when source_knowledge_ids is empty', async () => {
+		const skillDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'empty-sources',
+		);
+		await mkdir(skillDir, { recursive: true });
+		await writeFile(
+			path.join(skillDir, 'SKILL.md'),
+			['---', 'name: empty-sources', '---', '# Empty'].join('\n'),
+			'utf-8',
+		);
+		const result = await _internals.retireOrMarkStale(
+			tmp,
+			skillDir,
+			new Set(['x']),
+		);
+		expect(result.action).toBe('stale');
+		// Empty source_knowledge_ids → allArchived=false → markSkillStale is called
+		expect(existsSync(path.join(skillDir, 'stale.marker'))).toBe(true);
+	});
+});
+
+// ============================================================================
+// findStaleSkillsBySourceKnowledgeId tests (task 2.2)
+// ============================================================================
+
+describe('findStaleSkillsBySourceKnowledgeId', () => {
+	async function makeStaleSkillDir(
+		slug: string,
+		sourceIds: string[],
+	): Promise<string> {
+		const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
+		await mkdir(skillDir, { recursive: true });
+		const fm = [
+			'---',
+			`name: ${slug}`,
+			'source_knowledge_ids:',
+			...sourceIds.map((id) => `  - ${id}`),
+			'---',
+			`# ${slug}`,
+		].join('\n');
+		await writeFile(path.join(skillDir, 'SKILL.md'), fm, 'utf-8');
+		await writeFile(
+			path.join(skillDir, 'stale.marker'),
+			'needs regeneration',
+			'utf-8',
+		);
+		return skillDir;
+	}
+
+	async function makeActiveSkillDir(
+		slug: string,
+		sourceIds: string[],
+	): Promise<string> {
+		const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
+		await mkdir(skillDir, { recursive: true });
+		const fm = [
+			'---',
+			`name: ${slug}`,
+			'source_knowledge_ids:',
+			...sourceIds.map((id) => `  - ${id}`),
+			'---',
+			`# ${slug}`,
+		].join('\n');
+		await writeFile(path.join(skillDir, 'SKILL.md'), fm, 'utf-8');
+		return skillDir;
+	}
+
+	async function makeRetiredSkillDir(
+		slug: string,
+		sourceIds: string[],
+	): Promise<string> {
+		const skillDir = path.join(tmp, '.opencode', 'skills', 'generated', slug);
+		await mkdir(skillDir, { recursive: true });
+		const fm = [
+			'---',
+			`name: ${slug}`,
+			'source_knowledge_ids:',
+			...sourceIds.map((id) => `  - ${id}`),
+			'---',
+			`# ${slug}`,
+		].join('\n');
+		await writeFile(path.join(skillDir, 'SKILL.md'), fm, 'utf-8');
+		await writeFile(path.join(skillDir, 'stale.marker'), 'was stale', 'utf-8');
+		await writeFile(
+			path.join(skillDir, 'retired.marker'),
+			JSON.stringify({ retiredAt: new Date().toISOString() }),
+			'utf-8',
+		);
+		return skillDir;
+	}
+
+	it('findStaleSkillsBySourceKnowledgeId_allArchived → returns stale skill when ALL sources archived', async () => {
+		// Stale skill has sources [A, B], both are in archivedIds → should be returned
+		await makeStaleSkillDir('all-gone-stale', ['src-a', 'src-b']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-a', 'src-b']),
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].replace(/\\/g, '/')).toContain('all-gone-stale');
+	});
+
+	it('findStaleSkillsBySourceKnowledgeId_partial → does NOT return stale skill when NOT all sources archived', async () => {
+		// Stale skill has sources [A, B], only A is in archivedIds → should NOT be returned
+		await makeStaleSkillDir('partial-stale', ['src-a', 'src-b']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-a']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('returns empty array when generated directory does not exist', async () => {
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['x']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('returns empty array when no stale skills exist', async () => {
+		await makeActiveSkillDir('active-only', ['src-a']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-a']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('skips retired skills even if all sources are archived', async () => {
+		await makeRetiredSkillDir('retired-all-archived', ['src-x']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-x']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('skips active (non-stale) skills even if all sources are archived', async () => {
+		await makeActiveSkillDir('active-skill', ['src-y']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-y']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('skips stale skill with empty source_knowledge_ids', async () => {
+		const skillDir = path.join(
+			tmp,
+			'.opencode',
+			'skills',
+			'generated',
+			'empty-stale',
+		);
+		await mkdir(skillDir, { recursive: true });
+		await writeFile(
+			path.join(skillDir, 'SKILL.md'),
+			['---', 'name: empty-stale', '---', '# Empty'].join('\n'),
+			'utf-8',
+		);
+		await writeFile(
+			path.join(skillDir, 'stale.marker'),
+			'empty sources',
+			'utf-8',
+		);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['any-id']),
+		);
+		expect(result).toEqual([]);
+	});
+
+	it('returns multiple stale skills when all their sources are archived', async () => {
+		await makeStaleSkillDir('stale-alpha', ['src-1']);
+		await makeStaleSkillDir('stale-beta', ['src-2']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-1', 'src-2']),
+		);
+		expect(result).toHaveLength(2);
+	});
+
+	it('skips stale skill when only SOME of multiple sources are archived', async () => {
+		await makeStaleSkillDir('multi-partial', ['src-a', 'src-b', 'src-c']);
+		const result = await _internals.findStaleSkillsBySourceKnowledgeId(
+			tmp,
+			new Set(['src-a', 'src-b']),
+		);
+		expect(result).toEqual([]);
 	});
 });

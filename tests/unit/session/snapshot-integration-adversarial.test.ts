@@ -3,6 +3,7 @@
  * Tests security protections and resilience against malicious inputs.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -13,7 +14,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadSnapshot } from '../../../src/session/snapshot-reader.js';
 import type {
 	SerializedAgentSession,

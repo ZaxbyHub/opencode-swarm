@@ -3,21 +3,33 @@
  * Focus: Attack vectors, malformed inputs, path traversal, injection attempts, boundary violations
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
+import * as realFs from 'node:fs';
+import * as realPath from 'node:path';
 
-// Mock fs functions
-vi.mock('node:fs', () => ({
-	existsSync: vi.fn(),
-	mkdirSync: vi.fn(),
-	copyFileSync: vi.fn(),
-	readdirSync: vi.fn(),
-	cpSync: vi.fn(),
+// Mock fs functions — spread-real-exports pattern for node:* modules
+mock.module('node:fs', () => ({
+	...realFs,
+	existsSync: mock(() => false),
+	mkdirSync: mock(() => {}),
+	copyFileSync: mock(() => {}),
+	readdirSync: mock(() => []),
+	cpSync: mock(() => {}),
 }));
 
 // Mock path functions
-vi.mock('node:path', () => ({
-	join: vi.fn((...parts: string[]) => parts.join('/')),
-	dirname: vi.fn(),
+mock.module('node:path', () => ({
+	...realPath,
+	join: mock((...parts: string[]) => parts.join('/')),
+	dirname: mock(() => ''),
 }));
 
 // Import after mocking
@@ -39,7 +51,7 @@ const originalConsole = { ...console };
 
 describe('copy-grammars.ts - Adversarial Tests', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		// No need to reset module-level mocks; mock.restore() in afterEach handles cleanup
 	});
 
 	afterEach(() => {
@@ -47,6 +59,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 		console.log = originalConsole.log;
 		console.warn = originalConsole.warn;
 		console.error = originalConsole.error;
+		mock.restore();
 	});
 
 	describe('Attack Vector 1: Path Traversal in Grammar Filenames', () => {
@@ -175,11 +188,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 
 		it('should fail if SOURCE_DIR does not exist', () => {
 			(existsSync as any).mockReturnValue(false);
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).toThrow('Process exited with code 1');
 		});
@@ -191,11 +204,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 				throw new Error('EIO: I/O error');
 			});
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).toThrow();
 		});
@@ -212,11 +225,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 				throw new Error('EACCES: permission denied');
 			});
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammarsToDist()).toThrow();
 		});
@@ -229,11 +242,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 				throw new Error('EROFS: read-only file system');
 			});
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).toThrow();
 		});
@@ -246,11 +259,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			});
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).toThrow();
 		});
@@ -263,11 +276,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			});
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).toThrow();
 		});
@@ -287,20 +300,20 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should throw when trying to call console.log
 			expect(() => copyGrammars()).toThrow();
 		});
 
 		it('should handle when console functions throw errors', () => {
-			vi.spyOn(console, 'log').mockImplementation(() => {
+			spyOn(console, 'log').mockImplementation(() => {
 				throw new Error('Console log failed');
 			});
-			vi.spyOn(console, 'warn').mockImplementation(() => {
+			spyOn(console, 'warn').mockImplementation(() => {
 				throw new Error('Console warn failed');
 			});
-			vi.spyOn(console, 'error').mockImplementation(() => {
+			spyOn(console, 'error').mockImplementation(() => {
 				throw new Error('Console error failed');
 			});
 
@@ -309,7 +322,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should throw when console functions fail
 			expect(() => copyGrammars()).toThrow('Console log failed');
@@ -328,7 +341,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should throw when trying to call undefined console
 			expect(() => copyGrammars()).toThrow();
@@ -342,7 +355,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).not.toThrow();
 		});
@@ -358,7 +371,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue(hugeFileList);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should not throw, but may be slow
 			expect(() => copyGrammars()).not.toThrow();
@@ -377,7 +390,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue(nonWasmFiles);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).not.toThrow();
 			// Only tree-sitter.wasm core file should be copied, not non-wasm files
@@ -390,7 +403,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue(['tree-sitter.js']);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).not.toThrow();
 			// tree-sitter.js should be skipped
@@ -415,9 +428,9 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
-			const warnSpy = vi.spyOn(console, 'warn');
+			const warnSpy = spyOn(console, 'warn');
 
 			expect(() => copyGrammars()).not.toThrow();
 
@@ -433,11 +446,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue([]);
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should exit before verification if SOURCE_DIR doesn't exist
 			expect(() => copyGrammars()).toThrow('Process exited with code 1');
@@ -460,7 +473,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue(maliciousFilenames);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should not execute shell commands
 			expect(() => copyGrammars()).not.toThrow();
@@ -483,7 +496,7 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			(copyFileSync as any).mockReturnValue(undefined);
 			(readdirSync as any).mockReturnValue(unicodeFilenames);
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			expect(() => copyGrammars()).not.toThrow();
 		});
@@ -503,11 +516,11 @@ describe('copy-grammars.ts - Adversarial Tests', () => {
 			});
 			(readdirSync as any).mockReturnValue(['test.wasm']);
 
-			vi.spyOn(process, 'exit').mockImplementation((code: number) => {
+			spyOn(process, 'exit').mockImplementation((code: number) => {
 				throw new Error(`Process exited with code ${code}`);
 			});
 
-			vi.spyOn(process, 'cwd').mockReturnValue('/workspace');
+			spyOn(process, 'cwd').mockReturnValue('/workspace');
 
 			// Should handle the error gracefully
 			expect(() => copyGrammars()).toThrow();

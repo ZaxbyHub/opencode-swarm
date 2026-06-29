@@ -1,6 +1,6 @@
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadEvidence } from '../../../src/evidence/manager.js';
 
 describe('loadEvidence - adversarial tests', () => {

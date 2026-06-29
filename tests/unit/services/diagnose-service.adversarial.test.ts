@@ -1,48 +1,87 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as realChildProcess from 'node:child_process';
+import * as realFs from 'node:fs';
 import type { Plan } from '../../../src/config/plan-schema.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
 
-// Mock all the imported modules
-vi.mock('../../../src/plan/manager.js', () => ({
-	loadPlanJsonOnly: vi.fn(),
-	closePlanTerminalState: async () => {},
-	_snapshot_test_exports: {},
+// Shared mock registry — allows factory-created mocks to be re-imported
+// and accessed via the same binding that the test code uses.
+const mockRegistry: Record<string, Function> = {};
+
+// --- Create mock functions before mock.module so factory refs are stable ---
+const mockReadSwarmFileAsync = mock(() => Promise.resolve(null));
+const mockReaddirSync = mock(() => [] as realFs.Dirent[]);
+const mockExistsSync = mock(() => true);
+const mockStatSync = mock(() => ({ isDirectory: () => true }));
+
+mockRegistry.readSwarmFileAsync = mockReadSwarmFileAsync;
+mockRegistry.readdirSync = mockReaddirSync;
+mockRegistry.existsSync = mockExistsSync;
+mockRegistry.statSync = mockStatSync;
+
+// --- Mock modules using registry ---
+mock.module('../../../src/plan/manager.js', () => {
+	const m = mock(() => Promise.resolve(null));
+	mockRegistry.loadPlanJsonOnly = m;
+	return {
+		loadPlanJsonOnly: m,
+		closePlanTerminalState: async () => {},
+		_snapshot_test_exports: {},
+	};
+});
+mock.module('../../../src/evidence/manager.js', () => {
+	const m = mock(() => Promise.resolve([]));
+	mockRegistry.listEvidenceTaskIds = m;
+	return { listEvidenceTaskIds: m };
+});
+mock.module('../../../src/hooks/utils.js', () => ({
+	readSwarmFileAsync: mockReadSwarmFileAsync,
 }));
-vi.mock('../../../src/evidence/manager.js', () => ({
-	listEvidenceTaskIds: vi.fn(),
+mock.module('../../../src/config/loader.js', () => {
+	const m = mock(() => null);
+	mockRegistry.loadPluginConfig = m;
+	return { loadPluginConfig: m };
+});
+mock.module('node:fs', () => ({
+	...realFs,
+	readdirSync: mockReaddirSync,
+	existsSync: mockExistsSync,
+	statSync: mockStatSync,
 }));
-vi.mock('../../../src/hooks/utils.js', () => ({
-	readSwarmFileAsync: vi.fn(),
-}));
-vi.mock('../../../src/config/loader.js', () => ({
-	loadPluginConfig: vi.fn(),
-}));
-vi.mock('node:fs', () => ({
-	readdirSync: vi.fn(),
-	existsSync: vi.fn(),
-	statSync: vi.fn(),
-}));
-vi.mock('node:child_process', () => ({
-	execSync: vi.fn(),
-}));
+mock.module('node:child_process', () => {
+	const m = mock(() => Buffer.from('.git'));
+	mockRegistry.execSync = m;
+	return { ...realChildProcess, execSync: m };
+});
 
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { loadPluginConfig } from '../../../src/config/loader.js';
 import { listEvidenceTaskIds } from '../../../src/evidence/manager.js';
 import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
-// Import mocked modules
+// --- Import mocked modules AFTER mock.module so bindings get the mocks ---
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
 
-// Type assertions for mocks
-const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof vi.fn>;
-const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
-const mockReadSwarmFileAsync = readSwarmFileAsync as ReturnType<typeof vi.fn>;
-const mockLoadPluginConfig = loadPluginConfig as ReturnType<typeof vi.fn>;
-const mockReaddirSync = readdirSync as ReturnType<typeof vi.fn>;
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockStatSync = statSync as ReturnType<typeof vi.fn>;
-const mockExecSync = execSync as ReturnType<typeof vi.fn>;
+// Type assertions — use registry mocks (which have mock methods) not the imports
+const mockLoadPlanJsonOnly = mockRegistry.loadPlanJsonOnly as ReturnType<
+	typeof mock
+>;
+const mockListEvidenceTaskIds = mockRegistry.listEvidenceTaskIds as ReturnType<
+	typeof mock
+>;
+const mockReadSwarmFileAsyncFromReg =
+	mockRegistry.readSwarmFileAsync as ReturnType<typeof mock>;
+const mockLoadPluginConfig = mockRegistry.loadPluginConfig as ReturnType<
+	typeof mock
+>;
+const mockReaddirSyncFromReg = mockRegistry.readdirSync as ReturnType<
+	typeof mock
+>;
+const mockExistsSyncFromReg = mockRegistry.existsSync as ReturnType<
+	typeof mock
+>;
+const mockStatSyncFromReg = mockRegistry.statSync as ReturnType<typeof mock>;
+const mockExecSync = mockRegistry.execSync as ReturnType<typeof mock>;
 
 // Helper to create minimal valid plan object
 function makePlan(
@@ -82,20 +121,21 @@ function findCheck(checks: any[], name: string) {
 const testDirectory = '/test/directory';
 
 beforeEach(() => {
-	vi.clearAllMocks();
+	mock.clearAllMocks();
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
 	mockListEvidenceTaskIds.mockResolvedValue([]);
-	mockReadSwarmFileAsync.mockResolvedValue(null);
+	mockReadSwarmFileAsyncFromReg.mockResolvedValue(null);
 	mockLoadPluginConfig.mockReturnValue(null);
-	mockReaddirSync.mockReturnValue([]);
-	mockExistsSync.mockReturnValue(true);
-	mockStatSync.mockReturnValue({ isDirectory: () => true });
+	mockReaddirSyncFromReg.mockImplementation(() => [] as realFs.Dirent[]);
+	mockExistsSyncFromReg.mockReturnValue(true);
+	mockStatSyncFromReg.mockReturnValue({ isDirectory: () => true });
 	mockExecSync.mockReturnValue(Buffer.from('.git'));
 	// restore env var
 	delete process.env.OPENCODE_SWARM_ID;
 });
 
 afterEach(() => {
+	mock.restore();
 	delete process.env.OPENCODE_SWARM_ID;
 });
 
@@ -726,7 +766,14 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 			);
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
-			mockReaddirSync.mockReturnValue(backupFiles);
+			mockReaddirSync.mockReturnValue(
+				backupFiles.map((name) => ({
+					name,
+					isDirectory: () => false,
+					isFile: () => true,
+					isSymbolicLink: () => false,
+				})),
+			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
 
@@ -749,7 +796,14 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 			);
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
-			mockReaddirSync.mockReturnValue(backupFiles);
+			mockReaddirSync.mockReturnValue(
+				backupFiles.map((name) => ({
+					name,
+					isDirectory: () => false,
+					isFile: () => true,
+					isSymbolicLink: () => false,
+				})),
+			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
 
@@ -772,7 +826,14 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 			);
 
 			mockLoadPlanJsonOnly.mockResolvedValue(plan);
-			mockReaddirSync.mockReturnValue(backupFiles);
+			mockReaddirSync.mockReturnValue(
+				backupFiles.map((name) => ({
+					name,
+					isDirectory: () => false,
+					isFile: () => true,
+					isSymbolicLink: () => false,
+				})),
+			);
 
 			process.env.OPENCODE_SWARM_ID = 'test-swarm-id';
 

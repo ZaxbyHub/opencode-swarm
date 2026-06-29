@@ -41,14 +41,14 @@ mock.module('../../../src/background/event-bus', () => ({
 				}
 			};
 		},
-		publish: jest.fn(),
+		publish: mock(),
 	}),
 }));
 
 // Mock the evidence summary service
 mock.module('../../../src/services/evidence-summary-service', () => ({
-	buildEvidenceSummary: jest.fn(),
-	isAutoSummaryEnabled: jest.fn(),
+	buildEvidenceSummary: mock(),
+	isAutoSummaryEnabled: mock(),
 }));
 
 import {
@@ -56,11 +56,11 @@ import {
 	isAutoSummaryEnabled,
 } from '../../../src/services/evidence-summary-service';
 
-const mockBuildEvidenceSummary = buildEvidenceSummary as jest.MockedFunction<
-	typeof buildEvidenceSummary
+const mockBuildEvidenceSummary = buildEvidenceSummary as ReturnType<
+	typeof mock
 >;
-const mockIsAutoSummaryEnabled = isAutoSummaryEnabled as jest.MockedFunction<
-	typeof isAutoSummaryEnabled
+const mockIsAutoSummaryEnabled = isAutoSummaryEnabled as ReturnType<
+	typeof mock
 >;
 
 let tempDir: string;
@@ -74,7 +74,7 @@ beforeEach(() => {
 	projectDir = tempDir;
 	mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	mockSubscribers.clear();
-	jest.clearAllMocks();
+	mock.restore();
 });
 
 // Cross-module mocks via mock.module must be restored after each test to prevent

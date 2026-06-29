@@ -3,10 +3,10 @@
  * Tests round-trip save/load, error handling, and idempotency.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadSnapshot } from '../../../src/session/snapshot-reader.js';
 // Direct imports from session modules (not from src/index.ts)
 import { createSnapshotWriterHook } from '../../../src/session/snapshot-writer.js';

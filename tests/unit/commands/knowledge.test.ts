@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock knowledge-store — required because quarantine/restore handlers now call readKnowledge
 // to resolve prefix matches before delegating to the backend.
-const mockReadKnowledge = vi.fn().mockResolvedValue([]);
-const mockResolveSwarmKnowledgePath = vi
-	.fn()
-	.mockImplementation((dir: string) => `${dir}/.swarm/knowledge.jsonl`);
+const mockReadKnowledge = mock().mockResolvedValue([]);
+const mockResolveSwarmKnowledgePath = mock().mockImplementation(
+	(dir: string) => `${dir}/.swarm/knowledge.jsonl`,
+);
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	readKnowledge: (path: string) => mockReadKnowledge(path),
 	resolveSwarmKnowledgePath: (dir: string) =>
 		mockResolveSwarmKnowledgePath(dir),
@@ -18,18 +18,18 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 }));
 
 // Mock knowledge-validator module
-const mockQuarantineEntry = vi.fn();
-const mockRestoreEntry = vi.fn();
+const mockQuarantineEntry = mock();
+const mockRestoreEntry = mock();
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	quarantineEntry: mockQuarantineEntry,
 	restoreEntry: mockRestoreEntry,
 }));
 
 // Mock knowledge-migrator module
-const mockMigrate = vi.fn();
+const mockMigrate = mock();
 
-vi.mock('../../../src/hooks/knowledge-migrator.js', () => ({
+mock.module('../../../src/hooks/knowledge-migrator.js', () => ({
 	migrateContextToKnowledge: mockMigrate,
 }));
 
@@ -70,7 +70,8 @@ function makeEntry(id: string, overrides?: Record<string, unknown>) {
 
 describe('handleKnowledgeQuarantineCommand', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	it('returns usage message when entryId is missing (empty args)', async () => {
@@ -232,7 +233,7 @@ describe('handleKnowledgeQuarantineCommand', () => {
 
 describe('handleKnowledgeRestoreCommand', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 	});
 
 	it('returns usage message when entryId is missing (empty args)', async () => {
@@ -304,7 +305,7 @@ describe('handleKnowledgeRestoreCommand', () => {
 
 describe('handleKnowledgeListCommand', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 	});
 
 	it('returns no-entries message when knowledge store is empty', async () => {
@@ -361,7 +362,7 @@ describe('handleKnowledgeListCommand', () => {
 
 describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 	});
 
 	it('knowledge quarantine <id> routes to quarantine handler', async () => {
@@ -400,7 +401,7 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 
 describe('handleKnowledgeMigrateCommand', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
 	});
 
 	it('successful migration returns string containing "Migration complete" with correct counts (entriesMigrated=3, entriesDropped=1, entriesTotal=4)', async () => {

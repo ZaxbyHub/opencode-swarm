@@ -3,7 +3,7 @@
  * Tests cover the full registry with all 11 profiles across all tiers
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { LANGUAGE_REGISTRY } from '../../../src/lang/profiles';
 
 describe('LanguageRegistry - Registry Completeness', () => {

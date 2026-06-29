@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, jest, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -7,8 +7,8 @@ import { loadFullOutput } from '../../../src/summaries/manager';
 import { retrieve_summary } from '../../../src/tools/retrieve-summary';
 
 // Mock loadFullOutput
-jest.mock('../../../src/summaries/manager', () => ({
-	loadFullOutput: jest.fn(),
+mock.module('../../../src/summaries/manager', () => ({
+	loadFullOutput: mock(),
 	sanitizeSummaryId: (id: string) => {
 		if (!/^S\d+$/.test(id)) {
 			throw new Error('Invalid ID');
@@ -17,9 +17,7 @@ jest.mock('../../../src/summaries/manager', () => ({
 	},
 }));
 
-const mockLoadFullOutput = loadFullOutput as jest.MockedFunction<
-	typeof loadFullOutput
->;
+const mockLoadFullOutput = loadFullOutput as ReturnType<typeof mock>;
 
 // Helper to create mock context
 function getMockContext(dir: string): ToolContext {
@@ -51,7 +49,7 @@ describe('retrieve_summary pagination', () => {
 	afterEach(() => {
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
-		jest.restoreAllMocks();
+		mock.restore();
 	});
 
 	test('returns first 100 lines with continuation header for large output', async () => {

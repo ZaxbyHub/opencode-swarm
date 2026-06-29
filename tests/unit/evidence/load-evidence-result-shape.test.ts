@@ -1,7 +1,7 @@
+import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
 import { loadEvidence } from '../../../src/evidence/manager.js';
 
 // Helper to create a temp directory

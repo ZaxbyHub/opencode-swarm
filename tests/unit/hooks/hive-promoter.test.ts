@@ -3,24 +3,26 @@
  * Tests all three promotion routes and confirmation advancement logic.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
 
 // Mock knowledge-store module
-const mockResolveHiveKnowledgePath = vi
-	.fn()
-	.mockReturnValue('/hive/shared-learnings.jsonl');
-const mockResolveHiveRejectedPath = vi
-	.fn()
-	.mockReturnValue('/hive/shared-learnings-rejected.jsonl');
-const mockResolveSwarmKnowledgePath = vi
-	.fn()
-	.mockReturnValue('/swarm/.swarm/knowledge.jsonl');
-const mockReadKnowledge = vi.fn().mockResolvedValue([]);
-const mockAppendKnowledge = vi.fn().mockResolvedValue(undefined);
-const mockRewriteKnowledge = vi.fn().mockResolvedValue(undefined);
-const mockFindNearDuplicate = vi.fn().mockReturnValue(undefined);
+const mockResolveHiveKnowledgePath = mock(() => '/hive/shared-learnings.jsonl');
+const mockResolveHiveRejectedPath = mock(
+	() => '/hive/shared-learnings-rejected.jsonl',
+);
+const mockResolveSwarmKnowledgePath = mock(
+	() => '/swarm/.swarm/knowledge.jsonl',
+);
+const mockReadKnowledge = mock(async () => []);
+const mockAppendKnowledge = mock(async () => undefined);
+const mockRewriteKnowledge = mock(async () => undefined);
+const mockFindNearDuplicate = mock(() => undefined);
 
-vi.mock('../../../src/hooks/knowledge-store.js', () => ({
+mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	resolveHiveKnowledgePath: () => mockResolveHiveKnowledgePath(),
 	resolveHiveRejectedPath: () => mockResolveHiveRejectedPath(),
 	resolveSwarmKnowledgePath: (dir?: string) =>
@@ -32,7 +34,7 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 		mockRewriteKnowledge(path, data),
 	findNearDuplicate: (lesson: string, entries: unknown[], threshold: number) =>
 		mockFindNearDuplicate(lesson, entries, threshold),
-	computeConfidence: vi.fn().mockReturnValue(0.6),
+	computeConfidence: mock(() => 0.6),
 	enforceKnowledgeCap: async () => {},
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
@@ -40,14 +42,14 @@ vi.mock('../../../src/hooks/knowledge-store.js', () => ({
 }));
 
 // Mock knowledge-validator module
-const mockValidateLesson = vi.fn().mockReturnValue({
+const mockValidateLesson = mock(() => ({
 	valid: true,
 	layer: 0,
 	reason: '',
 	severity: undefined,
-});
+}));
 
-vi.mock('../../../src/hooks/knowledge-validator.js', () => ({
+mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 	validateLesson: (lesson: string, existingLessons: string[], meta: unknown) =>
 		mockValidateLesson(lesson, existingLessons, meta),
 }));
@@ -67,7 +69,8 @@ describe('hive-promoter', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 
 		mockConfig = {
 			hive_enabled: true,
@@ -662,7 +665,8 @@ describe('promoteToHive - Schema Mismatch Fix Verification', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -871,7 +875,8 @@ describe('promoteFromSwarm - Schema Mismatch Fix Verification', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -1286,7 +1291,8 @@ describe('Hive promoter module exports', () => {
 
 describe('R5: promoteToHive source_project cross-platform fix', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -1388,7 +1394,8 @@ describe('Task 3.3: weighted advancement behavior', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -1713,7 +1720,8 @@ describe('Task 3.3: same-run double-count prevention', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -1881,10 +1889,10 @@ describe('Task 3.3: same-run double-count prevention', () => {
 });
 
 // Mock curator module for curator-summary tests
-const mockReadCuratorSummary = vi.fn();
-const mockWriteCuratorSummary = vi.fn();
+const mockReadCuratorSummary = mock();
+const mockWriteCuratorSummary = mock();
 
-vi.mock('../../../src/hooks/curator.js', () => ({
+mock.module('../../../src/hooks/curator.js', () => ({
 	readCuratorSummary: (...args: unknown[]) => mockReadCuratorSummary(...args),
 	writeCuratorSummary: (...args: unknown[]) => mockWriteCuratorSummary(...args),
 }));
@@ -1894,7 +1902,8 @@ describe('Task 3.4: curator-summary feedback integration', () => {
 	let baseSwarmEntry: SwarmKnowledgeEntry;
 
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -2232,7 +2241,8 @@ describe('Task 3.4: curator-summary feedback integration', () => {
 
 describe('promoteToHive - canonical hive path and field names', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockReadKnowledge.mockResolvedValue([]);
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
@@ -2307,7 +2317,8 @@ describe('promoteToHive - canonical hive path and field names', () => {
 
 describe('promoteFromSwarm - canonical hive path', () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
+		mock.restore();
+		mock.clearAllMocks();
 		mockFindNearDuplicate.mockReturnValue(undefined);
 		mockValidateLesson.mockReturnValue({
 			valid: true,

@@ -1,24 +1,32 @@
-import type * as fs from 'node:fs';
-import * as path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// IMPORTANT MOCK PATTERN - vi.mocked() does NOT work in this environment
-const mockIsCommandAvailable = vi.fn<[string], boolean>();
-vi.mock('../../../src/build/discovery', () => ({
+afterEach(() => {
+	mock.restore();
+});
+
+import type * as fs from 'node:fs';
+import * as realFs from 'node:fs';
+import * as path from 'node:path';
+
+// IMPORTANT MOCK PATTERN
+const mockIsCommandAvailable = mock();
+mock.module('../../../src/build/discovery', () => ({
 	isCommandAvailable: (...args: unknown[]) =>
 		mockIsCommandAvailable(...(args as [string])),
 }));
 
-const mockExistsSync = vi.fn<[fs.PathLike], boolean>();
-const mockReaddirSync = vi.fn<[string], string[]>();
-const mockReadFileSync = vi.fn<[string, string], string>();
-vi.mock('node:fs', () => ({
+const mockExistsSync = mock();
+const mockReaddirSync = mock();
+const mockReadFileSync = mock();
+mock.module('node:fs', () => ({
+	...realFs,
 	existsSync: (...args: unknown[]) =>
 		mockExistsSync(...(args as [fs.PathLike])),
 	readdirSync: (...args: unknown[]) => mockReaddirSync(...(args as [string])),
 	readFileSync: (...args: unknown[]) =>
 		mockReadFileSync(...(args as [string, string])),
 	default: {
+		...realFs,
 		existsSync: (...args: unknown[]) =>
 			mockExistsSync(...(args as [fs.PathLike])),
 		readdirSync: (...args: unknown[]) => mockReaddirSync(...(args as [string])),
@@ -33,12 +41,13 @@ import {
 } from '../../../src/tools/test-runner';
 
 beforeEach(() => {
-	vi.clearAllMocks();
+	mock.restore();
+	mock.clearAllMocks();
 	// Default mocks for safety
-	mockIsCommandAvailable.mockReturnValue(false);
-	mockExistsSync.mockReturnValue(false);
-	mockReaddirSync.mockReturnValue([]);
-	mockReadFileSync.mockReturnValue('{}');
+	mockIsCommandAvailable.mockImplementation(() => false);
+	mockExistsSync.mockImplementation(() => false);
+	mockReaddirSync.mockImplementation(() => []);
+	mockReadFileSync.mockImplementation(() => '{}');
 });
 
 describe('Group 1: SUPPORTED_FRAMEWORKS constant', () => {
@@ -101,15 +110,15 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect go-test when go.mod is missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('go-test');
 		});
 
 		it('does not detect go-test when go binary is not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('go.mod');
@@ -133,15 +142,15 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect maven when pom.xml is missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('maven');
 		});
 
 		it('does not detect maven when mvn binary is not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('pom.xml');
@@ -187,8 +196,8 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect gradle when build files are missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('gradle');
@@ -198,24 +207,24 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 	describe('dotnet-test', () => {
 		it('detects dotnet-test when .csproj exists and dotnet binary is available', async () => {
 			mockIsCommandAvailable.mockImplementation((cmd) => cmd === 'dotnet');
-			mockReaddirSync.mockReturnValue(['MyProject.csproj', 'Program.cs']);
-			mockExistsSync.mockReturnValue(false); // No other markers
+			mockReaddirSync.mockImplementation(['MyProject.csproj', 'Program.cs']);
+			mockExistsSync.mockImplementation(false); // No other markers
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).toBe('dotnet-test');
 		});
 
 		it('does not detect dotnet-test when no .csproj files exist', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockReaddirSync.mockReturnValue(['Program.cs', 'README.md']);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockReaddirSync.mockImplementation(['Program.cs', 'README.md']);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('dotnet-test');
 		});
 
 		it('does not detect dotnet-test when dotnet binary is not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue(['MyProject.csproj']);
+			mockIsCommandAvailable.mockImplementation(false);
+			mockReaddirSync.mockImplementation(['MyProject.csproj']);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('dotnet-test');
@@ -257,8 +266,8 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect ctest when cmake files are missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('ctest');
@@ -278,15 +287,15 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect swift-test when Package.swift is missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('swift-test');
 		});
 
 		it('does not detect swift-test when swift binary is not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('Package.swift');
@@ -321,8 +330,8 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect dart-test when pubspec.yaml is missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('dart-test');
@@ -364,8 +373,8 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect rspec when markers are missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
-			mockExistsSync.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(true);
+			mockExistsSync.mockImplementation(false);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).not.toBe('rspec');
@@ -396,7 +405,7 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect minitest when test/ dir is missing', async () => {
-			mockIsCommandAvailable.mockReturnValue(true);
+			mockIsCommandAvailable.mockImplementation(true);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('Gemfile');
@@ -407,7 +416,7 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 		});
 
 		it('does not detect minitest when ruby binary is not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('test') || strPath.endsWith('Gemfile');
@@ -420,22 +429,22 @@ describe('Group 2: detectTestFramework() — new detectors wired in', () => {
 
 	describe('return "none" when NO frameworks are detected', () => {
 		it('returns none when no framework markers exist and no binaries available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
-			mockExistsSync.mockReturnValue(false);
-			mockReaddirSync.mockReturnValue([]);
+			mockIsCommandAvailable.mockImplementation(false);
+			mockExistsSync.mockImplementation(false);
+			mockReaddirSync.mockImplementation([]);
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).toBe('none');
 		});
 
 		it('returns none when framework markers exist but binaries are not available', async () => {
-			mockIsCommandAvailable.mockReturnValue(false);
+			mockIsCommandAvailable.mockImplementation(false);
 			mockExistsSync.mockImplementation((filePath) => {
 				const strPath = String(filePath);
 				return strPath.endsWith('package.json');
 			});
-			mockReaddirSync.mockReturnValue([]);
-			mockReadFileSync.mockReturnValue('{}');
+			mockReaddirSync.mockImplementation([]);
+			mockReadFileSync.mockImplementation('{}');
 
 			const result = await detectTestFramework(tmpDir);
 			expect(result).toBe('none');
@@ -481,13 +490,13 @@ describe('Integration: detectTestFramework with multiple frameworks', () => {
 	const tmpDir = '/tmp/test-project';
 
 	it('prioritizes JS frameworks over new languages when package.json exists', async () => {
-		mockIsCommandAvailable.mockReturnValue(true);
+		mockIsCommandAvailable.mockImplementation(true);
 		mockExistsSync.mockImplementation((filePath) => {
 			const strPath = String(filePath);
 			return strPath.endsWith('package.json') || strPath.endsWith('go.mod');
 		});
-		mockReaddirSync.mockReturnValue([]);
-		mockReadFileSync.mockReturnValue(
+		mockReaddirSync.mockImplementation([]);
+		mockReadFileSync.mockImplementation(
 			JSON.stringify({
 				scripts: { test: 'vitest' },
 			}),
@@ -509,9 +518,9 @@ describe('Integration: detectTestFramework with multiple frameworks', () => {
 	});
 
 	it('returns none when no markers exist', async () => {
-		mockIsCommandAvailable.mockReturnValue(false);
-		mockExistsSync.mockReturnValue(false);
-		mockReaddirSync.mockReturnValue([]);
+		mockIsCommandAvailable.mockImplementation(false);
+		mockExistsSync.mockImplementation(false);
+		mockReaddirSync.mockImplementation([]);
 
 		const result = await detectTestFramework(tmpDir);
 		expect(result).toBe('none');
