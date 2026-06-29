@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as fsPromises from 'node:fs/promises';
+import * as realCrypto from 'node:crypto';
+import * as realFs from 'node:fs';
+import * as realFsPromises from 'node:fs/promises';
+import { _internals } from '../../../src/hooks/knowledge-migrator';
 
 // At top of file, before imports:
 const mockExistsSync = mock(() => false);
@@ -25,17 +26,24 @@ const mockValidateLesson = mock(() => ({
 }));
 const mockRandomUUID = mock(() => 'test-uuid-1234');
 
+// Save originals for _internals restoration
+const originalInternals: Record<string, unknown> = {};
+for (const key of Object.keys(_internals)) {
+	originalInternals[key] = _internals[key as keyof typeof _internals];
+}
+
 mock.module('node:fs', () => ({
-	...fs,
+	...realFs,
 	existsSync: (...args: unknown[]) => mockExistsSync(...args),
 	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
 }));
 
+// Note: node:fs/promises is NOT mocked via mock.module because mkdir and writeFile
+// are captured at import time in _internals. Instead, we mock them via _internals below.
+// readFile is mocked here because migrateContextToKnowledge uses bare readFile.
 mock.module('node:fs/promises', () => ({
-	...fsPromises,
+	...realFsPromises,
 	readFile: (...args: unknown[]) => mockReadFile(...args),
-	writeFile: (...args: unknown[]) => mockWriteFile(...args),
-	mkdir: (...args: unknown[]) => mockMkdir(...args),
 }));
 
 mock.module('../../../src/hooks/knowledge-store.js', () => ({
@@ -57,7 +65,7 @@ mock.module('../../../src/hooks/knowledge-validator.js', () => ({
 }));
 
 mock.module('node:crypto', () => ({
-	...crypto,
+	...realCrypto,
 	randomUUID: () => mockRandomUUID(),
 }));
 
@@ -94,8 +102,23 @@ const withOrderTracking = (name: string, fn: (...args: any[]) => any) => {
 
 describe('migrateContextToKnowledge', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.clearAllMocks();
 		callOrder.length = 0; // Clear order tracking
+
+		// Restore _internals to clean state before applying mocks
+		for (const key of Object.keys(_internals)) {
+			delete _internals[key as keyof typeof _internals];
+		}
+		Object.assign(_internals, originalInternals);
+
+		// Replace filesystem operations via _internals DI seam
+		Object.assign(_internals, {
+			existsSync: mockExistsSync,
+			readFileSync: mockReadFileSync,
+			mkdir: mockMkdir,
+			readFile: mockReadFile,
+			writeFile: mockWriteFile,
+		});
 
 		// defaults
 		mockExistsSync.mockImplementation(() => false); // no files exist by default
@@ -125,6 +148,11 @@ describe('migrateContextToKnowledge', () => {
 
 	afterEach(() => {
 		mock.restore();
+		// Restore original _internals
+		for (const key of Object.keys(_internals)) {
+			delete _internals[key as keyof typeof _internals];
+		}
+		Object.assign(_internals, originalInternals);
 	});
 
 	describe('Gate 1 — sentinel exists', () => {

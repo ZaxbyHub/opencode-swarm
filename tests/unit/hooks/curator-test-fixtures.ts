@@ -20,7 +20,12 @@
  */
 
 import { type Mock, mock } from 'bun:test';
+import * as realKnowledgeReader from '../../../src/hooks/knowledge-reader.js';
+import * as realKnowledgeStore from '../../../src/hooks/knowledge-store.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+// Import real modules for spreading in mock returns (FR-001 SC-001.1 pattern)
+import * as realKnowledgeValidator from '../../../src/hooks/knowledge-validator.js';
+import * as realUtils from '../../../src/hooks/utils.js';
 
 // =============================================================================
 // Mock factory
@@ -138,6 +143,7 @@ export function setupMockModules(mocks: ReturnType<typeof createCuratorMocks>) {
 	} = mocks;
 
 	mock.module('../../../src/hooks/knowledge-validator.js', () => ({
+		...realKnowledgeValidator,
 		validateLesson: (...args: unknown[]) =>
 			mockValidateLesson(
 				...(args as [
@@ -156,11 +162,13 @@ export function setupMockModules(mocks: ReturnType<typeof createCuratorMocks>) {
 	}));
 
 	mock.module('../../../src/hooks/knowledge-reader.js', () => ({
+		...realKnowledgeReader,
 		updateRetrievalOutcome: (...args: unknown[]) =>
 			mockUpdateRetrievalOutcome(...(args as [string, string, boolean])),
 	}));
 
 	mock.module('../../../src/hooks/knowledge-store.js', () => ({
+		...realKnowledgeStore,
 		resolveSwarmKnowledgePath: (...args: unknown[]) =>
 			mockResolveSwarmKnowledgePath(...(args as [string])),
 		resolveSwarmRejectedPath: (...args: unknown[]) =>
@@ -209,6 +217,7 @@ export function setupMockModules(mocks: ReturnType<typeof createCuratorMocks>) {
 	}));
 
 	mock.module('../../../src/hooks/utils.js', () => ({
+		...realUtils,
 		readSwarmFileAsync: (...args: unknown[]) =>
 			mockReadSwarmFileAsync(...(args as [string, string])),
 		safeHook: (...args: unknown[]) => mockSafeHook(...(args as [unknown])),

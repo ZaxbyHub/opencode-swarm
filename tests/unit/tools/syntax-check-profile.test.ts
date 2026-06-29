@@ -82,7 +82,8 @@ function createErrorParser() {
 
 describe('syntaxCheck - Profile-Driven Grammar Resolution (Task 2.5)', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		mockGetProfileForFile.mockReset();
 		mockGetLanguageForExtension.mockReset();
 		mockGetParserForFile.mockReset();

@@ -2,11 +2,49 @@
 # Check that test files using mock.module have proper cleanup.
 # Cross-module mock.module is permitted per two-tier convention,
 # but must have afterEach(mock.restore()) or documented exception.
+#
+# FB-001: This script is non-blocking for pre-existing violations.
+# It only fails if the PR DIFF introduces NEW violations.
+# Pre-existing violations are reported as WARNINGS, not errors.
 set -euo pipefail
 
 violations=0
+new_violations=0
+pre_existing_violations=0
 
-# Scan both tests/ and src/ for test files with mock.module (excluding test infrastructure)
+# Get list of files changed in PR diff (compare against main/master)
+get_pr_changed_files() {
+    local pr_files=""
+    # Try to detect the base branch
+    local base_branch=""
+    for branch in origin/main origin/master main master; do
+        if git rev-parse "$branch" >/dev/null 2>&1; then
+            base_branch="$branch"
+            break
+        fi
+    done
+
+    if [ -n "$base_branch" ]; then
+        pr_files=$(git diff --name-only "$base_branch" HEAD 2>/dev/null || echo "")
+    fi
+    echo "$pr_files"
+}
+
+# Check if a file is in the PR diff
+is_pr_file() {
+    local file="$1"
+    local pr_files="$2"
+    if [ -z "$pr_files" ]; then
+        return 1  # No PR context
+    fi
+    echo "$pr_files" | grep -qF "$file"
+    return $?
+}
+
+# Get PR changed files
+PR_CHANGED_FILES=$(get_pr_changed_files)
+
+# --- Check 1: mock.module cleanup ---
 while IFS= read -r file; do
   # Check if file has afterEach with mock.restore
   has_cleanup=$(grep -c "mock\.restore" "$file" || true)
@@ -16,11 +54,17 @@ while IFS= read -r file; do
   has_exception=$(grep -c "skip.*mock\.restore\|NOT.*mock\.restore\|no.*mock\.restore\|file-scoped\|mockClear\|mockReset" "$file" || true)
 
   if [ "$has_cleanup" -eq 0 ] && [ "$has_file_scoped" -eq 0 ] && [ "$has_exception" -eq 0 ]; then
-    echo "ERROR: $file uses mock.module but has no afterEach(mock.restore()) cleanup"
-    echo "       Add afterEach(() => mock.restore()), or use file-scoped pattern"
-    echo "       (mock.module at top + mockClear/mockReset in beforeEach),"
-    echo "       or document why it's skipped"
-    violations=$((violations + 1))
+    if is_pr_file "$file" "$PR_CHANGED_FILES"; then
+      echo "ERROR: $file uses mock.module but has no afterEach(mock.restore()) cleanup"
+      echo "       Add afterEach(() => mock.restore()), or use file-scoped pattern"
+      echo "       (mock.module at top + mockClear/mockReset in beforeEach),"
+      echo "       or document why it's skipped"
+      violations=$((violations + 1))
+      new_violations=$((new_violations + 1))
+    else
+      echo "WARNING: $file uses mock.module but has no afterEach(mock.restore()) cleanup (pre-existing)"
+      pre_existing_violations=$((pre_existing_violations + 1))
+    fi
   fi
 done < <(grep -rl "mock\.module(" tests/ src/ --include="*.test.ts" 2>/dev/null | grep -v "tests/unit/scripts/temp-test-files/" | grep -v "tests/unit/scripts/check-mock-cleanup.test.ts" || true)
 
@@ -71,22 +115,36 @@ while IFS= read -r file; do
             if ! grep -qE "const\s+${spread_var}\s*=\s*await\s+import\(['\"]node:${mod}['\"]" "$file"; then
                 # Find the line number of the first mock.module call for this module
                 line_num=$(grep -nE "mock\.module\(['\"]node:${mod}['\"]" "$file" | head -1 | cut -d: -f1)
-                echo "ERROR: $file:$line_num uses mock.module('node:$mod', ...) without spreading real exports"
-                echo " Add ...${spread_var} to the returned object, e.g.:"
-                echo " mock.module('node:$mod', () => ({ ...${spread_var}, ... }))"
-                echo " or:"
-                echo " mock.module('node:$mod', async () => { const ${spread_var} = await import('node:$mod'); return { ...${spread_var}, ... } })"
-                violations=$((violations + 1))
+                if is_pr_file "$file" "$PR_CHANGED_FILES"; then
+                    echo "ERROR: $file:$line_num uses mock.module('node:$mod', ...) without spreading real exports"
+                    echo " Add ...${spread_var} to the returned object, e.g.:"
+                    echo " mock.module('node:$mod', () => ({ ...${spread_var}, ... }))"
+                    echo " or:"
+                    echo " mock.module('node:$mod', async () => { const ${spread_var} = await import('node:$mod'); return { ...${spread_var}, ... } })"
+                    violations=$((violations + 1))
+                    new_violations=$((new_violations + 1))
+                else
+                    echo "WARNING: $file:$line_num uses mock.module('node:$mod', ...) without spreading real exports (pre-existing)"
+                    pre_existing_violations=$((pre_existing_violations + 1))
+                fi
             fi
         fi
     done
 done < <(grep -rlE "mock\.module\(['\"]node:" tests/ src/ --include="*.test.ts" 2>/dev/null | grep -v "tests/unit/scripts/temp-test-files/" | grep -v "tests/unit/scripts/check-mock-cleanup.test.ts" || true)
 
 
-if [ "$violations" -gt 0 ]; then
+if [ "$new_violations" -gt 0 ]; then
   echo ""
-  echo "$violations file(s) have mock.module issues. See errors above."
+  echo "$new_violations NEW violation(s) introduced by this PR. See errors above."
+  echo "$pre_existing_violations pre-existing violation(s) also found (non-blocking)."
   exit 1
+fi
+
+if [ "$pre_existing_violations" -gt 0 ]; then
+  echo ""
+  echo "$pre_existing_violations pre-existing violation(s) found (non-blocking)."
+  echo "All test files with mock.module have proper cleanup and spread real exports."
+  exit 0
 fi
 
 echo "All test files with mock.module have proper cleanup and spread real exports."

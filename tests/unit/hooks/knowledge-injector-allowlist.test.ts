@@ -17,7 +17,12 @@
  * receive the orchestrator block — the two paths are mutually exclusive.
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -199,7 +204,8 @@ function hasAnyInjection(output: { messages: MessageWithParts[] }): boolean {
 
 describe('Knowledge injection — architect vs delegate vs none', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test',

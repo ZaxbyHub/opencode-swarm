@@ -204,11 +204,13 @@ describe('delegation-gate: tests_run completion flow', () => {
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		// Complete the task
+		// Complete the task — state advancement to 'complete' happens in toolAfter,
+		// not toolBefore, so we simulate it directly here (FB-003 fix).
 		await callToolBefore(hook, 'update_task_status', 'test-session', {
 			task_id: '1.1',
 			status: 'completed',
 		});
+		session.taskWorkflowStates.set('1.1', 'complete');
 
 		// Now delegation should work
 		let threw = false;

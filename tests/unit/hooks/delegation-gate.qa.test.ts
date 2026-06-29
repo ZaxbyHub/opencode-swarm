@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	ensureAgentSession,
@@ -14,21 +17,36 @@ import {
 	makeMessages,
 } from './_delegation-gate-helpers';
 
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
+
 // ============================================
 // QA Skip Hard-Block Enforcement Tests (v6.17)
 // ============================================
 describe('QA skip hard-block enforcement', () => {
+	let tempDir: string;
+
 	beforeEach(() => {
 		resetSwarmState();
+		tempDir = makeTempProject('dg-qa-');
 	});
 
 	afterEach(() => {
 		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
 	});
 
 	it('first coder delegation issues warning not error: After one coder delegation with no reviewer/test_engineer, a second coder delegation injects a warning into a system message but does NOT throw', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Setup delegation chain with 2 coder delegations (architect→coder→architect→coder)
 		// This simulates the case where the first coder delegation happened, and now architect is delegating to coder again without QA
@@ -74,7 +92,7 @@ describe('QA skip hard-block enforcement', () => {
 
 	it('second consecutive coder delegation throws hard-block Error: After two coder delegations without reviewer/test_engineer, a third coder delegation throws an Error', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Setup delegation chain with multiple coder delegations without reviewer/test_engineer
 		swarmState.delegationChains.set('test-session', [
@@ -104,7 +122,7 @@ describe('QA skip hard-block enforcement', () => {
 
 	it('thrown error message names skipped task IDs: The thrown error message contains the task IDs that were skipped', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		swarmState.delegationChains.set('test-session', [
 			{ from: 'architect', to: 'mega_coder', timestamp: 1 },
@@ -135,7 +153,7 @@ describe('QA skip hard-block enforcement', () => {
 
 	it('reviewer delegation resets counter so next coder does not throw: After reviewer delegation detected in toolAfter, qaSkipCount resets and next coder can proceed without throw', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Setup: previous QA skip state
 		swarmState.delegationChains.set('test-session', [
@@ -193,7 +211,7 @@ describe('QA skip hard-block enforcement', () => {
 
 	it('test_engineer delegation resets counter so next coder does not throw: Same as above but for test_engineer', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Setup: previous QA skip state
 		swarmState.delegationChains.set('test-session', [

@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	ensureAgentSession,
@@ -13,10 +16,33 @@ import {
 	makeMessages,
 } from './_delegation-gate-helpers';
 
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
+
 // ============================================
 // Task 4.1 — Progressive Task Disclosure Tests
 // ============================================
 describe('Task 4.1 — progressive task disclosure (task window trimming)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		resetSwarmState();
+		tempDir = makeTempProject('dg-progressive-');
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
 	// Helper to set currentTaskId in session
 	const setCurrentTaskId = (sessionID: string, taskId: string | null) => {
 		const session = ensureAgentSession(sessionID);
@@ -25,7 +51,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('no trimming when 5 or fewer tasks present', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-1';
 
 		// No sessionID to skip preamble injection
@@ -52,7 +78,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('trims task list when more than 5 tasks and current task in middle', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-2';
 
 		// 10 tasks, current is 1.5 (index 4)
@@ -106,7 +132,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('no trimming when currentTaskId is null', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-3';
 
 		// More than 5 tasks but currentTaskId is null - no sessionID to skip preamble
@@ -132,7 +158,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('trims correctly when current task is near the start', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-4';
 
 		// 10 tasks, current is 1.2 (index 1)
@@ -182,7 +208,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('trims correctly when current task is near the end', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-5';
 
 		// 10 tasks, current is 1.9 (index 8)
@@ -235,7 +261,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('handles currentTaskId not found in task list gracefully', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-6';
 
 		// 10 tasks, but currentTaskId is 9.9 (not in list)
@@ -273,7 +299,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('preserves text before and after task list', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-7';
 
 		// Set up session with currentTaskId for task window trimming
@@ -328,7 +354,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('works with mega_architect agent', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-8';
 
 		// Using mega_architect should also work (architect prefix stripped)
@@ -353,7 +379,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('does not trim for non-architect agents', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-9';
 
 		const taskList = [
@@ -379,7 +405,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 	it('handles different task list formats (checked, unchecked, plain)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'test-session-task-window-10';
 
 		// Mixed format: - [x] checked, - [ ] unchecked, - plain

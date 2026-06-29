@@ -49,6 +49,7 @@ describe('handleDebuggingSpiral', () => {
 	});
 
 	afterEach(() => {
+		mock.restore();
 		process.chdir(originalCwd);
 		try {
 			const cleanupPath = path.join(os.tmpdir(), tempDir);

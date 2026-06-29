@@ -54,7 +54,8 @@ const makeStream = (content: string) =>
 
 describe('getAdditionalLinterCommand', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		mockIsCommandAvailable.mockImplementation(() => true);
 		mockExistsSync.mockImplementation(() => false);
 	});
@@ -278,13 +279,14 @@ describe('runAdditionalLint', () => {
 	let originalSpawn: typeof Bun.spawn;
 
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		mockIsCommandAvailable.mockImplementation(true);
 		mockExistsSync.mockImplementation(false);
 		originalSpawn = Bun.spawn;
 	});
 
 	afterEach(() => {
+		mock.restore();
 		Bun.spawn = originalSpawn;
 	});
 

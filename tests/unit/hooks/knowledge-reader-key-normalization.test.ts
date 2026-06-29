@@ -93,7 +93,8 @@ beforeEach(() => {
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	shownFile = path.join(tmpDir, '.swarm', '.knowledge-shown.json');
-	mock.reset();
+	mock.restore();
+	mock.clearAllMocks();
 });
 
 afterEach(() => {

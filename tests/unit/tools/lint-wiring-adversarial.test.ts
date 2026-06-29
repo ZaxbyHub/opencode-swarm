@@ -47,7 +47,8 @@ const makeStream = (content: string) =>
 
 describe('getAdditionalLinterCommand — injection and path attacks', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		mockIsCommandAvailable.mockImplementation(() => false);
 		mockExistsSync.mockImplementation(() => false);
 	});
@@ -166,7 +167,7 @@ describe('getAdditionalLinterCommand — injection and path attacks', () => {
 
 describe('getAdditionalLinterCommand — Gradlew path edge cases', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		mockIsCommandAvailable.mockImplementation(false);
 	});
 
@@ -293,13 +294,14 @@ describe('runAdditionalLint — resource and error attacks', () => {
 	let originalSpawn: typeof Bun.spawn;
 
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		mockIsCommandAvailable.mockImplementation(false);
 		mockExistsSync.mockImplementation(false);
 		originalSpawn = Bun.spawn;
 	});
 
 	afterEach(() => {
+		mock.restore();
 		Bun.spawn = originalSpawn;
 	});
 
@@ -524,7 +526,7 @@ describe('runAdditionalLint — resource and error attacks', () => {
 
 describe('getAdditionalLinterCommand — type safety edge cases', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 	});
 
 	it('should return undefined for null linter (bypasses TypeScript type check)', () => {

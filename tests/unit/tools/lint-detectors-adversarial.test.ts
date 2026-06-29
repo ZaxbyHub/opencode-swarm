@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import * as realFs from 'node:fs';
 import { detectAdditionalLinter } from '../../../src/tools/lint';
 
@@ -21,7 +26,8 @@ mock.module('../../../src/build/discovery', () => ({
 
 describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	describe('Path traversal / injection', () => {

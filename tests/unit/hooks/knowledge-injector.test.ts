@@ -18,7 +18,12 @@
  * - Prompt injection sanitization
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -211,7 +216,8 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('First-call injection', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -248,7 +254,8 @@ describe('First-call injection', () => {
 
 describe('Cache re-inject', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -289,7 +296,8 @@ describe('Cache re-inject', () => {
 
 describe('Second-call fetch and injection', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -335,7 +343,8 @@ describe('Second-call fetch and injection', () => {
 
 describe('Cache re-inject', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -380,7 +389,8 @@ describe('Cache re-inject', () => {
 
 describe('Phase change', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -455,7 +465,7 @@ describe('Phase change', () => {
 
 describe('Non-orchestrator agents skipped', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -539,7 +549,7 @@ describe('Non-orchestrator agents skipped', () => {
 
 describe('Context budget exhaustion', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -596,7 +606,8 @@ describe('Context budget exhaustion', () => {
 
 describe('Empty knowledge', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -629,7 +640,7 @@ describe('Empty knowledge', () => {
 
 describe('Tier labels', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -673,7 +684,8 @@ describe('Tier labels', () => {
 
 describe('Explicit [tier:status] prefixes', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -831,7 +843,8 @@ describe('Explicit [tier:status] prefixes', () => {
 
 describe('Compact format and confirmation indicators', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -971,7 +984,8 @@ describe('Compact format and confirmation indicators', () => {
 
 describe('Rejected pattern warnings', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1083,7 +1097,8 @@ describe('Rejected pattern warnings', () => {
 
 describe('Idempotency', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1124,7 +1139,8 @@ describe('Idempotency', () => {
 
 describe('No plan', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue(null);
 		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
 		readRejectedLessons.mockResolvedValue([]);
@@ -1152,7 +1168,8 @@ describe('No plan', () => {
 
 describe('Unknown agent (undefined agentName)', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1192,7 +1209,8 @@ describe('Unknown agent (undefined agentName)', () => {
 
 describe('Prompt injection sanitization', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1266,7 +1284,8 @@ describe('Prompt injection sanitization', () => {
 
 describe('Run memory wiring', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1383,7 +1402,8 @@ describe('Run memory wiring', () => {
  */
 describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowledge entries)', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -1529,7 +1549,8 @@ describe('Task 5.3: Drift injection when cachedInjectionText is null (no knowled
  */
 describe('Drift-only injection idempotency', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',

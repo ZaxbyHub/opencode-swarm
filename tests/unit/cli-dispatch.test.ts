@@ -5,7 +5,11 @@
  * These tests verify the COMMAND_REGISTRY and resolveCommand() function
  * independently of the CLI or hook entry points.
  */
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
 
 // Mock all individual command files so we can import the registry
 // without triggering real I/O in handler modules

@@ -135,6 +135,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	mock.restore();
 	delete process.env.OPENCODE_SWARM_ID;
 });
 

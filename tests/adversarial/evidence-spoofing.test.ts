@@ -12,10 +12,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Evidence } from '../../src/config/evidence-schema';
+import type { Plan } from '../../src/config/plan-schema';
 import type { validateProjectRoot as ValidateProjectRootType } from '../../src/evidence/manager';
 import {
 	_internals,
@@ -60,6 +61,50 @@ function validBase(overrides: Partial<Evidence> = {}): Evidence {
 		summary: 'Test evidence',
 		...overrides,
 	} as Evidence;
+}
+
+/** Write a minimal plan.json with a specific task marked as completed (FB-005). */
+function writePlanJsonForCompletionTest(
+	dir: string,
+	completedTaskId: string,
+): void {
+	const plan: Plan = {
+		schema_version: '1.0.0' as const,
+		title: 'Test Plan',
+		swarm: 'test-swarm',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'in_progress',
+				tasks: [
+					{
+						id: completedTaskId,
+						phase: 1,
+						status: 'completed' as const,
+						size: 'small' as const,
+						description: 'Test task',
+						depends: [],
+						files_touched: [],
+					},
+					{
+						id: '1.2',
+						phase: 1,
+						status: 'pending' as const,
+						size: 'small' as const,
+						description: 'Another task',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+		],
+	};
+	writeFileSync(
+		join(dir, '.swarm', 'plan.json'),
+		JSON.stringify(plan, null, 2),
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +219,28 @@ describe('SC-005.2 — Timestamp manipulation rejection', () => {
 		const evidence = validBase({ timestamp: new Date().toISOString() });
 		await expect(saveEvidence(tempDir, '1.1', evidence)).resolves.toBeDefined();
 	});
+
+	// FB-005: Semantic timestamp tests
+	it('rejects evidence with a future timestamp (1 day ahead)', async () => {
+		const futureTimestamp = new Date(Date.now() + 86400000).toISOString();
+		const forgedEvidence = validBase({ timestamp: futureTimestamp });
+		// Zod datetime() accepts future dates; saveEvidence schema validation currently
+		// allows them too — this test documents the expected secure behavior.
+		await expect(
+			saveEvidence(tempDir, '1.1', forgedEvidence),
+		).rejects.toThrow();
+	});
+
+	it('accepts a past timestamp (before task assignment) — known limitation', async () => {
+		// FB-005: Schema validation does NOT enforce lower-bound on timestamps.
+		// This is a known limitation documented in the schema validation layer.
+		// The application layer should reject timestamps predating task creation,
+		// but currently does not. This test documents current behavior.
+		const ancientTimestamp = '1999-01-01T00:00:00.000Z';
+		const evidence = validBase({ timestamp: ancientTimestamp });
+		// Currently passes — known limitation
+		await expect(saveEvidence(tempDir, '1.1', evidence)).resolves.toBeDefined();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -257,6 +324,25 @@ describe('SC-005.3 — Task-ID spoofing rejection', () => {
 		await expect(
 			saveEvidence(tempDir, 'sast_scan', evidence),
 		).resolves.toBeDefined();
+	});
+
+	// FB-005: Semantic task-ID tests
+	it('rejects evidence with a non-existent task_id (999.999)', async () => {
+		// FB-005: A task ID that does not exist in the project plan should be rejected.
+		// The application-layer validation in saveEvidence should enforce this.
+		const evidence = validBase({ task_id: '999.999' });
+		await expect(saveEvidence(tempDir, '999.999', evidence)).rejects.toThrow();
+	});
+
+	it('rejects evidence with a completed task_id (status=completed)', async () => {
+		// FB-005: Writing evidence for an already-completed task should be rejected,
+		// as it could be used to backdate or forge evidence after task completion.
+		// Set up plan.json with task 1.1 already marked completed.
+		writePlanJsonForCompletionTest(tempDir, '1.1');
+		const evidence = validBase({ task_id: '1.1' });
+		await expect(saveEvidence(tempDir, '1.1', evidence)).rejects.toThrow(
+			'already completed',
+		);
 	});
 });
 

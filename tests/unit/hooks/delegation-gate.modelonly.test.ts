@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession } from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	findSystemMessage,
 	findUserMessage,
@@ -9,6 +12,13 @@ import {
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
+
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
 
 // Type for message structure
 type TestMessageWithParts = {
@@ -22,6 +32,22 @@ type TestMessageWithParts = {
 // and no delegation debug text leaks into visible output
 // ============================================
 describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		resetSwarmState();
+		tempDir = makeTempProject('dg-modelonly-');
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
 	// Helper to find system messages containing warnings
 	const findSystemWarnings = (messages: {
 		messages: TestMessageWithParts[];
@@ -37,7 +63,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('[NEXT] guidance should be in system message only, NOT in visible user message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-1';
 
 		// Setup session with lastGateOutcome
@@ -74,7 +100,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('[DELEGATION VIOLATION] should be in system message only, NOT in visible user message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-2';
 
 		// Setup session with architect writes
@@ -105,7 +131,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('⚠️ BATCH DETECTED warning should be in system message only, NOT in visible user message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-3';
 
 		// Setup session for [NEXT] guidance
@@ -141,7 +167,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('⚠️ PROTOCOL VIOLATION warning should be in system message only, NOT in visible user message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-4';
 
 		// Setup session with QA skip scenario
@@ -185,7 +211,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('Multiple warnings should all be consolidated in system messages, not visible in user output', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-5';
 
 		// Setup session with lastGateOutcome
@@ -226,7 +252,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('Original task text should be preserved unchanged in user message (no debug prefix/suffix)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-6';
 
 		// Setup session
@@ -257,7 +283,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('No delegation debug text should leak when sessionID is null (no system guidance injected)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Large message but no sessionID - should still not leak debug info
 		const largeText = 'TASK: ' + 'a'.repeat(5000);
@@ -283,7 +309,7 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 
 	it('Combined test: both [NEXT] guidance and batch warnings in separate system messages', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'model-only-test-7';
 
 		// Setup session

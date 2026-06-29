@@ -7,7 +7,11 @@
  * - Leakage of unintended data in the summary payload
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
 
 // Mock curator module
 const mockReadCuratorSummary = mock();
@@ -52,7 +56,8 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 	let mockConfig: KnowledgeConfig;
 
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 
 		mockConfig = {
 			enabled: true,

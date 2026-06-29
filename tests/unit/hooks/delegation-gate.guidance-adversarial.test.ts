@@ -1,12 +1,22 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession } from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	findSystemMessage,
 	getPrimaryText,
 	getSystemWarningText,
 	makeConfig,
 } from './_delegation-gate-helpers';
+
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
 
 // Type for message structure
 type TestMessageWithParts = {
@@ -18,6 +28,22 @@ type TestMessageWithParts = {
 // Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)
 // ============================================
 describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		resetSwarmState();
+		tempDir = makeTempProject('dg-guidance-adv-');
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
 	// Helper to create messages with a specific sessionID
 	const makeArchitectMessages = (text: string, sessionID: string) => {
 		return {
@@ -62,7 +88,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 1. Malicious sessionID — SQL/path injection attempt
 	it('should NOT inject [NEXT] guidance for SQL injection attempt in sessionID', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = "' OR 1=1 --";
 
 		// Set up lastGateOutcome to verify guidance would be injected if format were valid
@@ -93,7 +119,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 2. Malicious sessionID — spaces
 	it('should NOT inject [NEXT] guidance for sessionID with spaces', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'session id with spaces';
 
 		const session = ensureAgentSession(sessionID);
@@ -122,7 +148,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 3. Malicious sessionID — exactly 129 chars (too long)
 	it('should NOT inject [NEXT] guidance for sessionID with 129 characters (too long)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		// 129 valid alphanumeric chars - exceeds max of 128
 		const sessionID = 'a'.repeat(129);
 
@@ -152,7 +178,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 4. Malicious sessionID — exactly 128 chars (boundary, valid)
 	it('should inject [NEXT] guidance for sessionID with exactly 128 characters (boundary)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		// Exactly 128 valid alphanumeric chars - at the boundary
 		const sessionID = 'a'.repeat(128);
 
@@ -182,7 +208,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 5. Prompt injection via lastGate.gate — bracket attack
 	it('should sanitize brackets in lastGate.gate to prevent prompt injection', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-123';
 
 		const session = ensureAgentSession(sessionID);
@@ -224,7 +250,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 6. Prompt injection via lastGate.taskId — bracket attack
 	it('should sanitize brackets in lastGate.taskId to prevent prompt injection', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-456';
 
 		const session = ensureAgentSession(sessionID);
@@ -262,7 +288,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 7. Oversized gate field — 1000 char gate (truncated to 64)
 	it('should truncate oversized gate field to 64 characters', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-789';
 
 		const session = ensureAgentSession(sessionID);
@@ -299,7 +325,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 8. Oversized taskId field — 200 char taskId (truncated to 32)
 	it('should truncate oversized taskId field to 32 characters', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-abc';
 
 		const session = ensureAgentSession(sessionID);
@@ -336,7 +362,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 9. Null/empty textPart.text
 	it('should handle null/undefined textPart.text without crashing', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-null-text';
 
 		const session = ensureAgentSession(sessionID);
@@ -377,7 +403,7 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 	// 10. Newline injection in gate field
 	it('should replace newlines with spaces in gate field to prevent injection', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'valid-session-newline';
 
 		const session = ensureAgentSession(sessionID);

@@ -7,7 +7,12 @@
  * Happy-path tests are in hive-promoter.test.ts
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import {
 	checkHivePromotions,
 	createHivePromoterHook,
@@ -63,7 +68,8 @@ describe('hive-promoter adversarial tests', () => {
 
 	beforeEach(() => {
 		// Reset all mocks
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 
 		// Reset validateLesson to pass by default
 		validateLesson.mockReturnValue({

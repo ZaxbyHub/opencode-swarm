@@ -1,5 +1,11 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import * as realFs from 'node:fs';
+import * as realPath from 'node:path';
 
 import {
 	type SyntaxCheckInput,
@@ -39,6 +45,7 @@ mock.module('node:fs', () => ({
 }));
 
 mock.module('node:path', () => ({
+	...realPath,
 	isAbsolute: (p: string) => p.startsWith('/') || /^[A-Z]:/.test(p),
 	extname: (p: string) => {
 		const i = p.lastIndexOf('.');
@@ -60,7 +67,8 @@ const mockParser = {
 
 describe('syntaxCheck - Profile-Driven Grammar Resolution Adversarial Tests', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 
 		// Default mock behaviors
 		mockGetProfileForFile.mockImplementation(() => null);

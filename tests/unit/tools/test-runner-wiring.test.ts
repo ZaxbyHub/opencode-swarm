@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import type * as fs from 'node:fs';
 import * as realFs from 'node:fs';
 import * as path from 'node:path';
@@ -36,7 +41,8 @@ import {
 } from '../../../src/tools/test-runner';
 
 beforeEach(() => {
-	mock.reset();
+	mock.restore();
+	mock.clearAllMocks();
 	// Default mocks for safety
 	mockIsCommandAvailable.mockImplementation(() => false);
 	mockExistsSync.mockImplementation(() => false);

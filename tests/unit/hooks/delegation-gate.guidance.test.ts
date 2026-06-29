@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession } from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	findSystemMessage,
 	getPrimaryText,
@@ -8,6 +11,13 @@ import {
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
+
+function makeTempProject(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	return real;
+}
 
 // Type for message structure
 type TestMessageWithParts = {
@@ -19,6 +29,22 @@ type TestMessageWithParts = {
 // Task 4.2: Model-Only [NEXT] Guidance Tests (replaces visible deliberation preamble)
 // ============================================
 describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible deliberation)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		resetSwarmState();
+		tempDir = makeTempProject('delegation-gate-guidance-');
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	});
+
 	// Helper to find system message containing [NEXT] guidance
 	const findSystemGuidance = (messages: {
 		messages: TestMessageWithParts[];
@@ -38,7 +64,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('null lastGateOutcome → [NEXT] guidance injected as model-only system message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'deliberation-test-1';
 
 		// Setup session with no lastGateOutcome (null)
@@ -68,7 +94,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('passed gate → [NEXT] guidance with PASSED status in system message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'deliberation-test-2';
 
 		// Setup session with a passed gate outcome
@@ -104,7 +130,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('failed gate → [NEXT] guidance with FAILED status in system message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'deliberation-test-3';
 
 		// Setup session with a failed gate outcome
@@ -140,7 +166,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('original text unchanged - [NEXT] guidance in separate system message', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'deliberation-test-4';
 
 		// Setup session with passed gate
@@ -170,7 +196,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('no sessionID → no [NEXT] guidance (original text unchanged)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Message without sessionID
 		const messages = {
@@ -198,7 +224,7 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 
 	it('non-coder delegation also gets [NEXT] guidance (runs before isCoderDelegation check)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 		const sessionID = 'deliberation-test-6';
 
 		// Setup session with a passed gate

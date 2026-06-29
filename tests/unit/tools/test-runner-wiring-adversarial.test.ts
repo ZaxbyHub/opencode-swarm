@@ -30,13 +30,15 @@ let fsExistsSyncSpy: ReturnType<typeof spyOn<typeof fs, 'existsSync'>>;
 
 describe('detectTestFramework - Adversarial Security Tests', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		mockIsCommandAvailable.mockImplementation(() => false);
 		// Spy on existsSync per-test so it's automatically restored in afterEach
 		fsExistsSyncSpy = spyOn(fs, 'existsSync').mockImplementation(() => false);
 	});
 
 	afterEach(() => {
+		mock.restore();
 		// Restore the real existsSync so other test files are not affected
 		fsExistsSyncSpy.mockRestore();
 	});

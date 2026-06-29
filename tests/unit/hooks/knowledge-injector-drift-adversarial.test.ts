@@ -11,7 +11,12 @@
  * 7. Context budget stressed (totalChars > 75,000) → early return before drift injection
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -146,7 +151,8 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('Adversarial: Malformed drift report structure', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -206,7 +212,8 @@ describe('Adversarial: Malformed drift report structure', () => {
 
 describe('Adversarial: Oversized drift text', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -279,7 +286,8 @@ describe('Adversarial: Oversized drift text', () => {
 
 describe('Adversarial: Array with null entry', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -342,7 +350,8 @@ describe('Adversarial: Array with null entry', () => {
 
 describe('Adversarial: buildDriftInjectionText throws synchronously', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -411,7 +420,8 @@ describe('Adversarial: buildDriftInjectionText throws synchronously', () => {
 
 describe('Adversarial: Wrong type returned (empty string instead of array)', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -468,7 +478,8 @@ describe('Adversarial: Wrong type returned (empty string instead of array)', () 
 
 describe('Adversarial: cachedInjectionText is empty string', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -543,7 +554,8 @@ describe('Adversarial: cachedInjectionText is empty string', () => {
 
 describe('Adversarial: Context budget stressed', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -660,7 +672,8 @@ describe('Adversarial: Context budget stressed', () => {
 
 describe('Adversarial: Additional edge cases', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',

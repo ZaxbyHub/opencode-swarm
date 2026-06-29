@@ -10,7 +10,12 @@
  * - No drift prepend when cachedInjectionText is null
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
@@ -145,7 +150,8 @@ function makeConfig(overrides?: Partial<KnowledgeConfig>): KnowledgeConfig {
 
 describe('Drift injection: reports exist and cachedInjectionText populated', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -215,7 +221,8 @@ describe('Drift injection: reports exist and cachedInjectionText populated', () 
 
 describe('Drift injection: no drift reports', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -273,7 +280,8 @@ describe('Drift injection: no drift reports', () => {
 
 describe('Drift injection: empty drift text', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -337,7 +345,8 @@ describe('Drift injection: empty drift text', () => {
 
 describe('Drift injection: error swallowing', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -429,7 +438,8 @@ describe('Drift injection: error swallowing', () => {
 
 describe('Drift injection: multiple reports use last one', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',
@@ -516,7 +526,8 @@ describe('Drift injection: multiple reports use last one', () => {
 
 describe('Drift injection: drift text format', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		loadPlan.mockResolvedValue({
 			current_phase: 1,
 			title: 'Test Project',

@@ -71,6 +71,7 @@ function makeEntry(id: string, overrides?: Record<string, unknown>) {
 describe('handleKnowledgeQuarantineCommand', () => {
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	it('returns usage message when entryId is missing (empty args)', async () => {
@@ -361,7 +362,7 @@ describe('handleKnowledgeListCommand', () => {
 
 describe('createSwarmCommandHandler routing (in index.ts)', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 	});
 
 	it('knowledge quarantine <id> routes to quarantine handler', async () => {
@@ -400,7 +401,7 @@ describe('createSwarmCommandHandler routing (in index.ts)', () => {
 
 describe('handleKnowledgeMigrateCommand', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
 	});
 
 	it('successful migration returns string containing "Migration complete" with correct counts (entriesMigrated=3, entriesDropped=1, entriesTotal=4)', async () => {

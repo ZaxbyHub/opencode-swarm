@@ -13,6 +13,10 @@ import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
+afterEach(() => {
+	mock.restore();
+});
+
 // ===== MOCK TRACKERS =====
 
 // Track calls to sastScan

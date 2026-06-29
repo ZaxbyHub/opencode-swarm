@@ -361,6 +361,18 @@ describe('knowledge-curator', () => {
 
 			// Should have 3 lessons stored (but transactKnowledge called once per batch)
 			expect(transactKnowledge).toHaveBeenCalledTimes(1);
+			// Content assertion: verify the batch contains exactly 3 extracted lessons
+			const [, mutate1] = transactKnowledge.mock.calls[0] as [
+				string,
+				(entries: SwarmKnowledgeEntry[]) => SwarmKnowledgeEntry[] | null,
+			];
+			const result1 = mutate1([]);
+			expect(result1).toHaveLength(3);
+			expect(result1!.map((e) => e.lesson)).toEqual([
+				'First lesson learned',
+				'Second lesson learned',
+				'Third lesson learned',
+			]);
 		});
 
 		test('non-bullet lines in the section are ignored', async () => {
@@ -385,6 +397,17 @@ Another line without a bullet
 
 			// Should only store 2 lessons (the bullet points) — transact once for the batch
 			expect(transactKnowledge).toHaveBeenCalledTimes(1);
+			// Content assertion: verify only the 2 bullet-point lessons were extracted
+			const [, mutate2] = transactKnowledge.mock.calls[0] as [
+				string,
+				(entries: SwarmKnowledgeEntry[]) => SwarmKnowledgeEntry[] | null,
+			];
+			const result2 = mutate2([]);
+			expect(result2).toHaveLength(2);
+			expect(result2!.map((e) => e.lesson)).toEqual([
+				'But this is a real lesson',
+				'Another real lesson',
+			]);
 		});
 	});
 

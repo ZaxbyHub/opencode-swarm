@@ -20,6 +20,36 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 
+function derivePlanId(plan: { swarm: string; title: string }): string {
+	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+}
+
+const PLAN_FIXTURE = {
+	schema_version: '1.0.0' as const,
+	title: 'Test Plan',
+	swarm: 'test-swarm',
+	current_phase: 1,
+	phases: [
+		{
+			id: 1,
+			name: 'Phase 1',
+			status: 'in_progress' as const,
+			tasks: [
+				{
+					id: '1.1',
+					phase: 1,
+					status: 'in_progress' as const,
+					size: 'small' as const,
+					description: 'test task',
+					depends: [],
+					files_touched: [],
+				},
+			],
+		},
+	],
+};
+const PLAN_ID = derivePlanId(PLAN_FIXTURE);
+
 function makeConfig(
 	overrides?: Record<string, unknown>,
 	council?: { enabled?: boolean },
@@ -150,8 +180,8 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 
 		it('should throw when qa_gate_profile.reviewer is true but task not reviewed', async () => {
 			// Set reviewer gate
-			const profile = getOrCreateProfile();
-			setGates({ reviewer: true });
+			const profile = getOrCreateProfile(tempDir, PLAN_ID);
+			setGates(tempDir, PLAN_ID, { reviewer: true });
 			profile.gates = { reviewer: true };
 
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
@@ -172,8 +202,8 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 		});
 
 		it('should NOT throw when reviewer gate is satisfied (task has review evidence)', async () => {
-			const profile = getOrCreateProfile();
-			setGates({ reviewer: true });
+			const profile = getOrCreateProfile(tempDir, PLAN_ID);
+			setGates(tempDir, PLAN_ID, { reviewer: true });
 			profile.gates = { reviewer: true };
 
 			// Mark task 1.1 as reviewed in qa-gate-profile

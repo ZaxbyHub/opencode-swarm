@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import * as realFs from 'node:fs';
 import { detectAdditionalLinter } from '../../../src/tools/lint';
 
@@ -25,7 +30,8 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 	const testCwd = '/test/project';
 
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 		// Default: no command available
 		mockIsCommandAvailable.mockImplementation(() => false);
 		// Default: no files exist

@@ -73,18 +73,26 @@ function writePlanJson(
 	);
 }
 
+let tempDir: string;
+
+beforeEach(() => {
+	resetSwarmState();
+	tempDir = makeTempProject('dg-task15-');
+});
+
+afterEach(() => {
+	resetSwarmState();
+	try {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	} catch {
+		// best-effort cleanup
+	}
+});
+
 describe('delegation-gate task 1.5: sessionID validation (security)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('should reject sessionID with invalid characters', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Try injection attempts
 		const invalidSessionIDs = [
@@ -124,7 +132,7 @@ describe('delegation-gate task 1.5: sessionID validation (security)', () => {
 
 	it('should accept valid sessionID formats', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const validSessionIDs = [
 			'test-session',
@@ -169,7 +177,7 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 	it('should handle null lastGateOutcome gracefully', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession('test-session');
 		expect(session.lastGateOutcome).toBeNull();
@@ -192,7 +200,7 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 	it('should handle undefined lastGateOutcome', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession('test-session');
 		// lastGateOutcome starts as null, not undefined
@@ -212,7 +220,7 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 	it('should handle malformed lastGateOutcome (missing fields)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession('test-session');
 		// @ts-expect-error - intentionally malformed
@@ -235,7 +243,7 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 	it('should sanitize gate name with special characters', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession('test-session');
 		session.lastGateOutcome = {
@@ -272,7 +280,7 @@ describe('delegation-gate task 1.5: duplicate guidance insertion (violation + de
 
 	it('should handle both zero-coder violation and deliberation guidance', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Set up state to trigger zero-coder violation warning
 		const session = ensureAgentSession('test-session');
@@ -300,7 +308,7 @@ describe('delegation-gate task 1.5: duplicate guidance insertion (violation + de
 
 	it('should preserve original message when both warnings insert system messages', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const session = ensureAgentSession('test-session');
 		session.architectWriteCount = 1;
@@ -329,7 +337,7 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 
 	it('should skip guidance injection for empty string agent', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Empty string agent - should be skipped
 		const messages = makeMessages('TASK: test\nFILE: src/t.ts', '');
@@ -345,7 +353,7 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 
 	it('should skip guidance injection for non-architect agent', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Non-architect agent - should be skipped
 		const messages = makeMessages('TASK: test\nFILE: src/t.ts', 'mega_coder');
@@ -360,7 +368,7 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 
 	it('should inject guidance for undefined agent (main session = architect)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// No agent specified - should be treated as architect (main session)
 		const messages = {
@@ -393,7 +401,7 @@ describe('delegation-gate task 1.5: batch detection regression', () => {
 
 	it('should still detect batching language after [NEXT] guidance change', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		// Set up properly for architect
 		const messages2 = makeMessages(
@@ -416,7 +424,7 @@ describe('delegation-gate task 1.5: batch detection regression', () => {
 
 	it('should still detect multiple FILE: directives', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, tempDir);
 
 		const messages = {
 			messages: [

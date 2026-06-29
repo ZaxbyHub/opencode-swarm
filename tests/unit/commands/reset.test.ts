@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as fsSync from 'node:fs';
+import * as realFs from 'node:fs';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -399,7 +399,7 @@ describe('handleResetCommand', () => {
 			);
 
 			await mock.module('node:fs', () => ({
-				...fsSync,
+				...realFs,
 				existsSync: mock((_p: string) => true),
 				unlinkSync: mock((_p: string) => {
 					unlinkCallCount++;
@@ -451,7 +451,7 @@ describe('handleResetCommand', () => {
 			);
 
 			await mock.module('node:fs', () => ({
-				...fsSync,
+				...realFs,
 				existsSync: mock((_p: string) => true),
 				unlinkSync: mock((_p: string) => {
 					unlinkCallCount++;

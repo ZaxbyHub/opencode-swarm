@@ -24,7 +24,12 @@
  * 3. Tools execute successfully with provided contexts
  */
 
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+afterEach(() => {
+	mock.restore();
+});
+
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
 
@@ -83,7 +88,8 @@ import { todo_extract } from '../../../src/tools/todo-extract';
 
 describe('Batch tool migration: createSwarmTool integration verification', () => {
 	beforeEach(() => {
-		mock.reset();
+		mock.restore();
+		mock.clearAllMocks();
 	});
 
 	// Verify all tools have execute methods that accept directory parameter
