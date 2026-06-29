@@ -254,6 +254,40 @@ describe('runAutoReview', () => {
 		});
 	});
 
+	test('dispatchReviewer omits parentID when parentSessionId is empty string', async () => {
+		let capturedBody: { parentID?: string; title?: string } | undefined;
+		swarmState.opencodeClient = {
+			session: {
+				create: async (params: {
+					body?: { parentID?: string; title?: string };
+					query: { directory: string };
+				}) => {
+					capturedBody = params.body;
+					return { data: { id: 'review-session-1' } };
+				},
+				prompt: async () => ({
+					data: { parts: [{ type: 'text', text: APPROVED }] },
+				}),
+				delete: async () => ({}),
+			},
+		} as typeof swarmState.opencodeClient;
+
+		const transcript = await origDispatch(
+			tmpDir,
+			'review this diff',
+			'test_reviewer',
+			30_000,
+			'',
+		);
+
+		expect(transcript).toBe(APPROVED);
+		// parentID must be absent (not undefined, not empty string)
+		expect(Object.hasOwn(capturedBody!, 'parentID')).toBe(false);
+		expect(capturedBody).toMatchObject({
+			title: 'auto-review (test_reviewer) background',
+		});
+	});
+
 	test('APPROVED verdict: persists receipt + event, no advisory', async () => {
 		_internals.computeExecutionDiff = async () => ({
 			status: 'ok' as const,

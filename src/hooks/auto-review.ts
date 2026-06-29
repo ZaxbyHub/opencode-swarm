@@ -196,9 +196,10 @@ async function dispatchReviewer(
 	if (!client) {
 		throw new Error('OpencodeClient not available');
 	}
+	const trimmedParentID = parentSessionId?.trim();
 	const createResult = await client.session.create({
 		body: {
-			parentID: parentSessionId,
+			...(trimmedParentID ? { parentID: trimmedParentID } : {}),
 			title: `auto-review (${agentName}) background`,
 		},
 		query: { directory },

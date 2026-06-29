@@ -363,6 +363,7 @@ export const _internals: {
 export const _test_exports = {
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
+	buildLaneSessionCreateArgs,
 	extractAssistantTranscript,
 	formatError,
 	nextCollectPollInterval,
@@ -1629,10 +1630,14 @@ function buildLaneSessionCreateArgs(
 	query: { directory: string };
 } {
 	const parentID = context.sessionID?.trim();
+	// Escape parentheses in agent name for title to prevent ambiguous nesting
+	const escapedAgent = lane.agent
+		.replace(/\(/g, '&#40;')
+		.replace(/\)/g, '&#41;');
 	return {
 		body: {
 			...(parentID ? { parentID } : {}),
-			title: `${lane.id} (${lane.agent})`,
+			title: `${lane.id} (${escapedAgent})`,
 		},
 		query: { directory },
 	};

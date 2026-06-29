@@ -22,6 +22,59 @@ const DEFAULT_MAX_CYCLES = 3;
 const MIN_MAX_CYCLES = 1;
 const MAX_MAX_CYCLES = 5;
 
+// ---------------------------------------------------------------------------
+// _internals seam (writing-tests skill: DI over mock.module)
+// ---------------------------------------------------------------------------
+
+interface LoopState {
+	params?: { autonomy?: string };
+}
+
+async function readLatestLoopState(directory: string): Promise<{
+	autonomy?: string;
+} | null> {
+	try {
+		const { readdirSync, statSync, readFileSync } = await import('node:fs');
+		const loopDir = `${directory}/.swarm/loop`;
+		let latestMtime = 0;
+		let latestPath: string | null = null;
+		try {
+			const entries = readdirSync(loopDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (!entry.isDirectory()) continue;
+				const statePath = `${loopDir}/${entry.name}/state.json`;
+				try {
+					const mtime = statSync(statePath).mtimeMs;
+					if (mtime > latestMtime) {
+						latestMtime = mtime;
+						latestPath = statePath;
+					}
+				} catch {
+					// state.json may not exist for some run-ids; skip
+				}
+			}
+		} catch {
+			// .swarm/loop/ may not exist yet
+			return null;
+		}
+		if (!latestPath) return null;
+		const raw = readFileSync(latestPath, 'utf-8');
+		const state: LoopState = JSON.parse(raw);
+		return { autonomy: state.params?.autonomy };
+	} catch {
+		// Best-effort: corrupt state.json falls back to default
+		return null;
+	}
+}
+
+export const _internals: {
+	readLatestLoopState: (
+		directory: string,
+	) => Promise<{ autonomy?: string } | null>;
+} = {
+	readLatestLoopState,
+};
+
 const USAGE = `Usage: /swarm loop <objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]
 
 Run a compound-engineering loop: brainstorm → plan → build → review → improve,
@@ -60,6 +113,7 @@ function sanitizeObjective(raw: string): string {
 interface ParsedArgs {
 	maxCycles: number;
 	autonomy: string;
+	autonomyExplicit: boolean;
 	depth: string;
 	resume: boolean;
 	rest: string[];
@@ -74,6 +128,7 @@ function parseArgs(args: string[]): ParsedArgs {
 	const result: ParsedArgs = {
 		maxCycles: DEFAULT_MAX_CYCLES,
 		autonomy: DEFAULT_AUTONOMY,
+		autonomyExplicit: false,
 		depth: DEFAULT_DEPTH,
 		resume: false,
 		rest: [],
@@ -114,6 +169,7 @@ function parseArgs(args: string[]): ParsedArgs {
 				};
 			}
 			result.autonomy = value;
+			result.autonomyExplicit = true;
 		} else if (token === '--depth') {
 			if (i + 1 >= args.length) {
 				return { ...result, error: `Flag "${token}" requires a value` };
@@ -161,8 +217,18 @@ export async function handleLoopCommand(
 		return USAGE;
 	}
 
+	// When resuming, read persisted autonomy from the latest loop run unless
+	// the user explicitly passed --autonomy on the command line.
+	let autonomy = parsed.autonomy;
+	if (parsed.resume && !parsed.autonomyExplicit) {
+		const state = await _internals.readLatestLoopState(_directory);
+		if (state?.autonomy && AUTONOMY_LEVELS.has(state.autonomy)) {
+			autonomy = state.autonomy;
+		}
+	}
+
 	const header =
-		`[MODE: LOOP max_cycles=${parsed.maxCycles} autonomy=${parsed.autonomy}` +
+		`[MODE: LOOP max_cycles=${parsed.maxCycles} autonomy=${autonomy}` +
 		` depth=${parsed.depth} resume=${parsed.resume}]`;
 
 	if (!objective && parsed.resume) {

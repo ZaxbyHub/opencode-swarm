@@ -2,7 +2,7 @@
 
 ## What
 
-Two changes.
+Three changes.
 
 **1. New first-class `/swarm loop` command.** A user-initiated
 compound-engineering workflow that chains the existing mode skills —

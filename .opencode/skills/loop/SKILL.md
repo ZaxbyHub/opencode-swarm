@@ -290,7 +290,7 @@ A minimal, append-friendly shape — extend as needed but keep these fields:
 
 ## Autonomy Quick Reference
 
-| Behavior | `checkpoint` (default) | `auto` |
+| Behavior | `auto` (default) | `checkpoint` |
 | --- | --- | --- |
 | Pause at phase gates | Yes — wait for user approval | No |
 | Confirm before next cycle | Yes | No |
